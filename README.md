@@ -1,4 +1,4 @@
-#ProjectHephaestus
+# ProjectHephaestus
 
 ProjectHephaestus is the shared utilities and tooling repository of the HomericIntelligence ecosystem. Named after Hephaestus, the Greek god of craftsmanship, forging, and ingenious invention, this project provides the foundational scripts, helpers, and infrastructure that support development across all other repositories. Just as Hephaestus forged the divine tools of Olympus, this repository forges the essential components that power agentic workflows.
 
