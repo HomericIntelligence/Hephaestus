@@ -1,0 +1,31 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/pre-bash-exec.py"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/utility-audit.py\"",
+            "timeout": 120,
+            "once": true
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "skills-registry-commands@ProjectMnemosyne": true,
+    "safety-net@cc-marketplace": true
+  }
+}
