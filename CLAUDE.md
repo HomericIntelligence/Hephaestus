@@ -1,0 +1,344 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+ProjectHephaestus is the shared utilities and tooling repository of the HomericIntelligence ecosystem. Named after Hephaestus, the Greek god of craftsmanship, forging, and ingenious invention, this project provides the foundational scripts, helpers, and infrastructure that support development across all other repositories.
+
+**Purpose**: Centralize and maintain Python utilities, helper functions, and common abstractions used throughout the HomericIntelligence suite.
+
+**Role in Ecosystem**:
+- ProjectOdyssey → Training and capability development  
+- ProjectKeystone → Communication and distributed agent coordination
+- ProjectScylla → Testing, measurement, and optimization
+- ProjectMnemosyne → Knowledge, skills, and memory preservation
+- **ProjectHephaestus → Shared utilities, tooling, and foundational components**
+
+## Repository Structure
+
+```text
+ProjectHephaestus/
+├── hephaestus/                 # Python source code
+│   ├── utils/                  # General utility functions
+│   ├── helpers/                # Helper classes and modules
+│   ├── config/                 # Configuration management
+│   ├── logging/                # Logging utilities
+│   ├── io/                     # Input/output utilities
+│   └── cli/                    # Command-line interface tools
+├── scripts/                    # Automation and maintenance scripts
+├── tests/                      # Unit and integration tests
+├── docs/                       # Documentation
+└── .claude/                    # Claude Code configurations
+    ├── context/                # Directory-specific contexts
+    ├── security/               # Security considerations
+    └── workflows/              # Automated workflows
+```
+
+## Python Development Guidelines
+
+### Language Preference
+
+**Python 3.8+** is the implementation language for all ProjectHephaestus code:
+- Shared utility scripts and helpers
+- Configuration management tools
+- Logging and monitoring utilities
+- Cross-project abstraction layers
+- Automation and maintenance scripts
+
+### Key Principles
+
+1. **Modularity**: Develop independent modules with well-defined interfaces
+2. **Reusability**: Design components for use across multiple projects
+3. **Consistency**: Follow established patterns and conventions
+4. **Reliability**: Write robust, well-tested code with clear error handling
+5. **Documentation**: Provide comprehensive docstrings and inline comments
+
+### Python Standards
+
+```python
+#!/usr/bin/env python3
+
+"""
+Module description with purpose, usage, and examples.
+
+Usage:
+    python scripts/script_name.py [options]
+"""
+
+# Standard library imports first
+import sys
+import os
+from typing import List, Dict, Optional
+
+# Third-party imports next
+# import requests
+# import numpy as np
+
+# Local imports last
+# from hephaestus.utils.helpers import helper_function
+
+def function_name(param: str, optional_param: Optional[int] = None) -> bool:
+    """Clear docstring with purpose, parameters, and return value.
+    
+    Args:
+        param: Description of parameter
+        optional_param: Description of optional parameter
+        
+    Returns:
+        Description of return value
+        
+    Raises:
+        SpecificException: When something goes wrong
+    """
+    pass
+```
+
+### Requirements
+
+- Python 3.8+
+- Type hints required for all functions
+- Clear docstrings for public functions and classes
+- Comprehensive error handling
+- Comprehensive test coverage (unit tests)
+- Follow PEP 8 style guidelines
+
+## Key Development Principles
+
+1. **KISS** - *Keep It Simple, Stupid* → Don't add complexity when a simpler solution works
+2. **YAGNI** - *You Ain't Gonna Need It* → Don't add things until they are required
+3. **DRY** - *Don't Repeat Yourself* → Don't duplicate functionality, data structures, or algorithms
+4. **SOLID** Principles:
+   - Single Responsibility: Each module/class should have one reason to change
+   - Open/Closed: Open for extension, closed for modification
+   - Liskov Substitution: Subtypes must be substitutable for their base types
+   - Interface Segregation: Clients should not be forced to depend on interfaces they don't use
+   - Dependency Inversion: Depend on abstractions, not concretions
+5. **Modularity** - Develop independent modules through well-defined interfaces
+6. **POLA** - *Principle of Least Astonishment* - Create intuitive and predictable interfaces
+
+## Security Configuration Guidelines
+
+### Secrets Management
+
+- **Never hardcode secrets** in source code
+- Use environment variables for sensitive configuration
+- Reference secret management systems when appropriate
+- Document secret requirements in README, not code
+
+### Input Validation
+
+All utility functions accepting external input must:
+1. Validate input types and ranges
+2. Sanitize potentially malicious content
+3. Handle encoding/decoding safely
+4. Log suspicious inputs appropriately
+
+### Secure Coding Practices
+
+- Always use parameterized queries for database interactions
+- Implement proper error handling without exposing sensitive information
+- Follow principle of least privilege for file system access
+- Validate and sanitize all external inputs
+
+## Documentation Rules
+
+### Code Documentation
+
+- **Inline Comments**: Explain *why*, not *what*
+- **Function Docstrings**: Follow Google Python Style Guide
+- **Class Docstrings**: Describe purpose, attributes, and usage
+- **Module Docstrings**: Explain module purpose and key components
+
+### Technical Documentation
+
+- Maintain README.md with setup and usage instructions
+- Document API endpoints in OpenAPI format when applicable
+- Keep CHANGELOG.md updated with notable changes
+- Reference external documentation rather than duplicating
+
+## Claude Code Optimization
+
+### When to Use Extended Thinking
+
+Use Extended Thinking for:
+- Designing new utility abstractions
+- Analyzing complex cross-cutting concerns
+- Planning refactoring of shared components
+- Understanding dependency relationships
+- Evaluating tradeoffs in utility design
+
+Skip Extended Thinking for:
+- Simple utility function implementation
+- Straightforward bug fixes
+- Boilerplate code generation
+- Well-defined refactorings
+
+### Agent Skills vs Sub-Agents Decision Tree
+
+```text
+Is the task well-defined with predictable steps?
+├─ YES → Use an Agent Skill
+│   ├─ Is it a GitHub operation? → Use gh-* skills
+│   ├─ Is it a testing task? → Use test-* skills
+│   ├─ Is it a CI/CD task? → Use ci-* skills
+│   └─ Is it documentation work? → Use doc-* skills
+│
+└─ NO → Use a Sub-Agent
+    ├─ Does it require exploration/discovery? → Use sub-agent
+    ├─ Does it need adaptive decision-making? → Use sub-agent
+    ├─ Is the workflow dynamic/context-dependent? → Use sub-agent
+    └─ Does it need extended thinking? → Use sub-agent
+```
+
+### Output Style Guidelines
+
+#### Code References
+
+**DO**: Use repo-relative file paths with line numbers:
+```markdown
+Updated hephaestus/utils/helpers.py:45-52
+```
+
+#### GitHub Issue Integration
+
+**DO**: Post implementation notes as GitHub issue comments:
+```bash
+gh issue comment <number> --body "Completed implementation of new logging utility"
+```
+
+## Working with GitHub
+
+### Git Workflow
+
+**IMPORTANT**: The `main` branch is protected. All changes must go through a pull request.
+
+```bash
+# 1. Create feature branch
+git checkout -b <issue-number>-description
+
+# 2. Make changes and commit
+git add <files>
+git commit -m "type(scope): description"
+
+# 3. Push feature branch
+git push -u origin <branch-name>
+
+# 4. Create pull request
+gh pr create \
+  --title "[Type] Brief description" \
+  --body "Closes #<issue-number>" \
+  --label "appropriate-label"
+
+# 5. Enable auto-merge
+gh pr merge --auto --rebase
+```
+
+### Commit Message Format
+
+Follow conventional commits:
+```text
+feat(utils): Add new configuration helper
+fix(logging): Correct timestamp formatting
+docs(readme): Update installation instructions
+refactor(io): Simplify file handling logic
+```
+
+### Testing Strategy
+
+All utility functions must include comprehensive test coverage:
+
+1. **Unit Tests**: Test individual functions and classes
+2. **Integration Tests**: Test component interactions
+3. **Edge Cases**: Test boundary conditions and error scenarios
+4. **Cross-platform**: Ensure compatibility across supported environments
+
+```bash
+# Run all tests
+python -m pytest tests/ -v
+
+# Run specific test file
+python -m pytest tests/test_utils.py -v
+
+# Run with coverage
+python -m pytest tests/ --cov=hephaestus --cov-report=html
+```
+
+## Environment Setup
+
+This project uses standard Python tooling:
+
+```bash
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+pip install -r requirements-dev.txt  # For development
+
+# Run pre-commit hooks (PEP 8, formatting, etc.)
+pre-commit install
+```
+
+## Common Commands
+
+### Development Workflows
+
+```bash
+# Run tests
+python -m pytest tests/
+
+# Run linter
+flake8 hephaestus/ tests/
+
+# Run formatter
+black hephaestus/ tests/
+
+# Run type checking
+mypy hephaestus/
+
+# Run all quality checks
+tox
+```
+
+### Pre-commit Hooks
+
+Pre-commit hooks automatically check code quality:
+
+```bash
+# Install pre-commit hooks (one-time setup)
+pre-commit install
+
+# Run hooks manually on all files
+pre-commit run --all-files
+
+# NEVER skip hooks with --no-verify
+```
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Import Errors**: Check PYTHONPATH and virtual environment activation
+2. **Dependency Conflicts**: Use pip-tools to manage dependencies
+3. **Test Failures**: Run tests with verbose output for details
+4. **Formatting Issues**: Run black and isort to auto-format
+
+### Getting Help
+
+1. Check existing GitHub issues and discussions
+2. Review documentation in docs/ directory
+3. Post implementation questions as issue comments
+4. Refer to shared documentation in .claude/shared/
+
+## Key Files and Directories
+
+- `hephaestus/utils/` - Core utility functions
+- `hephaestus/helpers/` - Helper classes and modules
+- `tests/` - Comprehensive test suite
+- `scripts/` - Automation and maintenance tools
+- `docs/` - Documentation and guides
+- `requirements.txt` - Production dependencies
+- `requirements-dev.txt` - Development dependencies
+- `.claude/` - Claude Code configuration and guidance
