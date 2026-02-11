@@ -19,6 +19,52 @@ import pickle
 from typing import Any, Union, Optional
 from pathlib import Path
 
+
+def read_file(filepath: Union[str, Path], mode: str = 'r') -> Union[str, bytes]:
+    """Read content from a file.
+    
+    Args:
+        filepath: Path to file
+        mode: File open mode ('r' for text, 'rb' for binary)
+        
+    Returns:
+        File content as string or bytes
+        
+    Raises:
+        FileNotFoundError: If file doesn't exist
+        IOError: If file cannot be read
+    """
+    filepath = Path(filepath)
+    with open(filepath, mode) as f:
+        return f.read()
+
+
+def write_file(filepath: Union[str, Path], 
+               content: Union[str, bytes],
+               mode: str = 'w') -> bool:
+    """Write content to a file.
+    
+    Args:
+        filepath: Path to file
+        content: Content to write
+        mode: File open mode ('w' for text, 'wb' for binary)
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    filepath = Path(filepath)
+    try:
+        # Ensure parent directory exists
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(filepath, mode) as f:
+            f.write(content)
+        return True
+    except Exception as e:
+        print(f"Failed to write to {filepath}: {e}")
+        return False
+
+
 def ensure_directory(path: Union[str, Path]) -> bool:
     """Ensure directory exists, creating it if necessary.
     
@@ -34,6 +80,7 @@ def ensure_directory(path: Union[str, Path]) -> bool:
     except Exception as e:
         print(f"Failed to create directory {path}: {e}")
         return False
+
 
 def safe_write(filepath: Union[str, Path], 
                content: Union[str, bytes],
@@ -72,6 +119,7 @@ def safe_write(filepath: Union[str, Path],
         print(f"Failed to write to {filepath}: {e}")
         return False
 
+
 def load_data(filepath: Union[str, Path], 
               format_hint: Optional[str] = None) -> Any:
     """Load data from file with automatic format detection.
@@ -109,6 +157,7 @@ def load_data(filepath: Union[str, Path],
     except Exception as e:
         print(f"Failed to load data from {filepath}: {e}")
         raise
+
 
 def save_data(data: Any, 
               filepath: Union[str, Path],
