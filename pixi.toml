@@ -1,0 +1,50 @@
+[project]
+name = "project-hephaestus"
+version = "0.1.0"
+description = "Shared utilities and tooling for the HomericIntelligence ecosystem"
+authors = ["HomericIntelligence Team"]
+channels = ["conda-forge", "bioconda"]
+platforms = ["linux-64", "win-64", "osx-64", "osx-arm64"]
+
+[tasks]
+
+[dependencies]
+python = ">=3.9"
+pip = "*"
+
+[pypi-dependencies]
+# Core dependencies for utilities
+pyyaml = "*"
+click = "*"
+requests = "*"
+tabulate = "*"
+tqdm = "*"
+
+[feature.test.dependencies]
+pytest = "*"
+pytest-cov = "*"
+pytest-mock = "*"
+
+[feature.dev.dependencies]
+black = "*"
+ruff = "*"
+mypy = "*"
+pre-commit = "*"
+
+[feature.docs.dependencies]
+mkdocs = "*"
+mkdocs-material = "*"
+
+[feature.test]
+tasks = {test = "pytest"}
+
+[feature.dev]
+tasks = {lint = "ruff check .", format = "black ."}
+
+[feature.docs]
+tasks = {docs = "mkdocs serve", "docs-build" = "mkdocs build"}
+
+[environments]
+default = ["test"]
+dev = ["test", "dev"]
+docs = ["docs"]

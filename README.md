@@ -1,42 +1,175 @@
 # ProjectHephaestus
 
-ProjectHephaestus is the shared utilities and tooling repository of the HomericIntelligence ecosystem. Named after Hephaestus, the Greek god of craftsmanship, forging, and ingenious invention, this project provides the foundational scripts, helpers, and infrastructure that support development across all other repositories. Just as Hephaestus forged the divine tools of Olympus, this repository forges the essential components that power agentic workflows.
+Shared utilities and tooling for the HomericIntelligence ecosystem, powered by [Pixi](https://pixi.sh) for environment management.
 
-## Purpose
+## Overview
 
-ProjectHephaestus exists to centralize and maintain the Python utilities, helper functions, and common abstractions used throughout the HomericIntelligence suite. Instead of duplicating logic across projects, Hephaestus offers a unified, well‑structured toolkit that ensures consistency, reliability, and ease of maintenance.
-This repository is designed to:
+ProjectHephaestus provides standardized utility functions and tools that can be shared across all HomericIntelligence repositories. Following the principles in [CLAUDE.md](CLAUDE.md), this project emphasizes:
+- **Modularity**: Well-defined, reusable components
+- **Simplicity**: KISS (Keep It Simple, Stupid) principle
+- **Consistency**: Standardized interfaces and patterns
+- **Reliability**: Comprehensive testing and error handling
 
-- 🔧 Provide Shared Utilities: Core Python helpers, abstractions, and reusable modules used across multiple projects.
-- 🧱 Establish a Common Foundation: Standardized patterns and building blocks that unify development practices.
-- 🚀 Accelerate Development: Reduce boilerplate, eliminate duplication, and streamline workflows.
-- 🛠️ Support the Entire Ecosystem: Serve as the underlying craftsmanship layer beneath Odyssey, Keystone, Scylla, and Mnemosyne.
-  
-## Role in the HomericIntelligence Ecosystem
+## Directory Structure
 
-ProjectHephaestus complements the other repositories by acting as the forge—the place where essential tools are crafted:
+```
+ProjectHephaestus/
+├── pixi.toml          # Pixi configuration
+├── pyproject.toml     # Python package configuration
+├── src/               # Source code
+│   └── hephaestus/    # Main package
+│       ├── __init__.py
+│       ├── utils/     # Utility functions
+│       ├── config/    # Configuration utilities
+│       └── io/        # I/O utilities
+├── tests/             # Unit tests
+├── docs/              # Documentation
+├── scripts/           # Utility scripts
+└── README.md          # This file
+```
 
-- ProjectOdyssey → Training and capability development
-- ProjectKeystone → Communication and distributed agent coordination
-- ProjectScylla → Testing, measurement, and optimization
-- ProjectMnemosyne → Knowledge, skills, and memory preservation
-- ProjectHephaestus → Shared utilities, tooling, and foundational components
+## Getting Started with Pixi
 
-Together, these projects form a cohesive system for building, connecting, evaluating, and refining agentic workflows.
+This project uses [Pixi](https://pixi.sh) for environment management, which automatically handles dependencies and creates isolated environments.
 
-## What Belongs Here
+### Prerequisites
 
-ProjectHephaestus is the home for:
+Install Pixi by following the [official installation guide](https://pixi.sh/install/).
 
-- Common Python helper scripts
-- Shared utility modules
-- Logging, configuration, and environment helpers
-- Reusable abstractions for agent workflows
-- Cross‑project constants, types, and patterns
-- Lightweight tools that support development across repos
+### Setup Development Environment
 
-If multiple repositories need it, it belongs here.
+```bash
+# Install dependencies and create environment
+pixi install
 
-## Philosophy
+# Activate the environment (optional, as pixi runs commands in the environment automatically)
+pixi shell
+```
 
-Hephaestus represents craftsmanship, precision, and reliability. This repository embodies those values by providing clean, well‑designed utilities that strengthen the entire ecosystem. It is the quiet but essential layer that ensures every other project can operate smoothly and consistently.
+### Running Tests
+
+```bash
+# Run tests using the test feature
+pixi run test
+
+# Or run tests directly with pytest
+pixi run pytest
+```
+
+### Development Commands
+
+```bash
+# Format code with Black
+pixi run format
+
+# Lint code with Ruff
+pixi run lint
+
+# Build documentation
+pixi run docs-build
+```
+
+## Usage
+
+### As a Package
+
+After installing with Pixi:
+
+```python
+from hephaestus import slugify, human_readable_size
+from hephaestus.utils.general import retry_with_backoff
+
+# Convert text to URL-friendly slug
+project_slug = slugify("My Project Name")
+print(project_slug)  # Output: my-project-name
+
+# Convert bytes to human readable size
+size_str = human_readable_size(1048576)
+print(size_str)  # Output: 1.0 MB
+```
+
+### Installing in Another Project
+
+To use ProjectHephaestus in another project with Pixi:
+
+1. Add it as a dependency in your `pixi.toml`:
+   ```toml
+   [pypi-dependencies]
+   project-hephaestus = { path = "../ProjectHephaestus", editable = true }
+   ```
+
+2. Run `pixi install` to install the dependency
+
+## Key Features
+
+### General Utilities (`hephaestus.utils.general`)
+
+- `slugify(text)`: Convert text to URL-friendly slug
+- `retry_with_backoff(func)`: Decorator for exponential backoff retries
+- `human_readable_size(bytes)`: Convert bytes to human readable format
+- `flatten_dict(dict)`: Flatten nested dictionaries
+- `run_command(cmd)`: Execute shell commands with error handling
+- `get_nested_value(data, key_path)`: Get nested dict values with dot notation
+
+### Configuration (`hephaestus.config`)
+
+*Coming soon: Standardized configuration management*
+
+### I/O Utilities (`hephaestus.io`)
+
+*Coming soon: File I/O utilities with standardized interfaces*
+
+## Development Guidelines
+
+1. Follow the principles in [CLAUDE.md](CLAUDE.md)
+2. Write comprehensive unit tests for all new functionality
+3. Document all public functions with Google-style docstrings
+4. Use type hints for all function parameters and return values
+5. Keep functions small and focused (single responsibility principle)
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## Pixi Environments
+
+This project defines multiple environments in `pixi.toml`:
+
+- **default**: Basic runtime environment
+- **dev**: Development environment with linting and formatting tools
+- **docs**: Documentation building environment
+
+Switch between environments with:
+```bash
+pixi shell -e dev
+pixi shell -e docs
+```
+
+## Adding New Dependencies
+
+Add new dependencies to `pixi.toml`:
+
+For conda packages:
+```toml
+[dependencies]
+numpy = "*"
+```
+
+For PyPI packages:
+```toml
+[pypi-dependencies]
+requests = "*"
+```
+
+Then run:
+```bash
+pixi install
+```
+
+## License
+
+MIT License - see [LICENSE](LICENSE) file for details.
