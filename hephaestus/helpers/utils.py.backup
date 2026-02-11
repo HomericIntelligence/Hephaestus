@@ -99,31 +99,5 @@ def flatten_dict(d: Dict[str, Any],
             items.append((new_key, v))
     return dict(items)
 
-
-# Extended functions from src/hephaestus/utils/helpers.py
-def get_repo_root(start_path=None) -> str:
-    """Find repository root by looking for .git directory.
-    
-    Args:
-        start_path: Starting path to search from. Defaults to current directory.
-        
-    Returns:
-        Path to repository root
-    """
-    import os
-    from pathlib import Path
-    
-    if start_path is None:
-        start_path = Path.cwd()
-    else:
-        start_path = Path(start_path).resolve()
-    
-    path = start_path
-    while path != path.parent:  # Stop at filesystem root
-        if (path / ".git").exists():
-            return str(path)
-        path = path.parent
-    
-    # If we get here, we didn't find a .git directory
-    return str(start_path)
-
+# Functions from src/hephaestus/utils/helpers.py
+def slugify(text: str) -> str:

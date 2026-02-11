@@ -1,67 +1,46 @@
-#!/usr/bin/env python3
+"""Helper functions for ProjectHephaestus.
+
+General utility functions that don't fit in other specific modules.
 """
-General utility functions for ProjectHephaestus.
-
-Common helper functions for file operations, string manipulation,
-and system utilities.
-
-Usage:
-    from hephaestus.utils.helpers import slugify, retry_with_backoff
-    
-    name = slugify("My Project Name")
-    result = retry_with_backoff(some_unreliable_function)
-"""
-
-import time
+import os
 import re
-import functools
-import math
-from typing import Any, Callable, Optional
+import unicodedata
 from pathlib import Path
-
-# Import slugify from the shared layer within our package
-from ..shared.utils.common import slugify
+from typing import Any, Dict, Union
 
 
-def retry_with_backoff(func: Callable,
-                      max_retries: int = 3,
-                      base_delay: float = 1.0,
-                      exponential_base: float = 2.0) -> Callable:
-    """Decorator to retry function with exponential backoff.
+def slugify(text: str) -> str:
+    """Convert text to a URL-friendly slug.
     
     Args:
-        func: Function to decorate
-        max_retries: Maximum number of retries
-        base_delay: Base delay in seconds
-        exponential_base: Base for exponential backoff calculation
+        text: Text to convert to slug
         
     Returns:
-        Decorated function
+        URL-friendly slug string
     """
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        retries = 0
-        while retries <= max_retries:
-            try:
-                return func(*args, **kwargs)
-            except Exception as e:
-                retries += 1
-                if retries > max_retries:
-                    raise e
-                delay = base_delay * (exponential_base ** (retries - 1))
-                time.sleep(delay)
-        return None
-    return wrapper
+    # Normalize unicode characters
+    text = unicodedata.normalize('NFKD', text)
+    # Convert to ASCII
+    text = text.encode('ascii', 'ignore').decode('ascii')
+    # Convert to lowercase and replace spaces/underscores with hyphens
+    text = re.sub(r'[\s_]+', '-', text.lower())
+    # Remove non-alphanumeric characters (except hyphens)
+    text = re.sub(r'[^a-z0-9-]', '', text)
+    # Remove leading/trailing hyphens
+    text = text.strip('-')
+    # Replace multiple consecutive hyphens with single hyphen
+    text = re.sub(r'-+', '-', text)
+    return text
 
 
-def human_readable_size(size_bytes: int) -> str:
-    """Convert bytes to human readable string.
+def human_readable_size(size_bytes: Union[int, float]) -> str:
+    """Convert byte size to human readable format.
     
     Args:
         size_bytes: Size in bytes
         
     Returns:
-        Human readable size string
+        Human readable size string with appropriate unit
     """
     if size_bytes == 0:
         return "0 B"
@@ -73,26 +52,54 @@ def human_readable_size(size_bytes: int) -> str:
     while size >= 1024.0 and i < len(size_names) - 1:
         size /= 1024.0
         i += 1
-        
+    
     return f"{size:.1f} {size_names[i]}"
 
 
-def flatten_dict(d: dict, separator: str = '.', prefix: str = '') -> dict:
-    """Flatten nested dictionary.
+def flatten_dict(d: Dict[str, Any], parent_key: str = '', sep: str = '.') -> Dict[str, Any]:
+    """Flatten nested dictionary using dot notation for keys.
     
     Args:
         d: Dictionary to flatten
-        separator: Separator for nested keys
-        prefix: Prefix for top-level keys
+        parent_key: Parent key prefix
+        sep: Separator for nested keys
         
     Returns:
         Flattened dictionary
     """
     items = []
     for k, v in d.items():
-        new_key = f"{prefix}{separator}{k}" if prefix else k
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
         if isinstance(v, dict):
-            items.extend(flatten_dict(v, separator, new_key).items())
+            items.extend(flatten_dict(v, new_key, sep=sep).items())
         else:
             items.append((new_key, v))
     return dict(items)
+
+
+def get_repo_root(start_path: Union[str, Path, None] = None) -> Path:
+    """Find repository root by looking for .git directory.
+    
+    Args:
+        start_path: Starting path to search from. Defaults to current directory.
+        
+    Returns:
+        Path to repository root
+        
+    Raises:
+        FileNotFoundError: If no repository root is found
+    """
+    if start_path is None:
+        start_path = Path.cwd()
+    else:
+        start_path = Path(start_path).resolve()
+    
+    path = start_path
+    while path != path.parent:  # Stop at filesystem root
+        if (path / ".git").exists():
+            return path
+        path = path.parent
+    
+    # If we get here, we didn't find a .git directory
+    # Return the original start path as fallback
+    return start_path
