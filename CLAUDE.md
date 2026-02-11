@@ -342,3 +342,5 @@ pre-commit run --all-files
 - `requirements.txt` - Production dependencies
 - `requirements-dev.txt` - Development dependencies
 - `.claude/` - Claude Code configuration and guidance
+
+Make sure all temporary files are in the build/ directory
