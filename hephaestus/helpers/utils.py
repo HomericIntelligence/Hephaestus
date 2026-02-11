@@ -8,33 +8,14 @@ These utilities provide common functionality used across the HomericIntelligence
 import time
 import re
 import math
+import random
 from typing import Any, Callable, Dict, Union
 from pathlib import Path
 
-def slugify(text: str) -> str:
-    """Convert text to a URL-friendly slug.
-    
-    Args:
-        text: Text to convert to slug
-        
-    Returns:
-        URL-friendly slug string
-        
-    Examples:
-        >>> slugify("Hello World!")
-        'hello-world'
-        >>> slugify("Test@#$%Title")
-        'test-title'
-    """
-    # Convert to lowercase and replace spaces/whitespace with hyphens
-    slug = re.sub(r'\s+', '-', text.lower().strip())
-    # Remove non-alphanumeric characters except hyphens
-    slug = re.sub(r'[^a-z0-9-]', '', slug)
-    # Replace multiple hyphens with single hyphen
-    slug = re.sub(r'-+', '-', slug)
-    # Remove leading/trailing hyphens
-    slug = slug.strip('-')
-    return slug
+
+# Import core utilities from shared layer within our package
+from ..shared.utils.common import slugify, load_config, get_nested_value
+
 
 def retry_with_backoff(func: Callable, 
                       max_retries: int = 3, 
@@ -65,13 +46,13 @@ def retry_with_backoff(func: Callable,
                 # Calculate delay with exponential backoff and jitter
                 delay = min(base_delay * (2 ** attempt), max_delay)
                 # Add jitter (±25%)
-                import random
                 jitter = random.uniform(-0.25 * delay, 0.25 * delay)
                 time.sleep(delay + jitter)
             else:
                 break
     
     raise last_exception
+
 
 def human_readable_size(size_bytes: int) -> str:
     """Convert bytes to human readable size string.
@@ -90,6 +71,7 @@ def human_readable_size(size_bytes: int) -> str:
     p = math.pow(1024, i)
     s = round(size_bytes / p, 2)
     return f"{s} {size_names[i]}"
+
 
 def flatten_dict(d: Dict[str, Any], 
                 parent_key: str = '', 

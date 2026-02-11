@@ -1,5 +1,6 @@
 """ProjectHephaestus - Centralized utility library for HomericIntelligence ecosystem."""
 
+# Import from the lowest common layer first
 from .helpers import slugify, retry_with_backoff, human_readable_size, flatten_dict
 from .config.utils import get_setting, load_config, merge_configs, get_config_value
 from .io.utils import read_file, write_file, load_data, save_data, ensure_directory

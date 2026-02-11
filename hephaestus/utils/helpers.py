@@ -15,26 +15,13 @@ Usage:
 import time
 import re
 import functools
+import math
 from typing import Any, Callable, Optional
 from pathlib import Path
 
-def slugify(text: str) -> str:
-    """Convert text to URL-friendly slug.
-    
-    Args:
-        text: Text to convert
-        
-    Returns:
-        Slugified text
-    """
-    # Convert to lowercase
-    text = text.lower()
-    # Replace spaces and special chars with hyphens
-    text = re.sub(r'[^\w\s-]', '', text)
-    # Replace multiple spaces/hyphens with single hyphen
-    text = re.sub(r'[-\s]+', '-', text)
-    # Strip leading/trailing hyphens
-    return text.strip('-')
+# Import slugify from the shared layer within our package
+from ..shared.utils.common import slugify
+
 
 def retry_with_backoff(func: Callable,
                       max_retries: int = 3,
@@ -66,6 +53,7 @@ def retry_with_backoff(func: Callable,
         return None
     return wrapper
 
+
 def human_readable_size(size_bytes: int) -> str:
     """Convert bytes to human readable string.
     
@@ -87,6 +75,7 @@ def human_readable_size(size_bytes: int) -> str:
         i += 1
         
     return f"{size:.1f} {size_names[i]}"
+
 
 def flatten_dict(d: dict, separator: str = '.', prefix: str = '') -> dict:
     """Flatten nested dictionary.

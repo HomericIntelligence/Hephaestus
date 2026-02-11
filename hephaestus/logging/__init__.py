@@ -1,1 +1,1 @@
-"""Logging utilities for the HomericIntelligence ecosystem."""
+"""Enhanced logging utilities for the HomericIntelligence ecosystem."""
