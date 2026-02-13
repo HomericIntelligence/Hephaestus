@@ -1,15 +1,14 @@
 {
-  "name": "github-actions-python-cicd",
+  "name": "create-reusable-utilities",
   "version": "1.0.0",
-  "category": "ci-cd",
-  "description": "Comprehensive GitHub Actions CI/CD setup for Python projects with multi-version testing, linting, and coverage reporting",
-  "author": "HomericIntelligence Team",
-  "created": "2026-02-12",
-  "tags": ["ci-cd", "github-actions", "python", "pytest", "testing", "multi-version"],
-  "metadata": {
-    "python_versions": ["3.8", "3.9", "3.10", "3.11", "3.12"],
-    "tools": ["pytest", "flake8", "black", "mypy", "pytest-cov"],
-    "project": "ProjectHephaestus",
-    "session_date": "2026-02-12"
-  }
+  "description": "Systematic approach for porting and generalizing utility scripts across projects",
+  "category": "architecture",
+  "keywords": ["utilities", "porting", "generalization", "cross-project", "modular-design"],
+  "created": "2026-02-13",
+  "lastUpdated": "2026-02-13",
+  "author": "Claude Code",
+  "skill_path": "skills/create-reusable-utilities/SKILL.md",
+  "references": [
+    "references/notes.md"
+  ]
 }

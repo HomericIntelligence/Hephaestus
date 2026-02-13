@@ -69,6 +69,9 @@ class MarkdownFixer:
         content, fix_count = self._fix_structural_issues(content)
         fixes += fix_count
 
+        content, fix_count = self._fix_md034_bare_urls(content)
+        fixes += fix_count
+
         # Ensure file ends with single newline
         if content and not content.endswith("\n"):
             content += "\n"
@@ -268,6 +271,37 @@ class MarkdownFixer:
     def _is_list_item(self, line: str) -> bool:
         """Check if line is a list item."""
         return bool(re.match(r"^\\s*[-*+]\\s+", line) or re.match(r"^\\s*\\d+\\.\\s+", line))
+
+    def _fix_md034_bare_urls(self, content: str) -> Tuple[str, int]:
+        """
+        Fix MD034: Convert bare URLs to angle-bracket format.
+
+        Wraps bare HTTP/HTTPS URLs in angle brackets to comply with markdown
+        linting rules, while avoiding URLs already in markdown link syntax.
+
+        Args:
+            content: Markdown content to fix
+
+        Returns:
+            Tuple of (fixed_content, fix_count)
+        """
+        fixes = 0
+
+        def replace_url(match):
+            nonlocal fixes
+            url = match.group(0)
+            # Check if URL is already in a markdown link syntax
+            start = match.start()
+            if start >= 2 and content[start - 2 : start] == "](":
+                return url
+            fixes += 1
+            return f"<{url}>"
+
+        # Match http/https URLs
+        pattern = r"https?://[a-zA-Z0-9][-a-zA-Z0-9@:%._\+~#=]{0,256}\.[a-zA-Z0-9]{1,6}\b[-a-zA-Z0-9@:%_\+.~#?&/=]*"
+
+        fixed_content = re.sub(pattern, replace_url, content)
+        return fixed_content, fixes
 
     def process_path(self, path: Path) -> Tuple[int, int]:
         """
