@@ -1,1 +1,2 @@
 # Production dependencies
+PyYAML>=5.4.0

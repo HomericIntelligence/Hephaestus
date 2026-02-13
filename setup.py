@@ -24,11 +24,12 @@ setup(
     ],
     python_requires=">=3.8",
     install_requires=[
-        # Currently no dependencies, but we might add them later
+        "PyYAML>=5.4.0",
     ],
     extras_require={
         "dev": [
             "pytest>=6.0.0",
+            "pytest-cov>=2.12.0",
             "black>=21.0.0",
             "flake8>=3.8.0",
             "mypy>=0.800",
