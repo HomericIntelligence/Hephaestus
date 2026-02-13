@@ -4,9 +4,11 @@ General utility functions that don't fit in other specific modules.
 """
 import os
 import re
+import sys
+import subprocess
 import unicodedata
 from pathlib import Path
-from typing import Any, Dict, Union
+from typing import Any, Dict, List, Optional, Union
 
 
 def slugify(text: str) -> str:
@@ -79,13 +81,13 @@ def flatten_dict(d: Dict[str, Any], parent_key: str = '', sep: str = '.') -> Dic
 
 def get_repo_root(start_path: Union[str, Path, None] = None) -> Path:
     """Find repository root by looking for .git directory.
-    
+
     Args:
         start_path: Starting path to search from. Defaults to current directory.
-        
+
     Returns:
         Path to repository root
-        
+
     Raises:
         FileNotFoundError: If no repository root is found
     """
@@ -93,13 +95,99 @@ def get_repo_root(start_path: Union[str, Path, None] = None) -> Path:
         start_path = Path.cwd()
     else:
         start_path = Path(start_path).resolve()
-    
+
     path = start_path
     while path != path.parent:  # Stop at filesystem root
         if (path / ".git").exists():
             return path
         path = path.parent
-    
+
     # If we get here, we didn't find a .git directory
     # Return the original start path as fallback
     return start_path
+
+
+def run_subprocess(cmd: List[str], cwd: Optional[str] = None) -> subprocess.CompletedProcess:
+    """Run subprocess command with proper error handling.
+
+    Args:
+        cmd: Command and arguments as list
+        cwd: Working directory for command execution
+
+    Returns:
+        Completed process object
+
+    Raises:
+        subprocess.CalledProcessError: If command fails
+    """
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        return result
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Command failed: {' '.join(cmd)}")
+        print(f"[ERROR] stderr: {e.stderr}")
+        raise
+
+
+def get_proj_root(proj_name: str) -> str:
+    """Get absolute path to project root by name.
+
+    First checks for PROJECT_ROOT environment variable, then searches
+    filesystem for a git repository with matching name.
+
+    Args:
+        proj_name: Name of the project (e.g., 'ProjectHephaestus')
+
+    Returns:
+        Absolute path to project root
+
+    Raises:
+        ValueError: If project root cannot be determined
+    """
+    proj_env_var = f"{proj_name.upper()}_ROOT"
+    proj_root = os.environ.get(proj_env_var)
+
+    if not proj_root:
+        # Fallback to relative path approach
+        current_dir = Path.cwd()
+        while current_dir != current_dir.parent:
+            if (current_dir / ".git").exists() and current_dir.name == proj_name:
+                proj_root = str(current_dir)
+                break
+            current_dir = current_dir.parent
+
+    if not proj_root:
+        raise ValueError(f"Could not determine {proj_name} root. "
+                         f"Please set {proj_env_var} environment variable.")
+
+    return proj_root
+
+
+def install_package(package_name: str, upgrade: bool = False) -> bool:
+    """Install Python package with pip.
+
+    Args:
+        package_name: Name of package to install
+        upgrade: Whether to upgrade if already installed
+
+    Returns:
+        True if installation successful, False otherwise
+    """
+    cmd = [sys.executable, "-m", "pip", "install"]
+    if upgrade:
+        cmd.append("--upgrade")
+    cmd.append(package_name)
+
+    try:
+        result = run_subprocess(cmd)
+        print(f"Successfully installed {package_name}")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to install {package_name}: {e}")
+        return False

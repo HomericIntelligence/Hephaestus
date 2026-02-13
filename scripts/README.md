@@ -1,36 +1,52 @@
-# Scripts and Tools Organization
+# Scripts Directory
 
-This directory contains consolidated scripts and tools from the HomericIntelligence ecosystem.
+This directory contains CLI wrapper scripts for ProjectHephaestus utilities.
 
-## Structure
+## Available Scripts
 
-```
-scripts/
-├── utilities/     # General purpose utility scripts
-├── deployment/    # Deployment and infrastructure scripts
-├── testing/       # Test automation scripts
-└── README.md      # This file
+### Validation Scripts
 
-tools/
-├── dev/          # Development tools
-├── ops/          # Operations tools
-└── README.md     # Tools documentation
+- **validate_links.py** - Validate markdown links in documentation
+- **validate_structure.py** - Validate repository directory structure
+- **check_readmes.py** - Check README files for completeness
+- **lint_configs.py** - Lint YAML configuration files
 
-shared/
-├── config/       # Shared configuration utilities
-├── utils/        # Shared utility functions
-└── README.md     # Shared components documentation
+### Git/GitHub Scripts
+
+- **generate_changelog.py** - Generate changelog from git commit history
+- **merge_prs.py** - Merge pull requests with successful CI/CD
+
+### Demo/Testing Scripts
+
+- **demo_cli.py** - Demo CLI functionality
+- **run_tests.py** - Run test suite
+- **example_usage.py** - Usage examples
+
+## Usage
+
+All scripts are executable and can be run directly:
+
+```bash
+# Generate changelog
+python scripts/generate_changelog.py
+
+# Merge PRs (requires GITHUB_TOKEN)
+python scripts/merge_prs.py --dry-run
+
+# Validate structure (requires configuration)
+python scripts/validate_structure.py
 ```
 
 ## Source Repositories
 
-Scripts and tools have been consolidated from:
-- ProjectOdyssey: Various script utilities
-- ProjectScylla: Tool utilities
-- ProjectMnemosyne: Shared utilities
+Scripts ported from:
+- **ProjectOdyssey**: Validation, changelog generation, PR merging
+- **ProjectHephaestus**: Original utilities and helpers
 
-Following principles from CLAUDE.md:
-- KISS (Keep It Simple, Stupid)
-- DRY (Don't Repeat Yourself)
-- YAGNI (You Aren't Gonna Need It)
-- Modularity with well-defined interfaces
+## Design Principles
+
+Following CLAUDE.md guidelines:
+- **KISS** (Keep It Simple, Stupid) - Scripts are thin wrappers
+- **DRY** (Don't Repeat Yourself) - Logic in hephaestus modules
+- **YAGNI** (You Aren't Gonna Need It) - Only port what's reusable
+- **Modularity** - Clear separation between CLI and core logic

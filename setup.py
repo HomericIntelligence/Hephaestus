@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="projecthephaestus",
-    version="0.1.0",
+    version="0.2.0",
     author="HomericIntelligence Team",
     author_email="team@homericintelligence.com",
     description="Shared utilities and tooling for the HomericIntelligence ecosystem",
@@ -32,6 +32,9 @@ setup(
             "black>=21.0.0",
             "flake8>=3.8.0",
             "mypy>=0.800",
+        ],
+        "github": [
+            "PyGithub>=1.55",
         ],
     },
     entry_points={
