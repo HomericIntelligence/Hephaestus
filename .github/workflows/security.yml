@@ -1,0 +1,55 @@
+name: Security
+
+on:
+  pull_request:
+    paths:
+      - "pixi.toml"
+      - "pixi.lock"
+      - "pyproject.toml"
+      - "**/*.py"
+      - ".github/workflows/security.yml"
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+jobs:
+  pip-audit:
+    name: Dependency vulnerability scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pixi
+        uses: prefix-dev/setup-pixi@v0.9.4
+        with:
+          pixi-version: v0.63.2
+          environments: lint
+
+      - name: Cache pixi environments
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pixi
+            ~/.cache/rattler/cache
+          key: pixi-lint-${{ runner.os }}-${{ hashFiles('pixi.lock') }}
+
+      - name: Run pip-audit
+        id: pip-audit
+        run: pixi run --environment lint pip-audit
+
+      - name: Post pip-audit summary
+        if: always()
+        env:
+          AUDIT_OUTCOME: ${{ steps.pip-audit.outcome }}
+        run: |
+          {
+            echo "## pip-audit Security Scan"
+            echo ""
+            if [ "$AUDIT_OUTCOME" = "success" ]; then
+              echo "No HIGH/CRITICAL vulnerabilities found."
+            else
+              echo "Vulnerabilities detected — see job logs for details."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

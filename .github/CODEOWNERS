@@ -1,0 +1,16 @@
+# Default: all changes require maintainer review
+* @mvillmow
+
+# Core configuration
+CLAUDE.md @mvillmow
+pyproject.toml @mvillmow
+pixi.toml @mvillmow
+.pre-commit-config.yaml @mvillmow
+
+# CI/CD
+.github/ @mvillmow
+
+# Core source
+hephaestus/ @mvillmow
+tests/ @mvillmow
+scripts/ @mvillmow

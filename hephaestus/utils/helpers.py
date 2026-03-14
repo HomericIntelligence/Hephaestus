@@ -4,11 +4,11 @@ General utility functions that don't fit in other specific modules.
 """
 import os
 import re
-import sys
 import subprocess
+import sys
 import unicodedata
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 
 def slugify(text: str) -> str:
@@ -19,13 +19,14 @@ def slugify(text: str) -> str:
         
     Returns:
         URL-friendly slug string
+
     """
     # Normalize unicode characters
     text = unicodedata.normalize('NFKD', text)
     # Convert to ASCII
     text = text.encode('ascii', 'ignore').decode('ascii')
-    # Convert to lowercase and replace spaces/underscores with hyphens
-    text = re.sub(r'[\s_]+', '-', text.lower())
+    # Convert to lowercase and replace spaces/underscores/dots with hyphens
+    text = re.sub(r'[\s_.]+', '-', text.lower())
     # Remove non-alphanumeric characters (except hyphens)
     text = re.sub(r'[^a-z0-9-]', '', text)
     # Remove leading/trailing hyphens
@@ -35,7 +36,7 @@ def slugify(text: str) -> str:
     return text
 
 
-def human_readable_size(size_bytes: Union[int, float]) -> str:
+def human_readable_size(size_bytes: int | float) -> str:
     """Convert byte size to human readable format.
     
     Args:
@@ -43,22 +44,23 @@ def human_readable_size(size_bytes: Union[int, float]) -> str:
         
     Returns:
         Human readable size string with appropriate unit
+
     """
     if size_bytes == 0:
         return "0 B"
-    
+
     size_names = ["B", "KB", "MB", "GB", "TB"]
     i = 0
     size = float(size_bytes)
-    
+
     while size >= 1024.0 and i < len(size_names) - 1:
         size /= 1024.0
         i += 1
-    
+
     return f"{size:.1f} {size_names[i]}"
 
 
-def flatten_dict(d: Dict[str, Any], parent_key: str = '', sep: str = '.') -> Dict[str, Any]:
+def flatten_dict(d: dict[str, Any], parent_key: str = '', sep: str = '.') -> dict[str, Any]:
     """Flatten nested dictionary using dot notation for keys.
     
     Args:
@@ -68,6 +70,7 @@ def flatten_dict(d: Dict[str, Any], parent_key: str = '', sep: str = '.') -> Dic
         
     Returns:
         Flattened dictionary
+
     """
     items = []
     for k, v in d.items():
@@ -79,7 +82,7 @@ def flatten_dict(d: Dict[str, Any], parent_key: str = '', sep: str = '.') -> Dic
     return dict(items)
 
 
-def get_repo_root(start_path: Union[str, Path, None] = None) -> Path:
+def get_repo_root(start_path: str | Path | None = None) -> Path:
     """Find repository root by looking for .git directory.
 
     Args:
@@ -90,6 +93,7 @@ def get_repo_root(start_path: Union[str, Path, None] = None) -> Path:
 
     Raises:
         FileNotFoundError: If no repository root is found
+
     """
     if start_path is None:
         start_path = Path.cwd()
@@ -107,7 +111,7 @@ def get_repo_root(start_path: Union[str, Path, None] = None) -> Path:
     return start_path
 
 
-def run_subprocess(cmd: List[str], cwd: Optional[str] = None) -> subprocess.CompletedProcess:
+def run_subprocess(cmd: list[str], cwd: str | None = None) -> subprocess.CompletedProcess:
     """Run subprocess command with proper error handling.
 
     Args:
@@ -119,6 +123,7 @@ def run_subprocess(cmd: List[str], cwd: Optional[str] = None) -> subprocess.Comp
 
     Raises:
         subprocess.CalledProcessError: If command fails
+
     """
     try:
         result = subprocess.run(
@@ -149,6 +154,7 @@ def get_proj_root(proj_name: str) -> str:
 
     Raises:
         ValueError: If project root cannot be determined
+
     """
     proj_env_var = f"{proj_name.upper()}_ROOT"
     proj_root = os.environ.get(proj_env_var)
@@ -178,6 +184,7 @@ def install_package(package_name: str, upgrade: bool = False) -> bool:
 
     Returns:
         True if installation successful, False otherwise
+
     """
     cmd = [sys.executable, "-m", "pip", "install"]
     if upgrade:

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-System information collection utilities for ProjectHephaestus.
+"""System information collection utilities for ProjectHephaestus.
 
 Collects comprehensive system information for debugging, reporting, and environment analysis.
 Gathers OS details, Python versions, Git information, and environment variables.
@@ -10,13 +9,13 @@ import os
 import platform
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional, Tuple, Dict, Any
+from typing import Any
 
 
-def run_command(cmd: list, capture_output: bool = True, timeout: int = 5) -> Tuple[bool, str]:
-    """
-    Run a shell command and return success status and output.
+def run_command(cmd: list, capture_output: bool = True, timeout: int = 5) -> tuple[bool, str]:
+    """Run a shell command and return success status and output.
 
     Args:
         cmd: Command as list of strings
@@ -25,6 +24,7 @@ def run_command(cmd: list, capture_output: bool = True, timeout: int = 5) -> Tup
 
     Returns:
         Tuple of (success: bool, output: str).
+
     """
     try:
         result = subprocess.run(cmd, capture_output=capture_output, text=True, timeout=timeout)
@@ -33,15 +33,15 @@ def run_command(cmd: list, capture_output: bool = True, timeout: int = 5) -> Tup
         return (False, "")
 
 
-def get_command_path(cmd: str) -> Optional[str]:
-    """
-    Get the full path of a command if it exists.
+def get_command_path(cmd: str) -> str | None:
+    """Get the full path of a command if it exists.
 
     Args:
         cmd: Command name to locate
 
     Returns:
         Full path to command or None if not found
+
     """
     success, output = run_command(["which", cmd])
     return output if success and output else None
@@ -89,10 +89,9 @@ def get_os_info() -> str:
 def get_tool_info(
     tool_name: str,
     version_flag: str = "--version",
-    version_extract: Optional[Callable[[str], str]] = None,
-) -> Tuple[str, str]:
-    """
-    Get version and path information for a tool.
+    version_extract: Callable[[str], str] | None = None,
+) -> tuple[str, str]:
+    """Get version and path information for a tool.
 
     Args:
         tool_name: Name of the tool
@@ -101,6 +100,7 @@ def get_tool_info(
 
     Returns:
         Tuple of (version: str, path: str).
+
     """
     path = get_command_path(tool_name)
 
@@ -125,7 +125,7 @@ def extract_version_word(output: str, word_index: int = 1) -> str:
     return parts[word_index] if len(parts) > word_index else output
 
 
-def get_python_info() -> Dict[str, Any]:
+def get_python_info() -> dict[str, Any]:
     """Get comprehensive Python information."""
     return {
         "version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
@@ -136,7 +136,7 @@ def get_python_info() -> Dict[str, Any]:
     }
 
 
-def get_git_info() -> Dict[str, str]:
+def get_git_info() -> dict[str, str]:
     """Get Git repository information if in a Git repo."""
     git_info = {
         "repository": "No",
@@ -162,21 +162,21 @@ def get_git_info() -> Dict[str, str]:
     return git_info
 
 
-def get_environment_info() -> Dict[str, str]:
+def get_environment_info() -> dict[str, str]:
     """Get selected environment variables."""
     env_vars = ["SHELL", "LANG", "USER", "HOME", "PATH"]
     return {var: os.environ.get(var, "Not set") for var in env_vars}
 
 
-def get_system_info(include_tools: bool = True) -> Dict[str, Any]:
-    """
-    Collect comprehensive system information.
+def get_system_info(include_tools: bool = True) -> dict[str, Any]:
+    """Collect comprehensive system information.
 
     Args:
         include_tools: Whether to include tool versions (may be slow)
 
     Returns:
         Dictionary containing system information organized by category
+
     """
     info = {
         "os": {
@@ -207,9 +207,8 @@ def get_system_info(include_tools: bool = True) -> Dict[str, Any]:
     return info
 
 
-def format_system_info(info: Dict[str, Any], format_type: str = "text") -> str:
-    """
-    Format system information for display.
+def format_system_info(info: dict[str, Any], format_type: str = "text") -> str:
+    """Format system information for display.
 
     Args:
         info: System information dictionary
@@ -217,6 +216,7 @@ def format_system_info(info: Dict[str, Any], format_type: str = "text") -> str:
 
     Returns:
         Formatted string representation
+
     """
     if format_type.lower() == "json":
         import json

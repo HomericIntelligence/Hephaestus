@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Enhanced logging utilities for ProjectHephaestus.
+"""Enhanced logging utilities for ProjectHephaestus.
 
 Standardized logging interface with configurable output formats,
 multiple destinations, and context management.
@@ -16,32 +15,31 @@ Usage:
 import logging
 import sys
 import threading
-from typing import Optional, Dict, Any
-from pathlib import Path
 from contextlib import contextmanager
+from typing import Any
 
 
 class ContextLogger(logging.LoggerAdapter):
     """Logger adapter that adds context information to log messages."""
-    
-    def __init__(self, logger: logging.Logger, context: Optional[Dict[str, Any]] = None):
+
+    def __init__(self, logger: logging.Logger, context: dict[str, Any] | None = None):
         super().__init__(logger, context or {})
         self._context = context or {}
         self._context_lock = threading.Lock()
-    
+
     def process(self, msg, kwargs):
         """Add context information to log messages."""
         extra = kwargs.get('extra', {})
         extra.update(self._context)
         kwargs['extra'] = extra
         return msg, kwargs
-    
+
     def bind(self, **kwargs):
         """Create a new logger with additional context."""
         new_context = self._context.copy()
         new_context.update(kwargs)
         return ContextLogger(self.logger, new_context)
-    
+
     def unbind(self, *keys):
         """Remove context keys from logger."""
         new_context = self._context.copy()
@@ -50,10 +48,10 @@ class ContextLogger(logging.LoggerAdapter):
         return ContextLogger(self.logger, new_context)
 
 
-def get_logger(name: str, 
-               level: Optional[int] = None,
-               log_file: Optional[str] = None,
-               context: Optional[Dict[str, Any]] = None) -> ContextLogger:
+def get_logger(name: str,
+               level: int | None = None,
+               log_file: str | None = None,
+               context: dict[str, Any] | None = None) -> ContextLogger:
     """Get a configured logger instance with optional context.
     
     Args:
@@ -64,33 +62,34 @@ def get_logger(name: str,
         
     Returns:
         Configured ContextLogger instance
+
     """
     logger = logging.getLogger(name)
     logger.setLevel(level or logging.INFO)
-    
+
     # Prevent adding handlers multiple times
     if not logger.handlers:
         formatter = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
-        
+
         # Console handler
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
-        
+
         # File handler (optional)
         if log_file:
             file_handler = logging.FileHandler(log_file)
             file_handler.setFormatter(formatter)
             logger.addHandler(file_handler)
-    
+
     return ContextLogger(logger, context)
 
 
 def setup_logging(level: int = logging.INFO,
-                  log_file: Optional[str] = None,
-                  format_string: Optional[str] = None,
+                  log_file: str | None = None,
+                  format_string: str | None = None,
                   log_to_stderr: bool = False) -> None:
     """Setup global logging configuration.
     
@@ -99,20 +98,21 @@ def setup_logging(level: int = logging.INFO,
         log_file: Optional file to log to
         format_string: Custom log format
         log_to_stderr: Whether to also log to stderr
+
     """
     format_string = format_string or '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    
+
     handlers = [logging.StreamHandler(sys.stdout)]
-    
+
     if log_to_stderr:
         handlers.append(logging.StreamHandler(sys.stderr))
-    
+
     logging.basicConfig(
         level=level,
         format=format_string,
         handlers=handlers
     )
-    
+
     if log_file:
         file_handler = logging.FileHandler(log_file)
         file_handler.setFormatter(logging.Formatter(format_string))
@@ -135,7 +135,7 @@ def log_context(**context):
         pass  # Cleanup would happen here in a real implementation
 
 
-def create_rotating_file_logger(name: str, 
+def create_rotating_file_logger(name: str,
                                log_file: str,
                                max_bytes: int = 10485760,  # 10MB
                                backup_count: int = 5) -> ContextLogger:
@@ -149,27 +149,28 @@ def create_rotating_file_logger(name: str,
         
     Returns:
         Configured ContextLogger with rotating file handler
+
     """
     try:
         from logging.handlers import RotatingFileHandler
     except ImportError:
         # Fallback to regular file handler
         return get_logger(name, log_file=log_file)
-    
+
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
-    
+
     # Create rotating file handler
     handler = RotatingFileHandler(
-        log_file, 
-        maxBytes=max_bytes, 
+        log_file,
+        maxBytes=max_bytes,
         backupCount=backup_count
     )
-    
+
     formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
     handler.setFormatter(formatter)
     logger.addHandler(handler)
-    
+
     return ContextLogger(logger)

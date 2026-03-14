@@ -1,201 +1,258 @@
 #!/usr/bin/env python3
-"""
-Input/output utilities for ProjectHephaestus.
+"""Input/output utilities for ProjectHephaestus.
 
 Standardized interfaces for file operations, data serialization,
 and resource management.
 
 Usage:
     from hephaestus.io.utils import safe_write, ensure_directory
-    
+
     ensure_directory('/path/to/dir')
     safe_write('/path/to/file.txt', 'content')
 """
 
-import os
 import json
-import yaml
-import pickle
-from typing import Any, Union, Optional
+import logging
 from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# Formats that require unsafe deserialization (e.g. pickle)
+_UNSAFE_FORMATS = {"pickle"}
 
 
-def read_file(filepath: Union[str, Path], mode: str = 'r') -> Union[str, bytes]:
+def read_file(filepath: str | Path, mode: str = "r") -> str | bytes:
     """Read content from a file.
-    
+
     Args:
         filepath: Path to file
         mode: File open mode ('r' for text, 'rb' for binary)
-        
+
     Returns:
         File content as string or bytes
-        
+
     Raises:
         FileNotFoundError: If file doesn't exist
         IOError: If file cannot be read
+
     """
     filepath = Path(filepath)
     with open(filepath, mode) as f:
-        return f.read()
+        return f.read()  # type: ignore[return-value]
 
 
-def write_file(filepath: Union[str, Path], 
-               content: Union[str, bytes],
-               mode: str = 'w') -> bool:
+def write_file(
+    filepath: str | Path,
+    content: str | bytes,
+    mode: str = "w",
+) -> bool:
     """Write content to a file.
-    
+
     Args:
         filepath: Path to file
         content: Content to write
         mode: File open mode ('w' for text, 'wb' for binary)
-        
+
     Returns:
         True if successful, False otherwise
+
     """
     filepath = Path(filepath)
     try:
-        # Ensure parent directory exists
         filepath.parent.mkdir(parents=True, exist_ok=True)
-        
         with open(filepath, mode) as f:
-            f.write(content)
+            f.write(content)  # type: ignore[arg-type]
         return True
     except Exception as e:
-        print(f"Failed to write to {filepath}: {e}")
+        logger.warning("Failed to write to %s: %s", filepath, e)
         return False
 
 
-def ensure_directory(path: Union[str, Path]) -> bool:
+def ensure_directory(path: str | Path) -> bool:
     """Ensure directory exists, creating it if necessary.
-    
+
     Args:
         path: Path to directory
-        
+
     Returns:
         True if successful, False otherwise
+
     """
     try:
         Path(path).mkdir(parents=True, exist_ok=True)
         return True
     except Exception as e:
-        print(f"Failed to create directory {path}: {e}")
+        logger.warning("Failed to create directory %s: %s", path, e)
         return False
 
 
-def safe_write(filepath: Union[str, Path], 
-               content: Union[str, bytes],
-               backup: bool = True) -> bool:
+def safe_write(
+    filepath: str | Path,
+    content: str | bytes,
+    backup: bool = True,
+) -> bool:
     """Write content to file safely with optional backup.
-    
+
     Args:
         filepath: Path to file
         content: Content to write
         backup: Whether to create backup of existing file
-        
+
     Returns:
         True if successful, False otherwise
+
     """
     filepath = Path(filepath)
-    
-    # Create backup if requested and file exists
+
     if backup and filepath.exists():
-        backup_path = filepath.with_suffix(filepath.suffix + '.bak')
+        backup_path = filepath.with_suffix(filepath.suffix + ".bak")
         try:
             backup_path.write_bytes(filepath.read_bytes())
         except Exception as e:
-            print(f"Warning: Could not create backup: {e}")
-    
+            logger.warning("Could not create backup: %s", e)
+
     try:
-        # Ensure parent directory exists
         ensure_directory(filepath.parent)
-        
-        # Write content
         if isinstance(content, str):
             filepath.write_text(content)
         else:
             filepath.write_bytes(content)
         return True
     except Exception as e:
-        print(f"Failed to write to {filepath}: {e}")
+        logger.warning("Failed to write to %s: %s", filepath, e)
         return False
 
 
-def load_data(filepath: Union[str, Path], 
-              format_hint: Optional[str] = None) -> Any:
+def _detect_format(filepath: Path, format_hint: str | None) -> str:
+    """Detect serialization format from file extension or hint.
+
+    Args:
+        filepath: Path to file
+        format_hint: Caller-supplied format override
+
+    Returns:
+        Format string ('json', 'yaml', or 'pickle')
+
+    Raises:
+        ValueError: If format cannot be determined
+
+    """
+    if format_hint is not None:
+        return format_hint
+    ext = filepath.suffix.lower()
+    if ext == ".json":
+        return "json"
+    if ext in {".yml", ".yaml"}:
+        return "yaml"
+    if ext == ".pkl":
+        return "pickle"
+    raise ValueError(f"Could not determine serialization format for '{filepath}'")
+
+
+def load_data(
+    filepath: str | Path,
+    format_hint: str | None = None,
+    allow_unsafe_deserialization: bool = False,
+) -> Any:
     """Load data from file with automatic format detection.
-    
+
     Args:
         filepath: Path to file
         format_hint: Optional format hint ('json', 'yaml', 'pickle')
-        
+        allow_unsafe_deserialization: If False (default), raise ValueError for
+            formats that can execute arbitrary code (e.g. pickle).
+
     Returns:
         Loaded data object
+
+    Raises:
+        ValueError: If format is unsafe and allow_unsafe_deserialization is False,
+            or if format cannot be determined.
+        FileNotFoundError: If the file does not exist.
+
     """
     filepath = Path(filepath)
-    
-    # Determine format
-    if format_hint is None:
-        ext = filepath.suffix.lower()
-        if ext == '.json':
-            format_hint = 'json'
-        elif ext in ['.yml', '.yaml']:
-            format_hint = 'yaml'
-        elif ext == '.pkl':
-            format_hint = 'pickle'
-        else:
-            raise ValueError(f"Could not determine format for {filepath}")
-    
-    try:
-        with open(filepath, 'r') as f:
-            if format_hint == 'json':
-                return json.load(f)
-            elif format_hint == 'yaml':
-                return yaml.safe_load(f)
-            elif format_hint == 'pickle':
-                with open(filepath, 'rb') as pf:
-                    return pickle.load(pf)
-    except Exception as e:
-        print(f"Failed to load data from {filepath}: {e}")
-        raise
+    fmt = _detect_format(filepath, format_hint)
+
+    if fmt in _UNSAFE_FORMATS and not allow_unsafe_deserialization:
+        raise ValueError(
+            f"Format '{fmt}' uses unsafe deserialization. "
+            "Set allow_unsafe_deserialization=True to proceed at your own risk."
+        )
+
+    if fmt == "json":
+        with open(filepath) as f:
+            return json.load(f)
+    if fmt == "yaml":
+        import yaml  # lazy import — optional dependency
+
+        with open(filepath) as f:
+            return yaml.safe_load(f)
+    if fmt == "pickle":
+        import pickle
+
+        with open(filepath, "rb") as f:
+            return pickle.load(f)
+
+    raise ValueError(f"Unsupported format: '{fmt}'")
 
 
-def save_data(data: Any, 
-              filepath: Union[str, Path],
-              format_hint: Optional[str] = None) -> bool:
+def save_data(
+    data: Any,
+    filepath: str | Path,
+    format_hint: str | None = None,
+    allow_unsafe_deserialization: bool = False,
+) -> bool:
     """Save data to file with automatic format detection.
-    
+
     Args:
         data: Data to save
         filepath: Path to file
         format_hint: Optional format hint ('json', 'yaml', 'pickle')
-        
+        allow_unsafe_deserialization: If False (default), raise ValueError for
+            formats that can execute arbitrary code (e.g. pickle).
+
     Returns:
         True if successful, False otherwise
+
+    Raises:
+        ValueError: If format is unsafe and allow_unsafe_deserialization is False.
+
     """
     filepath = Path(filepath)
-    
-    # Determine format
-    if format_hint is None:
-        ext = filepath.suffix.lower()
-        if ext == '.json':
-            format_hint = 'json'
-        elif ext in ['.yml', '.yaml']:
-            format_hint = 'yaml'
-        elif ext == '.pkl':
-            format_hint = 'pickle'
-        else:
-            format_hint = 'json'  # Default to JSON
-    
+    ext = filepath.suffix.lower()
+    if format_hint is not None:
+        fmt = format_hint
+    elif ext == ".json":
+        fmt = "json"
+    elif ext in {".yml", ".yaml"}:
+        fmt = "yaml"
+    elif ext == ".pkl":
+        fmt = "pickle"
+    else:
+        fmt = "json"  # default
+
+    if fmt in _UNSAFE_FORMATS and not allow_unsafe_deserialization:
+        raise ValueError(
+            f"Format '{fmt}' uses unsafe deserialization. "
+            "Set allow_unsafe_deserialization=True to proceed at your own risk."
+        )
+
     try:
-        if format_hint == 'json':
+        if fmt == "json":
             filepath.write_text(json.dumps(data, indent=2))
-        elif format_hint == 'yaml':
-            with open(filepath, 'w') as f:
+        elif fmt == "yaml":
+            import yaml  # lazy import
+
+            with open(filepath, "w") as f:
                 yaml.dump(data, f, default_flow_style=False)
-        elif format_hint == 'pickle':
-            with open(filepath, 'wb') as f:
+        elif fmt == "pickle":
+            import pickle
+
+            with open(filepath, "wb") as f:
                 pickle.dump(data, f)
         return True
     except Exception as e:
-        print(f"Failed to save data to {filepath}: {e}")
+        logger.warning("Failed to save data to %s: %s", filepath, e)
         return False

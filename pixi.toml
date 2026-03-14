@@ -1,50 +1,47 @@
-[project]
-name = "project-hephaestus"
-version = "0.1.0"
+[workspace]
+name = "hephaestus"
+version = "0.3.0"
 description = "Shared utilities and tooling for the HomericIntelligence ecosystem"
-authors = ["HomericIntelligence Team"]
-channels = ["conda-forge", "bioconda"]
+channels = ["conda-forge"]
 platforms = ["linux-64", "win-64", "osx-64", "osx-arm64"]
 
 [tasks]
+test = "pytest"
+lint = "ruff check hephaestus scripts tests"
+format = "ruff format hephaestus scripts tests"
+audit = "pixi run --environment lint pip-audit"
 
 [dependencies]
-python = ">=3.9"
+python = ">=3.10"
 pip = "*"
 
 [pypi-dependencies]
-# Core dependencies for utilities
-pyyaml = "*"
-click = "*"
-requests = "*"
-tabulate = "*"
-tqdm = "*"
-
-[feature.test.dependencies]
-pytest = "*"
-pytest-cov = "*"
-pytest-mock = "*"
+hephaestus = { path = ".", editable = true }
 
 [feature.dev.dependencies]
-black = "*"
-ruff = "*"
-mypy = "*"
-pre-commit = "*"
+pre-commit = ">=3.0,<5"
+pytest = ">=9.0.0,<10"
+pytest-cov = ">=7.0.0,<8"
+types-pyyaml = ">=6.0.12,<7"
+ruff = ">=0.1.0,<1"
+mypy = ">=1.8.0,<2"
+yamllint = ">=1.35.0,<2"
 
-[feature.docs.dependencies]
-mkdocs = "*"
-mkdocs-material = "*"
+[feature.dev.pypi-dependencies]
+pip-audit = ">=2.7,<3"
 
-[feature.test]
-tasks = {test = "pytest"}
+[feature.lint.dependencies]
+ruff = ">=0.1.0,<1"
+mypy = ">=1.8.0,<2"
+yamllint = ">=1.35.0,<2"
+pre-commit = ">=3.0,<5"
 
-[feature.dev]
-tasks = {lint = "ruff check .", format = "black ."}
+[feature.lint.pypi-dependencies]
+pip-audit = ">=2.7,<3"
 
-[feature.docs]
-tasks = {docs = "mkdocs serve", "docs-build" = "mkdocs build"}
+[feature.lint.tasks]
+pip-audit = "pip-audit"
 
 [environments]
-default = ["test"]
-dev = ["test", "dev"]
-docs = ["docs"]
+default = { features = ["dev"], solve-group = "default" }
+lint = { features = ["lint"], solve-group = "lint" }

@@ -14,12 +14,11 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from hephaestus.utils.helpers import get_repo_root
 
 
-def run_git_command(args: List[str], cwd: Optional[Path] = None) -> str:
+def run_git_command(args: list[str], cwd: Path | None = None) -> str:
     """Run a git command and return output.
 
     Args:
@@ -28,6 +27,7 @@ def run_git_command(args: List[str], cwd: Optional[Path] = None) -> str:
 
     Returns:
         Git command output
+
     """
     if cwd is None:
         cwd = get_repo_root()
@@ -43,17 +43,18 @@ def run_git_command(args: List[str], cwd: Optional[Path] = None) -> str:
     return result.stdout.strip()
 
 
-def get_latest_tag() -> Optional[str]:
+def get_latest_tag() -> str | None:
     """Get the most recent release tag.
 
     Returns:
         Latest tag name or None if no tags exist
+
     """
     output = run_git_command(["describe", "--tags", "--abbrev=0"])
     return output if output else None
 
 
-def get_previous_tag(current_tag: str) -> Optional[str]:
+def get_previous_tag(current_tag: str) -> str | None:
     """Get the tag before the current one.
 
     Args:
@@ -61,12 +62,13 @@ def get_previous_tag(current_tag: str) -> Optional[str]:
 
     Returns:
         Previous tag name or None
+
     """
     output = run_git_command(["describe", "--tags", "--abbrev=0", f"{current_tag}^"])
     return output if output else None
 
 
-def get_commits_between(from_ref: Optional[str], to_ref: str = "HEAD") -> List[str]:
+def get_commits_between(from_ref: str | None, to_ref: str = "HEAD") -> list[str]:
     """Get commit messages between two refs.
 
     Args:
@@ -75,6 +77,7 @@ def get_commits_between(from_ref: Optional[str], to_ref: str = "HEAD") -> List[s
 
     Returns:
         List of commit lines
+
     """
     if from_ref:
         range_spec = f"{from_ref}..{to_ref}"
@@ -96,7 +99,7 @@ def get_commits_between(from_ref: Optional[str], to_ref: str = "HEAD") -> List[s
     return output.split("\n")
 
 
-def parse_commit(commit_line: str) -> Tuple[str, str, str, str]:
+def parse_commit(commit_line: str) -> tuple[str, str, str, str]:
     """Parse a commit line into (hash, type, scope, message).
 
     Handles conventional commits format: type(scope): message
@@ -106,6 +109,7 @@ def parse_commit(commit_line: str) -> Tuple[str, str, str, str]:
 
     Returns:
         Tuple of (hash, type, scope, message)
+
     """
     parts = commit_line.split("|", 2)
     if len(parts) != 3:
@@ -132,7 +136,7 @@ def parse_commit(commit_line: str) -> Tuple[str, str, str, str]:
     return (commit_hash, commit_type, scope, message)
 
 
-def categorize_commits(commits: List[str]) -> Dict[str, List[Tuple[str, str, str]]]:
+def categorize_commits(commits: list[str]) -> dict[str, list[tuple[str, str, str]]]:
     """Categorize commits by type.
 
     Args:
@@ -140,6 +144,7 @@ def categorize_commits(commits: List[str]) -> Dict[str, List[Tuple[str, str, str
 
     Returns:
         Dict mapping category name to list of (hash, scope, message) tuples
+
     """
     categories = defaultdict(list)
 
@@ -170,7 +175,7 @@ def categorize_commits(commits: List[str]) -> Dict[str, List[Tuple[str, str, str
 
 def generate_changelog(
     version: str,
-    from_ref: Optional[str] = None,
+    from_ref: str | None = None,
     to_ref: str = "HEAD",
 ) -> str:
     """Generate changelog content.
@@ -182,6 +187,7 @@ def generate_changelog(
 
     Returns:
         Formatted changelog as markdown string
+
     """
     lines = []
 

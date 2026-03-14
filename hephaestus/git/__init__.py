@@ -5,13 +5,13 @@ and commit analysis.
 """
 
 from .changelog import (
-    parse_commit,
     categorize_commits,
     generate_changelog,
+    parse_commit,
 )
 
 __all__ = [
-    "parse_commit",
     "categorize_commits",
     "generate_changelog",
+    "parse_commit",
 ]

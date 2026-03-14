@@ -42,15 +42,15 @@ This project follows the [HomericIntelligence Code of Conduct](CODE_OF_CONDUCT.m
 
 We follow these style guidelines:
 
-- Python code: Formatted with Black
-- Imports: Sorted with isort
-- Linting: Checked with Ruff
-- Type hints: Required for all functions
+- Python code: Formatted and linted with [Ruff](https://docs.astral.sh/ruff/)
+- Type hints: Required for all public functions (enforced by mypy strict mode)
+- Line length: 100 characters
+- Target Python: 3.10+
 
 Run the development tools:
 ```bash
-pixi run format  # Format code
-pixi run lint    # Check for issues
+pixi run format  # Format code with ruff format
+pixi run lint    # Lint with ruff check
 ```
 
 ## Testing

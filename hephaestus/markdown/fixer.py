@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Markdown linting fixer utilities for ProjectHephaestus.
+"""Markdown linting fixer utilities for ProjectHephaestus.
 
 This module provides functionality to automatically fix common markdown
 linting issues across repositories.
@@ -9,43 +8,43 @@ linting issues across repositories.
 import argparse
 import re
 import sys
-from pathlib import Path
-from typing import List, Tuple, Optional, Set
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
 class FixerOptions:
     """Configuration options for the markdown fixer."""
+
     verbose: bool = False
     dry_run: bool = False
-    exclude_patterns: Optional[Set[str]] = None
+    exclude_patterns: set[str] | None = None
 
 
 class MarkdownFixer:
     """Fixes common markdown linting issues."""
 
-    def __init__(self, options: Optional[FixerOptions] = None):
-        """
-        Initialize the markdown fixer.
+    def __init__(self, options: FixerOptions | None = None):
+        """Initialize the markdown fixer.
 
         Args:
             options: Configuration options for the fixer
+
         """
         self.options = options or FixerOptions()
         self.exclude_patterns = self.options.exclude_patterns or {
             "node_modules", ".git", "venv", "__pycache__", ".tox"
         }
 
-    def fix_file(self, file_path: Path) -> Tuple[bool, int]:
-        """
-        Fix markdown linting errors in a file.
+    def fix_file(self, file_path: Path) -> tuple[bool, int]:
+        """Fix markdown linting errors in a file.
 
         Args:
             file_path: Path to markdown file
 
         Returns:
             Tuple of (file_was_modified, error_count_fixed).
+
         """
         try:
             content = file_path.read_text(encoding="utf-8")
@@ -96,7 +95,7 @@ class MarkdownFixer:
             print(f"No changes needed for {file_path}")
         return False, 0
 
-    def _fix_md012_multiple_blank_lines(self, content: str) -> Tuple[str, int]:
+    def _fix_md012_multiple_blank_lines(self, content: str) -> tuple[str, int]:
         """Fix MD012: Remove multiple consecutive blank lines."""
         fixes = 0
         while "\n\n\n" in content:
@@ -104,12 +103,12 @@ class MarkdownFixer:
             fixes += 1
         return content, fixes
 
-    def _fix_md040_code_language(self, content: str) -> Tuple[str, int]:
+    def _fix_md040_code_language(self, content: str) -> tuple[str, int]:
         """Fix MD040: Add language tags to code blocks."""
         fixes = 0
         # Find ``` without a language tag
         new_content = re.sub(
-            r"^\`\`\`\\s*\\n",  # ``` followed by optional whitespace and newline
+            r"^\`\`\`\s*\\n",  # ``` followed by optional whitespace and newline
             "```text\n",  # Add 'text' language tag
             content,
             flags=re.MULTILINE,
@@ -118,7 +117,7 @@ class MarkdownFixer:
             fixes = content.count("```\n") - new_content.count("```\n")
         return new_content, fixes
 
-    def _fix_md026_heading_punctuation(self, content: str) -> Tuple[str, int]:
+    def _fix_md026_heading_punctuation(self, content: str) -> tuple[str, int]:
         """Fix MD026: Remove trailing punctuation from headings."""
         fixes = 0
         lines = content.split("\n")
@@ -126,18 +125,17 @@ class MarkdownFixer:
 
         for line in lines:
             # Remove trailing colons, periods, etc. from headings
-            if re.match(r"^#{1,6}\\s+", line):
+            if re.match(r"^#{1,6}\s+", line):
                 original_line = line
-                line = re.sub(r"[:.,;!?]+\\s*$", "", line)
+                line = re.sub(r"[:.,;!?]+\s*$", "", line)
                 if line != original_line:
                     fixes += 1
             fixed_lines.append(line)
 
-        return "\\n".join(fixed_lines), fixes
+        return "\n".join(fixed_lines), fixes
 
-    def _fix_structural_issues(self, content: str) -> Tuple[str, int]:
-        """
-        Fix structural markdown issues (MD022, MD031, MD032, MD029, MD036).
+    def _fix_structural_issues(self, content: str) -> tuple[str, int]:
+        """Fix structural markdown issues (MD022, MD031, MD032, MD029, MD036).
 
         - MD022: Headings surrounded by blank lines
         - MD031: Code blocks surrounded by blank lines
@@ -146,7 +144,7 @@ class MarkdownFixer:
         - MD036: Bold text as headings
         """
         lines = content.split("\n")
-        fixed_lines: List[str] = []
+        fixed_lines: list[str] = []
         fixes = 0
         i = 0
 
@@ -156,8 +154,8 @@ class MarkdownFixer:
             next_line = lines[i + 1] if i + 1 < len(lines) else ""
 
             # MD036: Convert **Bold:** to heading
-            if re.match(r"^\\*\\*[^*]+\\*\\*:?", line.strip()):
-                text = re.sub(r"\\*\\*([^*]+)\\*\\*:?", r"\\1", line.strip())
+            if re.match(r"^\*\*[^*]+\*\*:?", line.strip()):
+                text = re.sub(r"\*\*([^*]+)\*\*:?", r"\1", line.strip())
                 # Check if this looks like a heading (short, no lowercase middle)
                 if len(text) < 50 and text[0].isupper():
                     fixes += 1
@@ -170,7 +168,7 @@ class MarkdownFixer:
                     continue
 
             # MD022: Headings should be surrounded by blank lines
-            if re.match(r"^#{1,6}\\s+", line):
+            if re.match(r"^#{1,6}\s+", line):
                 # Add blank line before heading (except at start)
                 if fixed_lines and prev_line.strip() != "":
                     fixed_lines.append("")
@@ -180,7 +178,7 @@ class MarkdownFixer:
                 i += 1
 
                 # Add blank line after heading
-                if next_line.strip() != "" and not re.match(r"^#{1,6}\\s+", next_line):
+                if next_line.strip() != "" and not re.match(r"^#{1,6}\s+", next_line):
                     fixed_lines.append("")
                     fixes += 1
                 continue
@@ -215,7 +213,7 @@ class MarkdownFixer:
 
             # MD032: Lists should be surrounded by blank lines
             # MD029: Ordered lists should use 1. for all items
-            if re.match(r"^\\s*[-*+]\\s+", line) or re.match(r"^\\s*\\d+\\.\\s+", line):
+            if re.match(r"^\s*[-*+]\s+", line) or re.match(r"^\s*\d+\\.\s+", line):
                 # Add blank line before list
                 if fixed_lines and prev_line.strip() != "" and not self._is_list_item(prev_line):
                     fixed_lines.append("")
@@ -239,9 +237,9 @@ class MarkdownFixer:
                     # List item or continuation
                     if self._is_list_item(curr_line):
                         # MD029: Fix ordered list numbering
-                        if re.match(r"^\\s*\\d+\\.\\s+", curr_line):
+                        if re.match(r"^\s*\d+\\.\s+", curr_line):
                             indent = len(curr_line) - len(curr_line.lstrip())
-                            rest = re.sub(r"^\\s*\\d+\\.", "", curr_line)
+                            rest = re.sub(r"^\s*\d+\\.", "", curr_line)
                             fixed_line = " " * indent + "1." + rest
                             if fixed_line != curr_line:
                                 fixes += 1
@@ -266,15 +264,14 @@ class MarkdownFixer:
             fixed_lines.append(line)
             i += 1
 
-        return "\\n".join(fixed_lines), fixes
+        return "\n".join(fixed_lines), fixes
 
     def _is_list_item(self, line: str) -> bool:
         """Check if line is a list item."""
-        return bool(re.match(r"^\\s*[-*+]\\s+", line) or re.match(r"^\\s*\\d+\\.\\s+", line))
+        return bool(re.match(r"^\s*[-*+]\s+", line) or re.match(r"^\s*\d+\\.\s+", line))
 
-    def _fix_md034_bare_urls(self, content: str) -> Tuple[str, int]:
-        """
-        Fix MD034: Convert bare URLs to angle-bracket format.
+    def _fix_md034_bare_urls(self, content: str) -> tuple[str, int]:
+        """Fix MD034: Convert bare URLs to angle-bracket format.
 
         Wraps bare HTTP/HTTPS URLs in angle brackets to comply with markdown
         linting rules, while avoiding URLs already in markdown link syntax.
@@ -284,6 +281,7 @@ class MarkdownFixer:
 
         Returns:
             Tuple of (fixed_content, fix_count)
+
         """
         fixes = 0
 
@@ -303,15 +301,15 @@ class MarkdownFixer:
         fixed_content = re.sub(pattern, replace_url, content)
         return fixed_content, fixes
 
-    def process_path(self, path: Path) -> Tuple[int, int]:
-        """
-        Process a file or directory.
+    def process_path(self, path: Path) -> tuple[int, int]:
+        """Process a file or directory.
 
         Args:
             path: Path to file or directory
 
         Returns:
             Tuple of (files_modified, total_fixes).
+
         """
         if not path.exists():
             print(f"Error: {path} does not exist", file=sys.stderr)
@@ -326,7 +324,7 @@ class MarkdownFixer:
                 return 0, 0
         else:
             files_to_fix = [
-                f for f in path.rglob("*.md") 
+                f for f in path.rglob("*.md")
                 if not any(part in self.exclude_patterns for part in f.parts)
             ]
 
@@ -370,7 +368,7 @@ def main():
         verbose=args.verbose,
         dry_run=args.dry_run
     )
-    
+
     fixer = MarkdownFixer(options)
     files_modified, total_fixes = fixer.process_path(args.path)
 

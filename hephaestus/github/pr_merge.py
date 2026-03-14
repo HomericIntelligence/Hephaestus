@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Merge open PRs with successful CI/CD using GitHub API.
+"""Merge open PRs with successful CI/CD using GitHub API.
 
 Supports dry-run mode and can detect repository name from git remote.
 
@@ -23,19 +22,19 @@ import os
 import re
 import subprocess
 import sys
-from typing import List, Optional, Tuple
 
 from hephaestus.logging.utils import get_logger
-from hephaestus.utils.helpers import get_repo_root, run_subprocess
+from hephaestus.utils.helpers import run_subprocess
 
 logger = get_logger(__name__)
 
 
-def detect_repo_from_remote() -> Optional[str]:
+def detect_repo_from_remote() -> str | None:
     """Detect repository name from git remote.
 
     Returns:
         Repository in format 'owner/repo' or None if not detected
+
     """
     try:
         result = run_subprocess(["git", "remote", "get-url", "origin"])
@@ -61,13 +60,14 @@ def detect_repo_from_remote() -> Optional[str]:
         return None
 
 
-def run_git_cmd(cmd: List[str], dry_run: bool = False, cwd: Optional[str] = None) -> None:
+def run_git_cmd(cmd: list[str], dry_run: bool = False, cwd: str | None = None) -> None:
     """Run a git command with dry-run support.
 
     Args:
         cmd: Command and arguments
         dry_run: If True, only print the command
         cwd: Working directory
+
     """
     if dry_run:
         logger.info(f"[DRY-RUN] $ {' '.join(cmd)}")
@@ -77,7 +77,7 @@ def run_git_cmd(cmd: List[str], dry_run: bool = False, cwd: Optional[str] = None
     subprocess.run(cmd, check=True, cwd=cwd)
 
 
-def checks_success_and_print(commit) -> Tuple[Optional[bool], List]:
+def checks_success_and_print(commit) -> tuple[bool | None, list]:
     """Check if commit has successful CI/CD checks.
 
     Args:
@@ -85,6 +85,7 @@ def checks_success_and_print(commit) -> Tuple[Optional[bool], List]:
 
     Returns:
         Tuple of (success status, checks list) or (None, []) if no check runs present
+
     """
     try:
         checks = list(commit.get_check_runs())
@@ -117,6 +118,7 @@ def legacy_status_and_print(commit) -> str:
 
     Returns:
         Combined status state
+
     """
     try:
         combined = commit.get_combined_status()
@@ -136,6 +138,7 @@ def local_branch_exists(branch_name: str) -> bool:
 
     Returns:
         True if branch exists locally
+
     """
     try:
         out = subprocess.check_output(
@@ -153,6 +156,7 @@ def try_push_head_branch(head_branch: str, dry_run: bool) -> None:
     Args:
         head_branch: Branch name to push
         dry_run: If True, only print the action
+
     """
     if dry_run:
         logger.info(f"[DRY-RUN] Would push local branch '{head_branch}' to origin if it exists locally.")
@@ -171,6 +175,7 @@ def handle_merge_result(result, pr_number: int, base_branch: str) -> None:
         result: Merge result object from PyGithub
         pr_number: PR number
         base_branch: Base branch name
+
     """
     try:
         merged = getattr(result, "merged", None)

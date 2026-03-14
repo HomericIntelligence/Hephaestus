@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
-"""
-ANSI color codes for terminal output.
+"""ANSI color codes for terminal output.
 
 Provides a simple Colors class with standard ANSI codes and utilities
 for disabling colors in non-terminal environments.

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Markdown validation utilities for HomericIntelligence projects.
+"""Markdown validation utilities for HomericIntelligence projects.
 
 Provides functions for validating markdown files, checking links, and ensuring
 documentation quality across projects.
@@ -8,7 +7,6 @@ documentation quality across projects.
 
 import re
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
 
 from hephaestus.logging.utils import get_logger
 
@@ -16,8 +14,8 @@ logger = get_logger(__name__)
 
 
 def find_markdown_files(
-    directory: Path, exclude_dirs: Optional[Set[str]] = None
-) -> List[Path]:
+    directory: Path, exclude_dirs: set[str] | None = None
+) -> list[Path]:
     """Find all markdown files in a directory recursively.
 
     Args:
@@ -26,6 +24,7 @@ def find_markdown_files(
 
     Returns:
         Sorted list of Path objects for markdown files
+
     """
     if exclude_dirs is None:
         exclude_dirs = {
@@ -59,6 +58,7 @@ def validate_file_exists(file_path: Path) -> bool:
 
     Returns:
         True if file exists and is a regular file
+
     """
     return file_path.exists() and file_path.is_file()
 
@@ -71,15 +71,16 @@ def validate_directory_exists(dir_path: Path) -> bool:
 
     Returns:
         True if directory exists and is a directory
+
     """
     return dir_path.exists() and dir_path.is_dir()
 
 
 def check_required_sections(
     content: str,
-    required_sections: List[str],
-    file_path: Optional[Path] = None
-) -> Tuple[bool, List[str]]:
+    required_sections: list[str],
+    file_path: Path | None = None
+) -> tuple[bool, list[str]]:
     """Check if markdown content has all required sections.
 
     Args:
@@ -89,6 +90,7 @@ def check_required_sections(
 
     Returns:
         Tuple of (all_found, missing_sections).
+
     """
     missing = []
 
@@ -104,7 +106,7 @@ def check_required_sections(
     return len(missing) == 0, missing
 
 
-def extract_markdown_links(content: str) -> List[Tuple[str, int]]:
+def extract_markdown_links(content: str) -> list[tuple[str, int]]:
     """Extract all markdown links from content.
 
     Args:
@@ -112,6 +114,7 @@ def extract_markdown_links(content: str) -> List[Tuple[str, int]]:
 
     Returns:
         List of (link_target, line_number) tuples
+
     """
     links = []
     lines = content.split("\n")
@@ -127,7 +130,7 @@ def extract_markdown_links(content: str) -> List[Tuple[str, int]]:
 
 def validate_relative_link(
     link: str, source_file: Path, repo_root: Path
-) -> Tuple[bool, Optional[str]]:
+) -> tuple[bool, str | None]:
     """Validate a relative markdown link.
 
     Args:
@@ -137,6 +140,7 @@ def validate_relative_link(
 
     Returns:
         Tuple of (is_valid, error_message).
+
     """
     # Skip external links
     if link.startswith(("http://", "https://", "mailto:")):
@@ -177,6 +181,7 @@ def count_markdown_issues(content: str) -> dict:
 
     Returns:
         Dictionary of issue counts
+
     """
     issues = {
         "multiple_blank_lines": 0,
@@ -225,7 +230,7 @@ def count_markdown_issues(content: str) -> dict:
     return issues
 
 
-def find_readmes(directory: Path) -> List[Path]:
+def find_readmes(directory: Path) -> list[Path]:
     """Find all README.md files in directory tree.
 
     Args:
@@ -233,11 +238,12 @@ def find_readmes(directory: Path) -> List[Path]:
 
     Returns:
         List of README.md file paths
+
     """
     return list(directory.rglob("README.md"))
 
 
-def extract_sections(content: str) -> List[str]:
+def extract_sections(content: str) -> list[str]:
     """Extract section headings from markdown content.
 
     Args:
@@ -245,6 +251,7 @@ def extract_sections(content: str) -> List[str]:
 
     Returns:
         List of section heading names
+
     """
     heading_pattern = r"^#{1,6}\s+(.+)$"
     sections = []
@@ -257,7 +264,7 @@ def extract_sections(content: str) -> List[str]:
     return sections
 
 
-def check_markdown_formatting(content: str) -> List[str]:
+def check_markdown_formatting(content: str) -> list[str]:
     """Check markdown formatting issues.
 
     Args:
@@ -265,6 +272,7 @@ def check_markdown_formatting(content: str) -> List[str]:
 
     Returns:
         List of formatting issue descriptions
+
     """
     issues = []
 
@@ -300,6 +308,7 @@ def is_url(link: str) -> bool:
 
     Returns:
         True if link is an HTTP(S) URL
+
     """
     from urllib.parse import urlparse
     try:

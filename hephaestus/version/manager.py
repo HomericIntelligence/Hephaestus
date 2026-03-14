@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
-"""
-Version management utilities for updating and verifying version files.
+"""Version management utilities for updating and verifying version files.
 
 Supports updating version numbers across:
 - VERSION (root file)
@@ -9,16 +8,13 @@ Supports updating version numbers across:
 """
 
 import re
-import sys
 from pathlib import Path
-from typing import Tuple, List, Optional
 
 from hephaestus.utils.helpers import get_repo_root
 
 
-def parse_version(version: str) -> Tuple[int, int, int]:
-    """
-    Parse version string into components.
+def parse_version(version: str) -> tuple[int, int, int]:
+    """Parse version string into components.
 
     Args:
         version: Version string in format "MAJOR.MINOR.PATCH"
@@ -28,6 +24,7 @@ def parse_version(version: str) -> Tuple[int, int, int]:
 
     Raises:
         ValueError: If version format is invalid
+
     """
     match = re.match(r"^(\d+)\.(\d+)\.(\d+)$", version)
     if not match:
@@ -45,17 +42,17 @@ class VersionManager:
 
     def __init__(
         self,
-        repo_root: Optional[Path] = None,
-        version_files: Optional[List[Path]] = None,
-        init_files: Optional[List[Path]] = None,
+        repo_root: Path | None = None,
+        version_files: list[Path] | None = None,
+        init_files: list[Path] | None = None,
     ):
-        """
-        Initialize the version manager.
+        """Initialize the version manager.
 
         Args:
             repo_root: Repository root path. If None, will attempt to detect.
             version_files: List of VERSION file paths. Defaults to [repo_root/VERSION].
             init_files: List of __init__.py files to update. Defaults to [repo_root/<package>/__init__.py].
+
         """
         self.repo_root = repo_root or get_repo_root()
         self.version_files = version_files or [self.repo_root / "VERSION"]
@@ -82,13 +79,13 @@ class VersionManager:
             self.init_files = init_files
 
     def update_version_file(self, version_file: Path, version: str, verbose: bool = True) -> None:
-        """
-        Update VERSION file.
+        """Update VERSION file.
 
         Args:
             version_file: Path to VERSION file
             version: New version string
             verbose: Print status messages
+
         """
         if verbose:
             print(f"Updating {version_file}...")
@@ -97,13 +94,13 @@ class VersionManager:
             print(f"  ✓ Updated to {version}")
 
     def update_init_file(self, init_file: Path, version: str, verbose: bool = True) -> None:
-        """
-        Update __version__ in __init__.py file.
+        """Update __version__ in __init__.py file.
 
         Args:
             init_file: Path to __init__.py file
             version: New version string
             verbose: Print status messages
+
         """
         if not init_file.exists():
             if verbose:
@@ -132,12 +129,12 @@ class VersionManager:
             print(f"  ✓ Updated __version__ = \"{version}\"")
 
     def update(self, version: str, verbose: bool = True) -> None:
-        """
-        Update all configured version files.
+        """Update all configured version files.
 
         Args:
             version: New version string
             verbose: Print status messages
+
         """
         # Parse and validate version
         major, minor, patch = parse_version(version)
@@ -153,8 +150,7 @@ class VersionManager:
             self.update_init_file(init_file, version, verbose=verbose)
 
     def verify(self, version: str, verbose: bool = True) -> bool:
-        """
-        Verify that all version files are consistent.
+        """Verify that all version files are consistent.
 
         Args:
             version: Expected version string
@@ -162,6 +158,7 @@ class VersionManager:
 
         Returns:
             True if all files consistent, False otherwise
+
         """
         if verbose:
             print("\nVerifying version files...")

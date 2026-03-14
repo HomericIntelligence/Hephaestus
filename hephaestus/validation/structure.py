@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""
-Repository structure validation utilities.
+"""Repository structure validation utilities.
 
 Validates directory structure, required files, and subdirectories for HomericIntelligence projects.
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 from hephaestus.logging.utils import get_logger
 
@@ -18,9 +17,9 @@ class StructureValidator:
 
     def __init__(
         self,
-        required_directories: List[str],
-        required_files: Dict[str, List[str]],
-        required_subdirs: Dict[str, List[str]],
+        required_directories: list[str],
+        required_files: dict[str, list[str]],
+        required_subdirs: dict[str, list[str]],
     ):
         """Initialize structure validator.
 
@@ -28,6 +27,7 @@ class StructureValidator:
             required_directories: List of required top-level directory names
             required_files: Dict mapping directory names to required files
             required_subdirs: Dict mapping parent dirs to required subdirectories
+
         """
         self.required_directories = required_directories
         self.required_files = required_files
@@ -35,7 +35,7 @@ class StructureValidator:
 
     def check_directory_exists(
         self, base_path: Path, dir_name: str
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """Check if a directory exists.
 
         Args:
@@ -44,6 +44,7 @@ class StructureValidator:
 
         Returns:
             Tuple of (exists, message)
+
         """
         dir_path = base_path / dir_name
         if not dir_path.exists():
@@ -54,7 +55,7 @@ class StructureValidator:
 
     def check_file_exists(
         self, base_path: Path, dir_name: str, file_name: str
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """Check if a required file exists.
 
         Args:
@@ -64,6 +65,7 @@ class StructureValidator:
 
         Returns:
             Tuple of (exists, message)
+
         """
         file_path = base_path / dir_name / file_name
         if not file_path.exists():
@@ -74,7 +76,7 @@ class StructureValidator:
 
     def check_subdirectory_exists(
         self, base_path: Path, parent_dir: str, subdir: str
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """Check if a required subdirectory exists.
 
         Args:
@@ -84,6 +86,7 @@ class StructureValidator:
 
         Returns:
             Tuple of (exists, message)
+
         """
         subdir_path = base_path / parent_dir / subdir
         if not subdir_path.exists():
@@ -94,7 +97,7 @@ class StructureValidator:
 
     def validate_structure(
         self, repo_root: Path, verbose: bool = False
-    ) -> Dict[str, List[str]]:
+    ) -> dict[str, list[str]]:
         """Validate repository directory structure.
 
         Args:
@@ -103,8 +106,9 @@ class StructureValidator:
 
         Returns:
             Dictionary with 'passed' and 'failed' lists of validation messages
+
         """
-        results: Dict[str, Any] = {"passed": [], "failed": []}
+        results: dict[str, Any] = {"passed": [], "failed": []}
 
         logger.info("Validating repository directory structure...\n")
 
@@ -150,11 +154,12 @@ class StructureValidator:
 
         return results
 
-    def print_summary(self, results: Dict[str, List[str]]) -> None:
+    def print_summary(self, results: dict[str, list[str]]) -> None:
         """Print validation summary.
 
         Args:
             results: Validation results dictionary
+
         """
         total_checks = len(results["passed"]) + len(results["failed"])
         passed = len(results["passed"])

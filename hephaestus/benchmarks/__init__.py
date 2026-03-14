@@ -2,16 +2,16 @@
 
 from hephaestus.benchmarks.compare import (
     Regression,
-    load_benchmark_results,
-    extract_timings,
     detect_regressions,
+    extract_timings,
     format_markdown_report,
+    load_benchmark_results,
 )
 
 __all__ = [
     "Regression",
-    "load_benchmark_results",
-    "extract_timings",
     "detect_regressions",
+    "extract_timings",
     "format_markdown_report",
+    "load_benchmark_results",
 ]

@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 
-"""
-Compare benchmark results against baseline and detect regressions.
+"""Compare benchmark results against baseline and detect regressions.
 
 Provides utilities for analyzing benchmark results, detecting performance
 regressions, and generating formatted reports for CI/CD integration.
 """
 
 import json
-import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 
 @dataclass
@@ -25,9 +23,8 @@ class Regression:
     severity: str  # "critical", "high", "medium"
 
 
-def load_benchmark_results(filepath: Path) -> Dict[str, Any]:
-    """
-    Load benchmark results from JSON file.
+def load_benchmark_results(filepath: Path) -> dict[str, Any]:
+    """Load benchmark results from JSON file.
 
     Args:
         filepath: Path to benchmark results JSON file.
@@ -38,20 +35,21 @@ def load_benchmark_results(filepath: Path) -> Dict[str, Any]:
     Raises:
         FileNotFoundError: If file doesn't exist.
         json.JSONDecodeError: If file is invalid JSON.
+
     """
     with open(filepath) as f:
         return json.load(f)
 
 
-def extract_timings(results: Dict[str, Any]) -> Dict[str, float]:
-    """
-    Extract benchmark name to duration mapping.
+def extract_timings(results: dict[str, Any]) -> dict[str, float]:
+    """Extract benchmark name to duration mapping.
 
     Args:
         results: Benchmark results dictionary.
 
     Returns:
         Dictionary mapping benchmark names to durations in ms.
+
     """
     timings = {}
 
@@ -67,14 +65,13 @@ def extract_timings(results: Dict[str, Any]) -> Dict[str, float]:
 
 
 def detect_regressions(
-    current: Dict[str, float],
-    baseline: Dict[str, float],
+    current: dict[str, float],
+    baseline: dict[str, float],
     critical_threshold: float = 25.0,
     high_threshold: float = 10.0,
     medium_threshold: float = 5.0,
-) -> Tuple[List[Regression], List[Dict[str, Any]]]:
-    """
-    Detect performance regressions by comparing current to baseline.
+) -> tuple[list[Regression], list[dict[str, Any]]]:
+    """Detect performance regressions by comparing current to baseline.
 
     Args:
         current: Current benchmark timings (name -> ms).
@@ -85,6 +82,7 @@ def detect_regressions(
 
     Returns:
         Tuple of (regressions list, improvements list).
+
     """
     regressions = []
     improvements = []
@@ -146,13 +144,12 @@ def detect_regressions(
 
 
 def format_markdown_report(
-    regressions: List[Regression],
-    improvements: List[Dict[str, Any]],
-    current_results: Dict[str, Any],
-    baseline_results: Dict[str, Any],
+    regressions: list[Regression],
+    improvements: list[dict[str, Any]],
+    current_results: dict[str, Any],
+    baseline_results: dict[str, Any],
 ) -> str:
-    """
-    Generate markdown report of regression analysis.
+    """Generate markdown report of regression analysis.
 
     Args:
         regressions: List of detected regressions.
@@ -162,6 +159,7 @@ def format_markdown_report(
 
     Returns:
         Markdown formatted report string.
+
     """
     lines = []
     lines.append("# Performance Regression Report")

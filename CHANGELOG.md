@@ -1,0 +1,58 @@
+# Changelog
+
+All notable changes to ProjectHephaestus are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.3.0] - 2026-03-13
+
+### Added
+
+- `pyproject.toml` with Hatchling build backend replacing legacy `setup.py`
+- BSD 3-Clause `LICENSE` file
+- `.gitattributes` for consistent line-ending normalization
+- `.yamllint.yaml` and `.markdownlint.json` linting configuration
+- `CHANGELOG.md` (this file)
+- GitHub PR template, issue templates, dependabot, and CODEOWNERS
+- Three focused CI/CD workflows: `test.yml`, `pre-commit.yml`, `security.yml`
+- Comprehensive test suite covering previously untested modules
+
+### Changed
+
+- Package name standardized to `hephaestus` (was `projecthephaestus` / `project-hephaestus`)
+- Version bumped to `0.3.0`; now sourced from package metadata via `importlib.metadata`
+- `pixi.toml` rewritten to use `[workspace]` header, editable self-install, and aligned environments
+- Python minimum version raised to `>=3.10` (matching ProjectScylla)
+- Linting migrated from black + flake8 to Ruff; mypy strict mode enabled
+- Pre-commit hooks upgraded to ~15 comprehensive hooks matching ProjectScylla
+- `.gitignore` expanded from 3 lines to comprehensive coverage
+- `hephaestus/io/utils.py`: replaced unsafe pickle deserialization with explicit opt-in guard,
+  replaced `print()` error reporting with `logging`, moved `yaml` import to call sites
+- `hephaestus/cli/utils.py`: version string now sourced from `hephaestus.__version__`
+
+### Removed
+
+- `setup.py` (replaced by `pyproject.toml`)
+- `requirements.txt` and `requirements-dev.txt` (deps consolidated in `pyproject.toml`)
+- `pytest.ini` (config consolidated in `pyproject.toml`)
+- One-time maintenance files: `ACTION_PLAN.md`, `CICD_IMPLEMENTATION_SUMMARY.md`,
+  `CI_CD_SETUP.md`, `IMPLEMENTATION_SUMMARY.md`, `MANUAL_CLEANUP.sh`, `PIXI_USAGE.md`,
+  `TEST_QUICK_START.md`, `run_cleanup_and_test.py`, `validate_cicd.py`
+- Old `.github/workflows/ci.yml` (replaced by three focused workflows)
+
+## [0.2.0] - 2024-02-12
+
+### Added
+
+- Ported utilities from ProjectOdyssey: markdown fixer, retry utilities, system info,
+  dataset downloader
+- Consolidated `src/hephaestus` into `hephaestus/`
+- CI/CD pipeline with Pixi and pre-commit hooks
+
+## [0.1.0] - 2024-02-10
+
+### Added
+
+- Initial repository structure
+- Core utility modules: utils, config, io, cli, logging

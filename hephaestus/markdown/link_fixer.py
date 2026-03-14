@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
-"""
-Fix invalid absolute path links in markdown files.
+"""Fix invalid absolute path links in markdown files.
 
 This module provides functionality to fix two types of invalid links:
 1. Full system paths: /home/user/repo/... -> relative paths
@@ -10,9 +9,8 @@ This module provides functionality to fix two types of invalid links:
 
 import re
 import sys
-from pathlib import Path
-from typing import Tuple, Optional, Set
 from dataclasses import dataclass
+from pathlib import Path
 
 from hephaestus.utils.helpers import get_repo_root
 
@@ -20,21 +18,22 @@ from hephaestus.utils.helpers import get_repo_root
 @dataclass
 class LinkFixerOptions:
     """Configuration options for the link fixer."""
+
     verbose: bool = False
     dry_run: bool = False
-    exclude_patterns: Optional[Set[str]] = None
-    system_path_pattern: Optional[str] = None
+    exclude_patterns: set[str] | None = None
+    system_path_pattern: str | None = None
 
 
 class LinkFixer:
     """Fixes invalid absolute path links in markdown files."""
 
-    def __init__(self, options: Optional[LinkFixerOptions] = None):
-        """
-        Initialize the link fixer.
+    def __init__(self, options: LinkFixerOptions | None = None):
+        """Initialize the link fixer.
 
         Args:
             options: Configuration options for the fixer
+
         """
         self.options = options or LinkFixerOptions()
         self.exclude_patterns = self.options.exclude_patterns or {
@@ -44,9 +43,8 @@ class LinkFixer:
         # (captures up to but not including the final slash before the file path)
         self.system_path_pattern = self.options.system_path_pattern or r"/home/[^/]+/[^/]+"
 
-    def fix_system_path_links(self, content: str) -> Tuple[str, int]:
-        """
-        Fix links with full system paths like /home/user/worktree/...
+    def fix_system_path_links(self, content: str) -> tuple[str, int]:
+        """Fix links with full system paths like /home/user/worktree/...
 
         These are converted to relative paths without the system path prefix.
 
@@ -55,6 +53,7 @@ class LinkFixer:
 
         Returns:
             Tuple of (fixed_content, fix_count)
+
         """
         # Match ](<system_path>/<rest>) and capture just <rest> after the system path
         # Pattern: ]\(<system_path>/(<captured_path>)\)
@@ -64,9 +63,8 @@ class LinkFixer:
         new_content, count = re.subn(pattern, replacement, content)
         return new_content, count
 
-    def fix_absolute_path_links(self, content: str, file_path: Path) -> Tuple[str, int]:
-        """
-        Fix absolute paths like /agents/... to relative paths.
+    def fix_absolute_path_links(self, content: str, file_path: Path) -> tuple[str, int]:
+        """Fix absolute paths like /agents/... to relative paths.
 
         Calculate the correct relative path based on the file's location.
 
@@ -76,6 +74,7 @@ class LinkFixer:
 
         Returns:
             Tuple of (fixed_content, fix_count)
+
         """
         # Count slashes in file path to determine directory depth
         # e.g., notes/issues/863/README.md -> depth 3, need ../../../
@@ -89,15 +88,15 @@ class LinkFixer:
         new_content, count = re.subn(pattern, replacement, content)
         return new_content, count
 
-    def fix_file(self, file_path: Path) -> Tuple[bool, int, int]:
-        """
-        Process a single markdown file to fix invalid links.
+    def fix_file(self, file_path: Path) -> tuple[bool, int, int]:
+        """Process a single markdown file to fix invalid links.
 
         Args:
             file_path: Path to markdown file
 
         Returns:
             Tuple of (file_was_modified, system_path_fixes, absolute_path_fixes).
+
         """
         try:
             content = file_path.read_text(encoding="utf-8")
@@ -137,15 +136,15 @@ class LinkFixer:
             print(f"Error processing {file_path}: {e}", file=sys.stderr)
             return False, 0, 0
 
-    def process_path(self, path: Path) -> Tuple[int, int, int]:
-        """
-        Process a file or directory.
+    def process_path(self, path: Path) -> tuple[int, int, int]:
+        """Process a file or directory.
 
         Args:
             path: Path to file or directory
 
         Returns:
             Tuple of (files_modified, total_system_fixes, total_absolute_fixes).
+
         """
         if not path.exists():
             print(f"Error: {path} does not exist", file=sys.stderr)

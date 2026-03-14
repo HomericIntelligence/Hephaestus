@@ -6,7 +6,7 @@ Validates YAML configuration files for syntax, formatting, and common issues.
 
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from hephaestus.logging.utils import get_logger
 
@@ -19,9 +19,9 @@ class ConfigLinter:
     def __init__(
         self,
         verbose: bool = False,
-        deprecated_keys: Optional[Dict[str, str]] = None,
-        required_keys: Optional[Dict[str, List[str]]] = None,
-        perf_thresholds: Optional[Dict[str, Tuple[float, float]]] = None,
+        deprecated_keys: dict[str, str] | None = None,
+        required_keys: dict[str, list[str]] | None = None,
+        perf_thresholds: dict[str, tuple[float, float]] | None = None,
     ):
         """Initialize the linter.
 
@@ -30,11 +30,12 @@ class ConfigLinter:
             deprecated_keys: Dict mapping deprecated keys to their replacements
             required_keys: Dict mapping config types to required key lists
             perf_thresholds: Dict mapping parameter names to (min, max) thresholds
+
         """
         self.verbose = verbose
-        self.errors: List[str] = []
-        self.warnings: List[str] = []
-        self.suggestions: List[str] = []
+        self.errors: list[str] = []
+        self.warnings: list[str] = []
+        self.suggestions: list[str] = []
 
         # Default deprecated keys
         self.deprecated_keys = deprecated_keys or {
@@ -66,6 +67,7 @@ class ConfigLinter:
 
         Returns:
             True if file passes linting, False otherwise
+
         """
         self.errors = []
         self.warnings = []
@@ -79,7 +81,7 @@ class ConfigLinter:
             logger.info(f"Linting: {filepath}")
 
         try:
-            with open(filepath, "r") as f:
+            with open(filepath) as f:
                 content = f.read()
         except Exception as e:
             self.errors.append(f"Failed to read file: {e}")
@@ -114,6 +116,7 @@ class ConfigLinter:
 
         Returns:
             True if syntax is valid
+
         """
         try:
             lines = content.split("\n")
@@ -155,6 +158,7 @@ class ConfigLinter:
         Args:
             content: File content
             filepath: Path to file
+
         """
         lines = content.split("\n")
 
@@ -179,7 +183,7 @@ class ConfigLinter:
                         f"{filepath}:{i + 1} - Inconsistent indentation (use 2 spaces)"
                     )
 
-    def _parse_yaml(self, content: str) -> Optional[Dict[str, Any]]:
+    def _parse_yaml(self, content: str) -> dict[str, Any] | None:
         """Parse YAML content.
 
         Args:
@@ -187,6 +191,7 @@ class ConfigLinter:
 
         Returns:
             Parsed configuration dict or None if parsing fails
+
         """
         try:
             import yaml
@@ -199,13 +204,14 @@ class ConfigLinter:
             return None
 
     def _check_deprecated_keys(
-        self, config: Dict[str, Any], filepath: Path
+        self, config: dict[str, Any], filepath: Path
     ) -> None:
         """Check for deprecated configuration keys.
 
         Args:
             config: Configuration dictionary
             filepath: Path to file
+
         """
         for deprecated_key, replacement in self.deprecated_keys.items():
             if "." in deprecated_key:
@@ -229,13 +235,14 @@ class ConfigLinter:
                 )
 
     def _check_required_keys(
-        self, config: Dict[str, Any], filepath: Path
+        self, config: dict[str, Any], filepath: Path
     ) -> None:
         """Check for required configuration keys.
 
         Args:
             config: Configuration dictionary
             filepath: Path to file
+
         """
         # Try to detect config type from filename or content
         filename = filepath.stem
@@ -254,18 +261,19 @@ class ConfigLinter:
                     )
 
     def _check_duplicate_values(
-        self, config: Dict[str, Any], filepath: Path
+        self, config: dict[str, Any], filepath: Path
     ) -> None:
         """Check for duplicate values in configuration.
 
         Args:
             config: Configuration dictionary
             filepath: Path to file
+
         """
         # Flatten config and check for duplicate values
         values = []
 
-        def flatten(d: Dict, parent_key: str = ""):
+        def flatten(d: dict, parent_key: str = ""):
             for k, v in d.items():
                 new_key = f"{parent_key}.{k}" if parent_key else k
                 if isinstance(v, dict):
@@ -288,13 +296,14 @@ class ConfigLinter:
                     seen_values[value] = key
 
     def _check_performance(
-        self, config: Dict[str, Any], filepath: Path
+        self, config: dict[str, Any], filepath: Path
     ) -> None:
         """Check performance-related settings.
 
         Args:
             config: Configuration dictionary
             filepath: Path to file
+
         """
         for param, (min_val, max_val) in self.perf_thresholds.items():
             if param in config:

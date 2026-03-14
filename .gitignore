@@ -1,3 +1,62 @@
-*.pyc
-__pycache__
+# Worktrees for parallel development
+/worktree/
+
+# Build artifacts
 build/
+
+# Python
+*__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+.eggs/
+dist/
+*.egg
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.orig
+*.bak
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.local
+*.pem
+credentials.json
+
+# Pixi
+.pixi/
+.ruff_cache/
+
+# Coverage reports
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Type checking
+.mypy_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Root-level log files
+/*.log
+
+# Automation runtime directories
+.worktrees/
+.issue_implementer/
+.mnemosyne.lock

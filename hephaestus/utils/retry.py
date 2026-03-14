@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Enhanced retry utilities with exponential backoff for ProjectHephaestus.
+"""Enhanced retry utilities with exponential backoff for ProjectHephaestus.
 
 Provides automatic retry logic with configurable parameters:
 - Exponential backoff with jitter
@@ -11,9 +10,10 @@ Provides automatic retry logic with configurable parameters:
 """
 
 import functools
-import time
 import random
-from typing import Any, Callable, Optional, TypeVar, cast, Tuple
+import time
+from collections.abc import Callable
+from typing import Any, TypeVar, cast
 
 # Type variable for generic function decoration
 F = TypeVar("F", bound=Callable[..., Any])
@@ -43,6 +43,7 @@ def is_network_error(error: Exception) -> bool:
 
     Returns:
         True if error message contains network error keywords
+
     """
     error_str = str(error).lower()
     return any(keyword in error_str for keyword in NETWORK_ERROR_KEYWORDS)
@@ -53,8 +54,8 @@ def retry_with_backoff(
     initial_delay: float = 1.0,
     backoff_factor: int = 2,
     jitter: bool = True,
-    retry_on: Tuple[type, ...] = (Exception,),
-    logger: Optional[Callable[[str], None]] = None,
+    retry_on: tuple[type, ...] = (Exception,),
+    logger: Callable[[str], None] | None = None,
 ) -> Callable[[F], F]:
     """Decorator to retry function with exponential backoff.
 
@@ -80,6 +81,7 @@ def retry_with_backoff(
         def api_call():
             # Only retry on specific exceptions
             return requests.get("https://api.example.com")
+
     """
 
     def decorator(func: F) -> F:
@@ -99,12 +101,12 @@ def retry_with_backoff(
 
                     # Calculate delay with exponential backoff
                     delay = initial_delay * (backoff_factor ** attempt)
-                    
+
                     # Add jitter if requested (±25%)
                     if jitter:
                         jitter_amount = random.uniform(-0.25 * delay, 0.25 * delay)
                         delay += jitter_amount
-                    
+
                     # Ensure delay is positive
                     delay = max(0.1, delay)
 
@@ -133,9 +135,9 @@ def retry_with_backoff(
 
 
 def retry_on_network_error(
-    max_retries: int = 3, 
+    max_retries: int = 3,
     initial_delay: float = 2.0,
-    logger: Optional[Callable[[str], None]] = None
+    logger: Callable[[str], None] | None = None
 ) -> Callable[[F], F]:
     """Convenience decorator for retrying on network errors only.
 
@@ -146,6 +148,7 @@ def retry_on_network_error(
 
     Returns:
         Decorated function with network error retry logic
+
     """
     return retry_with_backoff(
         max_retries=max_retries,
@@ -158,8 +161,8 @@ def retry_on_network_error(
 
 # Compatibility function that matches Hephaestus existing API
 def retry_with_jitter(
-    func: Callable, 
-    max_retries: int = 3, 
+    func: Callable,
+    max_retries: int = 3,
     base_delay: float = 1.0,
     max_delay: float = 60.0
 ) -> Any:
@@ -178,9 +181,10 @@ def retry_with_jitter(
         
     Raises:
         Exception: Last exception raised if all retries fail
+
     """
     last_exception = None
-    
+
     for attempt in range(max_retries + 1):
         try:
             return func()
@@ -194,5 +198,5 @@ def retry_with_jitter(
                 time.sleep(max(0.1, delay + jitter))
             else:
                 break
-    
+
     raise last_exception
