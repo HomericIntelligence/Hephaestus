@@ -89,10 +89,7 @@ def get_repo_root(start_path: str | Path | None = None) -> Path:
         start_path: Starting path to search from. Defaults to current directory.
 
     Returns:
-        Path to repository root
-
-    Raises:
-        FileNotFoundError: If no repository root is found
+        Path to repository root if found, otherwise the original start_path as fallback.
 
     """
     if start_path is None:

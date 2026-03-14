@@ -108,9 +108,29 @@ repos:
         types: [python]
         pass_filenames: false
 
+  # Python version consistency check
+  - repo: local
+    hooks:
+      - id: check-python-version-consistency
+        name: Check Python version consistency
+        description: Ensure Python version is consistent across pyproject.toml, pixi.toml, and CI
+        entry: python scripts/check_python_version_consistency.py
+        language: system
+        pass_filenames: false
+        files: ^(pyproject\.toml|pixi\.toml|\.github/workflows/.*\.yml)$
+
+  # Shellcheck for shell scripts
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        name: ShellCheck
+        description: Shell script linter
+        files: \.sh$
+
   # General file checks
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer

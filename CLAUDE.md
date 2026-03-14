@@ -20,18 +20,25 @@ ProjectHephaestus is the shared utilities and tooling repository of the HomericI
 ```text
 ProjectHephaestus/
 ├── hephaestus/                 # Python source code
-│   ├── utils/                  # General utility functions
+│   ├── utils/                  # General utility functions (slugify, retry, subprocess)
 │   ├── config/                 # Configuration management
 │   ├── logging/                # Logging utilities
 │   ├── io/                     # Input/output utilities
-│   └── cli/                    # Command-line interface tools
+│   ├── cli/                    # Command-line interface tools
+│   ├── system/                 # System information collection
+│   ├── git/                    # Git utilities (changelog, commit parsing)
+│   ├── github/                 # GitHub automation (PR merging)
+│   ├── datasets/               # Dataset downloading utilities
+│   ├── markdown/               # Markdown linting and link fixing
+│   ├── benchmarks/             # Benchmark comparison utilities
+│   ├── version/                # Version management
+│   └── validation/             # README and config validation
 ├── scripts/                    # Automation and maintenance scripts
 ├── tests/                      # Unit and integration tests
+│   ├── unit/                   # Unit tests (mirrors hephaestus/ structure)
+│   └── integration/            # Integration tests
 ├── docs/                       # Documentation
 └── .claude/                    # Claude Code configurations
-    ├── context/                # Directory-specific contexts
-    ├── security/               # Security considerations
-    └── workflows/              # Automated workflows
 ```
 
 ## Python Development Guidelines
@@ -95,7 +102,7 @@ def function_name(param: str, optional_param: Optional[int] = None) -> bool:
 
 ### Requirements
 
-- Python 3.8+
+- Python 3.10+
 - Type hints required for all functions
 - Clear docstrings for public functions and classes
 - Comprehensive error handling
@@ -325,13 +332,20 @@ pre-commit run --all-files
 
 ## Key Files and Directories
 
-- `hephaestus/utils/` - Core utility functions
-- `hephaestus/helpers/` - Helper classes and modules
-- `tests/` - Comprehensive test suite
+- `hephaestus/utils/` - Core utility functions (slugify, retry, subprocess helpers)
+- `hephaestus/config/` - Configuration loading (YAML, JSON, env vars)
+- `hephaestus/io/` - File I/O (read, write, safe_write, load/save data)
+- `hephaestus/logging/` - Enhanced logging (ContextLogger, setup_logging)
+- `hephaestus/cli/` - CLI utilities (argument parsing, output formatting)
+- `hephaestus/system/` - System information collection
+- `hephaestus/git/` - Git utilities (changelog generation)
+- `hephaestus/github/` - GitHub automation (PR merging)
+- `tests/unit/` - Unit test suite (mirrors hephaestus/ package structure)
+- `tests/integration/` - Integration tests (package importability, smoke tests)
 - `scripts/` - Automation and maintenance tools
 - `docs/` - Documentation and guides
-- `requirements.txt` - Production dependencies
-- `requirements-dev.txt` - Development dependencies
+- `pyproject.toml` - Project metadata, dependencies, and tool configuration
+- `pixi.toml` - Pixi environment and task definitions
 - `.claude/` - Claude Code configuration and guidance
 
 Make sure all temporary files are in the build/ directory

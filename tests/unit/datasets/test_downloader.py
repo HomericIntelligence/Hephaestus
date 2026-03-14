@@ -2,7 +2,12 @@
 """Tests for dataset downloading utilities."""
 
 import gzip
+from io import BytesIO
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+from urllib.error import HTTPError, URLError
+
+import pytest
 
 from hephaestus.datasets.downloader import DatasetDownloader, MNISTDownloader
 
@@ -20,6 +25,16 @@ class TestDatasetDownloader:
         d = DatasetDownloader("http://example.com")
         assert d.max_retries == 3
         assert len(d.retry_delays) == 3
+
+    def test_init_custom_retries(self) -> None:
+        """Custom retry count is respected."""
+        d = DatasetDownloader("http://example.com", max_retries=5)
+        assert d.max_retries == 5
+
+    def test_init_custom_user_agent(self) -> None:
+        """Custom user agent is stored."""
+        d = DatasetDownloader("http://example.com", user_agent="TestAgent/1.0")
+        assert d.user_agent == "TestAgent/1.0"
 
     def test_decompress_gz(self, tmp_path: Path) -> None:
         """decompress_gz unpacks a valid gzip file."""
@@ -49,11 +64,70 @@ class TestDatasetDownloader:
     def test_download_with_retry_failure(self, tmp_path: Path) -> None:
         """download_with_retry returns False when all attempts fail."""
         downloader = DatasetDownloader("http://localhost:1", max_retries=1)
-        downloader.retry_delays = [0]  # no sleep in tests
+        downloader.retry_delays = [0]
         output = tmp_path / "file.bin"
-        # Should fail quickly with a URL/connection error
         success = downloader.download_with_retry("nonexistent.bin", output, max_retries=1)
         assert success is False
+
+    @patch("hephaestus.datasets.downloader.urlopen")
+    def test_download_with_retry_success(self, mock_urlopen, tmp_path: Path) -> None:
+        """download_with_retry returns True on successful download."""
+        content = b"file content"
+        mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_response.headers.get.return_value = str(len(content))
+        mock_response.read.side_effect = [content, b""]
+        mock_urlopen.return_value = mock_response
+
+        downloader = DatasetDownloader("http://example.com")
+        output = tmp_path / "file.bin"
+        success = downloader.download_with_retry("test.bin", output, max_retries=1)
+        assert success is True
+        assert output.exists()
+
+    @patch("hephaestus.datasets.downloader.urlopen")
+    def test_download_retries_on_http_error(self, mock_urlopen, tmp_path: Path) -> None:
+        """download_with_retry retries on HTTPError."""
+        mock_urlopen.side_effect = HTTPError(
+            url="http://example.com/file",
+            code=503,
+            msg="Service Unavailable",
+            hdrs=None,
+            fp=None,
+        )
+        downloader = DatasetDownloader("http://example.com", max_retries=2)
+        downloader.retry_delays = [0, 0]
+        output = tmp_path / "file.bin"
+        success = downloader.download_with_retry("test.bin", output, max_retries=2)
+        assert success is False
+        assert mock_urlopen.call_count == 2
+
+    @patch("hephaestus.datasets.downloader.urlopen")
+    def test_download_retries_on_url_error(self, mock_urlopen, tmp_path: Path) -> None:
+        """download_with_retry retries on URLError."""
+        mock_urlopen.side_effect = URLError(reason="connection refused")
+        downloader = DatasetDownloader("http://example.com", max_retries=2)
+        downloader.retry_delays = [0, 0]
+        output = tmp_path / "file.bin"
+        success = downloader.download_with_retry("test.bin", output, max_retries=2)
+        assert success is False
+
+    @patch("hephaestus.datasets.downloader.urlopen")
+    def test_download_shows_progress_no_content_length(self, mock_urlopen, tmp_path: Path) -> None:
+        """Handles missing Content-Length header gracefully."""
+        content = b"data"
+        mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_response.headers.get.return_value = "0"  # No content length
+        mock_response.read.side_effect = [content, b""]
+        mock_urlopen.return_value = mock_response
+
+        downloader = DatasetDownloader("http://example.com")
+        output = tmp_path / "file.bin"
+        success = downloader.download_with_retry("test.bin", output, max_retries=1)
+        assert success is True
 
 
 class TestMNISTDownloader:
@@ -75,9 +149,30 @@ class TestMNISTDownloader:
         output_dir = tmp_path / "mnist"
         output_dir.mkdir()
 
-        # Pre-create all output files so nothing is downloaded
         for _, output_filename in d.files:
             (output_dir / output_filename).write_bytes(b"dummy")
 
         success = d.download_mnist(str(output_dir))
         assert success is True
+
+    @patch.object(DatasetDownloader, "download_with_retry", return_value=False)
+    def test_download_mnist_failure(self, mock_download, tmp_path: Path) -> None:
+        """download_mnist returns False when download fails."""
+        d = MNISTDownloader()
+        success = d.download_mnist(str(tmp_path / "mnist"))
+        assert success is False
+
+    @patch.object(DatasetDownloader, "download_with_retry", return_value=True)
+    @patch.object(DatasetDownloader, "decompress_gz", return_value=True)
+    def test_download_mnist_success(self, mock_decompress, mock_download, tmp_path: Path) -> None:
+        """download_mnist returns True when all downloads succeed."""
+        d = MNISTDownloader()
+        mnist_dir = tmp_path / "mnist"
+        mnist_dir.mkdir()
+        # Create dummy gz files so unlink() doesn't fail
+        for gz_filename, _ in d.files:
+            (mnist_dir / gz_filename).write_bytes(b"dummy")
+        success = d.download_mnist(str(mnist_dir))
+        assert success is True
+        assert mock_download.call_count == len(d.files)
+        assert mock_decompress.call_count == len(d.files)

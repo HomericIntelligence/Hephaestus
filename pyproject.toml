@@ -13,7 +13,7 @@ authors = [
     { name = "Micah Villmow <research@villmow.us>" },
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: BSD License",
     "Programming Language :: Python :: 3",
@@ -33,6 +33,7 @@ dev = [
     "pre-commit>=3.0,<5",
     "ruff>=0.1.0,<1",
     "mypy>=1.8.0,<2",
+    "build>=1.0,<2",
 ]
 github = [
     "PyGithub>=1.55,<3",
@@ -51,7 +52,7 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "N", "D", "UP", "S101", "B", "SIM", "C4", "C901", "RUF"]
+select = ["E", "F", "W", "I", "N", "D", "UP", "S101", "S102", "S105", "S106", "B", "SIM", "C4", "C901", "RUF"]
 ignore = [
     "D100",   # Missing docstring in public module
     "D104",   # Missing docstring in public package
@@ -79,8 +80,7 @@ addopts = [
     "--strict-markers",
     "--cov=hephaestus",
     "--cov-report=term-missing",
-    "--cov-report=html",
-    "--cov-fail-under=50",
+    "--cov-fail-under=75",
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
@@ -112,7 +112,7 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 50
+fail_under = 75
 precision = 2
 show_missing = true
 skip_covered = false

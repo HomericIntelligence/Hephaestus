@@ -137,6 +137,14 @@ class TestStructureValidator:
         assert exists
         assert "✓" in msg
 
+    def test_check_directory_not_a_dir(self, tmp_path):
+        """Returns False when path is a file, not a directory."""
+        validator = StructureValidator([], {}, {})
+        (tmp_path / "file.txt").write_text("content")
+        exists, msg = validator.check_directory_exists(tmp_path, "file.txt")
+        assert not exists
+        assert "Not a directory" in msg
+
     def test_check_file_exists(self, tmp_path):
         """Test file existence check."""
         validator = StructureValidator([], {}, {})
@@ -155,6 +163,42 @@ class TestStructureValidator:
         assert exists
         assert "✓" in msg
 
+    def test_check_file_not_a_file(self, tmp_path):
+        """Returns False when path is a directory, not a file."""
+        validator = StructureValidator([], {}, {})
+        (tmp_path / "dir").mkdir()
+        (tmp_path / "dir" / "subdir").mkdir()
+        exists, msg = validator.check_file_exists(tmp_path, "dir", "subdir")
+        assert not exists
+        assert "Not a file" in msg
+
+    def test_check_subdirectory_exists(self, tmp_path):
+        """Test subdirectory existence check."""
+        validator = StructureValidator([], {}, {})
+        parent = tmp_path / "parent"
+        parent.mkdir()
+
+        # Non-existent subdirectory
+        exists, msg = validator.check_subdirectory_exists(tmp_path, "parent", "missing")
+        assert not exists
+        assert "Missing subdirectory" in msg
+
+        # Existing subdirectory
+        (parent / "subdir").mkdir()
+        exists, msg = validator.check_subdirectory_exists(tmp_path, "parent", "subdir")
+        assert exists
+        assert "✓" in msg
+
+    def test_check_subdirectory_not_a_dir(self, tmp_path):
+        """Returns False when subdir path is a file."""
+        validator = StructureValidator([], {}, {})
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        (parent / "notadir.txt").write_text("content")
+        exists, msg = validator.check_subdirectory_exists(tmp_path, "parent", "notadir.txt")
+        assert not exists
+        assert "Not a directory" in msg
+
     def test_validate_structure(self, tmp_path):
         """Test full structure validation."""
         # Create test structure
@@ -171,6 +215,55 @@ class TestStructureValidator:
         results = validator.validate_structure(tmp_path, verbose=False)
         assert len(results["passed"]) == 3  # 2 dirs + 1 file
         assert len(results["failed"]) == 0
+
+    def test_validate_structure_with_failures(self, tmp_path):
+        """Test structure validation with missing items."""
+        validator = StructureValidator(
+            required_directories=["missing_dir"],
+            required_files={"missing_dir": ["missing.txt"]},
+            required_subdirs={"missing_dir": ["subdir"]},
+        )
+        results = validator.validate_structure(tmp_path)
+        assert len(results["failed"]) > 0
+
+    def test_validate_structure_verbose(self, tmp_path):
+        """Test structure validation with verbose=True."""
+        (tmp_path / "src").mkdir()
+        validator = StructureValidator(
+            required_directories=["src"],
+            required_files={},
+            required_subdirs={},
+        )
+        results = validator.validate_structure(tmp_path, verbose=True)
+        assert len(results["passed"]) == 1
+
+    def test_validate_structure_with_subdirs(self, tmp_path):
+        """Test structure validation checks subdirectories."""
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "utils").mkdir()
+
+        validator = StructureValidator(
+            required_directories=["src"],
+            required_files={},
+            required_subdirs={"src": ["utils", "missing"]},
+        )
+        results = validator.validate_structure(tmp_path)
+        assert any("utils" in m for m in results["passed"])
+        assert any("missing" in m for m in results["failed"])
+
+    def test_print_summary_no_failures(self, tmp_path):
+        """print_summary doesn't crash with no failures."""
+        validator = StructureValidator([], {}, {})
+        results = {"passed": ["check1", "check2"], "failed": []}
+        # Should not raise
+        validator.print_summary(results)
+
+    def test_print_summary_with_failures(self, tmp_path):
+        """print_summary doesn't crash with failures."""
+        validator = StructureValidator([], {}, {})
+        results = {"passed": ["check1"], "failed": ["failed1", "failed2"]}
+        # Should not raise
+        validator.print_summary(results)
 
 
 if __name__ == "__main__":

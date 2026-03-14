@@ -2,23 +2,30 @@
 
 Welcome to the official documentation for ProjectHephaestus.
 
-## Getting Started
+## Overview
 
-- [Installation](installation.md)
-- [Quick Start Guide](quickstart.md)
+ProjectHephaestus is the shared utilities and tooling library for the HomericIntelligence ecosystem.
 
-## API Reference
+## Subpackages
 
-- [General Utilities](api/general.md)
-- [Configuration](api/config.md)
-- [I/O Utilities](api/io.md)
+- **hephaestus.utils** — General utility functions (slugify, retry, subprocess helpers)
+- **hephaestus.config** — Configuration loading and management (YAML, JSON, env vars)
+- **hephaestus.io** — File I/O utilities (read, write, safe_write, load/save data)
+- **hephaestus.logging** — Enhanced logging (ContextLogger, setup_logging)
+- **hephaestus.cli** — CLI argument parsing and output formatting
+- **hephaestus.system** — System information collection
+- **hephaestus.git** — Git utilities (changelog generation, commit parsing)
+- **hephaestus.github** — GitHub automation (PR merging)
+- **hephaestus.datasets** — Dataset downloading utilities
+- **hephaestus.markdown** — Markdown linting and link fixing
+- **hephaestus.benchmarks** — Benchmark comparison and regression detection
+- **hephaestus.version** — Version management utilities
+- **hephaestus.validation** — README and config validation
 
-## Guides
+## Setup
 
-- [Using with Pixi](guides/pixi.md)
-- [Development Workflow](guides/development.md)
+See the [README](../README.md) for installation and development setup instructions.
 
-## Community
+## Contributing
 
-- [Contributing](../CONTRIBUTING.md)
-- [Code of Conduct](../CODE_OF_CONDUCT.md)
+See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines.
