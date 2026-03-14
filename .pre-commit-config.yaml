@@ -3,33 +3,121 @@
 # Run manually: pixi run pre-commit run --all-files
 
 repos:
+
+  # Security checks
+  - repo: local
+    hooks:
+      - id: check-shell-injection
+        name: Check for shell=True (Security)
+        description: Prevent command injection vulnerabilities via shell=True
+        entry: 'shell=True'
+        language: pygrep
+        files: \.py$
+        types: [python]
+
+  # Python formatting and linting
+  - repo: local
+    hooks:
+      - id: ruff-format-python
+        name: Ruff Format Python
+        description: Format Python files using ruff format
+        entry: pixi run ruff format hephaestus/ scripts/ tests/
+        language: system
+        files: ^(hephaestus|scripts|tests)/.*\.py$
+        types: [python]
+        pass_filenames: false
+      - id: ruff-check-python
+        name: Ruff Check Python
+        description: Lint Python files using ruff check
+        entry: pixi run ruff check --fix hephaestus/ scripts/ tests/
+        language: system
+        files: ^(hephaestus|scripts|tests)/.*\.py$
+        types: [python]
+        pass_filenames: false
+      - id: mypy-check-python
+        name: Mypy Type Check Python
+        description: Type check Python files using mypy
+        entry: pixi run mypy hephaestus/
+        language: system
+        files: ^hephaestus/.*\.py$
+        types: [python]
+        pass_filenames: false
+
+  # Markdown linting
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.20.0
+    hooks:
+      - id: markdownlint-cli2
+        name: Markdown Lint
+        description: Lint markdown files for consistency
+        exclude: ^(build/|docs/)
+        args: ['--config', '.markdownlint.json', '--fix']
+
+  # YAML linting
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+        name: YAML Lint
+        description: Lint YAML files for syntax and style
+        args: ['--config-file', '.yamllint.yaml']
+        exclude: ^(\.pixi|build)/
+
+  # Security: CVE scanning
+  - repo: local
+    hooks:
+      - id: pip-audit
+        name: pip-audit (CVE scan)
+        description: Scan dependencies for known CVEs
+        entry: pixi run pip-audit
+        language: system
+        pass_filenames: false
+        stages: [manual]
+
+  # Lock file freshness
+  - repo: local
+    hooks:
+      - id: check-pixi-lock
+        name: Check pixi lock file
+        description: Verify pixi.lock is up to date
+        entry: pixi install --locked
+        language: system
+        pass_filenames: false
+        files: ^pixi\.(toml|lock)$
+
+  # Test structure enforcement
+  - repo: local
+    hooks:
+      - id: check-unit-test-structure
+        name: Check unit test structure
+        description: Enforce tests/unit/ mirrors hephaestus/ subpackage structure
+        entry: python scripts/check_unit_test_structure.py
+        language: system
+        pass_filenames: false
+        files: ^(hephaestus|tests/unit)/
+
+  # Complexity check
+  - repo: local
+    hooks:
+      - id: ruff-check-complexity
+        name: Ruff Complexity Check (C901)
+        description: Enforce McCabe complexity limit on hephaestus/
+        entry: pixi run ruff check --select C901 hephaestus/
+        language: system
+        files: ^hephaestus/.*\.py$
+        types: [python]
+        pass_filenames: false
+
+  # General file checks
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
-      - id: check-added-large-files
-      - id: check-merge-conflict
       - id: check-toml
+      - id: check-added-large-files
+        args: ['--maxkb=5000']
+      - id: mixed-line-ending
+      - id: check-merge-conflict
       - id: debug-statements
-
-  - repo: https://github.com/psf/black
-    rev: 24.1.1
-    hooks:
-      - id: black
-        language_version: python3.11
-        args: ['--line-length=127']
-
-  - repo: https://github.com/pycqa/flake8
-    rev: 7.0.0
-    hooks:
-      - id: flake8
-        args: ['--max-line-length=127', '--extend-ignore=E203,W503']
-
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.8.0
-    hooks:
-      - id: mypy
-        additional_dependencies: [types-all]
-        args: ['--ignore-missing-imports']

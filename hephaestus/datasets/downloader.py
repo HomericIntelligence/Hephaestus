@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Dataset downloading utilities for ProjectHephaestus.
+"""Dataset downloading utilities for ProjectHephaestus.
 
 Provides functionality to download and manage common machine learning datasets
 with proper error handling, progress tracking, and decompression support.
@@ -10,43 +9,41 @@ import gzip
 import sys
 import time
 from pathlib import Path
-from typing import List, Tuple, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
 class DatasetDownloader:
     """Generic dataset downloader with retry logic and progress tracking."""
-    
+
     def __init__(
         self,
         base_url: str,
         user_agent: str = "Mozilla/5.0 (compatible; ProjectHephaestus/1.0)",
         max_retries: int = 3,
-        retry_delays: List[float] = None
+        retry_delays: list[float] | None = None
     ):
-        """
-        Initialize the dataset downloader.
+        """Initialize the dataset downloader.
         
         Args:
             base_url: Base URL for dataset files
             user_agent: User-Agent header for HTTP requests
             max_retries: Maximum number of retry attempts
             retry_delays: Delay times between retries (exponential backoff)
+
         """
         self.base_url = base_url.rstrip("/")
         self.user_agent = user_agent
         self.max_retries = max_retries
         self.retry_delays = retry_delays or [1.0, 2.0, 4.0]
-        
+
     def download_with_retry(
-        self, 
-        filename: str, 
+        self,
+        filename: str,
         output_path: Path,
-        max_retries: Optional[int] = None
+        max_retries: int | None = None
     ) -> bool:
-        """
-        Download file with User-Agent header and retry logic.
+        """Download file with User-Agent header and retry logic.
         
         Args:
             filename: Name of file to download
@@ -55,6 +52,7 @@ class DatasetDownloader:
             
         Returns:
             True if successful, False otherwise
+
         """
         url = f"{self.base_url}/{filename}"
         max_retries = max_retries if max_retries is not None else self.max_retries
@@ -110,8 +108,7 @@ class DatasetDownloader:
         return False
 
     def decompress_gz(self, gz_path: Path, output_path: Path) -> bool:
-        """
-        Decompress gzip file.
+        """Decompress gzip file.
         
         Args:
             gz_path: Path to .gz file
@@ -119,6 +116,7 @@ class DatasetDownloader:
             
         Returns:
             True if successful, False otherwise
+
         """
         try:
             with gzip.open(gz_path, "rb") as f_in:
@@ -132,7 +130,7 @@ class DatasetDownloader:
 
 class MNISTDownloader(DatasetDownloader):
     """Specialized downloader for MNIST dataset."""
-    
+
     def __init__(self):
         super().__init__("http://yann.lecun.com/exdb/mnist")
         self.files = [
@@ -141,22 +139,22 @@ class MNISTDownloader(DatasetDownloader):
             ("t10k-images-idx3-ubyte.gz", "test_images.idx"),
             ("t10k-labels-idx1-ubyte.gz", "test_labels.idx"),
         ]
-    
+
     def download_mnist(self, output_dir: str = "datasets/mnist") -> bool:
-        """
-        Download and extract MNIST dataset.
+        """Download and extract MNIST dataset.
         
         Args:
             output_dir: Directory to save dataset
             
         Returns:
             True if successful, False otherwise
+
         """
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
-        
+
         success = True
-        
+
         for gz_filename, output_filename in self.files:
             gz_path = output_path / gz_filename
             output_file_path = output_path / output_filename
@@ -164,7 +162,7 @@ class MNISTDownloader(DatasetDownloader):
             # Download if not exists
             if not output_file_path.exists():
                 print(f"Downloading MNIST {output_filename.split('_')[0]} data...")
-                
+
                 if self.download_with_retry(gz_filename, gz_path):
                     # Decompress
                     print(f"Decompressing {gz_filename}...")
@@ -178,34 +176,34 @@ class MNISTDownloader(DatasetDownloader):
                     success = False
             else:
                 print(f"✓ {output_filename} already exists")
-                
+
         if success:
             print(f"\n✓ MNIST dataset ready at: {output_path}")
         else:
-            print(f"\n✗ Some MNIST files failed to download.")
-            
+            print("\n✗ Some MNIST files failed to download.")
+
         return success
 
 
 def main():
     """Main entry point."""
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="Download machine learning datasets")
     parser.add_argument(
-        "dataset", 
-        choices=["mnist"], 
+        "dataset",
+        choices=["mnist"],
         help="Dataset to download"
     )
     parser.add_argument(
-        "output_dir", 
-        nargs="?", 
+        "output_dir",
+        nargs="?",
         default=None,
         help="Output directory (default: datasets/<dataset>)"
     )
-    
+
     args = parser.parse_args()
-    
+
     if args.dataset == "mnist":
         output_dir = args.output_dir or "datasets/mnist"
         downloader = MNISTDownloader()

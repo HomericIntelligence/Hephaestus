@@ -16,12 +16,15 @@ ProjectHephaestus provides standardized utility functions and tools that can be 
 ProjectHephaestus/
 ├── pixi.toml          # Pixi configuration
 ├── pyproject.toml     # Python package configuration
-├── src/               # Source code
-│   └── hephaestus/    # Main package
-│       ├── __init__.py
-│       ├── utils/     # Utility functions
-│       ├── config/    # Configuration utilities
-│       └── io/        # I/O utilities
+├── hephaestus/        # Main package
+│   ├── __init__.py
+│   ├── utils/         # General utility functions
+│   ├── config/        # Configuration utilities
+│   ├── io/            # I/O utilities
+│   ├── cli/           # CLI helpers
+│   ├── logging/       # Logging utilities
+│   ├── system/        # System information
+│   └── validation/    # Validation utilities
 ├── tests/             # Unit tests
 ├── docs/              # Documentation
 ├── scripts/           # Utility scripts
@@ -59,14 +62,11 @@ pixi run pytest
 ### Development Commands
 
 ```bash
-# Format code with Black
+# Format code with ruff
 pixi run format
 
-# Lint code with Ruff
+# Lint code with ruff
 pixi run lint
-
-# Build documentation
-pixi run docs-build
 ```
 
 ## Usage
@@ -76,8 +76,7 @@ pixi run docs-build
 After installing with Pixi:
 
 ```python
-from hephaestus import slugify, human_readable_size
-from hephaestus.utils.general import retry_with_backoff
+from hephaestus import slugify, human_readable_size, retry_with_backoff
 
 # Convert text to URL-friendly slug
 project_slug = slugify("My Project Name")
@@ -95,29 +94,38 @@ To use ProjectHephaestus in another project with Pixi:
 1. Add it as a dependency in your `pixi.toml`:
    ```toml
    [pypi-dependencies]
-   project-hephaestus = { path = "../ProjectHephaestus", editable = true }
+   hephaestus = { path = "../ProjectHephaestus", editable = true }
    ```
 
 2. Run `pixi install` to install the dependency
 
+Or install directly with pip:
+```bash
+pip install -e /path/to/ProjectHephaestus
+```
+
 ## Key Features
 
-### General Utilities (`hephaestus.utils.general`)
+### General Utilities (`hephaestus.utils`)
 
 - `slugify(text)`: Convert text to URL-friendly slug
 - `retry_with_backoff(func)`: Decorator for exponential backoff retries
 - `human_readable_size(bytes)`: Convert bytes to human readable format
 - `flatten_dict(dict)`: Flatten nested dictionaries
-- `run_command(cmd)`: Execute shell commands with error handling
-- `get_nested_value(data, key_path)`: Get nested dict values with dot notation
+- `run_subprocess(cmd)`: Execute shell commands with error handling
+- `get_setting(config, key_path)`: Get nested dict values with dot notation
 
 ### Configuration (`hephaestus.config`)
 
-*Coming soon: Standardized configuration management*
+- `load_config(path)`: Load YAML or JSON configuration files
+- `get_setting(config, key_path)`: Dot-notation config access
+- `merge_configs(*configs)`: Deep-merge multiple configuration dicts
+- `merge_with_env(config, prefix)`: Overlay environment variables onto config
 
 ### I/O Utilities (`hephaestus.io`)
 
-*Coming soon: File I/O utilities with standardized interfaces*
+- `read_file(path)` / `write_file(path, content)`: Simple file I/O
+- `load_data(path)` / `save_data(path, data)`: Structured data (JSON/YAML)
 
 ## Development Guidelines
 
@@ -141,12 +149,12 @@ This project defines multiple environments in `pixi.toml`:
 
 - **default**: Basic runtime environment
 - **dev**: Development environment with linting and formatting tools
-- **docs**: Documentation building environment
+- **lint**: Linting-only environment
 
-Switch between environments with:
+Switch environments with:
 ```bash
 pixi shell -e dev
-pixi shell -e docs
+pixi shell -e lint
 ```
 
 ## Adding New Dependencies
@@ -172,4 +180,4 @@ pixi install
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+BSD 3-Clause License - see [LICENSE](LICENSE) file for details.

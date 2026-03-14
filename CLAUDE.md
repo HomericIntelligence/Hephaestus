@@ -21,7 +21,6 @@ ProjectHephaestus is the shared utilities and tooling repository of the HomericI
 ProjectHephaestus/
 ├── hephaestus/                 # Python source code
 │   ├── utils/                  # General utility functions
-│   ├── helpers/                # Helper classes and modules
 │   ├── config/                 # Configuration management
 │   ├── logging/                # Logging utilities
 │   ├── io/                     # Input/output utilities
@@ -39,7 +38,7 @@ ProjectHephaestus/
 
 ### Language Preference
 
-**Python 3.8+** is the implementation language for all ProjectHephaestus code:
+**Python 3.10+** is the implementation language for all ProjectHephaestus code:
 - Shared utility scripts and helpers
 - Configuration management tools
 - Logging and monitoring utilities
@@ -254,30 +253,25 @@ All utility functions must include comprehensive test coverage:
 4. **Cross-platform**: Ensure compatibility across supported environments
 
 ```bash
-# Run all tests
-python -m pytest tests/ -v
+# Run all unit tests
+pixi run pytest tests/unit -v
 
 # Run specific test file
-python -m pytest tests/test_utils.py -v
+pixi run pytest tests/unit/utils/test_general_utils.py -v
 
 # Run with coverage
-python -m pytest tests/ --cov=hephaestus --cov-report=html
+pixi run pytest tests/unit --cov=hephaestus --cov-report=html
 ```
 
 ## Environment Setup
 
-This project uses standard Python tooling:
+This project uses [Pixi](https://pixi.sh) for environment management:
 
 ```bash
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
+# Install dependencies and create environment
+pixi install
 
-# Install dependencies
-pip install -r requirements.txt
-pip install -r requirements-dev.txt  # For development
-
-# Run pre-commit hooks (PEP 8, formatting, etc.)
+# Run pre-commit hooks (formatting, linting, etc.)
 pre-commit install
 ```
 
@@ -287,19 +281,16 @@ pre-commit install
 
 ```bash
 # Run tests
-python -m pytest tests/
+pixi run pytest tests/unit
 
 # Run linter
-flake8 hephaestus/ tests/
+pixi run ruff check hephaestus/ tests/
 
 # Run formatter
-black hephaestus/ tests/
+pixi run ruff format hephaestus/ tests/
 
 # Run type checking
-mypy hephaestus/
-
-# Run all quality checks
-tox
+pixi run mypy hephaestus/
 ```
 
 ### Pre-commit Hooks
@@ -320,10 +311,10 @@ pre-commit run --all-files
 
 ### Common Issues
 
-1. **Import Errors**: Check PYTHONPATH and virtual environment activation
-2. **Dependency Conflicts**: Use pip-tools to manage dependencies
+1. **Import Errors**: Check that `pixi install` has been run
+2. **Dependency Conflicts**: Update `pixi.toml` and run `pixi install`
 3. **Test Failures**: Run tests with verbose output for details
-4. **Formatting Issues**: Run black and isort to auto-format
+4. **Formatting Issues**: Run `pixi run ruff format hephaestus/ tests/`
 
 ### Getting Help
 

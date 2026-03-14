@@ -1,0 +1,128 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hephaestus"
+version = "0.3.0"
+description = "Shared utilities and tooling for the HomericIntelligence ecosystem"
+readme = "README.md"
+license = {text = "BSD 3-Clause"}
+requires-python = ">=3.10"
+authors = [
+    { name = "Micah Villmow <research@villmow.us>" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+keywords = ["utilities", "helpers", "tooling", "homercintelligence"]
+dependencies = [
+    "pyyaml>=6.0,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0,<9",
+    "pytest-cov>=4.0,<7",
+    "pre-commit>=3.0,<5",
+    "ruff>=0.1.0,<1",
+    "mypy>=1.8.0,<2",
+]
+github = [
+    "PyGithub>=1.55,<3",
+]
+
+[project.urls]
+Homepage = "https://github.com/mvillmow/ProjectHephaestus"
+Repository = "https://github.com/mvillmow/ProjectHephaestus"
+Issues = "https://github.com/mvillmow/ProjectHephaestus/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["hephaestus"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "D", "UP", "S101", "B", "SIM", "C4", "C901", "RUF"]
+ignore = [
+    "D100",   # Missing docstring in public module
+    "D104",   # Missing docstring in public package
+    "D203",   # 1 blank line before class (conflicts with D211)
+    "D213",   # Multi-line summary second line (conflicts with D212)
+    "D417",   # Missing argument descriptions in docstring
+    "SIM117", # Cannot merge nested with statements in all cases
+    "RUF001", # Intentional Unicode in strings/docstrings
+    "RUF002", # Intentional Unicode in docstrings
+    "RUF003", # Intentional Unicode in comments
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+"scripts/**" = ["C901"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+pythonpath = [".", "scripts"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--cov=hephaestus",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+    "--cov-fail-under=50",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
+    "unit: marks tests as unit tests",
+]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_configs = true
+ignore_missing_imports = true
+show_error_codes = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_any_generics = true
+warn_return_any = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+allow_redefinition = false
+implicit_reexport = false
+
+[tool.coverage.run]
+branch = true
+source = ["hephaestus"]
+omit = [
+    "*/tests/*",
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+fail_under = 50
+precision = 2
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]

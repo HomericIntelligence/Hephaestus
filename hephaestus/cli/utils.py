@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Enhanced CLI utilities for ProjectHephaestus.
+"""Enhanced CLI utilities for ProjectHephaestus.
 
 This module provides advanced command line interface utilities including
 argument parsing, command registration, and output formatting.
@@ -13,16 +12,24 @@ Follows development principles:
 
 import argparse
 import sys
-from typing import Any, Callable, Dict, List, Optional, Sequence, Union
-from pathlib import Path
+from collections.abc import Callable, Sequence
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
+from typing import Any
+
+try:
+    __version__ = _pkg_version("hephaestus")
+except PackageNotFoundError:
+    __version__ = "0.3.0"
+
 
 class CommandRegistry:
     """Registry for CLI commands with decorator-based registration."""
-    
+
     def __init__(self):
-        self.commands: Dict[str, Dict[str, Any]] = {}
-    
-    def register(self, name: str, description: str = "", aliases: Optional[List[str]] = None):
+        self.commands: dict[str, dict[str, Any]] = {}
+
+    def register(self, name: str, description: str = "", aliases: list[str] | None = None):
         """Decorator to register a command function."""
         def decorator(func: Callable):
             self.commands[name] = {
@@ -30,15 +37,15 @@ class CommandRegistry:
                 'description': description,
                 'aliases': aliases or []
             }
-            
+
             # Register aliases
             for alias in (aliases or []):
                 self.commands[alias] = self.commands[name]
-                
+
             return func
         return decorator
-    
-    def get_command(self, name: str) -> Optional[Dict[str, Any]]:
+
+    def get_command(self, name: str) -> dict[str, Any] | None:
         """Get a registered command info."""
         return self.commands.get(name)
 
@@ -50,6 +57,7 @@ def create_parser(prog_name: str = "hephaestus") -> argparse.ArgumentParser:
         
     Returns:
         Configured ArgumentParser instance
+
     """
     parser = argparse.ArgumentParser(
         prog=prog_name,
@@ -60,14 +68,15 @@ Examples:
   %(prog)s --version          Show version information
         """.strip()
     )
-    
+
     # Add standard options
     parser.add_argument(
-        '-V', '--version',
-        action='version',
-        version=f'%(prog)s 0.1.0'
+        "-V",
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
-    
+
     return parser
 
 def add_logging_args(parser: argparse.ArgumentParser) -> None:
@@ -75,6 +84,7 @@ def add_logging_args(parser: argparse.ArgumentParser) -> None:
     
     Args:
         parser: ArgumentParser instance
+
     """
     logging_group = parser.add_argument_group('logging options')
     logging_group.add_argument(
@@ -92,7 +102,7 @@ def add_logging_args(parser: argparse.ArgumentParser) -> None:
         help='Log to file instead of stdout'
     )
 
-def confirm_action(prompt: str = "Are you sure?", 
+def confirm_action(prompt: str = "Are you sure?",
                    default: bool = False) -> bool:
     """Prompt user for confirmation.
     
@@ -102,6 +112,7 @@ def confirm_action(prompt: str = "Are you sure?",
         
     Returns:
         User's confirmation decision
+
     """
     choices = "Y/n" if default else "y/N"
     try:
@@ -109,7 +120,7 @@ def confirm_action(prompt: str = "Are you sure?",
     except KeyboardInterrupt:
         print("\nOperation cancelled.")
         sys.exit(1)
-    
+
     if not choice:
         return default
     elif choice in ['y', 'yes']:
@@ -120,8 +131,8 @@ def confirm_action(prompt: str = "Are you sure?",
         print("Invalid choice. Please enter 'y' or 'n'.")
         return confirm_action(prompt, default)
 
-def format_table(rows: Sequence[Sequence[str]], 
-                headers: Optional[Sequence[str]] = None,
+def format_table(rows: Sequence[Sequence[str]],
+                headers: Sequence[str] | None = None,
                 separator: str = "  ") -> str:
     """Format data as a pretty table.
     
@@ -132,40 +143,41 @@ def format_table(rows: Sequence[Sequence[str]],
         
     Returns:
         Formatted table string
+
     """
     # Combine headers and rows
     all_rows = [headers] if headers else []
     all_rows.extend(rows)
-    
+
     if not all_rows:
         return ""
-    
+
     # Calculate column widths
     col_widths = [
         max(len(str(row[i])) for row in all_rows if i < len(row))
         for i in range(max(len(row) for row in all_rows))
     ]
-    
+
     # Handle case where there are no columns
     if not col_widths:
         return ""
-    
+
     # Format rows
     result = []
     for row_idx, row in enumerate(all_rows):
         formatted_row = separator.join(
-            str(cell).ljust(col_widths[i]) 
+            str(cell).ljust(col_widths[i])
             for i, cell in enumerate(row) if i < len(col_widths)
         )
         result.append(formatted_row)
-        
+
         # Add separator line after headers
         if headers and row_idx == 0 and col_widths:
             separator_line = separator.join(
                 "-" * width for width in col_widths
             )
             result.append(separator_line)
-    
+
     return "\n".join(result)
 
 def format_output(data: Any, format_type: str = "text") -> str:
@@ -177,6 +189,7 @@ def format_output(data: Any, format_type: str = "text") -> str:
         
     Returns:
         Formatted string representation
+
     """
     if format_type == "json":
         import json
@@ -208,12 +221,13 @@ def format_output(data: Any, format_type: str = "text") -> str:
 # Global command registry
 COMMAND_REGISTRY = CommandRegistry()
 
-def register_command(name: str, description: str = "", aliases: Optional[List[str]] = None):
+def register_command(name: str, description: str = "", aliases: list[str] | None = None):
     """Decorator to register a CLI command.
     
     Args:
         name: Command name
         description: Brief command description
         aliases: Optional command aliases
+
     """
     return COMMAND_REGISTRY.register(name, description, aliases)

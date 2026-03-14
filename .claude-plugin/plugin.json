@@ -1,14 +1,27 @@
 {
   "name": "create-reusable-utilities",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Systematic approach for porting and generalizing utility scripts across projects",
   "category": "architecture",
   "keywords": ["utilities", "porting", "generalization", "cross-project", "modular-design"],
   "created": "2026-02-13",
-  "lastUpdated": "2026-02-13",
+  "lastUpdated": "2026-03-13",
   "author": "Claude Code",
   "skill_path": "skills/create-reusable-utilities/SKILL.md",
   "references": [
     "references/notes.md"
+  ],
+  "skills": [
+    {
+      "name": "python-repo-modernization",
+      "category": "tooling",
+      "description": "Bring a Python repo to production-grade quality: fix bugs, restructure tests, harden CI/pre-commit, prepare for PyPI publishing",
+      "keywords": ["python", "modernization", "testing", "ci-cd", "pre-commit", "pypi", "type-hints", "circular-imports"],
+      "created": "2026-03-13",
+      "skill_path": "skills/python-repo-modernization/SKILL.md",
+      "references": [
+        "skills/python-repo-modernization/references/notes.md"
+      ]
+    }
   ]
 }
