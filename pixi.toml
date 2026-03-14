@@ -35,6 +35,7 @@ ruff = ">=0.1.0,<1"
 mypy = ">=1.8.0,<2"
 yamllint = ">=1.35.0,<2"
 pre-commit = ">=3.0,<5"
+types-pyyaml = ">=6.0.12,<7"
 
 [feature.lint.pypi-dependencies]
 pip-audit = ">=2.7,<3"
