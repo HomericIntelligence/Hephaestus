@@ -2,9 +2,19 @@
 
 """Tests for hephaestus.validation.readme_commands module."""
 
+import platform
+import shutil
+
+import pytest
+
 from hephaestus.validation.readme_commands import (
     CodeBlock,
     ReadmeValidator,
+)
+
+requires_bash = pytest.mark.skipif(
+    platform.system() == "Windows" or not shutil.which("bash"),
+    reason="requires bash shell",
 )
 
 
@@ -119,6 +129,7 @@ def test_is_safe_command():
     assert "allowed prefixes" in reason
 
 
+@requires_bash
 def test_validate_syntax():
     """Test syntax validation."""
     validator = ReadmeValidator()
