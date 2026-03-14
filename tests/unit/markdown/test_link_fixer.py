@@ -68,16 +68,14 @@ def test_link_fixer_integration(tmp_path):
     # Create test file
     test_file = tmp_path / "docs" / "test.md"
     test_file.parent.mkdir(parents=True)
-    test_file.write_text(
-        "See [docs](/home/user/repo/docs/guide.md) and [agents](/agents/index.md)"
-    )
+    test_file.write_text("See [docs](/home/user/repo/docs/guide.md) and [agents](/agents/index.md)")
 
     # Create fixer
     options = LinkFixerOptions(verbose=False, dry_run=False)
     fixer = LinkFixer(options)
 
     # Fix file
-    modified, system_fixes, absolute_fixes = fixer.fix_file(test_file)
+    modified, _system_fixes, _absolute_fixes = fixer.fix_file(test_file)
 
     assert modified is True
     # Note: system_fixes count depends on the pattern matching the actual path structure
@@ -96,7 +94,7 @@ def test_link_fixer_dry_run(tmp_path):
     options = LinkFixerOptions(verbose=False, dry_run=True)
     fixer = LinkFixer(options)
 
-    modified, system_fixes, absolute_fixes = fixer.fix_file(test_file)
+    _modified, _system_fixes, _absolute_fixes = fixer.fix_file(test_file)
 
     # Should report as modified but not actually change file
     assert test_file.read_text() == original_content
@@ -122,7 +120,7 @@ def test_link_fixer_process_path_directory(tmp_path):
     (tmp_path / "test3.txt").write_text("Not markdown")
 
     fixer = LinkFixer()
-    files_modified, system_fixes, absolute_fixes = fixer.process_path(tmp_path)
+    files_modified, _system_fixes, _absolute_fixes = fixer.process_path(tmp_path)
 
     # Should process 2 markdown files
     assert files_modified >= 0  # Depends on if fixes were needed

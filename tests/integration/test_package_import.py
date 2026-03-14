@@ -2,8 +2,8 @@
 """Integration tests verifying all public symbols in __all__ are importable."""
 
 import importlib
-import pytest
 
+import pytest
 
 # All top-level symbols from hephaestus.__all__
 TOP_LEVEL_SYMBOLS = [
@@ -100,7 +100,7 @@ class TestSubpackageImports:
 
     def test_io_functions_callable(self):
         """Core io functions must be callable."""
-        from hephaestus.io import read_file, write_file, ensure_directory
+        from hephaestus.io import ensure_directory, read_file, write_file
 
         assert callable(read_file)
         assert callable(write_file)
@@ -108,13 +108,13 @@ class TestSubpackageImports:
 
     def test_logging_functions_callable(self):
         """Core logging functions must be callable."""
-        from hephaestus.logging import setup_logging, get_logger
+        from hephaestus.logging import get_logger, setup_logging
 
         assert callable(setup_logging)
         assert callable(get_logger)
 
     def test_slugify_works(self):
-        """slugify must produce correct output (smoke test)."""
+        """Slugify must produce correct output (smoke test)."""
         from hephaestus.utils import slugify
 
         assert slugify("Hello World") == "hello-world"

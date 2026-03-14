@@ -2,7 +2,6 @@
 """Shared test fixtures for ProjectHephaestus tests."""
 
 import json
-from pathlib import Path
 
 import pytest
 import yaml

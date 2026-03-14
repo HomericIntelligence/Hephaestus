@@ -2,8 +2,6 @@
 
 """Tests for hephaestus.validation.readme_commands module."""
 
-
-
 from hephaestus.validation.readme_commands import (
     CodeBlock,
     ReadmeValidator,

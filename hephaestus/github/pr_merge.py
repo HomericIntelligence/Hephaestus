@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+from typing import Any
 
 from hephaestus.logging.utils import get_logger
 from hephaestus.utils.helpers import run_subprocess
@@ -73,7 +74,7 @@ def run_git_cmd(cmd: list[str], dry_run: bool = False, cwd: str | None = None) -
     run_subprocess(cmd, cwd=cwd, dry_run=dry_run)
 
 
-def checks_success_and_print(commit) -> tuple[bool | None, list]:
+def checks_success_and_print(commit: Any) -> tuple[bool | None, list[Any]]:
     """Check if commit has successful CI/CD checks.
 
     Args:
@@ -106,7 +107,7 @@ def checks_success_and_print(commit) -> tuple[bool | None, list]:
     return None, []
 
 
-def legacy_status_and_print(commit) -> str:
+def legacy_status_and_print(commit: Any) -> str:
     """Get legacy commit status and print contexts.
 
     Args:
@@ -138,8 +139,7 @@ def local_branch_exists(branch_name: str) -> bool:
     """
     try:
         out = subprocess.check_output(
-            ["git", "branch", "--list", branch_name],
-            stderr=subprocess.DEVNULL
+            ["git", "branch", "--list", branch_name], stderr=subprocess.DEVNULL
         )
         return bool(out.strip())
     except subprocess.CalledProcessError:
@@ -155,16 +155,20 @@ def try_push_head_branch(head_branch: str, dry_run: bool) -> None:
 
     """
     if dry_run:
-        logger.info(f"[DRY-RUN] Would push local branch '{head_branch}' to origin if it exists locally.")
+        logger.info(
+            f"[DRY-RUN] Would push local branch '{head_branch}' to origin if it exists locally."
+        )
         return
 
     if local_branch_exists(head_branch):
         run_git_cmd(["git", "push", "origin", f"{head_branch}:{head_branch}"], dry_run=False)
     else:
-        logger.info(f"  Local branch '{head_branch}' not found; assuming remote branch already present.")
+        logger.info(
+            f"  Local branch '{head_branch}' not found; assuming remote branch already present."
+        )
 
 
-def handle_merge_result(result, pr_number: int, base_branch: str) -> None:
+def handle_merge_result(result: Any, pr_number: int, base_branch: str) -> None:
     """Handle and log the result of a PR merge.
 
     Args:
@@ -189,8 +193,8 @@ def handle_merge_result(result, pr_number: int, base_branch: str) -> None:
         logger.error(f"  Failed to merge PR #{pr_number}. API message: {message}")
 
 
-def main():
-    """Main entry point for PR merge automation."""
+def main() -> None:  # noqa: C901
+    """Serve as the main entry point for PR merge automation."""
     parser = argparse.ArgumentParser(
         description="Merge open PRs with successful CI/CD into main (rebase via PR API)"
     )
@@ -213,7 +217,9 @@ def main():
     # Get GitHub token
     token = os.getenv("GITHUB_TOKEN")
     if not token:
-        logger.error("Please set GITHUB_TOKEN environment variable with a token that has 'repo' scope.")
+        logger.error(
+            "Please set GITHUB_TOKEN environment variable with a token that has 'repo' scope."
+        )
         sys.exit(1)
 
     # Detect or use provided repo name
@@ -263,12 +269,12 @@ def main():
             continue
 
         logger.info("  Checks API results:")
-        success, checks = checks_success_and_print(commit)
+        success, _checks = checks_success_and_print(commit)
 
         if success is None:
             logger.info("  No check runs found; falling back to legacy status contexts:")
             state = legacy_status_and_print(commit)
-            success = (state == "success")
+            success = state == "success"
 
         # Handle push-all flag
         if args.push_all:
@@ -293,8 +299,7 @@ def main():
             logger.warning(f"  CI/CD checks not successful for PR #{pr.number}. Skipping merge.")
 
     logger.info("\nDone processing all open PRs.")
-    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

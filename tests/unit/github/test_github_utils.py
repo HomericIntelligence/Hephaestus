@@ -171,9 +171,7 @@ class TestLegacyStatusAndPrint:
     def test_returns_state_string(self):
         """Returns the combined status state."""
         mock_commit = MagicMock()
-        mock_commit.get_combined_status.return_value = MagicMock(
-            statuses=[], state="success"
-        )
+        mock_commit.get_combined_status.return_value = MagicMock(statuses=[], state="success")
         result = legacy_status_and_print(mock_commit)
         assert result == "success"
 

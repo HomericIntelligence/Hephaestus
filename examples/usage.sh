@@ -7,8 +7,8 @@ echo "=== ProjectHephaestus Utilities Examples ==="
 echo "Python version:"
 python --version
 
-echo "\nAvailable packages:"
+printf "\nAvailable packages:\n"
 pip list | head -10
 
 # Demonstrate utility functions if we had them fully installed
-echo "\n=== End Examples ==="
+printf "\n=== End Examples ===\n"

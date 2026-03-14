@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""README Command Validation
+"""README Command Validation.
 
 Extracts and validates commands from README.md code blocks to ensure
 documented commands actually work.
@@ -16,6 +16,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import ClassVar
 
 from hephaestus.utils.helpers import get_repo_root
 
@@ -101,7 +102,7 @@ class ReadmeValidator:
     """Validates commands in README markdown files."""
 
     # Default allowed command prefixes (can be overridden)
-    DEFAULT_ALLOWED_PREFIXES = [
+    DEFAULT_ALLOWED_PREFIXES: ClassVar[list[str]] = [
         "pixi run",
         "pixi install",
         "pixi info",
@@ -153,7 +154,9 @@ class ReadmeValidator:
             # Calculate line number
             line_number = content[: match.start()].count("\n") + 1
 
-            blocks.append(CodeBlock(language=language, content=block_content, line_number=line_number))
+            blocks.append(
+                CodeBlock(language=language, content=block_content, line_number=line_number)
+            )
 
         return blocks
 
@@ -167,10 +170,7 @@ class ReadmeValidator:
             True if command is blocked
 
         """
-        for pattern in BLOCKED_PATTERNS:
-            if re.search(pattern, command):
-                return True
-        return False
+        return any(re.search(pattern, command) for pattern in BLOCKED_PATTERNS)
 
     def is_allowed_command(self, command: str) -> bool:
         """Check if command starts with an allowed prefix.
@@ -182,10 +182,7 @@ class ReadmeValidator:
             True if command is allowed
 
         """
-        for prefix in self.allowed_prefixes:
-            if command.startswith(prefix):
-                return True
-        return False
+        return any(command.startswith(prefix) for prefix in self.allowed_prefixes)
 
     def is_safe_command(self, command: str) -> tuple[bool, str]:
         """Check if command is safe to execute.
@@ -360,7 +357,7 @@ class ReadmeValidator:
                 report.total_commands += 1
 
                 # Check safety
-                is_safe, reason = self.is_safe_command(command)
+                is_safe, _reason = self.is_safe_command(command)
                 if not is_safe:
                     report.skipped_commands += 1
                     continue
@@ -415,7 +412,7 @@ class ReadmeValidator:
                 report.total_commands += 1
 
                 # Check safety
-                is_safe, reason = self.is_safe_command(command)
+                is_safe, _reason = self.is_safe_command(command)
                 if not is_safe:
                     report.skipped_commands += 1
                     continue

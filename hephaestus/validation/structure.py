@@ -33,9 +33,7 @@ class StructureValidator:
         self.required_files = required_files
         self.required_subdirs = required_subdirs
 
-    def check_directory_exists(
-        self, base_path: Path, dir_name: str
-    ) -> tuple[bool, str]:
+    def check_directory_exists(self, base_path: Path, dir_name: str) -> tuple[bool, str]:
         """Check if a directory exists.
 
         Args:
@@ -53,9 +51,7 @@ class StructureValidator:
             return False, f"Not a directory: {dir_name}"
         return True, f"✓ {dir_name}/"
 
-    def check_file_exists(
-        self, base_path: Path, dir_name: str, file_name: str
-    ) -> tuple[bool, str]:
+    def check_file_exists(self, base_path: Path, dir_name: str, file_name: str) -> tuple[bool, str]:
         """Check if a required file exists.
 
         Args:
@@ -95,9 +91,7 @@ class StructureValidator:
             return False, f"Not a directory: {parent_dir}/{subdir}"
         return True, f"✓ {parent_dir}/{subdir}/"
 
-    def validate_structure(
-        self, repo_root: Path, verbose: bool = False
-    ) -> dict[str, list[str]]:
+    def validate_structure(self, repo_root: Path, verbose: bool = False) -> dict[str, list[str]]:
         """Validate repository directory structure.
 
         Args:
@@ -118,8 +112,7 @@ class StructureValidator:
             passed, message = self.check_directory_exists(repo_root, dir_name)
             if passed:
                 results["passed"].append(message)
-                if verbose:
-                    logger.info(f"  {message}")
+                logger.info(f"  {message}") if verbose else None
             else:
                 results["failed"].append(message)
                 logger.error(f"  ✗ {message}")
@@ -131,8 +124,7 @@ class StructureValidator:
                 passed, message = self.check_file_exists(repo_root, dir_name, file_name)
                 if passed:
                     results["passed"].append(message)
-                    if verbose:
-                        logger.info(f"  {message}")
+                    logger.info(f"  {message}") if verbose else None
                 else:
                     results["failed"].append(message)
                     logger.error(f"  ✗ {message}")
@@ -141,13 +133,10 @@ class StructureValidator:
         logger.info("\nChecking required subdirectories...")
         for parent_dir, subdirs in self.required_subdirs.items():
             for subdir in subdirs:
-                passed, message = self.check_subdirectory_exists(
-                    repo_root, parent_dir, subdir
-                )
+                passed, message = self.check_subdirectory_exists(repo_root, parent_dir, subdir)
                 if passed:
                     results["passed"].append(message)
-                    if verbose:
-                        logger.info(f"  {message}")
+                    logger.info(f"  {message}") if verbose else None
                 else:
                     results["failed"].append(message)
                     logger.error(f"  ✗ {message}")

@@ -40,12 +40,14 @@ python scripts/validate_structure.py
 ## Source Repositories
 
 Scripts ported from:
+
 - **ProjectOdyssey**: Validation, changelog generation, PR merging
 - **ProjectHephaestus**: Original utilities and helpers
 
 ## Design Principles
 
 Following CLAUDE.md guidelines:
+
 - **KISS** (Keep It Simple, Stupid) - Scripts are thin wrappers
 - **DRY** (Don't Repeat Yourself) - Logic in hephaestus modules
 - **YAGNI** (You Aren't Gonna Need It) - Only port what's reusable

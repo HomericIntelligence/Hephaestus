@@ -14,7 +14,7 @@ Usage:
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ def read_file(filepath: str | Path, mode: str = "r") -> str | bytes:
     """
     filepath = Path(filepath)
     with open(filepath, mode) as f:
-        return f.read()  # type: ignore[return-value]
+        return cast(str | bytes, f.read())
 
 
 def write_file(
@@ -64,7 +64,7 @@ def write_file(
     filepath = Path(filepath)
     filepath.parent.mkdir(parents=True, exist_ok=True)
     with open(filepath, mode) as f:
-        f.write(content)  # type: ignore[arg-type]
+        f.write(content)
     return True
 
 

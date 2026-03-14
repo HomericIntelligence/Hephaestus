@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
-"""
-Update version across project version files.
+"""Update version across project version files.
 
 This script updates version numbers in:
 - VERSION (root file)
@@ -15,25 +14,26 @@ Usage:
 
 import argparse
 import sys
-from pathlib import Path
 
-from hephaestus.version.manager import VersionManager, parse_version
 from hephaestus.utils.helpers import get_repo_root
+from hephaestus.version.manager import VersionManager, parse_version
 
 
 def main() -> int:
-    """
-    Main entry point for version update script.
+    """Main entry point for version update script.
 
     Returns:
         0 on success, 1 on failure
+
     """
     parser = argparse.ArgumentParser(
         description="Update project version across all version files",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("version", help="New version string (format: MAJOR.MINOR.PATCH, e.g., 0.1.0)")
+    parser.add_argument(
+        "version", help="New version string (format: MAJOR.MINOR.PATCH, e.g., 0.1.0)"
+    )
     parser.add_argument(
         "--verify-only",
         action="store_true",
@@ -44,7 +44,7 @@ def main() -> int:
 
     try:
         # Parse and validate version
-        major, minor, patch = parse_version(args.version)
+        _major, _minor, _patch = parse_version(args.version)
 
         # Get repository root
         repo_root = get_repo_root()

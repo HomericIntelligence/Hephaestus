@@ -31,7 +31,7 @@ def run_git_command(args: list[str], cwd: Path | None = None) -> str:
     if cwd is None:
         cwd = get_repo_root()
 
-    result = run_subprocess(["git"] + args, cwd=str(cwd), check=False)
+    result = run_subprocess(["git", *args], cwd=str(cwd), check=False)
     if result.returncode != 0:
         return ""
     return result.stdout.strip()
@@ -73,10 +73,7 @@ def get_commits_between(from_ref: str | None, to_ref: str = "HEAD") -> list[str]
         List of commit lines
 
     """
-    if from_ref:
-        range_spec = f"{from_ref}..{to_ref}"
-    else:
-        range_spec = to_ref
+    range_spec = f"{from_ref}..{to_ref}" if from_ref else to_ref
 
     output = run_git_command(
         [
@@ -109,7 +106,7 @@ def parse_commit(commit_line: str) -> tuple[str, str, str, str]:
     if len(parts) != 3:
         return ("", "other", "", commit_line)
 
-    commit_hash, subject, author = parts
+    commit_hash, subject, _author = parts
 
     # Parse conventional commit format
     commit_type = "other"
@@ -241,8 +238,8 @@ def generate_changelog(
     return "\n".join(lines)
 
 
-def main():
-    """Main entry point for changelog generation."""
+def main() -> None:
+    """Generate a changelog from git commit history."""
     parser = argparse.ArgumentParser(description="Generate changelog from git commit history")
     parser.add_argument(
         "version",
@@ -286,8 +283,8 @@ def main():
     else:
         print(changelog)
 
-    return 0
+    sys.exit(0)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

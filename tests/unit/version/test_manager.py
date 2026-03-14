@@ -2,7 +2,6 @@
 
 """Tests for hephaestus.version.manager module."""
 
-
 import pytest
 
 from hephaestus.version.manager import VersionManager, parse_version

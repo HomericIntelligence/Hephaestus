@@ -35,7 +35,7 @@ NETWORK_ERROR_KEYWORDS = [
 ]
 
 
-def is_network_error(error: Exception) -> bool:
+def is_network_error(error: BaseException) -> bool:
     """Check if error is likely a transient network issue.
 
     Args:
@@ -54,10 +54,10 @@ def retry_with_backoff(
     initial_delay: float = 1.0,
     backoff_factor: int = 2,
     jitter: bool = True,
-    retry_on: tuple[type, ...] = (Exception,),
+    retry_on: tuple[type[BaseException], ...] = (Exception,),
     logger: Callable[[str], None] | None = None,
 ) -> Callable[[F], F]:
-    """Decorator to retry function with exponential backoff.
+    """Retry a function with exponential backoff.
 
     Args:
         max_retries: Maximum number of retry attempts (default: 3)
@@ -76,7 +76,7 @@ def retry_with_backoff(
             # May fail transiently
             response = requests.get("https://api.github.com")
             return response.json()
-            
+
         @retry_with_backoff(retry_on=(ConnectionError, TimeoutError))
         def api_call():
             # Only retry on specific exceptions
@@ -100,7 +100,7 @@ def retry_with_backoff(
                         break
 
                     # Calculate delay with exponential backoff
-                    delay = initial_delay * (backoff_factor ** attempt)
+                    delay = initial_delay * (backoff_factor**attempt)
 
                     # Add jitter if requested (±25%)
                     if jitter:
@@ -116,7 +116,8 @@ def retry_with_backoff(
                         is_network = is_network_error(e)
                         network_tag = " [NETWORK]" if is_network else ""
                         logger(
-                            f"Retry {attempt + 1}/{max_retries} after {error_type}{network_tag}: {e} (waiting {delay:.2f}s)"
+                            f"Retry {attempt + 1}/{max_retries} after"
+                            f" {error_type}{network_tag}: {e} (waiting {delay:.2f}s)"
                         )
 
                     # Wait before retry
@@ -135,11 +136,9 @@ def retry_with_backoff(
 
 
 def retry_on_network_error(
-    max_retries: int = 3,
-    initial_delay: float = 2.0,
-    logger: Callable[[str], None] | None = None
+    max_retries: int = 3, initial_delay: float = 2.0, logger: Callable[[str], None] | None = None
 ) -> Callable[[F], F]:
-    """Convenience decorator for retrying on network errors only.
+    """Retry on network errors only (convenience wrapper).
 
     Args:
         max_retries: Maximum number of retry attempts
@@ -161,29 +160,26 @@ def retry_on_network_error(
 
 # Compatibility function that matches Hephaestus existing API
 def retry_with_jitter(
-    func: Callable,
-    max_retries: int = 3,
-    base_delay: float = 1.0,
-    max_delay: float = 60.0
+    func: Callable[..., Any], max_retries: int = 3, base_delay: float = 1.0, max_delay: float = 60.0
 ) -> Any:
     """Retry a function with exponential backoff and jitter.
-    
+
     Compatible with existing Hephaestus retry utilities.
-    
+
     Args:
         func: Function to retry
         max_retries: Maximum number of retry attempts
         base_delay: Base delay in seconds
         max_delay: Maximum delay between retries
-        
+
     Returns:
         Result of successful function call
-        
+
     Raises:
         Exception: Last exception raised if all retries fail
 
     """
-    last_exception = None
+    last_exception: Exception | None = None
 
     for attempt in range(max_retries + 1):
         try:
@@ -192,11 +188,13 @@ def retry_with_jitter(
             last_exception = e
             if attempt < max_retries:
                 # Calculate delay with exponential backoff and jitter
-                delay = min(base_delay * (2 ** attempt), max_delay)
+                delay = min(base_delay * (2**attempt), max_delay)
                 # Add jitter (±25%)
                 jitter = random.uniform(-0.25 * delay, 0.25 * delay)
                 time.sleep(max(0.1, delay + jitter))
             else:
                 break
 
-    raise last_exception
+    if last_exception is not None:
+        raise last_exception
+    raise RuntimeError("retry_with_jitter: no exception but no return value")

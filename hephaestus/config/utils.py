@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Enhanced configuration management utilities for ProjectHephaestus.
 
-This module provides utilities for loading, validating, and managing 
+This module provides utilities for loading, validating, and managing
 configuration settings across the HomericIntelligence ecosystem with
 support for YAML, environment variables, and hierarchical merging.
 
@@ -15,26 +15,28 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 _logger = logging.getLogger(__name__)
 
 try:
     import yaml
+
     YAML_AVAILABLE = True
 except ImportError:
     YAML_AVAILABLE = False
     _logger.warning("PyYAML not available, YAML config support disabled")
 
+
 def load_config(config_path: str | Path) -> dict[str, Any]:
     """Load configuration from a YAML or JSON file.
-    
+
     Args:
         config_path: Path to the configuration file
-        
+
     Returns:
         Dictionary containing configuration settings
-        
+
     Raises:
         FileNotFoundError: If config file doesn't exist
         ValueError: If config file format is unsupported
@@ -46,27 +48,27 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
     with open(config_path) as f:
-        if config_path.suffix.lower() in ['.yml', '.yaml'] and YAML_AVAILABLE:
-            return yaml.safe_load(f) or {}
-        elif config_path.suffix.lower() == '.json':
-            return json.load(f)
+        if config_path.suffix.lower() in [".yml", ".yaml"] and YAML_AVAILABLE:
+            return cast(dict[str, Any], yaml.safe_load(f) or {})
+        elif config_path.suffix.lower() == ".json":
+            return cast(dict[str, Any], json.load(f))
         else:
             raise ValueError(f"Unsupported config format: {config_path.suffix}")
 
-def get_setting(config: dict[str, Any], key_path: str,
-                default: Any | None = None) -> Any:
+
+def get_setting(config: dict[str, Any], key_path: str, default: Any | None = None) -> Any:
     """Get a configuration setting using dot notation.
-    
+
     Args:
         config: Configuration dictionary
         key_path: Dot-separated path to setting (e.g., 'database.host')
         default: Default value if setting not found
-        
+
     Returns:
         Configuration value or default
 
     """
-    keys = key_path.split('.')
+    keys = key_path.split(".")
     current = config
 
     try:
@@ -76,14 +78,14 @@ def get_setting(config: dict[str, Any], key_path: str,
     except (KeyError, TypeError):
         return default
 
-def validate_config(config: dict[str, Any],
-                   schema: dict[str, Any]) -> bool:
+
+def validate_config(config: dict[str, Any], schema: dict[str, Any]) -> bool:
     """Validate configuration against a schema.
-    
+
     Args:
         config: Configuration dictionary
         schema: Schema defining required fields and types
-        
+
     Returns:
         True if valid, False otherwise
 
@@ -94,27 +96,32 @@ def validate_config(config: dict[str, Any],
             print(f"Missing required config key: {key}")
             return False
         if expected_type and not isinstance(config[key], expected_type):
-            print(f"Config key {key} has wrong type. Expected {expected_type}, got {type(config[key])}")
+            print(
+                f"Config key {key} has wrong type. Expected {expected_type},"
+                f" got {type(config[key])}"
+            )
             return False
     return True
 
+
 def merge_configs(*configs: dict[str, Any]) -> dict[str, Any]:
     """Merge multiple configuration dictionaries with priority.
-    
+
     Later configs override earlier ones.
-    
+
     Args:
         *configs: Configuration dictionaries in order of priority
-        
+
     Returns:
         Merged configuration dictionary
 
     """
-    result = {}
+    result: dict[str, Any] = {}
     for config in configs:
         if config:
             _deep_merge(result, config)
     return result
+
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> None:
     """Deep merge two dictionaries."""
@@ -124,12 +131,13 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> None:
         else:
             base[key] = value
 
+
 def load_yaml_config(config_path: str | Path) -> dict[str, Any]:
     """Load configuration from a YAML file with validation.
-    
+
     Args:
         config_path: Path to the YAML configuration file
-        
+
     Returns:
         Dictionary containing configuration settings
 
@@ -139,38 +147,39 @@ def load_yaml_config(config_path: str | Path) -> dict[str, Any]:
 
     return load_config(config_path)
 
+
 def merge_with_env(config: dict[str, Any], prefix: str = "HEPHAESTUS_") -> dict[str, Any]:
     """Merge configuration with environment variables.
-    
+
     Environment variables with the given prefix are mapped to config keys.
     For example, HEPHAESTUS_DATABASE_HOST becomes database.host
-    
+
     Args:
         config: Base configuration dictionary
         prefix: Environment variable prefix to look for
-        
+
     Returns:
         Configuration merged with environment variables
 
     """
-    env_config = {}
+    env_config: dict[str, Any] = {}
 
     for key, value in os.environ.items():
         if key.startswith(prefix):
             # Convert HEPHAESTUS_DATABASE_HOST to database.host
-            config_key = key[len(prefix):].lower().replace('_', '.')
+            config_key = key[len(prefix) :].lower().replace("_", ".")
             # Try to convert to int or float if possible
             typed_value: int | float | str = value
             try:
-                if '.' not in value and value.isdigit():
+                if "." not in value and value.isdigit():
                     typed_value = int(value)
-                elif '.' in value:
+                elif "." in value:
                     typed_value = float(value)
             except ValueError:
                 pass  # Keep as string
 
             # Set nested keys
-            keys = config_key.split('.')
+            keys = config_key.split(".")
             current = env_config
             for k in keys[:-1]:
                 if k not in current:
@@ -180,19 +189,20 @@ def merge_with_env(config: dict[str, Any], prefix: str = "HEPHAESTUS_") -> dict[
 
     return merge_configs(config, env_config)
 
+
 # Example usage function
-def get_config_value(key_path: str,
-                    default: Any | None = None,
-                    config_files: list | None = None) -> Any:
+def get_config_value(
+    key_path: str, default: Any | None = None, config_files: list[str] | None = None
+) -> Any:
     """High-level function to get a configuration value with full merging.
-    
+
     Loads defaults, then user config, then environment variables.
-    
+
     Args:
         key_path: Dot-separated path to setting
         default: Default value if not found
         config_files: List of config files to load in order
-        
+
     Returns:
         Configuration value or default
 

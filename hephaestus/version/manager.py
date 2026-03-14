@@ -28,7 +28,9 @@ def parse_version(version: str) -> tuple[int, int, int]:
     """
     match = re.match(r"^(\d+)\.(\d+)\.(\d+)$", version)
     if not match:
-        raise ValueError(f"Invalid version format: {version}. Expected format: MAJOR.MINOR.PATCH (e.g., 0.1.0)")
+        raise ValueError(
+            f"Invalid version format: {version}. Expected format: MAJOR.MINOR.PATCH (e.g., 0.1.0)"
+        )
 
     major = int(match.group(1))
     minor = int(match.group(2))
@@ -51,7 +53,8 @@ class VersionManager:
         Args:
             repo_root: Repository root path. If None, will attempt to detect.
             version_files: List of VERSION file paths. Defaults to [repo_root/VERSION].
-            init_files: List of __init__.py files to update. Defaults to [repo_root/<package>/__init__.py].
+            init_files: List of __init__.py files to update.
+                Defaults to [repo_root/<package>/__init__.py].
 
         """
         self.repo_root = repo_root or get_repo_root()
@@ -60,7 +63,7 @@ class VersionManager:
         # Auto-detect init files if not provided
         if init_files is None:
             # Look for common package __init__.py patterns
-            potential_inits = []
+            potential_inits: list[Path] = []
             for pattern in ["*/__init__.py", "*/*/init__.py"]:
                 potential_inits.extend(self.repo_root.glob(pattern))
 
@@ -68,12 +71,15 @@ class VersionManager:
             self.init_files = []
             for init_file in potential_inits:
                 # Skip test, build, and hidden directories
-                if any(part.startswith(".") or part in {"tests", "build", "dist", "__pycache__"} for part in init_file.parts):
+                if any(
+                    part.startswith(".") or part in {"tests", "build", "dist", "__pycache__"}
+                    for part in init_file.parts
+                ):
                     continue
                 # Check if it has a __version__ attribute
                 if init_file.exists():
                     content = init_file.read_text()
-                    if '__version__' in content:
+                    if "__version__" in content:
                         self.init_files.append(init_file)
         else:
             self.init_files = init_files
@@ -114,9 +120,7 @@ class VersionManager:
 
         # Update __version__ = "x.y.z" pattern
         new_content = re.sub(
-            r'__version__\s*=\s*["\']([^"\']+)["\']',
-            f'__version__ = "{version}"',
-            content
+            r'__version__\s*=\s*["\']([^"\']+)["\']', f'__version__ = "{version}"', content
         )
 
         if new_content == content:
@@ -126,7 +130,7 @@ class VersionManager:
 
         init_file.write_text(new_content)
         if verbose:
-            print(f"  ✓ Updated __version__ = \"{version}\"")
+            print(f'  ✓ Updated __version__ = "{version}"')
 
     def update(self, version: str, verbose: bool = True) -> None:
         """Update all configured version files.
@@ -149,7 +153,7 @@ class VersionManager:
         for init_file in self.init_files:
             self.update_init_file(init_file, version, verbose=verbose)
 
-    def verify(self, version: str, verbose: bool = True) -> bool:
+    def verify(self, version: str, verbose: bool = True) -> bool:  # noqa: C901
         """Verify that all version files are consistent.
 
         Args:
@@ -174,7 +178,10 @@ class VersionManager:
                         print(f"  ✓ {version_file.relative_to(self.repo_root)}: {content}")
                 else:
                     if verbose:
-                        print(f"  ✗ {version_file.relative_to(self.repo_root)}: {content} (expected {version})")
+                        print(
+                            f"  ✗ {version_file.relative_to(self.repo_root)}: {content}"
+                            f" (expected {version})"
+                        )
                     success = False
             else:
                 if verbose:

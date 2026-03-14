@@ -90,7 +90,7 @@ def test_detect_regressions_high():
     current = {"bench1": 115.0}  # 15% slower
     baseline = {"bench1": 100.0}
 
-    regressions, improvements = detect_regressions(current, baseline)
+    regressions, _improvements = detect_regressions(current, baseline)
 
     assert len(regressions) == 1
     assert regressions[0].severity == "high"
@@ -102,7 +102,7 @@ def test_detect_regressions_medium():
     current = {"bench1": 107.0}  # 7% slower
     baseline = {"bench1": 100.0}
 
-    regressions, improvements = detect_regressions(current, baseline)
+    regressions, _improvements = detect_regressions(current, baseline)
 
     assert len(regressions) == 1
     assert regressions[0].severity == "medium"

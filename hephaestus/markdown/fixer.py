@@ -134,7 +134,7 @@ class MarkdownFixer:
 
         return "\n".join(fixed_lines), fixes
 
-    def _fix_structural_issues(self, content: str) -> tuple[str, int]:
+    def _fix_structural_issues(self, content: str) -> tuple[str, int]:  # noqa: C901
         """Fix structural markdown issues (MD022, MD031, MD032, MD029, MD036).
 
         - MD022: Headings surrounded by blank lines
@@ -285,7 +285,7 @@ class MarkdownFixer:
         """
         fixes = 0
 
-        def replace_url(match):
+        def replace_url(match: re.Match[str]) -> str:
             nonlocal fixes
             url = match.group(0)
             # Check if URL is already in a markdown link syntax
@@ -347,8 +347,8 @@ class MarkdownFixer:
         return files_modified, total_fixes
 
 
-def main():
-    """Main entry point."""
+def main() -> None:
+    """Serve as the main entry point for the markdown fixer."""
     parser = argparse.ArgumentParser(
         description="Fix common markdown linting errors automatically",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -377,8 +377,8 @@ def main():
     if args.dry_run:
         print("\n[DRY RUN] No files were actually modified")
 
-    return 0
+    sys.exit(0)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

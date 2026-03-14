@@ -6,7 +6,7 @@ Validates YAML configuration files for syntax, formatting, and common issues.
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from hephaestus.logging.utils import get_logger
 
@@ -132,11 +132,13 @@ class ConfigLinter:
                 bracket_count += stripped.count("[") - stripped.count("]")
 
                 # Check for common issues
-                if ":" in stripped and not re.match(r"^\s*[\w\-]+:", stripped):
-                    if "://" not in stripped:  # Not a URL
-                        self.warnings.append(
-                            f"{filepath}:{i + 1} - Possible malformed key"
-                        )
+                # Not a URL: skip lines with "://"
+                if (
+                    ":" in stripped
+                    and not re.match(r"^\s*[\w\-]+:", stripped)
+                    and "://" not in stripped
+                ):
+                    self.warnings.append(f"{filepath}:{i + 1} - Possible malformed key")
 
             if brace_count != 0:
                 self.errors.append(f"{filepath} - Unmatched braces")
@@ -165,15 +167,11 @@ class ConfigLinter:
         for i, line in enumerate(lines):
             # Check for tabs
             if "\t" in line:
-                self.warnings.append(
-                    f"{filepath}:{i + 1} - Use spaces instead of tabs"
-                )
+                self.warnings.append(f"{filepath}:{i + 1} - Use spaces instead of tabs")
 
             # Check for trailing whitespace
             if line != line.rstrip():
-                self.suggestions.append(
-                    f"{filepath}:{i + 1} - Trailing whitespace"
-                )
+                self.suggestions.append(f"{filepath}:{i + 1} - Trailing whitespace")
 
             # Check for inconsistent indentation
             if line and line[0] == " ":
@@ -195,7 +193,8 @@ class ConfigLinter:
         """
         try:
             import yaml
-            return yaml.safe_load(content)
+
+            return cast(dict[str, Any], yaml.safe_load(content))
         except ImportError:
             logger.warning("PyYAML not installed, skipping YAML parsing checks")
             return {}
@@ -203,9 +202,7 @@ class ConfigLinter:
             self.errors.append(f"YAML parsing failed: {e}")
             return None
 
-    def _check_deprecated_keys(
-        self, config: dict[str, Any], filepath: Path
-    ) -> None:
+    def _check_deprecated_keys(self, config: dict[str, Any], filepath: Path) -> None:
         """Check for deprecated configuration keys.
 
         Args:
@@ -230,13 +227,10 @@ class ConfigLinter:
                     )
             elif deprecated_key in config:
                 self.warnings.append(
-                    f"{filepath} - Deprecated key '{deprecated_key}', "
-                    f"use '{replacement}' instead"
+                    f"{filepath} - Deprecated key '{deprecated_key}', use '{replacement}' instead"
                 )
 
-    def _check_required_keys(
-        self, config: dict[str, Any], filepath: Path
-    ) -> None:
+    def _check_required_keys(self, config: dict[str, Any], filepath: Path) -> None:
         """Check for required configuration keys.
 
         Args:
@@ -248,7 +242,7 @@ class ConfigLinter:
         filename = filepath.stem
         config_type = None
 
-        for key_type in self.required_keys.keys():
+        for key_type in self.required_keys:
             if key_type in filename or key_type in config:
                 config_type = key_type
                 break
@@ -256,13 +250,9 @@ class ConfigLinter:
         if config_type and config_type in self.required_keys:
             for required_key in self.required_keys[config_type]:
                 if required_key not in config:
-                    self.errors.append(
-                        f"{filepath} - Missing required key '{required_key}'"
-                    )
+                    self.errors.append(f"{filepath} - Missing required key '{required_key}'")
 
-    def _check_duplicate_values(
-        self, config: dict[str, Any], filepath: Path
-    ) -> None:
+    def _check_duplicate_values(self, config: dict[str, Any], filepath: Path) -> None:
         """Check for duplicate values in configuration.
 
         Args:
@@ -273,7 +263,7 @@ class ConfigLinter:
         # Flatten config and check for duplicate values
         values = []
 
-        def flatten(d: dict, parent_key: str = ""):
+        def flatten(d: dict[str, Any], parent_key: str = "") -> None:
             for k, v in d.items():
                 new_key = f"{parent_key}.{k}" if parent_key else k
                 if isinstance(v, dict):
@@ -284,7 +274,7 @@ class ConfigLinter:
         flatten(config)
 
         # Check for duplicate values (may indicate copy-paste errors)
-        seen_values = {}
+        seen_values: dict[Any, str] = {}
         for key, value in values:
             if isinstance(value, (int, float, str)) and value != "":
                 if value in seen_values:
@@ -295,9 +285,7 @@ class ConfigLinter:
                 else:
                     seen_values[value] = key
 
-    def _check_performance(
-        self, config: dict[str, Any], filepath: Path
-    ) -> None:
+    def _check_performance(self, config: dict[str, Any], filepath: Path) -> None:
         """Check performance-related settings.
 
         Args:
@@ -308,12 +296,11 @@ class ConfigLinter:
         for param, (min_val, max_val) in self.perf_thresholds.items():
             if param in config:
                 value = config[param]
-                if isinstance(value, (int, float)):
-                    if value < min_val or value > max_val:
-                        self.warnings.append(
-                            f"{filepath} - '{param}' value {value} "
-                            f"outside recommended range ({min_val}-{max_val})"
-                        )
+                if isinstance(value, (int, float)) and (value < min_val or value > max_val):
+                    self.warnings.append(
+                        f"{filepath} - '{param}' value {value} "
+                        f"outside recommended range ({min_val}-{max_val})"
+                    )
 
     def print_results(self) -> None:
         """Print linting results."""

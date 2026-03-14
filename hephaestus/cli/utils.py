@@ -26,35 +26,41 @@ except PackageNotFoundError:
 class CommandRegistry:
     """Registry for CLI commands with decorator-based registration."""
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Initialize the command registry with an empty commands dict."""
         self.commands: dict[str, dict[str, Any]] = {}
 
-    def register(self, name: str, description: str = "", aliases: list[str] | None = None):
-        """Decorator to register a command function."""
-        def decorator(func: Callable):
+    def register(
+        self, name: str, description: str = "", aliases: list[str] | None = None
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Register a command function via decorator."""
+
+        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
             self.commands[name] = {
-                'function': func,
-                'description': description,
-                'aliases': aliases or []
+                "function": func,
+                "description": description,
+                "aliases": aliases or [],
             }
 
             # Register aliases
-            for alias in (aliases or []):
+            for alias in aliases or []:
                 self.commands[alias] = self.commands[name]
 
             return func
+
         return decorator
 
     def get_command(self, name: str) -> dict[str, Any] | None:
         """Get a registered command info."""
         return self.commands.get(name)
 
+
 def create_parser(prog_name: str = "hephaestus") -> argparse.ArgumentParser:
     """Create a standardized argument parser with common options.
-    
+
     Args:
         prog_name: Program name for the parser
-        
+
     Returns:
         Configured ArgumentParser instance
 
@@ -66,7 +72,7 @@ def create_parser(prog_name: str = "hephaestus") -> argparse.ArgumentParser:
 Examples:
   %(prog)s command --help     Show help for a specific command
   %(prog)s --version          Show version information
-        """.strip()
+        """.strip(),
     )
 
     # Add standard options
@@ -79,37 +85,29 @@ Examples:
 
     return parser
 
+
 def add_logging_args(parser: argparse.ArgumentParser) -> None:
     """Add standard logging arguments to parser.
-    
+
     Args:
         parser: ArgumentParser instance
 
     """
-    logging_group = parser.add_argument_group('logging options')
+    logging_group = parser.add_argument_group("logging options")
+    logging_group.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
     logging_group.add_argument(
-        '-v', '--verbose',
-        action='store_true',
-        help='Enable verbose output'
+        "-q", "--quiet", action="store_true", help="Suppress informational messages"
     )
-    logging_group.add_argument(
-        '-q', '--quiet',
-        action='store_true',
-        help='Suppress informational messages'
-    )
-    logging_group.add_argument(
-        '--log-file',
-        help='Log to file instead of stdout'
-    )
+    logging_group.add_argument("--log-file", help="Log to file instead of stdout")
 
-def confirm_action(prompt: str = "Are you sure?",
-                   default: bool = False) -> bool:
+
+def confirm_action(prompt: str = "Are you sure?", default: bool = False) -> bool:
     """Prompt user for confirmation.
-    
+
     Args:
         prompt: Confirmation prompt
         default: Default response if user just presses Enter
-        
+
     Returns:
         User's confirmation decision
 
@@ -123,24 +121,25 @@ def confirm_action(prompt: str = "Are you sure?",
 
     if not choice:
         return default
-    elif choice in ['y', 'yes']:
+    elif choice in ["y", "yes"]:
         return True
-    elif choice in ['n', 'no']:
+    elif choice in ["n", "no"]:
         return False
     else:
         print("Invalid choice. Please enter 'y' or 'n'.")
         return confirm_action(prompt, default)
 
-def format_table(rows: Sequence[Sequence[str]],
-                headers: Sequence[str] | None = None,
-                separator: str = "  ") -> str:
+
+def format_table(
+    rows: Sequence[Sequence[str]], headers: Sequence[str] | None = None, separator: str = "  "
+) -> str:
     """Format data as a pretty table.
-    
+
     Args:
         rows: Table data rows
         headers: Optional header row
         separator: Column separator
-        
+
     Returns:
         Formatted table string
 
@@ -166,33 +165,32 @@ def format_table(rows: Sequence[Sequence[str]],
     result = []
     for row_idx, row in enumerate(all_rows):
         formatted_row = separator.join(
-            str(cell).ljust(col_widths[i])
-            for i, cell in enumerate(row) if i < len(col_widths)
+            str(cell).ljust(col_widths[i]) for i, cell in enumerate(row) if i < len(col_widths)
         )
         result.append(formatted_row)
 
         # Add separator line after headers
         if headers and row_idx == 0 and col_widths:
-            separator_line = separator.join(
-                "-" * width for width in col_widths
-            )
+            separator_line = separator.join("-" * width for width in col_widths)
             result.append(separator_line)
 
     return "\n".join(result)
 
+
 def format_output(data: Any, format_type: str = "text") -> str:
     """Format output in various formats.
-    
+
     Args:
         data: Data to format
         format_type: Output format ('text', 'json', 'table')
-        
+
     Returns:
         Formatted string representation
 
     """
     if format_type == "json":
         import json
+
         return json.dumps(data, indent=2)
     elif format_type == "table" and isinstance(data, (list, tuple)):
         if data and isinstance(data[0], dict):
@@ -218,12 +216,16 @@ def format_output(data: Any, format_type: str = "text") -> str:
         else:
             return str(data)
 
+
 # Global command registry
 COMMAND_REGISTRY = CommandRegistry()
 
-def register_command(name: str, description: str = "", aliases: list[str] | None = None):
-    """Decorator to register a CLI command.
-    
+
+def register_command(
+    name: str, description: str = "", aliases: list[str] | None = None
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Register a CLI command via decorator.
+
     Args:
         name: Command name
         description: Brief command description

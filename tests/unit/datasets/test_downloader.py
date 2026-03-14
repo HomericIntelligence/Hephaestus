@@ -2,12 +2,9 @@
 """Tests for dataset downloading utilities."""
 
 import gzip
-from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
-
-import pytest
 
 from hephaestus.datasets.downloader import DatasetDownloader, MNISTDownloader
 

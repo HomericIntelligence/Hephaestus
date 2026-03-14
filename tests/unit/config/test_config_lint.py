@@ -70,25 +70,19 @@ class TestLintFile:
         linter.lint_file(path)
         assert any("tab" in w.lower() for w in linter.warnings)
 
-    def test_trailing_whitespace_suggestion(
-        self, linter: ConfigLinter, yaml_file: Any
-    ) -> None:
+    def test_trailing_whitespace_suggestion(self, linter: ConfigLinter, yaml_file: Any) -> None:
         """Trailing whitespace generates a suggestion."""
         path = yaml_file("key: value   \n")
         linter.lint_file(path)
         assert any("trailing" in s.lower() for s in linter.suggestions)
 
-    def test_deprecated_key_warning(
-        self, linter: ConfigLinter, yaml_file: Any
-    ) -> None:
+    def test_deprecated_key_warning(self, linter: ConfigLinter, yaml_file: Any) -> None:
         """Deprecated key generates a warning."""
         path = yaml_file("lr: 0.001\n")
         linter.lint_file(path)
         assert any("lr" in w for w in linter.warnings)
 
-    def test_perf_threshold_warning(
-        self, linter: ConfigLinter, yaml_file: Any
-    ) -> None:
+    def test_perf_threshold_warning(self, linter: ConfigLinter, yaml_file: Any) -> None:
         """Out-of-range performance parameter generates a warning."""
         path = yaml_file("batch_size: 2\n")
         linter.lint_file(path)

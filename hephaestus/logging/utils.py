@@ -20,28 +20,29 @@ from typing import Any
 from hephaestus.constants import LOG_FORMAT
 
 
-class ContextLogger(logging.LoggerAdapter):
+class ContextLogger(logging.LoggerAdapter[logging.Logger]):
     """Logger adapter that adds context information to log messages."""
 
-    def __init__(self, logger: logging.Logger, context: dict[str, Any] | None = None):
+    def __init__(self, logger: logging.Logger, context: dict[str, Any] | None = None) -> None:
+        """Initialize with logger and optional context dict."""
         super().__init__(logger, context or {})
         self._context = context or {}
         self._context_lock = threading.Lock()
 
-    def process(self, msg, kwargs):
+    def process(self, msg: Any, kwargs: Any) -> tuple[Any, Any]:
         """Add context information to log messages."""
         extra = kwargs.get("extra", {})
         extra.update(self._context)
         kwargs["extra"] = extra
         return msg, kwargs
 
-    def bind(self, **kwargs):
+    def bind(self, **kwargs: Any) -> "ContextLogger":
         """Create a new logger with additional context."""
         new_context = self._context.copy()
         new_context.update(kwargs)
         return ContextLogger(self.logger, new_context)
 
-    def unbind(self, *keys):
+    def unbind(self, *keys: str) -> "ContextLogger":
         """Remove context keys from logger."""
         new_context = self._context.copy()
         for key in keys:
@@ -94,7 +95,7 @@ def setup_logging(
     format_string: str | None = None,
     log_to_stderr: bool = False,
 ) -> None:
-    """Setup global logging configuration.
+    """Set up global logging configuration.
 
     Args:
         level: Default logging level

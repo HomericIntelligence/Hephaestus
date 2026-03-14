@@ -26,7 +26,7 @@ def find_markdown_files(directory: Path, exclude_dirs: set[str] | None = None) -
 
     """
     if exclude_dirs is None:
-        exclude_dirs = DEFAULT_EXCLUDE_DIRS
+        exclude_dirs = set(DEFAULT_EXCLUDE_DIRS)
 
     markdown_files = []
     for md_file in directory.rglob("*.md"):
@@ -159,7 +159,7 @@ def validate_relative_link(
     return True, None
 
 
-def count_markdown_issues(content: str) -> dict:
+def count_markdown_issues(content: str) -> dict[str, int]:  # noqa: C901
     """Count common markdown issues in content.
 
     Args:
@@ -203,10 +203,9 @@ def count_markdown_issues(content: str) -> dict:
 
     # Check for long lines (> 120 characters)
     for line in lines:
-        if len(line) > 120:
-            # Skip lines that are URLs or code
-            if not (line.strip().startswith("http") or line.strip().startswith("`")):
-                issues["long_lines"] += 1
+        stripped = line.strip()
+        if len(line) > 120 and not (stripped.startswith("http") or stripped.startswith("`")):
+            issues["long_lines"] += 1
 
     # Check for trailing whitespace
     for line in lines:

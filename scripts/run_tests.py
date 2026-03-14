@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
-"""
-Simple test runner for ProjectHephaestus.
+"""Simple test runner for ProjectHephaestus.
 
 This script runs basic tests without requiring pytest installation.
 """
 
 import sys
-import traceback
 import tempfile
+import traceback
 from pathlib import Path
 
 # Import our utilities
 try:
     from hephaestus.config.utils import get_setting
-    from hephaestus.utils.helpers import slugify, human_readable_size, flatten_dict
-    from hephaestus.io.utils import ensure_directory, safe_write
-    from hephaestus.cli.utils import create_parser
-    
+    from hephaestus.io.utils import ensure_directory
+    from hephaestus.utils.helpers import human_readable_size, slugify
+
     print("✓ All imports successful")
 except Exception as e:
     print(f"✗ Import error: {e}")
     traceback.print_exc()
     sys.exit(1)
+
 
 def test_slugify():
     """Test slugify function."""
@@ -33,6 +32,7 @@ def test_slugify():
     except Exception as e:
         print(f"✗ slugify test failed: {e}")
         return False
+
 
 def test_human_readable_size():
     """Test human_readable_size function."""
@@ -46,15 +46,11 @@ def test_human_readable_size():
         print(f"✗ human_readable_size test failed: {e}")
         return False
 
+
 def test_get_setting():
     """Test get_setting function."""
     try:
-        config = {
-            "database": {
-                "host": "localhost",
-                "port": 5432
-            }
-        }
+        config = {"database": {"host": "localhost", "port": 5432}}
         assert get_setting(config, "database.host") == "localhost"
         assert get_setting(config, "database.port") == 5432
         assert get_setting(config, "non.existing", "default") == "default"
@@ -64,13 +60,14 @@ def test_get_setting():
         print(f"✗ get_setting test failed: {e}")
         return False
 
+
 def test_ensure_directory():
     """Test ensure_directory function."""
     try:
         with tempfile.TemporaryDirectory() as temp_dir:
             test_path = Path(temp_dir) / "test" / "nested" / "directory"
             result = ensure_directory(test_path)
-            assert result == True
+            assert result
             assert test_path.exists()
         print("✓ ensure_directory tests passed")
         return True
@@ -78,34 +75,31 @@ def test_ensure_directory():
         print(f"✗ ensure_directory test failed: {e}")
         return False
 
+
 def main():
     """Run all tests."""
     print("Running ProjectHephaestus tests...")
-    
-    tests = [
-        test_slugify,
-        test_human_readable_size,
-        test_get_setting,
-        test_ensure_directory
-    ]
-    
+
+    tests = [test_slugify, test_human_readable_size, test_get_setting, test_ensure_directory]
+
     passed = 0
     failed = 0
-    
+
     for test in tests:
         if test():
             passed += 1
         else:
             failed += 1
-    
+
     print(f"\nTest Results: {passed} passed, {failed} failed")
-    
+
     if failed == 0:
         print("🎉 All tests passed!")
         return 0
     else:
         print("❌ Some tests failed.")
         return 1
+
 
 if __name__ == "__main__":
     sys.exit(main())

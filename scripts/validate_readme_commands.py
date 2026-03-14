@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
-"""
-README Command Validation Script
+"""README Command Validation Script.
 
 Extracts and validates commands from README.md code blocks to ensure
 documented commands actually work.
@@ -28,11 +27,11 @@ from hephaestus.validation.readme_commands import ReadmeValidator
 
 
 def main() -> int:
-    """
-    Main entry point for README command validation.
+    """Main entry point for README command validation.
 
     Returns:
         Exit code (0 = success, 1 = failure).
+
     """
     parser = argparse.ArgumentParser(
         description="Validate README.md commands",
@@ -73,6 +72,7 @@ def main() -> int:
 
     # Filter to executable blocks
     from hephaestus.validation.readme_commands import EXECUTE_LANGUAGES
+
     executable_blocks = [b for b in blocks if b.language in EXECUTE_LANGUAGES]
     print(f"Found {len(executable_blocks)} executable blocks (bash/shell/sh)")
 

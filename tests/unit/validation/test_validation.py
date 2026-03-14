@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Tests for validation utilities."""
 
-
 import pytest
 
 from hephaestus.validation.markdown import (
@@ -108,7 +107,8 @@ class TestMarkdownValidation:
             "Code without language\n"
             "```\n"
             "\n"
-            "This is a very long line that exceeds 120 characters and should be flagged as a long line issue for markdown linting purposes.\n"
+            "This is a very long line that exceeds 120 characters and should be flagged"
+            " as a long line issue for markdown linting purposes.\n"
             "\n"
             "Line with trailing spaces   \n"
         )

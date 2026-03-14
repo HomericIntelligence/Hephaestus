@@ -2,8 +2,6 @@
 
 """Tests for hephaestus.markdown.fixer module."""
 
-
-
 from hephaestus.markdown.fixer import FixerOptions, MarkdownFixer
 
 
@@ -90,7 +88,7 @@ def test_markdown_fixer_dry_run(tmp_path):
     options = FixerOptions(verbose=False, dry_run=True)
     fixer = MarkdownFixer(options)
 
-    modified, fixes = fixer.fix_file(test_file)
+    modified, _fixes = fixer.fix_file(test_file)
 
     # Should report as modified but not actually change file
     assert modified is True
@@ -135,7 +133,7 @@ def test_markdown_fixer_excludes_directories(tmp_path):
     (tmp_path / "normal.md").write_text("# Normal:\n")
 
     fixer = MarkdownFixer()
-    files_modified, total_fixes = fixer.process_path(tmp_path)
+    files_modified, _total_fixes = fixer.process_path(tmp_path)
 
     # Should only process normal.md
     assert files_modified == 1

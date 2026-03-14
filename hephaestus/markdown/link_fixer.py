@@ -115,19 +115,19 @@ class LinkFixer:
             # Fix absolute path links
             content, absolute_fixes = self.fix_absolute_path_links(content, relative_path)
 
-            total_fixes = system_fixes + absolute_fixes
-
             if content != original_content:
                 if self.options.dry_run:
                     print(
-                        f"[DRY RUN] Would fix {file_path}: {system_fixes} system paths, {absolute_fixes} absolute paths"
+                        f"[DRY RUN] Would fix {file_path}: {system_fixes} system paths,"
+                        f" {absolute_fixes} absolute paths"
                     )
                     return True, system_fixes, absolute_fixes
 
                 file_path.write_text(content, encoding="utf-8")
                 if self.options.verbose:
                     print(
-                        f"Fixed {file_path}: {system_fixes} system paths, {absolute_fixes} absolute paths"
+                        f"Fixed {file_path}: {system_fixes} system paths,"
+                        f" {absolute_fixes} absolute paths"
                     )
                 return True, system_fixes, absolute_fixes
 

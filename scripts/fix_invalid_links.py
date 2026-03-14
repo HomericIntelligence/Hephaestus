@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
-"""
-Fix invalid absolute path links in markdown files.
+"""Fix invalid absolute path links in markdown files.
 
 This script fixes two types of invalid links:
 1. Full system paths: /home/user/repo/... -> relative paths

@@ -9,7 +9,7 @@ regressions, and generating formatted reports for CI/CD integration.
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 @dataclass
@@ -38,7 +38,7 @@ def load_benchmark_results(filepath: Path) -> dict[str, Any]:
 
     """
     with open(filepath) as f:
-        return json.load(f)
+        return cast(dict[str, Any], json.load(f))
 
 
 def extract_timings(results: dict[str, Any]) -> dict[str, float]:
@@ -229,7 +229,9 @@ def format_markdown_report(
     lines.append(f"- **OS**: {env.get('os', 'unknown')}")
     lines.append(f"- **CPU**: {env.get('cpu', 'unknown')}")
     # Changed from mojo_version to runtime_version for generalization
-    lines.append(f"- **Runtime**: {env.get('runtime_version', env.get('python_version', 'unknown'))}")
+    lines.append(
+        f"- **Runtime**: {env.get('runtime_version', env.get('python_version', 'unknown'))}"
+    )
     lines.append(f"- **Commit**: {env.get('git_commit', 'unknown')}")
     lines.append("")
 

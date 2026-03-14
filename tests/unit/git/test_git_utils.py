@@ -3,8 +3,6 @@
 
 from unittest.mock import patch
 
-import pytest
-
 from hephaestus.git.changelog import (
     categorize_commits,
     generate_changelog,
@@ -46,7 +44,7 @@ class TestParseCommit:
     def test_parse_commit_missing_parts(self):
         """Parse malformed commit line."""
         commit = "malformed line"
-        hash_val, commit_type, scope, message = parse_commit(commit)
+        hash_val, commit_type, _scope, message = parse_commit(commit)
         assert hash_val == ""
         assert commit_type == "other"
         assert message == "malformed line"

@@ -21,10 +21,10 @@ class DatasetDownloader:
         base_url: str,
         user_agent: str = "Mozilla/5.0 (compatible; ProjectHephaestus/1.0)",
         max_retries: int = 3,
-        retry_delays: list[float] | None = None
+        retry_delays: list[float] | None = None,
     ):
         """Initialize the dataset downloader.
-        
+
         Args:
             base_url: Base URL for dataset files
             user_agent: User-Agent header for HTTP requests
@@ -38,18 +38,15 @@ class DatasetDownloader:
         self.retry_delays = retry_delays or [1.0, 2.0, 4.0]
 
     def download_with_retry(
-        self,
-        filename: str,
-        output_path: Path,
-        max_retries: int | None = None
+        self, filename: str, output_path: Path, max_retries: int | None = None
     ) -> bool:
         """Download file with User-Agent header and retry logic.
-        
+
         Args:
             filename: Name of file to download
             output_path: Path to save downloaded file
             max_retries: Override default max retries
-            
+
         Returns:
             True if successful, False otherwise
 
@@ -104,16 +101,18 @@ class DatasetDownloader:
                 last_error = str(e)
                 print(f"\n  Download failed: {last_error}")
 
-        print(f"Failed to download {filename} after {max_retries} attempts. Last error: {last_error}")
+        print(
+            f"Failed to download {filename} after {max_retries} attempts. Last error: {last_error}"
+        )
         return False
 
     def decompress_gz(self, gz_path: Path, output_path: Path) -> bool:
         """Decompress gzip file.
-        
+
         Args:
             gz_path: Path to .gz file
             output_path: Path to save decompressed file
-            
+
         Returns:
             True if successful, False otherwise
 
@@ -131,7 +130,8 @@ class DatasetDownloader:
 class MNISTDownloader(DatasetDownloader):
     """Specialized downloader for MNIST dataset."""
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Initialize with the MNIST dataset URL."""
         super().__init__("https://yann.lecun.com/exdb/mnist")
         self.files = [
             ("train-images-idx3-ubyte.gz", "train_images.idx"),
@@ -142,10 +142,10 @@ class MNISTDownloader(DatasetDownloader):
 
     def download_mnist(self, output_dir: str = "datasets/mnist") -> bool:
         """Download and extract MNIST dataset.
-        
+
         Args:
             output_dir: Directory to save dataset
-            
+
         Returns:
             True if successful, False otherwise
 
@@ -185,21 +185,14 @@ class MNISTDownloader(DatasetDownloader):
         return success
 
 
-def main():
-    """Main entry point."""
+def main() -> None:
+    """Serve as the main entry point for dataset downloading."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Download machine learning datasets")
+    parser.add_argument("dataset", choices=["mnist"], help="Dataset to download")
     parser.add_argument(
-        "dataset",
-        choices=["mnist"],
-        help="Dataset to download"
-    )
-    parser.add_argument(
-        "output_dir",
-        nargs="?",
-        default=None,
-        help="Output directory (default: datasets/<dataset>)"
+        "output_dir", nargs="?", default=None, help="Output directory (default: datasets/<dataset>)"
     )
 
     args = parser.parse_args()

@@ -17,5 +17,5 @@ __all__ = [
     "load_yaml_config",
     "merge_configs",
     "merge_with_env",
-    "validate_config"
+    "validate_config",
 ]

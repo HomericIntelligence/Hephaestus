@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """Tests for configuration utilities."""
 
-import os
-from pathlib import Path
-
 import pytest
 import yaml
 

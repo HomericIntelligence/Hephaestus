@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Tests for system information utilities."""
 
-
-
 from hephaestus.system.info import (
     extract_version_word,
     format_system_info,

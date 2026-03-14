@@ -2,6 +2,7 @@
 
 General utility functions that don't fit in other specific modules.
 """
+
 import os
 import re
 import subprocess
@@ -13,35 +14,35 @@ from typing import Any
 
 def slugify(text: str) -> str:
     """Convert text to a URL-friendly slug.
-    
+
     Args:
         text: Text to convert to slug
-        
+
     Returns:
         URL-friendly slug string
 
     """
     # Normalize unicode characters
-    text = unicodedata.normalize('NFKD', text)
+    text = unicodedata.normalize("NFKD", text)
     # Convert to ASCII
-    text = text.encode('ascii', 'ignore').decode('ascii')
+    text = text.encode("ascii", "ignore").decode("ascii")
     # Convert to lowercase and replace spaces/underscores/dots with hyphens
-    text = re.sub(r'[\s_.]+', '-', text.lower())
+    text = re.sub(r"[\s_.]+", "-", text.lower())
     # Remove non-alphanumeric characters (except hyphens)
-    text = re.sub(r'[^a-z0-9-]', '', text)
+    text = re.sub(r"[^a-z0-9-]", "", text)
     # Remove leading/trailing hyphens
-    text = text.strip('-')
+    text = text.strip("-")
     # Replace multiple consecutive hyphens with single hyphen
-    text = re.sub(r'-+', '-', text)
+    text = re.sub(r"-+", "-", text)
     return text
 
 
 def human_readable_size(size_bytes: int | float) -> str:
     """Convert byte size to human readable format.
-    
+
     Args:
         size_bytes: Size in bytes
-        
+
     Returns:
         Human readable size string with appropriate unit
 
@@ -60,19 +61,19 @@ def human_readable_size(size_bytes: int | float) -> str:
     return f"{size:.1f} {size_names[i]}"
 
 
-def flatten_dict(d: dict[str, Any], parent_key: str = '', sep: str = '.') -> dict[str, Any]:
+def flatten_dict(d: dict[str, Any], parent_key: str = "", sep: str = ".") -> dict[str, Any]:
     """Flatten nested dictionary using dot notation for keys.
-    
+
     Args:
         d: Dictionary to flatten
         parent_key: Parent key prefix
         sep: Separator for nested keys
-        
+
     Returns:
         Flattened dictionary
 
     """
-    items = []
+    items: list[Any] = []
     for k, v in d.items():
         new_key = f"{parent_key}{sep}{k}" if parent_key else k
         if isinstance(v, dict):
@@ -92,10 +93,7 @@ def get_repo_root(start_path: str | Path | None = None) -> Path:
         Path to repository root if found, otherwise the original start_path as fallback.
 
     """
-    if start_path is None:
-        start_path = Path.cwd()
-    else:
-        start_path = Path(start_path).resolve()
+    start_path = Path.cwd() if start_path is None else Path(start_path).resolve()
 
     path = start_path
     while path != path.parent:  # Stop at filesystem root
@@ -179,8 +177,9 @@ def get_proj_root(proj_name: str) -> str:
             current_dir = current_dir.parent
 
     if not proj_root:
-        raise ValueError(f"Could not determine {proj_name} root. "
-                         f"Please set {proj_env_var} environment variable.")
+        raise ValueError(
+            f"Could not determine {proj_name} root. Please set {proj_env_var} environment variable."
+        )
 
     return proj_root
 
@@ -200,7 +199,7 @@ def install_package(package_name: str, upgrade: bool = False) -> bool:
 
     """
     # Validate package name: only alphanumerics, hyphens, underscores, dots, brackets, ==, >=, <=
-    if not re.match(r'^[A-Za-z0-9_\-\.\[\],>=<!\s]+$', package_name):
+    if not re.match(r"^[A-Za-z0-9_\-\.\[\],>=<!\s]+$", package_name):
         raise ValueError(f"Invalid package name: {package_name!r}")
 
     cmd = [sys.executable, "-m", "pip", "install"]

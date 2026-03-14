@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Tests for retry utilities."""
 
-import time
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -140,6 +139,7 @@ class TestRetryWithBackoff:
 
     def test_preserves_function_name(self):
         """Decorated function preserves original name via functools.wraps."""
+
         def my_function():
             return 1
 

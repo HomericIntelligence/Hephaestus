@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
-"""
-Compare benchmark results against baseline and detect regressions.
+"""Compare benchmark results against baseline and detect regressions.
 
 Provides utilities for analyzing benchmark results, detecting performance
 regressions, and generating formatted reports for CI/CD integration.
@@ -18,10 +17,10 @@ import sys
 from pathlib import Path
 
 from hephaestus.benchmarks.compare import (
-    load_benchmark_results,
-    extract_timings,
     detect_regressions,
+    extract_timings,
     format_markdown_report,
+    load_benchmark_results,
 )
 
 
@@ -106,9 +105,7 @@ def main() -> int:
     )
 
     # Generate report
-    report = format_markdown_report(
-        regressions, improvements, current_results, baseline_results
-    )
+    report = format_markdown_report(regressions, improvements, current_results, baseline_results)
 
     # Output report
     if args.output:
@@ -123,7 +120,10 @@ def main() -> int:
     high_count = sum(1 for r in regressions if r.severity == "high")
     medium_count = sum(1 for r in regressions if r.severity == "medium")
 
-    print(f"\nRegressions: {critical_count} critical, {high_count} high, {medium_count} medium", file=sys.stderr)
+    print(
+        f"\nRegressions: {critical_count} critical, {high_count} high, {medium_count} medium",
+        file=sys.stderr,
+    )
     print(f"Improvements: {len(improvements)}", file=sys.stderr)
 
     # Exit with error if critical regressions and flag is set

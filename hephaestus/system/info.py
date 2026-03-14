@@ -283,8 +283,8 @@ def format_system_info(info: dict[str, Any], format_type: str = "text") -> str:
     return "\n".join(output)
 
 
-def main():
-    """Main function to collect and display system information."""
+def main() -> None:
+    """Collect and display system information."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Collect system information")
