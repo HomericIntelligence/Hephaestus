@@ -1,7 +1,10 @@
 """ProjectHephaestus - Centralized utility library for HomericIntelligence ecosystem."""
 
+from __future__ import annotations
+
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
+from typing import Any
 
 try:
     __version__ = _pkg_version("hephaestus")
@@ -10,61 +13,65 @@ except PackageNotFoundError:
 
 __author__ = "Micah Villmow"
 
-# Import from utils (consolidated location)
-from .cli.utils import (
-    COMMAND_REGISTRY,
-    add_logging_args,
-    confirm_action,
-    create_parser,
-    format_output,
-    format_table,
-    register_command,
-)
-from .config.utils import get_config_value, get_setting, load_config, merge_configs
-from .io.utils import ensure_directory, load_data, read_file, safe_write, save_data, write_file
-from .logging.utils import ContextLogger, get_logger, setup_logging
-from .system.info import format_system_info, get_system_info
-from .utils import (
-    flatten_dict,
-    get_proj_root,
-    get_repo_root,
-    human_readable_size,
-    install_package,
-    retry_with_backoff,
-    run_subprocess,
-    slugify,
-)
-
+# Public API surface — prefer subpackage imports for full access:
+#   from hephaestus.utils import slugify
+#   from hephaestus.io.utils import load_data
 __all__ = [
-    "COMMAND_REGISTRY",
     "ContextLogger",
     "__version__",
-    "add_logging_args",
-    "confirm_action",
-    "create_parser",
     "ensure_directory",
-    "flatten_dict",
-    "format_output",
-    "format_system_info",
-    "format_table",
-    "get_config_value",
     "get_logger",
-    "get_proj_root",
-    "get_repo_root",
-    "get_setting",
     "get_system_info",
-    "human_readable_size",
-    "install_package",
     "load_config",
-    "load_data",
-    "merge_configs",
-    "read_file",
-    "register_command",
     "retry_with_backoff",
-    "run_subprocess",
-    "safe_write",
-    "save_data",
     "setup_logging",
     "slugify",
-    "write_file",
 ]
+
+_LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+    # name -> (module, attr)
+    "COMMAND_REGISTRY": ("hephaestus.cli.utils", "COMMAND_REGISTRY"),
+    "add_logging_args": ("hephaestus.cli.utils", "add_logging_args"),
+    "confirm_action": ("hephaestus.cli.utils", "confirm_action"),
+    "create_parser": ("hephaestus.cli.utils", "create_parser"),
+    "format_output": ("hephaestus.cli.utils", "format_output"),
+    "format_table": ("hephaestus.cli.utils", "format_table"),
+    "register_command": ("hephaestus.cli.utils", "register_command"),
+    "get_config_value": ("hephaestus.config.utils", "get_config_value"),
+    "get_setting": ("hephaestus.config.utils", "get_setting"),
+    "load_config": ("hephaestus.config.utils", "load_config"),
+    "merge_configs": ("hephaestus.config.utils", "merge_configs"),
+    "ensure_directory": ("hephaestus.io.utils", "ensure_directory"),
+    "load_data": ("hephaestus.io.utils", "load_data"),
+    "read_file": ("hephaestus.io.utils", "read_file"),
+    "safe_write": ("hephaestus.io.utils", "safe_write"),
+    "save_data": ("hephaestus.io.utils", "save_data"),
+    "write_file": ("hephaestus.io.utils", "write_file"),
+    "ContextLogger": ("hephaestus.logging.utils", "ContextLogger"),
+    "get_logger": ("hephaestus.logging.utils", "get_logger"),
+    "setup_logging": ("hephaestus.logging.utils", "setup_logging"),
+    "format_system_info": ("hephaestus.system.info", "format_system_info"),
+    "get_system_info": ("hephaestus.system.info", "get_system_info"),
+    "flatten_dict": ("hephaestus.utils", "flatten_dict"),
+    "get_proj_root": ("hephaestus.utils", "get_proj_root"),
+    "get_repo_root": ("hephaestus.utils", "get_repo_root"),
+    "human_readable_size": ("hephaestus.utils", "human_readable_size"),
+    "install_package": ("hephaestus.utils", "install_package"),
+    "retry_with_backoff": ("hephaestus.utils", "retry_with_backoff"),
+    "run_subprocess": ("hephaestus.utils", "run_subprocess"),
+    "slugify": ("hephaestus.utils", "slugify"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy-load public symbols on first access (PEP 562)."""
+    if name in _LAZY_IMPORTS:
+        module_name, attr = _LAZY_IMPORTS[name]
+        import importlib
+
+        module = importlib.import_module(module_name)
+        value = getattr(module, attr)
+        # Cache in module globals to avoid repeated lookups
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module 'hephaestus' has no attribute {name!r}")

@@ -34,6 +34,21 @@ def test_fix_md034_bare_urls():
     assert count == 1
 
 
+def test_fix_md040_code_language():
+    """Test that bare ``` lines (no language tag) are replaced with ```text."""
+    fixer = MarkdownFixer()
+
+    # A bare ``` line (opening fence without a language specifier) should be fixed
+    content = "```\ncode here\n```\n"
+    fixed, _count = fixer._fix_md040_code_language(content)
+    assert "```text" in fixed
+
+    # A code block that already has a language tag should NOT have its opening fence changed
+    content_with_lang = "```python\ncode here\n```\n"
+    fixed2, _count2 = fixer._fix_md040_code_language(content_with_lang)
+    assert "```python" in fixed2
+
+
 def test_fix_md012_multiple_blank_lines():
     """Test that multiple blank lines are reduced to two."""
     fixer = MarkdownFixer()
@@ -42,6 +57,17 @@ def test_fix_md012_multiple_blank_lines():
     fixed, count = fixer._fix_md012_multiple_blank_lines(content)
     assert fixed == "Line 1\n\nLine 2"
     assert count > 0
+
+
+def test_is_list_item_ordered():
+    """Test that ordered list items are detected correctly."""
+    fixer = MarkdownFixer()
+
+    assert fixer._is_list_item("1. First item")
+    assert fixer._is_list_item("2. Second item")
+    assert fixer._is_list_item("  1. Indented item")
+    assert not fixer._is_list_item("1\\. Not a list item (escaped)")
+    assert not fixer._is_list_item("just text")
 
 
 def test_fix_md026_heading_punctuation():
@@ -137,3 +163,68 @@ def test_markdown_fixer_excludes_directories(tmp_path):
 
     # Should only process normal.md
     assert files_modified == 1
+
+
+def test_markdown_fixer_process_path_nonexistent(tmp_path):
+    """Test processing a non-existent path."""
+    fixer = MarkdownFixer()
+    files_modified, total_fixes = fixer.process_path(tmp_path / "nonexistent")
+    assert files_modified == 0
+    assert total_fixes == 0
+
+
+def test_markdown_fixer_process_path_non_md_file(tmp_path):
+    """Test processing a non-markdown file."""
+    txt_file = tmp_path / "test.txt"
+    txt_file.write_text("not markdown")
+    fixer = MarkdownFixer()
+    files_modified, total_fixes = fixer.process_path(txt_file)
+    assert files_modified == 0
+    assert total_fixes == 0
+
+
+def test_markdown_fixer_no_markdown_in_dir(tmp_path):
+    """Test processing a directory with no markdown files."""
+    (tmp_path / "test.txt").write_text("plain text")
+    fixer = MarkdownFixer()
+    files_modified, total_fixes = fixer.process_path(tmp_path)
+    assert files_modified == 0
+    assert total_fixes == 0
+
+
+def test_fix_structural_issues_heading_blank_lines():
+    """Headings get blank lines added around them."""
+    fixer = MarkdownFixer()
+    content = "Some text\n## Heading\nMore text\n"
+    fixed, fixes = fixer._fix_structural_issues(content)
+    assert fixes > 0
+    assert "\n\n## Heading\n\n" in fixed
+
+
+def test_fix_structural_issues_code_block_blank_lines():
+    """Code blocks get blank lines added around them."""
+    fixer = MarkdownFixer()
+    content = "Some text\n```python\ncode\n```\nMore text\n"
+    fixed, fixes = fixer._fix_structural_issues(content)
+    assert fixes > 0
+    lines = fixed.split("\n")
+    # There should be a blank line before the code block
+    fence_idx = next(i for i, line in enumerate(lines) if line.strip() == "```python")
+    assert lines[fence_idx - 1] == ""
+
+
+def test_fix_structural_issues_unordered_list_blank_lines():
+    """Unordered lists get blank lines around them."""
+    fixer = MarkdownFixer()
+    content = "Text before\n- item 1\n- item 2\nText after\n"
+    _fixed, fixes = fixer._fix_structural_issues(content)
+    assert fixes > 0
+
+
+def test_fix_structural_issues_ordered_list():
+    """Ordered list items are processed."""
+    fixer = MarkdownFixer()
+    content = "Text\n\n1. First\n2. Second\n3. Third\n\nMore text\n"
+    fixed, _fixes = fixer._fix_structural_issues(content)
+    # Ordered list items should be present
+    assert "1." in fixed

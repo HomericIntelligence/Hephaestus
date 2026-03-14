@@ -64,7 +64,7 @@ class VersionManager:
         if init_files is None:
             # Look for common package __init__.py patterns
             potential_inits: list[Path] = []
-            for pattern in ["*/__init__.py", "*/*/init__.py"]:
+            for pattern in ["*/__init__.py", "*/*/__init__.py"]:
                 potential_inits.extend(self.repo_root.glob(pattern))
 
             # Filter to main package init (usually in repo_root/<package>/__init__.py)

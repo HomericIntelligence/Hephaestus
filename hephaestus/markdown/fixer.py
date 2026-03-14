@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hephaestus.constants import DEFAULT_EXCLUDE_DIRS
+from hephaestus.logging.utils import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -49,7 +52,7 @@ class MarkdownFixer:
         try:
             content = file_path.read_text(encoding="utf-8")
         except Exception as e:
-            print(f"Error reading {file_path}: {e}", file=sys.stderr)
+            logger.error("Error reading %s: %s", file_path, e)
             return False, 0
 
         original_content = content
@@ -85,14 +88,14 @@ class MarkdownFixer:
             try:
                 file_path.write_text(content, encoding="utf-8")
                 if self.options.verbose:
-                    print(f"Fixed {file_path}: {fixes} issues")
+                    logger.info("Fixed %s: %d issues", file_path, fixes)
                 return True, fixes
             except Exception as e:
-                print(f"Error writing {file_path}: {e}", file=sys.stderr)
+                logger.error("Error writing %s: %s", file_path, e)
                 return False, 0
 
         if self.options.verbose:
-            print(f"No changes needed for {file_path}")
+            logger.info("No changes needed for %s", file_path)
         return False, 0
 
     def _fix_md012_multiple_blank_lines(self, content: str) -> tuple[str, int]:
@@ -108,8 +111,8 @@ class MarkdownFixer:
         fixes = 0
         # Find ``` without a language tag
         new_content = re.sub(
-            r"^\`\`\`\s*\\n",  # ``` followed by optional whitespace and newline
-            "```text\n",  # Add 'text' language tag
+            r"^```\s*$",  # ``` followed only by optional whitespace at end of line
+            "```text",  # Add 'text' language tag
             content,
             flags=re.MULTILINE,
         )
@@ -213,7 +216,7 @@ class MarkdownFixer:
 
             # MD032: Lists should be surrounded by blank lines
             # MD029: Ordered lists should use 1. for all items
-            if re.match(r"^\s*[-*+]\s+", line) or re.match(r"^\s*\d+\\.\s+", line):
+            if re.match(r"^\s*[-*+]\s+", line) or re.match(r"^\s*\d+\.\s+", line):
                 # Add blank line before list
                 if fixed_lines and prev_line.strip() != "" and not self._is_list_item(prev_line):
                     fixed_lines.append("")
@@ -237,9 +240,9 @@ class MarkdownFixer:
                     # List item or continuation
                     if self._is_list_item(curr_line):
                         # MD029: Fix ordered list numbering
-                        if re.match(r"^\s*\d+\\.\s+", curr_line):
+                        if re.match(r"^\s*\d+\.\s+", curr_line):
                             indent = len(curr_line) - len(curr_line.lstrip())
-                            rest = re.sub(r"^\s*\d+\\.", "", curr_line)
+                            rest = re.sub(r"^\s*\d+\.", "", curr_line)
                             fixed_line = " " * indent + "1." + rest
                             if fixed_line != curr_line:
                                 fixes += 1
@@ -268,7 +271,7 @@ class MarkdownFixer:
 
     def _is_list_item(self, line: str) -> bool:
         """Check if line is a list item."""
-        return bool(re.match(r"^\s*[-*+]\s+", line) or re.match(r"^\s*\d+\\.\s+", line))
+        return bool(re.match(r"^\s*[-*+]\s+", line) or re.match(r"^\s*\d+\.\s+", line))
 
     def _fix_md034_bare_urls(self, content: str) -> tuple[str, int]:
         """Fix MD034: Convert bare URLs to angle-bracket format.

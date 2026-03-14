@@ -176,3 +176,18 @@ def test_version_manager_update_without_version_attribute(tmp_path):
 
     # File should remain unchanged
     assert "__version__" not in init_file.read_text()
+
+
+def test_version_manager_auto_detect_nested_init_files(tmp_path):
+    """Test auto-detection of nested __init__.py files (the */*/__init__.py glob)."""
+    # Create a nested package structure: mypackage/subpkg/__init__.py
+    subpkg_dir = tmp_path / "mypackage" / "subpkg"
+    subpkg_dir.mkdir(parents=True)
+    init_file = subpkg_dir / "__init__.py"
+    init_file.write_text('__version__ = "0.1.0"\n')
+
+    # Create manager with auto-detection (no explicit init_files)
+    manager = VersionManager(repo_root=tmp_path)
+
+    # Should find the nested __init__.py
+    assert any(f == init_file for f in manager.init_files)

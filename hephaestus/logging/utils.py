@@ -38,13 +38,15 @@ class ContextLogger(logging.LoggerAdapter):  # type: ignore[type-arg]
 
     def bind(self, **kwargs: Any) -> "ContextLogger":
         """Create a new logger with additional context."""
-        new_context = self._context.copy()
+        with self._context_lock:
+            new_context = self._context.copy()
         new_context.update(kwargs)
         return ContextLogger(self.logger, new_context)
 
     def unbind(self, *keys: str) -> "ContextLogger":
         """Remove context keys from logger."""
-        new_context = self._context.copy()
+        with self._context_lock:
+            new_context = self._context.copy()
         for key in keys:
             new_context.pop(key, None)
         return ContextLogger(self.logger, new_context)

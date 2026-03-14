@@ -2,6 +2,7 @@
 """Tests for logging utilities."""
 
 import logging
+import threading
 from pathlib import Path
 
 from hephaestus.logging.utils import (
@@ -70,6 +71,28 @@ class TestContextLogger:
         logger = get_logger("test.process", context={"x": 42})
         _msg, kwargs = logger.process("hello", {})
         assert kwargs["extra"]["x"] == 42
+
+    def test_bind_thread_safe(self) -> None:
+        """Concurrent bind() calls do not corrupt context."""
+        base = get_logger("test.thread_safe", context={"base": 0})
+        results: list[dict[str, object]] = []
+
+        def worker(val: int) -> None:
+            bound = base.bind(val=val)
+            results.append(dict(bound._context))
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Original context must not be mutated
+        assert "val" not in base._context
+        # Each result must contain both base key and the thread-specific val
+        for ctx in results:
+            assert "base" in ctx
+            assert "val" in ctx
 
 
 class TestSetupLogging:

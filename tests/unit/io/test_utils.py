@@ -35,6 +35,14 @@ class TestEnsureDirectory:
         target = str(tmp_path / "str_dir")
         assert ensure_directory(target)
 
+    def test_raises_on_failure(self, tmp_path: Path) -> None:
+        """Raises OSError when directory cannot be created."""
+        # Create a file where a directory needs to exist
+        blocker = tmp_path / "blocker"
+        blocker.write_text("I am a file, not a dir")
+        with pytest.raises(OSError):
+            ensure_directory(blocker / "subdir")
+
 
 class TestReadFile:
     """Tests for read_file."""
@@ -198,3 +206,11 @@ class TestSaveData:
         f = tmp_path / "out.dat"
         assert save_data({"x": 1}, f)
         assert json.loads(f.read_text()) == {"x": 1}
+
+    def test_raises_on_io_error(self, tmp_path: Path) -> None:
+        """IOError is raised (not silently swallowed) when write fails."""
+        # Use a path inside a non-existent parent where we've put a file as blocker
+        blocker = tmp_path / "blocker"
+        blocker.write_text("file")
+        with pytest.raises(OSError):
+            save_data({"x": 1}, blocker / "out.json")

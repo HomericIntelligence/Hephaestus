@@ -12,6 +12,10 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from hephaestus.logging.utils import get_logger
+
+logger = get_logger(__name__)
+
 
 class DatasetDownloader:
     """Generic dataset downloader with retry logic and progress tracking."""
@@ -58,7 +62,7 @@ class DatasetDownloader:
         for attempt in range(max_retries):
             if attempt > 0:
                 delay = self.retry_delays[min(attempt - 1, len(self.retry_delays) - 1)]
-                print(f"  Retry {attempt}/{max_retries - 1} after {delay}s delay...")
+                logger.info("Retry %d/%d after %ss delay...", attempt, max_retries - 1, delay)
                 time.sleep(delay)
 
             try:
@@ -93,16 +97,19 @@ class DatasetDownloader:
 
             except HTTPError as e:
                 last_error = f"HTTP {e.code}: {e.reason}"
-                print(f"\n  Download failed: {last_error}")
+                logger.warning("Download failed: %s", last_error)
             except URLError as e:
                 last_error = f"URL Error: {e.reason}"
-                print(f"\n  Download failed: {last_error}")
+                logger.warning("Download failed: %s", last_error)
             except Exception as e:
                 last_error = str(e)
-                print(f"\n  Download failed: {last_error}")
+                logger.warning("Download failed: %s", last_error)
 
-        print(
-            f"Failed to download {filename} after {max_retries} attempts. Last error: {last_error}"
+        logger.error(
+            "Failed to download %s after %d attempts. Last error: %s",
+            filename,
+            max_retries,
+            last_error,
         )
         return False
 
@@ -123,7 +130,7 @@ class DatasetDownloader:
                     f_out.write(f_in.read())
             return True
         except Exception as e:
-            print(f"Failed to decompress {gz_path}: {e}")
+            logger.error("Failed to decompress %s: %s", gz_path, e)
             return False
 
 

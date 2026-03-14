@@ -86,7 +86,7 @@ addopts = [
     "--strict-markers",
     "--cov=hephaestus",
     "--cov-report=term-missing",
-    "--cov-fail-under=75",
+    "--cov-fail-under=80",
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
@@ -118,7 +118,7 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 75
+fail_under = 80
 precision = 2
 show_missing = true
 skip_covered = false

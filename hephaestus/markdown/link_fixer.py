@@ -38,9 +38,12 @@ class LinkFixer:
         """
         self.options = options or LinkFixerOptions()
         self.exclude_patterns = self.options.exclude_patterns or DEFAULT_EXCLUDE_DIRS
-        # Default pattern matches /home/<user>/<repo-name>
+        # Default pattern matches <home-dir>/<user>/<repo-name>
         # (captures up to but not including the final slash before the file path)
-        self.system_path_pattern = self.options.system_path_pattern or r"/home/[^/]+/[^/]+"
+        import re as _re
+
+        home_dir = _re.escape(str(Path.home().parent))
+        self.system_path_pattern = self.options.system_path_pattern or rf"{home_dir}/[^/]+/[^/]+"
 
     def fix_system_path_links(self, content: str) -> tuple[str, int]:
         """Fix links with full system paths like /home/user/worktree/...

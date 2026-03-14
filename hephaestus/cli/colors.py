@@ -10,7 +10,13 @@ import sys
 
 
 class Colors:
-    """ANSI color codes for terminal output."""
+    """ANSI color codes for terminal output.
+
+    Note: This class uses class-level mutable state (color code strings).
+    The ``disable()`` and ``auto()`` methods mutate class attributes and are
+    therefore **not thread-safe**.  Call them once at program startup before
+    spawning threads; do not call them concurrently.
+    """
 
     HEADER = "\033[95m"
     OKBLUE = "\033[94m"

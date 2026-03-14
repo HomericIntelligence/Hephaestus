@@ -11,13 +11,15 @@ Usage:
     value = get_setting(config, 'database.host', default='localhost')
 """
 
+import contextlib
 import json
-import logging
 import os
 from pathlib import Path
 from typing import Any, cast
 
-_logger = logging.getLogger(__name__)
+from hephaestus.logging.utils import get_logger
+
+_logger = get_logger(__name__)
 
 try:
     import yaml
@@ -90,18 +92,18 @@ def validate_config(config: dict[str, Any], schema: dict[str, Any]) -> bool:
         True if valid, False otherwise
 
     """
-    # Simple validation implementation
+    errors: list[str] = []
     for key, expected_type in schema.items():
         if key not in config:
-            print(f"Missing required config key: {key}")
-            return False
-        if expected_type and not isinstance(config[key], expected_type):
-            print(
+            errors.append(f"Missing required config key: {key}")
+        elif expected_type and not isinstance(config[key], expected_type):
+            errors.append(
                 f"Config key {key} has wrong type. Expected {expected_type},"
                 f" got {type(config[key])}"
             )
-            return False
-    return True
+    for error in errors:
+        _logger.error(error)
+    return len(errors) == 0
 
 
 def merge_configs(*configs: dict[str, Any]) -> dict[str, Any]:
@@ -171,12 +173,10 @@ def merge_with_env(config: dict[str, Any], prefix: str = "HEPHAESTUS_") -> dict[
             # Try to convert to int or float if possible
             typed_value: int | float | str = value
             try:
-                if "." not in value and value.isdigit():
-                    typed_value = int(value)
-                elif "." in value:
-                    typed_value = float(value)
+                typed_value = int(value)
             except ValueError:
-                pass  # Keep as string
+                with contextlib.suppress(ValueError):
+                    typed_value = float(value)
 
             # Set nested keys
             keys = config_key.split(".")

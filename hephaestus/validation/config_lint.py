@@ -6,7 +6,7 @@ Validates YAML configuration files for syntax, formatting, and common issues.
 
 import re
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from hephaestus.logging.utils import get_logger
 
@@ -37,27 +37,14 @@ class ConfigLinter:
         self.warnings: list[str] = []
         self.suggestions: list[str] = []
 
-        # Default deprecated keys
-        self.deprecated_keys = deprecated_keys or {
-            "optimizer.type": "optimizer.name",
-            "model.num_layers": "model.layers",
-            "lr": "learning_rate",
-            "val_split": "validation_split",
-        }
+        # Default deprecated keys (callers should pass ML-specific values)
+        self.deprecated_keys = deprecated_keys if deprecated_keys is not None else {}
 
-        # Default required keys
-        self.required_keys = required_keys or {
-            "training": ["epochs", "batch_size"],
-            "model": ["architecture"],
-            "optimizer": ["name", "learning_rate"],
-        }
+        # Default required keys (callers should pass domain-specific values)
+        self.required_keys = required_keys if required_keys is not None else {}
 
-        # Default performance thresholds
-        self.perf_thresholds = perf_thresholds or {
-            "batch_size": (8, 512),  # min, max
-            "learning_rate": (0.00001, 1.0),
-            "epochs": (1, 10000),
-        }
+        # Default performance thresholds (callers should pass domain-specific values)
+        self.perf_thresholds = perf_thresholds if perf_thresholds is not None else {}
 
     def lint_file(self, filepath: Path) -> bool:
         """Lint a single configuration file.
@@ -194,7 +181,8 @@ class ConfigLinter:
         try:
             import yaml
 
-            return cast(dict[str, Any], yaml.safe_load(content))
+            result = yaml.safe_load(content)
+            return result if isinstance(result, dict) else {}
         except ImportError:
             logger.warning("PyYAML not installed, skipping YAML parsing checks")
             return {}

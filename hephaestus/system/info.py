@@ -15,12 +15,11 @@ from typing import Any
 from hephaestus.utils.helpers import run_subprocess
 
 
-def run_command(cmd: list[str], capture_output: bool = True, timeout: int = 5) -> tuple[bool, str]:
+def run_command(cmd: list[str], timeout: int = 5) -> tuple[bool, str]:
     """Run a shell command and return success status and output.
 
     Args:
         cmd: Command as list of strings
-        capture_output: Whether to capture stdout/stderr (unused, kept for API compat)
         timeout: Timeout in seconds
 
     Returns:

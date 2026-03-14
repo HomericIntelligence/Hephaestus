@@ -3,16 +3,58 @@
 
 import argparse
 import json
+from unittest.mock import patch
 
 import pytest
 
 from hephaestus.cli.utils import (
     CommandRegistry,
     add_logging_args,
+    confirm_action,
     create_parser,
     format_output,
     format_table,
 )
+
+
+class TestConfirmAction:
+    """Tests for confirm_action."""
+
+    def test_yes_response(self) -> None:
+        """Returns True when user enters 'y'."""
+        with patch("builtins.input", return_value="y"):
+            assert confirm_action() is True
+
+    def test_no_response(self) -> None:
+        """Returns False when user enters 'n'."""
+        with patch("builtins.input", return_value="n"):
+            assert confirm_action() is False
+
+    def test_default_on_empty_input(self) -> None:
+        """Returns default when user just presses Enter."""
+        with patch("builtins.input", return_value=""):
+            assert confirm_action(default=True) is True
+            assert confirm_action(default=False) is False
+
+    def test_invalid_then_valid(self) -> None:
+        """Invalid input retries; accepts valid answer on second attempt."""
+        with patch("builtins.input", side_effect=["bad", "y"]):
+            assert confirm_action() is True
+
+    def test_max_attempts_returns_default(self) -> None:
+        """After max_attempts of invalid input, returns default."""
+        with patch("builtins.input", return_value="bad"):
+            assert confirm_action(default=True, max_attempts=2) is True
+
+    def test_yes_long_form(self) -> None:
+        """'yes' is accepted as affirmative."""
+        with patch("builtins.input", return_value="yes"):
+            assert confirm_action() is True
+
+    def test_no_long_form(self) -> None:
+        """'no' is accepted as negative."""
+        with patch("builtins.input", return_value="no"):
+            assert confirm_action() is False
 
 
 class TestCommandRegistry:

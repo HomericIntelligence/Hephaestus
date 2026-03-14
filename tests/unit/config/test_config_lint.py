@@ -8,11 +8,34 @@ import pytest
 
 from hephaestus.validation.config_lint import ConfigLinter
 
+ML_DEPRECATED_KEYS = {
+    "optimizer.type": "optimizer.name",
+    "model.num_layers": "model.layers",
+    "lr": "learning_rate",
+    "val_split": "validation_split",
+}
+
+ML_REQUIRED_KEYS = {
+    "training": ["epochs", "batch_size"],
+    "model": ["architecture"],
+    "optimizer": ["name", "learning_rate"],
+}
+
+ML_PERF_THRESHOLDS: dict[str, tuple[float, float]] = {
+    "batch_size": (8, 512),
+    "learning_rate": (0.00001, 1.0),
+    "epochs": (1, 10000),
+}
+
 
 @pytest.fixture()
 def linter() -> ConfigLinter:
-    """Return a default ConfigLinter instance."""
-    return ConfigLinter()
+    """Return a ConfigLinter instance with ML-domain defaults."""
+    return ConfigLinter(
+        deprecated_keys=ML_DEPRECATED_KEYS,
+        required_keys=ML_REQUIRED_KEYS,
+        perf_thresholds=ML_PERF_THRESHOLDS,
+    )
 
 
 @pytest.fixture()
@@ -30,14 +53,21 @@ def yaml_file(tmp_path: Path):
 class TestConfigLinterInit:
     """Tests for ConfigLinter initialization."""
 
-    def test_defaults(self, linter: ConfigLinter) -> None:
-        """Linter initializes with default deprecated/required/perf keys."""
+    def test_defaults_empty(self) -> None:
+        """Default ConfigLinter has empty deprecated/required/perf dicts."""
+        default_linter = ConfigLinter()
+        assert default_linter.deprecated_keys == {}
+        assert default_linter.required_keys == {}
+        assert default_linter.perf_thresholds == {}
+
+    def test_ml_fixture_has_keys(self, linter: ConfigLinter) -> None:
+        """Fixture linter has ML-domain keys populated."""
         assert "lr" in linter.deprecated_keys
         assert "training" in linter.required_keys
         assert "batch_size" in linter.perf_thresholds
 
     def test_custom_deprecated_keys(self) -> None:
-        """Custom deprecated_keys override the defaults."""
+        """Custom deprecated_keys are stored as-is."""
         custom = {"old_key": "new_key"}
         linter_obj = ConfigLinter(deprecated_keys=custom)
         assert linter_obj.deprecated_keys == custom

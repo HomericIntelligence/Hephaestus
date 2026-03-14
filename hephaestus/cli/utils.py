@@ -101,33 +101,37 @@ def add_logging_args(parser: argparse.ArgumentParser) -> None:
     logging_group.add_argument("--log-file", help="Log to file instead of stdout")
 
 
-def confirm_action(prompt: str = "Are you sure?", default: bool = False) -> bool:
+def confirm_action(
+    prompt: str = "Are you sure?", default: bool = False, max_attempts: int = 3
+) -> bool:
     """Prompt user for confirmation.
 
     Args:
         prompt: Confirmation prompt
         default: Default response if user just presses Enter
+        max_attempts: Maximum number of invalid-input retries before returning default
 
     Returns:
         User's confirmation decision
 
     """
     choices = "Y/n" if default else "y/N"
-    try:
-        choice = input(f"{prompt} [{choices}] ").strip().lower()
-    except KeyboardInterrupt:
-        print("\nOperation cancelled.")
-        sys.exit(1)
+    for _ in range(max_attempts):
+        try:
+            choice = input(f"{prompt} [{choices}] ").strip().lower()
+        except KeyboardInterrupt:
+            print("\nOperation cancelled.")
+            sys.exit(1)
 
-    if not choice:
-        return default
-    elif choice in ["y", "yes"]:
-        return True
-    elif choice in ["n", "no"]:
-        return False
-    else:
-        print("Invalid choice. Please enter 'y' or 'n'.")
-        return confirm_action(prompt, default)
+        if not choice:
+            return default
+        elif choice in ["y", "yes"]:
+            return True
+        elif choice in ["n", "no"]:
+            return False
+        else:
+            print("Invalid choice. Please enter 'y' or 'n'.")
+    return default
 
 
 def format_table(

@@ -12,11 +12,12 @@ Usage:
 """
 
 import json
-import logging
 from pathlib import Path
 from typing import Any, cast
 
-logger = logging.getLogger(__name__)
+from hephaestus.logging.utils import get_logger
+
+logger = get_logger(__name__)
 
 # Formats that require unsafe deserialization (e.g. pickle)
 _UNSAFE_FORMATS = {"pickle"}
@@ -75,15 +76,14 @@ def ensure_directory(path: str | Path) -> bool:
         path: Path to directory
 
     Returns:
-        True if successful, False otherwise
+        True if successful
+
+    Raises:
+        OSError: If the directory cannot be created
 
     """
-    try:
-        Path(path).mkdir(parents=True, exist_ok=True)
-        return True
-    except Exception as e:
-        logger.warning("Failed to create directory %s: %s", path, e)
-        return False
+    Path(path).mkdir(parents=True, exist_ok=True)
+    return True
 
 
 def safe_write(
@@ -230,20 +230,16 @@ def save_data(
             "Set allow_unsafe_deserialization=True to proceed at your own risk."
         )
 
-    try:
-        if fmt == "json":
-            filepath.write_text(json.dumps(data, indent=2))
-        elif fmt == "yaml":
-            import yaml  # lazy import
+    if fmt == "json":
+        filepath.write_text(json.dumps(data, indent=2))
+    elif fmt == "yaml":
+        import yaml  # lazy import
 
-            with open(filepath, "w") as f:
-                yaml.dump(data, f, default_flow_style=False)
-        elif fmt == "pickle":
-            import pickle
+        with open(filepath, "w") as f:
+            yaml.dump(data, f, default_flow_style=False)
+    elif fmt == "pickle":
+        import pickle
 
-            with open(filepath, "wb") as f:
-                pickle.dump(data, f)
-        return True
-    except Exception as e:
-        logger.warning("Failed to save data to %s: %s", filepath, e)
-        return False
+        with open(filepath, "wb") as f:
+            pickle.dump(data, f)
+    return True

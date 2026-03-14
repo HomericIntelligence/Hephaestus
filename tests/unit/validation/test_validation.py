@@ -4,10 +4,13 @@
 import pytest
 
 from hephaestus.validation.markdown import (
+    check_markdown_formatting,
     check_required_sections,
     count_markdown_issues,
     extract_markdown_links,
+    extract_sections,
     find_markdown_files,
+    find_readmes,
     validate_directory_exists,
     validate_file_exists,
     validate_relative_link,
@@ -117,6 +120,101 @@ class TestMarkdownValidation:
         assert issues["missing_language_tags"] > 0
         assert issues["long_lines"] > 0
         assert issues["trailing_whitespace"] > 0
+
+    def test_find_markdown_files_excludes_dirs(self, tmp_path):
+        """Test that excluded directories are skipped."""
+        excluded = tmp_path / ".git"
+        excluded.mkdir()
+        (excluded / "hidden.md").write_text("# Hidden")
+        (tmp_path / "visible.md").write_text("# Visible")
+        result = find_markdown_files(tmp_path)
+        assert len(result) == 1
+        assert result[0].name == "visible.md"
+
+    def test_find_markdown_files_custom_exclude(self, tmp_path):
+        """Test custom exclude_dirs parameter."""
+        custom_dir = tmp_path / "custom_excluded"
+        custom_dir.mkdir()
+        (custom_dir / "file.md").write_text("# Excluded")
+        (tmp_path / "normal.md").write_text("# Normal")
+        result = find_markdown_files(tmp_path, exclude_dirs={"custom_excluded"})
+        assert all("custom_excluded" not in str(p) for p in result)
+
+    def test_check_required_sections_with_file_path(self, tmp_path):
+        """check_required_sections logs when file_path provided."""
+        content = "# Present\n"
+        path = tmp_path / "test.md"
+        all_found, missing = check_required_sections(
+            content, ["Present", "Missing"], file_path=path
+        )
+        assert not all_found
+        assert "Missing" in missing
+
+    def test_validate_relative_link_with_anchor(self, tmp_path):
+        """Validates link with anchor fragment correctly."""
+        source = tmp_path / "source.md"
+        source.write_text("# Source")
+        target = tmp_path / "target.md"
+        target.write_text("# Target")
+        is_valid, error = validate_relative_link("target.md#section", source, tmp_path)
+        assert is_valid
+        assert error is None
+
+    def test_validate_relative_link_anchor_only(self, tmp_path):
+        """Links that are anchors only (#section) are always valid."""
+        source = tmp_path / "source.md"
+        source.write_text("# Source")
+        is_valid, _error = validate_relative_link("#anchor", source, tmp_path)
+        assert is_valid
+
+    def test_validate_relative_link_empty_file_part(self, tmp_path):
+        """Link '#' with empty file part is valid."""
+        source = tmp_path / "source.md"
+        source.write_text("# Source")
+        is_valid, _error = validate_relative_link("#", source, tmp_path)
+        assert is_valid
+
+    def test_find_readmes(self, tmp_path):
+        """find_readmes returns all README.md files."""
+        (tmp_path / "README.md").write_text("# Root")
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "README.md").write_text("# Sub")
+        readmes = find_readmes(tmp_path)
+        assert len(readmes) == 2
+
+    def test_extract_sections(self):
+        """extract_sections returns list of heading names."""
+        content = "# Title\n\n## Section 1\n\n### Subsection\n\nText"
+        sections = extract_sections(content)
+        assert "Title" in sections
+        assert "Section 1" in sections
+        assert "Subsection" in sections
+
+    def test_check_markdown_formatting_clean(self):
+        """Clean markdown (no bare code fences, proper spacing) has no issues."""
+        # No bare ``` lines, list has blank line before, heading has blank line before
+        content = "# Title\n\nSome text.\n"
+        issues = check_markdown_formatting(content)
+        assert issues == []
+
+    def test_check_markdown_formatting_bare_code_block(self):
+        """Detects code block without language tag."""
+        content = "# Title\n\n```\ncode\n```\n"
+        issues = check_markdown_formatting(content)
+        assert any("language" in i.lower() for i in issues)
+
+    def test_check_markdown_formatting_list_without_blank_line(self):
+        """Detects list without blank line before it."""
+        content = "Some text\n- item one\n- item two\n"
+        issues = check_markdown_formatting(content)
+        assert any("List" in i for i in issues)
+
+    def test_check_markdown_formatting_heading_without_blank_line(self):
+        """Detects heading without blank line before it."""
+        content = "Some text\n## Heading\n"
+        issues = check_markdown_formatting(content)
+        assert any("Heading" in i for i in issues)
 
 
 class TestStructureValidator:
