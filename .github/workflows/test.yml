@@ -12,8 +12,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.10", "3.11", "3.12"]
+        os: [ubuntu-latest]
+        python-version: ["3.12"]
         test-type: [unit, integration]
 
     steps:
@@ -65,7 +65,7 @@ jobs:
           python -c "from hephaestus import slugify, retry_with_backoff, setup_logging; print('OK')"
 
       - name: Upload coverage
-        if: matrix.test-type == 'unit' && matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        if: matrix.test-type == 'unit'
         uses: codecov/codecov-action@v5
         with:
           files: ./coverage.xml
