@@ -6,8 +6,15 @@
   "MD024": false,
   "MD025": true,
   "MD033": {
-    "allowed_elements": ["details", "summary", "br", "img", "a", "sub", "sup"]
+    "allowed_elements": [
+      "details", "summary", "br", "img", "a", "sub", "sup",
+      "system", "task", "section", "sections", "step",
+      "principle", "sub_principle", "development_principles",
+      "grading_rubric", "audit_sections", "analysis_instructions",
+      "output_format", "important_notes", "criteria", "anti_inflation_rules"
+    ]
   },
+  "MD046": false,
   "MD036": false,
   "MD040": false,
   "MD041": false,
