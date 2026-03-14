@@ -55,18 +55,17 @@ def write_file(
         mode: File open mode ('w' for text, 'wb' for binary)
 
     Returns:
-        True if successful, False otherwise
+        True if successful
+
+    Raises:
+        OSError: If the file cannot be written
 
     """
     filepath = Path(filepath)
-    try:
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-        with open(filepath, mode) as f:
-            f.write(content)  # type: ignore[arg-type]
-        return True
-    except Exception as e:
-        logger.warning("Failed to write to %s: %s", filepath, e)
-        return False
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    with open(filepath, mode) as f:
+        f.write(content)  # type: ignore[arg-type]
+    return True
 
 
 def ensure_directory(path: str | Path) -> bool:
@@ -100,7 +99,10 @@ def safe_write(
         backup: Whether to create backup of existing file
 
     Returns:
-        True if successful, False otherwise
+        True if successful
+
+    Raises:
+        OSError: If the file cannot be written
 
     """
     filepath = Path(filepath)
@@ -112,16 +114,12 @@ def safe_write(
         except Exception as e:
             logger.warning("Could not create backup: %s", e)
 
-    try:
-        ensure_directory(filepath.parent)
-        if isinstance(content, str):
-            filepath.write_text(content)
-        else:
-            filepath.write_bytes(content)
-        return True
-    except Exception as e:
-        logger.warning("Failed to write to %s: %s", filepath, e)
-        return False
+    ensure_directory(filepath.parent)
+    if isinstance(content, str):
+        filepath.write_text(content)
+    else:
+        filepath.write_bytes(content)
+    return True
 
 
 def _detect_format(filepath: Path, format_hint: str | None) -> str:
@@ -221,17 +219,10 @@ def save_data(
 
     """
     filepath = Path(filepath)
-    ext = filepath.suffix.lower()
-    if format_hint is not None:
-        fmt = format_hint
-    elif ext == ".json":
-        fmt = "json"
-    elif ext in {".yml", ".yaml"}:
-        fmt = "yaml"
-    elif ext == ".pkl":
-        fmt = "pickle"
-    else:
-        fmt = "json"  # default
+    try:
+        fmt = _detect_format(filepath, format_hint)
+    except ValueError:
+        fmt = "json"  # default for unknown extensions
 
     if fmt in _UNSAFE_FORMATS and not allow_unsafe_deserialization:
         raise ValueError(

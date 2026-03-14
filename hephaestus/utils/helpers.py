@@ -108,27 +108,40 @@ def get_repo_root(start_path: str | Path | None = None) -> Path:
     return start_path
 
 
-def run_subprocess(cmd: list[str], cwd: str | None = None) -> subprocess.CompletedProcess:
+def run_subprocess(
+    cmd: list[str],
+    cwd: str | None = None,
+    timeout: int | None = None,
+    check: bool = True,
+    dry_run: bool = False,
+) -> subprocess.CompletedProcess[str]:
     """Run subprocess command with proper error handling.
 
     Args:
         cmd: Command and arguments as list
         cwd: Working directory for command execution
+        timeout: Optional timeout in seconds
+        check: Whether to raise on non-zero exit code
+        dry_run: If True, log the command but do not execute it
 
     Returns:
         Completed process object
 
     Raises:
-        subprocess.CalledProcessError: If command fails
+        subprocess.CalledProcessError: If command fails and check=True
 
     """
+    if dry_run:
+        print(f"[DRY-RUN] $ {' '.join(cmd)}")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
     try:
         result = subprocess.run(
             cmd,
             cwd=cwd,
             capture_output=True,
             text=True,
-            check=True
+            check=check,
+            timeout=timeout,
         )
         return result
     except subprocess.CalledProcessError as e:
@@ -176,20 +189,27 @@ def install_package(package_name: str, upgrade: bool = False) -> bool:
     """Install Python package with pip.
 
     Args:
-        package_name: Name of package to install
+        package_name: Name of package to install (must be a valid PyPI package name)
         upgrade: Whether to upgrade if already installed
 
     Returns:
         True if installation successful, False otherwise
 
+    Raises:
+        ValueError: If package_name contains invalid characters
+
     """
+    # Validate package name: only alphanumerics, hyphens, underscores, dots, brackets, ==, >=, <=
+    if not re.match(r'^[A-Za-z0-9_\-\.\[\],>=<!\s]+$', package_name):
+        raise ValueError(f"Invalid package name: {package_name!r}")
+
     cmd = [sys.executable, "-m", "pip", "install"]
     if upgrade:
         cmd.append("--upgrade")
     cmd.append(package_name)
 
     try:
-        result = run_subprocess(cmd)
+        run_subprocess(cmd)
         print(f"Successfully installed {package_name}")
         return True
     except subprocess.CalledProcessError as e:

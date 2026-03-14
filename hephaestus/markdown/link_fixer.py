@@ -12,6 +12,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from hephaestus.constants import DEFAULT_EXCLUDE_DIRS
 from hephaestus.utils.helpers import get_repo_root
 
 
@@ -36,9 +37,7 @@ class LinkFixer:
 
         """
         self.options = options or LinkFixerOptions()
-        self.exclude_patterns = self.options.exclude_patterns or {
-            "node_modules", ".git", "venv", "__pycache__", ".tox", ".pixi"
-        }
+        self.exclude_patterns = self.options.exclude_patterns or DEFAULT_EXCLUDE_DIRS
         # Default pattern matches /home/<user>/<repo-name>
         # (captures up to but not including the final slash before the file path)
         self.system_path_pattern = self.options.system_path_pattern or r"/home/[^/]+/[^/]+"
@@ -120,12 +119,16 @@ class LinkFixer:
 
             if content != original_content:
                 if self.options.dry_run:
-                    print(f"[DRY RUN] Would fix {file_path}: {system_fixes} system paths, {absolute_fixes} absolute paths")
+                    print(
+                        f"[DRY RUN] Would fix {file_path}: {system_fixes} system paths, {absolute_fixes} absolute paths"
+                    )
                     return True, system_fixes, absolute_fixes
 
                 file_path.write_text(content, encoding="utf-8")
                 if self.options.verbose:
-                    print(f"Fixed {file_path}: {system_fixes} system paths, {absolute_fixes} absolute paths")
+                    print(
+                        f"Fixed {file_path}: {system_fixes} system paths, {absolute_fixes} absolute paths"
+                    )
                 return True, system_fixes, absolute_fixes
 
             if self.options.verbose:
@@ -159,7 +162,8 @@ class LinkFixer:
                 return 0, 0, 0
         else:
             files_to_fix = [
-                f for f in path.rglob("*.md")
+                f
+                for f in path.rglob("*.md")
                 if not any(part in self.exclude_patterns for part in f.parts)
             ]
 

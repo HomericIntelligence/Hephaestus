@@ -7,29 +7,32 @@ Gathers OS details, Python versions, Git information, and environment variables.
 
 import os
 import platform
-import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from hephaestus.utils.helpers import run_subprocess
 
-def run_command(cmd: list, capture_output: bool = True, timeout: int = 5) -> tuple[bool, str]:
+
+def run_command(cmd: list[str], capture_output: bool = True, timeout: int = 5) -> tuple[bool, str]:
     """Run a shell command and return success status and output.
 
     Args:
         cmd: Command as list of strings
-        capture_output: Whether to capture stdout/stderr
+        capture_output: Whether to capture stdout/stderr (unused, kept for API compat)
         timeout: Timeout in seconds
 
     Returns:
         Tuple of (success: bool, output: str).
 
     """
+    import subprocess as _subprocess
+
     try:
-        result = subprocess.run(cmd, capture_output=capture_output, text=True, timeout=timeout)
+        result = run_subprocess(cmd, timeout=timeout, check=False)
         return (result.returncode == 0, result.stdout.strip())
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+    except (_subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return (False, "")
 
 
@@ -220,6 +223,7 @@ def format_system_info(info: dict[str, Any], format_type: str = "text") -> str:
     """
     if format_type.lower() == "json":
         import json
+
         return json.dumps(info, indent=2)
 
     # Text format
@@ -237,7 +241,7 @@ def format_system_info(info: dict[str, Any], format_type: str = "text") -> str:
 
     # Python Information
     output.append("Python:")
-    python_info = info['python']
+    python_info = info["python"]
     output.append(f"  Version: {python_info['version']}")
     output.append(f"  Implementation: {python_info['implementation']}")
     output.append(f"  Compiler: {python_info['compiler']}")
@@ -246,11 +250,11 @@ def format_system_info(info: dict[str, Any], format_type: str = "text") -> str:
 
     # Git Information
     output.append("Git:")
-    git_info = info['git']
+    git_info = info["git"]
     output.append(f"  Repository: {git_info['repository']}")
-    if git_info['branch']:
+    if git_info["branch"]:
         output.append(f"  Branch: {git_info['branch']}")
-    if git_info['commit']:
+    if git_info["commit"]:
         output.append(f"  Commit: {git_info['commit']}")
     output.append("")
 
@@ -261,14 +265,14 @@ def format_system_info(info: dict[str, Any], format_type: str = "text") -> str:
 
     # Environment Information
     output.append("Environment:")
-    for key, value in info['environment'].items():
+    for key, value in info["environment"].items():
         output.append(f"  {key}: {value}")
     output.append("")
 
     # Tools Information (if available)
-    if 'tools' in info:
+    if "tools" in info:
         output.append("Tools:")
-        for tool_name, (version, path) in info['tools'].items():
+        for tool_name, (version, path) in info["tools"].items():
             if path:
                 output.append(f"  {tool_name}: {version}")
             else:

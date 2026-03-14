@@ -4,45 +4,50 @@ This directory contains GitHub-specific configuration files for ProjectHephaestu
 
 ## Workflows
 
-### CI Workflow (`workflows/ci.yml`)
+### Test Workflow (`workflows/test.yml`)
 
 Continuous Integration pipeline that runs on every push and pull request to `main`.
 
+**Matrix:**
+- OS: `ubuntu-latest`, `macos-latest`, `windows-latest`
+- Python: `3.10`, `3.11`, `3.12`
+- Test types: `unit`, `integration`
+
 **Jobs:**
-- **Test**: Runs pytest on Python 3.8-3.12
-- **Lint**: Code quality checks (flake8, black, mypy)
-- **Coverage**: Test coverage reporting
+- **Unit tests**: pytest with coverage (≥75%)
+- **Integration tests**: import smoke tests + wheel build/install
+- **Structure check**: enforces test mirrors source layout
 
 **Status Badge:**
 ```markdown
-![CI](https://github.com/HomericIntelligence/ProjectHephaestus/workflows/CI/badge.svg)
+![Test](https://github.com/mvillmow/ProjectHephaestus/actions/workflows/test.yml/badge.svg)
 ```
 
-## Future Additions
+### Pre-commit Workflow (`workflows/pre-commit.yml`)
 
-Potential future GitHub configurations:
+Runs all pre-commit hooks (ruff, mypy, security checks) on pull requests.
 
-- **Issue Templates**: `.github/ISSUE_TEMPLATE/`
-- **Pull Request Template**: `.github/PULL_REQUEST_TEMPLATE.md`
-- **Dependabot**: `.github/dependabot.yml`
-- **Code Owners**: `.github/CODEOWNERS`
-- **Release Workflow**: `.github/workflows/release.yml`
-- **Documentation Deploy**: `.github/workflows/docs.yml`
+### Security Workflow (`workflows/security.yml`)
+
+Scheduled and on-demand pip-audit scan for dependency vulnerabilities.
+
+### Release Workflow (`workflows/release.yml`)
+
+Builds and publishes the package to PyPI on version tag push (`v*`).
 
 ## Maintenance
 
-To update the CI workflow:
+To update a workflow:
 
-1. Edit `.github/workflows/ci.yml`
+1. Edit the relevant `.github/workflows/*.yml` file
 2. Test locally if possible
-3. Commit and push to trigger workflow
-4. Monitor Actions tab on GitHub
-5. Fix any issues and iterate
+3. Commit and push to trigger the workflow
+4. Monitor the Actions tab on GitHub
 
 ## Security
 
-The CI workflow follows GitHub Actions security best practices:
+Workflows follow GitHub Actions security best practices:
 - No untrusted input in `run:` commands
 - Environment variables used for user-controlled data
 - Dependencies pinned with version constraints
-- Actions pinned to specific versions
+- Actions pinned to specific SHAs (release.yml) or versions

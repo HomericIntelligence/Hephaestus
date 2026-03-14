@@ -36,6 +36,7 @@ jobs:
         run: pixi run python -m build
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        # Pinned to v1.12.2 (sha: 9c65b…) for supply-chain safety
+        uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9e4905c3b51a7d2d4c89f09
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}

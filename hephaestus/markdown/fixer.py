@@ -11,6 +11,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from hephaestus.constants import DEFAULT_EXCLUDE_DIRS
+
 
 @dataclass
 class FixerOptions:
@@ -32,9 +34,7 @@ class MarkdownFixer:
 
         """
         self.options = options or FixerOptions()
-        self.exclude_patterns = self.options.exclude_patterns or {
-            "node_modules", ".git", "venv", "__pycache__", ".tox"
-        }
+        self.exclude_patterns = self.options.exclude_patterns or DEFAULT_EXCLUDE_DIRS
 
     def fix_file(self, file_path: Path) -> tuple[bool, int]:
         """Fix markdown linting errors in a file.
@@ -324,7 +324,8 @@ class MarkdownFixer:
                 return 0, 0
         else:
             files_to_fix = [
-                f for f in path.rglob("*.md")
+                f
+                for f in path.rglob("*.md")
                 if not any(part in self.exclude_patterns for part in f.parts)
             ]
 
@@ -364,10 +365,7 @@ def main():
 
     args = parser.parse_args()
 
-    options = FixerOptions(
-        verbose=args.verbose,
-        dry_run=args.dry_run
-    )
+    options = FixerOptions(verbose=args.verbose, dry_run=args.dry_run)
 
     fixer = MarkdownFixer(options)
     files_modified, total_fixes = fixer.process_path(args.path)

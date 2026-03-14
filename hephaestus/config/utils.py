@@ -12,16 +12,19 @@ Usage:
 """
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 try:
     import yaml
     YAML_AVAILABLE = True
 except ImportError:
     YAML_AVAILABLE = False
-    print("Warning: PyYAML not available, YAML config support disabled")
+    _logger.warning("PyYAML not available, YAML config support disabled")
 
 def load_config(config_path: str | Path) -> dict[str, Any]:
     """Load configuration from a YAML or JSON file.

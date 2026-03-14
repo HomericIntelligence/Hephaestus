@@ -132,7 +132,7 @@ class MNISTDownloader(DatasetDownloader):
     """Specialized downloader for MNIST dataset."""
 
     def __init__(self):
-        super().__init__("http://yann.lecun.com/exdb/mnist")
+        super().__init__("https://yann.lecun.com/exdb/mnist")
         self.files = [
             ("train-images-idx3-ubyte.gz", "train_images.idx"),
             ("train-labels-idx1-ubyte.gz", "train_labels.idx"),

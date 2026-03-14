@@ -9,13 +9,12 @@ Usage:
 """
 
 import argparse
-import subprocess
 import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from hephaestus.utils.helpers import get_repo_root
+from hephaestus.utils.helpers import get_repo_root, run_subprocess
 
 
 def run_git_command(args: list[str], cwd: Path | None = None) -> str:
@@ -26,18 +25,13 @@ def run_git_command(args: list[str], cwd: Path | None = None) -> str:
         cwd: Working directory for command (defaults to repo root)
 
     Returns:
-        Git command output
+        Git command output, or empty string on failure
 
     """
     if cwd is None:
         cwd = get_repo_root()
 
-    result = subprocess.run(
-        ["git"] + args,
-        capture_output=True,
-        text=True,
-        cwd=cwd,
-    )
+    result = run_subprocess(["git"] + args, cwd=str(cwd), check=False)
     if result.returncode != 0:
         return ""
     return result.stdout.strip()
@@ -249,9 +243,7 @@ def generate_changelog(
 
 def main():
     """Main entry point for changelog generation."""
-    parser = argparse.ArgumentParser(
-        description="Generate changelog from git commit history"
-    )
+    parser = argparse.ArgumentParser(description="Generate changelog from git commit history")
     parser.add_argument(
         "version",
         nargs="?",

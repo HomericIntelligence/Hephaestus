@@ -28,7 +28,6 @@ TOP_LEVEL_SYMBOLS = [
     "install_package",
     "load_config",
     "load_data",
-    "log_context",
     "merge_configs",
     "read_file",
     "register_command",
@@ -42,8 +41,11 @@ TOP_LEVEL_SYMBOLS = [
 ]
 
 SUBPACKAGE_SYMBOLS = [
-    ("hephaestus.io", ["read_file", "write_file", "safe_write", "load_data", "save_data", "ensure_directory"]),
-    ("hephaestus.logging", ["setup_logging", "get_logger", "ContextLogger", "log_context"]),
+    (
+        "hephaestus.io",
+        ["read_file", "write_file", "safe_write", "load_data", "save_data", "ensure_directory"],
+    ),
+    ("hephaestus.logging", ["setup_logging", "get_logger", "ContextLogger"]),
     ("hephaestus.system", ["get_system_info", "format_system_info"]),
     ("hephaestus.datasets", ["DatasetDownloader"]),
     ("hephaestus.github", ["detect_repo_from_remote", "local_branch_exists", "merge_prs"]),
@@ -68,6 +70,7 @@ class TestTopLevelImports:
     def test_version_defined(self):
         """__version__ must be defined and non-empty."""
         import hephaestus
+
         assert hephaestus.__version__
         assert isinstance(hephaestus.__version__, str)
 
@@ -80,6 +83,7 @@ class TestTopLevelImports:
     def test_all_declared(self):
         """hephaestus.__all__ must be defined and non-empty."""
         import hephaestus
+
         assert hasattr(hephaestus, "__all__")
         assert len(hephaestus.__all__) > 0
 
@@ -97,6 +101,7 @@ class TestSubpackageImports:
     def test_io_functions_callable(self):
         """Core io functions must be callable."""
         from hephaestus.io import read_file, write_file, ensure_directory
+
         assert callable(read_file)
         assert callable(write_file)
         assert callable(ensure_directory)
@@ -104,18 +109,21 @@ class TestSubpackageImports:
     def test_logging_functions_callable(self):
         """Core logging functions must be callable."""
         from hephaestus.logging import setup_logging, get_logger
+
         assert callable(setup_logging)
         assert callable(get_logger)
 
     def test_slugify_works(self):
         """slugify must produce correct output (smoke test)."""
         from hephaestus.utils import slugify
+
         assert slugify("Hello World") == "hello-world"
         assert slugify("foo_bar.baz") == "foo-bar-baz"
 
     def test_retry_with_backoff_is_decorator(self):
         """retry_with_backoff must return a decorator."""
         from hephaestus.utils import retry_with_backoff
+
         decorator = retry_with_backoff(max_retries=1, initial_delay=0.0)
         assert callable(decorator)
 

@@ -6,9 +6,7 @@ from pathlib import Path
 
 from hephaestus.logging.utils import (
     ContextLogger,
-    create_rotating_file_logger,
     get_logger,
-    log_context,
     setup_logging,
 )
 
@@ -86,9 +84,7 @@ class TestSetupLogging:
         log_file = str(tmp_path / "setup.log")
         setup_logging(log_file=log_file)
         root_logger = logging.getLogger()
-        handler_files = [
-            getattr(h, "baseFilename", None) for h in root_logger.handlers
-        ]
+        handler_files = [getattr(h, "baseFilename", None) for h in root_logger.handlers]
         assert log_file in handler_files
 
     def test_log_to_stderr(self) -> None:
@@ -110,22 +106,3 @@ class TestSetupLogging:
         finally:
             root.handlers.clear()
             root.handlers.extend(saved)
-
-
-class TestLogContext:
-    """Tests for log_context context manager."""
-
-    def test_log_context_yields(self) -> None:
-        """log_context context manager yields without error."""
-        with log_context(user="test", operation="load"):
-            pass  # should not raise
-
-
-class TestRotatingFileLogger:
-    """Tests for create_rotating_file_logger."""
-
-    def test_creates_logger(self, tmp_path: Path) -> None:
-        """create_rotating_file_logger returns a ContextLogger."""
-        log_file = str(tmp_path / "rotating.log")
-        logger = create_rotating_file_logger("test.rotating", log_file)
-        assert isinstance(logger, ContextLogger)

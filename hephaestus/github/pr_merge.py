@@ -69,12 +69,8 @@ def run_git_cmd(cmd: list[str], dry_run: bool = False, cwd: str | None = None) -
         cwd: Working directory
 
     """
-    if dry_run:
-        logger.info(f"[DRY-RUN] $ {' '.join(cmd)}")
-        return
-
     logger.info(f"$ {' '.join(cmd)}")
-    subprocess.run(cmd, check=True, cwd=cwd)
+    run_subprocess(cmd, cwd=cwd, dry_run=dry_run)
 
 
 def checks_success_and_print(commit) -> tuple[bool | None, list]:

@@ -39,6 +39,12 @@ github = [
     "PyGithub>=1.55,<3",
 ]
 
+[project.scripts]
+hephaestus-changelog = "hephaestus.git.changelog:main"
+hephaestus-merge-prs = "hephaestus.github.pr_merge:main"
+hephaestus-system-info = "hephaestus.system.info:main"
+hephaestus-download-dataset = "hephaestus.datasets.downloader:main"
+
 [project.urls]
 Homepage = "https://github.com/mvillmow/ProjectHephaestus"
 Repository = "https://github.com/mvillmow/ProjectHephaestus"

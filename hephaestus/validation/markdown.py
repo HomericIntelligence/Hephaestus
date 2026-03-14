@@ -8,14 +8,13 @@ documentation quality across projects.
 import re
 from pathlib import Path
 
+from hephaestus.constants import DEFAULT_EXCLUDE_DIRS
 from hephaestus.logging.utils import get_logger
 
 logger = get_logger(__name__)
 
 
-def find_markdown_files(
-    directory: Path, exclude_dirs: set[str] | None = None
-) -> list[Path]:
+def find_markdown_files(directory: Path, exclude_dirs: set[str] | None = None) -> list[Path]:
     """Find all markdown files in a directory recursively.
 
     Args:
@@ -27,18 +26,7 @@ def find_markdown_files(
 
     """
     if exclude_dirs is None:
-        exclude_dirs = {
-            "node_modules",
-            ".git",
-            "venv",
-            "__pycache__",
-            ".pytest_cache",
-            "dist",
-            "build",
-            ".tox",
-            ".mypy_cache",
-            ".eggs",
-        }
+        exclude_dirs = DEFAULT_EXCLUDE_DIRS
 
     markdown_files = []
     for md_file in directory.rglob("*.md"):
@@ -77,9 +65,7 @@ def validate_directory_exists(dir_path: Path) -> bool:
 
 
 def check_required_sections(
-    content: str,
-    required_sections: list[str],
-    file_path: Path | None = None
+    content: str, required_sections: list[str], file_path: Path | None = None
 ) -> tuple[bool, list[str]]:
     """Check if markdown content has all required sections.
 
@@ -298,21 +284,3 @@ def check_markdown_formatting(content: str) -> list[str]:
                 break  # Only report first occurrence
 
     return issues
-
-
-def is_url(link: str) -> bool:
-    """Check if link is a URL (http/https).
-
-    Args:
-        link: Link string to check
-
-    Returns:
-        True if link is an HTTP(S) URL
-
-    """
-    from urllib.parse import urlparse
-    try:
-        result = urlparse(link)
-        return result.scheme in ["http", "https"]
-    except (ValueError, TypeError):
-        return False

@@ -22,7 +22,7 @@ from .cli.utils import (
 )
 from .config.utils import get_config_value, get_setting, load_config, merge_configs
 from .io.utils import ensure_directory, load_data, read_file, safe_write, save_data, write_file
-from .logging.utils import ContextLogger, get_logger, log_context, setup_logging
+from .logging.utils import ContextLogger, get_logger, setup_logging
 from .system.info import format_system_info, get_system_info
 from .utils import (
     flatten_dict,
@@ -37,8 +37,8 @@ from .utils import (
 
 __all__ = [
     "COMMAND_REGISTRY",
-    "__version__",
     "ContextLogger",
+    "__version__",
     "add_logging_args",
     "confirm_action",
     "create_parser",
@@ -57,7 +57,6 @@ __all__ = [
     "install_package",
     "load_config",
     "load_data",
-    "log_context",
     "merge_configs",
     "read_file",
     "register_command",

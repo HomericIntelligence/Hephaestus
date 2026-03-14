@@ -7,15 +7,22 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12"]
         test-type: [unit, integration]
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
 
       - name: Install pixi
         uses: prefix-dev/setup-pixi@v0.9.4
@@ -28,9 +35,9 @@ jobs:
           path: |
             .pixi
             ~/.cache/rattler/cache
-          key: pixi-${{ runner.os }}-${{ hashFiles('pixi.lock') }}
+          key: pixi-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('pixi.lock') }}
           restore-keys: |
-            pixi-${{ runner.os }}-
+            pixi-${{ runner.os }}-${{ matrix.python-version }}-
 
       - name: Install package
         run: pixi run pip install -e .
@@ -60,7 +67,7 @@ jobs:
           python -c "from hephaestus import slugify, retry_with_backoff, setup_logging; print('OK')"
 
       - name: Upload coverage
-        if: matrix.test-type == 'unit'
+        if: matrix.test-type == 'unit' && matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
         uses: codecov/codecov-action@v4
         with:
           files: ./coverage.xml
