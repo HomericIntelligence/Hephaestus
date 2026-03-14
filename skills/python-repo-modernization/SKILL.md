@@ -12,6 +12,7 @@
 ## When to Use
 
 Use this skill when you need to:
+
 - Fix circular imports in a Python package
 - Remove backward-compat shims no longer needed
 - Restructure flat `tests/` into `tests/unit/<subpackage>/` mirroring source layout
@@ -22,6 +23,7 @@ Use this skill when you need to:
 - Fix stale documentation referencing renamed functions or removed modules
 
 **Triggers:**
+
 - "Bring this repo to production grade"
 - "Match the quality bar of [other repo]"
 - "Prepare for PyPI publishing"
@@ -96,6 +98,7 @@ rm -rf hephaestus/helpers/
 ```
 
 Verify no remaining references:
+
 ```bash
 grep -r "hephaestus.helpers" .  # should return nothing
 ```

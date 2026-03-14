@@ -854,7 +854,7 @@ packages:
 - pypi: ./
   name: hephaestus
   version: 0.3.0
-  sha256: d7578abe38fa2cda00329cd84569da7abfba9f57674a92f9fdc62cc40ebffb41
+  sha256: 60424348a7b60d0498e4c84526120cc187ebad2eedee69b3b7983ddac31e32bf
   requires_dist:
   - pyyaml>=6.0,<7
   - pytest>=7.0,<9 ; extra == 'dev'
@@ -862,6 +862,7 @@ packages:
   - pre-commit>=3.0,<5 ; extra == 'dev'
   - ruff>=0.1.0,<1 ; extra == 'dev'
   - mypy>=1.8.0,<2 ; extra == 'dev'
+  - build>=1.0,<2 ; extra == 'dev'
   - pygithub>=1.55,<3 ; extra == 'github'
   requires_python: '>=3.10'
 - conda: https://conda.anaconda.org/conda-forge/linux-64/icu-78.2-h33c6efd_0.conda

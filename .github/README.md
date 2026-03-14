@@ -9,16 +9,19 @@ This directory contains GitHub-specific configuration files for ProjectHephaestu
 Continuous Integration pipeline that runs on every push and pull request to `main`.
 
 **Matrix:**
+
 - OS: `ubuntu-latest`, `macos-latest`, `windows-latest`
 - Python: `3.10`, `3.11`, `3.12`
 - Test types: `unit`, `integration`
 
 **Jobs:**
+
 - **Unit tests**: pytest with coverage (≥75%)
 - **Integration tests**: import smoke tests + wheel build/install
 - **Structure check**: enforces test mirrors source layout
 
 **Status Badge:**
+
 ```markdown
 ![Test](https://github.com/mvillmow/ProjectHephaestus/actions/workflows/test.yml/badge.svg)
 ```
@@ -47,6 +50,7 @@ To update a workflow:
 ## Security
 
 Workflows follow GitHub Actions security best practices:
+
 - No untrusted input in `run:` commands
 - Environment variables used for user-controlled data
 - Dependencies pinned with version constraints

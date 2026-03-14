@@ -11,7 +11,7 @@
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-To report a vulnerability, email **research@villmow.us** with:
+To report a vulnerability, email **<research@villmow.us>** with:
 
 1. A description of the vulnerability and its impact
 2. Steps to reproduce the issue

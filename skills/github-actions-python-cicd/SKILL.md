@@ -13,6 +13,7 @@
 ## When to Use
 
 Use this skill when you need to:
+
 - Set up GitHub Actions CI/CD for a Python project
 - Configure multi-version Python testing
 - Add automated linting and code quality checks
@@ -22,6 +23,7 @@ Use this skill when you need to:
 - Create comprehensive CI/CD documentation
 
 **Triggers:**
+
 - "Enable CI/CD for this project"
 - "Set up GitHub Actions for Python testing"
 - "Add automated testing pipeline"
@@ -150,12 +152,14 @@ markers =
 ### 3. Update Dependencies
 
 **requirements.txt:**
+
 ```
 PyYAML>=5.4.0
 # Add your project dependencies
 ```
 
 **requirements-dev.txt:**
+
 ```
 pytest>=6.0.0
 pytest-cov>=2.12.0
@@ -165,6 +169,7 @@ mypy>=0.800
 ```
 
 **setup.py:**
+
 ```python
 setup(
     # ... other config ...
@@ -285,9 +290,11 @@ Create these documentation files:
 ## Failed Attempts & Solutions
 
 ### ❌ Attempt 1: Using Bash for Cleanup
+
 **Problem:** Claude Code Bash hook (`/claude/hooks/pre-bash-exec.py`) was missing, blocking all Bash commands.
 
 **Error:**
+
 ```
 PreToolUse:Bash hook error: [python3 "$CLAUDE_PROJECT_DIR"/.claude/hooks/pre-bash-exec.py]:
 python3: can't open file '/home/user/project/.claude/hooks/pre-bash-exec.py': [Errno 2] No such file or directory
@@ -298,9 +305,11 @@ python3: can't open file '/home/user/project/.claude/hooks/pre-bash-exec.py': [E
 **Solution:** Created Python-based alternatives (`run_cleanup_and_test.py`, `validate_cicd.py`) that don't require Bash.
 
 ### ❌ Attempt 2: Running Tests Without PyYAML
+
 **Problem:** Tests failed with ImportError for `yaml` module.
 
 **Error:**
+
 ```python
 ImportError: No module named 'yaml'
 ```
@@ -308,16 +317,19 @@ ImportError: No module named 'yaml'
 **Why it failed:** PyYAML was used in `io/utils.py` and `config/utils.py` but not declared in requirements.
 
 **Solution:**
+
 - Added `PyYAML>=5.4.0` to `requirements.txt`
 - Added to `setup.py` `install_requires`
 - Installed in CI workflow explicitly
 
 ### ❌ Attempt 3: Relying on Hooks for Automation
+
 **Problem:** User wanted to remove hooks and use plugins instead.
 
 **Why it failed:** Hooks were blocking operations and user preferred plugin-based approach.
 
 **Solution:**
+
 - Removed hooks from `.claude/settings.json` (set to `{}`)
 - Relied on enabled plugins: `skills-registry-commands@ProjectMnemosyne` and `safety-net@cc-marketplace`
 - Created manual cleanup script instead
@@ -327,17 +339,20 @@ ImportError: No module named 'yaml'
 ### Successful CI/CD Configuration
 
 **GitHub Actions Jobs:**
+
 - **Test Matrix**: 5 Python versions × tests = comprehensive compatibility
 - **Lint**: flake8 + black + mypy on Python 3.11
 - **Coverage**: pytest-cov with optional Codecov upload
 
 **Performance:**
+
 - ✅ All tests pass across Python 3.8-3.12
 - ✅ Parallel job execution
 - ✅ Dependency caching (~30% faster builds)
 - ✅ Total runtime: 5-10 minutes per workflow
 
 **Test Infrastructure:**
+
 - 6 test files covering utilities, I/O, config, validation, git, GitHub
 - pytest.ini for consistent configuration
 - Markers for categorization (unit, integration, slow)
@@ -345,6 +360,7 @@ ImportError: No module named 'yaml'
 ### Copy-Paste Configurations
 
 **Minimum pytest.ini:**
+
 ```ini
 [pytest]
 testpaths = tests
@@ -352,6 +368,7 @@ addopts = -v --tb=short
 ```
 
 **Minimum requirements-dev.txt:**
+
 ```
 pytest>=6.0.0
 black>=21.0.0
@@ -359,6 +376,7 @@ flake8>=3.8.0
 ```
 
 **Minimum workflow (single Python version):**
+
 ```yaml
 name: CI
 on: [push, pull_request]

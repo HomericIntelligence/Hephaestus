@@ -38,12 +38,12 @@ def main():
     parser = argparse.ArgumentParser(description="Script description")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose output")
     args = parser.parse_args()
-    
+
     if args.verbose:
         logging.basicConfig(level=logging.DEBUG)
-    
+
     # Implementation here
-    
+
     return 0
 
 if __name__ == "__main__":

@@ -55,11 +55,11 @@ def fix_thing(content: str) -> str:
 # Ported: hephaestus/<category>/utility.py (class-based)
 class ThingFixer:
     """Fixes things in a configurable way."""
-    
+
     def __init__(self, options: Optional[FixerOptions] = None):
         self.options = options or FixerOptions()
         self.pattern = self.options.pattern or r"/home/[^/]+/[^/]+"
-    
+
     def fix_thing(self, content: str) -> Tuple[str, int]:
         """Fix things and return (fixed_content, fix_count)."""
         new_content, count = re.subn(self.pattern, "", content)
@@ -67,6 +67,7 @@ class ThingFixer:
 ```
 
 **Key Changes**:
+
 - Functional → Class-based design
 - Hardcoded values → Constructor parameters
 - Simple return → Tuple with metrics
@@ -84,6 +85,7 @@ hephaestus/
 ```
 
 Update `__init__.py`:
+
 ```python
 from hephaestus.<category>.utility import UtilityClass, Options
 
@@ -108,14 +110,14 @@ def main() -> int:
     parser.add_argument("input", type=Path, help="Input file")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("-v", "--verbose", action="store_true")
-    
+
     args = parser.parse_args()
-    
+
     options = Options(dry_run=args.dry_run, verbose=args.verbose)
     utility = UtilityClass(options)
-    
+
     result = utility.process(args.input)
-    
+
     return 0 if result else 1
 
 
@@ -124,6 +126,7 @@ if __name__ == "__main__":
 ```
 
 Make executable:
+
 ```bash
 chmod +x scripts/<utility_name>.py
 ```
@@ -159,10 +162,10 @@ def test_integration(tmp_path):
     """Test full workflow with files."""
     test_file = tmp_path / "test.txt"
     test_file.write_text("content")
-    
+
     utility = UtilityClass()
     utility.process_file(test_file)
-    
+
     assert test_file.read_text() == "processed"
 ```
 
@@ -194,11 +197,13 @@ python -m pytest tests/ -v
 **Problem**: Used Read tool which showed escaped backslashes (`\\n`), then tried to use Edit tool with those escaped values.
 
 **What Happened**:
+
 - Read tool output: `return "\\n".join(fixed_lines), fixes`
 - Attempted Edit with: `old_string="\\n"` thinking that's the actual content
 - Failed because the file actually contains `\n` not `\\n`
 
-**Solution**: 
+**Solution**:
+
 - The Read tool escapes output for display but file content is unescaped
 - Use Edit with actual unescaped strings: `old_string="\n"`
 - Or use Bash with heredoc for complex insertions
@@ -208,13 +213,16 @@ python -m pytest tests/ -v
 **Problem**: Created pattern `\]({pattern}/([^)]+)\)` intending to capture path after system prefix.
 
 **What Happened**:
+
 ```python
 pattern = rf"\]({self.system_path_pattern}/([^)]+)\)"  # Two groups!
 replacement = r"](\1)"  # Referenced wrong group
 ```
+
 The `self.system_path_pattern` itself contains `[^/]+` character classes which aren't capturing groups, but the outer `()` creates group 1, and the inner `([^)]+)` creates group 2.
 
 **Solution**:
+
 ```python
 # Use non-capturing group for pattern, capture only the path
 pattern = rf"\]\({self.system_path_pattern}/([^)]+)\)"
@@ -226,12 +234,15 @@ replacement = r"](\1)"  # Now \1 is the path after system prefix
 **Problem**: Used Python heredoc to insert regex pattern with `\b` word boundary.
 
 **What Happened**:
+
 ```python
 pattern = r"https?://...\.  \b..."
 ```
+
 Python interpreted `\b` as backspace character (0x08) in the string literal, breaking the regex.
 
 **Solution**:
+
 - Use raw string in Python: `pattern = r"https?://...\b..."`
 - Or escape in heredoc: `pattern = "https?://...\\b..."`
 - Verify with: `repr(pattern)` to see actual bytes
@@ -241,20 +252,25 @@ Python interpreted `\b` as backspace character (0x08) in the string literal, bre
 **Problem**: File had double-escaped strings, attempted to fix by running `git checkout` to restore, which lost the bare URL fix I had just added.
 
 **What Happened**:
+
 1. Added `_fix_md034_bare_urls()` method to file
 2. Discovered file had escaped backslashes from earlier commit
 3. Ran `git checkout` to restore clean version
 4. Lost the just-added method
 
 **Solution**:
+
 - **Don't use git checkout on files with uncommitted work**
 - Instead: Read original from git, apply changes programmatically
+
   ```bash
   git show HEAD:file.py > /tmp/clean.py
   # Apply changes to /tmp/clean.py
   mv /tmp/clean.py file.py
   ```
+
 - Or: Stash work, checkout, reapply stash
+
   ```bash
   git stash
   git checkout file.py
@@ -266,11 +282,13 @@ Python interpreted `\b` as backspace character (0x08) in the string literal, bre
 **Problem**: Pattern `\]({path})` didn't match markdown links `[text](url)`.
 
 **What Happened**:
+
 - Markdown link syntax is `[text](url)`
 - To match the URL part, need to match `](url)` not just `(url)`
 - Pattern `\]({path})` was missing the opening parenthesis
 
 **Solution**:
+
 ```python
 # Wrong: Matches ] followed by (path)
 pattern = r"\]({path})"
@@ -306,7 +324,7 @@ pattern = r"\]\({path}\)"
    - Configuration: `ReadmeValidator(allowed_prefixes=["custom", "commands"])`
 
 5. **VersionManager** (`hephaestus/version/manager.py`)
-   - Updates VERSION files and __init__.py __version__
+   - Updates VERSION files and **init**.py **version**
    - Parses semver: `parse_version("1.2.3")` → `(1, 2, 3)`
    - Verifies consistency across files
    - 11 tests, all passing
@@ -331,12 +349,14 @@ pattern = r"\]\({path}\)"
 ### CLI Wrappers
 
 All wrappers follow standard pattern:
+
 ```bash
 PYTHONPATH=. python3 scripts/<name>.py --help
 PYTHONPATH=. python3 scripts/<name>.py input.file [--dry-run] [-v]
 ```
 
 Created wrappers:
+
 - `scripts/fix_invalid_links.py`
 - `scripts/validate_readme_commands.py`
 - `scripts/update_version.py`

@@ -5,6 +5,7 @@ Shared utilities and tooling for the HomericIntelligence ecosystem, powered by [
 ## Overview
 
 ProjectHephaestus provides standardized utility functions and tools that can be shared across all HomericIntelligence repositories. Following the principles in [CLAUDE.md](CLAUDE.md), this project emphasizes:
+
 - **Modularity**: Well-defined, reusable components
 - **Simplicity**: KISS (Keep It Simple, Stupid) principle
 - **Consistency**: Standardized interfaces and patterns
@@ -92,6 +93,7 @@ print(size_str)  # Output: 1.0 MB
 To use ProjectHephaestus in another project with Pixi:
 
 1. Add it as a dependency in your `pixi.toml`:
+
    ```toml
    [pypi-dependencies]
    hephaestus = { path = "../ProjectHephaestus", editable = true }
@@ -100,6 +102,7 @@ To use ProjectHephaestus in another project with Pixi:
 2. Run `pixi install` to install the dependency
 
 Or install directly with pip:
+
 ```bash
 pip install -e /path/to/ProjectHephaestus
 ```
@@ -152,6 +155,7 @@ This project defines multiple environments in `pixi.toml`:
 - **lint**: Linting-only environment
 
 Switch environments with:
+
 ```bash
 pixi shell -e dev
 pixi shell -e lint
@@ -162,18 +166,21 @@ pixi shell -e lint
 Add new dependencies to `pixi.toml`:
 
 For conda packages:
+
 ```toml
 [dependencies]
 numpy = "*"
 ```
 
 For PyPI packages:
+
 ```toml
 [pypi-dependencies]
 requests = "*"
 ```
 
 Then run:
+
 ```bash
 pixi install
 ```

@@ -9,7 +9,8 @@ ProjectHephaestus is the shared utilities and tooling repository of the HomericI
 **Purpose**: Centralize and maintain Python utilities, helper functions, and common abstractions used throughout the HomericIntelligence suite.
 
 **Role in Ecosystem**:
-- ProjectOdyssey → Training and capability development  
+
+- ProjectOdyssey → Training and capability development
 - ProjectKeystone → Communication and distributed agent coordination
 - ProjectScylla → Testing, measurement, and optimization
 - ProjectMnemosyne → Knowledge, skills, and memory preservation
@@ -46,6 +47,7 @@ ProjectHephaestus/
 ### Language Preference
 
 **Python 3.10+** is the implementation language for all ProjectHephaestus code:
+
 - Shared utility scripts and helpers
 - Configuration management tools
 - Logging and monitoring utilities
@@ -86,14 +88,14 @@ from typing import List, Dict, Optional
 
 def function_name(param: str, optional_param: Optional[int] = None) -> bool:
     """Clear docstring with purpose, parameters, and return value.
-    
+
     Args:
         param: Description of parameter
         optional_param: Description of optional parameter
-        
+
     Returns:
         Description of return value
-        
+
     Raises:
         SpecificException: When something goes wrong
     """
@@ -135,6 +137,7 @@ def function_name(param: str, optional_param: Optional[int] = None) -> bool:
 ### Input Validation
 
 All utility functions accepting external input must:
+
 1. Validate input types and ranges
 2. Sanitize potentially malicious content
 3. Handle encoding/decoding safely
@@ -168,6 +171,7 @@ All utility functions accepting external input must:
 ### When to Use Extended Thinking
 
 Use Extended Thinking for:
+
 - Designing new utility abstractions
 - Analyzing complex cross-cutting concerns
 - Planning refactoring of shared components
@@ -175,6 +179,7 @@ Use Extended Thinking for:
 - Evaluating tradeoffs in utility design
 
 Skip Extended Thinking for:
+
 - Simple utility function implementation
 - Straightforward bug fixes
 - Boilerplate code generation
@@ -202,6 +207,7 @@ Is the task well-defined with predictable steps?
 #### Code References
 
 **DO**: Use repo-relative file paths with line numbers:
+
 ```markdown
 Updated hephaestus/utils/helpers.py:45-52
 ```
@@ -209,6 +215,7 @@ Updated hephaestus/utils/helpers.py:45-52
 #### GitHub Issue Integration
 
 **DO**: Post implementation notes as GitHub issue comments:
+
 ```bash
 gh issue comment <number> --body "Completed implementation of new logging utility"
 ```
@@ -243,6 +250,7 @@ gh pr merge --auto --rebase
 ### Commit Message Format
 
 Follow conventional commits:
+
 ```text
 feat(utils): Add new configuration helper
 fix(logging): Correct timestamp formatting

@@ -21,6 +21,7 @@ This directory contains shared utility functions for the HomericIntelligence eco
 ## Dependencies
 
 Utilities should minimize external dependencies. When dependencies are needed:
+
 1. Use standard library when possible
 2. Prefer widely-used, stable packages
 3. Document all dependencies in function docstrings

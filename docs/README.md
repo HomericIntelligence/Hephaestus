@@ -16,7 +16,7 @@ Currently consolidating utilities from:
 ```
 ProjectHephaestus/
 ├── scripts/          # Organized script collections
-├── tools/            # Standalone tools  
+├── tools/            # Standalone tools
 ├── shared/           # Shared utility functions
 ├── examples/         # Usage examples
 └── docs/             # Documentation
@@ -31,6 +31,6 @@ Most scripts support `--help` flag for detailed usage information.
 
 Following CLAUDE.md guidelines:
 - KISS (Keep It Simple, Stupid)
-- DRY (Don't Repeat Yourself) 
+- DRY (Don't Repeat Yourself)
 - YAGNI (You Aren't Gonna Need It)
 - Modularity with consistent interfaces

@@ -5,6 +5,7 @@
 ### Files Modified
 
 **Phase 1 — Code Quality:**
+
 - `hephaestus/cli/utils.py:13-18` — replaced `from hephaestus import __version__` with inline `importlib.metadata` lookup
 - `hephaestus/config/utils.py:160-179` — fixed float detection logic (`'.' not in value` → `'.' in value`), introduced `typed_value` variable
 - `hephaestus/datasets/downloader.py:24` — `list[float] = None` → `list[float] | None = None`
@@ -12,19 +13,23 @@
 - `hephaestus/py.typed` — created (empty, PEP 561)
 
 **Phase 2 — Tests:**
+
 - 17 test files moved from `tests/` → `tests/unit/<subpackage>/`
 - `tests/unit/__init__.py` + 13 subdir `__init__.py` files created
 - `pyproject.toml` — `testpaths = ["tests/unit"]`, added `pythonpath = [".", "scripts"]`
 
 **Phase 3 — Pre-commit:**
+
 - `.pre-commit-config.yaml` — 4 new hooks: pip-audit, check-pixi-lock, check-unit-test-structure, ruff-check-complexity
 - `scripts/check_unit_test_structure.py` — new enforcement script
 
 **Phase 4 — CI:**
+
 - `.github/workflows/test.yml` — matrix strategy, hardcoded `tests/unit` in run step, `flags: unit` for codecov
 - `.github/workflows/release.yml` — new, tag-triggered PyPI publish via `pypa/gh-action-pypi-publish`
 
 **Phase 5 — Docs:**
+
 - `README.md` — fixed module path, function names, environment list, removed `docs-build`
 - `CLAUDE.md` — Python 3.10+, pixi commands, new test structure, removed helpers/ from structure
 
@@ -48,6 +53,7 @@ pixi run python scripts/check_unit_test_structure.py
 ### Key Bug: Float Coercion in merge_with_env
 
 Original buggy code:
+
 ```python
 if '.' not in value and value.isdigit():  # int branch
     value = int(value)
@@ -56,6 +62,7 @@ elif '.' not in value:                     # ← WRONG: this catches non-numeric
 ```
 
 Fixed code:
+
 ```python
 typed_value: int | float | str = value
 try:

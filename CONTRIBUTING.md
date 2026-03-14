@@ -33,7 +33,7 @@ This project follows the [HomericIntelligence Code of Conduct](CODE_OF_CONDUCT.m
 
 ## Development Setup
 
-1. Install Pixi: https://pixi.sh/install/
+1. Install Pixi: <https://pixi.sh/install/>
 2. Clone your fork
 3. Install dependencies: `pixi install`
 4. Activate development environment: `pixi shell -e dev`
@@ -48,6 +48,7 @@ We follow these style guidelines:
 - Target Python: 3.10+
 
 Run the development tools:
+
 ```bash
 pixi run format  # Format code with ruff format
 pixi run lint    # Lint with ruff check
@@ -62,6 +63,7 @@ All contributions must include appropriate tests:
 - Maintain or improve code coverage
 
 Run tests with:
+
 ```bash
 pixi run test
 ```
