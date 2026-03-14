@@ -881,10 +881,10 @@ packages:
 - pypi: ./
   name: hephaestus
   version: 0.3.0
-  sha256: 60424348a7b60d0498e4c84526120cc187ebad2eedee69b3b7983ddac31e32bf
+  sha256: 0a3b1b91bcef04c3dfc7cb67ce30245557d9e5892c44bfa89b0008a58aab4587
   requires_dist:
   - pyyaml>=6.0,<7
-  - pytest>=7.0,<9 ; extra == 'dev'
+  - pytest>=7.0,<10 ; extra == 'dev'
   - pytest-cov>=4.0,<7 ; extra == 'dev'
   - pre-commit>=3.0,<5 ; extra == 'dev'
   - ruff>=0.1.0,<1 ; extra == 'dev'
