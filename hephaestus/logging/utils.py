@@ -20,7 +20,7 @@ from typing import Any
 from hephaestus.constants import LOG_FORMAT
 
 
-class ContextLogger(logging.LoggerAdapter[logging.Logger]):
+class ContextLogger(logging.LoggerAdapter):  # type: ignore[type-arg]
     """Logger adapter that adds context information to log messages."""
 
     def __init__(self, logger: logging.Logger, context: dict[str, Any] | None = None) -> None:
