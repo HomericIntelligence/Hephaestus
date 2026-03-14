@@ -29,6 +29,7 @@ yamllint = ">=1.35.0,<2"
 
 [feature.dev.pypi-dependencies]
 pip-audit = ">=2.7,<3"
+build = ">=1.0,<2"
 
 [feature.lint.dependencies]
 ruff = ">=0.1.0,<1"
