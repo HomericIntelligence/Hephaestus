@@ -44,7 +44,7 @@ jobs:
 
       - name: Run unit tests
         if: matrix.test-type == 'unit'
-        run: pixi run pytest tests/unit --override-ini="addopts=" -v --strict-markers --cov=hephaestus --cov-report=term-missing --cov-report=xml --cov-fail-under=75
+        run: pixi run pytest tests/unit --override-ini="addopts=" -v --strict-markers --cov=hephaestus --cov-report=term-missing --cov-report=xml --cov-fail-under=80
         shell: bash
 
       - name: Check unit test structure

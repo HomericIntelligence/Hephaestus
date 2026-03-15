@@ -65,12 +65,12 @@ class ConfigLinter:
             return False
 
         if self.verbose:
-            logger.info(f"Linting: {filepath}")
+            logger.info("Linting: %s", filepath)
 
         try:
             with open(filepath) as f:
                 content = f.read()
-        except Exception as e:
+        except OSError as e:
             self.errors.append(f"Failed to read file: {e}")
             return False
 
@@ -137,7 +137,7 @@ class ConfigLinter:
 
             return True
 
-        except Exception as e:
+        except (ValueError, TypeError) as e:
             self.errors.append(f"Syntax check failed: {e}")
             return False
 
@@ -186,7 +186,7 @@ class ConfigLinter:
         except ImportError:
             logger.warning("PyYAML not installed, skipping YAML parsing checks")
             return {}
-        except Exception as e:
+        except Exception as e:  # broad catch intentional: yaml has undocumented exception subtypes
             self.errors.append(f"YAML parsing failed: {e}")
             return None
 
@@ -293,19 +293,19 @@ class ConfigLinter:
     def print_results(self) -> None:
         """Print linting results."""
         if self.errors:
-            logger.error(f"\n{len(self.errors)} error(s) found:")
+            logger.error("\n%d error(s) found:", len(self.errors))
             for error in self.errors:
-                logger.error(f"  ✗ {error}")
+                logger.error("  ✗ %s", error)
 
         if self.warnings:
-            logger.warning(f"\n{len(self.warnings)} warning(s) found:")
+            logger.warning("\n%d warning(s) found:", len(self.warnings))
             for warning in self.warnings:
-                logger.warning(f"  ⚠ {warning}")
+                logger.warning("  ⚠ %s", warning)
 
         if self.suggestions:
-            logger.info(f"\n{len(self.suggestions)} suggestion(s):")
+            logger.info("\n%d suggestion(s):", len(self.suggestions))
             for suggestion in self.suggestions:
-                logger.info(f"  ℹ {suggestion}")
+                logger.info("  ℹ %s", suggestion)
 
         if not self.errors and not self.warnings and not self.suggestions:
             logger.info("✓ No issues found")

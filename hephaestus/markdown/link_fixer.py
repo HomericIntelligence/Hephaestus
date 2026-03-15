@@ -8,12 +8,15 @@ This module provides functionality to fix two types of invalid links:
 """
 
 import re
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from hephaestus.constants import DEFAULT_EXCLUDE_DIRS
+from hephaestus.logging.utils import get_logger
+from hephaestus.markdown.utils import find_markdown_files
 from hephaestus.utils.helpers import get_repo_root
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -40,9 +43,7 @@ class LinkFixer:
         self.exclude_patterns = self.options.exclude_patterns or DEFAULT_EXCLUDE_DIRS
         # Default pattern matches <home-dir>/<user>/<repo-name>
         # (captures up to but not including the final slash before the file path)
-        import re as _re
-
-        home_dir = _re.escape(str(Path.home().parent))
+        home_dir = re.escape(str(Path.home().parent))
         self.system_path_pattern = self.options.system_path_pattern or rf"{home_dir}/[^/]+/[^/]+"
 
     def fix_system_path_links(self, content: str) -> tuple[str, int]:
@@ -111,7 +112,7 @@ class LinkFixer:
             try:
                 repo_root = get_repo_root()
                 relative_path = file_path.relative_to(repo_root)
-            except Exception:
+            except (OSError, ValueError):
                 # If we can't determine repo root, use file_path as-is
                 relative_path = file_path
 
@@ -120,26 +121,30 @@ class LinkFixer:
 
             if content != original_content:
                 if self.options.dry_run:
-                    print(
-                        f"[DRY RUN] Would fix {file_path}: {system_fixes} system paths,"
-                        f" {absolute_fixes} absolute paths"
+                    logger.info(
+                        "[DRY RUN] Would fix %s: %d system paths, %d absolute paths",
+                        file_path,
+                        system_fixes,
+                        absolute_fixes,
                     )
                     return True, system_fixes, absolute_fixes
 
                 file_path.write_text(content, encoding="utf-8")
                 if self.options.verbose:
-                    print(
-                        f"Fixed {file_path}: {system_fixes} system paths,"
-                        f" {absolute_fixes} absolute paths"
+                    logger.info(
+                        "Fixed %s: %d system paths, %d absolute paths",
+                        file_path,
+                        system_fixes,
+                        absolute_fixes,
                     )
                 return True, system_fixes, absolute_fixes
 
             if self.options.verbose:
-                print(f"No changes needed for {file_path}")
+                logger.info("No changes needed for %s", file_path)
             return False, 0, 0
 
-        except Exception as e:
-            print(f"Error processing {file_path}: {e}", file=sys.stderr)
+        except (OSError, UnicodeDecodeError) as e:
+            logger.error("Error processing %s: %s", file_path, e)
             return False, 0, 0
 
     def process_path(self, path: Path) -> tuple[int, int, int]:
@@ -153,7 +158,7 @@ class LinkFixer:
 
         """
         if not path.exists():
-            print(f"Error: {path} does not exist", file=sys.stderr)
+            logger.error("Error: %s does not exist", path)
             return 0, 0, 0
 
         files_to_fix = []
@@ -161,20 +166,16 @@ class LinkFixer:
             if path.suffix == ".md":
                 files_to_fix.append(path)
             else:
-                print(f"Warning: {path} is not a markdown file", file=sys.stderr)
+                logger.warning("Warning: %s is not a markdown file", path)
                 return 0, 0, 0
         else:
-            files_to_fix = [
-                f
-                for f in path.rglob("*.md")
-                if not any(part in self.exclude_patterns for part in f.parts)
-            ]
+            files_to_fix = find_markdown_files(path, self.exclude_patterns)
 
         if not files_to_fix:
-            print(f"No markdown files found in {path}")
+            logger.info("No markdown files found in %s", path)
             return 0, 0, 0
 
-        print(f"Found {len(files_to_fix)} markdown file(s)")
+        logger.info("Found %d markdown file(s)", len(files_to_fix))
 
         files_modified = 0
         total_system_fixes = 0

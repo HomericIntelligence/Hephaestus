@@ -8,34 +8,12 @@ documentation quality across projects.
 import re
 from pathlib import Path
 
-from hephaestus.constants import DEFAULT_EXCLUDE_DIRS
 from hephaestus.logging.utils import get_logger
+from hephaestus.markdown.utils import find_markdown_files
 
 logger = get_logger(__name__)
 
-
-def find_markdown_files(directory: Path, exclude_dirs: set[str] | None = None) -> list[Path]:
-    """Find all markdown files in a directory recursively.
-
-    Args:
-        directory: Directory to search
-        exclude_dirs: Set of directory names to exclude from search
-
-    Returns:
-        Sorted list of Path objects for markdown files
-
-    """
-    if exclude_dirs is None:
-        exclude_dirs = set(DEFAULT_EXCLUDE_DIRS)
-
-    markdown_files = []
-    for md_file in directory.rglob("*.md"):
-        # Check if any parent directory is in exclude list
-        if any(part in exclude_dirs for part in md_file.parts):
-            continue
-        markdown_files.append(md_file)
-
-    return sorted(markdown_files)
+__all__ = ["find_markdown_files"]
 
 
 def validate_file_exists(file_path: Path) -> bool:
@@ -87,7 +65,7 @@ def check_required_sections(
         if not re.search(pattern, content, re.MULTILINE):
             missing.append(section)
             if file_path:
-                logger.debug(f"{file_path}: Missing section '{section}'")
+                logger.debug("%s: Missing section '%s'", file_path, section)
 
     return len(missing) == 0, missing
 

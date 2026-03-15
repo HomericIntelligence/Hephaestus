@@ -19,13 +19,19 @@ ProjectHephaestus/
 ├── pyproject.toml     # Python package configuration
 ├── hephaestus/        # Main package
 │   ├── __init__.py
-│   ├── utils/         # General utility functions
-│   ├── config/        # Configuration utilities
-│   ├── io/            # I/O utilities
-│   ├── cli/           # CLI helpers
-│   ├── logging/       # Logging utilities
-│   ├── system/        # System information
-│   └── validation/    # Validation utilities
+│   ├── utils/         # General utility functions (slugify, retry, subprocess)
+│   ├── config/        # Configuration utilities (YAML, JSON, env vars)
+│   ├── io/            # I/O utilities (read, write, safe_write, load/save data)
+│   ├── cli/           # CLI helpers (argument parsing, output formatting)
+│   ├── logging/       # Logging utilities (ContextLogger, setup_logging)
+│   ├── system/        # System information collection
+│   ├── git/           # Git utilities (changelog generation)
+│   ├── github/        # GitHub automation (PR merging)
+│   ├── datasets/      # Dataset downloading utilities
+│   ├── markdown/      # Markdown linting and link fixing
+│   ├── benchmarks/    # Benchmark comparison utilities
+│   ├── version/       # Version management
+│   └── validation/    # README and config validation
 ├── tests/             # Unit tests
 ├── docs/              # Documentation
 ├── scripts/           # Utility scripts
@@ -129,6 +135,36 @@ pip install -e /path/to/ProjectHephaestus
 
 - `read_file(path)` / `write_file(path, content)`: Simple file I/O
 - `load_data(path)` / `save_data(path, data)`: Structured data (JSON/YAML)
+
+## CLI Commands
+
+Four command-line tools are installed as console scripts when you install the package:
+
+| Command | Description |
+|---|---|
+| `hephaestus-changelog` | Generate a changelog from Git history |
+| `hephaestus-merge-prs` | Automate merging of GitHub pull requests |
+| `hephaestus-system-info` | Collect and display system/environment information |
+| `hephaestus-download-dataset` | Download datasets with retry and progress reporting |
+
+### Examples
+
+```bash
+# Generate changelog
+hephaestus-changelog --help
+
+# Collect system info (JSON output)
+hephaestus-system-info --json
+
+# Collect system info without tool version checks
+hephaestus-system-info --no-tools
+
+# Download a dataset
+hephaestus-download-dataset --help
+
+# Merge open PRs
+hephaestus-merge-prs --help
+```
 
 ## Development Guidelines
 

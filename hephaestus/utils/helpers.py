@@ -11,6 +11,10 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
+from hephaestus.logging.utils import get_logger
+
+logger = get_logger(__name__)
+
 
 def slugify(text: str) -> str:
     """Convert text to a URL-friendly slug.
@@ -130,7 +134,7 @@ def run_subprocess(
 
     """
     if dry_run:
-        print(f"[DRY-RUN] $ {' '.join(cmd)}")
+        logger.info("[DRY-RUN] $ %s", " ".join(cmd))
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
     try:
         result = subprocess.run(
@@ -143,8 +147,8 @@ def run_subprocess(
         )
         return result
     except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Command failed: {' '.join(cmd)}")
-        print(f"[ERROR] stderr: {e.stderr}")
+        logger.error("Command failed: %s", " ".join(cmd))
+        logger.error("stderr: %s", e.stderr)
         raise
 
 
@@ -209,8 +213,8 @@ def install_package(package_name: str, upgrade: bool = False) -> bool:
 
     try:
         run_subprocess(cmd)
-        print(f"Successfully installed {package_name}")
+        logger.info("Successfully installed %s", package_name)
         return True
     except subprocess.CalledProcessError as e:
-        print(f"Failed to install {package_name}: {e}")
+        logger.error("Failed to install %s: %s", package_name, e)
         return False

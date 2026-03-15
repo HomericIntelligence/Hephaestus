@@ -112,10 +112,10 @@ class StructureValidator:
             passed, message = self.check_directory_exists(repo_root, dir_name)
             if passed:
                 results["passed"].append(message)
-                logger.info(f"  {message}") if verbose else None
+                logger.info("  %s", message) if verbose else None
             else:
                 results["failed"].append(message)
-                logger.error(f"  ✗ {message}")
+                logger.error("  ✗ %s", message)
 
         # Check required files
         logger.info("\nChecking required files...")
@@ -124,10 +124,10 @@ class StructureValidator:
                 passed, message = self.check_file_exists(repo_root, dir_name, file_name)
                 if passed:
                     results["passed"].append(message)
-                    logger.info(f"  {message}") if verbose else None
+                    logger.info("  %s", message) if verbose else None
                 else:
                     results["failed"].append(message)
-                    logger.error(f"  ✗ {message}")
+                    logger.error("  ✗ %s", message)
 
         # Check required subdirectories
         logger.info("\nChecking required subdirectories...")
@@ -136,10 +136,10 @@ class StructureValidator:
                 passed, message = self.check_subdirectory_exists(repo_root, parent_dir, subdir)
                 if passed:
                     results["passed"].append(message)
-                    logger.info(f"  {message}") if verbose else None
+                    logger.info("  %s", message) if verbose else None
                 else:
                     results["failed"].append(message)
-                    logger.error(f"  ✗ {message}")
+                    logger.error("  ✗ %s", message)
 
         return results
 
@@ -157,13 +157,13 @@ class StructureValidator:
         logger.info("\n" + "=" * 70)
         logger.info("STRUCTURE VALIDATION SUMMARY")
         logger.info("=" * 70)
-        logger.info(f"Total checks: {total_checks}")
-        logger.info(f"Passed: {passed}")
-        logger.info(f"Failed: {failed}")
+        logger.info("Total checks: %d", total_checks)
+        logger.info("Passed: %d", passed)
+        logger.info("Failed: %d", failed)
 
         if failed > 0:
-            logger.info(f"\nFailed checks ({failed}):")
+            logger.info("\nFailed checks (%d):", failed)
             for failure in results["failed"]:
-                logger.info(f"  {failure}")
+                logger.info("  %s", failure)
 
         logger.info("=" * 70)

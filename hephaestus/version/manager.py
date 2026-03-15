@@ -10,7 +10,10 @@ Supports updating version numbers across:
 import re
 from pathlib import Path
 
+from hephaestus.logging.utils import get_logger
 from hephaestus.utils.helpers import get_repo_root
+
+logger = get_logger(__name__)
 
 
 def parse_version(version: str) -> tuple[int, int, int]:
@@ -94,10 +97,10 @@ class VersionManager:
 
         """
         if verbose:
-            print(f"Updating {version_file}...")
+            logger.info("Updating %s...", version_file)
         version_file.write_text(f"{version}\n")
         if verbose:
-            print(f"  ✓ Updated to {version}")
+            logger.info("  Updated to %s", version)
 
     def update_init_file(self, init_file: Path, version: str, verbose: bool = True) -> None:
         """Update __version__ in __init__.py file.
@@ -110,11 +113,11 @@ class VersionManager:
         """
         if not init_file.exists():
             if verbose:
-                print(f"  ⚠️  Warning: {init_file} not found, skipping")
+                logger.warning("  %s not found, skipping", init_file)
             return
 
         if verbose:
-            print(f"Updating {init_file}...")
+            logger.info("Updating %s...", init_file)
 
         content = init_file.read_text()
 
@@ -125,12 +128,12 @@ class VersionManager:
 
         if new_content == content:
             if verbose:
-                print(f"  ⚠️  Warning: No __version__ attribute found in {init_file}")
+                logger.warning("  No __version__ attribute found in %s", init_file)
             return
 
         init_file.write_text(new_content)
         if verbose:
-            print(f'  ✓ Updated __version__ = "{version}"')
+            logger.info('  Updated __version__ = "%s"', version)
 
     def update(self, version: str, verbose: bool = True) -> None:
         """Update all configured version files.
@@ -143,7 +146,9 @@ class VersionManager:
         # Parse and validate version
         major, minor, patch = parse_version(version)
         if verbose:
-            print(f"Parsed version: {version} (major={major}, minor={minor}, patch={patch})\n")
+            logger.info(
+                "Parsed version: %s (major=%d, minor=%d, patch=%d)\n", version, major, minor, patch
+            )
 
         # Update VERSION files
         for version_file in self.version_files:
@@ -165,7 +170,7 @@ class VersionManager:
 
         """
         if verbose:
-            print("\nVerifying version files...")
+            logger.info("\nVerifying version files...")
 
         success = True
 
@@ -175,17 +180,19 @@ class VersionManager:
                 content = version_file.read_text().strip()
                 if content == version:
                     if verbose:
-                        print(f"  ✓ {version_file.relative_to(self.repo_root)}: {content}")
+                        logger.info("  %s: %s", version_file.relative_to(self.repo_root), content)
                 else:
                     if verbose:
-                        print(
-                            f"  ✗ {version_file.relative_to(self.repo_root)}: {content}"
-                            f" (expected {version})"
+                        logger.error(
+                            "  %s: %s (expected %s)",
+                            version_file.relative_to(self.repo_root),
+                            content,
+                            version,
                         )
                     success = False
             else:
                 if verbose:
-                    print(f"  ✗ {version_file.relative_to(self.repo_root)} not found")
+                    logger.error("  %s not found", version_file.relative_to(self.repo_root))
                 success = False
 
         # Check __init__.py files
@@ -196,13 +203,19 @@ class VersionManager:
                 match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
                 if match and match.group(1) == version:
                     if verbose:
-                        print(f"  ✓ {init_file.relative_to(self.repo_root)}: {match.group(1)}")
+                        logger.info(
+                            "  %s: %s", init_file.relative_to(self.repo_root), match.group(1)
+                        )
                 else:
                     if verbose:
-                        print(f"  ✗ {init_file.relative_to(self.repo_root)}: version mismatch")
+                        logger.error(
+                            "  %s: version mismatch", init_file.relative_to(self.repo_root)
+                        )
                     success = False
             else:
                 if verbose:
-                    print(f"  ⚠️  {init_file.relative_to(self.repo_root)} not found (optional)")
+                    logger.warning(
+                        "  %s not found (optional)", init_file.relative_to(self.repo_root)
+                    )
 
         return success

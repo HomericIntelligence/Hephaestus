@@ -111,7 +111,7 @@ def safe_write(
         backup_path = filepath.with_suffix(filepath.suffix + ".bak")
         try:
             backup_path.write_bytes(filepath.read_bytes())
-        except Exception as e:
+        except OSError as e:
             logger.warning("Could not create backup: %s", e)
 
     ensure_directory(filepath.parent)

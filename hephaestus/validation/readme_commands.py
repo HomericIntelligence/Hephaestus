@@ -249,7 +249,7 @@ class ReadmeValidator:
                 check_type="syntax",
                 error_message="Syntax check timed out",
             )
-        except Exception as e:
+        except (OSError, ValueError) as e:
             return ValidationResult(
                 command=command,
                 passed=False,
@@ -319,7 +319,7 @@ class ReadmeValidator:
                 check_type="execution",
                 error_message=f"Command timed out after {timeout}s",
             )
-        except Exception as e:
+        except (OSError, ValueError) as e:
             return ValidationResult(
                 command=command,
                 passed=False,

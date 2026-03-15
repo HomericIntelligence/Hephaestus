@@ -13,6 +13,7 @@ from pathlib import Path
 
 from hephaestus.constants import DEFAULT_EXCLUDE_DIRS
 from hephaestus.logging.utils import get_logger
+from hephaestus.markdown.utils import find_markdown_files
 
 logger = get_logger(__name__)
 
@@ -51,7 +52,7 @@ class MarkdownFixer:
         """
         try:
             content = file_path.read_text(encoding="utf-8")
-        except Exception as e:
+        except OSError as e:
             logger.error("Error reading %s: %s", file_path, e)
             return False, 0
 
@@ -82,7 +83,7 @@ class MarkdownFixer:
         # Write back if changed
         if content != original_content:
             if self.options.dry_run:
-                print(f"[DRY RUN] Would fix {file_path}: {fixes} issues")
+                logger.info("[DRY RUN] Would fix %s: %d issues", file_path, fixes)
                 return True, fixes
 
             try:
@@ -90,7 +91,7 @@ class MarkdownFixer:
                 if self.options.verbose:
                     logger.info("Fixed %s: %d issues", file_path, fixes)
                 return True, fixes
-            except Exception as e:
+            except OSError as e:
                 logger.error("Error writing %s: %s", file_path, e)
                 return False, 0
 
@@ -315,7 +316,7 @@ class MarkdownFixer:
 
         """
         if not path.exists():
-            print(f"Error: {path} does not exist", file=sys.stderr)
+            logger.error("Error: %s does not exist", path)
             return 0, 0
 
         files_to_fix = []
@@ -323,20 +324,16 @@ class MarkdownFixer:
             if path.suffix == ".md":
                 files_to_fix.append(path)
             else:
-                print(f"Warning: {path} is not a markdown file", file=sys.stderr)
+                logger.warning("Warning: %s is not a markdown file", path)
                 return 0, 0
         else:
-            files_to_fix = [
-                f
-                for f in path.rglob("*.md")
-                if not any(part in self.exclude_patterns for part in f.parts)
-            ]
+            files_to_fix = find_markdown_files(path, self.exclude_patterns)
 
         if not files_to_fix:
-            print(f"No markdown files found in {path}")
+            logger.info("No markdown files found in %s", path)
             return 0, 0
 
-        print(f"Found {len(files_to_fix)} markdown file(s)")
+        logger.info("Found %d markdown file(s)", len(files_to_fix))
 
         files_modified = 0
         total_fixes = 0

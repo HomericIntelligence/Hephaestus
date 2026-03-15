@@ -53,11 +53,11 @@ def detect_repo_from_remote() -> str | None:
                 owner, repo = match.groups()
                 return f"{owner}/{repo}"
 
-        logger.warning(f"Could not parse GitHub repo from remote URL: {remote_url}")
+        logger.warning("Could not parse GitHub repo from remote URL: %s", remote_url)
         return None
 
-    except Exception as e:
-        logger.warning(f"Could not detect repo from git remote: {e}")
+    except Exception as e:  # broad catch intentional: git subprocess can fail in many ways
+        logger.warning("Could not detect repo from git remote: %s", e)
         return None
 
 
@@ -70,7 +70,7 @@ def run_git_cmd(cmd: list[str], dry_run: bool = False, cwd: str | None = None) -
         cwd: Working directory
 
     """
-    logger.info(f"$ {' '.join(cmd)}")
+    logger.info("$ %s", " ".join(cmd))
     run_subprocess(cmd, cwd=cwd, dry_run=dry_run)
 
 
@@ -86,8 +86,8 @@ def checks_success_and_print(commit: Any) -> tuple[bool | None, list[Any]]:
     """
     try:
         checks = list(commit.get_check_runs())
-    except Exception as e:
-        logger.error(f"Error getting check runs: {e}")
+    except Exception as e:  # broad catch intentional: PyGithub raises many exception subtypes
+        logger.error("Error getting check runs: %s", e)
         return None, []
 
     bad = {"failure", "timed_out", "cancelled", "action_required"}
@@ -95,7 +95,7 @@ def checks_success_and_print(commit: Any) -> tuple[bool | None, list[Any]]:
 
     if checks:
         for cr in checks:
-            logger.info(f"    - {cr.name}: status={cr.status}, conclusion={cr.conclusion}")
+            logger.info("    - %s: status=%s, conclusion=%s", cr.name, cr.status, cr.conclusion)
             if cr.status != "completed":
                 return False, checks
             if cr.conclusion in bad:
@@ -120,10 +120,12 @@ def legacy_status_and_print(commit: Any) -> str:
     try:
         combined = commit.get_combined_status()
         for ctx in combined.statuses:
-            logger.info(f"    - {ctx.context}: state={ctx.state}, description={ctx.description}")
+            logger.info(
+                "    - %s: state=%s, description=%s", ctx.context, ctx.state, ctx.description
+            )
         return combined.state or "unknown"
-    except Exception as e:
-        logger.error(f"Error getting combined status: {e}")
+    except Exception as e:  # broad catch intentional: PyGithub raises many exception subtypes
+        logger.error("Error getting combined status: %s", e)
         return "unknown"
 
 
@@ -156,7 +158,7 @@ def try_push_head_branch(head_branch: str, dry_run: bool) -> None:
     """
     if dry_run:
         logger.info(
-            f"[DRY-RUN] Would push local branch '{head_branch}' to origin if it exists locally."
+            "[DRY-RUN] Would push local branch '%s' to origin if it exists locally.", head_branch
         )
         return
 
@@ -164,7 +166,7 @@ def try_push_head_branch(head_branch: str, dry_run: bool) -> None:
         run_git_cmd(["git", "push", "origin", f"{head_branch}:{head_branch}"], dry_run=False)
     else:
         logger.info(
-            f"  Local branch '{head_branch}' not found; assuming remote branch already present."
+            "  Local branch '%s' not found; assuming remote branch already present.", head_branch
         )
 
 
@@ -181,16 +183,16 @@ def handle_merge_result(result: Any, pr_number: int, base_branch: str) -> None:
         merged = getattr(result, "merged", None)
         message = getattr(result, "message", None)
         sha = getattr(result, "sha", None)
-    except Exception:
+    except AttributeError:
         # Fallback for unexpected types
         merged = False
         message = str(result)
         sha = None
 
     if merged:
-        logger.info(f"  🎉 PR #{pr_number} merged into {base_branch} via rebase. sha={sha}")
+        logger.info("  PR #%d merged into %s via rebase. sha=%s", pr_number, base_branch, sha)
     else:
-        logger.error(f"  Failed to merge PR #{pr_number}. API message: {message}")
+        logger.error("  Failed to merge PR #%d. API message: %s", pr_number, message)
 
 
 def main() -> None:  # noqa: C901
@@ -231,7 +233,7 @@ def main() -> None:  # noqa: C901
         )
         sys.exit(1)
 
-    logger.info(f"Working with repository: {repo_name}")
+    logger.info("Working with repository: %s", repo_name)
 
     # Import PyGithub
     try:
@@ -247,8 +249,8 @@ def main() -> None:  # noqa: C901
     gh = Github(token)
     try:
         repo = gh.get_repo(repo_name)
-    except Exception as e:
-        logger.error(f"Error accessing repo {repo_name}: {e}")
+    except Exception as e:  # broad catch intentional: PyGithub raises many exception subtypes
+        logger.error("Error accessing repo %s: %s", repo_name, e)
         sys.exit(1)
 
     # Update local main
@@ -260,12 +262,12 @@ def main() -> None:  # noqa: C901
     for pr in repo.get_pulls(state="open", sort="created"):
         head_branch = pr.head.ref
         base_branch = pr.base.ref
-        logger.info(f"\nChecking PR #{pr.number}: {head_branch} -> {base_branch}")
+        logger.info("\nChecking PR #%d: %s -> %s", pr.number, head_branch, base_branch)
 
         try:
             commit = repo.get_commit(pr.head.sha)
-        except Exception as e:
-            logger.error(f"  Unable to retrieve head commit for PR #{pr.number}: {e}")
+        except Exception as e:  # broad catch intentional: PyGithub raises many exception subtypes
+            logger.error("  Unable to retrieve head commit for PR #%d: %s", pr.number, e)
             continue
 
         logger.info("  Checks API results:")
@@ -278,25 +280,26 @@ def main() -> None:  # noqa: C901
 
         # Handle push-all flag
         if args.push_all:
-            logger.info(f"  Pushing head branch '{head_branch}' (--push-all mode)...")
+            logger.info("  Pushing head branch '%s' (--push-all mode)...", head_branch)
             try_push_head_branch(head_branch, args.dry_run)
 
         # Merge if checks passed
         if success:
-            logger.info(f"  CI/CD checks passed for PR #{pr.number}. Attempting merge...")
+            logger.info("  CI/CD checks passed for PR #%d. Attempting merge...", pr.number)
             if not args.push_all:
                 try_push_head_branch(head_branch, args.dry_run)
 
             if args.dry_run:
-                logger.info(f"[DRY-RUN] Would merge PR #{pr.number} via rebase")
+                logger.info("[DRY-RUN] Would merge PR #%d via rebase", pr.number)
             else:
                 try:
                     result = pr.merge(merge_method="rebase")
                     handle_merge_result(result, pr.number, base_branch)
+                # broad catch intentional: PyGithub raises many exception subtypes
                 except Exception as e:
-                    logger.error(f"  Error merging PR #{pr.number}: {e}")
+                    logger.error("  Error merging PR #%d: %s", pr.number, e)
         else:
-            logger.warning(f"  CI/CD checks not successful for PR #{pr.number}. Skipping merge.")
+            logger.warning("  CI/CD checks not successful for PR #%d. Skipping merge.", pr.number)
 
     logger.info("\nDone processing all open PRs.")
 

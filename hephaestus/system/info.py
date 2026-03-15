@@ -70,7 +70,7 @@ def get_os_info() -> str:
                     name = os_data.get("NAME", "Linux")
                     version = os_data.get("VERSION", "")
                     return f"{name} {version}".strip()
-            except Exception:
+            except Exception:  # /etc/os-release parsing is best-effort; any failure is non-fatal
                 pass
         return "Linux (unknown distribution)"
 

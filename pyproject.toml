@@ -17,18 +17,16 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: BSD License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
-keywords = ["utilities", "helpers", "tooling", "homercintelligence"]
+keywords = ["utilities", "helpers", "tooling", "homericintelligence"]
 dependencies = [
     "pyyaml>=6.0,<7",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0,<10",
+    "pytest>=9.0,<10",
     "pytest-cov>=4.0,<8",
     "pre-commit>=3.0,<5",
     "ruff>=0.1.0,<1",

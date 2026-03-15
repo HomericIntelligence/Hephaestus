@@ -184,7 +184,7 @@ def retry_with_jitter(
     for attempt in range(max_retries + 1):
         try:
             return func()
-        except Exception as e:
+        except Exception as e:  # broad catch intentional: generic retry must handle all exceptions
             last_exception = e
             if attempt < max_retries:
                 # Calculate delay with exponential backoff and jitter

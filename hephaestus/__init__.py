@@ -16,6 +16,11 @@ __author__ = "Micah Villmow"
 # Public API surface — prefer subpackage imports for full access:
 #   from hephaestus.utils import slugify
 #   from hephaestus.io.utils import load_data
+#
+# Design note: __all__ lists the *recommended* top-level symbols (9 most-used).
+# _LAZY_IMPORTS maps the full set of lazily-loaded symbols (28 total) that are
+# also accessible via `hephaestus.<name>` but not re-exported by star-import.
+# This keeps `import hephaestus` fast (PEP 562) while providing convenient access.
 __all__ = [
     "ContextLogger",
     "__version__",

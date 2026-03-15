@@ -101,7 +101,7 @@ class DatasetDownloader:
             except URLError as e:
                 last_error = f"URL Error: {e.reason}"
                 logger.warning("Download failed: %s", last_error)
-            except Exception as e:
+            except OSError as e:
                 last_error = str(e)
                 logger.warning("Download failed: %s", last_error)
 
@@ -129,7 +129,7 @@ class DatasetDownloader:
                 with open(output_path, "wb") as f_out:
                     f_out.write(f_in.read())
             return True
-        except Exception as e:
+        except (OSError, EOFError) as e:
             logger.error("Failed to decompress %s: %s", gz_path, e)
             return False
 
@@ -168,26 +168,26 @@ class MNISTDownloader(DatasetDownloader):
 
             # Download if not exists
             if not output_file_path.exists():
-                print(f"Downloading MNIST {output_filename.split('_')[0]} data...")
+                logger.info("Downloading MNIST %s data...", output_filename.split("_")[0])
 
                 if self.download_with_retry(gz_filename, gz_path):
                     # Decompress
-                    print(f"Decompressing {gz_filename}...")
+                    logger.info("Decompressing %s...", gz_filename)
                     if self.decompress_gz(gz_path, output_file_path):
                         # Clean up gzip file
                         gz_path.unlink()
-                        print(f"✓ {output_filename} ready")
+                        logger.info("%s ready", output_filename)
                     else:
                         success = False
                 else:
                     success = False
             else:
-                print(f"✓ {output_filename} already exists")
+                logger.info("%s already exists", output_filename)
 
         if success:
-            print(f"\n✓ MNIST dataset ready at: {output_path}")
+            logger.info("MNIST dataset ready at: %s", output_path)
         else:
-            print("\n✗ Some MNIST files failed to download.")
+            logger.error("Some MNIST files failed to download.")
 
         return success
 
