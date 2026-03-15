@@ -80,7 +80,8 @@ class DatasetDownloader:
                             f.write(block)
                             downloaded += len(block)
 
-                            # Progress bar
+                            # Progress bar: intentional stdout output for interactive
+                            # terminal feedback; not library logging
                             if total_size > 0:
                                 percent = min(100, downloaded * 100 / total_size)
                                 bar_length = 50
@@ -92,7 +93,7 @@ class DatasetDownloader:
                                     flush=True,
                                 )
 
-                print()  # New line after progress bar
+                print()  # terminates the progress bar line
                 return True
 
             except HTTPError as e:

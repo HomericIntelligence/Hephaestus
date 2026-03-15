@@ -5,6 +5,28 @@ All notable changes to ProjectHephaestus are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-03-15
+
+### Fixed
+
+- Fixed 21 bare `except Exception` clauses — all now justified with inline comments
+- Fixed 35 f-string logging anti-patterns — replaced with `%`-style lazy formatting
+- Fixed 44 unjustified `print()` calls in library code — replaced with `logging`
+- Added `needs: test` gate to release workflow (prevents publishing on test failure)
+- Aligned Python classifiers in `pyproject.toml` with CI (only `3.12` claimed)
+- Documented CLI entry points in `README.md`
+
+### Added
+
+- Shared `find_markdown_files()` utility eliminating DRY violation across markdown subpackage
+- `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1)
+
+### Changed
+
+- Aligned pytest coverage threshold to 80% in both `pyproject.toml` and CI
+- Removed empty directories: `scripts/testing/`, `scripts/utilities/`
+- Removed redundant `import re as _re` in `markdown/link_fixer.py`
+
 ## [0.3.0] - 2026-03-13
 
 ### Added

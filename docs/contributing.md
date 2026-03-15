@@ -32,10 +32,10 @@ All utility functions must include comprehensive test coverage:
 
 ```bash
 # Run all tests
-python -m pytest tests/ -v
+pixi run pytest tests/unit -v
 
 # Run with coverage
-python -m pytest tests/ --cov=hephaestus --cov-report=html
+pixi run pytest tests/unit --cov=hephaestus --cov-report=html
 ```
 
 ## Submitting Changes

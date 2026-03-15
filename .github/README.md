@@ -10,13 +10,13 @@ Continuous Integration pipeline that runs on every push and pull request to `mai
 
 **Matrix:**
 
-- OS: `ubuntu-latest`, `macos-latest`, `windows-latest`
-- Python: `3.10`, `3.11`, `3.12`
+- OS: `ubuntu-latest`
+- Python: `3.12`
 - Test types: `unit`, `integration`
 
 **Jobs:**
 
-- **Unit tests**: pytest with coverage (≥75%)
+- **Unit tests**: pytest with coverage (≥80%)
 - **Integration tests**: import smoke tests + wheel build/install
 - **Structure check**: enforces test mirrors source layout
 

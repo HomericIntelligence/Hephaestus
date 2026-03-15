@@ -15,11 +15,11 @@ Currently consolidating utilities from:
 
 ```
 ProjectHephaestus/
-├── scripts/          # Organized script collections
-├── tools/            # Standalone tools
-├── shared/           # Shared utility functions
-├── examples/         # Usage examples
-└── docs/             # Documentation
+├── hephaestus/       # Python package (13 subpackages)
+├── tests/            # Unit and integration tests
+├── scripts/          # Automation scripts
+├── docs/             # Documentation
+└── examples/         # Usage examples
 ```
 
 ## Usage
