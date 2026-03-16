@@ -1,5 +1,5 @@
 [workspace]
-name = "hephaestus"
+name = "project-hephaestus"
 version = "0.3.0"
 description = "Shared utilities and tooling for the HomericIntelligence ecosystem"
 channels = ["conda-forge"]
