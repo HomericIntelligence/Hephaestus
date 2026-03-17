@@ -14,6 +14,7 @@ from hephaestus.io.utils import (
     safe_write,
     save_data,
     write_file,
+    write_secure,
 )
 
 
@@ -111,6 +112,47 @@ class TestSafeWrite:
         f.write_text("original")
         safe_write(f, "updated", backup=False)
         assert not f.with_suffix(".txt.bak").exists()
+
+
+class TestWriteSecure:
+    """Tests for write_secure."""
+
+    def test_writes_content(self, tmp_path: Path) -> None:
+        """Writes text content to file."""
+        f = tmp_path / "secret.txt"
+        write_secure(f, "sensitive data")
+        assert f.read_text() == "sensitive data"
+
+    def test_default_permissions(self, tmp_path: Path) -> None:
+        """Default permissions are 0o600 (owner read/write only)."""
+        f = tmp_path / "secret.txt"
+        write_secure(f, "data")
+        assert oct(f.stat().st_mode & 0o777) == oct(0o600)
+
+    def test_custom_permissions(self, tmp_path: Path) -> None:
+        """Custom permissions are applied."""
+        f = tmp_path / "readable.txt"
+        write_secure(f, "data", permissions=0o644)
+        assert oct(f.stat().st_mode & 0o777) == oct(0o644)
+
+    def test_creates_parent_dirs(self, tmp_path: Path) -> None:
+        """Creates missing parent directories."""
+        f = tmp_path / "sub" / "dir" / "secret.txt"
+        write_secure(f, "data")
+        assert f.exists()
+
+    def test_string_path(self, tmp_path: Path) -> None:
+        """Accepts string path."""
+        f = str(tmp_path / "secret.txt")
+        write_secure(f, "data")
+        assert Path(f).read_text() == "data"
+
+    def test_overwrites_existing(self, tmp_path: Path) -> None:
+        """Overwrites existing file content."""
+        f = tmp_path / "secret.txt"
+        f.write_text("old")
+        write_secure(f, "new")
+        assert f.read_text() == "new"
 
 
 class TestDetectFormat:

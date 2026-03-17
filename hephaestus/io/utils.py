@@ -122,6 +122,28 @@ def safe_write(
     return True
 
 
+def write_secure(
+    filepath: str | Path,
+    content: str,
+    permissions: int = 0o600,
+) -> None:
+    """Write content to file with restrictive permissions.
+
+    Args:
+        filepath: Path to file
+        content: Text content to write
+        permissions: File permission bits (default: 0o600, owner read/write only)
+
+    Raises:
+        OSError: If the file cannot be written or permissions cannot be set
+
+    """
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    filepath.write_text(content)
+    filepath.chmod(permissions)
+
+
 def _detect_format(filepath: Path, format_hint: str | None) -> str:
     """Detect serialization format from file extension or hint.
 

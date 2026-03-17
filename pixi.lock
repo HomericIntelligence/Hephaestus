@@ -880,8 +880,8 @@ packages:
   timestamp: 1773314012590
 - pypi: ./
   name: hephaestus
-  version: 0.3.2
-  sha256: 2fa01869772047cdb3c430822a1f858d13dca914f134aa6879eb07302cbee127
+  version: 0.4.0
+  sha256: 015b78f1dc276e9d343884367de026e704fe877afa381d09dc0edbba0c145d26
   requires_dist:
   - pyyaml>=6.0,<7
   - pytest>=9.0,<10 ; extra == 'dev'

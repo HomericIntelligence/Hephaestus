@@ -7,6 +7,7 @@ from .utils import (
     safe_write,
     save_data,
     write_file,
+    write_secure,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "safe_write",
     "save_data",
     "write_file",
+    "write_secure",
 ]

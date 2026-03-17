@@ -5,6 +5,19 @@ All notable changes to ProjectHephaestus are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-03-17
+
+### Added
+
+- `write_secure(filepath, content, permissions=0o600)` in `hephaestus.io.utils` — writes files with restrictive permissions (e.g. credential files)
+- New `hephaestus.github.rate_limit` module with:
+  - `parse_reset_epoch(time_str, tz)` — parses GitHub CLI rate-limit reset times into epoch seconds
+  - `detect_rate_limit(text)` — scans text for rate-limit messages and returns the reset epoch
+  - `wait_until(epoch)` — blocks with countdown display until the given timestamp
+  - `RATE_LIMIT_RE` regex and `ALLOWED_TIMEZONES` constant
+- All new functions exposed via lazy imports on `hephaestus.*`
+- Comprehensive test coverage for all new utilities
+
 ## [0.3.2] - 2026-03-17
 
 ### Fixed
