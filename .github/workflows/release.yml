@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
@@ -58,11 +58,37 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pixi-
 
+      - name: Verify tag matches package version
+        shell: bash
+        env:
+          TAG_REF: ${{ github.ref_name }}
+        run: |
+          TAG_VERSION="${TAG_REF#v}"
+          PKG_VERSION=$(python -c "
+          import re, pathlib
+          text = pathlib.Path('pyproject.toml').read_text()
+          m = re.search(r'^version\s*=\s*\"(.+?)\"', text, re.MULTILINE)
+          print(m.group(1))
+          ")
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match pyproject.toml version ($PKG_VERSION)"
+            exit 1
+          fi
+          echo "Version check passed: $TAG_VERSION"
+
       - name: Build package
         run: pixi run python -m build
 
       - name: Publish to PyPI
-        # Pinned to v1.12.2 (sha: 9c65b…) for supply-chain safety
+        # Pinned to v1.12.2 (sha: 76f52b…) for supply-chain safety
         uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9e4905c3b51a7d2d4c89f09
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

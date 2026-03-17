@@ -5,6 +5,29 @@ All notable changes to ProjectHephaestus are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-03-17
+
+### Fixed
+
+- Changed `write_file`, `safe_write`, `ensure_directory`, and `save_data` to return `None` instead of `True` — these functions raise on failure, so the bool return was misleading
+- Removed unnecessary `cast(str | bytes, ...)` in `read_file` (`io/utils.py`)
+- Fixed cache key format inconsistency between `test.yml` and `release.yml` workflows
+- Updated `docs/README.md` subpackage count to match actual structure
+- Fixed project URLs in `pyproject.toml` to point to `HomericIntelligence/ProjectHephaestus`
+
+### Added
+
+- Tag-version consistency check in release workflow — prevents publishing when git tag doesn't match `pyproject.toml` version
+- GitHub Release with artifacts created automatically on tag push
+- `COMPATIBILITY.md` documenting backwards compatibility policy for v0.x and planned v1.0
+- Python 3.10 and 3.11 classifiers plus `Topic` classifiers in `pyproject.toml`
+
+### Changed
+
+- Converted `__init__.py` from eager imports to lazy loading via PEP 562 (`__getattr__`) for faster `import hephaestus`
+- CI coverage threshold aligned to 80% across `test.yml`, `release.yml`, and `pyproject.toml`
+- Coverage upload limited to single matrix entry (ubuntu/3.12) to avoid duplicate reports
+
 ## [0.3.1] - 2026-03-15
 
 ### Fixed

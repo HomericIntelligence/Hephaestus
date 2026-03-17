@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hephaestus"
-version = "0.3.0"
+version = "0.3.2"
 description = "Shared utilities and tooling for the HomericIntelligence ecosystem"
 readme = "README.md"
 license = {text = "BSD 3-Clause"}
@@ -17,7 +17,11 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: BSD License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Utilities",
 ]
 keywords = ["utilities", "helpers", "tooling", "homericintelligence"]
 dependencies = [
@@ -44,9 +48,9 @@ hephaestus-system-info = "hephaestus.system.info:main"
 hephaestus-download-dataset = "hephaestus.datasets.downloader:main"
 
 [project.urls]
-Homepage = "https://github.com/mvillmow/ProjectHephaestus"
-Repository = "https://github.com/mvillmow/ProjectHephaestus"
-Issues = "https://github.com/mvillmow/ProjectHephaestus/issues"
+Homepage = "https://github.com/HomericIntelligence/ProjectHephaestus"
+Repository = "https://github.com/HomericIntelligence/ProjectHephaestus"
+Issues = "https://github.com/HomericIntelligence/ProjectHephaestus/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["hephaestus"]
