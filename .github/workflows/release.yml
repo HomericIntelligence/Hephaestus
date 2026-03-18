@@ -39,6 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: test
+    environment: pypi
 
     steps:
       - uses: actions/checkout@v6
@@ -80,10 +81,7 @@ jobs:
         run: pixi run python -m build
 
       - name: Publish to PyPI
-        # Pinned to v1.12.2 (sha: 76f52b…) for supply-chain safety
-        uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9e4905c3b51a7d2d4c89f09
-        with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
+        uses: pypa/gh-action-pypi-publish@release/v1
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
