@@ -60,7 +60,7 @@ jobs:
         if: matrix.test-type == 'integration'
         run: |
           pixi run python -m build
-          pip install dist/hephaestus-*.whl --force-reinstall
+          pip install dist/HomericIntelligence_Hephaestus-*.whl --force-reinstall
           python -c "import hephaestus; print('Package version:', hephaestus.__version__)"
           python -c "from hephaestus import slugify, retry_with_backoff, setup_logging; print('OK')"
 

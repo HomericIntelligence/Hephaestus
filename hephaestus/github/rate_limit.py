@@ -22,7 +22,7 @@ from datetime import timezone
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover – Python 3.8 backport
-    from backports.zoneinfo import ZoneInfo  # type: ignore[import,no-redef]
+    from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
 
 # Regex matching GitHub CLI rate-limit messages, e.g.:
 #   "Limit reached ... resets 2:30pm (America/Los_Angeles)"
