@@ -16,7 +16,7 @@ python = ">=3.10"
 pip = "*"
 
 [pypi-dependencies]
-hephaestus = { path = ".", editable = true }
+homericintelligence-hephaestus = { path = ".", editable = true }
 
 [feature.dev.dependencies]
 pre-commit = ">=3.0,<5"

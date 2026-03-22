@@ -879,9 +879,9 @@ packages:
   size: 25845
   timestamp: 1773314012590
 - pypi: ./
-  name: hephaestus
+  name: homericintelligence-hephaestus
   version: 0.4.0
-  sha256: 015b78f1dc276e9d343884367de026e704fe877afa381d09dc0edbba0c145d26
+  sha256: 5cf27ab367bce8879d509b9e81064a5994b7ca673e2d221add2fe462530dab5e
   requires_dist:
   - pyyaml>=6.0,<7
   - pytest>=9.0,<10 ; extra == 'dev'
