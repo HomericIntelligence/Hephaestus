@@ -3,10 +3,21 @@
 
 Provides functions for validating markdown files, checking links, and ensuring
 documentation quality across projects.
+
+Usage::
+
+    hephaestus-validate-links docs/
+    hephaestus-validate-links --verbose --directory .
 """
 
+from __future__ import annotations
+
+import argparse
 import re
+import sys
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
 
 from hephaestus.logging.utils import get_logger
 from hephaestus.markdown.utils import find_markdown_files
@@ -261,3 +272,221 @@ def check_markdown_formatting(content: str) -> list[str]:
                 break  # Only report first occurrence
 
     return issues
+
+
+# ---------------------------------------------------------------------------
+# Link validation pipeline
+# ---------------------------------------------------------------------------
+
+
+def _is_url(link: str) -> bool:
+    """Check if link is an external URL (http/https)."""
+    try:
+        result = urlparse(link)
+        return result.scheme in ("http", "https")
+    except (ValueError, TypeError):
+        return False
+
+
+def validate_internal_link(
+    link: str, source_file: Path, repo_root: Path
+) -> tuple[bool, str]:
+    """Validate an internal (file) link in a markdown document.
+
+    Handles both relative paths and absolute-from-root paths (``/docs/foo.md``).
+
+    Args:
+        link: Link target from markdown ``[text](link)``.
+        source_file: File containing the link.
+        repo_root: Repository root directory.
+
+    Returns:
+        Tuple of ``(is_valid, error_message)``. Error message is empty if valid.
+
+    """
+    link_path = link.split("#")[0]
+    if not link_path:
+        return True, ""
+
+    if link_path.startswith("/"):
+        target_path = repo_root / link_path.lstrip("/")
+    else:
+        target_path = (source_file.parent / link_path).resolve()
+
+    if not target_path.exists():
+        return False, f"File not found: {link_path}"
+    return True, ""
+
+
+def validate_file_links(
+    file_path: Path, repo_root: Path, verbose: bool = False
+) -> dict[str, Any]:
+    """Validate all links in a single markdown file.
+
+    Args:
+        file_path: Path to the markdown file.
+        repo_root: Repository root directory.
+        verbose: If True, log passing files.
+
+    Returns:
+        Dictionary with validation results including ``total_links``,
+        ``valid_links``, ``broken_links``, and ``skipped_urls``.
+
+    """
+    try:
+        rel_path = str(file_path.relative_to(repo_root))
+    except ValueError:
+        rel_path = str(file_path.resolve())
+
+    result: dict[str, Any] = {
+        "path": rel_path,
+        "total_links": 0,
+        "valid_links": 0,
+        "broken_links": [],
+        "skipped_urls": 0,
+    }
+
+    try:
+        content = file_path.read_text(encoding="utf-8")
+    except OSError as e:
+        result["error"] = str(e)
+        return result
+
+    links = extract_markdown_links(content)
+    result["total_links"] = len(links)
+
+    for link_target, line_num in links:
+        if link_target.startswith("#"):
+            result["valid_links"] += 1
+            continue
+        if _is_url(link_target):
+            result["skipped_urls"] += 1
+            continue
+
+        is_valid, error = validate_internal_link(link_target, file_path, repo_root)
+        if is_valid:
+            result["valid_links"] += 1
+        else:
+            result["broken_links"].append(
+                {"line": line_num, "target": link_target, "error": error}
+            )
+
+    return result
+
+
+def validate_all_links(
+    directory: Path, repo_root: Path, verbose: bool = False
+) -> dict[str, Any]:
+    """Validate links in all markdown files under a directory.
+
+    Args:
+        directory: Directory to scan for markdown files.
+        repo_root: Repository root directory.
+        verbose: If True, log individual file results.
+
+    Returns:
+        Summary dictionary with ``passed``, ``failed``, ``total_links``,
+        and ``broken_links`` counts.
+
+    """
+    results: dict[str, Any] = {
+        "passed": [],
+        "failed": [],
+        "total_links": 0,
+        "broken_links": 0,
+    }
+
+    md_files = find_markdown_files(directory)
+    if not md_files:
+        return results
+
+    for md_file in md_files:
+        file_result = validate_file_links(md_file, repo_root, verbose)
+        results["total_links"] += file_result["total_links"]
+        results["broken_links"] += len(file_result["broken_links"])
+
+        if not file_result["broken_links"]:
+            results["passed"].append(file_result["path"])
+        else:
+            results["failed"].append(file_result)
+
+    return results
+
+
+def print_link_summary(results: dict[str, Any]) -> None:
+    """Print a summary of link validation results.
+
+    Args:
+        results: Results dictionary from :func:`validate_all_links`.
+
+    """
+    total_files = len(results["passed"]) + len(results["failed"])
+    print("\n" + "=" * 70)
+    print("LINK VALIDATION SUMMARY")
+    print("=" * 70)
+    print(f"Total files: {total_files}")
+    print(f"Files with valid links: {len(results['passed'])}")
+    print(f"Files with broken links: {len(results['failed'])}")
+    print(f"\nTotal links checked: {results['total_links']}")
+    print(f"Broken links: {results['broken_links']}")
+
+    if results["failed"]:
+        print(f"\nFiles with broken links ({len(results['failed'])}):")
+        for file_result in results["failed"]:
+            print(f"  {file_result['path']} - {len(file_result['broken_links'])} broken")
+            for broken in file_result["broken_links"]:
+                print(f"    Line {broken['line']}: {broken['target']}")
+                print(f"      -> {broken['error']}")
+
+    print("=" * 70)
+
+
+def main() -> int:
+    """CLI entry point for markdown link validation.
+
+    Returns:
+        Exit code (0 if all links valid, 1 if broken links found).
+
+    """
+    from hephaestus.utils.helpers import get_repo_root
+
+    parser = argparse.ArgumentParser(
+        description="Validate markdown links in documentation",
+        epilog="Example: %(prog)s docs/ --verbose",
+    )
+    parser.add_argument(
+        "directory",
+        nargs="?",
+        type=Path,
+        default=None,
+        help="Directory to scan (default: repo root)",
+    )
+    parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=None,
+        help="Repository root directory (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Print verbose output",
+    )
+
+    args = parser.parse_args()
+    repo_root = args.repo_root or get_repo_root()
+    directory = args.directory or repo_root
+
+    if not directory.exists():
+        print(f"ERROR: Directory not found: {directory}", file=sys.stderr)
+        return 1
+
+    results = validate_all_links(directory, repo_root, verbose=args.verbose)
+    print_link_summary(results)
+
+    return 0 if not results["failed"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

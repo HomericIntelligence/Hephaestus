@@ -11,8 +11,11 @@ from hephaestus.validation.markdown import (
     extract_sections,
     find_markdown_files,
     find_readmes,
+    validate_all_links,
     validate_directory_exists,
     validate_file_exists,
+    validate_file_links,
+    validate_internal_link,
     validate_relative_link,
 )
 from hephaestus.validation.structure import StructureValidator
@@ -362,6 +365,88 @@ class TestStructureValidator:
         results = {"passed": ["check1"], "failed": ["failed1", "failed2"]}
         # Should not raise
         validator.print_summary(results)
+
+
+class TestLinkValidationPipeline:
+    """Tests for the link validation pipeline functions."""
+
+    def test_validate_internal_link_valid(self, tmp_path):
+        """Valid relative link passes."""
+        md_file = tmp_path / "docs" / "index.md"
+        md_file.parent.mkdir()
+        md_file.write_text("# Index")
+        target = tmp_path / "docs" / "other.md"
+        target.write_text("# Other")
+        valid, error = validate_internal_link("other.md", md_file, tmp_path)
+        assert valid is True
+        assert error == ""
+
+    def test_validate_internal_link_broken(self, tmp_path):
+        """Broken relative link is detected."""
+        md_file = tmp_path / "docs" / "index.md"
+        md_file.parent.mkdir()
+        md_file.write_text("# Index")
+        valid, error = validate_internal_link("missing.md", md_file, tmp_path)
+        assert valid is False
+        assert "not found" in error.lower()
+
+    def test_validate_internal_link_absolute(self, tmp_path):
+        """Absolute-from-root links are resolved correctly."""
+        md_file = tmp_path / "docs" / "index.md"
+        md_file.parent.mkdir()
+        md_file.write_text("# Index")
+        target = tmp_path / "README.md"
+        target.write_text("# README")
+        valid, error = validate_internal_link("/README.md", md_file, tmp_path)
+        assert valid is True
+
+    def test_validate_internal_link_anchor_only(self, tmp_path):
+        """Anchor-only links (#section) are always valid."""
+        md_file = tmp_path / "index.md"
+        md_file.write_text("# Index")
+        valid, error = validate_internal_link("#section", md_file, tmp_path)
+        assert valid is True
+
+    def test_validate_file_links(self, tmp_path):
+        """validate_file_links checks all links in a file."""
+        target = tmp_path / "existing.md"
+        target.write_text("# Existing")
+        md_file = tmp_path / "index.md"
+        md_file.write_text(
+            "# Index\n"
+            "[good](existing.md)\n"
+            "[bad](missing.md)\n"
+            "[ext](https://example.com)\n"
+        )
+        result = validate_file_links(md_file, tmp_path)
+        assert result["total_links"] == 3
+        assert result["valid_links"] == 1
+        assert result["skipped_urls"] == 1
+        assert len(result["broken_links"]) == 1
+
+    def test_validate_all_links_clean(self, tmp_path):
+        """Clean directory with no broken links passes."""
+        target = tmp_path / "other.md"
+        target.write_text("# Other")
+        md_file = tmp_path / "index.md"
+        md_file.write_text("[link](other.md)\n")
+        results = validate_all_links(tmp_path, tmp_path)
+        assert len(results["failed"]) == 0
+        assert len(results["passed"]) == 2  # index.md + other.md
+
+    def test_validate_all_links_with_broken(self, tmp_path):
+        """Directory with broken links is reported."""
+        md_file = tmp_path / "broken.md"
+        md_file.write_text("[link](nonexistent.md)\n")
+        results = validate_all_links(tmp_path, tmp_path)
+        assert len(results["failed"]) == 1
+        assert results["broken_links"] == 1
+
+    def test_validate_all_links_empty_dir(self, tmp_path):
+        """Empty directory returns empty results."""
+        results = validate_all_links(tmp_path, tmp_path)
+        assert results["passed"] == []
+        assert results["failed"] == []
 
 
 if __name__ == "__main__":

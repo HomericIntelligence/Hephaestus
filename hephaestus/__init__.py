@@ -69,6 +69,18 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "retry_with_backoff": ("hephaestus.utils", "retry_with_backoff"),
     "run_subprocess": ("hephaestus.utils", "run_subprocess"),
     "slugify": ("hephaestus.utils", "slugify"),
+    # validation (v0.5.0)
+    "check_coverage": ("hephaestus.validation.coverage", "check_coverage"),
+    "check_max_complexity": ("hephaestus.validation.complexity", "check_max_complexity"),
+    "check_python_version_consistency": (
+        "hephaestus.validation.python_version",
+        "check_python_version_consistency",
+    ),
+    "check_test_structure": (
+        "hephaestus.validation.test_structure",
+        "check_test_structure",
+    ),
+    "filter_audit_results": ("hephaestus.validation.audit", "filter_audit_results"),
 }
 
 
