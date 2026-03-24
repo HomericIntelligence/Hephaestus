@@ -2,13 +2,12 @@
 
 from pathlib import Path
 
-import pytest
-
 from hephaestus.validation.docstrings import (
     FragmentFinding,
     format_json,
     format_report,
     is_genuine_fragment,
+    main,
     scan_directory,
     scan_file,
 )
@@ -64,9 +63,7 @@ class TestScanFile:
     def test_detects_fragment_in_function(self, tmp_path: Path) -> None:
         """Detects fragment docstring in a function."""
         py_file = tmp_path / "example.py"
-        py_file.write_text(
-            'def foo():\n    """and then does something."""\n    pass\n'
-        )
+        py_file.write_text('def foo():\n    """and then does something."""\n    pass\n')
         findings = scan_file(py_file, tmp_path)
         assert len(findings) == 1
         assert findings[0].context == "def foo"
@@ -74,18 +71,14 @@ class TestScanFile:
     def test_clean_file_no_findings(self, tmp_path: Path) -> None:
         """Clean file returns no findings."""
         py_file = tmp_path / "clean.py"
-        py_file.write_text(
-            'def foo():\n    """Calculate the total."""\n    return 1\n'
-        )
+        py_file.write_text('def foo():\n    """Calculate the total."""\n    return 1\n')
         findings = scan_file(py_file, tmp_path)
         assert findings == []
 
     def test_detects_fragment_in_class(self, tmp_path: Path) -> None:
         """Detects fragment docstring in a class."""
         py_file = tmp_path / "example.py"
-        py_file.write_text(
-            'class Foo:\n    """across multiple instances."""\n    pass\n'
-        )
+        py_file.write_text('class Foo:\n    """across multiple instances."""\n    pass\n')
         findings = scan_file(py_file, tmp_path)
         assert len(findings) == 1
         assert findings[0].context == "class Foo"
@@ -116,12 +109,8 @@ class TestScanDirectory:
 
     def test_scans_directory(self, tmp_path: Path) -> None:
         """Scans all .py files in a directory."""
-        (tmp_path / "a.py").write_text(
-            'def a():\n    """and stuff."""\n    pass\n'
-        )
-        (tmp_path / "b.py").write_text(
-            'def b():\n    """Normal docstring."""\n    pass\n'
-        )
+        (tmp_path / "a.py").write_text('def a():\n    """and stuff."""\n    pass\n')
+        (tmp_path / "b.py").write_text('def b():\n    """Normal docstring."""\n    pass\n')
         findings = scan_directory(tmp_path, tmp_path)
         assert len(findings) == 1
 
@@ -134,9 +123,7 @@ class TestScanDirectory:
         """Recursively scans subdirectories."""
         sub = tmp_path / "sub"
         sub.mkdir()
-        (sub / "mod.py").write_text(
-            'def foo():\n    """across items."""\n    pass\n'
-        )
+        (sub / "mod.py").write_text('def foo():\n    """across items."""\n    pass\n')
         findings = scan_directory(tmp_path, tmp_path)
         assert len(findings) == 1
 
@@ -151,9 +138,7 @@ class TestFormatReport:
 
     def test_with_findings(self) -> None:
         """Findings are included in the report."""
-        findings = [
-            FragmentFinding("file.py", 10, "and stuff", "def foo")
-        ]
+        findings = [FragmentFinding("file.py", 10, "and stuff", "def foo")]
         report = format_report(findings)
         assert "1 genuine docstring fragment" in report
         assert "file.py:10" in report
@@ -176,3 +161,41 @@ class TestFormatJson:
         assert len(data) == 1
         assert data[0]["file"] == "file.py"
         assert data[0]["line"] == 5
+
+
+class TestMain:
+    """Tests for main() CLI entry point."""
+
+    def test_clean_returns_zero(self, tmp_path: Path, monkeypatch) -> None:
+        """Clean code exits 0."""
+        (tmp_path / "clean.py").write_text('def f():\n    """Calculate total."""\n    pass\n')
+        monkeypatch.setattr(
+            "sys.argv",
+            ["check-docstrings", "--directory", str(tmp_path), "--repo-root", str(tmp_path)],
+        )
+        assert main() == 0
+
+    def test_violations_returns_one(self, tmp_path: Path, monkeypatch) -> None:
+        """Violations exit 1."""
+        (tmp_path / "bad.py").write_text('def f():\n    """and stuff."""\n    pass\n')
+        monkeypatch.setattr(
+            "sys.argv",
+            ["check-docstrings", "--directory", str(tmp_path), "--repo-root", str(tmp_path)],
+        )
+        assert main() == 1
+
+    def test_json_output(self, tmp_path: Path, monkeypatch) -> None:
+        """JSON output flag works."""
+        (tmp_path / "clean.py").write_text('def f():\n    """Good docstring."""\n    pass\n')
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "check-docstrings",
+                "--directory",
+                str(tmp_path),
+                "--repo-root",
+                str(tmp_path),
+                "--json",
+            ],
+        )
+        assert main() == 0

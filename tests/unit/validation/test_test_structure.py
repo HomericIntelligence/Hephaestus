@@ -2,12 +2,12 @@
 
 from pathlib import Path
 
-import pytest
-
 from hephaestus.validation.test_structure import (
+    _detect_src_package,
     check_no_loose_test_files,
     check_test_directory_mirrors,
     check_test_structure,
+    main,
 )
 
 
@@ -50,7 +50,7 @@ class TestCheckTestDirectoryMirrors:
         src.mkdir()
         tests = tmp_path / "tests" / "unit"
         tests.mkdir(parents=True)
-        mirrored, missing = check_test_directory_mirrors(src, tests)
+        mirrored, _missing = check_test_directory_mirrors(src, tests)
         assert mirrored is True
 
     def test_ignores_hidden_dirs(self, tmp_path: Path) -> None:
@@ -61,7 +61,7 @@ class TestCheckTestDirectoryMirrors:
         (src / "__pycache__").mkdir()
         (src / ".hidden").mkdir()
         (tests / "utils").mkdir(parents=True)
-        mirrored, missing = check_test_directory_mirrors(src, tests)
+        mirrored, _missing = check_test_directory_mirrors(src, tests)
         assert mirrored is True
 
 
@@ -97,12 +97,12 @@ class TestCheckNoLooseTestFiles:
         unit_root.mkdir(parents=True)
         (unit_root / "__init__.py").touch()
         (unit_root / "conftest.py").touch()
-        no_loose, violations = check_no_loose_test_files(unit_root)
+        no_loose, _violations = check_no_loose_test_files(unit_root)
         assert no_loose is True
 
     def test_missing_directory(self, tmp_path: Path) -> None:
         """Missing directory returns True (no violations)."""
-        no_loose, violations = check_no_loose_test_files(tmp_path / "nonexistent")
+        no_loose, _violations = check_no_loose_test_files(tmp_path / "nonexistent")
         assert no_loose is True
 
     def test_multiple_loose_files(self, tmp_path: Path) -> None:
@@ -152,3 +152,89 @@ class TestCheckTestStructure:
         (src / "__init__.py").touch()
         passed = check_test_structure(tmp_path, src_package="mypackage")
         assert passed is False
+
+    def test_verbose_output(self, tmp_path: Path) -> None:
+        """Verbose mode prints details."""
+        src = tmp_path / "mypackage"
+        _make_package(src, "utils")
+        (src / "__init__.py").touch()
+        test_root = tmp_path / "tests" / "unit"
+        (test_root / "utils").mkdir(parents=True)
+        passed = check_test_structure(tmp_path, src_package="mypackage", verbose=True)
+        assert passed is True
+
+    def test_auto_detect_src_package(self, tmp_path: Path) -> None:
+        """Auto-detects source package from pyproject.toml."""
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.hatch.build.targets.wheel]\npackages = ["mypkg"]\n'
+        )
+        src = tmp_path / "mypkg"
+        _make_package(src, "core")
+        (src / "__init__.py").touch()
+        test_root = tmp_path / "tests" / "unit"
+        (test_root / "core").mkdir(parents=True)
+        passed = check_test_structure(tmp_path)
+        assert passed is True
+
+
+class TestDetectSrcPackage:
+    """Tests for _detect_src_package()."""
+
+    def test_from_pyproject(self, tmp_path: Path) -> None:
+        """Detects package name from pyproject.toml."""
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.hatch.build.targets.wheel]\npackages = ["mypkg"]\n'
+        )
+        assert _detect_src_package(tmp_path) == "mypkg"
+
+    def test_fallback_to_init(self, tmp_path: Path) -> None:
+        """Falls back to first directory with __init__.py."""
+        pkg = tmp_path / "mypkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").touch()
+        assert _detect_src_package(tmp_path) == "mypkg"
+
+    def test_fallback_to_src(self, tmp_path: Path) -> None:
+        """Returns 'src' when nothing found."""
+        assert _detect_src_package(tmp_path) == "src"
+
+
+class TestMain:
+    """Tests for main() CLI entry point."""
+
+    def test_passing_returns_zero(self, tmp_path: Path, monkeypatch) -> None:
+        """Clean structure exits 0."""
+        src = tmp_path / "mypkg"
+        _make_package(src, "utils")
+        (src / "__init__.py").touch()
+        test_root = tmp_path / "tests" / "unit"
+        (test_root / "utils").mkdir(parents=True)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "check-test-structure",
+                "--repo-root",
+                str(tmp_path),
+                "--src-package",
+                "mypkg",
+            ],
+        )
+        assert main() == 0
+
+    def test_failing_returns_one(self, tmp_path: Path, monkeypatch) -> None:
+        """Missing test dirs exits 1."""
+        src = tmp_path / "mypkg"
+        _make_package(src, "utils")
+        (src / "__init__.py").touch()
+        (tmp_path / "tests" / "unit").mkdir(parents=True)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "check-test-structure",
+                "--repo-root",
+                str(tmp_path),
+                "--src-package",
+                "mypkg",
+            ],
+        )
+        assert main() == 1

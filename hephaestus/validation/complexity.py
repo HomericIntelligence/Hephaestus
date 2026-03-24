@@ -109,10 +109,7 @@ def check_max_complexity(
     for v in violations:
         print(f"  {v['file']}:{v['row']}:{v['col']}: {v['message']}")
 
-    print(
-        "\nTip: Refactor using extract-method or guard-clause flattening "
-        "to reduce complexity."
-    )
+    print("\nTip: Refactor using extract-method or guard-clause flattening to reduce complexity.")
     return False
 
 

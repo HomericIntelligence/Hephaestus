@@ -21,17 +21,15 @@ from pathlib import Path
 from hephaestus.utils.helpers import get_repo_root
 
 try:
-    import tomllib
+    import tomllib  # type: ignore[import-not-found,no-redef]
 except ModuleNotFoundError:
     try:
-        import tomli as tomllib  # type: ignore[no-redef]
+        import tomli as tomllib  # type: ignore[import-not-found,no-redef]
     except ModuleNotFoundError:
-        tomllib = None  # type: ignore[assignment]
+        tomllib = None  # type: ignore[assignment,no-redef]
 
 _CLASSIFIER_VERSION_RE = re.compile(r"Programming Language :: Python :: (\d+\.\d+)$")
-_DOCKERFILE_FROM_RE = re.compile(
-    r"^\s*FROM\s+python:(\d+\.\d+)", re.IGNORECASE | re.MULTILINE
-)
+_DOCKERFILE_FROM_RE = re.compile(r"^\s*FROM\s+python:(\d+\.\d+)", re.IGNORECASE | re.MULTILINE)
 
 
 def extract_pyproject_versions(pyproject_path: Path) -> dict[str, str]:
@@ -114,9 +112,7 @@ def _extract_via_regex(pyproject_path: Path) -> dict[str, str]:
         if ver_match:
             versions["requires-python"] = ver_match.group(1)
 
-    match = re.search(
-        r'\[tool\.mypy\].*?python_version\s*=\s*"([^"]+)"', content, re.DOTALL
-    )
+    match = re.search(r'\[tool\.mypy\].*?python_version\s*=\s*"([^"]+)"', content, re.DOTALL)
     if match:
         versions["mypy.python_version"] = match.group(1)
 

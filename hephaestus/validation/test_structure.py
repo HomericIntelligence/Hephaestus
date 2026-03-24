@@ -82,9 +82,7 @@ def check_no_loose_test_files(
     if not unit_root.is_dir():
         return True, []
 
-    violations = sorted(
-        p for p in unit_root.glob("test_*.py") if p.name not in allowed_names
-    )
+    violations = sorted(p for p in unit_root.glob("test_*.py") if p.name not in allowed_names)
     return len(violations) == 0, violations
 
 
@@ -129,8 +127,7 @@ def check_test_structure(
     else:
         all_passed = False
         print(
-            "ERROR: The following source subpackages have no corresponding "
-            "tests/unit/ directory:",
+            "ERROR: The following source subpackages have no corresponding tests/unit/ directory:",
             file=sys.stderr,
         )
         for name in sorted(missing):

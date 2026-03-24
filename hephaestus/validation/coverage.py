@@ -21,12 +21,12 @@ from typing import Any, cast
 from hephaestus.utils.helpers import get_repo_root
 
 try:
-    import tomllib
+    import tomllib  # type: ignore[import-not-found,no-redef]
 except ModuleNotFoundError:
     try:
-        import tomli as tomllib  # type: ignore[no-redef]
+        import tomli as tomllib  # type: ignore[import-not-found,no-redef]
     except ModuleNotFoundError:
-        tomllib = None  # type: ignore[assignment]
+        tomllib = None  # type: ignore[assignment,no-redef]
 
 
 def load_coverage_config(config_file: Path | None = None) -> dict[str, Any]:
@@ -116,7 +116,7 @@ def parse_coverage_report(coverage_file: Path) -> float | None:
         return None
 
     try:
-        import defusedxml.ElementTree as ET
+        import defusedxml.ElementTree as ElementTree
     except ImportError:
         print(
             "WARNING: defusedxml not installed. "
@@ -126,7 +126,7 @@ def parse_coverage_report(coverage_file: Path) -> float | None:
         return None
 
     try:
-        tree = ET.parse(str(coverage_file))
+        tree = ElementTree.parse(str(coverage_file))
         root = tree.getroot()
         line_rate = root.get("line-rate")
         if line_rate is not None:

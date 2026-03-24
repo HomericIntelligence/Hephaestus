@@ -397,14 +397,14 @@ class TestLinkValidationPipeline:
         md_file.write_text("# Index")
         target = tmp_path / "README.md"
         target.write_text("# README")
-        valid, error = validate_internal_link("/README.md", md_file, tmp_path)
+        valid, _error = validate_internal_link("/README.md", md_file, tmp_path)
         assert valid is True
 
     def test_validate_internal_link_anchor_only(self, tmp_path):
         """Anchor-only links (#section) are always valid."""
         md_file = tmp_path / "index.md"
         md_file.write_text("# Index")
-        valid, error = validate_internal_link("#section", md_file, tmp_path)
+        valid, _error = validate_internal_link("#section", md_file, tmp_path)
         assert valid is True
 
     def test_validate_file_links(self, tmp_path):
@@ -413,10 +413,7 @@ class TestLinkValidationPipeline:
         target.write_text("# Existing")
         md_file = tmp_path / "index.md"
         md_file.write_text(
-            "# Index\n"
-            "[good](existing.md)\n"
-            "[bad](missing.md)\n"
-            "[ext](https://example.com)\n"
+            "# Index\n[good](existing.md)\n[bad](missing.md)\n[ext](https://example.com)\n"
         )
         result = validate_file_links(md_file, tmp_path)
         assert result["total_links"] == 3

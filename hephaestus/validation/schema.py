@@ -47,9 +47,7 @@ def load_schema_map(schema_map_file: Path) -> SchemaMapping:
     return [(re.compile(pattern), Path(schema_path)) for pattern, schema_path in data]
 
 
-def resolve_schema(
-    file_path: Path, repo_root: Path, schema_map: SchemaMapping
-) -> Path | None:
+def resolve_schema(file_path: Path, repo_root: Path, schema_map: SchemaMapping) -> Path | None:
     """Return the schema path for *file_path*, or None if no match.
 
     Args:
@@ -144,9 +142,7 @@ def check_files(
 
         if schema_path not in schema_cache:
             try:
-                schema_cache[schema_path] = json.loads(
-                    schema_path.read_text(encoding="utf-8")
-                )
+                schema_cache[schema_path] = json.loads(schema_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 print(
                     f"ERROR: Could not load schema {schema_path}: {exc}",

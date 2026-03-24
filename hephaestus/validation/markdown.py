@@ -148,7 +148,36 @@ def validate_relative_link(
     return True, None
 
 
-def count_markdown_issues(content: str) -> dict[str, int]:  # noqa: C901
+def _count_multiple_blank_lines(lines: list[str]) -> int:
+    """Count occurrences of multiple consecutive blank lines."""
+    count = 0
+    blank_count = 0
+    for line in lines:
+        if line.strip() == "":
+            blank_count += 1
+            if blank_count > 1:
+                count += 1
+        else:
+            blank_count = 0
+    return count
+
+
+def _count_missing_language_tags(lines: list[str]) -> int:
+    """Count code blocks without language tags."""
+    count = 0
+    in_code_block = False
+    for line in lines:
+        if line.strip().startswith("```"):
+            if not in_code_block:
+                if line.strip() == "```":
+                    count += 1
+                in_code_block = True
+            else:
+                in_code_block = False
+    return count
+
+
+def count_markdown_issues(content: str) -> dict[str, int]:
     """Count common markdown issues in content.
 
     Args:
@@ -158,50 +187,21 @@ def count_markdown_issues(content: str) -> dict[str, int]:  # noqa: C901
         Dictionary of issue counts
 
     """
-    issues = {
-        "multiple_blank_lines": 0,
-        "missing_language_tags": 0,
-        "long_lines": 0,
-        "trailing_whitespace": 0,
-    }
-
     lines = content.split("\n")
 
-    # Check for multiple consecutive blank lines
-    blank_count = 0
-    for line in lines:
-        if line.strip() == "":
-            blank_count += 1
-            if blank_count > 1:
-                issues["multiple_blank_lines"] += 1
-        else:
-            blank_count = 0
+    long_lines = sum(
+        1
+        for line in lines
+        if len(line) > 120 and not (line.strip().startswith("http") or line.strip().startswith("`"))
+    )
+    trailing_ws = sum(1 for line in lines if line and line != line.rstrip())
 
-    # Check for code blocks without language tags
-    in_code_block = False
-    for line in lines:
-        if line.strip().startswith("```"):
-            if not in_code_block:
-                # Starting code block
-                if line.strip() == "```":
-                    issues["missing_language_tags"] += 1
-                in_code_block = True
-            else:
-                # Ending code block
-                in_code_block = False
-
-    # Check for long lines (> 120 characters)
-    for line in lines:
-        stripped = line.strip()
-        if len(line) > 120 and not (stripped.startswith("http") or stripped.startswith("`")):
-            issues["long_lines"] += 1
-
-    # Check for trailing whitespace
-    for line in lines:
-        if line and line != line.rstrip():
-            issues["trailing_whitespace"] += 1
-
-    return issues
+    return {
+        "multiple_blank_lines": _count_multiple_blank_lines(lines),
+        "missing_language_tags": _count_missing_language_tags(lines),
+        "long_lines": long_lines,
+        "trailing_whitespace": trailing_ws,
+    }
 
 
 def find_readmes(directory: Path) -> list[Path]:
@@ -288,9 +288,7 @@ def _is_url(link: str) -> bool:
         return False
 
 
-def validate_internal_link(
-    link: str, source_file: Path, repo_root: Path
-) -> tuple[bool, str]:
+def validate_internal_link(link: str, source_file: Path, repo_root: Path) -> tuple[bool, str]:
     """Validate an internal (file) link in a markdown document.
 
     Handles both relative paths and absolute-from-root paths (``/docs/foo.md``).
@@ -318,9 +316,7 @@ def validate_internal_link(
     return True, ""
 
 
-def validate_file_links(
-    file_path: Path, repo_root: Path, verbose: bool = False
-) -> dict[str, Any]:
+def validate_file_links(file_path: Path, repo_root: Path, verbose: bool = False) -> dict[str, Any]:
     """Validate all links in a single markdown file.
 
     Args:
@@ -367,16 +363,12 @@ def validate_file_links(
         if is_valid:
             result["valid_links"] += 1
         else:
-            result["broken_links"].append(
-                {"line": line_num, "target": link_target, "error": error}
-            )
+            result["broken_links"].append({"line": line_num, "target": link_target, "error": error})
 
     return result
 
 
-def validate_all_links(
-    directory: Path, repo_root: Path, verbose: bool = False
-) -> dict[str, Any]:
+def validate_all_links(directory: Path, repo_root: Path, verbose: bool = False) -> dict[str, Any]:
     """Validate links in all markdown files under a directory.
 
     Args:

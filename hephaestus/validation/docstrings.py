@@ -24,17 +24,83 @@ from hephaestus.utils.helpers import get_repo_root
 
 _CONTINUATION_STARTERS = frozenset(
     {
-        "according", "across", "after", "against", "along", "alongside",
-        "also", "although", "among", "and", "around", "as", "at", "based",
-        "because", "before", "beneath", "beside", "between", "beyond",
-        "but", "by", "compared", "depending", "despite", "during", "except",
-        "following", "for", "from", "given", "hence", "however", "if", "in",
-        "including", "instead", "into", "nor", "of", "on", "or", "otherwise",
-        "over", "per", "plus", "relative", "since", "so", "than", "that",
-        "the", "then", "thereby", "therefore", "though", "through",
-        "throughout", "thus", "to", "toward", "under", "unless", "until",
-        "upon", "using", "via", "when", "where", "whereas", "whether",
-        "which", "while", "with", "within", "without", "yet",
+        "according",
+        "across",
+        "after",
+        "against",
+        "along",
+        "alongside",
+        "also",
+        "although",
+        "among",
+        "and",
+        "around",
+        "as",
+        "at",
+        "based",
+        "because",
+        "before",
+        "beneath",
+        "beside",
+        "between",
+        "beyond",
+        "but",
+        "by",
+        "compared",
+        "depending",
+        "despite",
+        "during",
+        "except",
+        "following",
+        "for",
+        "from",
+        "given",
+        "hence",
+        "however",
+        "if",
+        "in",
+        "including",
+        "instead",
+        "into",
+        "nor",
+        "of",
+        "on",
+        "or",
+        "otherwise",
+        "over",
+        "per",
+        "plus",
+        "relative",
+        "since",
+        "so",
+        "than",
+        "that",
+        "the",
+        "then",
+        "thereby",
+        "therefore",
+        "though",
+        "through",
+        "throughout",
+        "thus",
+        "to",
+        "toward",
+        "under",
+        "unless",
+        "until",
+        "upon",
+        "using",
+        "via",
+        "when",
+        "where",
+        "whereas",
+        "whether",
+        "which",
+        "while",
+        "with",
+        "within",
+        "without",
+        "yet",
     }
 )
 
@@ -103,9 +169,7 @@ def _docstring_nodes(tree: ast.Module) -> list[tuple[ast.AST, str, int]]:
     """Extract ``(node, docstring_text, line_number)`` for all docstring-bearing nodes."""
     results: list[tuple[ast.AST, str, int]] = []
     for node in ast.walk(tree):
-        if not isinstance(
-            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
-        ):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         body = getattr(node, "body", [])
         if not body:
@@ -149,9 +213,7 @@ def scan_file(file_path: Path, repo_root: Path) -> list[FragmentFinding]:
 
     for node, docstring, lineno in _docstring_nodes(tree):
         if is_genuine_fragment(docstring):
-            first_line = next(
-                (ln.strip() for ln in docstring.splitlines() if ln.strip()), ""
-            )
+            first_line = next((ln.strip() for ln in docstring.splitlines() if ln.strip()), "")
             findings.append(
                 FragmentFinding(
                     file=relative_path,

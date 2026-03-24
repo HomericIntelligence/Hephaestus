@@ -2,14 +2,13 @@
 
 from pathlib import Path
 
-import pytest
-
 from hephaestus.validation.python_version import (
+    _extract_via_regex,
     check_python_version_consistency,
     extract_pyproject_versions,
     get_dockerfile_python_version,
+    main,
 )
-
 
 CONSISTENT_PYPROJECT = """\
 [project]
@@ -113,15 +112,13 @@ class TestCheckPythonVersionConsistency:
     def test_inconsistent_versions(self, tmp_path: Path) -> None:
         """Inconsistent versions return False."""
         (tmp_path / "pyproject.toml").write_text(INCONSISTENT_PYPROJECT)
-        consistent, versions = check_python_version_consistency(tmp_path)
+        consistent, _versions = check_python_version_consistency(tmp_path)
         assert consistent is False
 
     def test_single_version_spec(self, tmp_path: Path) -> None:
         """Single version spec is always consistent."""
-        (tmp_path / "pyproject.toml").write_text(
-            '[project]\nrequires-python = ">=3.10"\n'
-        )
-        consistent, versions = check_python_version_consistency(tmp_path)
+        (tmp_path / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.10"\n')
+        consistent, _versions = check_python_version_consistency(tmp_path)
         assert consistent is True
 
     def test_with_dockerfile_check(self, tmp_path: Path) -> None:
@@ -130,9 +127,7 @@ class TestCheckPythonVersionConsistency:
         docker_dir = tmp_path / "docker"
         docker_dir.mkdir()
         (docker_dir / "Dockerfile").write_text("FROM python:3.10-slim\n")
-        consistent, versions = check_python_version_consistency(
-            tmp_path, check_dockerfile=True
-        )
+        consistent, versions = check_python_version_consistency(tmp_path, check_dockerfile=True)
         assert consistent is True
         assert any("Dockerfile" in k for k in versions)
 
@@ -142,9 +137,7 @@ class TestCheckPythonVersionConsistency:
         docker_dir = tmp_path / "docker"
         docker_dir.mkdir()
         (docker_dir / "Dockerfile").write_text("FROM python:3.13-slim\n")
-        consistent, versions = check_python_version_consistency(
-            tmp_path, check_dockerfile=True
-        )
+        consistent, _versions = check_python_version_consistency(tmp_path, check_dockerfile=True)
         assert consistent is False
 
     def test_no_pyproject(self, tmp_path: Path) -> None:
@@ -152,3 +145,52 @@ class TestCheckPythonVersionConsistency:
         consistent, versions = check_python_version_consistency(tmp_path)
         assert consistent is True
         assert versions == {}
+
+    def test_verbose_output(self, tmp_path: Path) -> None:
+        """Verbose mode prints version details."""
+        (tmp_path / "pyproject.toml").write_text(CONSISTENT_PYPROJECT)
+        consistent, _versions = check_python_version_consistency(tmp_path, verbose=True)
+        assert consistent is True
+
+
+class TestExtractViaRegex:
+    """Tests for _extract_via_regex fallback."""
+
+    def test_extracts_versions(self, tmp_path: Path) -> None:
+        """Regex fallback extracts versions from pyproject.toml."""
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(CONSISTENT_PYPROJECT)
+        versions = _extract_via_regex(pyproject)
+        assert "requires-python" in versions
+        assert "mypy.python_version" in versions
+        assert "ruff.target-version" in versions
+
+
+class TestMain:
+    """Tests for main() CLI entry point."""
+
+    def test_consistent_returns_zero(self, tmp_path: Path, monkeypatch) -> None:
+        """Consistent versions exit 0."""
+        (tmp_path / "pyproject.toml").write_text(CONSISTENT_PYPROJECT)
+        monkeypatch.setattr("sys.argv", ["check-python-version", "--repo-root", str(tmp_path)])
+        assert main() == 0
+
+    def test_inconsistent_returns_one(self, tmp_path: Path, monkeypatch) -> None:
+        """Inconsistent versions exit 1."""
+        (tmp_path / "pyproject.toml").write_text(INCONSISTENT_PYPROJECT)
+        monkeypatch.setattr("sys.argv", ["check-python-version", "--repo-root", str(tmp_path)])
+        assert main() == 1
+
+    def test_no_pyproject_returns_zero(self, tmp_path: Path, monkeypatch) -> None:
+        """Missing pyproject.toml exits 0 with warning."""
+        monkeypatch.setattr("sys.argv", ["check-python-version", "--repo-root", str(tmp_path)])
+        assert main() == 0
+
+    def test_verbose_flag(self, tmp_path: Path, monkeypatch) -> None:
+        """Verbose flag is accepted."""
+        (tmp_path / "pyproject.toml").write_text(CONSISTENT_PYPROJECT)
+        monkeypatch.setattr(
+            "sys.argv",
+            ["check-python-version", "--repo-root", str(tmp_path), "--verbose"],
+        )
+        assert main() == 0

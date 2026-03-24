@@ -1,13 +1,14 @@
 """Tests for hephaestus.validation.audit."""
 
+import io
+import json
 from pathlib import Path
-
-import pytest
 
 from hephaestus.validation.audit import (
     extract_cvss_score,
     filter_audit_results,
     load_ignore_list,
+    main,
     severity_label,
 )
 
@@ -101,9 +102,7 @@ class TestSeverityLabel:
 class TestFilterAuditResults:
     """Tests for filter_audit_results()."""
 
-    def _make_data(
-        self, vulns: list[dict], name: str = "pkg", version: str = "1.0"
-    ) -> dict:
+    def _make_data(self, vulns: list[dict], name: str = "pkg", version: str = "1.0") -> dict:
         return {"dependencies": [{"name": name, "version": version, "vulns": vulns}]}
 
     def test_high_severity_blocks(self) -> None:
@@ -138,7 +137,7 @@ class TestFilterAuditResults:
     def test_custom_threshold(self) -> None:
         """Custom threshold changes what is blocking."""
         data = self._make_data([{"id": "CVE-3", "severity": [{"score": 5.0}]}])
-        blocking, suppressed = filter_audit_results(data, threshold=4.0)
+        blocking, _suppressed = filter_audit_results(data, threshold=4.0)
         assert len(blocking) == 1
 
     def test_no_score_is_suppressed(self) -> None:
@@ -147,3 +146,56 @@ class TestFilterAuditResults:
         blocking, suppressed = filter_audit_results(data)
         assert len(blocking) == 0
         assert len(suppressed) == 1
+
+
+class TestMain:
+    """Tests for main() CLI entry point."""
+
+    def test_no_json_input(self, monkeypatch) -> None:
+        """No JSON on stdin returns 0."""
+        monkeypatch.setattr("sys.argv", ["filter-audit"])
+        monkeypatch.setattr("sys.stdin", io.StringIO("No known vulnerabilities found"))
+        assert main() == 0
+
+    def test_invalid_json(self, monkeypatch) -> None:
+        """Invalid JSON returns 1."""
+        monkeypatch.setattr("sys.argv", ["filter-audit"])
+        monkeypatch.setattr("sys.stdin", io.StringIO("{invalid json"))
+        assert main() == 1
+
+    def test_clean_audit(self, monkeypatch) -> None:
+        """Clean audit with no vulns returns 0."""
+        data = {"dependencies": [{"name": "safe", "version": "1.0", "vulns": []}]}
+        monkeypatch.setattr("sys.argv", ["filter-audit"])
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(data)))
+        assert main() == 0
+
+    def test_blocking_vuln(self, monkeypatch) -> None:
+        """Blocking vulnerability returns 1."""
+        data = {
+            "dependencies": [
+                {
+                    "name": "bad",
+                    "version": "1.0",
+                    "vulns": [{"id": "CVE-1", "severity": [{"score": 9.5}]}],
+                }
+            ]
+        }
+        monkeypatch.setattr("sys.argv", ["filter-audit"])
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(data)))
+        assert main() == 1
+
+    def test_suppressed_only(self, monkeypatch) -> None:
+        """Only suppressed vulns returns 0."""
+        data = {
+            "dependencies": [
+                {
+                    "name": "pkg",
+                    "version": "1.0",
+                    "vulns": [{"id": "CVE-2", "severity": [{"score": 3.0}]}],
+                }
+            ]
+        }
+        monkeypatch.setattr("sys.argv", ["filter-audit"])
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(data)))
+        assert main() == 0

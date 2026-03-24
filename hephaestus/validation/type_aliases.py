@@ -45,6 +45,19 @@ def is_shadowing_pattern(alias: str, target: str) -> bool:
     return target_lower.endswith(alias_lower)
 
 
+def _update_string_state(
+    stripped: str, in_string: bool, string_delimiter: str | None
+) -> tuple[bool, str | None]:
+    """Track whether we are inside a triple-quoted string."""
+    for delim in ('"""', "'''"):
+        if delim in stripped:
+            if in_string and string_delimiter == delim:
+                return False, None
+            if not in_string:
+                return True, delim
+    return in_string, string_delimiter
+
+
 def detect_shadowing(file_path: Path) -> list[tuple[int, str, str, str]]:
     """Find type alias shadowing violations in a Python file.
 
@@ -56,7 +69,7 @@ def detect_shadowing(file_path: Path) -> list[tuple[int, str, str, str]]:
         violation.
 
     """
-    violations = []
+    violations: list[tuple[int, str, str, str]] = []
     pattern = re.compile(r"^([A-Z][a-zA-Z0-9_]*)\s*=\s*([A-Z][a-zA-Z0-9_]*)\s*(?:#.*)?$")
 
     try:
@@ -66,24 +79,9 @@ def detect_shadowing(file_path: Path) -> list[tuple[int, str, str, str]]:
 
             for line_num, line in enumerate(f, start=1):
                 stripped = line.strip()
-                if '"""' in stripped or "'''" in stripped:
-                    triple_double = stripped.count('"""')
-                    triple_single = stripped.count("'''")
-
-                    if triple_double > 0:
-                        if in_string and string_delimiter == '"""':
-                            in_string = False
-                            string_delimiter = None
-                        elif not in_string:
-                            in_string = True
-                            string_delimiter = '"""'
-                    elif triple_single > 0:
-                        if in_string and string_delimiter == "'''":
-                            in_string = False
-                            string_delimiter = None
-                        elif not in_string:
-                            in_string = True
-                            string_delimiter = "'''"
+                in_string, string_delimiter = _update_string_state(
+                    stripped, in_string, string_delimiter
+                )
 
                 if in_string:
                     continue
@@ -104,9 +102,7 @@ def detect_shadowing(file_path: Path) -> list[tuple[int, str, str, str]]:
     return violations
 
 
-def format_error(
-    file_path: Path, line_num: int, line: str, alias: str, target: str
-) -> str:
+def format_error(file_path: Path, line_num: int, line: str, alias: str, target: str) -> str:
     """Format a violation as an error message.
 
     Args:

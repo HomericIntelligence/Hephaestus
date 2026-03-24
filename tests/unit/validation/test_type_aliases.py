@@ -2,13 +2,13 @@
 
 from pathlib import Path
 
-import pytest
-
 from hephaestus.validation.type_aliases import (
+    _update_string_state,
     check_files,
     detect_shadowing,
     format_error,
     is_shadowing_pattern,
+    main,
 )
 
 
@@ -136,7 +136,7 @@ class TestCheckFiles:
         """Non-Python files are skipped."""
         txt_file = tmp_path / "notes.txt"
         txt_file.write_text("Result = DomainResult\n")
-        exit_code, errors = check_files([tmp_path])
+        exit_code, _errors = check_files([tmp_path])
         assert exit_code == 0
 
     def test_accepts_file_paths(self, tmp_path: Path) -> None:
@@ -146,3 +146,55 @@ class TestCheckFiles:
         exit_code, errors = check_files([py_file])
         assert exit_code == 1
         assert len(errors) == 1
+
+
+class TestUpdateStringState:
+    """Tests for _update_string_state()."""
+
+    def test_enter_double_quote_string(self) -> None:
+        """Entering a triple double-quoted string."""
+        in_str, delim = _update_string_state('"""docstring"""', False, None)
+        assert in_str is True
+        assert delim == '"""'
+
+    def test_exit_double_quote_string(self) -> None:
+        """Exiting a triple double-quoted string."""
+        in_str, delim = _update_string_state('"""', True, '"""')
+        assert in_str is False
+        assert delim is None
+
+    def test_enter_single_quote_string(self) -> None:
+        """Entering a triple single-quoted string."""
+        in_str, delim = _update_string_state("'''docstring'''", False, None)
+        assert in_str is True
+        assert delim == "'''"
+
+    def test_no_change_for_normal_line(self) -> None:
+        """Normal lines don't change string state."""
+        in_str, _delim = _update_string_state("x = 1", False, None)
+        assert in_str is False
+
+
+class TestMain:
+    """Tests for main() CLI entry point."""
+
+    def test_clean_returns_zero(self, tmp_path: Path, monkeypatch) -> None:
+        """Clean code exits 0."""
+        py_file = tmp_path / "clean.py"
+        py_file.write_text("x = 1\n")
+        monkeypatch.setattr("sys.argv", ["check-type-aliases", str(tmp_path)])
+        assert main() == 0
+
+    def test_violations_returns_one(self, tmp_path: Path, monkeypatch) -> None:
+        """Code with violations exits 1."""
+        py_file = tmp_path / "bad.py"
+        py_file.write_text("Result = DomainResult\n")
+        monkeypatch.setattr("sys.argv", ["check-type-aliases", str(tmp_path)])
+        assert main() == 1
+
+    def test_verbose_flag(self, tmp_path: Path, monkeypatch) -> None:
+        """Verbose flag is accepted."""
+        py_file = tmp_path / "clean.py"
+        py_file.write_text("x = 1\n")
+        monkeypatch.setattr("sys.argv", ["check-type-aliases", "--verbose", str(tmp_path)])
+        assert main() == 0

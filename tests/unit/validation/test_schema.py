@@ -45,10 +45,12 @@ class TestLoadSchemaMap:
         """Loads pattern-to-schema mapping from JSON file."""
         map_file = tmp_path / "map.json"
         map_file.write_text(
-            json.dumps([
-                ["^config/.*\\.yaml$", "schemas/config.schema.json"],
-                ["^models/.*\\.yaml$", "schemas/model.schema.json"],
-            ])
+            json.dumps(
+                [
+                    ["^config/.*\\.yaml$", "schemas/config.schema.json"],
+                    ["^models/.*\\.yaml$", "schemas/model.schema.json"],
+                ]
+            )
         )
         result = load_schema_map(map_file)
         assert len(result) == 2
@@ -147,9 +149,7 @@ class TestCheckFiles:
         yaml_file.write_text("version: 1\n")
 
         schema_map = [(re.compile(r"^config/.*\.yaml$"), schema_file)]
-        exit_code, error_count = check_files(
-            [yaml_file], tmp_path, schema_map, dry_run=True
-        )
+        exit_code, error_count = check_files([yaml_file], tmp_path, schema_map, dry_run=True)
         assert exit_code == 0
         assert error_count >= 1
 
@@ -158,10 +158,10 @@ class TestCheckFiles:
         yaml_file = tmp_path / "random.yaml"
         yaml_file.write_text("key: value\n")
         schema_map: list = []
-        exit_code, error_count = check_files([yaml_file], tmp_path, schema_map)
+        exit_code, _error_count = check_files([yaml_file], tmp_path, schema_map)
         assert exit_code == 0
 
     def test_empty_files_list(self, tmp_path: Path) -> None:
         """Empty files list returns 0."""
-        exit_code, error_count = check_files([], tmp_path, [])
+        exit_code, _error_count = check_files([], tmp_path, [])
         assert exit_code == 0
