@@ -194,7 +194,6 @@ def main() -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     """Build argument parser for the filter-audit CLI."""
-
     parser = argparse.ArgumentParser(
         description="Filter pip-audit JSON to fail only on HIGH/CRITICAL vulnerabilities",
         epilog="Usage: pip-audit --format json | %(prog)s",

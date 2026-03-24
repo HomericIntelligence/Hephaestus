@@ -14,19 +14,20 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import importlib
 import re
 import sys
 from pathlib import Path
 
 from hephaestus.utils.helpers import get_repo_root
 
-try:
-    import tomllib  # type: ignore[import-not-found,no-redef]
-except ModuleNotFoundError:
+tomllib = None
+for _mod_name in ("tomllib", "tomli"):
     try:
-        import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+        tomllib = importlib.import_module(_mod_name)
+        break
     except ModuleNotFoundError:
-        tomllib = None  # type: ignore[assignment,no-redef]
+        continue
 
 _CLASSIFIER_VERSION_RE = re.compile(r"Programming Language :: Python :: (\d+\.\d+)$")
 _DOCKERFILE_FROM_RE = re.compile(r"^\s*FROM\s+python:(\d+\.\d+)", re.IGNORECASE | re.MULTILINE)

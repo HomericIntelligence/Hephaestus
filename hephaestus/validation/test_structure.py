@@ -172,10 +172,10 @@ def _detect_src_package(repo_root: Path) -> str:
             return match.group(1)
 
     # Fallback: first dir with __init__.py
+    skip = {"tests", "scripts", "docs"}
     for d in sorted(repo_root.iterdir()):
-        if d.is_dir() and (d / "__init__.py").exists():
-            if d.name not in {"tests", "scripts", "docs"}:
-                return d.name
+        if d.is_dir() and (d / "__init__.py").exists() and d.name not in skip:
+            return d.name
 
     return "src"
 

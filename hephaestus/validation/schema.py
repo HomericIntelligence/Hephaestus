@@ -24,13 +24,13 @@ SchemaMapping = list[tuple[re.Pattern[str], Path]]
 
 
 def load_schema_map(schema_map_file: Path) -> SchemaMapping:
-    """Load a schema mapping from a JSON file.
+    r"""Load a schema mapping from a JSON file.
 
     The JSON file should contain a list of ``[pattern, schema_path]`` pairs::
 
         [
-            ["^config/defaults\\\\.yaml$", "schemas/defaults.schema.json"],
-            ["^config/models/.+\\\\.yaml$", "schemas/model.schema.json"]
+            ["^config/defaults\\.yaml$", "schemas/defaults.schema.json"],
+            ["^config/models/.+\\.yaml$", "schemas/model.schema.json"]
         ]
 
     Args:
