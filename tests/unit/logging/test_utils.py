@@ -423,6 +423,21 @@ class TestSetupLogging:
             root.handlers.clear()
             root.handlers.extend(saved)
 
+    def test_repeated_calls_do_not_duplicate_handlers(self) -> None:
+        """Calling setup_logging() twice should not double the handler count."""
+        root = logging.getLogger()
+        root.handlers.clear()
+        try:
+            setup_logging(level=logging.INFO)
+            count_after_first = len(root.handlers)
+
+            setup_logging(level=logging.INFO)
+            count_after_second = len(root.handlers)
+
+            assert count_after_second == count_after_first
+        finally:
+            root.handlers.clear()
+
     def test_log_to_stderr(self) -> None:
         """setup_logging with log_to_stderr=True adds a stderr StreamHandler."""
         root = logging.getLogger()
