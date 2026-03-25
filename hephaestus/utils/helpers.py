@@ -11,6 +11,8 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
+from packaging.requirements import InvalidRequirement, Requirement
+
 from hephaestus.logging.utils import get_logger
 
 logger = get_logger(__name__)
@@ -190,27 +192,38 @@ def get_proj_root(proj_name: str) -> str:
 
 
 def install_package(package_name: str, upgrade: bool = False) -> bool:
-    """Install Python package with pip.
+    """Install a single Python package with pip.
+
+    Validates the package name using the PEP 508 requirement parser from
+    the ``packaging`` library. Supports extras (e.g. ``pkg[extra1,extra2]``)
+    and version specifiers (e.g. ``pkg>=1.0,<2``), but rejects URL-based
+    requirements for security.
 
     Args:
-        package_name: Name of package to install (must be a valid PyPI package name)
-        upgrade: Whether to upgrade if already installed
+        package_name: A single PEP 508 requirement string
+            (e.g. ``"requests"``, ``"pkg[extra]>=1.0"``).
+        upgrade: Whether to upgrade if already installed.
 
     Returns:
-        True if installation successful, False otherwise
+        True if installation successful, False otherwise.
 
     Raises:
-        ValueError: If package_name contains invalid characters
+        ValueError: If package_name is not a valid PEP 508 requirement
+            or uses a URL-based requirement.
 
     """
-    # Validate package name: only alphanumerics, hyphens, underscores, dots, brackets, ==, >=, <=
-    # Uses re.fullmatch and literal space (not \s) to block newlines/tabs.
-    # Excludes ! to prevent shell history expansion.
-    # Reject empty or whitespace-only strings before the regex to avoid silent acceptance.
     if not package_name or not package_name.strip():
-        raise ValueError(f"Invalid package name: {package_name!r}")
-    if not re.fullmatch(r"[A-Za-z0-9_\-.\[\],>=< ]+", package_name):
-        raise ValueError(f"Invalid package name: {package_name!r}")
+        raise ValueError(f"Invalid package requirement: {package_name!r}")
+
+    # Validate using the canonical PEP 508 requirement parser
+    try:
+        req = Requirement(package_name)
+    except InvalidRequirement as e:
+        raise ValueError(f"Invalid package requirement: {package_name!r}") from e
+
+    # Reject URL-based requirements for security
+    if req.url is not None:
+        raise ValueError(f"URL-based requirements are not supported: {package_name!r}")
 
     cmd = [sys.executable, "-m", "pip", "install"]
     if upgrade:

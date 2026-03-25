@@ -220,17 +220,12 @@ class TestInstallPackage:
 
     def test_rejects_newline_in_package_name(self):
         """Rejects package names containing newlines."""
-        with pytest.raises(ValueError, match="Invalid package name"):
+        with pytest.raises(ValueError, match="Invalid package requirement"):
             install_package("pkg\nmalicious")
-
-    def test_rejects_exclamation_mark_in_package_name(self):
-        """Rejects package names containing exclamation marks."""
-        with pytest.raises(ValueError, match="Invalid package name"):
-            install_package("pkg!exploit")
 
     def test_rejects_tab_in_package_name(self):
         """Rejects package names containing tab characters."""
-        with pytest.raises(ValueError, match="Invalid package name"):
+        with pytest.raises(ValueError, match="Invalid package requirement"):
             install_package("pkg\texploit")
 
     @patch("hephaestus.utils.helpers.run_subprocess")
@@ -255,37 +250,64 @@ class TestInstallPackage:
     )
     def test_shell_injection_rejected(self, malicious_input: str) -> None:
         """Reject package names containing shell injection characters."""
-        with pytest.raises(ValueError, match="Invalid package name"):
+        with pytest.raises(ValueError, match="Invalid package requirement"):
             install_package(malicious_input)
 
     def test_empty_string_raises_value_error(self) -> None:
         """Empty string is rejected by package name validation."""
-        with pytest.raises(ValueError, match="Invalid package name"):
+        with pytest.raises(ValueError, match="Invalid package requirement"):
             install_package("")
 
     @pytest.mark.parametrize("blank", ["   ", "\t", " \n "])
     def test_whitespace_only_raises_value_error(self, blank: str) -> None:
         """Whitespace-only strings are rejected before reaching pip."""
-        with pytest.raises(ValueError, match="Invalid package name"):
+        with pytest.raises(ValueError, match="Invalid package requirement"):
             install_package(blank)
 
+    def test_flag_injection_rejected(self) -> None:
+        """Flag injection like 'pkg --index-url http://...' is rejected by PEP 508 parser."""
+        with pytest.raises(ValueError, match="Invalid package requirement"):
+            install_package("pkg --index-url http://example.com")
+
     @pytest.mark.parametrize(
-        "unicode_input",
+        "name",
         [
-            "pkg\u200b",  # zero-width space — not a literal ASCII space
-            "pkg\u00e9",  # accented e — outside ASCII alnum set
+            "requests",
+            "my-package",
+            "my_package",
+            "pkg.name",
+            "pkg[extra1]",
+            "pkg[extra1,extra2]",
+            "pkg>=1.0",
+            "pkg>=1.0,<2",
+            "pkg==1.2.3",
+            "pkg!=1.3",
         ],
     )
-    def test_non_ascii_unicode_rejected(self, unicode_input: str) -> None:
-        """Non-ASCII unicode characters are rejected by the regex."""
-        with pytest.raises(ValueError, match="Invalid package name"):
-            install_package(unicode_input)
+    @patch("hephaestus.utils.helpers.run_subprocess")
+    def test_valid_requirement_accepted(self, mock_run, name):
+        """Accepts valid PEP 508 requirement strings."""
+        mock_run.return_value = MagicMock(returncode=0)
+        assert install_package(name) is True
 
-    def test_flag_injection_via_whitespace_rejected_by_regex(self) -> None:
-        r"""Flag injection like 'pkg --index-url http://...' is rejected.
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "pkg1 pkg2",
+            "pkg; rm -rf /",
+            "",
+            "   ",
+            "pkg && echo pwned",
+            "pkg | cat /etc/passwd",
+            "pkg\nnewline",
+        ],
+    )
+    def test_invalid_requirement_rejected(self, name):
+        """Rejects invalid or dangerous requirement strings."""
+        with pytest.raises(ValueError, match="Invalid package requirement"):
+            install_package(name)
 
-        Characters outside [A-Za-z0-9_\-.\[\],>=< ] (e.g. ':', '/', '-' as
-        flag prefix) cause the regex to reject the string before pip is invoked.
-        """
-        with pytest.raises(ValueError, match="Invalid package name"):
-            install_package("pkg --index-url http://example.com")
+    def test_url_requirement_rejected(self):
+        """Rejects URL-based requirements for security."""
+        with pytest.raises(ValueError, match="URL-based requirements are not supported"):
+            install_package("pkg @ https://evil.com/malware.tar.gz")
