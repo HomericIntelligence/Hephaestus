@@ -14,6 +14,7 @@ audit = "pixi run --environment lint pip-audit"
 [dependencies]
 python = ">=3.10"
 pip = "*"
+pydantic = ">=2.12.5,<3"
 
 [pypi-dependencies]
 homericintelligence-hephaestus = { path = ".", editable = true }
