@@ -528,6 +528,12 @@ class TestMergeWithEnv:
         assert result["port"] == 1
         assert isinstance(result["port"], int)
 
+    def test_triple_underscore_edge_case(self, monkeypatch):
+        """Triple underscore splits as __ + _, preserving leading _ in segment."""
+        monkeypatch.setenv("HEPHAESTUS_A___B", "val")
+        result = merge_with_env({})
+        assert result == {"a": {"_b": "val"}}
+
 
 class TestLoadYamlConfig:
     """Tests for load_yaml_config."""

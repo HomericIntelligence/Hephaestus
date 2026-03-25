@@ -294,6 +294,8 @@ def get_config_value(
     """High-level function to get a configuration value with full merging.
 
     Loads defaults, then user config, then environment variables.
+    Environment variables use double underscores (``__``) as nesting
+    delimiters — see :func:`merge_with_env` for details.
 
     Args:
         key_path: Dot-separated path to setting
