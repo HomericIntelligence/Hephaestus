@@ -257,3 +257,8 @@ class TestInstallPackage:
         """Reject package names containing shell injection characters."""
         with pytest.raises(ValueError, match="Invalid package name"):
             install_package(malicious_input)
+
+    def test_empty_string_raises_value_error(self) -> None:
+        """Empty string is rejected by package name validation."""
+        with pytest.raises(ValueError, match="Invalid package name"):
+            install_package("")
