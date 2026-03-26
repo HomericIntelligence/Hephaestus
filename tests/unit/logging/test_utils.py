@@ -113,6 +113,46 @@ class TestGetLogger:
 
         assert count_after_first == count_after_second
 
+    def test_concurrent_no_duplicate_handlers(self) -> None:
+        """Concurrent get_logger calls for the same name must not add duplicate handlers."""
+        logger_name = "test.concurrent_handler_safety"
+        # Ensure a fresh logger with no handlers
+        underlying = logging.getLogger(logger_name)
+        underlying.handlers.clear()
+
+        num_threads = 20
+        barrier = threading.Barrier(num_threads)
+        results: list[ContextLogger] = []
+        results_lock = threading.Lock()
+
+        def worker() -> None:
+            barrier.wait()
+            ctx_logger = get_logger(logger_name)
+            with results_lock:
+                results.append(ctx_logger)
+
+        threads = [threading.Thread(target=worker) for _ in range(num_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # All threads got a logger, but the underlying logger must have exactly 1 handler
+        assert len(results) == num_threads
+        assert len(underlying.handlers) == 1
+        assert isinstance(underlying.handlers[0], logging.StreamHandler)
+
+    def test_sequential_no_duplicate_handlers(self) -> None:
+        """Calling get_logger twice for the same name does not duplicate handlers."""
+        logger_name = "test.sequential_no_dup"
+        underlying = logging.getLogger(logger_name)
+        underlying.handlers.clear()
+
+        get_logger(logger_name)
+        get_logger(logger_name)
+
+        assert len(underlying.handlers) == 1
+
 
 class TestContextLogger:
     """Tests for ContextLogger adapter."""
