@@ -285,6 +285,24 @@ class TestSaveData:
             save_data({"x": 1}, f, format_hint="csv")
         assert not f.exists()
 
+    def test_creates_parent_dirs_json(self, tmp_path: Path) -> None:
+        """Creates missing parent directories for JSON output."""
+        f = tmp_path / "sub" / "deep" / "out.json"
+        assert save_data({"a": 1}, f)
+        assert json.loads(f.read_text()) == {"a": 1}
+
+    def test_creates_parent_dirs_yaml(self, tmp_path: Path) -> None:
+        """Creates missing parent directories for YAML output."""
+        f = tmp_path / "sub" / "deep" / "out.yaml"
+        assert save_data({"a": 1}, f)
+        assert "a:" in f.read_text()
+
+    def test_creates_parent_dirs_default_format(self, tmp_path: Path) -> None:
+        """Creates missing parent directories for unknown extension (defaults to JSON)."""
+        f = tmp_path / "new_dir" / "out.dat"
+        assert save_data({"a": 1}, f)
+        assert json.loads(f.read_text()) == {"a": 1}
+
     def test_raises_on_io_error(self, tmp_path: Path) -> None:
         """IOError is raised (not silently swallowed) when write fails."""
         # Use a path inside a non-existent parent where we've put a file as blocker

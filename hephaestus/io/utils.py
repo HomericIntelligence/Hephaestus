@@ -258,6 +258,8 @@ def save_data(
             "Set allow_unsafe_deserialization=True to proceed at your own risk."
         )
 
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+
     if fmt == "json":
         filepath.write_text(json.dumps(data, indent=2))
     elif fmt == "yaml":
