@@ -37,7 +37,10 @@ def extract_pyproject_versions(content: str) -> dict[str, str]:
             versions["requires-python"] = ver_match.group(1)
 
     # [tool.mypy] python_version = "3.10"
-    match = re.search(r'\[tool\.mypy\].*?python_version\s*=\s*"([^"]+)"', content, re.DOTALL)
+    match = re.search(
+        r'\[tool\.mypy\]\n(?:(?!\[).+\n)*?python_version\s*=\s*"([^"]+)"',
+        content,
+    )
     if match:
         versions["mypy.python_version"] = match.group(1)
 
@@ -47,6 +50,46 @@ def extract_pyproject_versions(content: str) -> dict[str, str]:
         versions["ruff.target-version"] = f"{match.group(1)}.{match.group(2)}"
 
     return versions
+
+
+def extract_project_version(content: str) -> str | None:
+    """Extract version from the [project] section in pyproject.toml content.
+
+    Uses a section-bounded regex with negative lookahead to prevent matching
+    version keys that belong to a different TOML section.
+
+    Args:
+        content: The raw text content of a pyproject.toml file.
+
+    Returns:
+        The version string if found within [project], or None.
+
+    """
+    match = re.search(
+        r'\[project\]\n(?:(?!\[).+\n)*?version\s*=\s*"([^"]+)"',
+        content,
+    )
+    return match.group(1) if match else None
+
+
+def extract_pixi_workspace_version(content: str) -> str | None:
+    """Extract version from the [workspace] section in pixi.toml content.
+
+    Uses a section-bounded regex with negative lookahead to prevent matching
+    version keys that belong to a different TOML section.
+
+    Args:
+        content: The raw text content of a pixi.toml file.
+
+    Returns:
+        The version string if found within [workspace], or None.
+
+    """
+    match = re.search(
+        r'\[workspace\]\n(?:(?!\[).+\n)*?version\s*=\s*"([^"]+)"',
+        content,
+    )
+    return match.group(1) if match else None
 
 
 def main() -> int:
