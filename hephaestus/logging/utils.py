@@ -30,7 +30,6 @@ _handler_setup_lock = threading.Lock()
 # deployment time without code changes (12-factor pattern).
 _ENV_JSON_FORMAT: bool = os.environ.get("HEPHAESTUS_LOG_FORMAT", "").lower() == "json"
 
-
 class ContextLogger(logging.LoggerAdapter):  # type: ignore[type-arg]
     """Logger adapter that adds context information to log messages."""
 

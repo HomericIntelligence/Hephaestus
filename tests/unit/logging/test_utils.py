@@ -10,12 +10,25 @@ import threading
 from io import StringIO
 from pathlib import Path
 
+import pytest
+
 from hephaestus.logging.formatters import JsonFormatter
 from hephaestus.logging.utils import (
     ContextLogger,
     get_logger,
     setup_logging,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clean_test_loggers() -> None:  # type: ignore[misc]
+    """Remove test loggers and their handlers after each test to prevent pollution."""
+    yield  # type: ignore[misc]
+    # Teardown: clear handlers on any test loggers we created
+    for name in list(logging.Logger.manager.loggerDict):
+        if name.startswith("test."):
+            logger = logging.getLogger(name)
+            logger.handlers.clear()
 
 
 class TestGetLogger:
@@ -237,6 +250,12 @@ class TestGetLogger:
             assert parsed["service"] == "odyssey"
         finally:
             bound.logger.removeHandler(handler)
+
+    def test_level_updated_on_second_call(self) -> None:
+        """A second call with a different level updates the logger's level."""
+        get_logger("test.level_update", level=logging.INFO)
+        logger2 = get_logger("test.level_update", level=logging.DEBUG)
+        assert logger2.logger.level == logging.DEBUG
 
 
 class TestContextLogger:
