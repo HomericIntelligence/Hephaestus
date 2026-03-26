@@ -41,6 +41,9 @@ jobs:
       - name: Format check
         run: pixi run ruff format --check hephaestus scripts tests
 
+      - name: Type check
+        run: pixi run mypy hephaestus/
+
   test:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
