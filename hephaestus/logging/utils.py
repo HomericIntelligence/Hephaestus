@@ -25,8 +25,9 @@ class ContextLogger(logging.LoggerAdapter):  # type: ignore[type-arg]
 
     def __init__(self, logger: logging.Logger, context: dict[str, Any] | None = None) -> None:
         """Initialize with logger and optional context dict."""
-        super().__init__(logger, context or {})
-        self._context = context or {}
+        ctx = dict(context) if context else {}
+        super().__init__(logger, ctx)
+        self._context = ctx
         self._context_lock = threading.Lock()
 
     def process(self, msg: Any, kwargs: Any) -> tuple[Any, Any]:

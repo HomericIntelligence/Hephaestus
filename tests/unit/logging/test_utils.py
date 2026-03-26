@@ -66,6 +66,29 @@ class TestContextLogger:
         assert "a" not in unbound._context
         assert unbound._context["b"] == 2
 
+    def test_init_copies_context_dict(self) -> None:
+        """__init__ stores a copy, not the caller's original dict."""
+        caller_dict: dict[str, object] = {"key": "value"}
+        logger = ContextLogger(logging.getLogger("test.copy"), caller_dict)
+        assert logger._context is not caller_dict
+        assert logger._context == caller_dict
+
+    def test_init_isolates_from_caller_mutation(self) -> None:
+        """Mutating the caller's dict after construction does not affect the logger."""
+        caller_dict: dict[str, object] = {"key": "original"}
+        logger = ContextLogger(logging.getLogger("test.isolate"), caller_dict)
+        caller_dict["key"] = "mutated"
+        caller_dict["new_key"] = "surprise"
+        assert logger._context["key"] == "original"
+        assert "new_key" not in logger._context
+
+    def test_get_logger_isolates_context(self) -> None:
+        """get_logger() also isolates the context dict from caller mutation."""
+        caller_dict: dict[str, object] = {"req": "abc"}
+        logger = get_logger("test.get_logger_isolate", context=caller_dict)
+        caller_dict["req"] = "changed"
+        assert logger._context["req"] == "abc"
+
     def test_process_adds_extra(self) -> None:
         """process() merges context into kwargs['extra']."""
         logger = get_logger("test.process", context={"x": 42})
