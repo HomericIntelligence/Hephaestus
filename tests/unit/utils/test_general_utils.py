@@ -244,3 +244,16 @@ class TestInstallPackage:
         """Accepts valid package names with extras."""
         mock_run.return_value = MagicMock(returncode=0)
         assert install_package("pkg[extra]") is True
+
+    @pytest.mark.parametrize(
+        "malicious_input",
+        [
+            "pkg; rm -rf /",
+            "pkg | cat /etc/passwd",
+            "pkg && echo pwned",
+        ],
+    )
+    def test_shell_injection_rejected(self, malicious_input: str) -> None:
+        """Reject package names containing shell injection characters."""
+        with pytest.raises(ValueError, match="Invalid package name"):
+            install_package(malicious_input)
