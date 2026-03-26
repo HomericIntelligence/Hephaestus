@@ -2,6 +2,8 @@
 """Tests for logging utilities."""
 
 import logging
+import os
+import sys
 import threading
 from pathlib import Path
 
@@ -361,17 +363,20 @@ class TestSetupLogging:
     def test_with_log_file(self, tmp_path: Path) -> None:
         """setup_logging creates log file handler."""
         log_file = str(tmp_path / "setup.log")
-        setup_logging(log_file=log_file)
-        root_logger = logging.getLogger()
-        handler_files = [getattr(h, "baseFilename", None) for h in root_logger.handlers]
-        assert log_file in handler_files
+        root = logging.getLogger()
+        saved = list(root.handlers)
+        root.handlers.clear()
+        try:
+            setup_logging(log_file=log_file)
+            handler_files = [getattr(h, "baseFilename", None) for h in root.handlers]
+            assert os.path.abspath(log_file) in handler_files
+        finally:
+            root.handlers.clear()
+            root.handlers.extend(saved)
 
     def test_log_to_stderr(self) -> None:
         """setup_logging with log_to_stderr=True adds a stderr StreamHandler."""
-        import sys
-
         root = logging.getLogger()
-        # basicConfig is a no-op if handlers already exist; clear them first.
         saved = list(root.handlers)
         root.handlers.clear()
         try:
@@ -382,6 +387,85 @@ class TestSetupLogging:
                 if isinstance(h, logging.StreamHandler) and h.stream is sys.stderr
             ]
             assert len(stderr_handlers) >= 1
+        finally:
+            root.handlers.clear()
+            root.handlers.extend(saved)
+
+    def test_no_duplicate_file_handler(self, tmp_path: Path) -> None:
+        """Calling setup_logging with same log_file twice adds only one FileHandler."""
+        log_file = str(tmp_path / "dup.log")
+        root = logging.getLogger()
+        saved = list(root.handlers)
+        root.handlers.clear()
+        try:
+            setup_logging(log_file=log_file)
+            setup_logging(log_file=log_file)
+            file_handlers = [
+                h
+                for h in root.handlers
+                if isinstance(h, logging.FileHandler)
+                and h.baseFilename == os.path.abspath(log_file)
+            ]
+            assert len(file_handlers) == 1
+        finally:
+            root.handlers.clear()
+            root.handlers.extend(saved)
+
+    def test_no_duplicate_stdout_handler(self) -> None:
+        """Calling setup_logging twice adds only one stdout StreamHandler."""
+        root = logging.getLogger()
+        saved = list(root.handlers)
+        root.handlers.clear()
+        try:
+            setup_logging()
+            setup_logging()
+            stdout_handlers = [
+                h
+                for h in root.handlers
+                if isinstance(h, logging.StreamHandler)
+                and not isinstance(h, logging.FileHandler)
+                and h.stream is sys.stdout
+            ]
+            assert len(stdout_handlers) == 1
+        finally:
+            root.handlers.clear()
+            root.handlers.extend(saved)
+
+    def test_no_duplicate_stderr_handler(self) -> None:
+        """Calling setup_logging with log_to_stderr=True twice adds only one stderr handler."""
+        root = logging.getLogger()
+        saved = list(root.handlers)
+        root.handlers.clear()
+        try:
+            setup_logging(log_to_stderr=True)
+            setup_logging(log_to_stderr=True)
+            stderr_handlers = [
+                h
+                for h in root.handlers
+                if isinstance(h, logging.StreamHandler)
+                and not isinstance(h, logging.FileHandler)
+                and h.stream is sys.stderr
+            ]
+            assert len(stderr_handlers) == 1
+        finally:
+            root.handlers.clear()
+            root.handlers.extend(saved)
+
+    def test_different_log_files_add_separate_handlers(self, tmp_path: Path) -> None:
+        """Different log file paths correctly add separate FileHandlers."""
+        log_a = str(tmp_path / "a.log")
+        log_b = str(tmp_path / "b.log")
+        root = logging.getLogger()
+        saved = list(root.handlers)
+        root.handlers.clear()
+        try:
+            setup_logging(log_file=log_a)
+            setup_logging(log_file=log_b)
+            file_handlers = [h for h in root.handlers if isinstance(h, logging.FileHandler)]
+            assert len(file_handlers) == 2
+            basenames = {h.baseFilename for h in file_handlers}
+            assert os.path.abspath(log_a) in basenames
+            assert os.path.abspath(log_b) in basenames
         finally:
             root.handlers.clear()
             root.handlers.extend(saved)

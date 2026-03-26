@@ -13,6 +13,7 @@ Usage:
 """
 
 import logging
+import os
 import sys
 import threading
 from pathlib import Path
@@ -129,15 +130,43 @@ def setup_logging(
 
     """
     format_string = format_string or LOG_FORMAT
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    formatter = logging.Formatter(format_string)
 
-    handlers = [logging.StreamHandler(sys.stdout)]
+    # Deduplicate stdout StreamHandler
+    has_stdout = any(
+        isinstance(h, logging.StreamHandler)
+        and not isinstance(h, logging.FileHandler)
+        and getattr(h, "stream", None) is sys.stdout
+        for h in root_logger.handlers
+    )
+    if not has_stdout:
+        stdout_handler = logging.StreamHandler(sys.stdout)
+        stdout_handler.setFormatter(formatter)
+        root_logger.addHandler(stdout_handler)
 
+    # Deduplicate stderr StreamHandler
     if log_to_stderr:
-        handlers.append(logging.StreamHandler(sys.stderr))
+        has_stderr = any(
+            isinstance(h, logging.StreamHandler)
+            and not isinstance(h, logging.FileHandler)
+            and getattr(h, "stream", None) is sys.stderr
+            for h in root_logger.handlers
+        )
+        if not has_stderr:
+            stderr_handler = logging.StreamHandler(sys.stderr)
+            stderr_handler.setFormatter(formatter)
+            root_logger.addHandler(stderr_handler)
 
-    logging.basicConfig(level=level, format=format_string, handlers=handlers)
-
+    # Deduplicate FileHandler by resolved path
     if log_file:
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(logging.Formatter(format_string))
-        logging.getLogger().addHandler(file_handler)
+        abs_log_file = os.path.abspath(log_file)
+        has_file = any(
+            isinstance(h, logging.FileHandler) and h.baseFilename == abs_log_file
+            for h in root_logger.handlers
+        )
+        if not has_file:
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setFormatter(formatter)
+            root_logger.addHandler(file_handler)
