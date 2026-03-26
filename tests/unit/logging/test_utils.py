@@ -43,6 +43,76 @@ class TestGetLogger:
         handler_types = [type(h) for h in logger.logger.handlers]
         assert logging.FileHandler in handler_types
 
+    def test_file_handler_added_after_console_only_call(self, tmp_path: Path) -> None:
+        """Calling get_logger with log_file after a console-only call adds the file handler."""
+        name = "test.file_after_console"
+        logger1 = get_logger(name)
+        assert len(logger1.logger.handlers) == 1
+
+        log_file = str(tmp_path / "late.log")
+        logger2 = get_logger(name, log_file=log_file)
+
+        console_handlers = [
+            h
+            for h in logger2.logger.handlers
+            if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        ]
+        file_handlers = [h for h in logger2.logger.handlers if isinstance(h, logging.FileHandler)]
+        assert len(console_handlers) == 1
+        assert len(file_handlers) == 1
+
+    def test_no_duplicate_console_handler(self) -> None:
+        """Repeated calls without log_file do not add duplicate console handlers."""
+        name = "test.no_dup_console"
+        get_logger(name)
+        get_logger(name)
+
+        underlying = logging.getLogger(name)
+        console_handlers = [
+            h
+            for h in underlying.handlers
+            if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        ]
+        assert len(console_handlers) == 1
+
+    def test_no_duplicate_file_handler_same_path(self, tmp_path: Path) -> None:
+        """Repeated calls with the same log_file do not add duplicate file handlers."""
+        name = "test.no_dup_file"
+        log_file = str(tmp_path / "same.log")
+        get_logger(name, log_file=log_file)
+        get_logger(name, log_file=log_file)
+
+        underlying = logging.getLogger(name)
+        file_handlers = [h for h in underlying.handlers if isinstance(h, logging.FileHandler)]
+        assert len(file_handlers) == 1
+
+    def test_different_file_handlers_both_added(self, tmp_path: Path) -> None:
+        """Calls with different log_file paths add separate file handlers."""
+        name = "test.diff_files"
+        file_a = str(tmp_path / "a.log")
+        file_b = str(tmp_path / "b.log")
+        get_logger(name, log_file=file_a)
+        get_logger(name, log_file=file_b)
+
+        underlying = logging.getLogger(name)
+        file_handlers = [h for h in underlying.handlers if isinstance(h, logging.FileHandler)]
+        base_filenames = {h.baseFilename for h in file_handlers}
+        assert len(file_handlers) == 2
+        assert str(Path(file_a).resolve()) in base_filenames
+        assert str(Path(file_b).resolve()) in base_filenames
+
+    def test_idempotent_full_call(self, tmp_path: Path) -> None:
+        """Identical calls with both console and file produce no extra handlers."""
+        name = "test.idempotent"
+        log_file = str(tmp_path / "idem.log")
+        get_logger(name, log_file=log_file)
+        count_after_first = len(logging.getLogger(name).handlers)
+
+        get_logger(name, log_file=log_file)
+        count_after_second = len(logging.getLogger(name).handlers)
+
+        assert count_after_first == count_after_second
+
 
 class TestContextLogger:
     """Tests for ContextLogger adapter."""

@@ -15,6 +15,7 @@ Usage:
 import logging
 import sys
 import threading
+from pathlib import Path
 from typing import Any
 
 from hephaestus.constants import LOG_FORMAT
@@ -75,17 +76,26 @@ def get_logger(
     logger = logging.getLogger(name)
     logger.setLevel(level or logging.INFO)
 
-    # Prevent adding handlers multiple times
-    if not logger.handlers:
-        formatter = logging.Formatter(LOG_FORMAT)
+    formatter = logging.Formatter(LOG_FORMAT)
 
-        # Console handler
+    # Add console handler if one doesn't already exist
+    has_console = any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        for h in logger.handlers
+    )
+    if not has_console:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
 
-        # File handler (optional)
-        if log_file:
+    # Add file handler if requested and not already present for this path
+    if log_file:
+        resolved = str(Path(log_file).resolve())
+        has_file = any(
+            isinstance(h, logging.FileHandler) and h.baseFilename == resolved
+            for h in logger.handlers
+        )
+        if not has_file:
             file_handler = logging.FileHandler(log_file)
             file_handler.setFormatter(formatter)
             logger.addHandler(file_handler)
