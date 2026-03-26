@@ -183,6 +183,16 @@ class TestDetectFormat:
         with pytest.raises(ValueError, match="Could not determine"):
             _detect_format(tmp_path / "f.xyz", None)
 
+    def test_unsupported_format_hint_raises(self, tmp_path: Path) -> None:
+        """Unsupported format_hint raises ValueError."""
+        with pytest.raises(ValueError, match="Unsupported format"):
+            _detect_format(tmp_path / "f.txt", "csv")
+
+    def test_unknown_format_hint_raises(self, tmp_path: Path) -> None:
+        """Unknown format_hint raises ValueError."""
+        with pytest.raises(ValueError, match="Unsupported format"):
+            _detect_format(tmp_path / "f.txt", "xml")
+
 
 class TestLoadData:
     """Tests for load_data."""
@@ -221,6 +231,13 @@ class TestLoadData:
         result = load_data(f, format_hint="json")
         assert result == {"a": 1}
 
+    def test_unsupported_format_hint_raises(self, tmp_path: Path) -> None:
+        """Unsupported format_hint raises ValueError."""
+        f = tmp_path / "data.json"
+        f.write_text(json.dumps({"a": 1}))
+        with pytest.raises(ValueError, match="Unsupported format"):
+            load_data(f, format_hint="csv")
+
 
 class TestSaveData:
     """Tests for save_data."""
@@ -243,11 +260,30 @@ class TestSaveData:
         with pytest.raises(ValueError, match="unsafe deserialization"):
             save_data({"x": 1}, f)
 
-    def test_default_format_json(self, tmp_path: Path) -> None:
-        """Unknown extension defaults to JSON."""
+    def test_unknown_extension_without_hint_raises(self, tmp_path: Path) -> None:
+        """Unknown extension without format_hint raises ValueError."""
         f = tmp_path / "out.dat"
-        assert save_data({"x": 1}, f)
-        assert json.loads(f.read_text()) == {"x": 1}
+        with pytest.raises(ValueError, match="Could not determine"):
+            save_data({"x": 1}, f)
+
+    def test_unsupported_format_hint_raises(self, tmp_path: Path) -> None:
+        """Unsupported format_hint raises ValueError."""
+        f = tmp_path / "out.csv"
+        with pytest.raises(ValueError, match="Unsupported format"):
+            save_data({"x": 1}, f, format_hint="csv")
+
+    def test_unknown_format_hint_raises(self, tmp_path: Path) -> None:
+        """Unknown format_hint raises ValueError."""
+        f = tmp_path / "out.xml"
+        with pytest.raises(ValueError, match="Unsupported format"):
+            save_data({"x": 1}, f, format_hint="xml")
+
+    def test_unsupported_format_no_file_written(self, tmp_path: Path) -> None:
+        """No file is written when format_hint is unsupported."""
+        f = tmp_path / "out.csv"
+        with pytest.raises(ValueError):
+            save_data({"x": 1}, f, format_hint="csv")
+        assert not f.exists()
 
     def test_raises_on_io_error(self, tmp_path: Path) -> None:
         """IOError is raised (not silently swallowed) when write fails."""

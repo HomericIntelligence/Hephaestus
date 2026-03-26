@@ -22,6 +22,9 @@ logger = get_logger(__name__)
 # Formats that require unsafe deserialization (e.g. pickle)
 _UNSAFE_FORMATS = {"pickle"}
 
+# All supported serialization formats
+_SUPPORTED_FORMATS = {"json", "yaml", "pickle"}
+
 
 def read_file(filepath: str | Path, mode: str = "r") -> str | bytes:
     """Read content from a file.
@@ -159,6 +162,11 @@ def _detect_format(filepath: Path, format_hint: str | None) -> str:
 
     """
     if format_hint is not None:
+        if format_hint not in _SUPPORTED_FORMATS:
+            raise ValueError(
+                f"Unsupported format: '{format_hint}'. "
+                f"Supported formats: {sorted(_SUPPORTED_FORMATS)}"
+            )
         return format_hint
     ext = filepath.suffix.lower()
     if ext == ".json":
@@ -237,14 +245,12 @@ def save_data(
         True if successful, False otherwise
 
     Raises:
-        ValueError: If format is unsafe and allow_unsafe_deserialization is False.
+        ValueError: If format is unsafe and allow_unsafe_deserialization is False,
+            or if format is unsupported or cannot be determined.
 
     """
     filepath = Path(filepath)
-    try:
-        fmt = _detect_format(filepath, format_hint)
-    except ValueError:
-        fmt = "json"  # default for unknown extensions
+    fmt = _detect_format(filepath, format_hint)
 
     if fmt in _UNSAFE_FORMATS and not allow_unsafe_deserialization:
         raise ValueError(
@@ -264,4 +270,6 @@ def save_data(
 
         with open(filepath, "wb") as f:
             pickle.dump(data, f)
+    else:
+        raise ValueError(f"Unsupported format: '{fmt}'")
     return True
