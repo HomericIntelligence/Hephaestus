@@ -334,6 +334,64 @@ class TestBlockScalarBraceCounting:
         assert any("Unmatched braces" in e for e in linter.errors)
 
 
+class TestStripInlineComment:
+    """Tests for ConfigLinter._strip_inline_comment."""
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ('color: "#FF0000"', 'color: "#FF0000"'),
+            ("color: '#FF0000'", "color: '#FF0000'"),
+            ('desc: "text with # in middle"', 'desc: "text with # in middle"'),
+            ("value: plain text # comment", "value: plain text "),
+            (
+                'value: "quoted # not comment" # real',
+                'value: "quoted # not comment" ',
+            ),
+            ("# full line comment", ""),
+            ("value: plain text", "value: plain text"),
+            ("value: no#space", "value: no#space"),
+            ("", ""),
+            ("  # indented comment", "  "),
+            ("key: 'single # hash' # comment", "key: 'single # hash' "),
+        ],
+        ids=[
+            "hex-color-double-quotes",
+            "hex-color-single-quotes",
+            "hash-mid-double-string",
+            "legitimate-inline-comment",
+            "quoted-hash-and-real-comment",
+            "full-line-comment",
+            "no-hash",
+            "hash-without-preceding-space",
+            "empty-line",
+            "indented-comment",
+            "single-quoted-hash-and-comment",
+        ],
+    )
+    def test_strip_inline_comment(self, line: str, expected: str) -> None:
+        """_strip_inline_comment handles various quote/comment scenarios."""
+        assert ConfigLinter._strip_inline_comment(line) == expected
+
+
+class TestLintFileQuotedHash:
+    """Integration tests for hex colors and quoted # in YAML files."""
+
+    def test_hex_color_no_false_brace_error(self, linter: ConfigLinter, yaml_file: Any) -> None:
+        """YAML with hex color in quotes should not produce brace mismatch errors."""
+        path = yaml_file('color: "#FF0000"\n')
+        result = linter.lint_file(path)
+        assert result is True
+        assert not any("brace" in e.lower() for e in linter.errors)
+
+    def test_quoted_hash_preserves_content(self, linter: ConfigLinter, yaml_file: Any) -> None:
+        """YAML with # inside quotes passes linting without syntax errors."""
+        path = yaml_file('title: "Section # 1"\ndesc: "Item #2"\n')
+        result = linter.lint_file(path)
+        assert result is True
+        assert linter.errors == []
+
+
 class TestPrintResults:
     """Tests for ConfigLinter.print_results."""
 
