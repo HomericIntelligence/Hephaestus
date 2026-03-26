@@ -13,7 +13,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.12"]
+        python-version: ["3.10", "3.11", "3.12"]
         test-type: [unit, integration]
 
     steps:
@@ -24,48 +24,41 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install pixi
-        uses: prefix-dev/setup-pixi@v0.9.4
-        with:
-          pixi-version: v0.63.2
-
-      - name: Cache pixi environments
+      - name: Cache pip packages
         uses: actions/cache@v5
         with:
-          path: |
-            .pixi
-            ~/.cache/rattler/cache
-          key: pixi-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('pixi.lock') }}
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
           restore-keys: |
-            pixi-${{ runner.os }}-${{ matrix.python-version }}-
+            pip-${{ runner.os }}-${{ matrix.python-version }}-
 
       - name: Install package
-        run: pixi run pip install -e .
+        run: pip install -e ".[dev]"
 
       - name: Run unit tests
         if: matrix.test-type == 'unit'
-        run: pixi run pytest tests/unit --override-ini="addopts=" -v --strict-markers --cov=hephaestus --cov-report=term-missing --cov-report=xml --cov-fail-under=80
+        run: pytest tests/unit --override-ini="addopts=" -v --strict-markers --cov=hephaestus --cov-report=term-missing --cov-report=xml --cov-fail-under=80
         shell: bash
 
       - name: Check unit test structure
         if: matrix.test-type == 'unit'
-        run: pixi run python scripts/check_unit_test_structure.py
+        run: python scripts/check_unit_test_structure.py
 
       - name: Run integration tests
         if: matrix.test-type == 'integration'
         run: |
-          pixi run pytest tests/integration --override-ini="addopts=" -v --strict-markers
+          pytest tests/integration --override-ini="addopts=" -v --strict-markers
 
       - name: Build wheel smoke test
         if: matrix.test-type == 'integration'
         run: |
-          pixi run python -m build
+          python -m build
           pip install dist/homericintelligence_hephaestus-*.whl --force-reinstall
           python -c "import hephaestus; print('Package version:', hephaestus.__version__)"
           python -c "from hephaestus import slugify, retry_with_backoff, setup_logging; print('OK')"
 
       - name: Upload coverage
-        if: matrix.test-type == 'unit'
+        if: matrix.test-type == 'unit' && matrix.python-version == '3.12'
         uses: codecov/codecov-action@v5
         with:
           files: ./coverage.xml
