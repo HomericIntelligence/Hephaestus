@@ -153,6 +153,47 @@ class TestGetLogger:
 
         assert len(underlying.handlers) == 1
 
+    def test_propagate_false_when_handlers_added(self) -> None:
+        """get_logger sets propagate=False to prevent duplicate output."""
+        logger = get_logger("test.propagate_false")
+        assert logger.logger.propagate is False
+
+    def test_no_duplicate_output_with_root_handlers(self) -> None:
+        """Messages appear once even when root logger has handlers."""
+        import io
+
+        # Set up root logger with a capturing handler
+        root = logging.getLogger()
+        capture_stream = io.StringIO()
+        root_handler = logging.StreamHandler(capture_stream)
+        root_handler.setFormatter(logging.Formatter("ROOT: %(message)s"))
+        root.addHandler(root_handler)
+        root.setLevel(logging.DEBUG)
+
+        try:
+            child = get_logger("test.no_dup")
+            # Replace the child's console handler stream for capturing
+            child_capture = io.StringIO()
+            for h in child.logger.handlers:
+                if isinstance(h, logging.StreamHandler):
+                    h.stream = child_capture
+
+            child.info("test message")
+
+            # Child should have the message
+            assert "test message" in child_capture.getvalue()
+            # Root should NOT have the message (propagation disabled)
+            assert "test message" not in capture_stream.getvalue()
+        finally:
+            root.removeHandler(root_handler)
+
+    def test_propagate_unchanged_on_subsequent_calls(self) -> None:
+        """Second get_logger() call with same name preserves propagate=False."""
+        logger1 = get_logger("test.subsequent_propagate")
+        assert logger1.logger.propagate is False
+        logger2 = get_logger("test.subsequent_propagate")
+        assert logger2.logger.propagate is False
+
 
 class TestContextLogger:
     """Tests for ContextLogger adapter."""
