@@ -21,6 +21,9 @@ from hephaestus.logging.utils import get_logger
 
 _logger = get_logger(__name__)
 
+_BOOL_TRUTHY: frozenset[str] = frozenset({"true", "yes", "on", "1"})
+_BOOL_FALSY: frozenset[str] = frozenset({"false", "no", "off", "0"})
+
 try:
     import yaml
 
@@ -150,7 +153,11 @@ def load_yaml_config(config_path: str | Path) -> dict[str, Any]:
     return load_config(config_path)
 
 
-def merge_with_env(config: dict[str, Any], prefix: str = "HEPHAESTUS_") -> dict[str, Any]:
+def merge_with_env(
+    config: dict[str, Any],
+    prefix: str = "HEPHAESTUS_",
+    convert_bools: bool = False,
+) -> dict[str, Any]:
     """Merge configuration with environment variables.
 
     Environment variables with the given prefix are mapped to config keys.
@@ -166,6 +173,10 @@ def merge_with_env(config: dict[str, Any], prefix: str = "HEPHAESTUS_") -> dict[
     Args:
         config: Base configuration dictionary
         prefix: Environment variable prefix to look for
+        convert_bools: If True, convert boolean-like string values
+            (true/false/yes/no/on/off/1/0, case-insensitive) to Python
+            bool. When enabled, "1" and "0" become True/False instead
+            of int. Defaults to False for backward compatibility.
 
     Returns:
         Configuration merged with environment variables
@@ -192,13 +203,19 @@ def merge_with_env(config: dict[str, Any], prefix: str = "HEPHAESTUS_") -> dict[
             )
             continue
 
-        # Try to convert to int or float if possible
-        typed_value: int | float | str = value
-        try:
-            typed_value = int(value)
-        except ValueError:
-            with contextlib.suppress(ValueError):
-                typed_value = float(value)
+        # Try to convert to bool, int, or float if possible
+        typed_value: int | float | bool | str = value
+        lower_value = value.lower()
+        if convert_bools and lower_value in _BOOL_TRUTHY:
+            typed_value = True
+        elif convert_bools and lower_value in _BOOL_FALSY:
+            typed_value = False
+        else:
+            try:
+                typed_value = int(value)
+            except ValueError:
+                with contextlib.suppress(ValueError):
+                    typed_value = float(value)
 
         # Set nested keys
         current = env_config

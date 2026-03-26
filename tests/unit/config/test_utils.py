@@ -347,6 +347,53 @@ class TestMergeWithEnv:
         result = merge_with_env({})
         assert result == {"a": 1, "b": 2, "c": 3}
 
+    def test_bool_conversion_disabled_by_default(self, monkeypatch):
+        """Boolean-like values stay as strings when convert_bools is not set."""
+        monkeypatch.setenv("HEPHAESTUS_DEBUG", "true")
+        result = merge_with_env({})
+        assert result["debug"] == "true"
+
+    def test_bool_true_values(self, monkeypatch):
+        """Each truthy boolean string converts to True."""
+        for val in ("true", "yes", "on", "1", "TRUE", "Yes", "ON"):
+            monkeypatch.setenv("HEPHAESTUS_FLAG", val)
+            result = merge_with_env({}, convert_bools=True)
+            assert result["flag"] is True, f"{val!r} should convert to True"
+
+    def test_bool_false_values(self, monkeypatch):
+        """Each falsy boolean string converts to False."""
+        for val in ("false", "no", "off", "0", "FALSE", "No", "OFF"):
+            monkeypatch.setenv("HEPHAESTUS_FLAG", val)
+            result = merge_with_env({}, convert_bools=True)
+            assert result["flag"] is False, f"{val!r} should convert to False"
+
+    def test_bool_case_insensitive(self, monkeypatch):
+        """Mixed-case boolean strings are converted correctly."""
+        monkeypatch.setenv("HEPHAESTUS_FLAG", "tRuE")
+        result = merge_with_env({}, convert_bools=True)
+        assert result["flag"] is True
+
+    def test_bool_conversion_does_not_affect_non_bool_strings(self, monkeypatch):
+        """Non-boolean strings remain as strings with convert_bools enabled."""
+        monkeypatch.setenv("HEPHAESTUS_NAME", "hello")
+        result = merge_with_env({}, convert_bools=True)
+        assert result["name"] == "hello"
+
+    def test_bool_1_0_override_int(self, monkeypatch):
+        """'1' becomes True and '0' becomes False when convert_bools is True."""
+        monkeypatch.setenv("HEPHAESTUS_A", "1")
+        monkeypatch.setenv("HEPHAESTUS_B", "0")
+        result = merge_with_env({}, convert_bools=True)
+        assert result["a"] is True
+        assert result["b"] is False
+
+    def test_int_conversion_when_bools_disabled(self, monkeypatch):
+        """'1' stays as int 1 when convert_bools is False (regression guard)."""
+        monkeypatch.setenv("HEPHAESTUS_PORT", "1")
+        result = merge_with_env({})
+        assert result["port"] == 1
+        assert isinstance(result["port"], int)
+
 
 class TestLoadYamlConfig:
     """Tests for load_yaml_config."""
