@@ -119,6 +119,80 @@ class TestLintFile:
         assert any("batch_size" in w for w in linter.warnings)
 
 
+class TestYamlSyntaxFalsePositives:
+    """Tests that valid YAML constructs do not trigger false-positive malformed key warnings."""
+
+    @pytest.mark.parametrize(
+        "yaml_content, description",
+        [
+            ('description: "Time: 3:00pm"\n', "colon in quoted value"),
+            ("created: 2024-01-15T10:30:00\n", "inline ISO timestamp"),
+            ('"my key": value\n', "double-quoted key"),
+            ("'my key': value\n", "single-quoted key"),
+            ("mapping: {key: value}\n", "flow mapping in value"),
+            ("{key: value, other: 2}\n", "top-level flow mapping"),
+            ('items:\n  - "key: value"\n', "list item with colon in value"),
+            ("items:\n  - name: foo\n", "list item as mapping"),
+            ("url: https://example.com\n", "URL value"),
+            ("key: value\n", "simple key-value pair"),
+            ("---\nkey: value\n", "document separator"),
+            ("key: value\n...\n", "document end marker"),
+            (
+                "desc: |\n  Line with: colon\n  Another: line\n",
+                "literal block scalar",
+            ),
+            (
+                "desc: >\n  Line with: colon\n  Another: line\n",
+                "folded block scalar",
+            ),
+            ("# comment with: colon\nkey: value\n", "comment with colon"),
+            ("message: 'Error: something failed'\n", "colon in single-quoted value"),
+        ],
+        ids=lambda d: d if isinstance(d, str) and ":" not in d else None,
+    )
+    def test_no_false_positive_warning(
+        self,
+        linter: ConfigLinter,
+        yaml_file: Any,
+        yaml_content: str,
+        description: str,
+    ) -> None:
+        """Valid YAML construct should not produce a malformed key warning."""
+        path = yaml_file(yaml_content)
+        linter.lint_file(path)
+        malformed_warnings = [w for w in linter.warnings if "malformed key" in w.lower()]
+        assert malformed_warnings == [], f"False positive for {description}: {malformed_warnings}"
+
+    def test_actual_malformed_key_still_detected(
+        self,
+        linter: ConfigLinter,
+        yaml_file: Any,
+    ) -> None:
+        """A genuinely suspicious line should still produce a warning."""
+        # A line like "  @weird:stuff" has a colon but doesn't match any valid pattern
+        path = yaml_file("key: value\n@weird:stuff\n")
+        linter.lint_file(path)
+        malformed_warnings = [w for w in linter.warnings if "malformed key" in w.lower()]
+        assert len(malformed_warnings) == 1
+
+    def test_block_scalar_skips_inner_lines(
+        self,
+        linter: ConfigLinter,
+        yaml_file: Any,
+    ) -> None:
+        """Lines inside block scalars should not be checked for malformed keys."""
+        content = (
+            "description: |\n"
+            "  not a key: this is block scalar text\n"
+            "  another: line\n"
+            "next_key: value\n"
+        )
+        path = yaml_file(content)
+        linter.lint_file(path)
+        malformed_warnings = [w for w in linter.warnings if "malformed key" in w.lower()]
+        assert malformed_warnings == []
+
+
 class TestPrintResults:
     """Tests for ConfigLinter.print_results."""
 

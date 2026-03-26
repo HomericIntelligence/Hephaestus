@@ -94,6 +94,47 @@ class ConfigLinter:
 
         return len(self.errors) == 0
 
+    @staticmethod
+    def _is_valid_yaml_key_line(line: str) -> bool:
+        """Check whether a line with a colon matches a valid YAML construct.
+
+        Args:
+            line: The line (after stripping inline comments).
+
+        Returns:
+            True if the line looks like a valid YAML key or construct.
+
+        """
+        s = line.strip()
+        return bool(
+            not s
+            or "://" in line
+            or re.match(r"^\s*[\w\-]+:", line)
+            or re.match(r'^\s*["\'][^"\']+["\']:', line)
+            or re.match(r"^\s*\{", line)
+            or re.match(r"^\s*-\s", line)
+            or re.match(r"^\s*---", line)
+            or re.match(r"^\s*\.\.\.", line)
+        )
+
+    @staticmethod
+    def _is_block_scalar_continuation(line: str, stripped: str, block_scalar_indent: int) -> bool:
+        """Check if a line is a continuation of a block scalar.
+
+        Args:
+            line: Raw line (for indentation measurement).
+            stripped: The stripped line content.
+            block_scalar_indent: Indent level of the block scalar's parent key.
+
+        Returns:
+            True if the line continues the block scalar.
+
+        """
+        if stripped == "":
+            return True
+        current_indent = len(line) - len(line.lstrip())
+        return current_indent > block_scalar_indent
+
     def _check_yaml_syntax(self, content: str, filepath: Path) -> bool:
         """Check if YAML syntax is valid.
 
@@ -109,22 +150,39 @@ class ConfigLinter:
             lines = content.split("\n")
             brace_count = 0
             bracket_count = 0
+            in_block_scalar = False
+            block_scalar_indent = 0
 
             for i, line in enumerate(lines):
-                # Skip comments
-                stripped = line.split("#")[0]
+                stripped = line.strip()
+
+                # Track block scalar context (| and > multi-line strings)
+                if in_block_scalar:
+                    if self._is_block_scalar_continuation(line, stripped, block_scalar_indent):
+                        continue
+                    in_block_scalar = False
+
+                # Skip comment-only lines
+                if stripped.startswith("#"):
+                    continue
+
+                # Strip inline comments (naive — doesn't handle # in quotes,
+                # but matches the pre-existing behavior)
+                comment_stripped = line.split("#")[0]
 
                 # Count braces and brackets
-                brace_count += stripped.count("{") - stripped.count("}")
-                bracket_count += stripped.count("[") - stripped.count("]")
+                brace_count += comment_stripped.count("{") - comment_stripped.count("}")
+                bracket_count += comment_stripped.count("[") - comment_stripped.count("]")
 
-                # Check for common issues
-                # Not a URL: skip lines with "://"
-                if (
-                    ":" in stripped
-                    and not re.match(r"^\s*[\w\-]+:", stripped)
-                    and "://" not in stripped
-                ):
+                # Detect block scalar start (key: | or key: >)
+                if re.match(r"^\s*[\w\"\'\-][^:]*:\s*[|>]", stripped):
+                    in_block_scalar = True
+                    block_scalar_indent = len(line) - len(line.lstrip())
+                    continue
+
+                # Malformed key check — only warn when a colon is present
+                # but the line doesn't match any valid YAML construct
+                if ":" in comment_stripped and not self._is_valid_yaml_key_line(comment_stripped):
                     self.warnings.append(f"{filepath}:{i + 1} - Possible malformed key")
 
             if brace_count != 0:
