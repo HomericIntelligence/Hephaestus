@@ -337,7 +337,9 @@ Documents <brief description of what was learned>.
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 
     # Enable auto-merge so the PR merges automatically once CI passes
-    gh pr merge --auto --rebase --repo HomericIntelligence/ProjectMnemosyne
+    # Note: gh pr merge requires a PR number when using --repo
+    PR_NUMBER=$(gh pr list --repo HomericIntelligence/ProjectMnemosyne --head "skill/<name>" --json number --jq '.[0].number')
+    gh pr merge "$PR_NUMBER" --auto --rebase --repo HomericIntelligence/ProjectMnemosyne
     ```
 
 11. **Cleanup** (if cloned to $HOME/.agent-brain):
