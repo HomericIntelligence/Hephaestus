@@ -156,6 +156,9 @@ def merge_with_env(config: dict[str, Any], prefix: str = "HEPHAESTUS_") -> dict[
     Environment variables with the given prefix are mapped to config keys.
     For example, HEPHAESTUS_DATABASE_HOST becomes database.host
 
+    Environment variables that produce empty key segments (e.g., trailing
+    or consecutive underscores) are skipped with a warning.
+
     Args:
         config: Base configuration dictionary
         prefix: Environment variable prefix to look for
@@ -170,6 +173,16 @@ def merge_with_env(config: dict[str, Any], prefix: str = "HEPHAESTUS_") -> dict[
         if key.startswith(prefix):
             # Convert HEPHAESTUS_DATABASE_HOST to database.host
             config_key = key[len(prefix) :].lower().replace("_", ".")
+
+            # Filter out empty segments from malformed env var names
+            keys = [k for k in config_key.split(".") if k]
+            if not keys:
+                _logger.warning(
+                    "Skipping malformed env var %r: produces no valid config keys",
+                    key,
+                )
+                continue
+
             # Try to convert to int or float if possible
             typed_value: int | float | str = value
             try:
@@ -179,7 +192,6 @@ def merge_with_env(config: dict[str, Any], prefix: str = "HEPHAESTUS_") -> dict[
                     typed_value = float(value)
 
             # Set nested keys
-            keys = config_key.split(".")
             current = env_config
             for k in keys[:-1]:
                 if k not in current:

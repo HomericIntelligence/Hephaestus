@@ -203,6 +203,40 @@ class TestMergeWithEnv:
         result = merge_with_env(config)
         assert result == {"a": 1}
 
+    def test_prefix_only_env_var_skipped(self, monkeypatch):
+        """Env var with only the prefix (no key) is skipped."""
+        monkeypatch.setenv("HEPHAESTUS_", "value")
+        result = merge_with_env({})
+        assert "" not in result
+
+    def test_trailing_double_underscore_skipped(self, monkeypatch):
+        """Trailing __ does not create empty-string nested key."""
+        monkeypatch.setenv("HEPHAESTUS_A__", "value")
+        result = merge_with_env({})
+        assert result == {"a": "value"}
+        assert "" not in result.get("a", {}) if isinstance(result.get("a"), dict) else True
+
+    def test_leading_double_underscore_skipped(self, monkeypatch):
+        """Leading __ (after prefix) is skipped entirely."""
+        monkeypatch.setenv("HEPHAESTUS___", "value")
+        result = merge_with_env({})
+        assert "" not in result
+
+    def test_middle_double_underscore_skipped(self, monkeypatch):
+        """Middle __ does not create empty-string intermediate key."""
+        monkeypatch.setenv("HEPHAESTUS_A__B", "value")
+        result = merge_with_env({})
+        assert result == {"a": {"b": "value"}}
+
+    def test_malformed_env_var_logs_warning(self, monkeypatch, caplog):
+        """Malformed env var (prefix only) logs a warning."""
+        import logging
+
+        monkeypatch.setenv("HEPHAESTUS_", "value")
+        with caplog.at_level(logging.WARNING):
+            merge_with_env({})
+        assert any("malformed env var" in r.message.lower() for r in caplog.records)
+
 
 class TestLoadYamlConfig:
     """Tests for load_yaml_config."""
