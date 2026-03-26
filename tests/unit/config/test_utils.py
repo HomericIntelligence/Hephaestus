@@ -245,6 +245,108 @@ class TestMergeWithEnv:
             config_logger.propagate = original_propagate
         assert any("malformed env var" in r.message.lower() for r in caplog.records)
 
+    def test_nesting_conflict_scalar_then_nest_warns(self, monkeypatch, caplog):
+        """Scalar overwritten by nesting logs a warning.
+
+        HEPHAESTUS_A=1 sets a=1, then HEPHAESTUS_A_B=2 needs to nest
+        under 'a', overwriting the scalar with a dict.
+        """
+        monkeypatch.setenv("HEPHAESTUS_A", "1")
+        monkeypatch.setenv("HEPHAESTUS_A_B", "2")
+        import logging
+
+        config_logger = logging.getLogger("hephaestus.config.utils")
+        original_propagate = config_logger.propagate
+        config_logger.propagate = True
+        try:
+            with caplog.at_level(logging.WARNING, logger="hephaestus.config.utils"):
+                result = merge_with_env({})
+        finally:
+            config_logger.propagate = original_propagate
+        assert result["a"]["b"] == 2
+        assert any("scalar value is being overwritten by a dict" in msg for msg in caplog.messages)
+
+    def test_nesting_conflict_deep_scalar_then_nest_warns(self, monkeypatch, caplog):
+        """Scalar at intermediate key overwritten by deeper nesting warns.
+
+        HEPHAESTUS_A_B=1 sets a.b=1, then HEPHAESTUS_A_B_C=2 needs to
+        nest under a.b, overwriting the scalar 1 with a dict.
+        """
+        monkeypatch.setenv("HEPHAESTUS_A_B", "1")
+        monkeypatch.setenv("HEPHAESTUS_A_B_C", "2")
+        import logging
+
+        config_logger = logging.getLogger("hephaestus.config.utils")
+        original_propagate = config_logger.propagate
+        config_logger.propagate = True
+        try:
+            with caplog.at_level(logging.WARNING, logger="hephaestus.config.utils"):
+                result = merge_with_env({})
+        finally:
+            config_logger.propagate = original_propagate
+        assert result["a"]["b"]["c"] == 2
+        assert any("scalar value is being overwritten by a dict" in msg for msg in caplog.messages)
+
+    def test_nesting_conflict_leaf_dict_overwritten_warns(self, monkeypatch, caplog):
+        """Nested dict at leaf overwritten by scalar logs a warning.
+
+        With sorted processing and underscore delimiter, the scalar key
+        always sorts before the nested key (HEPHAESTUS_A < HEPHAESTUS_A_B).
+        We reverse the processing order to exercise the defensive leaf
+        dict-overwrite warning path.
+        """
+        import logging
+        from unittest.mock import patch
+
+        monkeypatch.setenv("HEPHAESTUS_A", "2")
+        monkeypatch.setenv("HEPHAESTUS_A_B", "1")
+
+        original_sorted = sorted
+
+        def reverse_sorted(iterable, **kwargs):
+            """Reverse sort to process nested keys before scalar keys."""
+            return list(reversed(original_sorted(iterable, **kwargs)))
+
+        config_logger = logging.getLogger("hephaestus.config.utils")
+        original_propagate = config_logger.propagate
+        config_logger.propagate = True
+        try:
+            with (
+                patch("hephaestus.config.utils.sorted", side_effect=reverse_sorted),
+                caplog.at_level(logging.WARNING, logger="hephaestus.config.utils"),
+            ):
+                result = merge_with_env({})
+        finally:
+            config_logger.propagate = original_propagate
+
+        # A_B processed first → {a: {b: 1}}, then A → a=2 overwrites dict
+        assert result["a"] == 2
+        assert any(
+            "nested dict is being overwritten by the scalar value" in msg for msg in caplog.messages
+        )
+
+    def test_no_conflict_no_warning(self, monkeypatch, caplog):
+        """Non-conflicting env vars produce no warnings."""
+        monkeypatch.setenv("HEPHAESTUS_X_Y", "1")
+        monkeypatch.setenv("HEPHAESTUS_X_Z", "2")
+        monkeypatch.setenv("HEPHAESTUS_W", "3")
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="hephaestus.config.utils"):
+            result = merge_with_env({})
+        assert result["x"]["y"] == 1
+        assert result["x"]["z"] == 2
+        assert result["w"] == 3
+        assert not any("overwritten" in msg for msg in caplog.messages)
+
+    def test_sorted_processing_deterministic(self, monkeypatch):
+        """Env vars are processed in sorted order for deterministic results."""
+        monkeypatch.setenv("HEPHAESTUS_C", "3")
+        monkeypatch.setenv("HEPHAESTUS_A", "1")
+        monkeypatch.setenv("HEPHAESTUS_B", "2")
+        result = merge_with_env({})
+        assert result == {"a": 1, "b": 2, "c": 3}
+
 
 class TestLoadYamlConfig:
     """Tests for load_yaml_config."""

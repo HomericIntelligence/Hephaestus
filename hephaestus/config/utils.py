@@ -159,6 +159,10 @@ def merge_with_env(config: dict[str, Any], prefix: str = "HEPHAESTUS_") -> dict[
     Environment variables that produce empty key segments (e.g., trailing
     or consecutive underscores) are skipped with a warning.
 
+    When two environment variables conflict on nesting (e.g.,
+    ``HEPHAESTUS_A=scalar`` and ``HEPHAESTUS_A_B=nested``), the
+    last variable in sorted order wins and a warning is logged.
+
     Args:
         config: Base configuration dictionary
         prefix: Environment variable prefix to look for
@@ -169,35 +173,61 @@ def merge_with_env(config: dict[str, Any], prefix: str = "HEPHAESTUS_") -> dict[
     """
     env_config: dict[str, Any] = {}
 
-    for key, value in os.environ.items():
-        if key.startswith(prefix):
-            # Convert HEPHAESTUS_DATABASE_HOST to database.host
-            config_key = key[len(prefix) :].lower().replace("_", ".")
+    # Sort env vars for deterministic processing order
+    env_vars = sorted(
+        ((k, v) for k, v in os.environ.items() if k.startswith(prefix)),
+        key=lambda item: item[0],
+    )
 
-            # Filter out empty segments from malformed env var names
-            keys = [k for k in config_key.split(".") if k]
-            if not keys:
+    for key, value in env_vars:
+        # Convert HEPHAESTUS_DATABASE_HOST to database.host
+        config_key = key[len(prefix) :].lower().replace("_", ".")
+
+        # Filter out empty segments from malformed env var names
+        keys = [k for k in config_key.split(".") if k]
+        if not keys:
+            _logger.warning(
+                "Skipping malformed env var %r: produces no valid config keys",
+                key,
+            )
+            continue
+
+        # Try to convert to int or float if possible
+        typed_value: int | float | str = value
+        try:
+            typed_value = int(value)
+        except ValueError:
+            with contextlib.suppress(ValueError):
+                typed_value = float(value)
+
+        # Set nested keys
+        current = env_config
+        for k in keys[:-1]:
+            existing = current.get(k)
+            if existing is None:
+                current[k] = {}
+            elif not isinstance(existing, dict):
                 _logger.warning(
-                    "Skipping malformed env var %r: produces no valid config keys",
+                    "Environment variable '%s' requires nesting under key '%s', "
+                    "which was already set to a scalar value. "
+                    "The scalar value is being overwritten by a dict.",
                     key,
+                    k,
                 )
-                continue
+                current[k] = {}
+            current = current[k]
 
-            # Try to convert to int or float if possible
-            typed_value: int | float | str = value
-            try:
-                typed_value = int(value)
-            except ValueError:
-                with contextlib.suppress(ValueError):
-                    typed_value = float(value)
-
-            # Set nested keys
-            current = env_config
-            for k in keys[:-1]:
-                if k not in current:
-                    current[k] = {}
-                current = current[k]
-            current[keys[-1]] = typed_value
+        leaf = keys[-1]
+        existing_leaf = current.get(leaf)
+        if isinstance(existing_leaf, dict):
+            _logger.warning(
+                "Environment variable '%s' sets key '%s' to a scalar, "
+                "but it was already a nested dict from other environment variables. "
+                "The nested dict is being overwritten by the scalar value.",
+                key,
+                leaf,
+            )
+        current[leaf] = typed_value
 
     return merge_configs(config, env_config)
 
