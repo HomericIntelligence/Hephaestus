@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Tests for logging utilities."""
 
+import io
+import json
 import logging
 import os
 import sys
 import threading
+from io import StringIO
 from pathlib import Path
 
+from hephaestus.logging.formatters import JsonFormatter
 from hephaestus.logging.utils import (
     ContextLogger,
     get_logger,
@@ -162,8 +166,6 @@ class TestGetLogger:
 
     def test_no_duplicate_output_with_root_handlers(self) -> None:
         """Messages appear once even when root logger has handlers."""
-        import io
-
         # Set up root logger with a capturing handler
         root = logging.getLogger()
         capture_stream = io.StringIO()
@@ -195,6 +197,46 @@ class TestGetLogger:
         assert logger1.logger.propagate is False
         logger2 = get_logger("test.subsequent_propagate")
         assert logger2.logger.propagate is False
+
+    def test_json_format_uses_json_formatter(self) -> None:
+        """get_logger with json_format=True uses JsonFormatter on handlers."""
+        logger = get_logger("test.json_fmt", json_format=True)
+        for handler in logger.logger.handlers:
+            assert isinstance(handler.formatter, JsonFormatter)
+
+    def test_json_format_output_is_json(self) -> None:
+        """get_logger with json_format=True produces valid JSON output."""
+        logger = get_logger("test.json_output", json_format=True)
+        # Capture output from the handler
+        stream = StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(logger.logger.handlers[0].formatter)
+        logger.logger.addHandler(handler)
+        try:
+            logger.info("hello json")
+            output = stream.getvalue().strip()
+            parsed = json.loads(output)
+            assert parsed["message"] == "hello json"
+            assert parsed["level"] == "INFO"
+        finally:
+            logger.logger.removeHandler(handler)
+
+    def test_json_format_with_context(self) -> None:
+        """Bound context fields appear in JSON output."""
+        logger = get_logger("test.json_ctx", json_format=True)
+        bound = logger.bind(request_id="req-42", service="odyssey")
+        stream = StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(logger.logger.handlers[0].formatter)
+        bound.logger.addHandler(handler)
+        try:
+            bound.info("ctx test")
+            output = stream.getvalue().strip()
+            parsed = json.loads(output)
+            assert parsed["request_id"] == "req-42"
+            assert parsed["service"] == "odyssey"
+        finally:
+            bound.logger.removeHandler(handler)
 
 
 class TestContextLogger:
@@ -466,6 +508,35 @@ class TestSetupLogging:
             basenames = {h.baseFilename for h in file_handlers}
             assert os.path.abspath(log_a) in basenames
             assert os.path.abspath(log_b) in basenames
+        finally:
+            root.handlers.clear()
+            root.handlers.extend(saved)
+
+    def test_json_format_configures_json_formatter(self) -> None:
+        """setup_logging with json_format=True uses JsonFormatter on all handlers."""
+        root = logging.getLogger()
+        saved = list(root.handlers)
+        root.handlers.clear()
+        try:
+            setup_logging(json_format=True)
+            assert len(root.handlers) >= 1
+            for handler in root.handlers:
+                assert isinstance(handler.formatter, JsonFormatter)
+        finally:
+            root.handlers.clear()
+            root.handlers.extend(saved)
+
+    def test_json_format_with_log_file(self, tmp_path: Path) -> None:
+        """setup_logging with json_format=True also applies to file handler."""
+        root = logging.getLogger()
+        saved = list(root.handlers)
+        root.handlers.clear()
+        try:
+            log_file = str(tmp_path / "json_setup.log")
+            setup_logging(json_format=True, log_file=log_file)
+            file_handlers = [h for h in root.handlers if isinstance(h, logging.FileHandler)]
+            assert len(file_handlers) >= 1
+            assert isinstance(file_handlers[0].formatter, JsonFormatter)
         finally:
             root.handlers.clear()
             root.handlers.extend(saved)

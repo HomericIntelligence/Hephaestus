@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.constants import LOG_FORMAT
+from hephaestus.logging.formatters import JsonFormatter
 
 # Module-level lock protects the check-then-add TOCTOU in get_logger()
 _handler_setup_lock = threading.Lock()
@@ -64,6 +65,7 @@ def get_logger(
     level: int | None = None,
     log_file: str | None = None,
     context: dict[str, Any] | None = None,
+    json_format: bool = False,
 ) -> ContextLogger:
     """Get a configured logger instance with optional context.
 
@@ -72,6 +74,7 @@ def get_logger(
         level: Logging level (defaults to INFO)
         log_file: Optional file to log to
         context: Optional context dictionary to include in logs
+        json_format: If True, use structured JSON output instead of plain text
 
     Returns:
         Configured ContextLogger instance
@@ -80,7 +83,7 @@ def get_logger(
     logger = logging.getLogger(name)
     logger.setLevel(level or logging.INFO)
 
-    formatter = logging.Formatter(LOG_FORMAT)
+    formatter: logging.Formatter = JsonFormatter() if json_format else logging.Formatter(LOG_FORMAT)
 
     # Lock protects the check-then-add TOCTOU race condition during concurrent initialization
     with _handler_setup_lock:
@@ -119,20 +122,27 @@ def setup_logging(
     log_file: str | None = None,
     format_string: str | None = None,
     log_to_stderr: bool = False,
+    json_format: bool = False,
 ) -> None:
     """Set up global logging configuration.
 
     Args:
         level: Default logging level
         log_file: Optional file to log to
-        format_string: Custom log format
+        format_string: Custom log format (ignored when *json_format* is True)
         log_to_stderr: Whether to also log to stderr
+        json_format: If True, use structured JSON output instead of plain text
 
     """
-    format_string = format_string or LOG_FORMAT
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
-    formatter = logging.Formatter(format_string)
+
+    formatter: logging.Formatter
+    if json_format:
+        formatter = JsonFormatter()
+    else:
+        format_string = format_string or LOG_FORMAT
+        formatter = logging.Formatter(format_string)
 
     # Deduplicate stdout StreamHandler
     has_stdout = any(

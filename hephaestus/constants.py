@@ -20,3 +20,6 @@ DEFAULT_EXCLUDE_DIRS: frozenset[str] = frozenset(
 
 # Standard log format used across all logging utilities.
 LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Base field names included in every JSON log record.
+JSON_LOG_FIELDS: tuple[str, ...] = ("timestamp", "level", "logger", "message")
