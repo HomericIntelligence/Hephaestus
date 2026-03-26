@@ -193,6 +193,147 @@ class TestYamlSyntaxFalsePositives:
         assert malformed_warnings == []
 
 
+class TestBlockScalarBraceCounting:
+    """Tests that braces/brackets inside block scalars do not trigger unmatched errors."""
+
+    @pytest.mark.parametrize(
+        "scalar_type, content",
+        [
+            ("|", "{"),
+            ("|", "}"),
+            ("|", "{key: value}"),
+            ("|", "{{nested}}"),
+            ("|", "{unclosed"),
+            (">", "{"),
+            (">", "}"),
+            (">", "{key: value}"),
+            (">", "{{nested}}"),
+            (">", "{unclosed"),
+        ],
+        ids=[
+            "literal-lone-open-brace",
+            "literal-lone-close-brace",
+            "literal-flow-mapping",
+            "literal-double-braces",
+            "literal-mismatched-brace",
+            "folded-lone-open-brace",
+            "folded-lone-close-brace",
+            "folded-flow-mapping",
+            "folded-double-braces",
+            "folded-mismatched-brace",
+        ],
+    )
+    def test_braces_inside_block_scalar_not_counted(
+        self,
+        linter: ConfigLinter,
+        yaml_file: Any,
+        scalar_type: str,
+        content: str,
+    ) -> None:
+        """Braces inside block scalars should not affect brace counting."""
+        yaml_content = f"key: value\ndescription: {scalar_type}\n  {content}\nnext_key: value\n"
+        path = yaml_file(yaml_content)
+        result = linter.lint_file(path)
+        brace_errors = [e for e in linter.errors if "Unmatched braces" in e]
+        assert brace_errors == [], f"False brace error for {scalar_type} with '{content}'"
+        assert result is True
+
+    @pytest.mark.parametrize(
+        "scalar_type, content",
+        [
+            ("|", "["),
+            ("|", "]"),
+            ("|", "[item1, item2]"),
+            ("|", "[unclosed"),
+            (">", "["),
+            (">", "]"),
+            (">", "[item1, item2]"),
+            (">", "[unclosed"),
+        ],
+        ids=[
+            "literal-lone-open-bracket",
+            "literal-lone-close-bracket",
+            "literal-flow-sequence",
+            "literal-mismatched-bracket",
+            "folded-lone-open-bracket",
+            "folded-lone-close-bracket",
+            "folded-flow-sequence",
+            "folded-mismatched-bracket",
+        ],
+    )
+    def test_brackets_inside_block_scalar_not_counted(
+        self,
+        linter: ConfigLinter,
+        yaml_file: Any,
+        scalar_type: str,
+        content: str,
+    ) -> None:
+        """Brackets inside block scalars should not affect bracket counting."""
+        yaml_content = f"key: value\nitems: {scalar_type}\n  {content}\nnext_key: value\n"
+        path = yaml_file(yaml_content)
+        result = linter.lint_file(path)
+        bracket_errors = [e for e in linter.errors if "Unmatched brackets" in e]
+        assert bracket_errors == [], f"False bracket error for {scalar_type} with '{content}'"
+        assert result is True
+
+    def test_mixed_braces_and_brackets_inside_block_scalar(
+        self,
+        linter: ConfigLinter,
+        yaml_file: Any,
+    ) -> None:
+        """Mixed braces and brackets inside a block scalar should not trigger errors."""
+        content = (
+            "key: value\n"
+            "description: |\n"
+            "  {some text\n"
+            "  [more text\n"
+            "  {mixed] content\n"
+            "  {{nested[bracket\n"
+            "next_key: value\n"
+        )
+        path = yaml_file(content)
+        result = linter.lint_file(path)
+        brace_errors = [e for e in linter.errors if "Unmatched braces" in e]
+        bracket_errors = [e for e in linter.errors if "Unmatched brackets" in e]
+        assert brace_errors == []
+        assert bracket_errors == []
+        assert result is True
+
+    def test_braces_outside_block_scalar_still_detected(
+        self,
+        linter: ConfigLinter,
+        yaml_file: Any,
+    ) -> None:
+        """Unmatched braces outside block scalars should still trigger errors."""
+        path = yaml_file("key: { unclosed\n")
+        result = linter.lint_file(path)
+        assert result is False
+        assert any("Unmatched braces" in e for e in linter.errors)
+
+    def test_brackets_outside_block_scalar_still_detected(
+        self,
+        linter: ConfigLinter,
+        yaml_file: Any,
+    ) -> None:
+        """Unmatched brackets outside block scalars should still trigger errors."""
+        path = yaml_file("key: [ unclosed\n")
+        result = linter.lint_file(path)
+        assert result is False
+        assert any("Unmatched brackets" in e for e in linter.errors)
+
+    def test_braces_after_block_scalar_ends_still_counted(
+        self,
+        linter: ConfigLinter,
+        yaml_file: Any,
+    ) -> None:
+        """Brace counting should resume after a block scalar ends."""
+        content = "description: |\n  {safe inside block scalar\nbroken: { unclosed\n"
+        path = yaml_file(content)
+        result = linter.lint_file(path)
+        assert result is False
+        assert any("Unmatched braces" in e for e in linter.errors)
+
+
 class TestPrintResults:
     """Tests for ConfigLinter.print_results."""
 
