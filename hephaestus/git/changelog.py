@@ -79,7 +79,7 @@ def get_commits_between(from_ref: str | None, to_ref: str = "HEAD") -> list[str]
         [
             "log",
             range_spec,
-            "--pretty=format:%h|%s|%an",
+            "--pretty=format:%h%x09%s%x09%an",
             "--no-merges",
         ]
     )
@@ -96,13 +96,13 @@ def parse_commit(commit_line: str) -> tuple[str, str, str, str]:
     Handles conventional commits format: type(scope): message
 
     Args:
-        commit_line: Commit line in format "hash|subject|author"
+        commit_line: Commit line in format "hash<TAB>subject<TAB>author"
 
     Returns:
         Tuple of (hash, type, scope, message)
 
     """
-    parts = commit_line.split("|", 2)
+    parts = commit_line.split("\t", 2)
     if len(parts) != 3:
         return ("", "other", "", commit_line)
 
@@ -120,7 +120,10 @@ def parse_commit(commit_line: str) -> tuple[str, str, str, str]:
         # Extract type and optional scope
         if "(" in prefix and ")" in prefix:
             commit_type = prefix.split("(")[0].strip().lower()
-            scope = prefix.split("(")[1].split(")")[0].strip()
+            # Use index/rindex to handle nested parentheses
+            open_paren = prefix.index("(")
+            close_paren = prefix.rindex(")")
+            scope = prefix[open_paren + 1 : close_paren].strip()
         else:
             commit_type = prefix.strip().lower()
 
