@@ -117,6 +117,88 @@ class TestContextLogger:
             assert "base" in ctx
             assert "val" in ctx
 
+    def test_process_and_bind_thread_safe(self) -> None:
+        """Concurrent process() and bind() calls do not corrupt context."""
+        base = get_logger("test.process_bind_safe", context={"base": 0})
+        barrier = threading.Barrier(20)
+        exceptions: list[Exception] = []
+        process_results: list[dict[str, object]] = []
+        results_lock = threading.Lock()
+
+        def process_worker() -> None:
+            try:
+                barrier.wait()
+                for _ in range(100):
+                    _msg, kwargs = base.process("test", {})
+                    with results_lock:
+                        process_results.append(dict(kwargs.get("extra", {})))
+            except Exception as exc:
+                exceptions.append(exc)
+
+        def bind_worker(val: int) -> None:
+            try:
+                barrier.wait()
+                for _ in range(100):
+                    base.bind(key=val)
+            except Exception as exc:
+                exceptions.append(exc)
+
+        threads = [threading.Thread(target=process_worker) for _ in range(10)] + [
+            threading.Thread(target=bind_worker, args=(i,)) for i in range(10)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not exceptions, f"Threads raised exceptions: {exceptions}"
+        # Original context must not be mutated
+        assert base._context == {"base": 0}
+        # Every process() result must contain the base key
+        for result in process_results:
+            assert "base" in result
+
+    def test_process_and_unbind_thread_safe(self) -> None:
+        """Concurrent process() and unbind() calls do not corrupt context."""
+        base = get_logger("test.process_unbind_safe", context={"base": 0, "removable": 1})
+        barrier = threading.Barrier(20)
+        exceptions: list[Exception] = []
+        process_results: list[dict[str, object]] = []
+        results_lock = threading.Lock()
+
+        def process_worker() -> None:
+            try:
+                barrier.wait()
+                for _ in range(100):
+                    _msg, kwargs = base.process("test", {})
+                    with results_lock:
+                        process_results.append(dict(kwargs.get("extra", {})))
+            except Exception as exc:
+                exceptions.append(exc)
+
+        def unbind_worker() -> None:
+            try:
+                barrier.wait()
+                for _ in range(100):
+                    base.unbind("removable")
+            except Exception as exc:
+                exceptions.append(exc)
+
+        threads = [threading.Thread(target=process_worker) for _ in range(10)] + [
+            threading.Thread(target=unbind_worker) for _ in range(10)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not exceptions, f"Threads raised exceptions: {exceptions}"
+        # Original context must not be mutated
+        assert base._context == {"base": 0, "removable": 1}
+        # Every process() result must contain the base key
+        for result in process_results:
+            assert "base" in result
+
 
 class TestSetupLogging:
     """Tests for setup_logging function."""
