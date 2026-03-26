@@ -1,5 +1,7 @@
 ---
+name: learn
 description: Save session learnings as a new skill plugin. Use after experiments, debugging sessions, or when you want to preserve team knowledge.
+allowed-tools: [Read, Write, Edit, Bash, Grep, Glob]
 ---
 
 # /learn

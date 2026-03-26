@@ -1,5 +1,7 @@
 ---
+name: repo-analyze-quick
 description: Quick repository health check - catches showstoppers only, defaults to B, focuses on broken/dangerous/missing critical items
+allowed-tools: [Read, Bash, Grep, Glob, Agent]
 ---
 
 # /repo-analyze-quick

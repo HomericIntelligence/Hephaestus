@@ -1,5 +1,8 @@
 ---
+name: advise
 description: Search team knowledge before starting work. Use when starting experiments, debugging unfamiliar errors, or before implementing features with unknowns.
+argument-hint: <task description>
+allowed-tools: [Read, Bash, Grep, Glob, Agent]
 ---
 
 # /advise

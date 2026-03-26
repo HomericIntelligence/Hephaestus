@@ -10,7 +10,7 @@
     {
       "name": "hephaestus",
       "description": "Shared tooling plugin for the HomericIntelligence ecosystem. Provides /advise (search skills registry), /learn (capture session learnings), /myrmidon-swarm (hierarchical agent orchestration), and /repo-analyze variants (repository auditing).",
-      "version": "1.0.0",
+      "version": "2.0.0",
       "source": "./",
       "category": "tooling",
       "tags": ["advise", "learn", "myrmidon-swarm", "repo-analyze", "orchestration", "skills"]

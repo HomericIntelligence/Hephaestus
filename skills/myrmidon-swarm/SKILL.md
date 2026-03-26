@@ -1,5 +1,8 @@
 ---
+name: myrmidon-swarm
 description: Summon the Myrmidon swarm — hierarchical agent delegation with Opus/Sonnet/Haiku model tiers for the HomericIntelligence ecosystem
+argument-hint: <task description>
+allowed-tools: [Read, Write, Edit, Bash, Grep, Glob, Agent]
 ---
 
 # /myrmidon-swarm
