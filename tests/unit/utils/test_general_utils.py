@@ -217,3 +217,30 @@ class TestInstallPackage:
         install_package("some-package", upgrade=True)
         cmd = mock_run.call_args[0][0]
         assert "--upgrade" in cmd
+
+    def test_rejects_newline_in_package_name(self):
+        """Rejects package names containing newlines."""
+        with pytest.raises(ValueError, match="Invalid package name"):
+            install_package("pkg\nmalicious")
+
+    def test_rejects_exclamation_mark_in_package_name(self):
+        """Rejects package names containing exclamation marks."""
+        with pytest.raises(ValueError, match="Invalid package name"):
+            install_package("pkg!exploit")
+
+    def test_rejects_tab_in_package_name(self):
+        """Rejects package names containing tab characters."""
+        with pytest.raises(ValueError, match="Invalid package name"):
+            install_package("pkg\texploit")
+
+    @patch("hephaestus.utils.helpers.run_subprocess")
+    def test_accepts_version_constraints(self, mock_run):
+        """Accepts valid package names with version constraints."""
+        mock_run.return_value = MagicMock(returncode=0)
+        assert install_package("torch>=2.0,<3") is True
+
+    @patch("hephaestus.utils.helpers.run_subprocess")
+    def test_accepts_extras(self, mock_run):
+        """Accepts valid package names with extras."""
+        mock_run.return_value = MagicMock(returncode=0)
+        assert install_package("pkg[extra]") is True

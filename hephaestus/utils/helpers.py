@@ -203,7 +203,9 @@ def install_package(package_name: str, upgrade: bool = False) -> bool:
 
     """
     # Validate package name: only alphanumerics, hyphens, underscores, dots, brackets, ==, >=, <=
-    if not re.match(r"^[A-Za-z0-9_\-\.\[\],>=<!\s]+$", package_name):
+    # Uses re.fullmatch and literal space (not \s) to block newlines/tabs.
+    # Excludes ! to prevent shell history expansion.
+    if not re.fullmatch(r"[A-Za-z0-9_\-.\[\],>=< ]+", package_name):
         raise ValueError(f"Invalid package name: {package_name!r}")
 
     cmd = [sys.executable, "-m", "pip", "install"]
