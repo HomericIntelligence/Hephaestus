@@ -119,6 +119,17 @@ repos:
         pass_filenames: false
         files: ^(pyproject\.toml|pixi\.toml|\.github/workflows/.*\.yml)$
 
+  # Version single source of truth check
+  - repo: local
+    hooks:
+      - id: check-version-single-source
+        name: Check version single source of truth
+        description: Ensure pyproject.toml is the sole version authority, pixi.toml has no version
+        entry: python scripts/check_version_single_source.py
+        language: system
+        pass_filenames: false
+        files: ^(pyproject\.toml|pixi\.toml)$
+
   # Shellcheck for shell scripts
   - repo: https://github.com/shellcheck-py/shellcheck-py
     rev: v0.10.0.1

@@ -74,6 +74,30 @@ pixi run test
 - Add sections to README.md for new features
 - Keep documentation clear and concise
 
+## Version Management
+
+The project version is managed as follows:
+
+- **Single source of truth**: `pyproject.toml` under `[project].version`
+- **Secondary files**: `VERSION` and `hephaestus/__init__.py` (`__version__`) are kept in sync
+- **`pixi.toml` has no version field** — this is intentional. The `[workspace]` section in `pixi.toml`
+  is for environment metadata only; the package version comes from `pyproject.toml` via the editable install
+
+### Updating the version
+
+1. Update `version` in `pyproject.toml` under `[project]`
+2. Update secondary files using the version manager:
+
+   ```python
+   from hephaestus.version.manager import VersionManager
+   VersionManager().update("X.Y.Z")
+   ```
+
+   This updates `VERSION` and any `__init__.py` files that contain `__version__`.
+
+3. Do **not** add a `version` field to `pixi.toml` — a pre-commit hook (`check-version-single-source`)
+   will reject it
+
 ## Pull Request Process
 
 1. Ensure tests pass locally

@@ -2,9 +2,13 @@
 
 """Version management utilities for updating and verifying version files.
 
-Supports updating version numbers across:
+The authoritative project version lives in pyproject.toml under [project].version.
+This module keeps secondary version files in sync:
 - VERSION (root file)
 - __init__.py (__version__ attribute)
+
+Note: pixi.toml intentionally has no version field. The package version is
+provided to pixi via the editable install from pyproject.toml.
 """
 
 import re

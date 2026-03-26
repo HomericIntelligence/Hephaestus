@@ -384,4 +384,11 @@ pre-commit run --all-files
 - `pixi.toml` - Pixi environment and task definitions
 - `.claude/` - Claude Code configuration and guidance
 
+## Version Management
+
+- **`pyproject.toml`** is the single source of truth for the project version (`[project].version`)
+- **`pixi.toml`** intentionally has no version field — do not add one
+- Use `hephaestus.version.manager.VersionManager` to update secondary files (`VERSION`, `__init__.py`)
+- The `check-version-single-source` pre-commit hook enforces single-source versioning
+
 Make sure all temporary files are in the build/ directory
