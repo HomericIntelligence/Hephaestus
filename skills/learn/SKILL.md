@@ -19,6 +19,45 @@ worktrees (`/tmp/mnemosyne-skill-<name>`) for isolation — the shared clone sta
 Worktrees are cleaned up after PR creation. Automatically detected if already running in
 the ProjectMnemosyne repository.
 
+## Execution Model
+
+**CRITICAL: Always delegate /learn execution to a sub-agent.**
+
+The `/learn` workflow modifies a **different repository** (ProjectMnemosyne) than the user's current
+working directory. To avoid polluting the main conversation's git state or blocking other work:
+
+1. **Use a sub-agent** — Delegate the entire skill creation/amendment workflow to a sub-agent so
+   the main conversation can continue. The sub-agent handles clone/worktree setup, file creation,
+   validation, commit, push, and PR creation autonomously.
+
+2. **Use worktree isolation** — The sub-agent works in a git worktree (not the shared clone
+   directly) to avoid branch conflicts if multiple `/learn` invocations run concurrently or if
+   `/advise` is reading the same clone.
+
+```python
+# Launch /learn as an isolated sub-agent
+Agent(
+    description="Create/amend skill in ProjectMnemosyne",
+    isolation="worktree",  # Isolated copy — no branch conflicts
+    prompt="""Execute the /learn workflow for ProjectMnemosyne:
+    1. Clone/update ProjectMnemosyne at $HOME/.agent-brain/ProjectMnemosyne
+    2. Search for existing skills to amend
+    3. Create/amend the skill file in a worktree branch
+    4. Validate with scripts/validate_plugins.py
+    5. Commit, push, create PR, enable auto-merge
+    6. Clean up the worktree
+
+    Session learnings to capture: <extracted learnings from conversation>"""
+)
+```
+
+**Why sub-agents + worktrees:**
+- The shared clone at `$HOME/.agent-brain/ProjectMnemosyne/` may be on a different branch from a
+  prior `/learn` or `/advise` invocation
+- Direct `git checkout -b` in the shared clone can fail if another agent is mid-operation
+- Worktree isolation guarantees a clean state for each skill PR
+- Sub-agent delegation keeps the main conversation free to continue other work
+
 ## Instructions
 
 When the user invokes this command:
