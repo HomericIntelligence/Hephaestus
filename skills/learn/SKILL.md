@@ -14,8 +14,10 @@ Capture session learnings and create or amend a skill file in the ProjectMnemosy
 **Base branch**: `main`
 **Clone location**: `$HOME/.agent-brain/ProjectMnemosyne/`
 
-Single shared clone in user's home directory. Automatically cleaned after PR creation.
-Automatically skipped if already running in the ProjectMnemosyne repository.
+Single shared clone in user's home directory. Skill branches are created in temporary
+worktrees (`/tmp/mnemosyne-skill-<name>`) for isolation — the shared clone stays on main.
+Worktrees are cleaned up after PR creation. Automatically detected if already running in
+the ProjectMnemosyne repository.
 
 ## Instructions
 
@@ -128,18 +130,16 @@ When the user invokes this command:
    verification: verified-ci | verified-local | verified-precommit | unverified
    ```
 
-6. **Setup repository**:
+6. **Setup repository using worktrees** (CRITICAL — always use worktrees for branch isolation):
    ```bash
    # Detect if already in ProjectMnemosyne
    CURRENT_REMOTE=$(git remote get-url origin 2>/dev/null || echo "")
    if [[ "$CURRENT_REMOTE" == *"ProjectMnemosyne"* ]] && [[ "$CURRENT_REMOTE" != *"ProjectMnemosyne-"* ]]; then
-     # Already in ProjectMnemosyne - work in current directory
+     # Already in ProjectMnemosyne - use worktree from current repo
      MNEMOSYNE_DIR="."
-     NEED_CLEANUP=false
    else
      # Use shared home directory location
      MNEMOSYNE_DIR="$HOME/.agent-brain/ProjectMnemosyne"
-     NEED_CLEANUP=true
 
      if [ ! -d "$MNEMOSYNE_DIR" ]; then
        # Clone fresh
@@ -151,13 +151,18 @@ When the user invokes this command:
      git -C "$MNEMOSYNE_DIR" fetch origin
      git -C "$MNEMOSYNE_DIR" checkout main
      git -C "$MNEMOSYNE_DIR" pull --ff-only origin main
-
-     cd "$MNEMOSYNE_DIR"
    fi
 
-   # Create branch from origin/main (clean state)
-   git checkout -b skill/<name> origin/main
+   # Create a worktree for branch isolation (never checkout branches in the base repo)
+   WORKTREE_DIR="/tmp/mnemosyne-skill-<name>"
+   git -C "$MNEMOSYNE_DIR" worktree add "$WORKTREE_DIR" -b skill/<name> origin/main
+   cd "$WORKTREE_DIR"
    ```
+
+   **Why worktrees?** Working directly on the shared clone switches its branch, which
+   breaks concurrent `/advise` operations and leaves the clone in a dirty state if
+   the session is interrupted. Worktrees provide isolated copies that are safe to
+   abandon.
 
 7. **Generate or amend skill file** as flat `skills/<name>.md`:
 
@@ -342,12 +347,11 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
     gh pr merge "$PR_NUMBER" --auto --rebase --repo HomericIntelligence/ProjectMnemosyne
     ```
 
-11. **Cleanup** (if cloned to $HOME/.agent-brain):
+11. **Cleanup worktree** (always clean up after PR creation):
     ```bash
-    if [ "$NEED_CLEANUP" = true ]; then
-      # After PR created, remove the worktree clone
-      rm -rf "$HOME/.agent-brain/ProjectMnemosyne"
-    fi
+    # Remove the worktree (keeps the shared clone intact for future /advise)
+    git -C "$MNEMOSYNE_DIR" worktree remove "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"
+    git -C "$MNEMOSYNE_DIR" worktree prune
     ```
 
 ## Amendment Workflow Summary
