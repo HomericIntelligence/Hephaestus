@@ -1,7 +1,7 @@
 {
   "hooks": {},
   "enabledPlugins": {
-    "skills-registry-commands@ProjectMnemosyne": true,
+    "hephaestus@ProjectHephaestus": true,
     "safety-net@cc-marketplace": true
   }
 }
