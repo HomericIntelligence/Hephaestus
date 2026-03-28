@@ -180,7 +180,7 @@ After all implementation is complete:
 
 - Verify all changes are coherent and complete
 - Summarize what was accomplished
-- Suggest running `/hephaestus:learn` to capture learnings in ProjectMnemosyne
+- **MANDATORY**: Invoke `/hephaestus:learn` to capture learnings in ProjectMnemosyne — do not skip this step
 - Create PR if appropriate (using the repo's PR workflow from CLAUDE.md)
 </workflow>
 
@@ -237,7 +237,7 @@ Instruct sub-agents to report back (not attempt to fix) when they encounter:
 
 **Before starting (Phase 1)**: Auto-invoke `/advise` using the Skill tool. This is mandatory.
 
-**After completing (Phase 5)**: Suggest the user run `/hephaestus:learn` to capture learnings. Do not auto-invoke — let the user decide.
+**After completing (Phase 5)**: Auto-invoke `/hephaestus:learn` to capture learnings. This is mandatory — do not skip or leave it to the user.
 
 **Clone location**: `$HOME/.agent-brain/ProjectMnemosyne/`
 
@@ -385,6 +385,6 @@ After Phase 5, provide:
 ### Learnings
 - [Key decisions, surprising findings, or patterns worth capturing]
 
-Consider running `/retrospective` to save these learnings to ProjectMnemosyne.
+**Now invoke `/hephaestus:learn` to save these learnings to ProjectMnemosyne. This is mandatory.**
 ```
 </output_format>
