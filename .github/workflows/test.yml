@@ -94,7 +94,7 @@ jobs:
 
       - name: Upload coverage
         if: matrix.test-type == 'unit' && matrix.python-version == '3.12'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           files: ./coverage.xml
           token: ${{ secrets.CODECOV_TOKEN }}
