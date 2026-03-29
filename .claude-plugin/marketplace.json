@@ -5,15 +5,15 @@
     "url": "https://github.com/HomericIntelligence"
   },
   "description": "Shared tooling and commands for the HomericIntelligence agentic ecosystem",
-  "version": "1.0.0",
+  "version": "3.0.0",
   "plugins": [
     {
       "name": "hephaestus",
-      "description": "Shared tooling plugin for the HomericIntelligence ecosystem. Provides /advise (search skills registry), /learn (capture session learnings), /myrmidon-swarm (hierarchical agent orchestration), and /repo-analyze variants (repository auditing).",
-      "version": "2.0.0",
+      "description": "Shared tooling plugin for the HomericIntelligence ecosystem. Provides /skill-advisor (task routing), /advise (search skills registry), /learn (capture session learnings), /myrmidon-swarm (hierarchical agent orchestration), /brainstorm (design before code), /test-driven-development (RED-GREEN-REFACTOR), /systematic-debugging (root cause first), /verification (evidence before claims), /git-worktrees (isolated workspaces), /finish-branch (branch completion), /code-review (Sonnet reviewer + feedback), and /repo-analyze variants (repository auditing).",
+      "version": "3.0.0",
       "source": "./",
       "category": "tooling",
-      "tags": ["advise", "learn", "myrmidon-swarm", "repo-analyze", "orchestration", "skills"]
+      "tags": ["skill-advisor", "advise", "learn", "myrmidon-swarm", "brainstorm", "tdd", "test-driven-development", "debugging", "systematic-debugging", "verification", "git-worktrees", "finish-branch", "code-review", "repo-analyze", "orchestration", "skills"]
     }
   ]
 }

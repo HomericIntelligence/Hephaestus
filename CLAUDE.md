@@ -185,20 +185,48 @@ Skip Extended Thinking for:
 - Boilerplate code generation
 - Well-defined refactorings
 
+### Automatic Skill Selection
+
+Before beginning any substantive task, invoke `/hephaestus:skill-advisor` to determine if a structured
+skill applies. Use `Skill(skill: "hephaestus:skill-advisor", args: "<task description>")`.
+
+If you are a myrmidon-swarm subagent with a specific task prompt, skip this and follow your prompt directly.
+
+### Skill Catalog
+
+| Skill | When to Use |
+|-------|-------------|
+| `skill-advisor` | Before any task — routes to the correct skill |
+| `advise` | Before starting work — search ProjectMnemosyne for prior learnings |
+| `learn` | After completing work — capture session learnings in ProjectMnemosyne |
+| `myrmidon-swarm` | Complex multi-step tasks requiring parallel agent coordination |
+| `brainstorm` | Before implementing a new feature — design before code |
+| `test-driven-development` | Before writing implementation code — RED-GREEN-REFACTOR |
+| `systematic-debugging` | Before proposing fixes — root cause first |
+| `verification` | Before claiming work is done — evidence before assertions |
+| `git-worktrees` | When needing isolated branch workspace |
+| `finish-branch` | When implementation is complete — branch completion workflow |
+| `code-review` | After major feature completion — Sonnet reviewer + feedback reception |
+| `repo-analyze` | Comprehensive 15-dimension repository audit |
+| `repo-analyze-quick` | Quick repository health check |
+| `repo-analyze-strict` | Ruthlessly thorough repository audit |
+
 ### Agent Skills vs Sub-Agents Decision Tree
 
 ```text
 Is the task well-defined with predictable steps?
-├─ YES → Use an Agent Skill
+├─ YES → Use an Agent Skill (see catalog above)
+│   ├─ Is it a new feature? → brainstorm → test-driven-development
+│   ├─ Is it a bug? → systematic-debugging → test-driven-development
+│   ├─ Is it ready to ship? → verification → finish-branch
 │   ├─ Is it a GitHub operation? → Use gh-* skills
-│   ├─ Is it a testing task? → Use test-* skills
 │   ├─ Is it a CI/CD task? → Use ci-* skills
 │   └─ Is it documentation work? → Use doc-* skills
 │
 └─ NO → Use a Sub-Agent
     ├─ Does it require exploration/discovery? → Use sub-agent
     ├─ Does it need adaptive decision-making? → Use sub-agent
-    ├─ Is the workflow dynamic/context-dependent? → Use sub-agent
+    ├─ Is the workflow dynamic/context-dependent? → Use myrmidon-swarm
     └─ Does it need extended thinking? → Use sub-agent
 ```
 
