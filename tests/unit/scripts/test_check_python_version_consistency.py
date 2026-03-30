@@ -182,4 +182,9 @@ class TestSmokeAgainstRealFiles:
             pytest.skip("pixi.toml not found")
         content = path.read_text()
         version = extract_pixi_workspace_version(content)
-        assert version is not None, "Expected [workspace] version in pixi.toml"
+        # pyproject.toml is the single source of truth for the project version.
+        # pixi.toml [workspace] must NOT declare a version field.
+        assert version is None, (
+            "pixi.toml [workspace] must not contain a version field — "
+            "pyproject.toml is the single source of truth for the project version."
+        )
