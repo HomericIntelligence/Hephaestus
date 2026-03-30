@@ -94,6 +94,26 @@ size_str = human_readable_size(1048576)
 print(size_str)  # Output: 1.0 MB
 ```
 
+### As a Claude Code Plugin
+
+ProjectHephaestus also ships as a Claude Code plugin, providing slash commands for repository auditing, agent orchestration, and knowledge management.
+
+```bash
+claude plugin install HomericIntelligence/ProjectHephaestus
+```
+
+Then enable it in your project's `.claude/settings.json`:
+
+```json
+{
+  "enabledPlugins": {
+    "hephaestus@ProjectHephaestus": true
+  }
+}
+```
+
+See [docs/plugin-installation.md](docs/plugin-installation.md) for the full installation guide and skill reference.
+
 ### Installing in Another Project
 
 To use ProjectHephaestus in another project with Pixi:

@@ -26,6 +26,8 @@ ProjectHephaestus is the shared utilities and tooling library for the HomericInt
 
 See the [README](../README.md) for installation and development setup instructions.
 
+- [Plugin Installation Guide](plugin-installation.md) — Install the Claude Code plugin and enable skills in your project
+
 ## Contributing
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines.

@@ -1,12 +1,12 @@
 ---
 name: learn
-description: Save session learnings as a new skill plugin. Use after experiments, debugging sessions, or when you want to preserve team knowledge.
+description: Save session learnings as a skill plugin — amends existing skills when the topic matches, creates new ones otherwise. Use after experiments, debugging sessions, or when you want to preserve team knowledge.
 allowed-tools: [Read, Write, Edit, Bash, Grep, Glob]
 ---
 
 # /learn
 
-Capture session learnings and create or amend a skill file in the ProjectMnemosyne marketplace.
+Capture session learnings and amend an existing skill or create a new one in the ProjectMnemosyne marketplace. Always searches for an existing skill to update before creating a new file.
 
 ## Target Repository
 
@@ -68,6 +68,27 @@ When the user invokes this command:
    - Successes: What worked?
    - Failures: What didn't work and why?
    - Parameters: What configs/settings were used?
+
+**CRITICAL — One skill per independent learning:**
+
+If the session produced multiple learnings that are independently useful and would be searched for with different keywords, create separate skills for each rather than combining them into one. Ask yourself: "Would someone searching for learning A ever think to look in a skill about learning B?" If no, they must be separate files.
+
+Examples of learnings that **must be split**:
+- A git structural fix (symlink→submodule conversion) + a build system pattern (BUILD_ROOT) + a rebase strategy → 3 skills
+- A training hyperparameter finding + a Docker isolation fix → 2 skills
+
+Examples that **can stay combined**:
+- Two failure modes of the same API call → 1 skill (same search surface)
+- A configuration flag and its required companion setting → 1 skill
+
+When splitting, launch parallel sub-agents (one per skill) rather than creating them sequentially:
+
+```python
+# If multiple independent learnings, launch one agent per skill in parallel:
+Agent(description="Create skill A", prompt="...skill A content...")
+Agent(description="Create skill B", prompt="...skill B content...")
+Agent(description="Create skill C", prompt="...skill C content...")
+```
 
 2. **Auto-generate skill metadata** (NO user prompting):
    - Analyze conversation topic to extract: `<topic>-<subtopic>`
