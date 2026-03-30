@@ -5,7 +5,7 @@
 Several skills in this directory were adapted from [obra/superpowers](https://github.com/obra/superpowers),
 a Claude Code skills framework by Jesse Vincent / Prime Radiant.
 
-**Source repository:** https://github.com/obra/superpowers
+**Source repository:** <https://github.com/obra/superpowers>
 **License:** MIT License
 **Copyright:** Copyright (c) 2025 Jesse Vincent
 

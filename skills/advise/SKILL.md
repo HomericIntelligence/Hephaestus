@@ -24,6 +24,7 @@ When the user invokes this command:
 ### Phase 1: Search and Present Findings
 
 1. **Setup repository** (if not already cloned):
+
    ```bash
    # Detect if already in ProjectMnemosyne
    CURRENT_REMOTE=$(git remote get-url origin 2>/dev/null || echo "")
@@ -74,6 +75,7 @@ When the user invokes this command:
 7. **CRITICAL — Check for history files**:
 
    For each matched skill, check if a `.history` file exists:
+
    ```bash
    ls "$MNEMOSYNE_DIR/skills/<name>.history" 2>/dev/null
    ```

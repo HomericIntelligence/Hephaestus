@@ -18,11 +18,13 @@ Two-part skill: **Requesting** a code review via a Sonnet reviewer agent, and **
 ### When to Request Review
 
 **Mandatory:**
+
 - After completing a major feature or task
 - Before merging to main
 - After fixing a complex bug
 
 **Optional but valuable:**
+
 - When stuck (fresh perspective)
 - Before refactoring (baseline check)
 - After completing a myrmidon-swarm task wave
@@ -83,27 +85,36 @@ For each issue found:
 ## Output Format
 
 ```
+
 ## Strengths
-- <what was done well>
+
+- [what was done well]
 
 ## Issues
+
 ### Critical
-- <issue>: <specific location> — <what to fix>
+
+- [issue]: [specific location] — [what to fix]
 
 ### Important
-- <issue>: <specific location> — <what to fix>
+
+- [issue]: [specific location] — [what to fix]
 
 ### Suggestions
-- <suggestion>: <specific location>
+
+- [suggestion]: [specific location]
 
 ## Assessment
+
 Ready to merge / Fix Critical issues first / Fix Critical + Important issues first
+
 ```
 """
 )
 ```
 
 **3. Act on feedback:**
+
 - Fix Critical issues immediately
 - Fix Important issues before proceeding
 - Note Suggestions for later
@@ -129,12 +140,14 @@ WHEN receiving code review feedback:
 ### Forbidden Responses
 
 **NEVER:**
+
 - "You're absolutely right!" (performative)
 - "Great point!" / "Excellent feedback!"
 - "Let me implement that now" (before verification)
 - ANY expression of gratitude
 
 **INSTEAD:**
+
 - Restate the technical requirement
 - Ask clarifying questions
 - Push back with technical reasoning if wrong
@@ -176,6 +189,7 @@ IF reviewer suggests "implementing properly" with new features:
 ### When to Push Back
 
 Push back when:
+
 - Suggestion breaks existing functionality
 - Reviewer lacks full context
 - Violates YAGNI (unused feature)

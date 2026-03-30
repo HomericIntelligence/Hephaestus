@@ -18,12 +18,14 @@ Write the test first. Watch it fail. Write minimal code to pass.
 ## When to Use
 
 **Always:**
+
 - New features
 - Bug fixes
 - Refactoring
 - Behavior changes
 
 **Exceptions (ask your human partner):**
+
 - Throwaway prototypes
 - Generated code
 - Configuration files
@@ -41,6 +43,7 @@ NO PRODUCTION CODE WITHOUT A FAILING TEST FIRST
 Write code before the test? Delete it. Start over.
 
 **No exceptions:**
+
 - Don't keep it as "reference"
 - Don't "adapt" it while writing tests
 - Don't look at it
@@ -55,6 +58,7 @@ Implement fresh from tests. Period.
 Write one minimal test showing what should happen.
 
 **Requirements:**
+
 - One behavior per test
 - Clear descriptive name
 - Test real code (no mocks unless unavoidable)
@@ -69,6 +73,7 @@ pixi run pytest tests/ -k "<test_name>" -v
 ```
 
 Confirm:
+
 - Test fails (not errors)
 - Failure message is expected
 - Fails because feature is missing (not typos)
@@ -92,6 +97,7 @@ pixi run pytest tests/ -v
 ```
 
 Confirm:
+
 - The new test passes
 - All other tests still pass
 - No errors or warnings
@@ -103,6 +109,7 @@ Confirm:
 ### REFACTOR — Clean Up
 
 After green only:
+
 - Remove duplication
 - Improve names
 - Extract helpers

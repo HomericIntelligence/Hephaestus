@@ -64,10 +64,12 @@ Complete in order:
 ## After the Design
 
 **Write spec doc:**
+
 - Save to `docs/specs/YYYY-MM-DD-<topic>-design.md`
 - Commit: `docs(specs): add <topic> design document`
 
 **Spec Self-Review:**
+
 1. **Placeholder scan:** Any "TBD", "TODO", incomplete sections? Fix them.
 2. **Internal consistency:** Do any sections contradict each other?
 3. **Scope check:** Is this focused enough for a single plan?
@@ -80,6 +82,7 @@ After the self-review:
 Wait for approval. Only proceed once approved.
 
 **Implementation:**
+
 - Invoke the `planning` skill for task tracking, or
 - Invoke `/hephaestus:myrmidon-swarm` for complex multi-agent work
 

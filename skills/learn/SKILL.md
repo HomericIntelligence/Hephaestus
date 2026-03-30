@@ -52,6 +52,7 @@ Agent(
 ```
 
 **Why sub-agents + worktrees:**
+
 - The shared clone at `$HOME/.agent-brain/ProjectMnemosyne/` may be on a different branch from a
   prior `/learn` or `/advise` invocation
 - Direct `git checkout -b` in the shared clone can fail if another agent is mid-operation
@@ -74,10 +75,12 @@ When the user invokes this command:
 If the session produced multiple learnings that are independently useful and would be searched for with different keywords, create separate skills for each rather than combining them into one. Ask yourself: "Would someone searching for learning A ever think to look in a skill about learning B?" If no, they must be separate files.
 
 Examples of learnings that **must be split**:
+
 - A git structural fix (symlink→submodule conversion) + a build system pattern (BUILD_ROOT) + a rebase strategy → 3 skills
 - A training hyperparameter finding + a Docker isolation fix → 2 skills
 
 Examples that **can stay combined**:
+
 - Two failure modes of the same API call → 1 skill (same search surface)
 - A configuration flag and its required companion setting → 1 skill
 
@@ -90,13 +93,13 @@ Agent(description="Create skill B", prompt="...skill B content...")
 Agent(description="Create skill C", prompt="...skill C content...")
 ```
 
-2. **Auto-generate skill metadata** (NO user prompting):
+1. **Auto-generate skill metadata** (NO user prompting):
    - Analyze conversation topic to extract: `<topic>-<subtopic>`
    - Generate short 4-word summary from key learning
    - Filename: `<topic>-<subtopic>-<short-4-word-summary>` (kebab-case)
    - Auto-detect category from conversation context (training, evaluation, optimization, debugging, architecture, tooling, ci-cd, testing, documentation)
 
-3. **CRITICAL — Search for existing skills to amend**:
+2. **CRITICAL — Search for existing skills to amend**:
 
    Before creating a new file, search the registry for skills covering the same topic:
 
@@ -126,11 +129,12 @@ Agent(description="Create skill C", prompt="...skill C content...")
    | **Major** (X.0.0) | `1.0.0` → `2.0.0` | Merge multiple skills, rewrite verified workflow, change core recommendation | Consolidating 5 duplicate skills; replacing recommended API |
    | **Minor** (0.X.0) | `1.0.0` → `1.1.0` | Add new findings, new failed attempts, extend workflow with new steps | Adding 2 Failed Attempts rows; new "When to Use" trigger |
    | **Patch** (0.0.X) | `1.0.0` → `1.0.1` | Fix typos, formatting, metadata corrections, clarify existing text | Fix category typo; fix broken markdown table |
+
    d. Update the changelog in the history file
 
    **If no existing skill matches → Create a new skill** (proceed to Step 5)
 
-4. **History log management** (for amendments):
+3. **History log management** (for amendments):
 
    When amending an existing skill, preserve the previous version in `skills/<name>.history`:
 
@@ -172,7 +176,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
    - The snapshot preserves the exact previous content for auditability
    - Add a reference from the main skill file: `**History:** [changelog](./skills/<name>.history)`
 
-5. **CRITICAL — Honesty gate for "Verified Workflow"**:
+4. **CRITICAL — Honesty gate for "Verified Workflow"**:
 
    Before writing the "Verified Workflow" section, answer these questions honestly:
    - Was the workflow actually executed end-to-end? (Not just pre-commit hooks — the actual tests/code)
@@ -186,11 +190,13 @@ Agent(description="Create skill C", prompt="...skill C content...")
    - `unverified`: Approach is theoretically sound but never executed
 
    Add this as a frontmatter field:
+
    ```yaml
    verification: verified-ci | verified-local | verified-precommit | unverified
    ```
 
-6. **Setup repository using worktrees** (CRITICAL — always use worktrees for branch isolation):
+5. **Setup repository using worktrees** (CRITICAL — always use worktrees for branch isolation):
+
    ```bash
    # Detect if already in ProjectMnemosyne
    CURRENT_REMOTE=$(git remote get-url origin 2>/dev/null || echo "")
@@ -224,7 +230,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
    the session is interrupted. Worktrees provide isolated copies that are safe to
    abandon.
 
-7. **Generate or amend skill file** as flat `skills/<name>.md`:
+6. **Generate or amend skill file** as flat `skills/<name>.md`:
 
    > New flat format: Single `.md` file in `skills/` root (not nested directories or plugin.json)
 
@@ -289,6 +295,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
    | Project | Context | Details |
    |---------|---------|---------|
    | ProjectName | Session context | [notes.md](./skills/<name>.notes.md) |
+
    ```
 
    Rules:
@@ -308,7 +315,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
    - Referenced from main skill file via `history` frontmatter field
    - See Step 4 for format
 
-8. **Validate skill** (MUST pass before committing):
+7. **Validate skill** (MUST pass before committing):
 
    ### Pre-Commit Validation Checklist
 
@@ -327,79 +334,85 @@ Agent(description="Create skill C", prompt="...skill C content...")
    ```bash
    python3 scripts/validate_plugins.py
    ```
+
    If validation fails, fix errors and re-run. Do NOT commit until it passes.
 
-9. **Commit and push**:
+8. **Commit and push**:
+
    ```bash
    # For new skills:
    git add skills/<name>.md skills/<name>.notes.md 2>/dev/null || true
    git commit -m "feat: add <name> skill
 
-Documents <brief description of what was learned>.
+   Documents <brief description of what was learned>.
 
-Verification: <verified-ci|verified-local|verified-precommit|unverified>
+   Verification: <verified-ci|verified-local|verified-precommit|unverified>
 
-Key learnings:
-- <bullet 1>
-- <bullet 2>
-- <bullet 3>
+   Key learnings:
 
-Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
+   - <bullet 1>
+   - <bullet 2>
+   - <bullet 3>
 
-   # For amendments:
+   Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
+
+   # For amendments
+
    git add skills/<name>.md skills/<name>.history skills/<name>.notes.md 2>/dev/null || true
    git commit -m "feat: amend <name> skill (v<X.0.0>)
 
-<Brief description of what changed and why>.
+   <Brief description of what changed and why>.
 
-Verification: <level>
-Previous version archived in <name>.history
+   Verification: <level>
+   Previous version archived in <name>.history
 
-Key changes:
-- <change 1>
-- <change 2>
+   Key changes:
 
-Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
+   - <change 1>
+   - <change 2>
+
+   Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 
    git push -u origin skill/<name>
    ```
 
-10. **Create PR** (only if push succeeded):
+9. **Create PR** (only if push succeeded):
+
     ```bash
     gh pr create --repo HomericIntelligence/ProjectMnemosyne --base main \
       --title "feat: <add|amend> <name> skill" \
       --body "## Summary
 
-<New skill | Amends existing skill from v<old> to v<new>>.
+    <New skill | Amends existing skill from v<old> to v<new>>.
 
-Documents <brief description of what was learned>.
+    Documents <brief description of what was learned>.
 
-- <Key point 1>
-- <Key point 2>
-- <Key point 3>
+    - <Key point 1>
+    - <Key point 2>
+    - <Key point 3>
 
-## Verification Level
+    ## Verification Level
 
-**<verified-ci|verified-local|verified-precommit|unverified>**
+    **<verified-ci|verified-local|verified-precommit|unverified>**
 
-<If not verified-ci, explain what is pending>
+    <If not verified-ci, explain what is pending>
 
-## Key Findings
+    ## Key Findings
 
-**What Worked**:
-- <Successful approach 1>
-- <Successful approach 2>
+    **What Worked**:
+    - <Successful approach 1>
+    - <Successful approach 2>
 
-**What Failed**:
-- <Failed attempt 1> → <Why it failed>
+    **What Failed**:
+    - <Failed attempt 1> → <Why it failed>
 
-## Test Plan
+    ## Test Plan
 
-- [ ] Validate with \`python3 scripts/validate_plugins.py\`
-- [ ] Verify skill appears in marketplace
-- [ ] Test skill discovery with relevant keywords
+    - [ ] Validate with \`python3 scripts/validate_plugins.py\`
+    - [ ] Verify skill appears in marketplace
+    - [ ] Test skill discovery with relevant keywords
 
-Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
+    Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 
     # Enable auto-merge so the PR merges automatically once CI passes
     # Note: gh pr merge requires a PR number when using --repo
@@ -407,7 +420,8 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
     gh pr merge "$PR_NUMBER" --auto --rebase --repo HomericIntelligence/ProjectMnemosyne
     ```
 
-11. **Cleanup worktree** (always clean up after PR creation):
+10. **Cleanup worktree** (always clean up after PR creation):
+
     ```bash
     # Remove the worktree (keeps the shared clone intact for future /advise)
     git -C "$MNEMOSYNE_DIR" worktree remove "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"
@@ -451,6 +465,7 @@ Existing skill found?
 **Cause**: Branch was already pushed in previous attempt.
 
 **Solution**: Either delete the branch and re-push, or update the existing PR:
+
 ```bash
 # Delete old branch and try again
 git push origin :skill/<name>
@@ -465,6 +480,7 @@ git push origin skill/<name>
 **Cause**: Shared clone at `$HOME/.agent-brain/ProjectMnemosyne` takes up disk space.
 
 **Solution**: Safe to delete anytime — re-clones automatically on next `/advise` or `/learn`:
+
 ```bash
 rm -rf $HOME/.agent-brain/ProjectMnemosyne
 ```

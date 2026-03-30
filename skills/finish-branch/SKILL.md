@@ -30,6 +30,7 @@ pre-commit run --files $(git diff --name-only origin/main)
 ```
 
 **If ANY check fails:**
+
 ```
 Verification failing — must fix before completing:
 
@@ -109,6 +110,7 @@ Report: "Keeping branch `<name>`. Worktree preserved at `<path>`."
 #### Option 3: Discard
 
 **Confirm first:**
+
 ```
 This will permanently delete:
 - Branch <name>
@@ -152,6 +154,7 @@ chore(scope): maintenance task
 ```
 
 Include `Co-Authored-By` trailer when AI-assisted:
+
 ```
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 ```
@@ -159,12 +162,14 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 ## Red Flags
 
 **Never:**
+
 - Proceed with failing checks
 - Merge directly to main (protected branch)
 - Force-push without explicit request
 - Delete work without typed confirmation
 
 **Always:**
+
 - Run all 5 verification commands
 - Present structured options
 - Get typed confirmation for Option 3

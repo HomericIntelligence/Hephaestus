@@ -11,7 +11,12 @@
       "system", "task", "section", "sections", "step",
       "principle", "sub_principle", "development_principles",
       "grading_rubric", "audit_sections", "analysis_instructions",
-      "output_format", "important_notes", "criteria", "anti_inflation_rules"
+      "output_format", "important_notes", "criteria", "anti_inflation_rules",
+      "workflow", "integrations", "constraints", "agent_tiers",
+      "delegation_rules", "agent_prompt_template",
+      "brief", "Brief", "level", "name",
+      "what", "issue", "specific", "suggestion",
+      "old", "new", "Why", "bullet"
     ]
   },
   "MD046": false,

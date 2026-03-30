@@ -30,6 +30,7 @@ If you haven't completed Phase 1, you cannot propose fixes.
 ## When to Use
 
 Use for ANY technical issue:
+
 - Test failures
 - Bugs in production
 - Unexpected behavior
@@ -38,6 +39,7 @@ Use for ANY technical issue:
 - Integration issues
 
 **Use this ESPECIALLY when:**
+
 - Under time pressure (emergencies make guessing tempting)
 - "Just one quick fix" seems obvious
 - You've already tried multiple fixes
@@ -75,6 +77,7 @@ You MUST complete each phase before proceeding to the next.
    **WHEN system has multiple components:**
 
    **BEFORE proposing fixes, add diagnostic instrumentation:**
+
    ```
    For EACH component boundary:
      - Log what data enters component
@@ -182,6 +185,7 @@ pixi run mypy hephaestus/
 Run `/hephaestus:verification` before claiming the bug is fixed.
 
 Run `/hephaestus:learn` to capture the debugging session in ProjectMnemosyne — especially:
+
 - Root cause category and symptoms
 - What diagnostic steps revealed it
 - The fix pattern

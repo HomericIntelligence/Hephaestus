@@ -55,6 +55,7 @@ git check-ignore -q .worktrees 2>/dev/null || echo "NOT IGNORED - add to .gitign
 ```
 
 **If NOT ignored:**
+
 1. Add `.worktrees/` to `.gitignore`
 2. Commit the change
 3. Then proceed with worktree creation
@@ -125,6 +126,7 @@ git worktree prune
 ## Integration
 
 **Pairs with:**
+
 - `/hephaestus:finish-branch` — REQUIRED for cleanup after work is complete
 - `/hephaestus:verification` — run before finishing and cleaning up
 
