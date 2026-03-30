@@ -63,6 +63,7 @@ def extract_pyproject_versions(pyproject_path: Path) -> dict[str, str]:
 
 def _extract_via_tomllib(pyproject_path: Path) -> dict[str, str]:
     """Extract versions using proper TOML parsing."""
+    assert tomllib is not None, "tomllib/tomli must be available to call this function"
     with open(pyproject_path, "rb") as f:
         data = tomllib.load(f)
 
