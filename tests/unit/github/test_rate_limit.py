@@ -9,6 +9,7 @@ from unittest.mock import patch
 from hephaestus.github.rate_limit import (
     ALLOWED_TIMEZONES,
     RATE_LIMIT_RE,
+    detect_claude_usage_limit,
     detect_rate_limit,
     parse_reset_epoch,
     wait_until,
@@ -146,3 +147,47 @@ class TestWaitUntil:
         mock_time.side_effect = [999, 999, 1001]
         wait_until(target)
         assert mock_sleep.called
+
+
+class TestDetectClaudeUsageLimit:
+    """Tests for detect_claude_usage_limit."""
+
+    def test_detects_usage_limit(self) -> None:
+        """Returns True when usage limit message found."""
+        result = detect_claude_usage_limit("Claude AI usage limit reached for your account")
+        assert result is True
+
+    def test_detects_quota_exceeded(self) -> None:
+        """Returns True when quota exceeded message found."""
+        result = detect_claude_usage_limit("quota exceeded for this billing period")
+        assert result is True
+
+    def test_detects_credit_exhausted(self) -> None:
+        """Returns True when credit exhausted message found."""
+        result = detect_claude_usage_limit("credit balance exhausted")
+        assert result is True
+
+    def test_detects_billing_limit(self) -> None:
+        """Returns True when billing limit message found."""
+        result = detect_claude_usage_limit("billing limit exceeded for this month")
+        assert result is True
+
+    def test_returns_false_for_normal_output(self) -> None:
+        """Returns False when no usage limit message."""
+        result = detect_claude_usage_limit("Normal output, everything is fine")
+        assert result is False
+
+    def test_returns_false_for_empty_string(self) -> None:
+        """Returns False for empty string."""
+        result = detect_claude_usage_limit("")
+        assert result is False
+
+    def test_case_insensitive_detection(self) -> None:
+        """Detects usage limit regardless of case."""
+        result = detect_claude_usage_limit("USAGE LIMIT reached")
+        assert result is True
+
+    def test_returns_false_for_unrelated_error(self) -> None:
+        """Returns False for unrelated error messages."""
+        result = detect_claude_usage_limit("Error: command not found")
+        assert result is False

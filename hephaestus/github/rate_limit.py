@@ -14,10 +14,13 @@ Usage:
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import re
 import signal
 import time
 from datetime import timezone
+
+logger = logging.getLogger(__name__)
 
 try:
     from zoneinfo import ZoneInfo
@@ -152,3 +155,28 @@ def wait_until(epoch: int) -> None:
             time.sleep(1)
     finally:
         signal.signal(signal.SIGINT, old_handler)
+
+
+def detect_claude_usage_limit(stderr: str) -> bool:
+    """Detect Claude API usage limit from error output.
+
+    Args:
+        stderr: Standard error output
+
+    Returns:
+        True if usage limit detected
+
+    """
+    patterns = [
+        r"usage limit",
+        r"quota exceeded",
+        r"credit.*exhausted",
+        r"billing.*limit|billing.*exceeded",  # More specific to avoid false positives
+    ]
+
+    for pattern in patterns:
+        if re.search(pattern, stderr, re.IGNORECASE):
+            logger.error("Claude usage limit detected: %s", pattern)
+            return True
+
+    return False
