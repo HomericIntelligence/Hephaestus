@@ -41,7 +41,7 @@ class TestDefaultExcludeDirs:
             assert isinstance(entry, str)
 
     def test_immutability(self) -> None:
-        """frozenset should reject mutation attempts."""
+        """Frozenset should reject mutation attempts."""
         with pytest.raises(AttributeError):
             DEFAULT_EXCLUDE_DIRS.add("new_dir")  # type: ignore[attr-error]
 
