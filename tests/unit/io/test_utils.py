@@ -297,10 +297,10 @@ class TestSaveData:
         assert save_data({"a": 1}, f)
         assert "a:" in f.read_text()
 
-    def test_creates_parent_dirs_default_format(self, tmp_path: Path) -> None:
-        """Creates missing parent directories for unknown extension (defaults to JSON)."""
+    def test_creates_parent_dirs_with_format_hint(self, tmp_path: Path) -> None:
+        """Creates missing parent directories with explicit format_hint for unknown extension."""
         f = tmp_path / "new_dir" / "out.dat"
-        assert save_data({"a": 1}, f)
+        assert save_data({"a": 1}, f, format_hint="json")
         assert json.loads(f.read_text()) == {"a": 1}
 
     def test_raises_on_io_error(self, tmp_path: Path) -> None:
