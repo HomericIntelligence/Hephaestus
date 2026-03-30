@@ -37,7 +37,7 @@ repos:
       - id: mypy-check-python
         name: Mypy Type Check Python
         description: Type check Python files using mypy
-        entry: pixi run mypy hephaestus/
+        entry: pixi run mypy
         language: system
         files: ^hephaestus/.*\.py$
         types: [python]
