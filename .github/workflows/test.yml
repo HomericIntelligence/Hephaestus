@@ -42,7 +42,7 @@ jobs:
         run: pixi run ruff format --check hephaestus scripts tests
 
       - name: Type check
-        run: pixi run mypy hephaestus/
+        run: pixi run mypy
 
   test:
     runs-on: ${{ matrix.os }}

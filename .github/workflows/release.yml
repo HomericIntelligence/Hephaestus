@@ -58,7 +58,7 @@ jobs:
             ${{ runner.os }}-pixi-
 
       - name: Run mypy type checking
-        run: pixi run mypy hephaestus/
+        run: pixi run mypy
 
   build-and-publish:
     runs-on: ubuntu-latest
