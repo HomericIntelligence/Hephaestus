@@ -233,8 +233,16 @@ class TestMergeWithEnv:
         import logging
 
         monkeypatch.setenv("HEPHAESTUS_", "value")
-        with caplog.at_level(logging.WARNING):
-            merge_with_env({})
+        # hephaestus loggers set propagate=False; temporarily re-enable so caplog
+        # (which installs its handler on the root logger) can capture the record.
+        config_logger = logging.getLogger("hephaestus.config.utils")
+        original_propagate = config_logger.propagate
+        config_logger.propagate = True
+        try:
+            with caplog.at_level(logging.WARNING, logger="hephaestus.config.utils"):
+                merge_with_env({})
+        finally:
+            config_logger.propagate = original_propagate
         assert any("malformed env var" in r.message.lower() for r in caplog.records)
 
 
