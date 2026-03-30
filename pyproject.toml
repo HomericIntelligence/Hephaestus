@@ -27,6 +27,7 @@ classifiers = [
 keywords = ["utilities", "helpers", "tooling", "homericintelligence"]
 dependencies = [
     "pyyaml>=6.0,<7",
+    "pydantic>=2.0,<3",
 ]
 
 [project.optional-dependencies]
