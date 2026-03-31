@@ -71,6 +71,7 @@ hephaestus-check-complexity = "hephaestus.validation.complexity:main"
 hephaestus-filter-audit = "hephaestus.validation.audit:main"
 hephaestus-validate-schemas = "hephaestus.validation.schema:main"
 hephaestus-validate-links = "hephaestus.validation.markdown:main"
+hephaestus-check-readmes = "hephaestus.validation.markdown:check_readmes_main"
 hephaestus-check-type-aliases = "hephaestus.validation.type_aliases:main"
 hephaestus-check-docstrings = "hephaestus.validation.docstrings:main"
 

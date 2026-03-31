@@ -15,6 +15,7 @@ from hephaestus.validation.docstrings import (
     scan_file as scan_docstrings,
 )
 from hephaestus.validation.markdown import (
+    ReadmeValidationResult,
     check_markdown_formatting,
     check_required_sections,
     count_markdown_issues,
@@ -23,10 +24,12 @@ from hephaestus.validation.markdown import (
     find_markdown_files,
     find_readmes,
     validate_all_links,
+    validate_all_readmes,
     validate_directory_exists,
     validate_file_exists,
     validate_file_links,
     validate_internal_link,
+    validate_readme,
     validate_relative_link,
 )
 from hephaestus.validation.python_version import check_python_version_consistency
@@ -48,6 +51,7 @@ __all__ = [
     "CodeBlock",
     "ConfigLinter",
     "FragmentFinding",
+    "ReadmeValidationResult",
     "ReadmeValidator",
     "StructureValidator",
     "ValidationReport",
@@ -73,9 +77,11 @@ __all__ = [
     "scan_docstrings",
     "severity_label",
     "validate_all_links",
+    "validate_all_readmes",
     "validate_directory_exists",
     "validate_file_exists",
     "validate_file_links",
     "validate_internal_link",
+    "validate_readme",
     "validate_relative_link",
 ]

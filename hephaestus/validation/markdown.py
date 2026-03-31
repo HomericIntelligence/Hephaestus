@@ -13,8 +13,10 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -272,6 +274,225 @@ def check_markdown_formatting(content: str) -> list[str]:
                 break  # Only report first occurrence
 
     return issues
+
+
+# ---------------------------------------------------------------------------
+# README validation
+# ---------------------------------------------------------------------------
+
+DEFAULT_REQUIRED_SECTIONS: dict[str, list[str]] = {
+    "default": ["Overview", "Installation", "Usage"],
+}
+"""Default required sections for README validation.
+
+Keys are README type identifiers; values are lists of required heading names.
+Callers may pass custom lists to :func:`validate_readme` or
+:func:`validate_all_readmes` to override these defaults.
+"""
+
+
+@dataclass
+class ReadmeValidationResult:
+    """Validation result for a single README file.
+
+    Attributes:
+        file: Path to the README file.
+        passed: Whether all checks passed.
+        missing_sections: Required section headings that were not found.
+        formatting_issues: Markdown formatting problems detected.
+
+    """
+
+    file: Path
+    passed: bool
+    missing_sections: list[str] = field(default_factory=list)
+    formatting_issues: list[str] = field(default_factory=list)
+
+
+def validate_readme(
+    file_path: Path,
+    required_sections: list[str] | None = None,
+) -> ReadmeValidationResult:
+    """Validate a single README file for required sections and formatting.
+
+    Reads the file at *file_path*, checks that every heading listed in
+    *required_sections* is present (case-insensitive partial match), and
+    reports any markdown formatting issues found by
+    :func:`check_markdown_formatting`.
+
+    Args:
+        file_path: Path to the README.md file.
+        required_sections: Required section headings.  Defaults to
+            ``["Overview", "Installation", "Usage"]`` when *None*.
+
+    Returns:
+        :class:`ReadmeValidationResult` with pass/fail and details.
+
+    """
+    if required_sections is None:
+        required_sections = DEFAULT_REQUIRED_SECTIONS["default"]
+
+    missing: list[str] = []
+    formatting: list[str] = []
+    passed = True
+
+    try:
+        content = file_path.read_text(encoding="utf-8")
+
+        # Extract headings and check required sections (case-insensitive).
+        sections = extract_sections(content)
+        for section in required_sections:
+            found = any(section.lower() in existing.lower() for existing in sections)
+            if not found:
+                missing.append(section)
+
+        if missing:
+            passed = False
+
+        # Check markdown formatting issues.
+        formatting = check_markdown_formatting(content)
+        if formatting:
+            passed = False
+
+        # Files should end with a trailing newline.
+        if not content.endswith("\n"):
+            formatting.append("File must end with newline")
+            passed = False
+
+    except OSError as exc:
+        formatting.append(f"Error reading file: {exc}")
+        passed = False
+
+    return ReadmeValidationResult(
+        file=file_path,
+        passed=passed,
+        missing_sections=missing,
+        formatting_issues=formatting,
+    )
+
+
+def validate_all_readmes(
+    directory: Path,
+    required_sections: list[str] | None = None,
+) -> list[ReadmeValidationResult]:
+    """Validate all README.md files in a directory tree.
+
+    Scans *directory* recursively for ``README.md`` files and calls
+    :func:`validate_readme` on each one.
+
+    Args:
+        directory: Root directory to scan.
+        required_sections: Required section headings passed through to
+            :func:`validate_readme`.  Uses default sections when *None*.
+
+    Returns:
+        List of :class:`ReadmeValidationResult` for each README found.
+
+    """
+    readmes = find_readmes(directory)
+    return [validate_readme(readme, required_sections) for readme in readmes]
+
+
+def _print_readme_summary(results: list[ReadmeValidationResult]) -> None:
+    """Print a human-readable README validation summary to stdout.
+
+    Args:
+        results: Validation results from :func:`validate_all_readmes`.
+
+    """
+    passed = [r for r in results if r.passed]
+    failed = [r for r in results if not r.passed]
+
+    print("\n" + "=" * 70)
+    print("README VALIDATION SUMMARY")
+    print("=" * 70)
+    print(f"Total READMEs: {len(results)}")
+    print(f"Passed: {len(passed)}")
+    print(f"Failed: {len(failed)}")
+
+    if failed:
+        print(f"\nFailed READMEs ({len(failed)}):")
+        for result in failed:
+            print(f"  {result.file}")
+            for section in result.missing_sections:
+                print(f"    - Missing section: {section}")
+            for issue in result.formatting_issues:
+                print(f"    - {issue}")
+
+    print("=" * 70)
+
+
+def check_readmes_main() -> int:
+    """CLI entry point for README validation.
+
+    Parses command-line arguments, validates README files, and prints results.
+
+    Returns:
+        Exit code (0 if all pass, 1 if any failures).
+
+    """
+    parser = argparse.ArgumentParser(
+        description="Validate README files for required sections and formatting",
+    )
+    parser.add_argument(
+        "--directory",
+        type=Path,
+        default=None,
+        help="Directory to scan (default: current working directory)",
+    )
+    parser.add_argument(
+        "--required-section",
+        action="append",
+        dest="required_sections",
+        metavar="SECTION",
+        help="Required section heading (repeatable; overrides defaults)",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print each README path as it is checked",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Output results as JSON",
+    )
+
+    args = parser.parse_args()
+    directory = args.directory or Path.cwd()
+
+    if not directory.is_dir():
+        print(f"ERROR: Directory not found: {directory}", file=sys.stderr)
+        return 1
+
+    required_sections: list[str] | None = args.required_sections or None
+
+    results = validate_all_readmes(directory, required_sections)
+
+    if not results:
+        print(f"No README.md files found in {directory}")
+        return 0
+
+    if args.json_output:
+        output = [
+            {
+                "file": str(r.file),
+                "passed": r.passed,
+                "missing_sections": r.missing_sections,
+                "formatting_issues": r.formatting_issues,
+            }
+            for r in results
+        ]
+        print(json.dumps(output, indent=2))
+    else:
+        if args.verbose:
+            for result in results:
+                status = "PASS" if result.passed else "FAIL"
+                print(f"[{status}] {result.file}")
+        _print_readme_summary(results)
+
+    return 0 if all(r.passed for r in results) else 1
 
 
 # ---------------------------------------------------------------------------
