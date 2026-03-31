@@ -93,7 +93,9 @@ class JsonFormatter(logging.Formatter):
 
 
 # Set of attribute names present on a default LogRecord so we can detect
-# user-supplied extras.
+# user-supplied extras.  We also exclude ``asctime`` (added by ``formatTime()``)
+# and ``stack_info`` (present on all records but handled explicitly above) since
+# neither should be promoted to a top-level JSON key via the extras path.
 _DEFAULT_RECORD_ATTRS: frozenset[str] = frozenset(
     logging.LogRecord("", 0, "", 0, None, None, None).__dict__.keys()
-)
+) | {"asctime", "stack_info"}
