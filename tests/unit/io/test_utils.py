@@ -245,13 +245,13 @@ class TestSaveData:
     def test_save_json(self, tmp_path: Path) -> None:
         """Saves data as JSON."""
         f = tmp_path / "out.json"
-        assert save_data({"k": 1}, f)
+        save_data({"k": 1}, f)
         assert json.loads(f.read_text()) == {"k": 1}
 
     def test_save_yaml(self, tmp_path: Path) -> None:
         """Saves data as YAML."""
         f = tmp_path / "out.yaml"
-        assert save_data({"k": 1}, f)
+        save_data({"k": 1}, f)
         assert "k:" in f.read_text()
 
     def test_unsafe_format_blocked_by_default(self, tmp_path: Path) -> None:
@@ -288,19 +288,19 @@ class TestSaveData:
     def test_creates_parent_dirs_json(self, tmp_path: Path) -> None:
         """Creates missing parent directories for JSON output."""
         f = tmp_path / "sub" / "deep" / "out.json"
-        assert save_data({"a": 1}, f)
+        save_data({"a": 1}, f)
         assert json.loads(f.read_text()) == {"a": 1}
 
     def test_creates_parent_dirs_yaml(self, tmp_path: Path) -> None:
         """Creates missing parent directories for YAML output."""
         f = tmp_path / "sub" / "deep" / "out.yaml"
-        assert save_data({"a": 1}, f)
+        save_data({"a": 1}, f)
         assert "a:" in f.read_text()
 
     def test_creates_parent_dirs_with_format_hint(self, tmp_path: Path) -> None:
         """Creates missing parent directories with explicit format_hint for unknown extension."""
         f = tmp_path / "new_dir" / "out.dat"
-        assert save_data({"a": 1}, f, format_hint="json")
+        save_data({"a": 1}, f, format_hint="json")
         assert json.loads(f.read_text()) == {"a": 1}
 
     def test_raises_on_io_error(self, tmp_path: Path) -> None:

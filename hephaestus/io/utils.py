@@ -231,7 +231,7 @@ def save_data(
     filepath: str | Path,
     format_hint: str | None = None,
     allow_unsafe_deserialization: bool = False,
-) -> bool:
+) -> None:
     """Save data to file with automatic format detection.
 
     Args:
@@ -240,9 +240,6 @@ def save_data(
         format_hint: Optional format hint ('json', 'yaml', 'pickle')
         allow_unsafe_deserialization: If False (default), raise ValueError for
             formats that can execute arbitrary code (e.g. pickle).
-
-    Returns:
-        True if successful, False otherwise
 
     Raises:
         ValueError: If format is unsafe and allow_unsafe_deserialization is False,
@@ -274,4 +271,3 @@ def save_data(
             pickle.dump(data, f)
     else:
         raise ValueError(f"Unsupported format: '{fmt}'")
-    return True
