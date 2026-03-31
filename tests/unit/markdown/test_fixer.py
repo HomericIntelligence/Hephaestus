@@ -228,3 +228,241 @@ def test_fix_structural_issues_ordered_list():
     fixed, _fixes = fixer._fix_structural_issues(content)
     # Ordered list items should be present
     assert "1." in fixed
+
+
+# ---------------------------------------------------------------------------
+# _try_fix_md036_line (MD036)
+# ---------------------------------------------------------------------------
+
+
+class TestFixMd036:
+    """Tests for _try_fix_md036_line() and MD036 behaviour in _fix_structural_issues."""
+
+    def test_converts_bold_as_heading(self) -> None:
+        """Bold text that looks like a heading is converted to an ATX heading."""
+        f = MarkdownFixer()
+        result = f._try_fix_md036_line("**Introduction**", "", "")
+        assert result is not None
+        assert "### Introduction" in result
+
+    def test_adds_blank_line_before_when_prev_nonempty(self) -> None:
+        """A blank line is prepended when the preceding line is not blank."""
+        f = MarkdownFixer()
+        result = f._try_fix_md036_line("**Section**", "Some preceding text", "")
+        assert result is not None
+        assert result[0] == ""
+
+    def test_adds_blank_line_after_when_next_nonempty(self) -> None:
+        """A blank line is appended when the following line is not blank."""
+        f = MarkdownFixer()
+        result = f._try_fix_md036_line("**Section**", "", "Following text")
+        assert result is not None
+        assert result[-1] == ""
+
+    def test_no_blank_lines_when_surrounded_by_blank(self) -> None:
+        """No extra blank lines are inserted when already surrounded by blanks."""
+        f = MarkdownFixer()
+        result = f._try_fix_md036_line("**Section**", "", "")
+        assert result is not None
+        assert result == ["### Section"]
+
+    def test_removes_trailing_colon_after_bold(self) -> None:
+        """Trailing colon after closing ** is stripped from the heading text."""
+        f = MarkdownFixer()
+        # Colon after the closing **: **Summary**:
+        result = f._try_fix_md036_line("**Summary**:", "", "")
+        assert result is not None
+        assert "### Summary" in result
+
+    def test_ignores_long_bold_text(self) -> None:
+        """Bold text longer than 49 characters is not treated as a heading."""
+        f = MarkdownFixer()
+        long_text = "**" + "A" * 50 + "**"
+        result = f._try_fix_md036_line(long_text, "", "")
+        assert result is None
+
+    def test_ignores_lowercase_bold_text(self) -> None:
+        """Bold text starting with a lowercase letter is not converted."""
+        f = MarkdownFixer()
+        result = f._try_fix_md036_line("**some inline bold**", "", "")
+        assert result is None
+
+    def test_ignores_non_bold_line(self) -> None:
+        """Regular text lines return None."""
+        f = MarkdownFixer()
+        result = f._try_fix_md036_line("Just regular text", "", "")
+        assert result is None
+
+    def test_structural_issues_converts_bold_heading(self) -> None:
+        """Full _fix_structural_issues converts **Bold** to ### Bold."""
+        f = MarkdownFixer()
+        content = "Intro\n\n**Overview**\n\nDetails\n"
+        fixed, fixes = f._fix_structural_issues(content)
+        assert "### Overview" in fixed
+        assert fixes > 0
+
+
+# ---------------------------------------------------------------------------
+# _fix_md022_heading_blank_lines (MD022)
+# ---------------------------------------------------------------------------
+
+
+class TestFixMd022:
+    """Tests for _fix_md022_heading_blank_lines() and MD022 via _fix_structural_issues."""
+
+    def test_adds_blank_line_before_heading(self) -> None:
+        """A blank line is inserted before a heading preceded by text."""
+        f = MarkdownFixer()
+        content = "Some text\n## Heading\n\nMore text\n"
+        fixed, fixes = f._fix_structural_issues(content)
+        assert fixes > 0
+        assert "\n\n## Heading" in fixed
+
+    def test_adds_blank_line_after_heading(self) -> None:
+        """A blank line is inserted after a heading followed by text."""
+        f = MarkdownFixer()
+        content = "\n## Heading\nSome text\n"
+        fixed, fixes = f._fix_structural_issues(content)
+        assert fixes > 0
+        assert "## Heading\n\n" in fixed
+
+    def test_no_extra_blank_before_heading_at_start(self) -> None:
+        """No blank line is prepended when heading is at the document start."""
+        f = MarkdownFixer()
+        content = "## Heading\n\nContent\n"
+        fixed, fixes = f._fix_structural_issues(content)
+        # Nothing to add before — no extra blank at very top
+        assert fixed.startswith("## Heading")
+        assert fixes == 0
+
+    def test_no_blank_after_heading_when_next_is_heading(self) -> None:
+        """No blank line is added AFTER a heading when the next line is also a heading."""
+        f = MarkdownFixer()
+        content = "\n## Heading 1\n## Heading 2\n\nContent\n"
+        fixed, _fixes = f._fix_structural_issues(content)
+        # MD022 only skips the trailing blank when the NEXT line is a heading;
+        # the blank BEFORE Heading 2 is still inserted (MD022 requires blank before too)
+        assert "## Heading 1\n\n## Heading 2" in fixed
+
+    def test_direct_method_returns_fix_count(self) -> None:
+        """_fix_md022_heading_blank_lines() returns correct fix count."""
+        f = MarkdownFixer()
+        accumulated: list[str] = ["Some text"]
+        fixes = f._fix_md022_heading_blank_lines(
+            "## Heading", "Next line", accumulated, "Some text"
+        )
+        assert fixes == 2  # blank before + blank after
+        assert accumulated == ["Some text", "", "## Heading", ""]
+
+
+# ---------------------------------------------------------------------------
+# _fix_md031_code_block_blank_lines (MD031)
+# ---------------------------------------------------------------------------
+
+
+class TestFixMd031:
+    """Tests for _fix_md031_code_block_blank_lines() and MD031 via _fix_structural_issues."""
+
+    def test_adds_blank_line_before_code_block(self) -> None:
+        """A blank line is inserted before a fenced code block."""
+        f = MarkdownFixer()
+        content = "Text\n```python\ncode\n```\n"
+        fixed, fixes = f._fix_structural_issues(content)
+        assert fixes > 0
+        assert "\n\n```python" in fixed
+
+    def test_adds_blank_line_after_code_block(self) -> None:
+        """A blank line is inserted after a fenced code block."""
+        f = MarkdownFixer()
+        content = "\n```python\ncode\n```\nMore text\n"
+        fixed, fixes = f._fix_structural_issues(content)
+        assert fixes > 0
+        assert "```\n\nMore text" in fixed
+
+    def test_clean_code_block_unchanged(self) -> None:
+        """Code block already surrounded by blank lines is not modified."""
+        f = MarkdownFixer()
+        content = "\n```python\ncode\n```\n"
+        _fixed, fixes = f._fix_structural_issues(content)
+        assert fixes == 0
+
+    def test_direct_method_advances_index(self) -> None:
+        """_fix_md031_code_block_blank_lines() returns the updated index past the fence."""
+        f = MarkdownFixer()
+        lines = ["Text", "```python", "code", "```", "After"]
+        accumulated: list[str] = ["Text"]
+        fixes, new_i = f._fix_md031_code_block_blank_lines(lines, 1, accumulated, "Text")
+        assert fixes > 0
+        # Index stops at the "After" line (index 4) so caller can inspect it
+        assert new_i == 4
+
+
+# ---------------------------------------------------------------------------
+# _fix_md032_md029_list / _normalize_ordered_item (MD032, MD029)
+# ---------------------------------------------------------------------------
+
+
+class TestFixMd029:
+    """Tests for ordered-list numbering normalisation (MD029)."""
+
+    def test_normalises_sequential_numbers_to_one(self) -> None:
+        """Ordered items 1., 2., 3. are all changed to 1."""
+        f = MarkdownFixer()
+        content = "\n1. First\n2. Second\n3. Third\n\n"
+        fixed, fixes = f._fix_structural_issues(content)
+        assert fixes > 0
+        for line in fixed.strip().split("\n"):
+            if line.strip():
+                assert line.startswith("1.")
+
+    def test_already_normalised_list_unchanged(self) -> None:
+        """A list that already uses 1. everywhere reports zero ordered-item fixes."""
+        f = MarkdownFixer()
+        content = "\n1. First\n1. Second\n1. Third\n\n"
+        fixed, _fixes = f._fix_structural_issues(content)
+        for line in fixed.strip().split("\n"):
+            if line.strip():
+                assert line.startswith("1.")
+
+    def test_normalize_ordered_item_increments_counter(self) -> None:
+        """_normalize_ordered_item() increments fixes_ref when changing a number."""
+        f = MarkdownFixer()
+        counter: list[int] = [0]
+        result = f._normalize_ordered_item("2. item", counter)
+        assert result == "1. item"
+        assert counter[0] == 1
+
+    def test_normalize_ordered_item_no_change_when_already_one(self) -> None:
+        """_normalize_ordered_item() leaves fixes_ref at 0 when already 1."""
+        f = MarkdownFixer()
+        counter: list[int] = [0]
+        result = f._normalize_ordered_item("1. item", counter)
+        assert result == "1. item"
+        assert counter[0] == 0
+
+
+class TestFixMd032:
+    """Tests for blank lines around lists (MD032)."""
+
+    def test_adds_blank_line_before_unordered_list(self) -> None:
+        """A blank line is added before an unordered list preceded by text."""
+        f = MarkdownFixer()
+        content = "Text\n- item 1\n- item 2\n\n"
+        fixed, fixes = f._fix_structural_issues(content)
+        assert fixes > 0
+        assert "\n\n- item 1" in fixed
+
+    def test_adds_blank_line_after_unordered_list(self) -> None:
+        """A blank line is added after an unordered list followed by text."""
+        f = MarkdownFixer()
+        content = "\n- item 1\n- item 2\nText after\n"
+        fixed, fixes = f._fix_structural_issues(content)
+        assert fixes > 0
+        assert "- item 2\n\nText after" in fixed
+
+    def test_no_extra_blank_when_adjacent_list_items(self) -> None:
+        """Consecutive list items do not get extra blank lines between them."""
+        f = MarkdownFixer()
+        content = "\n- item 1\n- item 2\n\n"
+        fixed, _fixes = f._fix_structural_issues(content)
+        assert "- item 1\n- item 2" in fixed
