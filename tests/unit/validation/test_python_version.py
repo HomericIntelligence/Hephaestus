@@ -72,6 +72,15 @@ class TestExtractPyprojectVersions:
         versions = extract_pyproject_versions(pyproject)
         assert versions.get("requires-python") == "3.11"
 
+    def test_ruff_target_version_not_matched_in_other_sections(self, tmp_path: Path) -> None:
+        """target-version in non-[tool.ruff] sections is not extracted."""
+        # A different section that happens to have target-version should not match
+        content = '[tool.other]\ntarget-version = "py38"\n\n[tool.ruff]\ntarget-version = "py310"\n'
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(content)
+        versions = extract_pyproject_versions(pyproject)
+        assert versions.get("ruff.target-version") == "3.10"
+
 
 class TestGetDockerfilePythonVersion:
     """Tests for get_dockerfile_python_version()."""

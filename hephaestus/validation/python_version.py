@@ -119,7 +119,10 @@ def _extract_via_regex(pyproject_path: Path) -> dict[str, str]:
     if match:
         versions["mypy.python_version"] = match.group(1)
 
-    match = re.search(r'target-version\s*=\s*"py(\d)(\d+)"', content)
+    match = re.search(
+        r'\[tool\.ruff\]\n(?:(?!\[).+\n)*?target-version\s*=\s*"py(\d)(\d+)"',
+        content,
+    )
     if match:
         versions["ruff.target-version"] = f"{match.group(1)}.{match.group(2)}"
 
