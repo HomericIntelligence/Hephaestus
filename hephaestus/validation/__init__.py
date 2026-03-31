@@ -7,6 +7,18 @@ from hephaestus.validation.audit import (
 from hephaestus.validation.complexity import check_max_complexity
 from hephaestus.validation.config_lint import ConfigLinter
 from hephaestus.validation.coverage import check_coverage, parse_coverage_report
+from hephaestus.validation.doc_policy import (
+    Finding as DocPolicyFinding,
+)
+from hephaestus.validation.doc_policy import (
+    Severity,
+)
+from hephaestus.validation.doc_policy import (
+    scan_file as scan_doc_policy,
+)
+from hephaestus.validation.doc_policy import (
+    scan_repository as scan_doc_policy_repository,
+)
 from hephaestus.validation.docstrings import (
     FragmentFinding,
     is_genuine_fragment,
@@ -52,9 +64,11 @@ from hephaestus.validation.type_aliases import detect_shadowing, is_shadowing_pa
 __all__ = [
     "CodeBlock",
     "ConfigLinter",
+    "DocPolicyFinding",
     "FragmentFinding",
     "ReadmeValidationResult",
     "ReadmeValidator",
+    "Severity",
     "StructureValidator",
     "TierLabelFinding",
     "ValidationReport",
@@ -77,6 +91,8 @@ __all__ = [
     "is_genuine_fragment",
     "is_shadowing_pattern",
     "parse_coverage_report",
+    "scan_doc_policy",
+    "scan_doc_policy_repository",
     "scan_docstrings",
     "scan_tier_labels",
     "severity_label",
