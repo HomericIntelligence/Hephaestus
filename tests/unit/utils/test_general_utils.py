@@ -262,3 +262,30 @@ class TestInstallPackage:
         """Empty string is rejected by package name validation."""
         with pytest.raises(ValueError, match="Invalid package name"):
             install_package("")
+
+    @pytest.mark.parametrize("blank", ["   ", "\t", " \n "])
+    def test_whitespace_only_raises_value_error(self, blank: str) -> None:
+        """Whitespace-only strings are rejected before reaching pip."""
+        with pytest.raises(ValueError, match="Invalid package name"):
+            install_package(blank)
+
+    @pytest.mark.parametrize(
+        "unicode_input",
+        [
+            "pkg\u200b",  # zero-width space — not a literal ASCII space
+            "pkg\u00e9",  # accented e — outside ASCII alnum set
+        ],
+    )
+    def test_non_ascii_unicode_rejected(self, unicode_input: str) -> None:
+        """Non-ASCII unicode characters are rejected by the regex."""
+        with pytest.raises(ValueError, match="Invalid package name"):
+            install_package(unicode_input)
+
+    def test_flag_injection_via_whitespace_rejected_by_regex(self) -> None:
+        """Flag injection like 'pkg --index-url http://...' is rejected.
+
+        Characters outside [A-Za-z0-9_\\-.\\[\\],>=< ] (e.g. ':', '/', '-' as
+        flag prefix) cause the regex to reject the string before pip is invoked.
+        """
+        with pytest.raises(ValueError, match="Invalid package name"):
+            install_package("pkg --index-url http://example.com")

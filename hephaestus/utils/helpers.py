@@ -205,6 +205,9 @@ def install_package(package_name: str, upgrade: bool = False) -> bool:
     # Validate package name: only alphanumerics, hyphens, underscores, dots, brackets, ==, >=, <=
     # Uses re.fullmatch and literal space (not \s) to block newlines/tabs.
     # Excludes ! to prevent shell history expansion.
+    # Reject empty or whitespace-only strings before the regex to avoid silent acceptance.
+    if not package_name or not package_name.strip():
+        raise ValueError(f"Invalid package name: {package_name!r}")
     if not re.fullmatch(r"[A-Za-z0-9_\-.\[\],>=< ]+", package_name):
         raise ValueError(f"Invalid package name: {package_name!r}")
 
