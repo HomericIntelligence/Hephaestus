@@ -328,6 +328,37 @@ class TestMergeWithEnv:
         assert result["a"]["b"] == 2
         assert any("scalar value is being overwritten by a dict" in msg for msg in caplog.messages)
 
+    def test_nesting_conflict_warning_names_both_env_vars(self, monkeypatch, caplog):
+        """Conflict warning includes both the prior env var and the new one.
+
+        HEPHAESTUS_A=1 is processed first; then HEPHAESTUS_A_B=2 requires
+        nesting under 'a'. The warning must name HEPHAESTUS_A (which set the
+        scalar) and HEPHAESTUS_A_B (which triggered the conflict).
+        """
+        import logging
+
+        monkeypatch.setenv("HEPHAESTUS_A", "1")
+        monkeypatch.setenv("HEPHAESTUS_A_B", "2")
+
+        config_logger = logging.getLogger("hephaestus.config.utils")
+        original_propagate = config_logger.propagate
+        config_logger.propagate = True
+        try:
+            with caplog.at_level(logging.WARNING, logger="hephaestus.config.utils"):
+                merge_with_env({})
+        finally:
+            config_logger.propagate = original_propagate
+
+        warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        conflict_msg = next(
+            (m for m in warning_msgs if "scalar value is being overwritten" in m), None
+        )
+        assert conflict_msg is not None, "Expected a conflict warning"
+        assert "HEPHAESTUS_A_B" in conflict_msg, "Warning should name the new env var"
+        assert "HEPHAESTUS_A" in conflict_msg, (
+            "Warning should name the prior env var that set the scalar"
+        )
+
     def test_nesting_conflict_deep_scalar_then_nest_warns(self, monkeypatch, caplog):
         """Scalar at intermediate key overwritten by deeper nesting warns.
 
@@ -385,6 +416,46 @@ class TestMergeWithEnv:
         assert result["a"] == 2
         assert any(
             "nested dict is being overwritten by the scalar value" in msg for msg in caplog.messages
+        )
+
+    def test_leaf_dict_overwrite_warning_names_both_env_vars(self, monkeypatch, caplog):
+        """Leaf dict overwrite warning includes both the prior and new env var names."""
+        import logging
+        from unittest.mock import patch
+
+        monkeypatch.setenv("HEPHAESTUS_A", "2")
+        monkeypatch.setenv("HEPHAESTUS_A_B", "1")
+
+        original_sorted = sorted
+
+        def reverse_sorted(iterable, **kwargs):
+            return list(reversed(original_sorted(iterable, **kwargs)))
+
+        config_logger = logging.getLogger("hephaestus.config.utils")
+        original_propagate = config_logger.propagate
+        config_logger.propagate = True
+        try:
+            with (
+                patch("hephaestus.config.utils.sorted", side_effect=reverse_sorted),
+                caplog.at_level(logging.WARNING, logger="hephaestus.config.utils"),
+            ):
+                merge_with_env({})
+        finally:
+            config_logger.propagate = original_propagate
+
+        warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        conflict_msg = next(
+            (
+                m
+                for m in warning_msgs
+                if "nested dict is being overwritten by the scalar value" in m
+            ),
+            None,
+        )
+        assert conflict_msg is not None, "Expected a leaf dict overwrite warning"
+        assert "HEPHAESTUS_A" in conflict_msg, "Warning should name the new env var"
+        assert "HEPHAESTUS_A_B" in conflict_msg, (
+            "Warning should name the prior env var that built the dict"
         )
 
     def test_no_conflict_no_warning(self, monkeypatch, caplog):

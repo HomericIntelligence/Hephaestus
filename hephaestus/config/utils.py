@@ -204,6 +204,9 @@ def merge_with_env(
 
     """
     env_config: dict[str, Any] = {}
+    # Maps dotted key path (e.g. "a.b") to the env var name that last wrote it.
+    # Used to produce informative conflict warnings that name both parties.
+    key_provenance: dict[str, str] = {}
 
     # Sort env vars for deterministic processing order
     env_vars = sorted(
@@ -242,32 +245,41 @@ def merge_with_env(
 
         # Set nested keys
         current = env_config
-        for k in keys[:-1]:
+        for depth, k in enumerate(keys[:-1]):
+            path_so_far = ".".join(keys[: depth + 1])
             existing = current.get(k)
             if existing is None:
                 current[k] = {}
+                key_provenance[path_so_far] = key
             elif not isinstance(existing, dict):
+                prior_env_var = key_provenance.get(path_so_far, "<unknown>")
                 _logger.warning(
                     "Environment variable '%s' requires nesting under key '%s', "
-                    "which was already set to a scalar value. "
+                    "which was already set to a scalar value by '%s'. "
                     "The scalar value is being overwritten by a dict.",
                     key,
                     k,
+                    prior_env_var,
                 )
                 current[k] = {}
+                key_provenance[path_so_far] = key
             current = current[k]
 
         leaf = keys[-1]
+        leaf_path = ".".join(keys)
         existing_leaf = current.get(leaf)
         if isinstance(existing_leaf, dict):
+            prior_env_var = key_provenance.get(leaf_path, "<unknown>")
             _logger.warning(
                 "Environment variable '%s' sets key '%s' to a scalar, "
-                "but it was already a nested dict from other environment variables. "
+                "but it was already a nested dict from '%s'. "
                 "The nested dict is being overwritten by the scalar value.",
                 key,
                 leaf,
+                prior_env_var,
             )
         current[leaf] = typed_value
+        key_provenance[leaf_path] = key
 
     return merge_configs(config, env_config)
 
