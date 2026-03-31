@@ -9,12 +9,22 @@ Usage:
 """
 
 import argparse
+import importlib
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
 from hephaestus.utils.helpers import get_repo_root, run_subprocess
+
+tomllib = None
+for _mod_name in ("tomllib", "tomli"):
+    try:
+        tomllib = importlib.import_module(_mod_name)
+        break
+    except ModuleNotFoundError:
+        continue
 
 
 def run_git_command(args: list[str], cwd: Path | None = None) -> str:
@@ -239,6 +249,108 @@ def generate_changelog(
         lines.append("")
 
     return "\n".join(lines)
+
+
+def extract_version_from_pyproject(pyproject_path: Path) -> str | None:
+    """Extract the project version from a pyproject.toml file.
+
+    Args:
+        pyproject_path: Path to the pyproject.toml file.
+
+    Returns:
+        Version string, or None if not found or file unreadable.
+
+    """
+    if not pyproject_path.exists():
+        return None
+
+    try:
+        if tomllib is None:
+            return None
+        with open(pyproject_path, "rb") as f:
+            data = tomllib.load(f)
+        version: str = data["project"]["version"]
+        return version
+    except (KeyError, Exception):
+        return None
+
+
+def changelog_has_version(changelog_path: Path, version: str) -> bool:
+    """Check if a CHANGELOG.md file contains an entry for the given version.
+
+    Matches headers of the form ``## [X.Y.Z]`` or ``## X.Y.Z``.
+
+    Args:
+        changelog_path: Path to the CHANGELOG.md file.
+        version: Version string to search for (e.g. ``"0.6.0"``).
+
+    Returns:
+        True if the version entry is found, False otherwise.
+
+    """
+    if not changelog_path.exists():
+        return False
+
+    try:
+        text = changelog_path.read_text(encoding="utf-8")
+    except Exception:
+        return False
+
+    # Match "## [0.1.0]" with optional trailing content (date, link, etc.)
+    # or "## 0.1.0" without brackets.
+    # Use (?:\s|$) instead of \b because \b after ']' requires a word char.
+    escaped = re.escape(version)
+    pattern = rf"^##\s+(?:\[{escaped}\]|{escaped})(?:\s|$)"
+    return bool(re.search(pattern, text, re.MULTILINE))
+
+
+def check_version_main() -> int:
+    """CLI entry point for changelog version checking.
+
+    Returns:
+        Exit code (0 if version found, 1 if not found or error).
+
+    """
+    parser = argparse.ArgumentParser(
+        description="Check that CHANGELOG.md contains an entry for the current version",
+    )
+    parser.add_argument(
+        "--pyproject",
+        type=Path,
+        default=None,
+        help="Path to pyproject.toml (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--changelog",
+        type=Path,
+        default=None,
+        help="Path to CHANGELOG.md (default: auto-detect)",
+    )
+    parser.add_argument("--verbose", action="store_true")
+    args = parser.parse_args()
+
+    repo_root = get_repo_root()
+    pyproject_path = args.pyproject or (repo_root / "pyproject.toml")
+    changelog_path = args.changelog or (repo_root / "CHANGELOG.md")
+
+    version = extract_version_from_pyproject(pyproject_path)
+    if version is None:
+        print(f"ERROR: Could not read version from {pyproject_path}", file=sys.stderr)
+        return 1
+
+    if args.verbose:
+        print(f"Checking for version {version} in {changelog_path}")
+
+    if changelog_has_version(changelog_path, version):
+        if args.verbose:
+            print(f"✓ CHANGELOG.md contains entry for {version}")
+        return 0
+    else:
+        print(
+            f"ERROR: CHANGELOG.md does not contain entry for {version}",
+            file=sys.stderr,
+        )
+        return 1
 
 
 def main() -> None:
