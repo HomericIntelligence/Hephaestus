@@ -45,6 +45,8 @@ from hephaestus.validation.test_structure import (
     check_test_directory_mirrors,
     check_test_structure,
 )
+from hephaestus.validation.tier_labels import TierLabelFinding
+from hephaestus.validation.tier_labels import scan_repository as scan_tier_labels
 from hephaestus.validation.type_aliases import detect_shadowing, is_shadowing_pattern
 
 __all__ = [
@@ -54,6 +56,7 @@ __all__ = [
     "ReadmeValidationResult",
     "ReadmeValidator",
     "StructureValidator",
+    "TierLabelFinding",
     "ValidationReport",
     "ValidationResult",
     "check_coverage",
@@ -75,6 +78,7 @@ __all__ = [
     "is_shadowing_pattern",
     "parse_coverage_report",
     "scan_docstrings",
+    "scan_tier_labels",
     "severity_label",
     "validate_all_links",
     "validate_all_readmes",

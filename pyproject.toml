@@ -74,6 +74,7 @@ hephaestus-validate-links = "hephaestus.validation.markdown:main"
 hephaestus-check-readmes = "hephaestus.validation.markdown:check_readmes_main"
 hephaestus-check-type-aliases = "hephaestus.validation.type_aliases:main"
 hephaestus-check-docstrings = "hephaestus.validation.docstrings:main"
+hephaestus-check-tier-labels = "hephaestus.validation.tier_labels:main"
 
 [project.urls]
 Homepage = "https://github.com/HomericIntelligence/ProjectHephaestus"
