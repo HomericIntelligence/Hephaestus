@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "HomericIntelligence-Hephaestus"
-version = "0.5.0"
+version = "0.6.0"
 description = "Shared utilities and tooling for the HomericIntelligence ecosystem"
 readme = "README.md"
 license = {text = "BSD 3-Clause"}
@@ -56,6 +56,9 @@ all = [
 ]
 
 [project.scripts]
+hephaestus-plan-issues = "hephaestus.automation.planner:main"
+hephaestus-implement-issues = "hephaestus.automation.implementer:main"
+hephaestus-review-prs = "hephaestus.automation.reviewer:main"
 hephaestus-changelog = "hephaestus.git.changelog:main"
 hephaestus-merge-prs = "hephaestus.github.pr_merge:main"
 hephaestus-system-info = "hephaestus.system.info:main"

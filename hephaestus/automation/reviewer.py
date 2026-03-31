@@ -9,6 +9,7 @@ Provides:
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import json
 import logging
@@ -852,3 +853,123 @@ class PRReviewer:
             for issue_num, result in results.items():
                 if not result.success:
                     logger.info(f"  #{issue_num}: {result.error}")
+
+
+def _setup_logging(verbose: bool = False) -> None:
+    """Configure logging for the CLI.
+
+    Args:
+        verbose: Enable verbose (DEBUG) logging
+
+    """
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+def _parse_args() -> argparse.Namespace:
+    """Parse command line arguments for the reviewer CLI."""
+    parser = argparse.ArgumentParser(
+        description="Review and fix open PRs linked to GitHub issues using Claude Code",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Review PRs for specific issues
+  %(prog)s --issues 595 596
+
+  # Review with dry run
+  %(prog)s --issues 595 --dry-run
+
+  # Review with more workers
+  %(prog)s --issues 595 596 --max-workers 5
+        """,
+    )
+
+    parser.add_argument(
+        "--issues",
+        type=int,
+        nargs="+",
+        required=True,
+        help="Issue numbers whose linked PRs should be reviewed",
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=3,
+        choices=range(1, 33),
+        metavar="N",
+        help="Maximum number of parallel workers, 1-32 (default: 3)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be done without actually doing it",
+    )
+    parser.add_argument(
+        "--no-learn",
+        action="store_true",
+        help="Disable /learn after review (enabled by default)",
+    )
+    parser.add_argument(
+        "--no-ui",
+        action="store_true",
+        help="Disable curses UI (use plain logging instead)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging",
+    )
+
+    return parser.parse_args()
+
+
+def main() -> int:
+    """Execute the PR review workflow.
+
+    Returns:
+        Exit code: 0 on success, 1 on failure, 130 on keyboard interrupt
+
+    """
+    args = _parse_args()
+    _setup_logging(args.verbose)
+
+    log = logging.getLogger(__name__)
+    log.info(f"Starting PR review for issues: {args.issues}")
+
+    from hephaestus.automation.models import ReviewerOptions
+    from hephaestus.utils.terminal import terminal_guard
+
+    options = ReviewerOptions(
+        issues=args.issues,
+        max_workers=args.max_workers,
+        dry_run=args.dry_run,
+        enable_learn=not args.no_learn,
+        enable_ui=not args.no_ui,
+    )
+
+    with terminal_guard():
+        try:
+            reviewer = PRReviewer(options)
+            results = reviewer.run()
+
+            failed = [num for num, result in results.items() if not result.success]
+            if failed:
+                log.error(f"Failed to review {len(failed)} PR(s) for issue(s): {failed}")
+                return 1
+
+            log.info("PR review complete")
+            return 0
+        except KeyboardInterrupt:
+            log.warning("Interrupted by user")
+            return 130
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

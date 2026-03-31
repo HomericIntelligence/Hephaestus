@@ -9,6 +9,7 @@ Provides:
 
 from __future__ import annotations
 
+import argparse
 import fcntl
 import json
 import logging
@@ -529,3 +530,140 @@ class Planner:
             for issue_num, result in self.results.items():
                 if not result.success:
                     logger.info(f"  #{issue_num}: {result.error}")
+
+
+def _setup_logging(verbose: bool = False) -> None:
+    """Configure logging for the CLI.
+
+    Args:
+        verbose: Enable verbose (DEBUG) logging
+
+    """
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+def _parse_args() -> argparse.Namespace:
+    """Parse command line arguments for the planner CLI."""
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(
+        description="Bulk plan GitHub issues using Claude Code",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Plan specific issues
+  %(prog)s --issues 123 456 789
+
+  # Force re-plan even if plan exists
+  %(prog)s --issues 123 --force
+
+  # Dry run (no actual planning)
+  %(prog)s --issues 123 --dry-run
+
+  # Use custom system prompt
+  %(prog)s --issues 123 --system-prompt .claude/agents/planner.md
+
+  # Plan with more parallelism
+  %(prog)s --issues 123 456 789 --parallel 5
+        """,
+    )
+
+    parser.add_argument(
+        "--issues",
+        type=int,
+        nargs="+",
+        required=True,
+        help="Issue numbers to plan",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be done without actually doing it",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force re-planning even if plan already exists",
+    )
+    parser.add_argument(
+        "--parallel",
+        type=int,
+        default=3,
+        choices=range(1, 33),
+        metavar="N",
+        help="Number of parallel workers, 1-32 (default: 3)",
+    )
+    parser.add_argument(
+        "--system-prompt",
+        type=Path,
+        help="Path to system prompt file for Claude Code",
+    )
+    parser.add_argument(
+        "--no-skip-closed",
+        action="store_true",
+        help="Plan closed issues (default: skip closed issues)",
+    )
+    parser.add_argument(
+        "--no-advise",
+        action="store_true",
+        help="Skip the advise step (don't search team knowledge base before planning)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging",
+    )
+
+    return parser.parse_args()
+
+
+def main() -> int:
+    """Execute the issue planning workflow.
+
+    Returns:
+        Exit code: 0 on success, 1 on failure, 130 on keyboard interrupt
+
+    """
+    args = _parse_args()
+    _setup_logging(args.verbose)
+
+    log = logging.getLogger(__name__)
+    log.info("Starting issue planner")
+    log.info(f"Issues to plan: {args.issues}")
+
+    try:
+        options = PlannerOptions(
+            issues=args.issues,
+            dry_run=args.dry_run,
+            force=args.force,
+            parallel=args.parallel,
+            system_prompt_file=args.system_prompt,
+            skip_closed=not args.no_skip_closed,
+            enable_advise=not args.no_advise,
+        )
+
+        planner = Planner(options)
+        results = planner.run()
+
+        failed = [num for num, result in results.items() if not result.success]
+        if failed:
+            log.error(f"Failed to plan {len(failed)} issue(s): {failed}")
+            return 1
+
+        log.info("Planning complete")
+        return 0
+    except KeyboardInterrupt:
+        logging.getLogger(__name__).warning("Interrupted by user")
+        return 130
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())
