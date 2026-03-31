@@ -282,9 +282,9 @@ class TestInstallPackage:
             install_package(unicode_input)
 
     def test_flag_injection_via_whitespace_rejected_by_regex(self) -> None:
-        """Flag injection like 'pkg --index-url http://...' is rejected.
+        r"""Flag injection like 'pkg --index-url http://...' is rejected.
 
-        Characters outside [A-Za-z0-9_\\-.\\[\\],>=< ] (e.g. ':', '/', '-' as
+        Characters outside [A-Za-z0-9_\-.\[\],>=< ] (e.g. ':', '/', '-' as
         flag prefix) cause the regex to reject the string before pip is invoked.
         """
         with pytest.raises(ValueError, match="Invalid package name"):
