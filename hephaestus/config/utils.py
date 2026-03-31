@@ -131,6 +131,9 @@ def merge_configs(*configs: dict[str, Any]) -> dict[str, Any]:
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> None:
     """Deep merge two dictionaries."""
     for key, value in override.items():
+        if not isinstance(key, str) or not key:
+            _logger.warning("_deep_merge: skipping empty or non-string key %r", key)
+            continue
         if key in base and isinstance(base[key], dict) and isinstance(value, dict):
             _deep_merge(base[key], value)
         else:
@@ -251,7 +254,10 @@ def merge_with_env(
 
 # Example usage function
 def get_config_value(
-    key_path: str, default: Any | None = None, config_files: list[str] | None = None
+    key_path: str,
+    default: Any | None = None,
+    config_files: list[str] | None = None,
+    convert_bools: bool = False,
 ) -> Any:
     """High-level function to get a configuration value with full merging.
 
@@ -261,6 +267,9 @@ def get_config_value(
         key_path: Dot-separated path to setting
         default: Default value if not found
         config_files: List of config files to load in order
+        convert_bools: If True, convert boolean-like string values from
+            environment variables (true/false/yes/no/on/off/1/0,
+            case-insensitive) to Python bool before merging.
 
     Returns:
         Configuration value or default
@@ -281,7 +290,7 @@ def get_config_value(
                 config = merge_configs(config, user_config)
 
     # Merge with environment
-    config = merge_with_env(config)
+    config = merge_with_env(config, convert_bools=convert_bools)
 
     # Get the specific value
     return get_setting(config, key_path, default)

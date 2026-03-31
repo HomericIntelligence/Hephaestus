@@ -167,6 +167,42 @@ class TestMergeConfigs:
         """No args returns empty dict."""
         assert merge_configs() == {}
 
+    def test_empty_string_key_skipped(self, caplog):
+        """Empty-string keys in override dict are skipped with a warning."""
+        import logging
+
+        config_logger = logging.getLogger("hephaestus.config.utils")
+        original_propagate = config_logger.propagate
+        config_logger.propagate = True
+        try:
+            base: dict = {"a": 1}
+            override: dict = {"": "bad", "b": 2}
+            with caplog.at_level(logging.WARNING, logger="hephaestus.config.utils"):
+                result = merge_configs(base, override)
+        finally:
+            config_logger.propagate = original_propagate
+        assert "" not in result
+        assert result.get("b") == 2
+        assert any("empty or non-string key" in m for m in caplog.messages)
+
+    def test_non_string_key_skipped(self, caplog):
+        """Non-string keys in override dict are skipped with a warning."""
+        import logging
+
+        config_logger = logging.getLogger("hephaestus.config.utils")
+        original_propagate = config_logger.propagate
+        config_logger.propagate = True
+        try:
+            base: dict = {"a": 1}
+            override: dict = {42: "bad", "b": 2}
+            with caplog.at_level(logging.WARNING, logger="hephaestus.config.utils"):
+                result = merge_configs(base, override)
+        finally:
+            config_logger.propagate = original_propagate
+        assert 42 not in result
+        assert result.get("b") == 2
+        assert any("empty or non-string key" in m for m in caplog.messages)
+
 
 class TestMergeWithEnv:
     """Tests for merge_with_env."""
@@ -426,3 +462,15 @@ class TestGetConfigValue:
         """Loads from provided config_files list."""
         result = get_config_value("database.host", config_files=[str(tmp_config_yaml)])
         assert result == "localhost"
+
+    def test_convert_bools_false_by_default(self, monkeypatch):
+        """Boolean-like env vars stay as strings by default."""
+        monkeypatch.setenv("HEPHAESTUS_FLAG", "true")
+        result = get_config_value("flag")
+        assert result == "true"
+
+    def test_convert_bools_propagated_to_merge_with_env(self, monkeypatch):
+        """convert_bools=True converts boolean-like env var strings to bool."""
+        monkeypatch.setenv("HEPHAESTUS_FEATURE_ENABLED", "yes")
+        result = get_config_value("feature.enabled", convert_bools=True)
+        assert result is True
