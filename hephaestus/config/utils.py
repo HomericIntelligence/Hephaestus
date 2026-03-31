@@ -73,7 +73,18 @@ def get_setting(config: dict[str, Any], key_path: str, default: Any | None = Non
         Configuration value or default
 
     """
-    keys = key_path.split(".")
+    keys = [k for k in key_path.split(".") if k]
+    if not keys:
+        _logger.warning(
+            "get_setting: malformed key_path %r (no valid segments); returning default", key_path
+        )
+        return default
+    if len(keys) != len(key_path.split(".")):
+        _logger.warning(
+            "get_setting: key_path %r has empty segments; interpreting as %r",
+            key_path,
+            ".".join(keys),
+        )
     current = config
 
     try:

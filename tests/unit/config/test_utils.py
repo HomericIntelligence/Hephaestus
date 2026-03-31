@@ -99,6 +99,25 @@ class TestGetSetting:
         """Works on empty config dict."""
         assert get_setting({}, "any.key", "default") == "default"
 
+    def test_empty_key_path_returns_default(self, sample_config):
+        """Empty key_path returns default without raising."""
+        assert get_setting(sample_config, "", "fallback") == "fallback"
+
+    def test_leading_dot_returns_default(self, sample_config):
+        """Leading dot is treated as empty leading segment; still resolves valid remainder."""
+        # ".database.host" → segments ["database", "host"] → valid lookup
+        assert get_setting(sample_config, ".database.host") == "localhost"
+
+    def test_trailing_dot_returns_default(self, sample_config):
+        """Trailing dot is treated as empty trailing segment; still resolves valid prefix."""
+        # "database.host." → segments ["database", "host"] → valid lookup
+        assert get_setting(sample_config, "database.host.") == "localhost"
+
+    def test_double_dot_resolves_valid_segments(self, sample_config):
+        """Double dot produces empty segment which is filtered; valid segments still resolve."""
+        # "database..host" → segments ["database", "host"] → valid lookup
+        assert get_setting(sample_config, "database..host") == "localhost"
+
 
 class TestValidateConfig:
     """Tests for validate_config."""
