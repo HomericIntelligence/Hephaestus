@@ -140,6 +140,13 @@ source = ["hephaestus"]
 omit = [
     "*/tests/*",
     "*/__init__.py",
+    # Orchestration modules require live claude/gh CLI — integration test territory
+    "hephaestus/automation/implementer.py",
+    "hephaestus/automation/reviewer.py",
+    "hephaestus/automation/pr_manager.py",
+    "hephaestus/automation/planner.py",
+    "hephaestus/automation/follow_up.py",
+    "hephaestus/automation/learn.py",
 ]
 
 [tool.coverage.report]
