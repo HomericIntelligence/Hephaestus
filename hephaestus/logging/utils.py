@@ -144,39 +144,41 @@ def setup_logging(
         format_string = format_string or LOG_FORMAT
         formatter = logging.Formatter(format_string)
 
-    # Deduplicate stdout StreamHandler
-    has_stdout = any(
-        isinstance(h, logging.StreamHandler)
-        and not isinstance(h, logging.FileHandler)
-        and getattr(h, "stream", None) is sys.stdout
-        for h in root_logger.handlers
-    )
-    if not has_stdout:
-        stdout_handler = logging.StreamHandler(sys.stdout)
-        stdout_handler.setFormatter(formatter)
-        root_logger.addHandler(stdout_handler)
-
-    # Deduplicate stderr StreamHandler
-    if log_to_stderr:
-        has_stderr = any(
+    # Lock protects the check-then-add TOCTOU race on the root logger's handler list
+    with _handler_setup_lock:
+        # Deduplicate stdout StreamHandler
+        has_stdout = any(
             isinstance(h, logging.StreamHandler)
             and not isinstance(h, logging.FileHandler)
-            and getattr(h, "stream", None) is sys.stderr
+            and getattr(h, "stream", None) is sys.stdout
             for h in root_logger.handlers
         )
-        if not has_stderr:
-            stderr_handler = logging.StreamHandler(sys.stderr)
-            stderr_handler.setFormatter(formatter)
-            root_logger.addHandler(stderr_handler)
+        if not has_stdout:
+            stdout_handler = logging.StreamHandler(sys.stdout)
+            stdout_handler.setFormatter(formatter)
+            root_logger.addHandler(stdout_handler)
 
-    # Deduplicate FileHandler by resolved path
-    if log_file:
-        abs_log_file = os.path.abspath(log_file)
-        has_file = any(
-            isinstance(h, logging.FileHandler) and h.baseFilename == abs_log_file
-            for h in root_logger.handlers
-        )
-        if not has_file:
-            file_handler = logging.FileHandler(log_file)
-            file_handler.setFormatter(formatter)
-            root_logger.addHandler(file_handler)
+        # Deduplicate stderr StreamHandler
+        if log_to_stderr:
+            has_stderr = any(
+                isinstance(h, logging.StreamHandler)
+                and not isinstance(h, logging.FileHandler)
+                and getattr(h, "stream", None) is sys.stderr
+                for h in root_logger.handlers
+            )
+            if not has_stderr:
+                stderr_handler = logging.StreamHandler(sys.stderr)
+                stderr_handler.setFormatter(formatter)
+                root_logger.addHandler(stderr_handler)
+
+        # Deduplicate FileHandler by resolved path
+        if log_file:
+            abs_log_file = os.path.abspath(log_file)
+            has_file = any(
+                isinstance(h, logging.FileHandler) and h.baseFilename == abs_log_file
+                for h in root_logger.handlers
+            )
+            if not has_file:
+                file_handler = logging.FileHandler(log_file)
+                file_handler.setFormatter(formatter)
+                root_logger.addHandler(file_handler)
