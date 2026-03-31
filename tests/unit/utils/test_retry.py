@@ -146,6 +146,27 @@ class TestRetryWithBackoff:
         decorated = retry_with_backoff()(my_function)
         assert decorated.__name__ == "my_function"
 
+    @patch("time.sleep")
+    def test_max_delay_caps_backoff(self, mock_sleep):
+        """max_delay caps the sleep duration so it never exceeds the limit."""
+        call_count = 0
+
+        def flaky():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 4:
+                raise ValueError("fail")
+            return "ok"
+
+        decorated = retry_with_backoff(
+            max_retries=4, initial_delay=1.0, backoff_factor=10, jitter=False, max_delay=2.0
+        )(flaky)
+        result = decorated()
+        assert result == "ok"
+        # Without cap: delays would be 1.0, 10.0, 100.0 — all should be capped at 2.0
+        for call in mock_sleep.call_args_list:
+            assert call[0][0] <= 2.0
+
 
 class TestRetryOnNetworkError:
     """Tests for retry_on_network_error convenience decorator."""

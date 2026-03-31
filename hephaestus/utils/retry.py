@@ -56,6 +56,7 @@ def retry_with_backoff(
     jitter: bool = True,
     retry_on: tuple[type[BaseException], ...] = (Exception,),
     logger: Callable[[str], None] | None = None,
+    max_delay: float | None = None,
 ) -> Callable[[F], F]:
     """Retry a function with exponential backoff.
 
@@ -66,6 +67,7 @@ def retry_with_backoff(
         jitter: Add random jitter to delay times (default: True)
         retry_on: Tuple of exception types to retry on (default: all exceptions)
         logger: Optional logging function for retry attempts
+        max_delay: Maximum delay cap in seconds (default: None, no cap)
 
     Returns:
         Decorated function with retry logic
@@ -101,6 +103,10 @@ def retry_with_backoff(
 
                     # Calculate delay with exponential backoff
                     delay = initial_delay * (backoff_factor**attempt)
+
+                    # Cap delay if max_delay is specified
+                    if max_delay is not None:
+                        delay = min(delay, max_delay)
 
                     # Add jitter if requested (±25%)
                     if jitter:
