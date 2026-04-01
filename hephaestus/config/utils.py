@@ -163,14 +163,21 @@ def merge_with_env(
 ) -> dict[str, Any]:
     """Merge configuration with environment variables.
 
-    Environment variables with the given prefix are mapped to config keys.
-    For example, HEPHAESTUS_DATABASE_HOST becomes database.host
+    Environment variables with the given prefix are mapped to config keys
+    using double-underscore (``__``) as the nesting delimiter.  A single
+    underscore is preserved as part of the key name.
+
+    Mapping examples::
+
+        HEPHAESTUS_DATABASE__HOST       → {"database": {"host": <value>}}
+        HEPHAESTUS_MAX_CONNECTIONS      → {"max_connections": <value>}
+        HEPHAESTUS_DATABASE__MAX_RETRIES → {"database": {"max_retries": <value>}}
 
     Environment variables that produce empty key segments (e.g., trailing
-    or consecutive underscores) are skipped with a warning.
+    or consecutive double-underscores) are skipped with a warning.
 
     When two environment variables conflict on nesting (e.g.,
-    ``HEPHAESTUS_A=scalar`` and ``HEPHAESTUS_A_B=nested``), the
+    ``HEPHAESTUS_A=scalar`` and ``HEPHAESTUS_A__B=nested``), the
     last variable in sorted order wins and a warning is logged.
 
     Args:
@@ -194,8 +201,10 @@ def merge_with_env(
     )
 
     for key, value in env_vars:
-        # Convert HEPHAESTUS_DATABASE_HOST to database.host
-        config_key = key[len(prefix) :].lower().replace("_", ".")
+        # Convert HEPHAESTUS_DATABASE__HOST to database.host
+        # Double underscore is the nesting delimiter; single underscore is
+        # preserved as part of the key name (e.g. max_connections stays intact).
+        config_key = key[len(prefix) :].lower().replace("__", ".")
 
         # Filter out empty segments from malformed env var names
         keys = [k for k in config_key.split(".") if k]

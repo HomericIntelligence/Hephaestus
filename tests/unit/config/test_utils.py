@@ -208,11 +208,18 @@ class TestMergeWithEnv:
     """Tests for merge_with_env."""
 
     def test_env_variable_overrides(self, monkeypatch):
-        """Environment variable overrides config value."""
-        monkeypatch.setenv("HEPHAESTUS_DATABASE_HOST", "envhost")
+        """Environment variable overrides config value using __ as nesting delimiter."""
+        monkeypatch.setenv("HEPHAESTUS_DATABASE__HOST", "envhost")
         config = {"database": {"host": "localhost"}}
         result = merge_with_env(config)
         assert result["database"]["host"] == "envhost"
+
+    def test_single_underscore_is_flat(self, monkeypatch):
+        """Single underscores are preserved in the key name (not treated as nesting)."""
+        monkeypatch.setenv("HEPHAESTUS_MAX_CONNECTIONS", "10")
+        result = merge_with_env({})
+        assert result["max_connections"] == 10
+        assert "max" not in result
 
     def test_env_int_conversion(self, monkeypatch):
         """Numeric env vars are converted to int."""
@@ -284,11 +291,11 @@ class TestMergeWithEnv:
     def test_nesting_conflict_scalar_then_nest_warns(self, monkeypatch, caplog):
         """Scalar overwritten by nesting logs a warning.
 
-        HEPHAESTUS_A=1 sets a=1, then HEPHAESTUS_A_B=2 needs to nest
+        HEPHAESTUS_A=1 sets a=1, then HEPHAESTUS_A__B=2 needs to nest
         under 'a', overwriting the scalar with a dict.
         """
         monkeypatch.setenv("HEPHAESTUS_A", "1")
-        monkeypatch.setenv("HEPHAESTUS_A_B", "2")
+        monkeypatch.setenv("HEPHAESTUS_A__B", "2")
         import logging
 
         config_logger = logging.getLogger("hephaestus.config.utils")
@@ -305,11 +312,11 @@ class TestMergeWithEnv:
     def test_nesting_conflict_deep_scalar_then_nest_warns(self, monkeypatch, caplog):
         """Scalar at intermediate key overwritten by deeper nesting warns.
 
-        HEPHAESTUS_A_B=1 sets a.b=1, then HEPHAESTUS_A_B_C=2 needs to
+        HEPHAESTUS_A__B=1 sets a.b=1, then HEPHAESTUS_A__B__C=2 needs to
         nest under a.b, overwriting the scalar 1 with a dict.
         """
-        monkeypatch.setenv("HEPHAESTUS_A_B", "1")
-        monkeypatch.setenv("HEPHAESTUS_A_B_C", "2")
+        monkeypatch.setenv("HEPHAESTUS_A__B", "1")
+        monkeypatch.setenv("HEPHAESTUS_A__B__C", "2")
         import logging
 
         config_logger = logging.getLogger("hephaestus.config.utils")
@@ -326,8 +333,8 @@ class TestMergeWithEnv:
     def test_nesting_conflict_leaf_dict_overwritten_warns(self, monkeypatch, caplog):
         """Nested dict at leaf overwritten by scalar logs a warning.
 
-        With sorted processing and underscore delimiter, the scalar key
-        always sorts before the nested key (HEPHAESTUS_A < HEPHAESTUS_A_B).
+        With sorted processing and double-underscore delimiter, the scalar key
+        always sorts before the nested key (HEPHAESTUS_A < HEPHAESTUS_A__B).
         We reverse the processing order to exercise the defensive leaf
         dict-overwrite warning path.
         """
@@ -335,7 +342,7 @@ class TestMergeWithEnv:
         from unittest.mock import patch
 
         monkeypatch.setenv("HEPHAESTUS_A", "2")
-        monkeypatch.setenv("HEPHAESTUS_A_B", "1")
+        monkeypatch.setenv("HEPHAESTUS_A__B", "1")
 
         original_sorted = sorted
 
@@ -363,8 +370,8 @@ class TestMergeWithEnv:
 
     def test_no_conflict_no_warning(self, monkeypatch, caplog):
         """Non-conflicting env vars produce no warnings."""
-        monkeypatch.setenv("HEPHAESTUS_X_Y", "1")
-        monkeypatch.setenv("HEPHAESTUS_X_Z", "2")
+        monkeypatch.setenv("HEPHAESTUS_X__Y", "1")
+        monkeypatch.setenv("HEPHAESTUS_X__Z", "2")
         monkeypatch.setenv("HEPHAESTUS_W", "3")
         import logging
 
@@ -471,6 +478,6 @@ class TestGetConfigValue:
 
     def test_convert_bools_propagated_to_merge_with_env(self, monkeypatch):
         """convert_bools=True converts boolean-like env var strings to bool."""
-        monkeypatch.setenv("HEPHAESTUS_FEATURE_ENABLED", "yes")
+        monkeypatch.setenv("HEPHAESTUS_FEATURE__ENABLED", "yes")
         result = get_config_value("feature.enabled", convert_bools=True)
         assert result is True
