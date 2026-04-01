@@ -18,7 +18,7 @@ from typing import Any, cast
 
 from hephaestus.logging.utils import get_logger
 
-logger = get_logger(__name__)
+_logger = get_logger(__name__)
 
 # Formats that require unsafe deserialization (e.g. pickle)
 _UNSAFE_FORMATS = {"pickle"}
@@ -53,16 +53,13 @@ def write_file(
     filepath: str | Path,
     content: str | bytes,
     mode: str = "w",
-) -> bool:
+) -> None:
     """Write content to a file.
 
     Args:
         filepath: Path to file
         content: Content to write
         mode: File open mode ('w' for text, 'wb' for binary)
-
-    Returns:
-        True if successful
 
     Raises:
         OSError: If the file cannot be written
@@ -72,40 +69,32 @@ def write_file(
     filepath.parent.mkdir(parents=True, exist_ok=True)
     with open(filepath, mode) as f:
         f.write(content)
-    return True
 
 
-def ensure_directory(path: str | Path) -> bool:
+def ensure_directory(path: str | Path) -> None:
     """Ensure directory exists, creating it if necessary.
 
     Args:
         path: Path to directory
-
-    Returns:
-        True if successful
 
     Raises:
         OSError: If the directory cannot be created
 
     """
     Path(path).mkdir(parents=True, exist_ok=True)
-    return True
 
 
 def safe_write(
     filepath: str | Path,
     content: str | bytes,
     backup: bool = True,
-) -> bool:
+) -> None:
     """Write content to file safely with optional backup.
 
     Args:
         filepath: Path to file
         content: Content to write
         backup: Whether to create backup of existing file
-
-    Returns:
-        True if successful
 
     Raises:
         OSError: If the file cannot be written
@@ -118,14 +107,13 @@ def safe_write(
         try:
             backup_path.write_bytes(filepath.read_bytes())
         except OSError as e:
-            logger.warning("Could not create backup: %s", e)
+            _logger.warning("Could not create backup: %s", e)
 
     ensure_directory(filepath.parent)
     if isinstance(content, str):
         filepath.write_text(content)
     else:
         filepath.write_bytes(content)
-    return True
 
 
 def write_secure(
