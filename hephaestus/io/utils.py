@@ -14,7 +14,7 @@ Usage:
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from hephaestus.logging.utils import get_logger
 
@@ -44,7 +44,9 @@ def read_file(filepath: str | Path, mode: str = "r") -> str | bytes:
     """
     filepath = Path(filepath)
     with open(filepath, mode) as f:
-        return f.read()
+        # cast is required: open() with a str `mode` returns IO[Any], so mypy
+        # cannot infer str vs bytes from the runtime argument.
+        return cast(str | bytes, f.read())
 
 
 def write_file(
