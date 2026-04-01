@@ -127,12 +127,12 @@ def test_with_tmp_file(tmp_path):
 
 ### New Tests
 
-- `tests/test_cli_colors.py`
-- `tests/test_markdown_fixer.py`
-- `tests/test_link_fixer.py`
-- `tests/test_readme_commands.py`
-- `tests/test_version_manager.py`
-- `tests/test_benchmark_compare.py`
+- `tests/unit/cli/test_colors.py`
+- `tests/unit/markdown/test_fixer.py`
+- `tests/unit/markdown/test_link_fixer.py`
+- `tests/unit/validation/test_readme_commands.py`
+- `tests/unit/version/test_manager.py`
+- `tests/unit/benchmarks/test_compare.py`
 
 ### Package Updates
 
