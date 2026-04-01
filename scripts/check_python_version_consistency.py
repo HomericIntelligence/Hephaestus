@@ -92,6 +92,53 @@ def extract_pixi_workspace_version(content: str) -> str | None:
     return match.group(1) if match else None
 
 
+def check_project_version_consistency(repo_root: Path) -> bool:
+    """Check that pyproject.toml and pixi.toml project versions agree (if both present).
+
+    Reads the [project].version from pyproject.toml and the [workspace].version
+    from pixi.toml (if it exists) and verifies they match.  If pixi.toml has no
+    version field the check passes — that is the expected state for this project.
+
+    Args:
+        repo_root: Repository root directory.
+
+    Returns:
+        True if versions are consistent (or pixi.toml has no version), False otherwise.
+
+    """
+    pyproject_path = repo_root / "pyproject.toml"
+    if not pyproject_path.exists():
+        return True  # nothing to compare against
+
+    project_version = extract_project_version(pyproject_path.read_text())
+
+    pixi_path = repo_root / "pixi.toml"
+    if not pixi_path.exists():
+        if project_version:
+            print(f"OK: pyproject.toml project version = {project_version!r} (no pixi.toml)")
+        return True
+
+    pixi_version = extract_pixi_workspace_version(pixi_path.read_text())
+
+    if pixi_version is None:
+        # pixi.toml exists but has no version — expected state
+        if project_version:
+            print(f"OK: pyproject.toml project version = {project_version!r}")
+        print("OK: pixi.toml has no [workspace].version (as expected)")
+        return True
+
+    # Both files have a version — they must match
+    if project_version == pixi_version:
+        print(f"OK: project version is consistent at {project_version!r}")
+        return True
+
+    print("ERROR: project version mismatch between pyproject.toml and pixi.toml!")
+    print(f"  pyproject.toml [project].version = {project_version!r}")
+    print(f"  pixi.toml [workspace].version    = {pixi_version!r}")
+    print("  pyproject.toml is the single source of truth — update pixi.toml to match.")
+    return False
+
+
 def main() -> int:
     """Check Python version consistency. Returns 0 if OK, 1 if inconsistent."""
     repo_root = get_repo_root()
@@ -108,20 +155,26 @@ def main() -> int:
         print(f"WARNING: Could only find {len(versions)} version spec(s) in pyproject.toml")
         for key, val in versions.items():
             print(f"  {key}: {val}")
-        return 0
+        python_ok = True
+    else:
+        unique_versions = set(versions.values())
+        if len(unique_versions) == 1:
+            version = next(iter(unique_versions))
+            print(f"OK: Python version is consistent at {version}")
+            for key, val in versions.items():
+                print(f"  {key}: {val}")
+            python_ok = True
+        else:
+            print("ERROR: Python version inconsistency detected!")
+            for key, val in versions.items():
+                print(f"  {key}: {val}")
+            print("\nAll version specifications must agree on the same Python version.")
+            python_ok = False
 
-    unique_versions = set(versions.values())
-    if len(unique_versions) == 1:
-        version = next(iter(unique_versions))
-        print(f"OK: Python version is consistent at {version}")
-        for key, val in versions.items():
-            print(f"  {key}: {val}")
-        return 0
+    project_version_ok = check_project_version_consistency(repo_root)
 
-    print("ERROR: Python version inconsistency detected!")
-    for key, val in versions.items():
-        print(f"  {key}: {val}")
-    print("\nAll version specifications must agree on the same Python version.")
+    if python_ok and project_version_ok:
+        return 0
     return 1
 
 
