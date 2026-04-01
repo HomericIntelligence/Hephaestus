@@ -12,6 +12,7 @@ Usage:
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Any, cast
 
@@ -143,8 +144,11 @@ def write_secure(
     """
     filepath = Path(filepath)
     filepath.parent.mkdir(parents=True, exist_ok=True)
-    filepath.write_text(content)
-    filepath.chmod(permissions)
+    # Open with target permissions atomically to eliminate the race window
+    # between create (umask-default perms) and chmod.
+    fd = os.open(str(filepath), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, permissions)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(content)
 
 
 def _detect_format(filepath: Path, format_hint: str | None) -> str:
