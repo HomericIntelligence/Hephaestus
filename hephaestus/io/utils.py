@@ -158,7 +158,9 @@ def _detect_format(filepath: Path, format_hint: str | None) -> str:
         Format string ('json', 'yaml', or 'pickle')
 
     Raises:
-        ValueError: If format cannot be determined
+        ValueError: If format_hint is not in the supported formats set
+            ('json', 'yaml', 'pickle'), or if format cannot be determined
+            from the file extension when no hint is provided.
 
     """
     if format_hint is not None:

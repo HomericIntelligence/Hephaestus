@@ -45,7 +45,7 @@ SUBPACKAGE_SYMBOLS = [
         "hephaestus.io",
         ["read_file", "write_file", "safe_write", "load_data", "save_data", "ensure_directory"],
     ),
-    ("hephaestus.logging", ["setup_logging", "get_logger", "ContextLogger"]),
+    ("hephaestus.logging", ["setup_logging", "get_logger", "ContextLogger", "JsonFormatter"]),
     ("hephaestus.system", ["get_system_info", "format_system_info"]),
     ("hephaestus.datasets", ["DatasetDownloader"]),
     ("hephaestus.github", ["detect_repo_from_remote", "local_branch_exists", "merge_prs"]),
