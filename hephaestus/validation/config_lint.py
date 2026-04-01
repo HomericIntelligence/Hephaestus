@@ -96,11 +96,15 @@ class ConfigLinter:
 
     @staticmethod
     def _strip_inline_comment(line: str) -> str:
-        """Strip inline YAML comments while preserving # inside quoted strings.
+        r"""Strip inline YAML comments while preserving # inside quoted strings.
 
         Per YAML spec, # is a comment delimiter only when:
         - It is preceded by whitespace (or is the first character)
         - It is NOT inside a single-quoted or double-quoted scalar
+
+        Double-quoted scalars support backslash escapes (e.g. ``\"`` is a
+        literal quote, not a closing delimiter).  Single-quoted scalars do not
+        support backslash escapes (``''`` is the only escape sequence).
 
         Args:
             line: A single line of YAML text
@@ -111,8 +115,14 @@ class ConfigLinter:
         """
         in_single_quote = False
         in_double_quote = False
+        i = 0
 
-        for i, char in enumerate(line):
+        while i < len(line):
+            char = line[i]
+            # Skip over backslash escapes inside double-quoted scalars.
+            if in_double_quote and char == "\\":
+                i += 2  # skip the escaped character
+                continue
             if char == "'" and not in_double_quote:
                 in_single_quote = not in_single_quote
             elif char == '"' and not in_single_quote:
@@ -124,8 +134,47 @@ class ConfigLinter:
                 and (i == 0 or line[i - 1] in (" ", "\t"))
             ):
                 return line[:i]
+            i += 1
 
         return line
+
+    @staticmethod
+    def _count_unquoted(text: str, open_char: str, close_char: str) -> int:
+        """Count net occurrences of open_char/close_char outside quoted regions.
+
+        Skips characters inside single-quoted or double-quoted scalars.
+        Handles backslash escapes inside double-quoted scalars.
+
+        Args:
+            text: Text to scan (comment already stripped).
+            open_char: The opening delimiter to count (e.g. ``{``).
+            close_char: The closing delimiter to count (e.g. ``}``).
+
+        Returns:
+            Net count: number of open_char minus number of close_char found
+            outside any quoted region.
+
+        """
+        count = 0
+        in_single_quote = False
+        in_double_quote = False
+        i = 0
+        while i < len(text):
+            char = text[i]
+            if in_double_quote and char == "\\":
+                i += 2
+                continue
+            if char == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+            elif char == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+            elif not in_single_quote and not in_double_quote:
+                if char == open_char:
+                    count += 1
+                elif char == close_char:
+                    count -= 1
+            i += 1
+        return count
 
     @staticmethod
     def _is_valid_yaml_key_line(line: str) -> bool:
@@ -202,12 +251,16 @@ class ConfigLinter:
                 # Strip inline comments, preserving # inside quoted strings
                 comment_stripped = self._strip_inline_comment(line)
 
-                # Count braces and brackets
-                brace_count += comment_stripped.count("{") - comment_stripped.count("}")
-                bracket_count += comment_stripped.count("[") - comment_stripped.count("]")
+                # Count braces and brackets outside of quoted regions.
+                # Using the same quote-tracking approach as _strip_inline_comment
+                # avoids false positives for braces/brackets in string values
+                # (e.g. ``key: "{not a brace}"``).
+                brace_count += self._count_unquoted(comment_stripped, "{", "}")
+                bracket_count += self._count_unquoted(comment_stripped, "[", "]")
 
-                # Detect block scalar start (key: | or key: >)
-                if re.match(r"^\s*[\w\"\'\-][^:]*:\s*[|>]", stripped):
+                # Detect block scalar start: key: |  key: >  key: |+  key: |-
+                # key: |2  key: >+  key: >-2  etc.  (YAML chomping/indent indicators)
+                if re.match(r"^\s*[\w\"\'\-][^:]*:\s*[|>][-+]?\d*\s*$", stripped):
                     in_block_scalar = True
                     block_scalar_indent = len(line) - len(line.lstrip())
                     continue
