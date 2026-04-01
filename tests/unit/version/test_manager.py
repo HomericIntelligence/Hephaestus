@@ -191,3 +191,88 @@ def test_version_manager_auto_detect_nested_init_files(tmp_path):
 
     # Should find the nested __init__.py
     assert any(f == init_file for f in manager.init_files)
+
+
+def test_version_manager_verify_missing_init_file_is_optional(tmp_path):
+    """verify() treats a missing __init__.py as optional (returns True, logs warning)."""
+    version_file = tmp_path / "VERSION"
+    version_file.write_text("1.2.3\n")
+    missing_init = tmp_path / "missing_pkg" / "__init__.py"
+
+    manager = VersionManager(
+        repo_root=tmp_path,
+        version_files=[version_file],
+        init_files=[missing_init],
+    )
+
+    # Missing __init__.py is optional — version file check passes so overall True
+    assert manager.verify("1.2.3", verbose=False) is True
+
+
+def test_version_manager_verify_init_without_version_attribute(tmp_path):
+    """verify() returns False when __init__.py lacks __version__ attribute."""
+    version_file = tmp_path / "VERSION"
+    init_file = tmp_path / "__init__.py"
+
+    version_file.write_text("1.2.3\n")
+    init_file.write_text("# no __version__ here\n")
+
+    manager = VersionManager(
+        repo_root=tmp_path,
+        version_files=[version_file],
+        init_files=[init_file],
+    )
+
+    assert manager.verify("1.2.3", verbose=False) is False
+
+
+def test_version_manager_verify_verbose_consistent(tmp_path):
+    """verify(verbose=True) returns True for consistent versions without raising."""
+    version_file = tmp_path / "VERSION"
+    init_file = tmp_path / "__init__.py"
+    version_file.write_text("2.0.0\n")
+    init_file.write_text('__version__ = "2.0.0"\n')
+
+    manager = VersionManager(
+        repo_root=tmp_path,
+        version_files=[version_file],
+        init_files=[init_file],
+    )
+
+    assert manager.verify("2.0.0", verbose=True) is True
+
+
+def test_version_manager_verify_verbose_inconsistent(tmp_path):
+    """verify(verbose=True) returns False for inconsistent versions without raising."""
+    version_file = tmp_path / "VERSION"
+    init_file = tmp_path / "__init__.py"
+    version_file.write_text("1.0.0\n")
+    init_file.write_text('__version__ = "2.0.0"\n')
+
+    manager = VersionManager(
+        repo_root=tmp_path,
+        version_files=[version_file],
+        init_files=[init_file],
+    )
+
+    assert manager.verify("1.0.0", verbose=True) is False
+
+
+def test_version_manager_verify_multiple_init_files_mixed(tmp_path):
+    """verify() returns False when at least one __init__.py has the wrong version."""
+    version_file = tmp_path / "VERSION"
+    version_file.write_text("1.5.0\n")
+    good_init = tmp_path / "pkg_a" / "__init__.py"
+    bad_init = tmp_path / "pkg_b" / "__init__.py"
+    good_init.parent.mkdir()
+    bad_init.parent.mkdir()
+    good_init.write_text('__version__ = "1.5.0"\n')
+    bad_init.write_text('__version__ = "0.0.1"\n')
+
+    manager = VersionManager(
+        repo_root=tmp_path,
+        version_files=[version_file],
+        init_files=[good_init, bad_init],
+    )
+
+    assert manager.verify("1.5.0", verbose=False) is False
