@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
+import pytest
+
 from hephaestus.datasets.downloader import DatasetDownloader, MNISTDownloader
 
 
@@ -126,6 +128,27 @@ class TestDatasetDownloader:
         success = downloader.download_with_retry("test.bin", output, max_retries=1)
         assert success is True
 
+    @patch("hephaestus.datasets.downloader.urlopen")
+    def test_download_retries_on_oserror(self, mock_urlopen, tmp_path: Path) -> None:
+        """download_with_retry retries on OSError."""
+        mock_urlopen.side_effect = OSError("disk write failed")
+        downloader = DatasetDownloader("http://example.com", max_retries=2)
+        downloader.retry_delays = [0, 0]
+        output = tmp_path / "file.bin"
+        success = downloader.download_with_retry("test.bin", output, max_retries=2)
+        assert success is False
+        assert mock_urlopen.call_count == 2
+
+    @patch("hephaestus.datasets.downloader.urlopen")
+    def test_download_retry_delay_clamped_to_last(self, mock_urlopen, tmp_path: Path) -> None:
+        """When attempt index exceeds retry_delays length, last delay is used."""
+        mock_urlopen.side_effect = URLError(reason="refused")
+        downloader = DatasetDownloader("http://example.com", max_retries=4)
+        downloader.retry_delays = [0, 0]  # fewer delays than retries
+        output = tmp_path / "file.bin"
+        success = downloader.download_with_retry("test.bin", output, max_retries=4)
+        assert success is False
+
 
 class TestMNISTDownloader:
     """Tests for MNISTDownloader."""
@@ -173,3 +196,64 @@ class TestMNISTDownloader:
         assert success is True
         assert mock_download.call_count == len(d.files)
         assert mock_decompress.call_count == len(d.files)
+
+    @patch.object(DatasetDownloader, "download_with_retry", return_value=True)
+    @patch.object(DatasetDownloader, "decompress_gz", return_value=False)
+    def test_download_mnist_decompress_failure(
+        self, mock_decompress, mock_download, tmp_path: Path
+    ) -> None:
+        """download_mnist returns False when decompression fails."""
+        d = MNISTDownloader()
+        mnist_dir = tmp_path / "mnist"
+        mnist_dir.mkdir()
+        for gz_filename, _ in d.files:
+            (mnist_dir / gz_filename).write_bytes(b"dummy")
+        success = d.download_mnist(str(mnist_dir))
+        assert success is False
+
+
+class TestMain:
+    """Tests for the main() entry point."""
+
+    @patch("hephaestus.datasets.downloader.MNISTDownloader")
+    def test_main_mnist_success(self, mock_cls, tmp_path: Path) -> None:
+        """main() exits 0 on successful MNIST download."""
+        mock_instance = MagicMock()
+        mock_instance.download_mnist.return_value = True
+        mock_cls.return_value = mock_instance
+
+        with patch("sys.argv", ["prog", "mnist", str(tmp_path)]):
+            with pytest.raises(SystemExit) as exc_info:
+                from hephaestus.datasets.downloader import main
+
+                main()
+        assert exc_info.value.code == 0
+
+    @patch("hephaestus.datasets.downloader.MNISTDownloader")
+    def test_main_mnist_failure(self, mock_cls, tmp_path: Path) -> None:
+        """main() exits 1 on failed MNIST download."""
+        mock_instance = MagicMock()
+        mock_instance.download_mnist.return_value = False
+        mock_cls.return_value = mock_instance
+
+        with patch("sys.argv", ["prog", "mnist"]):
+            with pytest.raises(SystemExit) as exc_info:
+                from hephaestus.datasets.downloader import main
+
+                main()
+        assert exc_info.value.code == 1
+
+    @patch("hephaestus.datasets.downloader.MNISTDownloader")
+    def test_main_mnist_default_output_dir(self, mock_cls) -> None:
+        """main() uses default output dir when none is provided."""
+        mock_instance = MagicMock()
+        mock_instance.download_mnist.return_value = True
+        mock_cls.return_value = mock_instance
+
+        with patch("sys.argv", ["prog", "mnist"]):
+            with pytest.raises(SystemExit):
+                from hephaestus.datasets.downloader import main
+
+                main()
+
+        mock_instance.download_mnist.assert_called_once_with("datasets/mnist")
