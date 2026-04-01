@@ -92,6 +92,100 @@ def extract_pixi_workspace_version(content: str) -> str | None:
     return match.group(1) if match else None
 
 
+def extract_classifiers_python_versions(content: str) -> list[str]:
+    """Extract Python version strings from pyproject.toml classifiers.
+
+    Looks for entries of the form:
+        "Programming Language :: Python :: 3.10"
+
+    Args:
+        content: The raw text content of a pyproject.toml file.
+
+    Returns:
+        Sorted list of version strings (e.g. ["3.10", "3.11"]).
+
+    """
+    versions = re.findall(
+        r'"Programming Language :: Python :: (\d+\.\d+)"',
+        content,
+    )
+    return sorted(set(versions))
+
+
+def extract_ci_matrix_python_versions(content: str) -> list[str]:
+    """Extract Python version strings from a GitHub Actions workflow file.
+
+    Looks for a ``python-version`` matrix key with an inline list, e.g.::
+
+        python-version: ["3.10", "3.11", "3.12"]
+
+    Args:
+        content: The raw YAML text of a GitHub Actions workflow file.
+
+    Returns:
+        Sorted list of version strings (e.g. ["3.10", "3.11"]), or empty list
+        if no ``python-version`` matrix key is found.
+
+    """
+    match = re.search(r"python-version:\s*\[([^\]]+)\]", content)
+    if not match:
+        return []
+    raw = match.group(1)
+    versions = re.findall(r'["\']?(\d+\.\d+)["\']?', raw)
+    return sorted(set(versions))
+
+
+def check_ci_matrix_coverage(repo_root: Path) -> bool:
+    """Check that the CI python-version matrix covers all classifier versions.
+
+    Parses pyproject.toml classifiers and .github/workflows/test.yml matrix
+    and reports any classifier versions absent from the CI matrix.
+
+    Args:
+        repo_root: Repository root directory.
+
+    Returns:
+        True if CI matrix covers all classifier versions (or no data to compare),
+        False if any classifier version is missing from the CI matrix.
+
+    """
+    pyproject_path = repo_root / "pyproject.toml"
+    if not pyproject_path.exists():
+        return True  # nothing to check
+
+    classifier_versions = extract_classifiers_python_versions(pyproject_path.read_text())
+
+    if not classifier_versions:
+        # No classifier versions — nothing to cross-check
+        return True
+
+    ci_workflow = repo_root / ".github" / "workflows" / "test.yml"
+    if not ci_workflow.exists():
+        print(f"WARNING: CI workflow not found at {ci_workflow} — skipping matrix check")
+        return True
+
+    matrix_versions = extract_ci_matrix_python_versions(ci_workflow.read_text())
+
+    if not matrix_versions:
+        print(f"WARNING: No python-version matrix found in {ci_workflow} — skipping matrix check")
+        return True
+
+    missing = sorted(set(classifier_versions) - set(matrix_versions))
+    extra = sorted(set(matrix_versions) - set(classifier_versions))
+
+    if not missing:
+        print(f"OK: CI matrix covers all classifier Python versions: {matrix_versions}")
+        return True
+
+    print("ERROR: CI matrix is missing Python versions listed in pyproject.toml classifiers!")
+    print(f"  Classifiers: {classifier_versions}")
+    print(f"  CI matrix:   {matrix_versions}")
+    print(f"  Missing from CI matrix: {missing}")
+    if extra:
+        print(f"  In CI matrix but not in classifiers: {extra}")
+    return False
+
+
 def check_project_version_consistency(repo_root: Path) -> bool:
     """Check that pyproject.toml and pixi.toml project versions agree (if both present).
 
@@ -172,8 +266,9 @@ def main() -> int:
             python_ok = False
 
     project_version_ok = check_project_version_consistency(repo_root)
+    ci_matrix_ok = check_ci_matrix_coverage(repo_root)
 
-    if python_ok and project_version_ok:
+    if python_ok and project_version_ok and ci_matrix_ok:
         return 0
     return 1
 
