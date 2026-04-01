@@ -109,13 +109,13 @@ def validate_config(config: dict[str, Any], schema: dict[str, Any]) -> bool:
     return len(errors) == 0
 
 
-def merge_configs(*configs: dict[str, Any]) -> dict[str, Any]:
+def merge_configs(*configs: dict[str, Any] | None) -> dict[str, Any]:
     """Merge multiple configuration dictionaries with priority.
 
-    Later configs override earlier ones.
+    Later configs override earlier ones.  ``None`` entries are silently skipped.
 
     Args:
-        *configs: Configuration dictionaries in order of priority
+        *configs: Configuration dictionaries in order of priority; None is ignored.
 
     Returns:
         Merged configuration dictionary

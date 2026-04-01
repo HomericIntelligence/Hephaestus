@@ -25,7 +25,7 @@ def main():
     logger.info("Starting example script")
 
     # Demonstrate CLI utilities
-    parser = create_parser(description="ProjectHephaestus example script")
+    parser = create_parser(prog_name="ProjectHephaestus example script")
     add_logging_args(parser)
     parser.add_argument("--output", "-o", default="output.txt", help="Output file path")
     parser.parse_args()

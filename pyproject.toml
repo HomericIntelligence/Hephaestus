@@ -142,6 +142,17 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 allow_redefinition = false
 implicit_reexport = false
+# Allow scripts/ (no __init__.py) to be discovered without "found twice" errors
+explicit_package_bases = true
+
+# Relax strict typing requirements for test and script code
+[[tool.mypy.overrides]]
+module = ["tests.*", "scripts.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_any_generics = false
+warn_return_any = false
+check_untyped_defs = false
 
 [tool.coverage.run]
 branch = true

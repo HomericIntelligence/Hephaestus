@@ -39,7 +39,7 @@ repos:
         description: Type check Python files using mypy
         entry: pixi run mypy
         language: system
-        files: ^hephaestus/.*\.py$
+        files: ^(hephaestus|scripts|tests)/.*\.py$
         types: [python]
         pass_filenames: false
 

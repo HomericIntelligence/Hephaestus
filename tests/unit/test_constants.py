@@ -43,10 +43,10 @@ class TestDefaultExcludeDirs:
     def test_immutability(self) -> None:
         """Frozenset should reject mutation attempts."""
         with pytest.raises(AttributeError):
-            DEFAULT_EXCLUDE_DIRS.add("new_dir")  # type: ignore[attr-error]
+            DEFAULT_EXCLUDE_DIRS.add("new_dir")  # type: ignore[attr-defined]
 
         with pytest.raises(AttributeError):
-            DEFAULT_EXCLUDE_DIRS.discard(".git")  # type: ignore[attr-error]
+            DEFAULT_EXCLUDE_DIRS.discard(".git")  # type: ignore[attr-defined]
 
 
 class TestLogFormat:

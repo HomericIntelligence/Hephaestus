@@ -2,6 +2,7 @@
 """Tests for dataset downloading utilities."""
 
 import gzip
+from http.client import HTTPMessage
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
@@ -92,7 +93,7 @@ class TestDatasetDownloader:
             url="http://example.com/file",
             code=503,
             msg="Service Unavailable",
-            hdrs=None,
+            hdrs=HTTPMessage(),
             fp=None,
         )
         downloader = DatasetDownloader("http://example.com", max_retries=2)
