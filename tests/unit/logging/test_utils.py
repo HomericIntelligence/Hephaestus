@@ -400,7 +400,14 @@ class TestSetupLogging:
 
     def test_runs_without_error(self) -> None:
         """setup_logging runs without raising."""
-        setup_logging(level=logging.WARNING)
+        root = logging.getLogger()
+        saved = list(root.handlers)
+        root.handlers.clear()
+        try:
+            setup_logging(level=logging.WARNING)
+        finally:
+            root.handlers.clear()
+            root.handlers.extend(saved)
 
     def test_with_log_file(self, tmp_path: Path) -> None:
         """setup_logging creates log file handler."""
@@ -537,6 +544,39 @@ class TestSetupLogging:
             file_handlers = [h for h in root.handlers if isinstance(h, logging.FileHandler)]
             assert len(file_handlers) >= 1
             assert isinstance(file_handlers[0].formatter, JsonFormatter)
+        finally:
+            root.handlers.clear()
+            root.handlers.extend(saved)
+
+    def test_adding_stderr_on_second_call(self) -> None:
+        """Calling setup_logging() twice with different parameters correctly adds new handler.
+
+        First call without stderr, second call with log_to_stderr=True.
+        The stderr handler should be added without replacing the stdout handler.
+        """
+        root = logging.getLogger()
+        saved = list(root.handlers)
+        root.handlers.clear()
+        try:
+            setup_logging()
+            stdout_count = sum(
+                1
+                for h in root.handlers
+                if isinstance(h, logging.StreamHandler)
+                and not isinstance(h, logging.FileHandler)
+                and getattr(h, "stream", None) is sys.stdout
+            )
+            assert stdout_count == 1
+
+            setup_logging(log_to_stderr=True)
+            stderr_count = sum(
+                1
+                for h in root.handlers
+                if isinstance(h, logging.StreamHandler)
+                and not isinstance(h, logging.FileHandler)
+                and getattr(h, "stream", None) is sys.stderr
+            )
+            assert stderr_count == 1, "stderr handler should be added on second call"
         finally:
             root.handlers.clear()
             root.handlers.extend(saved)
