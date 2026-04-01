@@ -140,6 +140,7 @@ def run_subprocess(
         result = subprocess.run(
             cmd,
             cwd=cwd,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             check=check,
