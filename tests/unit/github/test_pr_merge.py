@@ -86,7 +86,7 @@ class TestRunGitCmd:
 class TestChecksSuccessAndPrint:
     """Tests for checks_success_and_print."""
 
-    def _make_check_run(self, name: str, status: str, conclusion: str) -> MagicMock:
+    def _make_check_run(self, name: str, status: str, conclusion: str | None) -> MagicMock:
         cr = MagicMock()
         cr.name = name
         cr.status = status

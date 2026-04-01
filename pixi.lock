@@ -942,7 +942,7 @@ packages:
 - pypi: ./
   name: homericintelligence-hephaestus
   version: 0.6.0
-  sha256: 768f7787064a6046cb183a1b904b4ff82bb63584fe62d43dee7ba29419629911
+  sha256: 922cd74bda874b988e9f5878b2e8afc6b6dafa9393693c3f2135c6c754ffb9c3
   requires_dist:
   - pyyaml>=6.0,<7
   - pydantic>=2.0,<3
