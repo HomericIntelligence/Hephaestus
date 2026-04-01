@@ -42,10 +42,9 @@ class ContextLogger(logging.LoggerAdapter):  # type: ignore[type-arg]
 
     def process(self, msg: Any, kwargs: Any) -> tuple[Any, Any]:
         """Add context information to log messages."""
-        extra = kwargs.get("extra", {})
         with self._context_lock:
-            extra.update(self._context)
-        kwargs["extra"] = extra
+            # Create a new dict to avoid mutating the caller's extra dict across calls.
+            kwargs["extra"] = {**kwargs.get("extra", {}), **self._context}
         return msg, kwargs
 
     def bind(self, **kwargs: Any) -> "ContextLogger":
