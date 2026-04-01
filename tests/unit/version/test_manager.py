@@ -276,3 +276,166 @@ def test_version_manager_verify_multiple_init_files_mixed(tmp_path):
     )
 
     assert manager.verify("1.5.0", verbose=False) is False
+
+
+def test_version_manager_update_pyproject_file(tmp_path):
+    """update_pyproject_file() writes the new version into pyproject.toml [project].version."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "mypkg"\nversion = "0.1.0"\n')
+
+    manager = VersionManager(
+        repo_root=tmp_path,
+        version_files=[],
+        init_files=[],
+        pyproject_file=pyproject,
+    )
+
+    manager.update_pyproject_file(pyproject, "2.3.4", verbose=False)
+
+    content = pyproject.read_text()
+    assert 'version = "2.3.4"' in content
+    assert 'version = "0.1.0"' not in content
+
+
+def test_version_manager_update_pyproject_no_version_section(tmp_path):
+    """update_pyproject_file() leaves file unchanged when no [project].version found."""
+    pyproject = tmp_path / "pyproject.toml"
+    original = '[tool.mypy]\npython_version = "3.10"\n'
+    pyproject.write_text(original)
+
+    manager = VersionManager(
+        repo_root=tmp_path,
+        version_files=[],
+        init_files=[],
+        pyproject_file=pyproject,
+    )
+
+    manager.update_pyproject_file(pyproject, "1.0.0", verbose=False)
+
+    assert pyproject.read_text() == original
+
+
+def test_version_manager_update_pyproject_missing_file(tmp_path):
+    """update_pyproject_file() handles missing pyproject.toml gracefully."""
+    missing = tmp_path / "pyproject.toml"
+
+    manager = VersionManager(
+        repo_root=tmp_path,
+        version_files=[],
+        init_files=[],
+        pyproject_file=missing,
+    )
+
+    # Should not raise
+    manager.update_pyproject_file(missing, "1.0.0", verbose=False)
+
+
+def test_version_manager_update_all_includes_pyproject(tmp_path):
+    """update() also updates pyproject.toml [project].version."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "mypkg"\nversion = "0.1.0"\n')
+    version_file = tmp_path / "VERSION"
+    init_file = tmp_path / "__init__.py"
+    init_file.write_text('__version__ = "0.1.0"\n')
+
+    manager = VersionManager(
+        repo_root=tmp_path,
+        version_files=[version_file],
+        init_files=[init_file],
+        pyproject_file=pyproject,
+    )
+
+    manager.update("3.0.0", verbose=False)
+
+    assert 'version = "3.0.0"' in pyproject.read_text()
+    assert version_file.read_text().strip() == "3.0.0"
+    assert '__version__ = "3.0.0"' in init_file.read_text()
+
+
+def test_version_manager_update_skips_pyproject_when_none(tmp_path):
+    """update() skips pyproject.toml when pyproject_file=None."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nversion = "0.1.0"\n')
+    version_file = tmp_path / "VERSION"
+
+    manager = VersionManager(
+        repo_root=tmp_path,
+        version_files=[version_file],
+        init_files=[],
+        pyproject_file=None,
+    )
+
+    manager.update("9.9.9", verbose=False)
+
+    # pyproject.toml should remain unchanged
+    assert 'version = "0.1.0"' in pyproject.read_text()
+    assert version_file.read_text().strip() == "9.9.9"
+
+
+def test_version_manager_verify_includes_pyproject(tmp_path):
+    """verify() checks pyproject.toml [project].version when present."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "mypkg"\nversion = "1.2.3"\n')
+    version_file = tmp_path / "VERSION"
+    version_file.write_text("1.2.3\n")
+
+    manager = VersionManager(
+        repo_root=tmp_path,
+        version_files=[version_file],
+        init_files=[],
+        pyproject_file=pyproject,
+    )
+
+    assert manager.verify("1.2.3", verbose=False) is True
+
+
+def test_version_manager_verify_fails_when_pyproject_wrong_version(tmp_path):
+    """verify() returns False when pyproject.toml has a mismatched version."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "mypkg"\nversion = "0.0.1"\n')
+    version_file = tmp_path / "VERSION"
+    version_file.write_text("1.2.3\n")
+
+    manager = VersionManager(
+        repo_root=tmp_path,
+        version_files=[version_file],
+        init_files=[],
+        pyproject_file=pyproject,
+    )
+
+    assert manager.verify("1.2.3", verbose=False) is False
+
+
+def test_version_manager_verify_skips_pyproject_when_none(tmp_path):
+    """verify() does not check pyproject.toml when pyproject_file=None."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nversion = "0.0.1"\n')  # wrong version
+    version_file = tmp_path / "VERSION"
+    version_file.write_text("1.2.3\n")
+
+    manager = VersionManager(
+        repo_root=tmp_path,
+        version_files=[version_file],
+        init_files=[],
+        pyproject_file=None,
+    )
+
+    # pyproject.toml mismatch is ignored because pyproject_file=None
+    assert manager.verify("1.2.3", verbose=False) is True
+
+
+def test_version_manager_verify_missing_pyproject_is_skipped(tmp_path):
+    """verify() skips pyproject.toml if it does not exist (logs warning)."""
+    version_file = tmp_path / "VERSION"
+    version_file.write_text("1.2.3\n")
+    missing_pyproject = tmp_path / "pyproject.toml"
+
+    manager = VersionManager(
+        repo_root=tmp_path,
+        version_files=[version_file],
+        init_files=[],
+        pyproject_file=missing_pyproject,
+    )
+
+    # Missing pyproject.toml is treated as optional in verify()
+    assert manager.verify("1.2.3", verbose=False) is True
