@@ -16,6 +16,7 @@ import logging
 import os
 import sys
 import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,20 @@ class ContextLogger(logging.LoggerAdapter):  # type: ignore[type-arg]
         for key in keys:
             new_context.pop(key, None)
         return ContextLogger(self.logger, new_context)
+
+    def with_correlation_id(self, correlation_id: str | None = None) -> "ContextLogger":
+        """Return a new logger with a correlation_id context key.
+
+        Args:
+            correlation_id: Explicit correlation ID string. If omitted, a
+                random UUID4 is generated.
+
+        Returns:
+            New ContextLogger with ``correlation_id`` bound to context.
+
+        """
+        cid = correlation_id if correlation_id is not None else str(uuid.uuid4())
+        return self.bind(correlation_id=cid)
 
 
 def get_logger(
