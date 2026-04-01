@@ -66,6 +66,7 @@ def get_logger(
     log_file: str | None = None,
     context: dict[str, Any] | None = None,
     json_format: bool = False,
+    propagate: bool = False,
 ) -> ContextLogger:
     """Get a configured logger instance with optional context.
 
@@ -75,6 +76,9 @@ def get_logger(
         log_file: Optional file to log to
         context: Optional context dictionary to include in logs
         json_format: If True, use structured JSON output instead of plain text
+        propagate: If True, allow log records to propagate to the root logger.
+            Defaults to False to prevent duplicate output when a root logger
+            is also configured (e.g. via setup_logging() or basicConfig()).
 
     Returns:
         Configured ContextLogger instance
@@ -112,7 +116,7 @@ def get_logger(
     # Prevent duplicate output when root logger also has handlers
     # (e.g., from setup_logging() or logging.basicConfig()).
     # Safe to set outside the lock — simple attribute assignment on the logger object.
-    logger.propagate = False
+    logger.propagate = propagate
 
     return ContextLogger(logger, context)
 

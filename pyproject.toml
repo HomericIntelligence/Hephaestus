@@ -38,6 +38,7 @@ dev = [
     "ruff>=0.1.0,<1",
     "mypy>=1.8.0,<2",
     "build>=1.0,<2",
+    "pip-audit>=2.6,<3",
 ]
 github = [
     "PyGithub>=1.55,<3",

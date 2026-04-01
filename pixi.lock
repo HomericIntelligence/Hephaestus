@@ -938,7 +938,7 @@ packages:
 - pypi: ./
   name: homericintelligence-hephaestus
   version: 0.6.0
-  sha256: 6e87d013e4f0acf86cdd43d61cf4ced67fa8a673c398aabaebc5dcf921f51e7a
+  sha256: 768f7787064a6046cb183a1b904b4ff82bb63584fe62d43dee7ba29419629911
   requires_dist:
   - pyyaml>=6.0,<7
   - pydantic>=2.0,<3
@@ -948,6 +948,7 @@ packages:
   - ruff>=0.1.0,<1 ; extra == 'dev'
   - mypy>=1.8.0,<2 ; extra == 'dev'
   - build>=1.0,<2 ; extra == 'dev'
+  - pip-audit>=2.6,<3 ; extra == 'dev'
   - pygithub>=1.55,<3 ; extra == 'github'
   - tomli>=2.0,<3 ; python_full_version < '3.11' and extra == 'toml'
   - defusedxml>=0.7,<1 ; extra == 'xml'
