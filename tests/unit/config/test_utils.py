@@ -331,14 +331,15 @@ class TestMergeWithEnv:
     def test_nesting_conflict_warning_names_both_env_vars(self, monkeypatch, caplog):
         """Conflict warning includes both the prior env var and the new one.
 
-        HEPHAESTUS_A=1 is processed first; then HEPHAESTUS_A_B=2 requires
-        nesting under 'a'. The warning must name HEPHAESTUS_A (which set the
-        scalar) and HEPHAESTUS_A_B (which triggered the conflict).
+        HEPHAESTUS_A=1 is processed first (sorted before HEPHAESTUS_A__B); then
+        HEPHAESTUS_A__B=2 requires nesting under 'a'. The warning must name
+        HEPHAESTUS_A (which set the scalar) and HEPHAESTUS_A__B (which triggered
+        the conflict).
         """
         import logging
 
         monkeypatch.setenv("HEPHAESTUS_A", "1")
-        monkeypatch.setenv("HEPHAESTUS_A_B", "2")
+        monkeypatch.setenv("HEPHAESTUS_A__B", "2")
 
         config_logger = logging.getLogger("hephaestus.config.utils")
         original_propagate = config_logger.propagate
@@ -349,12 +350,12 @@ class TestMergeWithEnv:
         finally:
             config_logger.propagate = original_propagate
 
-        warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        warning_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         conflict_msg = next(
             (m for m in warning_msgs if "scalar value is being overwritten" in m), None
         )
         assert conflict_msg is not None, "Expected a conflict warning"
-        assert "HEPHAESTUS_A_B" in conflict_msg, "Warning should name the new env var"
+        assert "HEPHAESTUS_A__B" in conflict_msg, "Warning should name the new env var"
         assert "HEPHAESTUS_A" in conflict_msg, (
             "Warning should name the prior env var that set the scalar"
         )
@@ -424,7 +425,7 @@ class TestMergeWithEnv:
         from unittest.mock import patch
 
         monkeypatch.setenv("HEPHAESTUS_A", "2")
-        monkeypatch.setenv("HEPHAESTUS_A_B", "1")
+        monkeypatch.setenv("HEPHAESTUS_A__B", "1")
 
         original_sorted = sorted
 
@@ -443,7 +444,7 @@ class TestMergeWithEnv:
         finally:
             config_logger.propagate = original_propagate
 
-        warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        warning_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         conflict_msg = next(
             (
                 m
@@ -454,7 +455,7 @@ class TestMergeWithEnv:
         )
         assert conflict_msg is not None, "Expected a leaf dict overwrite warning"
         assert "HEPHAESTUS_A" in conflict_msg, "Warning should name the new env var"
-        assert "HEPHAESTUS_A_B" in conflict_msg, (
+        assert "HEPHAESTUS_A__B" in conflict_msg, (
             "Warning should name the prior env var that built the dict"
         )
 
