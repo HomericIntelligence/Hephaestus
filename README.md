@@ -151,6 +151,25 @@ pip install -e /path/to/ProjectHephaestus
 - `merge_configs(*configs)`: Deep-merge multiple configuration dicts
 - `merge_with_env(config, prefix)`: Overlay environment variables onto config
 
+#### Environment Variable Convention
+
+`merge_with_env` maps environment variables to config keys using **double underscore (`__`) as the nesting delimiter**. Single underscores are preserved as part of the key name.
+
+| Environment Variable | Config Key |
+|---|---|
+| `HEPHAESTUS_DATABASE__HOST` | `{"database": {"host": ...}}` |
+| `HEPHAESTUS_MAX_CONNECTIONS` | `{"max_connections": ...}` |
+| `HEPHAESTUS_DATABASE__MAX_RETRIES` | `{"database": {"max_retries": ...}}` |
+
+Numeric strings are automatically converted to `int` or `float`. To also convert boolean-like strings (`true`/`false`/`yes`/`no`/`on`/`off`) to Python `bool`, pass `convert_bools=True`:
+
+```python
+from hephaestus.config.utils import merge_with_env
+
+# HEPHAESTUS_DEBUG=true → {"debug": True} (not the string "true")
+config = merge_with_env({}, convert_bools=True)
+```
+
 ### I/O Utilities (`hephaestus.io`)
 
 - `read_file(path)` / `write_file(path, content)`: Simple file I/O
