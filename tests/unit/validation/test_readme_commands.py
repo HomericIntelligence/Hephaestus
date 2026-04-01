@@ -303,6 +303,15 @@ class TestValidateSyntax:
         assert result.passed is False
         assert "bash not found" in (result.error_message or "")
 
+    @patch("hephaestus.validation.readme_commands.subprocess.run")
+    def test_value_error(self, mock_run: MagicMock) -> None:
+        """ValueError (e.g. from invalid args) returns passed=False with error string."""
+        mock_run.side_effect = ValueError("invalid argument")
+        result = ReadmeValidator().validate_syntax("echo fail")
+
+        assert result.passed is False
+        assert "invalid argument" in (result.error_message or "")
+
     @requires_bash
     def test_real_valid_syntax(self) -> None:
         """Integration: real bash validates correct syntax."""

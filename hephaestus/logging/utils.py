@@ -25,6 +25,10 @@ from hephaestus.logging.formatters import JsonFormatter
 # Module-level lock protects the check-then-add TOCTOU in get_logger()
 _handler_setup_lock = threading.Lock()
 
+# Honour HEPHAESTUS_LOG_FORMAT=json so logging format can be configured at
+# deployment time without code changes (12-factor pattern).
+_ENV_JSON_FORMAT: bool = os.environ.get("HEPHAESTUS_LOG_FORMAT", "").lower() == "json"
+
 
 class ContextLogger(logging.LoggerAdapter):  # type: ignore[type-arg]
     """Logger adapter that adds context information to log messages."""
@@ -87,7 +91,8 @@ def get_logger(
     logger = logging.getLogger(name)
     logger.setLevel(level or logging.INFO)
 
-    formatter: logging.Formatter = JsonFormatter() if json_format else logging.Formatter(LOG_FORMAT)
+    use_json = json_format or _ENV_JSON_FORMAT
+    formatter: logging.Formatter = JsonFormatter() if use_json else logging.Formatter(LOG_FORMAT)
 
     # Lock protects the check-then-add TOCTOU race condition during concurrent initialization
     with _handler_setup_lock:
@@ -142,7 +147,7 @@ def setup_logging(
     root_logger.setLevel(level)
 
     formatter: logging.Formatter
-    if json_format:
+    if json_format or _ENV_JSON_FORMAT:
         formatter = JsonFormatter()
     else:
         format_string = format_string or LOG_FORMAT
