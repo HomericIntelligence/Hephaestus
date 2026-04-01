@@ -11,9 +11,14 @@ ProjectHephaestus is the shared utilities and tooling repository of the HomericI
 **Role in Ecosystem**:
 
 - ProjectOdyssey → Training and capability development
-- ProjectKeystone → Communication and distributed agent coordination
+- ProjectKeystone → Automated task DAG execution
 - ProjectScylla → Testing, measurement, and optimization
 - ProjectMnemosyne → Knowledge, skills, and memory preservation
+- ProjectHermes → Agent communication and message routing
+- ProjectArgus → Observability, monitoring, and alerting
+- ProjectProteus → Dynamic configuration and environment adaptation
+- ProjectMyrmidons → Agent swarm coordination and task distribution
+- ProjectAchaeanFleet → Multi-agent fleet orchestration
 - **ProjectHephaestus → Shared utilities, tooling, and foundational components**
 
 ## Repository Structure
