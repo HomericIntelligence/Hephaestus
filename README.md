@@ -116,21 +116,39 @@ See [docs/plugin-installation.md](docs/plugin-installation.md) for the full inst
 
 ### Installing in Another Project
 
-To use ProjectHephaestus in another project with Pixi:
+ProjectHephaestus is published to PyPI as `homericintelligence-hephaestus`.
 
-1. Add it as a dependency in your `pixi.toml`:
-
-   ```toml
-   [pypi-dependencies]
-   hephaestus = { path = "../ProjectHephaestus", editable = true }
-   ```
-
-2. Run `pixi install` to install the dependency
-
-Or install directly with pip:
+**Using pip:**
 
 ```bash
-pip install -e /path/to/ProjectHephaestus
+pip install homericintelligence-hephaestus
+```
+
+**Using Pixi:**
+
+Add to `pyproject.toml`:
+
+```toml
+[project]
+dependencies = [
+    "homericintelligence-hephaestus>=0.6.0,<1",
+]
+```
+
+Or add a PyPI entry to `pixi.toml`:
+
+```toml
+[pypi-dependencies]
+homericintelligence-hephaestus = ">=0.6.0,<1"
+```
+
+Then run `pixi install` to resolve the dependency.
+
+**For local development (path dependency):**
+
+```toml
+[pypi-dependencies]
+homericintelligence-hephaestus = { path = "../ProjectHephaestus", editable = true }
 ```
 
 ## Key Features
