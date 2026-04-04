@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for hephaestus.github.pr_merge module."""
 
+import importlib.util
 import subprocess
 import sys
 from unittest.mock import MagicMock, patch
@@ -322,6 +323,10 @@ class TestMain:
                         main()
         assert exc_info.value.code == 1
 
+    @pytest.mark.skipif(
+        not importlib.util.find_spec("github"),
+        reason="PyGithub not installed — cannot mock its absence when it is genuinely absent",
+    )
     @patch("hephaestus.github.pr_merge.run_git_cmd")
     def test_exits_1_when_pygithub_not_installed(self, mock_git) -> None:
         """main() exits 1 when PyGithub is not importable."""
