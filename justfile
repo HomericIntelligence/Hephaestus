@@ -56,5 +56,9 @@ precommit:
 # Run lint + format-check + typecheck
 check: lint format-check typecheck
 
+# Run pip-audit to check for known dependency vulnerabilities
+audit:
+    pixi run --environment lint pip-audit
+
 # Full CI-equivalent run: bootstrap, check, and test
 all: bootstrap check test
