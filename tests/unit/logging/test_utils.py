@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import threading
+from collections.abc import Generator
 from io import StringIO
 from pathlib import Path
 
@@ -21,9 +22,9 @@ from hephaestus.logging.utils import (
 
 
 @pytest.fixture(autouse=True)
-def _clean_test_loggers() -> None:  # type: ignore[misc]
+def _clean_test_loggers() -> Generator[None, None, None]:
     """Remove test loggers and their handlers after each test to prevent pollution."""
-    yield  # type: ignore[misc]
+    yield
     # Teardown: clear handlers on any test loggers we created
     for name in list(logging.Logger.manager.loggerDict):
         if name.startswith("test."):
