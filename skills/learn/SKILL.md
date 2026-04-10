@@ -3,6 +3,7 @@ name: learn
 description: Save session learnings as a skill plugin — amends existing skills when the topic matches, creates new ones otherwise. Use after experiments, debugging sessions, or when you want to preserve team knowledge.
 allowed-tools: [Read, Write, Edit, Bash, Grep, Glob]
 ---
+<!-- markdownlint-disable MD025 -->
 
 # /learn
 
@@ -374,6 +375,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
    Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 
    git push -u origin skill/<name>
+
    ```
 
 9. **Create PR** (only if push succeeded):
