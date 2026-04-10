@@ -191,3 +191,8 @@ class TestDetectClaudeUsageLimit:
         """Returns False for unrelated error messages."""
         result = detect_claude_usage_limit("Error: command not found")
         assert result is False
+
+    def test_partial_match_in_longer_text(self) -> None:
+        """Detects pattern embedded in longer text."""
+        text = "API call failed: usage limit exceeded, please try again later"
+        assert detect_claude_usage_limit(text) is True

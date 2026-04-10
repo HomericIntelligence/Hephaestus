@@ -254,6 +254,15 @@ Instruct sub-agents to report back (not attempt to fix) when they encounter:
 
 **Clone location**: `$HOME/.agent-brain/ProjectMnemosyne/`
 
+## AI Maestro (Optional)
+
+If AI Maestro is available (check for `~/.aimaestro/` directory or the hook in `~/.claude/settings.json`):
+
+- Session state is broadcast automatically via hooks — no action needed
+- Track task progress in conversation output for dashboard visibility
+
+If not available: track progress in conversation only. Do not fail or warn.
+
 ## ProjectScylla Testing Tiers (When Relevant)
 
 For tasks involving agent evaluation or testing agent configurations, reference the T0-T6 tier structure:
