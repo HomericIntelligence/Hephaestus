@@ -14,6 +14,7 @@ import contextlib
 import json
 import logging
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -565,15 +566,46 @@ class IssueImplementer:
             return False
 
     def _generate_plan(self, issue_number: int) -> None:
-        """Generate plan for an issue using plan_issues.py."""
+        """Generate plan for an issue using hephaestus-plan-issues.
+
+        Prefers the installed entry point, falls back to a local
+        scripts/plan_issues.py if present (legacy ProjectScylla layout).
+        """
+        import shutil
+
+        # Prefer the installed entry point (works in any repo)
+        entry_point = shutil.which("hephaestus-plan-issues")
+        if entry_point:
+            run(
+                [entry_point, "--issues", str(issue_number)],
+                timeout=600,
+            )
+            return
+
+        # Fall back to python -m invocation (works when PYTHONPATH is set)
+        try:
+            run(
+                [sys.executable, "-m", "hephaestus.automation.planner",
+                 "--issues", str(issue_number)],
+                timeout=600,
+            )
+            return
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+        # Legacy fallback: local scripts/plan_issues.py (ProjectScylla layout)
         plan_script = self.repo_root / "scripts" / "plan_issues.py"
+        if plan_script.exists():
+            run(
+                [sys.executable, str(plan_script), "--issues", str(issue_number)],
+                timeout=600,
+            )
+            return
 
-        if not plan_script.exists():
-            raise RuntimeError(f"Plan script not found: {plan_script}")
-
-        run(
-            ["python", str(plan_script), "--issues", str(issue_number)],
-            timeout=600,  # 10 minutes
+        raise RuntimeError(
+            "Could not find hephaestus-plan-issues entry point, "
+            "hephaestus.automation.planner module, or "
+            f"scripts/plan_issues.py in {self.repo_root}"
         )
 
     def _parse_follow_up_items(self, text: str) -> list[dict[str, Any]]:
