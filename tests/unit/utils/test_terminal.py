@@ -73,7 +73,7 @@ class TestInstallSignalHandlers:
         handler = signal_module.getsignal(signal_module.SIGINT)
         assert callable(handler)
 
-        handler(signal_module.SIGINT, None)  # type: ignore[call-arg]
+        handler(signal_module.SIGINT, None)
         shutdown.assert_called_once()
         assert terminal_module._shutdown_requested is True
 
