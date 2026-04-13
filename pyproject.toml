@@ -79,6 +79,9 @@ hephaestus-check-docstrings = "hephaestus.validation.docstrings:main"
 hephaestus-check-tier-labels = "hephaestus.validation.tier_labels:main"
 hephaestus-fix-markdown = "hephaestus.markdown.fixer:main"
 hephaestus-audit-doc-policy = "hephaestus.validation.doc_policy:main"
+hephaestus-check-version-consistency = "hephaestus.version.consistency:check_version_consistency_main"
+hephaestus-check-package-versions = "hephaestus.version.consistency:check_package_versions_main"
+hephaestus-bump-version = "hephaestus.version.consistency:bump_version_main"
 
 [project.urls]
 Homepage = "https://github.com/HomericIntelligence/ProjectHephaestus"
