@@ -59,6 +59,7 @@ class CircuitBreaker:
         failure_threshold: Number of consecutive failures before opening
         recovery_timeout: Seconds to wait before transitioning to half-open
         half_open_max_calls: Max calls allowed in half-open state
+        success_threshold: Consecutive successes in HALF_OPEN required to close
 
     Example:
         >>> cb = CircuitBreaker("api", failure_threshold=3, recovery_timeout=30)
@@ -72,6 +73,7 @@ class CircuitBreaker:
         failure_threshold: int = 5,
         recovery_timeout: float = 60.0,
         half_open_max_calls: int = 1,
+        success_threshold: int = 1,
     ) -> None:
         """Initialize circuit breaker.
 
@@ -80,17 +82,20 @@ class CircuitBreaker:
             failure_threshold: Consecutive failures before opening
             recovery_timeout: Seconds before transitioning to half-open
             half_open_max_calls: Max calls allowed in half-open state
+            success_threshold: Consecutive successes in HALF_OPEN to close
 
         """
         self.name = name
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.half_open_max_calls = half_open_max_calls
+        self.success_threshold = success_threshold
 
         self._state = CircuitBreakerState.CLOSED
         self._failure_count = 0
         self._last_failure_time: float = 0.0
         self._half_open_calls = 0
+        self._half_open_successes = 0
         self._lock = threading.Lock()
 
     @property
@@ -106,6 +111,7 @@ class CircuitBreaker:
             if elapsed >= self.recovery_timeout:
                 self._state = CircuitBreakerState.HALF_OPEN
                 self._half_open_calls = 0
+                self._half_open_successes = 0
                 logger.info(
                     "Circuit breaker '%s' transitioning to HALF_OPEN after %.1fs",
                     self.name,
@@ -155,13 +161,20 @@ class CircuitBreaker:
         """Record a successful call."""
         with self._lock:
             if self._state == CircuitBreakerState.HALF_OPEN:
+                self._half_open_successes += 1
+                if self._half_open_successes < self.success_threshold:
+                    # Allow the next probe through by resetting the call counter
+                    self._half_open_calls = 0
+                    return
                 logger.info(
-                    "Circuit breaker '%s' closing after successful half-open call",
+                    "Circuit breaker '%s' closing after %d successful half-open call(s)",
                     self.name,
+                    self._half_open_successes,
                 )
             self._state = CircuitBreakerState.CLOSED
             self._failure_count = 0
             self._half_open_calls = 0
+            self._half_open_successes = 0
 
     def _record_failure(self) -> None:
         """Record a failed call."""
@@ -189,6 +202,7 @@ class CircuitBreaker:
             self._state = CircuitBreakerState.CLOSED
             self._failure_count = 0
             self._half_open_calls = 0
+            self._half_open_successes = 0
             self._last_failure_time = 0.0
             logger.info("Circuit breaker '%s' reset to CLOSED", self.name)
 
@@ -203,6 +217,7 @@ def get_circuit_breaker(
     failure_threshold: int = 5,
     recovery_timeout: float = 60.0,
     half_open_max_calls: int = 1,
+    success_threshold: int = 1,
 ) -> CircuitBreaker:
     """Get or create a named circuit breaker (singleton per name).
 
@@ -211,6 +226,7 @@ def get_circuit_breaker(
         failure_threshold: Failures before opening (only used on creation)
         recovery_timeout: Recovery timeout in seconds (only used on creation)
         half_open_max_calls: Max half-open calls (only used on creation)
+        success_threshold: Successes in HALF_OPEN to close (only used on creation)
 
     Returns:
         CircuitBreaker instance for the given name
@@ -223,6 +239,7 @@ def get_circuit_breaker(
                 failure_threshold=failure_threshold,
                 recovery_timeout=recovery_timeout,
                 half_open_max_calls=half_open_max_calls,
+                success_threshold=success_threshold,
             )
         return _registry[name]
 
