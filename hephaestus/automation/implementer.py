@@ -409,6 +409,20 @@ class IssueImplementer:
                 state.session_id = session_id
             self._save_state(state)
 
+            # In dry-run mode, skip all post-implementation steps
+            if self.options.dry_run:
+                self._log(
+                    "info",
+                    f"[DRY RUN] Skipping PR creation, learn, follow-up for #{issue_number}",
+                    thread_id,
+                )
+                return WorkerResult(
+                    issue_number=issue_number,
+                    success=True,
+                    branch_name=branch_name,
+                    worktree_path=str(worktree_path),
+                )
+
             # Verify commit, push, and PR were created by Claude
             with self.state_lock:
                 state.phase = ImplementationPhase.CREATING_PR
@@ -585,8 +599,13 @@ class IssueImplementer:
         # Fall back to python -m invocation (works when PYTHONPATH is set)
         try:
             run(
-                [sys.executable, "-m", "hephaestus.automation.planner",
-                 "--issues", str(issue_number)],
+                [
+                    sys.executable,
+                    "-m",
+                    "hephaestus.automation.planner",
+                    "--issues",
+                    str(issue_number),
+                ],
                 timeout=600,
             )
             return
