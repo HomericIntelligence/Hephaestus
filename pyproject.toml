@@ -82,6 +82,9 @@ hephaestus-audit-doc-policy = "hephaestus.validation.doc_policy:main"
 hephaestus-check-version-consistency = "hephaestus.version.consistency:check_version_consistency_main"
 hephaestus-check-package-versions = "hephaestus.version.consistency:check_package_versions_main"
 hephaestus-bump-version = "hephaestus.version.consistency:bump_version_main"
+hephaestus-check-doc-config = "hephaestus.validation.doc_config:main"
+hephaestus-check-stale-scripts = "hephaestus.validation.stale_scripts:main"
+hephaestus-mypy-each-file = "hephaestus.validation.mypy_per_file:main"
 
 [project.urls]
 Homepage = "https://github.com/HomericIntelligence/ProjectHephaestus"
