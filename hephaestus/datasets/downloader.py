@@ -296,8 +296,7 @@ class CIFAR10Downloader(DatasetDownloader):
             import numpy as np
         except ImportError as exc:
             raise ImportError(
-                "numpy is required for CIFAR-10 IDX conversion. "
-                "Install with: pip install numpy"
+                "numpy is required for CIFAR-10 IDX conversion. Install with: pip install numpy"
             ) from exc
 
         output_path = Path(output_dir)
@@ -327,9 +326,7 @@ class CIFAR10Downloader(DatasetDownloader):
             logger.info("CIFAR-10 dataset ready at: %s", output_path)
         return success
 
-    def _convert_batches(
-        self, batch_dir: Path, output_dir: Path, np: Any
-    ) -> bool:
+    def _convert_batches(self, batch_dir: Path, output_dir: Path, np: Any) -> bool:
         """Convert CIFAR-10 pickle batches to IDX files.
 
         Args:
@@ -448,9 +445,7 @@ class CIFAR100Downloader(DatasetDownloader):
 
 
 # EMNIST available splits
-EMNIST_SPLITS = frozenset(
-    ["balanced", "byclass", "bymerge", "digits", "letters", "mnist"]
-)
+EMNIST_SPLITS = frozenset(["balanced", "byclass", "bymerge", "digits", "letters", "mnist"])
 
 # EMNIST primary URL and fallback mirrors
 _EMNIST_URLS = [
@@ -467,9 +462,7 @@ class EMNISTDownloader(DatasetDownloader):
         super().__init__(_EMNIST_URLS[0])
         self._fallback_urls = _EMNIST_URLS[1:]
 
-    def download_emnist(
-        self, split: str = "balanced", output_dir: str = "datasets/emnist"
-    ) -> bool:
+    def download_emnist(self, split: str = "balanced", output_dir: str = "datasets/emnist") -> bool:
         """Download and extract EMNIST dataset for a specific split.
 
         Args:
@@ -486,8 +479,7 @@ class EMNISTDownloader(DatasetDownloader):
         """
         if split not in EMNIST_SPLITS:
             raise ValueError(
-                f"Unknown EMNIST split: {split!r}. "
-                f"Valid splits: {sorted(EMNIST_SPLITS)}"
+                f"Unknown EMNIST split: {split!r}. Valid splits: {sorted(EMNIST_SPLITS)}"
             )
 
         output_path = Path(output_dir)
