@@ -178,9 +178,7 @@ class NATSSubscriberThread(threading.Thread):
                     event = NATSEvent(
                         subject=msg.subject,
                         data=data,
-                        timestamp=(
-                            msg.headers.get("Nats-Time-Stamp", "") if msg.headers else ""
-                        ),
+                        timestamp=(msg.headers.get("Nats-Time-Stamp", "") if msg.headers else ""),
                         sequence=msg.metadata.sequence.stream if msg.metadata else 0,
                     )
 
