@@ -74,6 +74,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Install pixi
         uses: prefix-dev/setup-pixi@v0.9.5
@@ -93,7 +95,7 @@ jobs:
       - name: Verify tag matches package version
         shell: bash
         env:
-          TAG_REF: ${{ github.ref_name }}
+          TAG_REF: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           TAG_VERSION="${TAG_REF#v}"
           PKG_VERSION=$(python -c "
