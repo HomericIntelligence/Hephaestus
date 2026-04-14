@@ -4,7 +4,9 @@
 
 from pathlib import Path
 
-from hephaestus.markdown.link_fixer import LinkFixer, LinkFixerOptions
+import pytest
+
+from hephaestus.markdown.link_fixer import LinkFixer, LinkFixerOptions, check_links, main
 
 
 def test_fix_system_path_links():
@@ -124,3 +126,60 @@ def test_link_fixer_process_path_directory(tmp_path):
 
     # Should process 2 markdown files
     assert files_modified >= 0  # Depends on if fixes were needed
+
+
+class TestCheckLinks:
+    """Tests for check_links() validation helper."""
+
+    def test_no_issues_returns_zeros(self, tmp_path: Path) -> None:
+        (tmp_path / "clean.md").write_text("No problematic links here.\n")
+        files, sys_issues, abs_issues = check_links(tmp_path)
+        assert files == 0
+        assert sys_issues == 0
+        assert abs_issues == 0
+
+    def test_absolute_path_detected(self, tmp_path: Path) -> None:
+        (tmp_path / "bad.md").write_text("See [link](/absolute/path.md)\n")
+        _files, _sys, abs_issues = check_links(tmp_path)
+        assert abs_issues >= 1
+
+    def test_returns_tuple_of_three(self, tmp_path: Path) -> None:
+        (tmp_path / "f.md").write_text("Clean content.\n")
+        result = check_links(tmp_path)
+        assert len(result) == 3
+
+
+class TestMain:
+    """Tests for main() CLI entry point."""
+
+    def test_help_exits_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("sys.argv", ["hephaestus-check-links", "--help"])
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code == 0
+
+    def test_check_mode_clean_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        (tmp_path / "clean.md").write_text("No bad links here.\n")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["hephaestus-check-links", "--check", str(tmp_path)],
+        )
+        assert main() == 0
+
+    def test_check_mode_bad_links(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        (tmp_path / "bad.md").write_text("See [link](/absolute/path.md)\n")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["hephaestus-check-links", "--check", str(tmp_path)],
+        )
+        assert main() == 1
+
+    def test_fix_mode_modifies_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        f = tmp_path / "f.md"
+        f.write_text("See [link](/absolute/path.md)\n")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["hephaestus-check-links", str(tmp_path)],
+        )
+        result = main()
+        assert result == 0  # fix mode always exits 0

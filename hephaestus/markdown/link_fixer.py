@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
 
-"""Fix invalid absolute path links in markdown files.
+"""Fix or validate invalid absolute path links in markdown files.
 
-This module provides functionality to fix two types of invalid links:
-1. Full system paths: /home/user/repo/... -> relative paths
-2. Absolute paths starting with /: /agents/... -> agents/...
+This module provides functionality to fix (or check) two types of invalid links:
+
+1. Full system paths: ``/home/user/repo/...`` → relative paths
+2. Absolute paths starting with ``/``: ``/agents/...`` → ``agents/...``
+
+Use ``--check`` (``-n``) to validate without writing changes — exits 1 if
+any invalid links are found.
+
+Usage::
+
+    hephaestus-check-links docs/          # validate only (exit 1 on issues)
+    hephaestus-check-links file.md        # validate a single file
 """
 
+import argparse
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -189,3 +200,80 @@ class LinkFixer:
                 total_absolute_fixes += absolute_fixes
 
         return files_modified, total_system_fixes, total_absolute_fixes
+
+
+def check_links(
+    path: Path,
+    verbose: bool = False,
+) -> tuple[int, int, int]:
+    """Check for invalid absolute-path links without writing any changes.
+
+    Runs the link fixer in dry-run mode and returns counts of files and
+    fixes that *would* have been applied.
+
+    Args:
+        path: File or directory to scan.
+        verbose: If True, print details for each file that would be fixed.
+
+    Returns:
+        Tuple of ``(files_with_issues, system_path_issues, absolute_path_issues)``.
+
+    """
+    options = LinkFixerOptions(verbose=verbose, dry_run=True)
+    fixer = LinkFixer(options)
+    return fixer.process_path(path)
+
+
+def main() -> int:
+    """CLI entry point: validate (``--check``) or fix absolute-path links.
+
+    Returns:
+        0 if no issues found (or fixes applied); 1 if issues detected in
+        ``--check`` mode.
+
+    """
+    parser = argparse.ArgumentParser(
+        description="Check or fix absolute-path links in markdown files",
+        epilog="Example: %(prog)s --check docs/ -v",
+    )
+    parser.add_argument("path", type=Path, help="Markdown file or directory to process")
+    parser.add_argument(
+        "--check",
+        "-n",
+        action="store_true",
+        help="Validate only — report issues and exit 1 if any found (no writes)",
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Print per-file details",
+    )
+
+    args = parser.parse_args()
+
+    if args.check:
+        files_with_issues, system_issues, abs_issues = check_links(args.path, verbose=args.verbose)
+        total = system_issues + abs_issues
+        if total > 0:
+            print(
+                f"Found {files_with_issues} file(s) with {total} invalid link(s) "
+                f"({system_issues} system-path, {abs_issues} absolute-path).",
+                file=sys.stderr,
+            )
+            return 1
+        if args.verbose:
+            print("No invalid absolute-path links found.")
+        return 0
+
+    # Fix mode
+    options = LinkFixerOptions(verbose=args.verbose)
+    fixer = LinkFixer(options)
+    files_modified, system_fixes, abs_fixes = fixer.process_path(args.path)
+    total = system_fixes + abs_fixes
+    print(f"\nSummary: {files_modified} file(s) modified, {total} link(s) fixed.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -85,6 +85,8 @@ hephaestus-bump-version = "hephaestus.version.consistency:bump_version_main"
 hephaestus-check-doc-config = "hephaestus.validation.doc_config:main"
 hephaestus-check-stale-scripts = "hephaestus.validation.stale_scripts:main"
 hephaestus-mypy-each-file = "hephaestus.validation.mypy_per_file:main"
+hephaestus-check-links = "hephaestus.markdown.link_fixer:main"
+hephaestus-validate-anchors = "hephaestus.markdown.anchors:main"
 
 [project.urls]
 Homepage = "https://github.com/HomericIntelligence/ProjectHephaestus"
