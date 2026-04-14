@@ -936,8 +936,8 @@ packages:
   timestamp: 1773314012590
 - pypi: ./
   name: homericintelligence-hephaestus
-  version: 0.6.0
-  sha256: 0ef0c9c3ebbed5320321e51f15d7ef5f39a4303aae4793518de4a0c3de398070
+  version: 0.7.0
+  sha256: a42968995da7d731d99d44627d2931a4edd60f2783e5c1907c7c78481a718234
   requires_dist:
   - packaging>=21.0
   - pyyaml>=6.0,<7
