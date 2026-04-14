@@ -53,8 +53,11 @@ xml = [
 schema = [
     "jsonschema>=4.0,<5",
 ]
+nats = [
+    "nats-py>=2.6,<3",
+]
 all = [
-    "HomericIntelligence-Hephaestus[github,toml,xml,schema]",
+    "HomericIntelligence-Hephaestus[github,nats,toml,xml,schema]",
 ]
 
 [project.scripts]
