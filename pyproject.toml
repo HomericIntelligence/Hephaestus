@@ -89,6 +89,10 @@ hephaestus-check-links = "hephaestus.markdown.link_fixer:main"
 hephaestus-validate-anchors = "hephaestus.markdown.anchors:main"
 hephaestus-check-dep-sync = "hephaestus.config.dep_sync:check_dep_sync_main"
 hephaestus-sync-requirements = "hephaestus.config.dep_sync:sync_requirements_main"
+hephaestus-bench-precommit = "hephaestus.ci.precommit:bench_precommit_main"
+hephaestus-check-precommit-versions = "hephaestus.ci.precommit:check_precommit_versions_main"
+hephaestus-check-workflow-inventory = "hephaestus.ci.workflows:check_workflow_inventory_main"
+hephaestus-validate-workflow-checkout = "hephaestus.ci.workflows:validate_workflow_checkout_main"
 
 [project.urls]
 Homepage = "https://github.com/HomericIntelligence/ProjectHephaestus"
