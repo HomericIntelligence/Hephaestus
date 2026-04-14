@@ -141,24 +141,20 @@ class TestParsePixiToml:
 
     def test_reads_dependencies(self, tmp_path: Path) -> None:
         pixi = tmp_path / "pixi.toml"
-        pixi.write_text(
-            '[dependencies]\npyyaml = ">=6.0,<7"\npydantic = ">=2.0,<3"\n'
-        )
+        pixi.write_text('[dependencies]\npyyaml = ">=6.0,<7"\npydantic = ">=2.0,<3"\n')
         result = parse_pixi_toml(pixi)
         assert result["pyyaml"] == ">=6.0,<7"
         assert result["pydantic"] == ">=2.0,<3"
 
     def test_reads_pypi_dependencies(self, tmp_path: Path) -> None:
         pixi = tmp_path / "pixi.toml"
-        pixi.write_text(
-            "[pypi-dependencies]\nrequests = \">=2.28,<3\"\n"
-        )
+        pixi.write_text('[pypi-dependencies]\nrequests = ">=2.28,<3"\n')
         result = parse_pixi_toml(pixi)
         assert result["requests"] == ">=2.28,<3"
 
     def test_ignores_comments(self, tmp_path: Path) -> None:
         pixi = tmp_path / "pixi.toml"
-        pixi.write_text("[dependencies]\n# This is a comment\npyyaml = \">=6.0\"\n")
+        pixi.write_text('[dependencies]\n# This is a comment\npyyaml = ">=6.0"\n')
         result = parse_pixi_toml(pixi)
         assert "pyyaml" in result
         assert len(result) == 1
@@ -166,7 +162,7 @@ class TestParsePixiToml:
     def test_stops_at_next_section(self, tmp_path: Path) -> None:
         pixi = tmp_path / "pixi.toml"
         pixi.write_text(
-            "[dependencies]\npyyaml = \">=6.0\"\n\n[feature.dev.dependencies]\npytest = \">=9.0\"\n"
+            '[dependencies]\npyyaml = ">=6.0"\n\n[feature.dev.dependencies]\npytest = ">=9.0"\n'
         )
         result = parse_pixi_toml(pixi)
         assert "pyyaml" in result
@@ -260,16 +256,12 @@ class TestCheckRequirementsAgainstPixi:
 
     def test_valid_pin_passes(self, tmp_path: Path) -> None:
         self._write_req(tmp_path, "requirements.txt", "pyyaml==6.0.1\n")
-        errors = check_requirements_against_pixi(
-            tmp_path, {"pyyaml": ">=6.0,<7"}
-        )
+        errors = check_requirements_against_pixi(tmp_path, {"pyyaml": ">=6.0,<7"})
         assert errors == []
 
     def test_pin_outside_range_fails(self, tmp_path: Path) -> None:
         self._write_req(tmp_path, "requirements.txt", "pyyaml==7.0.0\n")
-        errors = check_requirements_against_pixi(
-            tmp_path, {"pyyaml": ">=6.0,<7"}
-        )
+        errors = check_requirements_against_pixi(tmp_path, {"pyyaml": ">=6.0,<7"})
         assert len(errors) == 1
         assert "pyyaml" in errors[0]
 
@@ -300,17 +292,13 @@ class TestCheckDepSync:
         assert errors == ["pixi.toml not found"]
 
     def test_clean_state_returns_empty(self, tmp_path: Path) -> None:
-        (tmp_path / "pixi.toml").write_text(
-            '[dependencies]\npyyaml = ">=6.0,<7"\n'
-        )
+        (tmp_path / "pixi.toml").write_text('[dependencies]\npyyaml = ">=6.0,<7"\n')
         (tmp_path / "requirements.txt").write_text("pyyaml==6.0.1\n")
         errors = check_dep_sync(tmp_path)
         assert errors == []
 
     def test_out_of_range_pin_fails(self, tmp_path: Path) -> None:
-        (tmp_path / "pixi.toml").write_text(
-            '[dependencies]\npyyaml = ">=6.0,<7"\n'
-        )
+        (tmp_path / "pixi.toml").write_text('[dependencies]\npyyaml = ">=6.0,<7"\n')
         (tmp_path / "requirements.txt").write_text("pyyaml==7.1.0\n")
         errors = check_dep_sync(tmp_path)
         assert len(errors) >= 1
@@ -320,9 +308,7 @@ class TestGenerateRequirementsContent:
     """Tests for generate_requirements_content()."""
 
     def test_basic_output(self) -> None:
-        content = generate_requirements_content(
-            ["pyyaml"], {"pyyaml": "6.0.1"}
-        )
+        content = generate_requirements_content(["pyyaml"], {"pyyaml": "6.0.1"})
         assert "pyyaml==6.0.1" in content
 
     def test_includes_header(self) -> None:
@@ -436,9 +422,7 @@ class TestCLIEntryPoints:
     ) -> None:
         from hephaestus.config.dep_sync import check_dep_sync_main
 
-        (tmp_path / "pixi.toml").write_text(
-            '[dependencies]\npyyaml = ">=6.0,<7"\n'
-        )
+        (tmp_path / "pixi.toml").write_text('[dependencies]\npyyaml = ">=6.0,<7"\n')
         monkeypatch.setattr("sys.argv", ["hephaestus-check-dep-sync", "--repo-root", str(tmp_path)])
         assert check_dep_sync_main() == 0
 
@@ -447,9 +431,7 @@ class TestCLIEntryPoints:
     ) -> None:
         from hephaestus.config.dep_sync import check_dep_sync_main
 
-        (tmp_path / "pixi.toml").write_text(
-            '[dependencies]\npyyaml = ">=6.0,<7"\n'
-        )
+        (tmp_path / "pixi.toml").write_text('[dependencies]\npyyaml = ">=6.0,<7"\n')
         (tmp_path / "requirements.txt").write_text("pyyaml==8.0.0\n")
         monkeypatch.setattr("sys.argv", ["hephaestus-check-dep-sync", "--repo-root", str(tmp_path)])
         assert check_dep_sync_main() == 1

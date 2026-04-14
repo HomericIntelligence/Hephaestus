@@ -141,9 +141,7 @@ def parse_pixi_toml(path: Path) -> dict[str, str]:
     in_deps = False
     for line in path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
-        if stripped.startswith("[dependencies]") or stripped.startswith(
-            "[pypi-dependencies]"
-        ):
+        if stripped.startswith("[dependencies]") or stripped.startswith("[pypi-dependencies]"):
             in_deps = True
             continue
         if stripped.startswith("[") and in_deps:
@@ -204,9 +202,7 @@ def check_pyproject_no_deps(path: Path) -> list[str]:
     if re.search(r"^\[project\.dependencies\]", text, re.MULTILINE):
         errors.append("pyproject.toml contains [project.dependencies] — remove it")
     if "[project.optional-dependencies]" in text:
-        errors.append(
-            "pyproject.toml contains [project.optional-dependencies] — remove it"
-        )
+        errors.append("pyproject.toml contains [project.optional-dependencies] — remove it")
     return errors
 
 
@@ -232,9 +228,7 @@ def check_requirements_against_pixi(
         pins = parse_requirements(req_path)
         for pkg, pinned_ver in pins.items():
             if pkg not in pixi_deps_lower:
-                errors.append(
-                    f"{req_name}: {pkg}=={pinned_ver} has no matching entry in pixi.toml"
-                )
+                errors.append(f"{req_name}: {pkg}=={pinned_ver} has no matching entry in pixi.toml")
                 continue
             constraints = _parse_constraints(pixi_deps_lower[pkg])
             if constraints:
@@ -367,9 +361,7 @@ def sync_requirements(
         List of paths written.
 
     """
-    req_txt = generate_requirements_content(
-        core_packages, resolved, section_comments=core_comments
-    )
+    req_txt = generate_requirements_content(core_packages, resolved, section_comments=core_comments)
     req_dev_txt = generate_requirements_content(
         dev_packages,
         resolved,
@@ -430,8 +422,7 @@ def check_requirements_up_to_date(
             continue
         if path.read_text(encoding="utf-8") != expected_content:
             print(
-                f"FAIL: {name} is out of date — "
-                f"regenerate with: hephaestus-sync-requirements",
+                f"FAIL: {name} is out of date — regenerate with: hephaestus-sync-requirements",
                 file=sys.stderr,
             )
             ok = False
