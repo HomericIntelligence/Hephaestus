@@ -258,7 +258,7 @@ def load_pixi_versions(pixi_path: Path) -> dict[str, str]:
     if _tomllib is not None:
         from typing import cast
 
-        _load = getattr(_tomllib, "load")
+        _load = _tomllib.load
         with pixi_path.open("rb") as fh:
             data = cast(dict[str, Any], _load(fh))
         deps: dict[str, str] = {}

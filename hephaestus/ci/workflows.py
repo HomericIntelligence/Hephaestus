@@ -168,9 +168,7 @@ def _is_local_reference_step(step: object) -> bool:
     return uses.startswith("./.github/actions/") or uses.startswith("./.github/workflows/")
 
 
-def _check_job_steps(
-    workflow_file: Path, job_name: str, steps: list[Any]
-) -> list[Violation]:
+def _check_job_steps(workflow_file: Path, job_name: str, steps: list[Any]) -> list[Violation]:
     """Check a single job's steps for checkout-first ordering violations.
 
     Args:
@@ -218,9 +216,7 @@ def validate_workflow(workflow_file: Path) -> list[Violation]:
 
     """
     if _yaml is None:
-        print(
-            f"WARNING: Skipping {workflow_file} (pyyaml not installed)", file=sys.stderr
-        )
+        print(f"WARNING: Skipping {workflow_file} (pyyaml not installed)", file=sys.stderr)
         return []
 
     if workflow_file.stat().st_size > _MAX_FILE_SIZE:
@@ -259,7 +255,6 @@ def validate_workflow(workflow_file: Path) -> list[Violation]:
         violations.extend(_check_job_steps(workflow_file, str(job_name), steps))
 
     return violations
-
 
 
 def collect_workflow_files(paths: list[str]) -> list[Path]:
@@ -398,10 +393,7 @@ def validate_workflow_checkout_main() -> int:
         print(f"\nFound {len(all_violations)} violation(s) in {len(workflow_files)} file(s).")
         return 1
 
-    print(
-        f"OK: {len(workflow_files)} workflow file(s) checked. "
-        "All pass checkout-first invariant."
-    )
+    print(f"OK: {len(workflow_files)} workflow file(s) checked. All pass checkout-first invariant.")
     return 0
 
 

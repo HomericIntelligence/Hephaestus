@@ -76,9 +76,7 @@ class TestParseReadmeTable:
 class TestCheckInventory:
     """Tests for check_inventory()."""
 
-    def _setup(
-        self, tmp_path: Path, on_disk: list[str], in_readme: list[str]
-    ) -> None:
+    def _setup(self, tmp_path: Path, on_disk: list[str], in_readme: list[str]) -> None:
         workflows = tmp_path / ".github" / "workflows"
         workflows.mkdir(parents=True)
         for name in on_disk:
@@ -210,9 +208,7 @@ class TestCollectWorkflowFiles:
         result = collect_workflow_files([str(f), str(f)])
         assert len(result) == 1
 
-    def test_missing_path_warns(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture
-    ) -> None:
+    def test_missing_path_warns(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         collect_workflow_files([str(tmp_path / "nonexistent.yml")])
         captured = capsys.readouterr()
         assert "WARNING" in captured.err
@@ -221,9 +217,7 @@ class TestCollectWorkflowFiles:
 class TestCLIEntryPoints:
     """Tests for check_workflow_inventory_main() and validate_workflow_checkout_main()."""
 
-    def test_inventory_in_sync(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_inventory_in_sync(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from hephaestus.ci.workflows import check_workflow_inventory_main
 
         workflows = tmp_path / ".github" / "workflows"
@@ -235,9 +229,7 @@ class TestCLIEntryPoints:
         )
         assert check_workflow_inventory_main() == 0
 
-    def test_inventory_drift(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_inventory_drift(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from hephaestus.ci.workflows import check_workflow_inventory_main
 
         workflows = tmp_path / ".github" / "workflows"
@@ -260,7 +252,5 @@ class TestCLIEntryPoints:
             "      - uses: actions/checkout@v4\n"
             "      - uses: ./.github/actions/setup\n"
         )
-        monkeypatch.setattr(
-            "sys.argv", ["hephaestus-validate-workflow-checkout", str(wf)]
-        )
+        monkeypatch.setattr("sys.argv", ["hephaestus-validate-workflow-checkout", str(wf)])
         assert validate_workflow_checkout_main() == 0
