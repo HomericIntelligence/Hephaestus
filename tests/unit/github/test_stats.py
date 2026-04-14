@@ -70,9 +70,7 @@ class TestGetIssuesStats:
             get_issues_stats("2026-01-01", "2026-01-31", "mvillmow", "owner/repo")
         # Verify author was part of the query string
         first_call_args = mock_run.call_args_list[0][0][0]
-        query_arg = next(
-            (a for a in first_call_args if "author:" in a), ""
-        )
+        query_arg = next((a for a in first_call_args if "author:" in a), "")
         assert "author:mvillmow" in query_arg
 
 

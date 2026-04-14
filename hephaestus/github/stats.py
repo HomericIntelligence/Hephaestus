@@ -115,9 +115,7 @@ def get_issues_stats(
     return {"total": total, "open": open_count, "closed": total - open_count}
 
 
-def get_prs_stats(
-    start_date: str, end_date: str, author: str | None, repo: str
-) -> dict[str, int]:
+def get_prs_stats(start_date: str, end_date: str, author: str | None, repo: str) -> dict[str, int]:
     """Return PR counts (total / merged / open / closed) for the given date range.
 
     Args:
@@ -219,15 +217,11 @@ def get_commits_stats(
     if result.returncode != 0:
         return {"total": 0}
 
-    total = sum(
-        int(line.strip()) for line in result.stdout.strip().split("\n") if line.strip()
-    )
+    total = sum(int(line.strip()) for line in result.stdout.strip().split("\n") if line.strip())
     return {"total": total}
 
 
-def collect_stats(
-    start_date: str, end_date: str, author: str | None, repo: str
-) -> dict[str, Any]:
+def collect_stats(start_date: str, end_date: str, author: str | None, repo: str) -> dict[str, Any]:
     """Collect all stats (issues, PRs, commits) for the given date range.
 
     Args:
@@ -315,9 +309,7 @@ def main() -> int:
     parser.add_argument("start_date", help="Start date (YYYY-MM-DD)")
     parser.add_argument("end_date", help="End date (YYYY-MM-DD)")
     parser.add_argument("--author", help="Filter by author username")
-    parser.add_argument(
-        "--repo", help="Repository (owner/repo), defaults to current repo"
-    )
+    parser.add_argument("--repo", help="Repository (owner/repo), defaults to current repo")
 
     args = parser.parse_args()
 
