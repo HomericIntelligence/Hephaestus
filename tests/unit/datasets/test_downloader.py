@@ -9,7 +9,15 @@ from urllib.error import HTTPError, URLError
 
 import pytest
 
-from hephaestus.datasets.downloader import DatasetDownloader, MNISTDownloader
+from hephaestus.datasets.downloader import (
+    EMNIST_SPLITS,
+    CIFAR10Downloader,
+    CIFAR100Downloader,
+    DatasetDownloader,
+    EMNISTDownloader,
+    FashionMNISTDownloader,
+    MNISTDownloader,
+)
 
 
 class TestDatasetDownloader:
@@ -258,3 +266,89 @@ class TestMain:
                 main()
 
         mock_instance.download_mnist.assert_called_once_with("datasets/mnist")
+
+
+class TestFashionMNISTDownloader:
+    """Tests for FashionMNISTDownloader."""
+
+    def test_inherits_downloader(self) -> None:
+        d = FashionMNISTDownloader()
+        assert isinstance(d, DatasetDownloader)
+
+    def test_files_list_populated(self) -> None:
+        d = FashionMNISTDownloader()
+        assert len(d.files) == 4
+
+    def test_download_skips_existing_files(self, tmp_path: Path) -> None:
+        d = FashionMNISTDownloader()
+        out = tmp_path / "fashion_mnist"
+        out.mkdir()
+        for _, output_filename in d.files:
+            (out / output_filename).write_bytes(b"dummy")
+        assert d.download_fashion_mnist(str(out)) is True
+
+    @patch.object(DatasetDownloader, "download_with_retry", return_value=False)
+    def test_download_failure(self, _mock, tmp_path: Path) -> None:
+        assert FashionMNISTDownloader().download_fashion_mnist(str(tmp_path)) is False
+
+    @patch.object(DatasetDownloader, "download_with_retry", return_value=True)
+    @patch.object(DatasetDownloader, "decompress_gz", return_value=True)
+    def test_download_success(self, _dc, _dl, tmp_path: Path) -> None:
+        d = FashionMNISTDownloader()
+        out = tmp_path / "fashion_mnist"
+        out.mkdir()
+        for gz_filename, _ in d.files:
+            (out / gz_filename).write_bytes(b"dummy")
+        assert d.download_fashion_mnist(str(out)) is True
+
+
+class TestCIFAR100Downloader:
+    """Tests for CIFAR100Downloader."""
+
+    def test_inherits_downloader(self) -> None:
+        assert isinstance(CIFAR100Downloader(), DatasetDownloader)
+
+    @patch.object(DatasetDownloader, "download_with_retry", return_value=False)
+    def test_download_failure(self, _mock, tmp_path: Path) -> None:
+        assert CIFAR100Downloader().download_cifar100(str(tmp_path)) is False
+
+    @patch.object(DatasetDownloader, "download_with_retry", return_value=True)
+    def test_download_tar_extraction_failure(self, _mock, tmp_path: Path) -> None:
+        # download_with_retry succeeds but the tar file is empty/invalid
+        tar_path = tmp_path / "cifar-100-python.tar.gz"
+        tar_path.write_bytes(b"not a valid tar")
+        assert CIFAR100Downloader().download_cifar100(str(tmp_path)) is False
+
+
+class TestCIFAR10Downloader:
+    """Tests for CIFAR10Downloader."""
+
+    def test_inherits_downloader(self) -> None:
+        assert isinstance(CIFAR10Downloader(), DatasetDownloader)
+
+    def test_raises_import_error_without_numpy(self, tmp_path: Path) -> None:
+        import sys
+
+        with patch.dict(sys.modules, {"numpy": None}):
+            with pytest.raises(ImportError, match="numpy"):
+                CIFAR10Downloader().download_cifar10(str(tmp_path))
+
+
+class TestEMNISTDownloader:
+    """Tests for EMNISTDownloader."""
+
+    def test_inherits_downloader(self) -> None:
+        assert isinstance(EMNISTDownloader(), DatasetDownloader)
+
+    def test_invalid_split_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown EMNIST split"):
+            EMNISTDownloader().download_emnist(split="invalid_split")
+
+    def test_valid_splits(self) -> None:
+        assert "balanced" in EMNIST_SPLITS
+        assert "digits" in EMNIST_SPLITS
+        assert "mnist" in EMNIST_SPLITS
+
+    @patch.object(DatasetDownloader, "download_with_retry", return_value=False)
+    def test_download_failure_all_mirrors(self, _mock, tmp_path: Path) -> None:
+        assert EMNISTDownloader().download_emnist("balanced", str(tmp_path)) is False
