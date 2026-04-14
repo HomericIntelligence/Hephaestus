@@ -93,6 +93,7 @@ hephaestus-bench-precommit = "hephaestus.ci.precommit:bench_precommit_main"
 hephaestus-check-precommit-versions = "hephaestus.ci.precommit:check_precommit_versions_main"
 hephaestus-check-workflow-inventory = "hephaestus.ci.workflows:check_workflow_inventory_main"
 hephaestus-validate-workflow-checkout = "hephaestus.ci.workflows:validate_workflow_checkout_main"
+hephaestus-github-stats = "hephaestus.github.stats:main"
 
 [project.urls]
 Homepage = "https://github.com/HomericIntelligence/ProjectHephaestus"
