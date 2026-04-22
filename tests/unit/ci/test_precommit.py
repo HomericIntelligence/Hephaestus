@@ -7,11 +7,14 @@ from pathlib import Path
 import pytest
 
 from hephaestus.ci.precommit import (
+    _is_deps_section_header,
+    _parse_pixi_dependencies_fallback,
     check_threshold,
     check_version_drift,
     emit_warning,
     extract_external_hooks,
     format_summary_table,
+    load_pixi_versions,
     normalize_version,
     parse_pixi_constraint,
     write_step_summary,
@@ -191,3 +194,108 @@ class TestBenchPrecommitMain:
         assert result == 0
         captured = capsys.readouterr()
         assert "::warning::" in captured.out
+
+
+class TestIsDepsSectionHeader:
+    """Tests for _is_deps_section_header()."""
+
+    def test_top_level_dependencies(self) -> None:
+        assert _is_deps_section_header("[dependencies]") is True
+
+    def test_feature_dev_dependencies(self) -> None:
+        assert _is_deps_section_header("[feature.dev.dependencies]") is True
+
+    def test_feature_custom_name_dependencies(self) -> None:
+        assert _is_deps_section_header("[feature.lint.dependencies]") is True
+
+    def test_other_section_returns_false(self) -> None:
+        assert _is_deps_section_header("[project]") is False
+
+    def test_pypi_dependencies_not_matched(self) -> None:
+        # The fallback only handles conda [dependencies]; pypi-dependencies
+        # is handled by the tomllib path in load_pixi_versions.
+        assert _is_deps_section_header("[pypi-dependencies]") is False
+
+    def test_feature_pypi_not_matched(self) -> None:
+        # precommit fallback only looks at conda deps
+        assert _is_deps_section_header("[feature.dev.pypi-dependencies]") is False
+
+
+class TestParsePixiDependenciesFallback:
+    """Tests for _parse_pixi_dependencies_fallback()."""
+
+    def test_reads_top_level_deps(self, tmp_path: Path) -> None:
+        pixi = tmp_path / "pixi.toml"
+        pixi.write_text('[dependencies]\nmypy = ">=1.19.1,<2"\n')
+        result = _parse_pixi_dependencies_fallback(pixi)
+        assert result["mypy"] == "1.19.1"
+
+    def test_reads_feature_dev_dependencies(self, tmp_path: Path) -> None:
+        pixi = tmp_path / "pixi.toml"
+        pixi.write_text(
+            '[dependencies]\npyyaml = ">=6.0,<7"\n\n'
+            '[feature.dev.dependencies]\nmypy = ">=1.19.1,<2"\n'
+        )
+        result = _parse_pixi_dependencies_fallback(pixi)
+        assert result["pyyaml"] == "6.0"
+        assert result["mypy"] == "1.19.1"
+
+    def test_merges_multiple_feature_envs(self, tmp_path: Path) -> None:
+        pixi = tmp_path / "pixi.toml"
+        pixi.write_text(
+            '[feature.dev.dependencies]\nmypy = ">=1.19.1,<2"\n\n'
+            '[feature.lint.dependencies]\nruff = ">=0.4.0,<1"\n'
+        )
+        result = _parse_pixi_dependencies_fallback(pixi)
+        assert "mypy" in result
+        assert "ruff" in result
+
+    def test_stops_at_non_dep_section(self, tmp_path: Path) -> None:
+        pixi = tmp_path / "pixi.toml"
+        pixi.write_text(
+            '[feature.dev.dependencies]\nmypy = ">=1.19.1,<2"\n\n'
+            '[tasks]\nbuild = "mojo build"\n'
+            'should_not_appear = "1.0"\n'
+        )
+        result = _parse_pixi_dependencies_fallback(pixi)
+        assert "mypy" in result
+        assert "should_not_appear" not in result
+
+
+class TestLoadPixiVersionsFeatureEnvs:
+    """Tests for load_pixi_versions() with [feature.*] sections (TOML path)."""
+
+    def test_reads_feature_dev_dependencies(self, tmp_path: Path) -> None:
+        pixi = tmp_path / "pixi.toml"
+        pixi.write_text(
+            '[dependencies]\npyyaml = ">=6.0,<7"\n\n'
+            '[feature.dev.dependencies]\nmypy = ">=1.19.1,<2"\n'
+        )
+        result = load_pixi_versions(pixi)
+        assert "pyyaml" in result
+        assert "mypy" in result
+        assert result["mypy"] == "1.19.1"
+
+    def test_reads_feature_pypi_dependencies(self, tmp_path: Path) -> None:
+        pixi = tmp_path / "pixi.toml"
+        pixi.write_text(
+            '[dependencies]\npyyaml = ">=6.0,<7"\n\n'
+            '[feature.dev.pypi-dependencies]\n'
+            'homericintelligence-hephaestus = ">=0.7.0"\n'
+        )
+        result = load_pixi_versions(pixi)
+        assert "pyyaml" in result
+        assert "homericintelligence-hephaestus" in result
+
+    def test_raises_for_missing_file(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError):
+            load_pixi_versions(tmp_path / "nonexistent.toml")
+
+    def test_check_version_drift_resolves_feature_env_package(self, tmp_path: Path) -> None:
+        pixi = tmp_path / "pixi.toml"
+        pixi.write_text('[feature.dev.dependencies]\nmypy = ">=1.19.1,<2"\n')
+        pixi_versions = load_pixi_versions(pixi)
+        hooks = {"https://github.com/pre-commit/mirrors-mypy": "v1.19.1"}
+        mapping = {"https://github.com/pre-commit/mirrors-mypy": "mypy"}
+        issues = check_version_drift(hooks, pixi_versions, mapping)
+        assert issues == []

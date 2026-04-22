@@ -209,8 +209,35 @@ def parse_pixi_constraint(constraint: str) -> str | None:
     return None
 
 
+def _is_deps_section_header(stripped: str) -> bool:
+    """Return True if *stripped* is a pixi.toml section header for dependencies.
+
+    Recognised patterns:
+
+    - ``[dependencies]``
+    - ``[feature.<name>.dependencies]``
+
+    Args:
+        stripped: A stripped TOML section header line (including brackets).
+
+    Returns:
+        True if this section contains conda/pip package→version entries.
+
+    """
+    inner = stripped.lstrip("[").split("]")[0].split("#")[0].strip()
+    if inner == "dependencies":
+        return True
+    parts = inner.split(".")
+    if len(parts) == 3 and parts[0] == "feature" and parts[2] == "dependencies":
+        return True
+    return False
+
+
 def _parse_pixi_dependencies_fallback(pixi_path: Path) -> dict[str, str]:
-    """Minimal line-by-line parser for ``[dependencies]`` when tomllib is unavailable.
+    """Minimal line-by-line parser for dependency sections when tomllib is unavailable.
+
+    Reads ``[dependencies]`` and all ``[feature.<name>.dependencies]`` sections
+    and merges them into a single dict.
 
     Args:
         pixi_path: Path to ``pixi.toml``.
@@ -223,11 +250,8 @@ def _parse_pixi_dependencies_fallback(pixi_path: Path) -> dict[str, str]:
     in_deps = False
     for line in pixi_path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
-        if stripped == "[dependencies]":
-            in_deps = True
-            continue
-        if stripped.startswith("[") and stripped != "[dependencies]":
-            in_deps = False
+        if stripped.startswith("["):
+            in_deps = _is_deps_section_header(stripped)
             continue
         if in_deps and "=" in stripped and not stripped.startswith("#"):
             key, _, value = stripped.partition("=")
@@ -241,6 +265,9 @@ def _parse_pixi_dependencies_fallback(pixi_path: Path) -> dict[str, str]:
 
 def load_pixi_versions(pixi_path: Path) -> dict[str, str]:
     """Parse ``pixi.toml`` and return a dict mapping package name to lower-bound version.
+
+    Reads ``[dependencies]`` and all ``[feature.<name>.dependencies]`` sections
+    (both conda and pypi-dependencies variants are included via the TOML path).
 
     Args:
         pixi_path: Path to ``pixi.toml``.
@@ -262,10 +289,20 @@ def load_pixi_versions(pixi_path: Path) -> dict[str, str]:
         with pixi_path.open("rb") as fh:
             data = cast(dict[str, Any], _load(fh))
         deps: dict[str, str] = {}
+        # Top-level [dependencies]
         for pkg, constraint in data.get("dependencies", {}).items():
             version = parse_pixi_constraint(str(constraint))
             if version:
                 deps[pkg.lower()] = version
+        # [feature.<name>.dependencies] and [feature.<name>.pypi-dependencies]
+        for _feat_name, feat_data in data.get("feature", {}).items():
+            if not isinstance(feat_data, dict):
+                continue
+            for section_key in ("dependencies", "pypi-dependencies"):
+                for pkg, constraint in feat_data.get(section_key, {}).items():
+                    version = parse_pixi_constraint(str(constraint))
+                    if version:
+                        deps[pkg.lower()] = version
         return deps
 
     return _parse_pixi_dependencies_fallback(pixi_path)

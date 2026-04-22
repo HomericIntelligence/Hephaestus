@@ -9,6 +9,7 @@ import pytest
 
 from hephaestus.config.dep_sync import (
     VersionRange,
+    _is_deps_section,
     _parse_constraints,
     _parse_version,
     _version_satisfies,
@@ -159,14 +160,23 @@ class TestParsePixiToml:
         assert "pyyaml" in result
         assert len(result) == 1
 
-    def test_stops_at_next_section(self, tmp_path: Path) -> None:
+    def test_stops_at_non_dep_section(self, tmp_path: Path) -> None:
+        pixi = tmp_path / "pixi.toml"
+        pixi.write_text(
+            '[dependencies]\npyyaml = ">=6.0"\n\n[tasks]\nbuild = "mojo build"\n'
+        )
+        result = parse_pixi_toml(pixi)
+        assert "pyyaml" in result
+        assert "build" not in result
+
+    def test_reads_feature_dev_dependencies(self, tmp_path: Path) -> None:
         pixi = tmp_path / "pixi.toml"
         pixi.write_text(
             '[dependencies]\npyyaml = ">=6.0"\n\n[feature.dev.dependencies]\npytest = ">=9.0"\n'
         )
         result = parse_pixi_toml(pixi)
         assert "pyyaml" in result
-        assert "pytest" not in result
+        assert "pytest" in result
 
     def test_inline_comment_stripped(self, tmp_path: Path) -> None:
         pixi = tmp_path / "pixi.toml"
@@ -478,3 +488,86 @@ class TestCLIEntryPoints:
             result = sync_requirements_main()
         assert result == 0
         assert (tmp_path / "requirements.txt").exists()
+
+
+class TestIsDepsSection:
+    """Tests for _is_deps_section()."""
+
+    def test_top_level_dependencies(self) -> None:
+        assert _is_deps_section("[dependencies]") is True
+
+    def test_top_level_pypi_dependencies(self) -> None:
+        assert _is_deps_section("[pypi-dependencies]") is True
+
+    def test_feature_dev_dependencies(self) -> None:
+        assert _is_deps_section("[feature.dev.dependencies]") is True
+
+    def test_feature_dev_pypi_dependencies(self) -> None:
+        assert _is_deps_section("[feature.dev.pypi-dependencies]") is True
+
+    def test_feature_custom_name_dependencies(self) -> None:
+        assert _is_deps_section("[feature.test-tools.dependencies]") is True
+
+    def test_other_section_returns_false(self) -> None:
+        assert _is_deps_section("[project]") is False
+
+    def test_feature_without_deps_suffix_returns_false(self) -> None:
+        assert _is_deps_section("[feature.dev]") is False
+
+    def test_tasks_section_returns_false(self) -> None:
+        assert _is_deps_section("[tasks]") is False
+
+
+class TestParsePixiTomlFeatureEnvs:
+    """Tests for parse_pixi_toml() with [feature.*] sections."""
+
+    def test_reads_feature_dev_dependencies(self, tmp_path: Path) -> None:
+        pixi = tmp_path / "pixi.toml"
+        pixi.write_text(
+            '[dependencies]\npyyaml = ">=6.0,<7"\n\n'
+            '[feature.dev.dependencies]\npytest = ">=9.0,<10"\n'
+        )
+        result = parse_pixi_toml(pixi)
+        assert result["pyyaml"] == ">=6.0,<7"
+        assert result["pytest"] == ">=9.0,<10"
+
+    def test_reads_feature_pypi_dependencies(self, tmp_path: Path) -> None:
+        pixi = tmp_path / "pixi.toml"
+        pixi.write_text(
+            '[pypi-dependencies]\nhomericintelligence-hephaestus = ">=0.7.0"\n\n'
+            '[feature.dev.pypi-dependencies]\nmypy = ">=1.19,<2"\n'
+        )
+        result = parse_pixi_toml(pixi)
+        assert result["homericintelligence-hephaestus"] == ">=0.7.0"
+        assert result["mypy"] == ">=1.19,<2"
+
+    def test_merges_multiple_feature_envs(self, tmp_path: Path) -> None:
+        pixi = tmp_path / "pixi.toml"
+        pixi.write_text(
+            '[dependencies]\npyyaml = ">=6.0,<7"\n\n'
+            '[feature.dev.dependencies]\npytest = ">=9.0,<10"\n\n'
+            '[feature.lint.dependencies]\nruff = ">=0.4,<1"\n'
+        )
+        result = parse_pixi_toml(pixi)
+        assert "pyyaml" in result
+        assert "pytest" in result
+        assert "ruff" in result
+
+    def test_feature_deps_not_shadowed_by_other_sections(self, tmp_path: Path) -> None:
+        pixi = tmp_path / "pixi.toml"
+        pixi.write_text(
+            '[project]\nname = "foo"\n\n'
+            '[feature.dev.dependencies]\npytest = ">=9.0,<10"\n\n'
+            '[tasks]\nbuild = "mojo build"\n'
+        )
+        result = parse_pixi_toml(pixi)
+        assert result == {"pytest": ">=9.0,<10"}
+
+    def test_check_dep_sync_finds_feature_dev_packages(self, tmp_path: Path) -> None:
+        (tmp_path / "pixi.toml").write_text(
+            '[dependencies]\npyyaml = ">=6.0,<7"\n\n'
+            '[feature.dev.dependencies]\npytest = ">=9.0,<10"\n'
+        )
+        (tmp_path / "requirements-dev.txt").write_text("pytest==9.0.3\n")
+        errors = check_dep_sync(tmp_path)
+        assert errors == []

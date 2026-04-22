@@ -124,28 +124,57 @@ def _version_satisfies(version: tuple[int, ...], constraints: list[VersionRange]
 # ---------------------------------------------------------------------------
 
 
+def _is_deps_section(header: str) -> bool:
+    """Return True if *header* is a dependency section header we should parse.
+
+    Recognised patterns:
+
+    - ``[dependencies]``
+    - ``[pypi-dependencies]``
+    - ``[feature.<name>.dependencies]``
+    - ``[feature.<name>.pypi-dependencies]``
+
+    Args:
+        header: A TOML section header line (including the brackets).
+
+    Returns:
+        True if the section contains package→version entries we care about.
+
+    """
+    # Strip brackets and optional inline comment
+    inner = header.strip().lstrip("[").split("]")[0].split("#")[0].strip()
+    if inner in ("dependencies", "pypi-dependencies"):
+        return True
+    # feature.<name>.dependencies or feature.<name>.pypi-dependencies
+    parts = inner.split(".")
+    if len(parts) == 3 and parts[0] == "feature" and parts[2] in ("dependencies", "pypi-dependencies"):
+        return True
+    return False
+
+
 def parse_pixi_toml(path: Path) -> dict[str, str]:
     """Extract package→version-spec from ``pixi.toml`` dependency sections.
 
-    Reads ``[dependencies]`` and ``[pypi-dependencies]`` sections using a
-    simple line-by-line parser (avoids a TOML dependency for 3.10 compat).
+    Reads ``[dependencies]``, ``[pypi-dependencies]``, and all
+    ``[feature.<name>.dependencies]`` / ``[feature.<name>.pypi-dependencies]``
+    sections using a simple line-by-line parser (avoids a TOML dependency for
+    3.10 compat).
 
     Args:
         path: Path to ``pixi.toml``.
 
     Returns:
-        Dict mapping package name to version spec string.
+        Dict mapping package name to version spec string.  Entries from all
+        feature environments are merged into a single flat dict; later entries
+        for the same package name overwrite earlier ones.
 
     """
     deps: dict[str, str] = {}
     in_deps = False
     for line in path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
-        if stripped.startswith("[dependencies]") or stripped.startswith("[pypi-dependencies]"):
-            in_deps = True
-            continue
-        if stripped.startswith("[") and in_deps:
-            in_deps = False
+        if stripped.startswith("["):
+            in_deps = _is_deps_section(stripped)
             continue
         if in_deps and "=" in stripped and not stripped.startswith("#"):
             line_no_comment = stripped.split("#")[0].strip()
