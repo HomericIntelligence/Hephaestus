@@ -4,6 +4,9 @@
 # Build artifacts
 build/
 
+# hatch-vcs generated version file
+hephaestus/_version.py
+
 # Python
 *__pycache__/
 *.py[cod]

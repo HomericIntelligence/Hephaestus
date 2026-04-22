@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling>=1.27.0,<2"]
+requires = ["hatchling>=1.27.0,<2", "hatch-vcs>=0.4.0,<1"]
 build-backend = "hatchling.build"
 
 [project]
 name = "HomericIntelligence-Hephaestus"
-version = "0.7.0"
+dynamic = ["version"]
 description = "Shared utilities and tooling for the HomericIntelligence ecosystem"
 readme = "README.md"
 license = {text = "BSD 3-Clause"}
@@ -104,6 +104,12 @@ hephaestus-validate-agents = "hephaestus.agents.frontmatter:validate_agents_main
 Homepage = "https://github.com/HomericIntelligence/ProjectHephaestus"
 Repository = "https://github.com/HomericIntelligence/ProjectHephaestus"
 Issues = "https://github.com/HomericIntelligence/ProjectHephaestus/issues"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "hephaestus/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["hephaestus"]

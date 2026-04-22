@@ -20,6 +20,7 @@ requests = ">=2.33.0"  # CVE-2026-25645
 
 [pypi-dependencies]
 homericintelligence-hephaestus = { path = ".", editable = true }
+hatch-vcs = ">=0.4.0,<1"
 
 [feature.dev.dependencies]
 pre-commit = ">=3.0,<5"
