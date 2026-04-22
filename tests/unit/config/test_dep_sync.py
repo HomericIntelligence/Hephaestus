@@ -162,9 +162,7 @@ class TestParsePixiToml:
 
     def test_stops_at_non_dep_section(self, tmp_path: Path) -> None:
         pixi = tmp_path / "pixi.toml"
-        pixi.write_text(
-            '[dependencies]\npyyaml = ">=6.0"\n\n[tasks]\nbuild = "mojo build"\n'
-        )
+        pixi.write_text('[dependencies]\npyyaml = ">=6.0"\n\n[tasks]\nbuild = "mojo build"\n')
         result = parse_pixi_toml(pixi)
         assert "pyyaml" in result
         assert "build" not in result

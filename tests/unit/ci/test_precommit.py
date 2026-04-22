@@ -280,7 +280,7 @@ class TestLoadPixiVersionsFeatureEnvs:
         pixi = tmp_path / "pixi.toml"
         pixi.write_text(
             '[dependencies]\npyyaml = ">=6.0,<7"\n\n'
-            '[feature.dev.pypi-dependencies]\n'
+            "[feature.dev.pypi-dependencies]\n"
             'homericintelligence-hephaestus = ">=0.7.0"\n'
         )
         result = load_pixi_versions(pixi)

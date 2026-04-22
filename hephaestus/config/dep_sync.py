@@ -147,7 +147,11 @@ def _is_deps_section(header: str) -> bool:
         return True
     # feature.<name>.dependencies or feature.<name>.pypi-dependencies
     parts = inner.split(".")
-    return len(parts) == 3 and parts[0] == "feature" and parts[2] in ("dependencies", "pypi-dependencies")
+    return (
+        len(parts) == 3
+        and parts[0] == "feature"
+        and parts[2] in ("dependencies", "pypi-dependencies")
+    )
 
 
 def parse_pixi_toml(path: Path) -> dict[str, str]:
