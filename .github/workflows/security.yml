@@ -26,6 +26,7 @@ jobs:
         with:
           pixi-version: v0.63.2
           environments: lint
+          locked: false
 
       - name: Cache pixi environments
         uses: actions/cache@v5
