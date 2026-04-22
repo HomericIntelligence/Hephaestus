@@ -228,9 +228,7 @@ def _is_deps_section_header(stripped: str) -> bool:
     if inner == "dependencies":
         return True
     parts = inner.split(".")
-    if len(parts) == 3 and parts[0] == "feature" and parts[2] == "dependencies":
-        return True
-    return False
+    return len(parts) == 3 and parts[0] == "feature" and parts[2] == "dependencies"
 
 
 def _parse_pixi_dependencies_fallback(pixi_path: Path) -> dict[str, str]:
