@@ -117,6 +117,7 @@ packages = ["hephaestus"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+exclude = ["hephaestus/_version.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "D", "UP", "S101", "S102", "S105", "S106", "B", "SIM", "C4", "C901", "RUF"]
@@ -138,7 +139,6 @@ max-complexity = 10
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "D102", "D107"]
 "scripts/**" = ["C901", "S101", "D102", "D107", "D401"]
-"hephaestus/_version.py" = ["ALL"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]
