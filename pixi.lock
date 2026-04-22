@@ -1150,8 +1150,8 @@ packages:
   requires_python: '>=3.10'
 - pypi: ./
   name: homericintelligence-hephaestus
-  version: 0.7.1.dev12+g6d14ee122.d20260422
-  sha256: 5b69eb21758fcc3bd7a0628a7e8cd335c892f680fc068e17700d059faabeddf0
+  version: 0.7.1.dev13+g379982e2b.d20260422
+  sha256: 17f27214e302c133c55d82ee770a83cdacaf802dace653563f1835e8a57e8a29
   requires_dist:
   - packaging>=21.0
   - pydantic>=2.0,<3
