@@ -1,9 +1,10 @@
 name: Auto Tag Release
 
 on:
-  push:
+  workflow_run:
+    workflows: [Test]
+    types: [completed]
     branches: [main]
-    paths: [pyproject.toml]
 
 permissions:
   contents: write
@@ -12,50 +13,90 @@ jobs:
   auto-tag:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Only run when the Test workflow succeeded on main
+    if: github.event.workflow_run.conclusion == 'success'
 
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0  # Need full history to check existing tags
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version from pyproject.toml
+      - name: Configure git bot identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch all tags
+        run: git fetch --tags
+
+      - name: Compute next patch version
         id: version
         shell: bash
         run: |
-          VERSION=$(python -c "
+          # Find the highest existing vX.Y.Z tag and increment patch
+          LATEST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ -z "${LATEST_TAG}" ]; then
+            # No tags yet — read version from pyproject.toml as starting point
+            LATEST=$(python -c "
           import re, pathlib
           text = pathlib.Path('pyproject.toml').read_text()
-          m = re.search(r'^\[project\].*?^version\s*=\s*\"(.+?)\"', text, re.MULTILINE | re.DOTALL)
+          m = re.search(r'^version\s*=\s*\"([^\"]+)\"', text, re.MULTILINE)
           print(m.group(1))
           ")
-          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "Extracted version: ${VERSION}"
-
-      - name: Check if tag already exists
-        id: tag_check
-        shell: bash
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          git fetch --tags
-          TAG="v${VERSION}"
-          if git rev-parse "${TAG}" >/dev/null 2>&1; then
-            echo "exists=true" >> "${GITHUB_OUTPUT}"
-            echo "Tag ${TAG} already exists — skipping"
           else
-            echo "exists=false" >> "${GITHUB_OUTPUT}"
-            echo "Tag ${TAG} does not exist — will create"
+            LATEST="${LATEST_TAG#v}"
           fi
 
-      - name: Create and push tag
-        if: steps.tag_check.outputs.exists == 'false'
+          MAJOR=$(echo "${LATEST}" | cut -d. -f1)
+          MINOR=$(echo "${LATEST}" | cut -d. -f2)
+          PATCH=$(echo "${LATEST}" | cut -d. -f3)
+          NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+          TAG="v${NEXT}"
+
+          # Idempotent: skip if tag already exists
+          if git rev-parse "${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists — nothing to do"
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Next version: ${NEXT} (tag: ${TAG})"
+            echo "version=${NEXT}" >> "${GITHUB_OUTPUT}"
+            echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Bump version in pyproject.toml
+        if: steps.version.outputs.skip == 'false'
         shell: bash
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          NEXT: ${{ steps.version.outputs.version }}
         run: |
-          TAG="v${VERSION}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          python - <<'EOF'
+          import re, pathlib, os
+          path = pathlib.Path("pyproject.toml")
+          text = path.read_text()
+          next_ver = os.environ["NEXT"]
+          text = re.sub(r'^(version\s*=\s*)"[^"]+"', rf'\1"{next_ver}"', text, flags=re.MULTILINE)
+          path.write_text(text)
+          print(f"Bumped pyproject.toml to {next_ver}")
+          EOF
+
+      - name: Commit version bump
+        if: steps.version.outputs.skip == 'false'
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git add pyproject.toml
+          git commit -m "chore(release): bump version to ${TAG#v} [skip ci]"
+          git push origin main
+
+      - name: Create and push tag
+        if: steps.version.outputs.skip == 'false'
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
           git tag "${TAG}"
           git push origin "${TAG}"
           echo "Created and pushed tag: ${TAG}"
