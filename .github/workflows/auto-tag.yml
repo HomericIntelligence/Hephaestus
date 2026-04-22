@@ -1,10 +1,7 @@
 name: Auto Tag Release
 
 on:
-  workflow_run:
-    workflows: [Test]
-    types: [completed]
-    branches: [main]
+  workflow_dispatch:  # manual only — auto-tagging is disabled
 
 permissions:
   contents: write
