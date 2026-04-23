@@ -24,6 +24,7 @@ def run(
     capture_output: bool = True,
     check: bool = True,
     timeout: int | None = None,
+    log_errors: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Run a subprocess command with consistent error handling.
 
@@ -33,6 +34,8 @@ def run(
         capture_output: Whether to capture stdout/stderr
         check: Whether to raise on non-zero exit
         timeout: Optional timeout in seconds
+        log_errors: If False, suppress ERROR logging on failure. Use when
+            the caller expects and handles the failure itself.
 
     Returns:
         CompletedProcess instance
@@ -48,6 +51,7 @@ def run(
         cwd=str(cwd) if cwd else None,
         timeout=timeout,
         check=check,
+        log_on_error=log_errors,
     )
 
 

@@ -7,12 +7,16 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+import hephaestus.automation.github_api as _github_api_module
 from hephaestus.automation.github_api import (
     _gh_call,
     fetch_issue_info,
+    gh_create_label,
     gh_issue_comment,
     gh_issue_create,
     gh_issue_json,
+    gh_list_labels,
+    gh_list_open_issues,
     gh_pr_create,
     is_issue_closed,
     parse_issue_dependencies,
@@ -349,9 +353,10 @@ class TestGhIssueCreate:
         call_args = mock_gh_call.call_args[0][0]
         assert call_args == ["issue", "create", "--title", "Test issue", "--body", "Test body"]
 
+    @patch("hephaestus.automation.github_api.gh_list_labels", return_value={"bug", "enhancement"})
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_creation_with_labels(self, mock_gh_call: Any) -> None:
-        """Test issue creation with labels."""
+    def test_creation_with_labels(self, mock_gh_call: Any, mock_labels: Any) -> None:
+        """Test issue creation with labels that already exist."""
         mock_result = Mock()
         mock_result.stdout = "https://github.com/owner/repo/issues/790"
         mock_gh_call.return_value = mock_result
@@ -370,7 +375,7 @@ class TestGhIssueCreate:
 
     @patch("hephaestus.automation.github_api._gh_call")
     def test_creation_without_labels(self, mock_gh_call: Any) -> None:
-        """Test issue creation without labels."""
+        """Test issue creation without labels skips label validation."""
         mock_result = Mock()
         mock_result.stdout = "https://github.com/owner/repo/issues/791"
         mock_gh_call.return_value = mock_result
@@ -392,6 +397,160 @@ class TestGhIssueCreate:
 
         with pytest.raises(RuntimeError, match="Failed to create issue"):
             gh_issue_create("Test", "Body")
+
+    @patch("hephaestus.automation.github_api.gh_create_label")
+    @patch("hephaestus.automation.github_api.gh_list_labels", return_value={"bug"})
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_creation_auto_creates_missing_label(
+        self, mock_gh_call: Any, mock_labels: Any, mock_create_label: Any
+    ) -> None:
+        """Missing labels are created before issue creation."""
+        mock_result = Mock()
+        mock_result.stdout = "https://github.com/owner/repo/issues/792"
+        mock_gh_call.return_value = mock_result
+
+        issue_number = gh_issue_create(
+            title="Test issue",
+            body="Test body",
+            labels=["bug", "testing"],
+        )
+
+        assert issue_number == 792
+        mock_create_label.assert_called_once_with("testing")
+
+    @patch("hephaestus.automation.github_api.gh_create_label")
+    @patch("hephaestus.automation.github_api.gh_list_labels", return_value={"bug"})
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_creation_retries_after_label_not_found_error(
+        self, mock_gh_call: Any, mock_labels: Any, mock_create_label: Any
+    ) -> None:
+        """If issue create fails with label-not-found despite pre-create, retries once."""
+        err = subprocess.CalledProcessError(1, "gh")
+        err.stderr = "could not add label: 'testing' not found"
+        err.stdout = ""
+        success = Mock()
+        success.stdout = "https://github.com/owner/repo/issues/793"
+        # First call to _gh_call (issue create) raises, second succeeds
+        mock_gh_call.side_effect = [err, success]
+
+        issue_number = gh_issue_create(
+            title="Test issue",
+            body="Test body",
+            labels=["testing"],
+        )
+
+        assert issue_number == 793
+        # gh_create_label called twice: once in _ensure_labels_exist, once in retry path
+        assert mock_create_label.call_count == 2
+
+    @patch("hephaestus.automation.github_api.gh_list_labels", return_value={"bug"})
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_creation_propagates_non_label_error(self, mock_gh_call: Any, mock_labels: Any) -> None:
+        """Non-label-related errors propagate without label retry."""
+        err = subprocess.CalledProcessError(1, "gh")
+        err.stderr = "403 Forbidden"
+        err.stdout = ""
+        mock_gh_call.side_effect = err
+
+        with pytest.raises(RuntimeError, match="Failed to create issue"):
+            gh_issue_create("Test", "Body", labels=["bug"])
+
+
+class TestGhListLabels:
+    """Tests for gh_list_labels and gh_create_label."""
+
+    def setup_method(self) -> None:
+        """Reset module-level label cache before each test."""
+        _github_api_module._label_cache = None
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_returns_set_of_label_names(self, mock_gh_call: Any) -> None:
+        """Returns the set of existing label names."""
+        mock_result = Mock()
+        mock_result.stdout = json.dumps([{"name": "bug"}, {"name": "enhancement"}])
+        mock_gh_call.return_value = mock_result
+
+        labels = gh_list_labels()
+
+        assert labels == {"bug", "enhancement"}
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_caches_result(self, mock_gh_call: Any) -> None:
+        """Subsequent calls without refresh use the cache."""
+        mock_result = Mock()
+        mock_result.stdout = json.dumps([{"name": "bug"}])
+        mock_gh_call.return_value = mock_result
+
+        gh_list_labels()
+        gh_list_labels()
+
+        assert mock_gh_call.call_count == 1
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_refresh_bypasses_cache(self, mock_gh_call: Any) -> None:
+        """refresh=True re-fetches even when cache is populated."""
+        mock_result = Mock()
+        mock_result.stdout = json.dumps([{"name": "bug"}])
+        mock_gh_call.return_value = mock_result
+
+        gh_list_labels()
+        gh_list_labels(refresh=True)
+
+        assert mock_gh_call.call_count == 2
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_create_label_calls_gh(self, mock_gh_call: Any) -> None:
+        """gh_create_label passes --force and the label name."""
+        mock_gh_call.return_value = Mock()
+
+        gh_create_label("testing")
+
+        args = mock_gh_call.call_args[0][0]
+        assert args[0:2] == ["label", "create"]
+        assert "testing" in args
+        assert "--force" in args
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_create_label_updates_cache(self, mock_gh_call: Any) -> None:
+        """gh_create_label adds the new label to the cache if it exists."""
+        _github_api_module._label_cache = {"bug"}
+        mock_gh_call.return_value = Mock()
+
+        gh_create_label("testing")
+
+        assert "testing" in _github_api_module._label_cache
+
+
+class TestGhListOpenIssues:
+    """Tests for gh_list_open_issues."""
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_returns_sorted_issue_numbers(self, mock_gh_call: Any) -> None:
+        """Returns issue numbers sorted ascending."""
+        mock_result = Mock()
+        mock_result.stdout = json.dumps([{"number": 5}, {"number": 1}, {"number": 3}])
+        mock_gh_call.return_value = mock_result
+
+        issues = gh_list_open_issues()
+
+        assert issues == [1, 3, 5]
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_empty_repo_returns_empty_list(self, mock_gh_call: Any) -> None:
+        """Returns empty list when no open issues."""
+        mock_result = Mock()
+        mock_result.stdout = json.dumps([])
+        mock_gh_call.return_value = mock_result
+
+        assert gh_list_open_issues() == []
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_failure_raises_runtime_error(self, mock_gh_call: Any) -> None:
+        """Wraps gh CLI errors in RuntimeError."""
+        mock_gh_call.side_effect = subprocess.CalledProcessError(1, "gh")
+
+        with pytest.raises(RuntimeError, match="Failed to list open issues"):
+            gh_list_open_issues()
 
 
 class TestGhPrCreate:

@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from hephaestus.automation.worktree_manager import WorktreeManager
+from hephaestus.automation.worktree_manager import WorktreeDirtyError, WorktreeManager
 
 
 class TestWorktreeManager:
@@ -132,10 +132,11 @@ class TestWorktreeManager:
         with pytest.raises(RuntimeError, match="Failed to create worktree"):
             manager.create_worktree(123, "123-feature")
 
+    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=True)
     @patch("hephaestus.automation.worktree_manager.run")
     @patch("hephaestus.automation.worktree_manager.get_repo_root")
     def test_remove_worktree_success(
-        self, mock_get_root: Any, mock_run: Any, tmp_path: Any
+        self, mock_get_root: Any, mock_run: Any, mock_clean: Any, tmp_path: Any
     ) -> None:
         """Test successful worktree removal."""
         mock_get_root.return_value = tmp_path
@@ -155,9 +156,12 @@ class TestWorktreeManager:
         call_args = mock_run.call_args[0][0]
         assert call_args[0:3] == ["git", "worktree", "remove"]
 
+    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=True)
     @patch("hephaestus.automation.worktree_manager.run")
     @patch("hephaestus.automation.worktree_manager.get_repo_root")
-    def test_remove_worktree_force(self, mock_get_root: Any, mock_run: Any, tmp_path: Any) -> None:
+    def test_remove_worktree_force(
+        self, mock_get_root: Any, mock_run: Any, mock_clean: Any, tmp_path: Any
+    ) -> None:
         """Test forced worktree removal."""
         mock_get_root.return_value = tmp_path
         manager = WorktreeManager()
@@ -187,10 +191,11 @@ class TestWorktreeManager:
         # Should only call git for base branch detection, not for remove
         assert mock_run.call_count == 1
 
+    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=True)
     @patch("hephaestus.automation.worktree_manager.run")
     @patch("hephaestus.automation.worktree_manager.get_repo_root")
     def test_remove_worktree_failure(
-        self, mock_get_root: Any, mock_run: Any, tmp_path: Any
+        self, mock_get_root: Any, mock_run: Any, mock_clean: Any, tmp_path: Any
     ) -> None:
         """Test worktree removal failure."""
         mock_get_root.return_value = tmp_path
@@ -204,6 +209,50 @@ class TestWorktreeManager:
         with pytest.raises(RuntimeError, match="Failed to remove worktree"):
             manager.remove_worktree(123)
 
+    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=False)
+    @patch("hephaestus.automation.worktree_manager.run")
+    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    def test_remove_worktree_dirty_raises(
+        self, mock_get_root: Any, mock_run: Any, mock_clean: Any, tmp_path: Any
+    ) -> None:
+        """Removing a dirty worktree without force raises WorktreeDirtyError."""
+        mock_get_root.return_value = tmp_path
+        manager = WorktreeManager()
+
+        worktree_path = manager.base_dir / "issue-42"
+        manager.worktrees[42] = worktree_path
+
+        with pytest.raises(WorktreeDirtyError) as exc_info:
+            manager.remove_worktree(42)
+
+        assert exc_info.value.issue_number == 42
+        assert exc_info.value.path == worktree_path
+        # git worktree remove should NOT have been called
+        remove_calls = [
+            call
+            for call in mock_run.call_args_list
+            if len(call[0][0]) >= 3 and call[0][0][:3] == ["git", "worktree", "remove"]
+        ]
+        assert remove_calls == []
+
+    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=False)
+    @patch("hephaestus.automation.worktree_manager.run")
+    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    def test_cleanup_all_preserves_dirty_worktree(
+        self, mock_get_root: Any, mock_run: Any, mock_clean: Any, tmp_path: Any
+    ) -> None:
+        """cleanup_all skips dirty worktrees and records them in self.preserved."""
+        mock_get_root.return_value = tmp_path
+        manager = WorktreeManager()
+
+        dirty_path = manager.base_dir / "issue-1"
+        manager.worktrees[1] = dirty_path
+
+        manager.cleanup_all()
+
+        assert len(manager.preserved) == 1
+        assert manager.preserved[0] == (1, dirty_path)
+
     @patch("hephaestus.automation.worktree_manager.get_repo_root")
     def test_get_worktree(self, mock_get_root: Any, tmp_path: Any) -> None:
         """Test getting worktree path."""
@@ -216,9 +265,12 @@ class TestWorktreeManager:
         assert manager.get_worktree(123) == worktree_path
         assert manager.get_worktree(999) is None
 
+    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=True)
     @patch("hephaestus.automation.worktree_manager.run")
     @patch("hephaestus.automation.worktree_manager.get_repo_root")
-    def test_cleanup_all(self, mock_get_root: Any, mock_run: Any, tmp_path: Any) -> None:
+    def test_cleanup_all(
+        self, mock_get_root: Any, mock_run: Any, mock_clean: Any, tmp_path: Any
+    ) -> None:
         """Test cleaning up all worktrees."""
         mock_get_root.return_value = tmp_path
         manager = WorktreeManager()
@@ -235,10 +287,11 @@ class TestWorktreeManager:
         # Should call git worktree remove for each
         assert mock_run.call_count >= 3
 
+    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=True)
     @patch("hephaestus.automation.worktree_manager.run")
     @patch("hephaestus.automation.worktree_manager.get_repo_root")
     def test_cleanup_all_with_failures(
-        self, mock_get_root: Any, mock_run: Any, tmp_path: Any
+        self, mock_get_root: Any, mock_run: Any, mock_clean: Any, tmp_path: Any
     ) -> None:
         """Test cleanup continues even if some removals fail."""
         mock_get_root.return_value = tmp_path

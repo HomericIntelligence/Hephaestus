@@ -175,6 +175,30 @@ class TestRunSubprocess:
         with pytest.raises(subprocess.CalledProcessError):
             run_subprocess(["false"])
 
+    def test_log_on_error_false_suppresses_error_log(self):
+        """When log_on_error=False, failure does not call logger.error."""
+        from unittest.mock import patch as _patch
+
+        import hephaestus.utils.helpers as _helpers
+
+        with _patch.object(_helpers.logger, "error") as mock_error:
+            with pytest.raises(subprocess.CalledProcessError):
+                run_subprocess(["false"], log_on_error=False)
+
+        assert not mock_error.called
+
+    def test_log_on_error_true_emits_error_log(self):
+        """When log_on_error=True (default), failure calls logger.error."""
+        from unittest.mock import patch as _patch
+
+        import hephaestus.utils.helpers as _helpers
+
+        with _patch.object(_helpers.logger, "error") as mock_error:
+            with pytest.raises(subprocess.CalledProcessError):
+                run_subprocess(["false"], log_on_error=True)
+
+        assert mock_error.called
+
 
 class TestGetProjRoot:
     """Tests for get_proj_root."""

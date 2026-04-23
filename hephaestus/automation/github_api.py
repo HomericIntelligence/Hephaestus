@@ -27,6 +27,50 @@ from .models import IssueInfo, IssueState
 
 logger = logging.getLogger(__name__)
 
+_label_cache: set[str] | None = None
+
+
+def gh_list_labels(refresh: bool = False) -> set[str]:
+    """Return the set of label names that exist in the current repository.
+
+    Args:
+        refresh: If True, bypass the in-process cache and re-fetch.
+
+    Returns:
+        Set of existing label names.
+
+    """
+    global _label_cache
+    if _label_cache is not None and not refresh:
+        return _label_cache
+
+    try:
+        result = _gh_call(["label", "list", "--json", "name", "--limit", "200"])
+        data = json.loads(result.stdout)
+        _label_cache = {item["name"] for item in data}
+        return _label_cache
+    except Exception as e:
+        logger.warning(f"Could not fetch label list: {e}; proceeding without validation")
+        return set()
+
+
+def gh_create_label(name: str, color: str = "ededed", description: str = "") -> None:
+    """Create a GitHub label, updating it if it already exists.
+
+    Args:
+        name: Label name
+        color: Hex color without leading ``#`` (default: neutral grey)
+        description: Optional short description
+
+    """
+    cmd = ["label", "create", name, "--color", color, "--force"]
+    if description:
+        cmd.extend(["--description", description])
+    _gh_call(cmd)
+    if _label_cache is not None:
+        _label_cache.add(name)
+    logger.info(f"Created missing label '{name}'")
+
 
 def _gh_call(
     args: list[str],
@@ -152,13 +196,30 @@ def gh_issue_comment(issue_number: int, body: str) -> None:
         raise RuntimeError(f"Failed to post comment to issue #{issue_number}: {e}") from e
 
 
+def _parse_issue_number(output: str) -> int:
+    """Extract issue number from gh issue create output (URL or bare number)."""
+    match = re.search(r"/issues/(\d+)", output)
+    if match:
+        return int(match.group(1))
+    return int(output.split("/")[-1])
+
+
+def _ensure_labels_exist(labels: list[str]) -> None:
+    """Create any labels in *labels* that do not yet exist in the repository."""
+    existing = gh_list_labels()
+    for label in labels:
+        if label not in existing:
+            gh_create_label(label)
+
+
 def gh_issue_create(title: str, body: str, labels: list[str] | None = None) -> int:
-    """Create a new GitHub issue.
+    """Create a new GitHub issue, auto-creating any missing labels.
 
     Args:
         title: Issue title
         body: Issue body/description
-        labels: Optional list of label names to apply
+        labels: Optional list of label names to apply. Missing labels are
+            created automatically before the issue is filed.
 
     Returns:
         Created issue number
@@ -168,22 +229,33 @@ def gh_issue_create(title: str, body: str, labels: list[str] | None = None) -> i
 
     """
     try:
-        # Build command
-        cmd = ["issue", "create", "--title", title, "--body", body]
+        if labels:
+            _ensure_labels_exist(labels)
 
-        # Add labels if provided
+        cmd = ["issue", "create", "--title", title, "--body", body]
         if labels:
             for label in labels:
                 cmd.extend(["--label", label])
 
-        result = _gh_call(cmd)
+        try:
+            result = _gh_call(cmd)
+        except subprocess.CalledProcessError as e:
+            # On a label-not-found error (race or cache miss), create the label and retry once.
+            stderr = e.stderr if e.stderr else ""
+            m = re.search(r"could not add label:\s*'([^']+)'\s*not found", stderr, re.IGNORECASE)
+            if m and labels:
+                missing_label = m.group(1)
+                logger.warning(
+                    f"Label '{missing_label}' not found after pre-create; recreating and retrying"
+                )
+                gh_create_label(missing_label)
+                result = _gh_call(cmd)
+            else:
+                raise
 
-        # Extract issue number from URL in output
         output = result.stdout.strip()
         try:
-            # Try to extract number from URL (e.g., https://github.com/owner/repo/issues/123)
-            match = re.search(r"/issues/(\d+)", output)
-            issue_number = int(match.group(1)) if match else int(output.split("/")[-1])
+            issue_number = _parse_issue_number(output)
         except (ValueError, IndexError) as e:
             raise RuntimeError(f"Failed to parse issue number from output: {output}") from e
 
@@ -192,6 +264,38 @@ def gh_issue_create(title: str, body: str, labels: list[str] | None = None) -> i
 
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to create issue: {e}") from e
+
+
+def gh_list_open_issues(limit: int = 500) -> list[int]:
+    """Return issue numbers for all open issues in the current repository, ascending.
+
+    Args:
+        limit: Maximum number of issues to fetch (default 500).
+
+    Returns:
+        Sorted list of open issue numbers.
+
+    Raises:
+        RuntimeError: If fetching issues fails.
+
+    """
+    try:
+        result = _gh_call(
+            [
+                "issue",
+                "list",
+                "--state",
+                "open",
+                "--limit",
+                str(limit),
+                "--json",
+                "number",
+            ]
+        )
+        data = json.loads(result.stdout)
+        return sorted(item["number"] for item in data)
+    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError) as e:
+        raise RuntimeError(f"Failed to list open issues: {e}") from e
 
 
 def gh_pr_create(

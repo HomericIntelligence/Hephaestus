@@ -28,6 +28,7 @@ from .github_api import (
     _gh_call,
     gh_issue_comment,
     gh_issue_json,
+    gh_list_open_issues,
     prefetch_issue_states,
 )
 from .models import PlannerOptions, PlanResult
@@ -556,6 +557,9 @@ def _parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Plan all open issues (no arguments needed)
+  %(prog)s
+
   # Plan specific issues
   %(prog)s --issues 123 456 789
 
@@ -577,8 +581,7 @@ Examples:
         "--issues",
         type=int,
         nargs="+",
-        required=True,
-        help="Issue numbers to plan",
+        help="Issue numbers to plan (default: all open issues)",
     )
     parser.add_argument(
         "--dry-run",
@@ -635,6 +638,12 @@ def main() -> int:
 
     log = logging.getLogger(__name__)
     log.info("Starting issue planner")
+
+    if not args.issues:
+        discovered = gh_list_open_issues()
+        log.info(f"No --issues given; discovered {len(discovered)} open issues: {discovered}")
+        args.issues = discovered
+
     log.info(f"Issues to plan: {args.issues}")
 
     try:

@@ -118,6 +118,7 @@ def run_subprocess(
     timeout: int | None = None,
     check: bool = True,
     dry_run: bool = False,
+    log_on_error: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Run subprocess command with proper error handling.
 
@@ -127,6 +128,8 @@ def run_subprocess(
         timeout: Optional timeout in seconds
         check: Whether to raise on non-zero exit code
         dry_run: If True, log the command but do not execute it
+        log_on_error: If False, suppress ERROR logging when the command fails.
+            Use when failure is expected and already handled by the caller.
 
     Returns:
         Completed process object
@@ -150,8 +153,9 @@ def run_subprocess(
         )
         return result
     except subprocess.CalledProcessError as e:
-        logger.error("Command failed: %s", " ".join(cmd))
-        logger.error("stderr: %s", e.stderr)
+        if log_on_error:
+            logger.error("Command failed: %s", " ".join(cmd))
+            logger.error("stderr: %s", e.stderr)
         raise
 
 

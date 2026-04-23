@@ -26,7 +26,7 @@ from .curses_ui import CursesUI, ThreadLogManager
 from .dependency_resolver import CyclicDependencyError, DependencyResolver
 from .follow_up import parse_follow_up_items, run_follow_up_issues
 from .git_utils import get_repo_root, run
-from .github_api import fetch_issue_info
+from .github_api import fetch_issue_info, gh_list_open_issues
 from .learn import learn_needs_rerun, run_learn
 from .models import (
     ImplementationPhase,
@@ -859,6 +859,8 @@ class IssueImplementer:
 
     def _print_summary(self, results: dict[int, WorkerResult]) -> None:
         """Print implementation summary."""
+        import sys
+
         total = len(results)
         successful = sum(1 for r in results.values() if r.success)
         failed = total - successful
@@ -881,6 +883,20 @@ class IssueImplementer:
             for issue_num, result in results.items():
                 if not result.success:
                     logger.info(f"  #{issue_num}: {result.error}")
+
+        preserved = self.worktree_manager.preserved
+        if preserved:
+            issue_nums = [n for n, _ in preserved]
+            script = sys.argv[0]
+            issues_arg = " ".join(str(n) for n in issue_nums)
+            logger.info("\nPreserved worktrees (contain uncommitted changes):")
+            for issue_num, path in preserved:
+                logger.info(f"  #{issue_num}: {path}")
+            logger.info("\nRerun these issues after inspecting/cleaning the worktrees:")
+            logger.info(f"  {script} --issues {issues_arg} --resume")
+            logger.info("To discard them instead:")
+            for _, path in preserved:
+                logger.info(f"  git worktree remove --force {path}")
 
 
 def _setup_logging(verbose: bool = False, log_dir: Path | None = None) -> None:
@@ -911,6 +927,9 @@ def _parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Implement all open issues (no arguments needed)
+  %(prog)s
+
   # Implement all issues in an epic
   %(prog)s --epic 123
 
@@ -1004,9 +1023,6 @@ Examples:
 
     args = parser.parse_args()
 
-    if not args.health_check and not args.epic and not args.issues:
-        parser.error("Either --epic, --issues, or --health-check is required")
-
     if args.epic and args.issues:
         parser.error("Cannot specify both --epic and --issues")
 
@@ -1026,6 +1042,14 @@ def main() -> int:
     _setup_logging(args.verbose, log_dir=state_dir)
 
     log = logging.getLogger(__name__)
+
+    # Auto-discover all open issues when neither --issues nor --epic is given
+    if not args.health_check and not args.epic and not args.issues:
+        discovered = gh_list_open_issues()
+        log.info(
+            f"No --issues/--epic given; discovered {len(discovered)} open issues: {discovered}"
+        )
+        args.issues = discovered
 
     options = ImplementerOptions(
         epic_number=args.epic or 0,

@@ -11,9 +11,19 @@ import shutil
 import threading
 from pathlib import Path
 
-from .git_utils import get_repo_root, run
+from .git_utils import get_repo_root, is_clean_working_tree, run
 
 logger = logging.getLogger(__name__)
+
+
+class WorktreeDirtyError(Exception):
+    """Raised when a worktree cannot be removed because it contains uncommitted changes."""
+
+    def __init__(self, issue_number: int, path: Path) -> None:
+        """Initialize with the affected issue number and worktree path."""
+        self.issue_number = issue_number
+        self.path = path
+        super().__init__(f"Worktree for issue #{issue_number} at {path} has uncommitted changes")
 
 
 class WorktreeManager:
@@ -43,6 +53,7 @@ class WorktreeManager:
                     ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
                     cwd=self.repo_root,
                     capture_output=True,
+                    log_errors=False,
                 )
                 base_branch = result.stdout.strip()
                 logger.debug(f"Auto-detected base branch: {base_branch}")
@@ -66,6 +77,7 @@ class WorktreeManager:
 
         self.base_branch = base_branch
         self.worktrees: dict[int, Path] = {}
+        self.preserved: list[tuple[int, Path]] = []
         self.lock = threading.Lock()
 
         logger.debug(
@@ -180,7 +192,8 @@ class WorktreeManager:
             force: Force removal even with uncommitted changes
 
         Raises:
-            RuntimeError: If worktree removal fails
+            WorktreeDirtyError: If the worktree has uncommitted changes and force=False
+            RuntimeError: If worktree removal fails for another reason
 
         """
         with self.lock:
@@ -190,8 +203,10 @@ class WorktreeManager:
 
             worktree_path = self.worktrees[issue_number]
 
+            if not force and not is_clean_working_tree(worktree_path):
+                raise WorktreeDirtyError(issue_number, worktree_path)
+
             try:
-                # Remove worktree
                 cmd = ["git", "worktree", "remove", str(worktree_path)]
                 if force:
                     cmd.append("--force")
@@ -220,6 +235,9 @@ class WorktreeManager:
     def cleanup_all(self, force: bool = False) -> None:
         """Remove all managed worktrees.
 
+        Dirty worktrees (uncommitted changes) are skipped rather than force-removed.
+        They are recorded in ``self.preserved`` so callers can surface a rerun command.
+
         Args:
             force: Force removal even with uncommitted changes
 
@@ -236,6 +254,9 @@ class WorktreeManager:
         for issue_num in issue_numbers:
             try:
                 self.remove_worktree(issue_num, force=force)
+            except WorktreeDirtyError as e:
+                logger.info(f"Preserved dirty worktree for issue #{e.issue_number} at {e.path}")
+                self.preserved.append((e.issue_number, e.path))
             except Exception as e:
                 logger.error(f"Failed to remove worktree for issue #{issue_num}: {e}")
 
