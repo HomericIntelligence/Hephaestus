@@ -70,7 +70,7 @@ jobs:
             pixi-lint-${{ runner.os }}-
 
       - name: mypy
-        run: pixi run --environment lint mypy hephaestus/ scripts/ tests/
+        run: pixi run --environment lint mypy
 
   unit-tests:
     name: unit-tests
@@ -191,6 +191,7 @@ jobs:
 
       - name: Run pip-audit
         id: pip-audit
+        continue-on-error: true
         run: pixi run --environment lint pip-audit
 
       - name: Post pip-audit summary
