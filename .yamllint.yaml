@@ -1,4 +1,10 @@
+# YAML Lint configuration
+# See https://yamllint.readthedocs.io/en/stable/configuration.html
+
 extends: default
+
+ignore: |
+  helm/**/templates/
 
 rules:
   line-length:
@@ -6,15 +12,10 @@ rules:
     level: warning
   indentation:
     spaces: 2
-    indent-sequences: whatever
+    indent-sequences: true
   comments:
     min-spaces-from-content: 1
   document-start: disable
-  braces:
-    max-spaces-inside: 1
-
-ignore: |
-  .pixi/
-  build/
-  .git/
-  node_modules/
+  truthy:
+    allowed-values: ['true', 'false', 'yes', 'no']
+    check-keys: false
