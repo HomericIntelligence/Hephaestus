@@ -76,11 +76,13 @@ branch or worktree deletion.
 ## When the Skill Has Run
 
 Read the summary at the end:
+
 - **Rebased**: branches that now point to a new tip rebased onto trunk. Their PRs have
   auto-merge re-armed.
 - **Subsumed**: branches whose commits were already on trunk after rebase — they still
   exist; you can delete them when you're ready.
 - **Still failing**: branches the swarm could not fix. Fix these manually:
+
   ```bash
   git fetch origin
   git switch <branch>

@@ -1,0 +1,478 @@
+#!/usr/bin/env bash
+# HomericIntelligence Ecosystem Installer
+#
+# Installs and verifies all dependencies needed to participate in the
+# HomericIntelligence distributed agent mesh.
+#
+# Usage:
+#   bash scripts/shell/install.sh             # Check-only mode
+#   bash scripts/shell/install.sh --install   # Check + install missing deps
+#   bash scripts/shell/install.sh --role worker   # Worker-only dependencies
+#   bash scripts/shell/install.sh --role control  # Control-plane deps (C++ build)
+#   bash scripts/shell/install.sh --role all      # Everything (default)
+#
+# Exit codes:
+#   0 — all checks passed (or installed successfully)
+#   1 — one or more checks failed
+#
+# shellcheck disable=SC2015  # A && B || C patterns are intentional best-effort installs
+set -uo pipefail
+
+# ─── Colors ──────────────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
+
+# ─── Counters ────────────────────────────────────────────────────────────────
+_PASS=0; _FAIL=0; _WARN=0; _SKIP=0
+
+check_pass() { _PASS=$((_PASS + 1)); echo -e "  ${GREEN}✓${NC} $1"; }
+check_fail() { _FAIL=$((_FAIL + 1)); echo -e "  ${RED}✗${NC} $1"; }
+check_warn() { _WARN=$((_WARN + 1)); echo -e "  ${YELLOW}⚠${NC} $1"; }
+check_skip() { _SKIP=$((_SKIP + 1)); echo -e "  ${DIM}–${NC} $1 ${DIM}(skipped)${NC}"; }
+section()    { echo -e "\n${BOLD}${CYAN}$1${NC}"; }
+
+# ─── Argument Parsing ─────────────────────────────────────────────────────────
+INSTALL=false
+ROLE="all"  # all | worker | control
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --install)   INSTALL=true; shift ;;
+        --role)      ROLE="$2"; shift 2 ;;
+        -h|--help)
+            echo "Usage: bash scripts/shell/install.sh [--install] [--role worker|control|all]"
+            exit 0
+            ;;
+        *) echo "Unknown argument: $1"; exit 1 ;;
+    esac
+done
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+has_cmd()     { command -v "$1" &>/dev/null; }
+get_version() { "$@" 2>&1 | head -1 | grep -oP '\d+\.\d+[\.\d]*' | head -1; }
+
+# Compare versions: returns 0 if $1 >= $2
+version_gte() { printf '%s\n%s\n' "$2" "$1" | sort -V | head -1 | grep -qF "$2"; }
+
+# Install an apt package if --install was passed; return 0 on success
+apt_install() {
+    local pkg="$1"
+    if $INSTALL; then
+        echo -e "    ${BLUE}→${NC} Installing $pkg via apt..."
+        sudo apt-get install -y "$pkg" >/dev/null 2>&1
+        return $?
+    fi
+    return 1
+}
+
+should_check_worker()  { [[ "$ROLE" == "all" || "$ROLE" == "worker" ]]; }
+should_check_control() { [[ "$ROLE" == "all" || "$ROLE" == "control" ]]; }
+
+# Install a binary from a GitHub release to ~/.local/bin
+# Usage: install_github_binary <owner/repo> <tag> <asset_glob> <binary_name>
+install_github_binary() {
+    local repo="$1" tag="$2" asset_glob="$3" binary="$4"
+    local url
+    url=$(curl -fsSL "https://api.github.com/repos/$repo/releases/tags/$tag" \
+        | grep "browser_download_url" | grep "$asset_glob" | head -1 \
+        | cut -d '"' -f 4)
+    if [[ -z "$url" ]]; then
+        echo -e "    ${RED}→${NC} Could not resolve download URL for $repo@$tag ($asset_glob)" >&2
+        return 1
+    fi
+    mkdir -p ~/.local/bin
+    curl -fsSL "$url" -o "/tmp/$binary" && chmod +x "/tmp/$binary" && mv "/tmp/$binary" ~/.local/bin/
+}
+
+# ─── Banner ───────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}HomericIntelligence Ecosystem Installer${NC}"
+echo "════════════════════════════════════════"
+echo -e "  Role: ${CYAN}${ROLE}${NC}    Install: ${CYAN}${INSTALL}${NC}"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Section 1: Core System Tooling (all roles)
+# ═════════════════════════════════════════════════════════════════════════════
+section "Core Tooling"
+
+for pkg in git curl jq unzip; do
+    if has_cmd "$pkg"; then
+        check_pass "$pkg $(get_version "$pkg" --version)"
+    else
+        check_fail "$pkg — NOT FOUND"
+        apt_install "$pkg" && check_pass "$pkg installed" || true
+    fi
+done
+
+# just (task runner)
+if has_cmd just; then
+    check_pass "just $(get_version just --version)"
+else
+    check_fail "just — NOT FOUND"
+    if $INSTALL; then
+        echo -e "    ${BLUE}→${NC} Installing just..."
+        if curl -sSf https://just.systems/install.sh | bash -s -- --to ~/.local/bin >/dev/null 2>&1; then
+            check_pass "just installed to ~/.local/bin"
+        else
+            check_fail "just — install failed (manual: cargo install just)"
+        fi
+    fi
+fi
+
+# gh CLI (GitHub operations, PR creation, issue management)
+if has_cmd gh; then
+    check_pass "gh $(get_version gh --version)"
+else
+    check_fail "gh — NOT FOUND (required for PR/issue operations)"
+    if $INSTALL; then
+        echo -e "    ${BLUE}→${NC} Installing gh via apt..."
+        if ! has_cmd gpg; then apt_install gnupg; fi
+        (
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+                | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null &&
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+                | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null &&
+            sudo apt-get update -qq >/dev/null 2>&1 &&
+            sudo apt-get install -y gh >/dev/null 2>&1
+        ) && check_pass "gh installed" || check_fail "gh — install failed (see https://cli.github.com)"
+    fi
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Section 2: Tailscale (mesh networking — all roles)
+# ═════════════════════════════════════════════════════════════════════════════
+section "Tailscale"
+
+if has_cmd tailscale; then
+    check_pass "tailscale $(get_version tailscale --version)"
+    if tailscale status >/dev/null 2>&1; then
+        check_pass "tailscaled running"
+    else
+        check_warn "tailscaled is not active — run: sudo tailscale up"
+    fi
+else
+    check_fail "tailscale — NOT FOUND"
+    if $INSTALL; then
+        echo -e "    ${BLUE}→${NC} Installing tailscale..."
+        curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1 \
+            && check_pass "tailscale installed" \
+            || check_fail "tailscale — install failed (see https://tailscale.com/download)"
+    fi
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Section 3: Python + pixi (all roles)
+# Required by: Myrmidons workers, Hermes bridge, console tools
+# ═════════════════════════════════════════════════════════════════════════════
+section "Python & pixi"
+
+# Python 3.10+
+if has_cmd python3; then
+    PY_VER=$(get_version python3 --version)
+    if version_gte "$PY_VER" "3.10"; then
+        check_pass "python3 $PY_VER (>= 3.10)"
+    else
+        check_fail "python3 $PY_VER — need >= 3.10"
+        if $INSTALL; then
+            echo -e "    ${BLUE}→${NC} Installing python3.10..."
+            apt_install python3.10 \
+                && sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 10 >/dev/null 2>&1 \
+                && check_pass "python3.10 installed" || check_fail "python3.10 — install failed"
+        fi
+    fi
+else
+    check_fail "python3 — NOT FOUND"
+    apt_install python3 && check_pass "python3 installed" || true
+fi
+
+# pip3 (needed to install nats-py and other Python deps)
+if has_cmd pip3; then
+    check_pass "pip3 $(get_version pip3 --version)"
+else
+    check_fail "pip3 — NOT FOUND"
+    if $INSTALL; then
+        apt_install python3-pip && check_pass "pip3 installed" || \
+            (python3 -m ensurepip --upgrade >/dev/null 2>&1 && check_pass "pip3 bootstrapped via ensurepip") || true
+    fi
+fi
+
+# nats-py (NATS Python client used by all myrmidon workers)
+if python3 -c "import nats" 2>/dev/null; then
+    NATS_PY=$(python3 -c "import importlib.metadata; print(importlib.metadata.version('nats-py'))" 2>/dev/null || echo "installed")
+    check_pass "nats-py $NATS_PY"
+else
+    check_fail "nats-py — NOT FOUND (required by myrmidon workers)"
+    if $INSTALL; then
+        echo -e "    ${BLUE}→${NC} Installing nats-py..."
+        pip3 install --break-system-packages nats-py >/dev/null 2>&1 \
+            || pip3 install --user nats-py >/dev/null 2>&1 \
+            && check_pass "nats-py installed" \
+            || check_fail "nats-py — install failed (try: pip3 install nats-py)"
+    fi
+fi
+
+# pixi (Python environment manager for Hermes + ProjectHephaestus)
+if has_cmd pixi; then
+    check_pass "pixi $(get_version pixi --version)"
+else
+    check_fail "pixi — NOT FOUND (required by Hermes bridge and ProjectHephaestus)"
+    if $INSTALL; then
+        echo -e "    ${BLUE}→${NC} Installing pixi..."
+        curl -fsSL https://pixi.sh/install.sh | bash >/dev/null 2>&1 \
+            && check_pass "pixi installed" \
+            || check_fail "pixi — install failed (see https://pixi.sh)"
+    fi
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Section 4: Go (Atlas dashboard — worker role)
+# Required by: infrastructure/ProjectArgus/dashboard (Atlas, port 3002)
+# ═════════════════════════════════════════════════════════════════════════════
+if should_check_worker; then
+    section "Go (Atlas Dashboard)"
+
+    GO_MIN="1.23"
+    if has_cmd go; then
+        GO_VER=$(get_version go version)
+        if version_gte "$GO_VER" "$GO_MIN"; then
+            check_pass "go $GO_VER (>= $GO_MIN)"
+        else
+            check_fail "go $GO_VER — need >= $GO_MIN (templ requires 1.23+)"
+            if $INSTALL; then
+                echo -e "    ${BLUE}→${NC} Installing Go $GO_MIN via official tarball..."
+                GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+                GO_PKG="go1.23.8.linux-${GOARCH}.tar.gz"
+                curl -fsSL "https://go.dev/dl/$GO_PKG" -o "/tmp/$GO_PKG" \
+                    && sudo rm -rf /usr/local/go \
+                    && sudo tar -C /usr/local -xzf "/tmp/$GO_PKG" \
+                    && rm "/tmp/$GO_PKG" \
+                    && check_pass "Go 1.23.8 installed to /usr/local/go" \
+                    || check_fail "Go — install failed"
+                echo -e "    ${DIM}Add to PATH: export PATH=\$PATH:/usr/local/go/bin${NC}"
+            fi
+        fi
+    else
+        check_fail "go — NOT FOUND"
+        if $INSTALL; then
+            echo -e "    ${BLUE}→${NC} Installing Go 1.23.8..."
+            GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+            GO_PKG="go1.23.8.linux-${GOARCH}.tar.gz"
+            curl -fsSL "https://go.dev/dl/$GO_PKG" -o "/tmp/$GO_PKG" \
+                && sudo rm -rf /usr/local/go \
+                && sudo tar -C /usr/local -xzf "/tmp/$GO_PKG" \
+                && rm "/tmp/$GO_PKG" \
+                && check_pass "Go 1.23.8 installed to /usr/local/go" \
+                || check_fail "Go — install failed"
+            echo -e "    ${DIM}Add to PATH: export PATH=\$PATH:/usr/local/go/bin${NC}"
+        fi
+    fi
+
+    # templ (Go HTML template generator used by Atlas)
+    if has_cmd templ; then
+        check_pass "templ $(get_version templ version)"
+    else
+        check_fail "templ — NOT FOUND (required by Atlas dashboard)"
+        if $INSTALL && has_cmd go; then
+            echo -e "    ${BLUE}→${NC} Installing templ..."
+            GOBIN=~/.local/bin go install github.com/a-h/templ/cmd/templ@latest >/dev/null 2>&1 \
+                && check_pass "templ installed to ~/.local/bin" \
+                || check_fail "templ — install failed (requires go in PATH)"
+        fi
+    fi
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Section 5: NATS Server (hub host)
+# Required by: hub host only — native binary to avoid slirp4netns
+# ═════════════════════════════════════════════════════════════════════════════
+section "NATS Server"
+
+NATS_MIN="2.10"
+NATS_BIN="${NATS_SERVER_BIN:-${HOME}/.local/bin/nats-server}"
+
+if has_cmd nats-server || [[ -x "$NATS_BIN" ]]; then
+    NATS_EXEC=$(has_cmd nats-server && echo "nats-server" || echo "$NATS_BIN")
+    NATS_VER=$(get_version "$NATS_EXEC" --version 2>/dev/null || "$NATS_EXEC" -v 2>&1 | grep -oP '\d+\.\d+[\.\d]*' | head -1)
+    if version_gte "$NATS_VER" "$NATS_MIN"; then
+        check_pass "nats-server $NATS_VER (>= $NATS_MIN)"
+    else
+        check_fail "nats-server $NATS_VER — need >= $NATS_MIN"
+    fi
+else
+    check_fail "nats-server — NOT FOUND"
+    if $INSTALL; then
+        echo -e "    ${BLUE}→${NC} Installing nats-server 2.10.24..."
+        GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+        NATS_PKG="nats-server-v2.10.24-linux-${GOARCH}.tar.gz"
+        NATS_URL="https://github.com/nats-io/nats-server/releases/download/v2.10.24/$NATS_PKG"
+        mkdir -p ~/.local/bin
+        curl -fsSL "$NATS_URL" -o "/tmp/$NATS_PKG" \
+            && tar -xzf "/tmp/$NATS_PKG" -C /tmp \
+            && mv "/tmp/nats-server-v2.10.24-linux-${GOARCH}/nats-server" ~/.local/bin/nats-server \
+            && chmod +x ~/.local/bin/nats-server \
+            && rm -rf "/tmp/$NATS_PKG" "/tmp/nats-server-v2.10.24-linux-${GOARCH}" \
+            && check_pass "nats-server 2.10.24 installed to ~/.local/bin" \
+            || check_fail "nats-server — install failed"
+        echo -e "    ${DIM}Ensure ~/.local/bin is in PATH${NC}"
+    fi
+fi
+
+# nats CLI (JetStream management and monitoring)
+if has_cmd nats; then
+    check_pass "nats CLI $(get_version nats --version)"
+else
+    check_warn "nats CLI — NOT FOUND (optional, useful for stream inspection)"
+    if $INSTALL; then
+        echo -e "    ${BLUE}→${NC} Installing nats CLI 0.1.5..."
+        GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+        NATS_CLI_PKG="nats-0.1.5-linux-${GOARCH}.zip"
+        NATS_CLI_URL="https://github.com/nats-io/natscli/releases/download/v0.1.5/$NATS_CLI_PKG"
+        mkdir -p ~/.local/bin
+        curl -fsSL "$NATS_CLI_URL" -o "/tmp/$NATS_CLI_PKG" \
+            && unzip -q "/tmp/$NATS_CLI_PKG" -d /tmp/nats-cli \
+            && mv /tmp/nats-cli/nats-*/nats ~/.local/bin/nats \
+            && chmod +x ~/.local/bin/nats \
+            && rm -rf "/tmp/$NATS_CLI_PKG" /tmp/nats-cli \
+            && check_pass "nats CLI installed to ~/.local/bin" \
+            || check_warn "nats CLI — install failed (optional)"
+    fi
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Section 6: Container Runtime (worker role — AchaeanFleet compose stack)
+# ═════════════════════════════════════════════════════════════════════════════
+if should_check_worker; then
+    section "Container Runtime"
+
+    if has_cmd podman; then
+        check_pass "podman $(get_version podman --version)"
+    else
+        check_fail "podman — NOT FOUND"
+        apt_install podman && check_pass "podman installed" || true
+    fi
+
+    if has_cmd podman && podman compose version >/dev/null 2>&1; then
+        COMPOSE_VER=$(podman compose version 2>&1 | grep -oP '\d+\.\d+[\.\d]*' | head -1)
+        check_pass "podman compose $COMPOSE_VER"
+    else
+        check_fail "podman compose — NOT FOUND"
+        apt_install podman-compose && check_pass "podman-compose installed" || true
+    fi
+
+    # Podman socket (required for some compose operations)
+    PODMAN_SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"
+    if [[ -S "$PODMAN_SOCK" ]]; then
+        check_pass "podman socket active"
+    else
+        check_warn "podman socket not active — run: systemctl --user enable --now podman.socket"
+        if $INSTALL; then
+            systemctl --user enable --now podman.socket 2>/dev/null \
+                && check_pass "podman socket enabled" \
+                || check_warn "podman socket — could not enable (may need desktop session)"
+        fi
+    fi
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Section 7: C++ Build Chain (control role — Agamemnon + Nestor)
+# ═════════════════════════════════════════════════════════════════════════════
+if should_check_control; then
+    section "C++ Build Chain (Agamemnon / Nestor)"
+
+    CMAKE_MIN="3.20"
+    if has_cmd cmake; then
+        CMAKE_VER=$(get_version cmake --version)
+        if version_gte "$CMAKE_VER" "$CMAKE_MIN"; then
+            check_pass "cmake $CMAKE_VER (>= $CMAKE_MIN)"
+        else
+            check_fail "cmake $CMAKE_VER — need >= $CMAKE_MIN"
+            apt_install cmake && check_pass "cmake installed" || true
+        fi
+    else
+        check_fail "cmake — NOT FOUND"
+        apt_install cmake && check_pass "cmake installed" || true
+    fi
+
+    if has_cmd ninja; then
+        check_pass "ninja $(get_version ninja --version)"
+    else
+        check_fail "ninja — NOT FOUND"
+        apt_install ninja-build && check_pass "ninja installed" || true
+    fi
+
+    for pkg in gcc g++ libssl-dev; do
+        if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
+            check_pass "$pkg"
+        else
+            check_fail "$pkg — NOT FOUND"
+            apt_install "$pkg" && check_pass "$pkg installed" || true
+        fi
+    done
+
+    # Conan (C++ package manager — used by Agamemnon/Nestor)
+    if has_cmd conan; then
+        check_pass "conan $(get_version conan --version)"
+        if conan profile show default >/dev/null 2>&1; then
+            check_pass "conan default profile exists"
+        else
+            check_fail "conan default profile missing"
+            if $INSTALL; then
+                conan profile detect --force >/dev/null 2>&1 \
+                    && check_pass "conan profile created" \
+                    || check_fail "conan profile detect failed"
+            fi
+        fi
+    else
+        check_fail "conan — NOT FOUND"
+        if $INSTALL && has_cmd pip3; then
+            pip3 install --break-system-packages conan >/dev/null 2>&1 \
+                || pip3 install --user conan >/dev/null 2>&1 \
+                && check_pass "conan installed" \
+                || check_fail "conan — install failed"
+        fi
+    fi
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Section 8: PATH sanity check
+# ═════════════════════════════════════════════════════════════════════════════
+section "PATH"
+
+MISSING_PATHS=()
+for dir in "$HOME/.local/bin" "/usr/local/go/bin"; do
+    if [[ ":$PATH:" != *":$dir:"* ]]; then
+        MISSING_PATHS+=("$dir")
+    fi
+done
+
+if [[ ${#MISSING_PATHS[@]} -eq 0 ]]; then
+    check_pass "PATH includes ~/.local/bin and /usr/local/go/bin"
+else
+    for dir in "${MISSING_PATHS[@]}"; do
+        check_warn "$dir not in PATH"
+        echo -e "    ${DIM}Add to ~/.bashrc or ~/.profile: export PATH=\$PATH:$dir${NC}"
+    done
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Summary
+# ═════════════════════════════════════════════════════════════════════════════
+echo ""
+echo -e "${BOLD}Summary${NC}"
+echo "═══════"
+echo -e "  ${GREEN}✓${NC} Passed:  $_PASS"
+[[ $_FAIL -gt 0 ]]  && echo -e "  ${RED}✗${NC} Failed:  $_FAIL"
+[[ $_WARN -gt 0 ]]  && echo -e "  ${YELLOW}⚠${NC} Warnings: $_WARN"
+[[ $_SKIP -gt 0 ]]  && echo -e "  ${DIM}–${NC} Skipped: $_SKIP"
+echo ""
+
+if [[ $_FAIL -gt 0 ]]; then
+    if $INSTALL; then
+        echo -e "${YELLOW}Some installs may require opening a new shell to take effect (PATH changes).${NC}"
+    else
+        echo -e "${YELLOW}Run with --install to attempt automatic installation of missing dependencies.${NC}"
+    fi
+    exit 1
+fi
+
+echo -e "${GREEN}All checks passed.${NC}"

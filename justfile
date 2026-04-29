@@ -62,3 +62,11 @@ audit:
 
 # Full CI-equivalent run: bootstrap, check, and test
 all: bootstrap check test
+
+# Check HomericIntelligence ecosystem dependencies (check-only mode)
+install-check:
+    bash scripts/shell/install.sh
+
+# Install missing HomericIntelligence ecosystem dependencies
+install ROLE="all":
+    bash scripts/shell/install.sh --install --role {{ ROLE }}

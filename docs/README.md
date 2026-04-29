@@ -7,6 +7,7 @@ This repository consolidates scripts and tools from across the HomericIntelligen
 ## Available Utilities
 
 Currently consolidating utilities from:
+
 - ProjectOdyssey (training visualization, project utilities)
 - ProjectScylla (installation tools, data processing)
 - Other project scripts and shared utilities
@@ -30,6 +31,7 @@ Most scripts support `--help` flag for detailed usage information.
 ## Development Principles
 
 Following CLAUDE.md guidelines:
+
 - KISS (Keep It Simple, Stupid)
 - DRY (Don't Repeat Yourself)
 - YAGNI (You Aren't Gonna Need It)
