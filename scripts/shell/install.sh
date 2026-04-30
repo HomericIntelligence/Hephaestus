@@ -508,7 +508,7 @@ if should_check_control; then
         apt_install ninja-build && check_pass "ninja installed" || true
     fi
 
-    for pkg in gcc g++ libssl-dev; do
+    for pkg in gcc g++ libssl-dev clang clang-format clang-tidy gdb valgrind lcov gcovr cppcheck; do
         if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
             check_pass "$pkg"
         else
@@ -640,7 +640,75 @@ if has_cmd claude; then
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Section 9: PATH sanity check
+# Section 9: Python dev toolchain (all roles)
+# pre-commit, ruff, mypy are required by every project's CI hooks
+# ═════════════════════════════════════════════════════════════════════════════
+section "Python Dev Toolchain"
+
+for pytool in pre-commit ruff mypy; do
+    if has_cmd "$pytool"; then
+        check_pass "$pytool $(get_version "$pytool" --version 2>/dev/null || echo installed)"
+    else
+        check_fail "$pytool — NOT FOUND"
+        if $INSTALL && has_cmd pip3; then
+            pip3 install --break-system-packages "$pytool" >/dev/null 2>&1 \
+                || pip3 install --user "$pytool" >/dev/null 2>&1 \
+                && check_pass "$pytool installed" \
+                || check_fail "$pytool — install failed"
+        fi
+    fi
+done
+
+# Dagger CLI (ProjectProteus pipeline engine)
+if has_cmd dagger; then
+    check_pass "dagger $(get_version dagger version 2>/dev/null || echo installed)"
+else
+    check_warn "dagger — NOT FOUND (required by ProjectProteus)"
+    if $INSTALL; then
+        echo -e "    ${BLUE}→${NC} Installing Dagger CLI..."
+        curl -fsSL https://dl.dagger.io/dagger/install.sh | BIN_DIR=~/.local/bin sh >/dev/null 2>&1 \
+            && check_pass "dagger installed to ~/.local/bin" \
+            || check_warn "dagger — install failed (see https://dagger.io)"
+    fi
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Section 10: Observability stack (worker role — ProjectArgus)
+# Checks that container images are available for the monitoring stack
+# ═════════════════════════════════════════════════════════════════════════════
+if should_check_worker; then
+    section "Observability (ProjectArgus)"
+
+    # The observability stack runs via podman/docker compose — just verify
+    # the container runtime is available (already checked in Section 6).
+    # We warn rather than fail since these pull automatically on first compose up.
+    OBS_IMAGES=(
+        "prom/prometheus:v2.54.1"
+        "grafana/loki:3.1.2"
+        "grafana/grafana:11.2.2"
+        "grafana/promtail:3.1.2"
+        "nginx:1.27-alpine"
+    )
+    OBS_RUNTIME=""
+    has_cmd podman && OBS_RUNTIME="podman"
+    has_cmd docker && [[ -z "$OBS_RUNTIME" ]] && OBS_RUNTIME="docker"
+
+    if [[ -n "$OBS_RUNTIME" ]]; then
+        for img in "${OBS_IMAGES[@]}"; do
+            if "$OBS_RUNTIME" image exists "$img" 2>/dev/null \
+               || "$OBS_RUNTIME" image inspect "$img" >/dev/null 2>&1; then
+                check_pass "$img (cached)"
+            else
+                check_warn "$img — not pulled (run: $OBS_RUNTIME pull $img)"
+            fi
+        done
+    else
+        check_warn "observability images — no container runtime found (podman or docker required)"
+    fi
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Section 11: PATH sanity check
 # ═════════════════════════════════════════════════════════════════════════════
 section "PATH"
 
