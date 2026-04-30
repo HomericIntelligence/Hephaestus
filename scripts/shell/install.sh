@@ -102,11 +102,52 @@ echo "════════════════════════�
 echo -e "  Role: ${CYAN}${ROLE}${NC}    Install: ${CYAN}${INSTALL}${NC}"
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Section 0: Homebrew (Linux — all roles)
+# Installed first so subsequent sections can fall back to `brew install`
+# ═════════════════════════════════════════════════════════════════════════════
+section "Homebrew"
+
+# Ensure brew is on PATH even if just installed
+_brew_path() {
+    for _b in /home/linuxbrew/.linuxbrew/bin/brew ~/.linuxbrew/bin/brew; do
+        [[ -x "$_b" ]] && echo "$_b" && return
+    done
+}
+
+if has_cmd brew; then
+    check_pass "brew $(get_version brew --version)"
+else
+    BREW_BIN=$(_brew_path)
+    if [[ -n "$BREW_BIN" ]]; then
+        check_pass "brew (found at $BREW_BIN)"
+        add_to_bashrc "eval \"\$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)\""
+        eval "$("$BREW_BIN" shellenv)" 2>/dev/null || true
+    else
+        check_fail "brew — NOT FOUND"
+        if $INSTALL; then
+            echo -e "    ${BLUE}→${NC} Installing Homebrew (Linuxbrew)..."
+            NONINTERACTIVE=1 /bin/bash -c \
+                "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
+                </dev/null >/dev/null 2>&1
+            BREW_BIN=$(_brew_path)
+            if [[ -n "$BREW_BIN" ]]; then
+                check_pass "brew installed"
+                # Linuxbrew standard shellenv
+                add_to_bashrc "eval \"\$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)\""
+                eval "$("$BREW_BIN" shellenv)" 2>/dev/null || true
+            else
+                check_fail "brew — install failed (see https://brew.sh)"
+            fi
+        fi
+    fi
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Section 1: Core System Tooling (all roles)
 # ═════════════════════════════════════════════════════════════════════════════
 section "Core Tooling"
 
-for pkg in git curl jq unzip; do
+for pkg in git curl jq unzip vim universal-ctags; do
     if has_cmd "$pkg"; then
         check_pass "$pkg $(get_version "$pkg" --version)"
     else
@@ -136,16 +177,44 @@ if has_cmd gh; then
 else
     check_fail "gh — NOT FOUND (required for PR/issue operations)"
     if $INSTALL; then
-        echo -e "    ${BLUE}→${NC} Installing gh via apt..."
-        if ! has_cmd gpg; then apt_install gnupg; fi
-        (
-            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-                | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null &&
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-                | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null &&
-            sudo apt-get update -qq >/dev/null 2>&1 &&
-            sudo apt-get install -y gh >/dev/null 2>&1
-        ) && check_pass "gh installed" || check_fail "gh — install failed (see https://cli.github.com)"
+        _gh_installed=false
+        # Try brew first if available (avoids apt keyring setup)
+        if has_cmd brew; then
+            echo -e "    ${BLUE}→${NC} Installing gh via brew..."
+            brew install gh >/dev/null 2>&1 && _gh_installed=true
+        fi
+        if ! $_gh_installed; then
+            echo -e "    ${BLUE}→${NC} Installing gh via apt..."
+            if ! has_cmd gpg; then apt_install gnupg; fi
+            (
+                curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+                    | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null &&
+                echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+                    | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null &&
+                sudo apt-get update -qq >/dev/null 2>&1 &&
+                sudo apt-get install -y gh >/dev/null 2>&1
+            ) && _gh_installed=true
+        fi
+        $_gh_installed && check_pass "gh installed" || check_fail "gh — install failed (see https://cli.github.com)"
+    fi
+fi
+
+# Node.js + npm (required for Claude Code install)
+if has_cmd npm; then
+    check_pass "npm $(get_version npm --version)"
+else
+    check_fail "npm — NOT FOUND (required for Claude Code)"
+    if $INSTALL; then
+        _npm_installed=false
+        if has_cmd brew; then
+            echo -e "    ${BLUE}→${NC} Installing Node.js via brew..."
+            brew install node >/dev/null 2>&1 && _npm_installed=true
+        fi
+        if ! $_npm_installed; then
+            echo -e "    ${BLUE}→${NC} Installing Node.js via apt..."
+            apt_install nodejs && apt_install npm && _npm_installed=true
+        fi
+        $_npm_installed && check_pass "npm installed" || check_fail "npm — install failed"
     fi
 fi
 
@@ -204,6 +273,33 @@ else
     if $INSTALL; then
         apt_install python3-pip && check_pass "pip3 installed" || \
             (python3 -m ensurepip --upgrade >/dev/null 2>&1 && check_pass "pip3 bootstrapped via ensurepip") || true
+    fi
+fi
+
+# python3.12-venv (required for pixi and isolated virtual environments)
+if python3 -c "import venv" 2>/dev/null; then
+    check_pass "python3 venv module available"
+else
+    check_fail "python3-venv — NOT FOUND"
+    if $INSTALL; then
+        apt_install python3.12-venv \
+            || apt_install python3-venv \
+            && check_pass "python3-venv installed" \
+            || check_fail "python3-venv — install failed"
+    fi
+fi
+
+# huggingface-cli (model/dataset downloads from Hugging Face Hub)
+if has_cmd huggingface-cli; then
+    check_pass "huggingface-cli $(get_version huggingface-cli version)"
+else
+    check_fail "huggingface-cli — NOT FOUND"
+    if $INSTALL && has_cmd pip3; then
+        echo -e "    ${BLUE}→${NC} Installing huggingface_hub[cli]..."
+        pip3 install --break-system-packages "huggingface_hub[cli]" >/dev/null 2>&1 \
+            || pip3 install --user "huggingface_hub[cli]" >/dev/null 2>&1 \
+            && check_pass "huggingface-cli installed" \
+            || check_fail "huggingface-cli — install failed"
     fi
 fi
 
