@@ -459,7 +459,92 @@ if should_check_control; then
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Section 8: PATH sanity check
+# Section 8: Claude Code + plugins (all roles)
+# ═════════════════════════════════════════════════════════════════════════════
+section "Claude Code"
+
+if has_cmd claude; then
+    check_pass "claude $(claude --version 2>&1 | head -1)"
+else
+    check_fail "claude — NOT FOUND"
+    if $INSTALL; then
+        if has_cmd npm; then
+            echo -e "    ${BLUE}→${NC} Installing Claude Code via npm..."
+            npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 \
+                && check_pass "claude installed" \
+                || check_fail "claude — install failed (see https://claude.ai/code)"
+        else
+            check_fail "claude — skipped (npm not found; install Node.js first)"
+        fi
+    fi
+fi
+
+if has_cmd claude; then
+    # Ensure required marketplaces are registered
+    declare -A MARKETPLACES=(
+        [claude-plugins-official]="anthropics/claude-plugins-official"
+        [cc-marketplace]="kenryu42/cc-marketplace"
+        [ProjectHephaestus]="HomericIntelligence/ProjectHephaestus"
+    )
+    for mkt_name in "${!MARKETPLACES[@]}"; do
+        mkt_source="${MARKETPLACES[$mkt_name]}"
+        if claude plugin marketplace list 2>/dev/null | grep -qF "$mkt_name"; then
+            check_pass "marketplace $mkt_name"
+        else
+            check_fail "marketplace $mkt_name — NOT REGISTERED"
+            if $INSTALL; then
+                claude plugin marketplace add "https://github.com/$mkt_source" --name "$mkt_name" 2>/dev/null \
+                    && check_pass "marketplace $mkt_name added" \
+                    || check_fail "marketplace $mkt_name — add failed"
+            fi
+        fi
+    done
+
+    # User-scoped plugins (enabled across all projects)
+    declare -A USER_PLUGINS=(
+        [clangd-lsp]="claude-plugins-official"
+        [code-review]="claude-plugins-official"
+        [commit-commands]="claude-plugins-official"
+        [feature-dev]="claude-plugins-official"
+        [pyright-lsp]="claude-plugins-official"
+        [safety-net]="cc-marketplace"
+        [security-guidance]="claude-plugins-official"
+    )
+    for plugin_name in "${!USER_PLUGINS[@]}"; do
+        mkt="${USER_PLUGINS[$plugin_name]}"
+        if claude plugin list 2>/dev/null | grep -qE "^\s+[>❯]\s+${plugin_name}@"; then
+            check_pass "plugin $plugin_name (user)"
+        else
+            check_fail "plugin $plugin_name — NOT INSTALLED"
+            if $INSTALL; then
+                claude plugin install "${plugin_name}@${mkt}" --scope user 2>/dev/null \
+                    && check_pass "plugin $plugin_name installed" \
+                    || check_fail "plugin $plugin_name — install failed"
+            fi
+        fi
+    done
+
+    # Project-scoped plugins (installed per-project in the repo's .claude-plugin)
+    declare -A PROJECT_PLUGINS=(
+        [hephaestus]="ProjectHephaestus"
+    )
+    for plugin_name in "${!PROJECT_PLUGINS[@]}"; do
+        mkt="${PROJECT_PLUGINS[$plugin_name]}"
+        if claude plugin list 2>/dev/null | grep -qE "^\s+[>❯]\s+${plugin_name}@"; then
+            check_pass "plugin $plugin_name (project)"
+        else
+            check_fail "plugin $plugin_name — NOT INSTALLED"
+            if $INSTALL; then
+                claude plugin install "${plugin_name}@${mkt}" --scope project 2>/dev/null \
+                    && check_pass "plugin $plugin_name installed" \
+                    || check_fail "plugin $plugin_name — install failed"
+            fi
+        fi
+    done
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Section 9: PATH sanity check
 # ═════════════════════════════════════════════════════════════════════════════
 section "PATH"
 
