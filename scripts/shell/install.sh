@@ -331,6 +331,25 @@ else
     fi
 fi
 
+# Mojo (ProjectOdyssey) — installed via pixi, not as a system binary
+# The mojo binary lives in ProjectOdyssey/.pixi/envs/default/bin/mojo
+ODYSSEY_DIR="${ODYSSEY_DIR:-$HOME/ProjectOdyssey}"
+if has_cmd mojo; then
+    check_pass "mojo $(get_version mojo --version)"
+elif [[ -x "$ODYSSEY_DIR/.pixi/envs/default/bin/mojo" ]]; then
+    check_pass "mojo (via pixi env at $ODYSSEY_DIR)"
+elif [[ -d "$ODYSSEY_DIR" ]]; then
+    check_warn "mojo — pixi env not initialized in $ODYSSEY_DIR"
+    if $INSTALL && has_cmd pixi; then
+        echo -e "    ${BLUE}→${NC} Running pixi install in $ODYSSEY_DIR..."
+        pixi install -q --manifest-path "$ODYSSEY_DIR/pixi.toml" >/dev/null 2>&1 \
+            && check_pass "mojo installed via pixi" \
+            || check_warn "mojo — pixi install failed (check $ODYSSEY_DIR/pixi.toml)"
+    fi
+else
+    check_skip "mojo — $ODYSSEY_DIR not found (clone ProjectOdyssey first)"
+fi
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Section 4: Go (Atlas dashboard — worker role)
 # Required by: infrastructure/ProjectArgus/dashboard (Atlas, port 3002)
