@@ -54,6 +54,17 @@ get_version() { "$@" 2>&1 | head -1 | grep -oP '\d+\.\d+[\.\d]*' | head -1; }
 # Compare versions: returns 0 if $1 >= $2
 version_gte() { printf '%s\n%s\n' "$2" "$1" | sort -V | head -1 | grep -qF "$2"; }
 
+# Append a line to ~/.bashrc if not already present, then source it in current shell
+add_to_bashrc() {
+    local line="$1"
+    if ! grep -qF "$line" ~/.bashrc 2>/dev/null; then
+        echo "$line" >> ~/.bashrc
+        echo -e "    ${BLUE}→${NC} Added to ~/.bashrc: $line"
+    fi
+    # Apply to current shell immediately
+    eval "$line" 2>/dev/null || true
+}
+
 # Install an apt package if --install was passed; return 0 on success
 apt_install() {
     local pkg="$1"
@@ -232,51 +243,52 @@ if should_check_worker; then
     section "Go (Atlas Dashboard)"
 
     GO_MIN="1.23"
-    if has_cmd go; then
-        GO_VER=$(get_version go version)
+    _go_installed_now=false
+
+    _install_go() {
+        echo -e "    ${BLUE}→${NC} Installing Go 1.23.8..."
+        GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+        GO_PKG="go1.23.8.linux-${GOARCH}.tar.gz"
+        if curl -fsSL "https://go.dev/dl/$GO_PKG" -o "/tmp/$GO_PKG" \
+            && sudo rm -rf /usr/local/go \
+            && sudo tar -C /usr/local -xzf "/tmp/$GO_PKG" \
+            && rm "/tmp/$GO_PKG"; then
+            check_pass "Go 1.23.8 installed to /usr/local/go"
+            add_to_bashrc "export PATH=\$PATH:/usr/local/go/bin"
+            _go_installed_now=true
+        else
+            check_fail "Go — install failed"
+        fi
+    }
+
+    if has_cmd go || [[ -x /usr/local/go/bin/go ]]; then
+        GO_BIN=$(has_cmd go && echo "go" || echo "/usr/local/go/bin/go")
+        GO_VER=$(get_version "$GO_BIN" version)
         if version_gte "$GO_VER" "$GO_MIN"; then
             check_pass "go $GO_VER (>= $GO_MIN)"
         else
             check_fail "go $GO_VER — need >= $GO_MIN (templ requires 1.23+)"
-            if $INSTALL; then
-                echo -e "    ${BLUE}→${NC} Installing Go $GO_MIN via official tarball..."
-                GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-                GO_PKG="go1.23.8.linux-${GOARCH}.tar.gz"
-                curl -fsSL "https://go.dev/dl/$GO_PKG" -o "/tmp/$GO_PKG" \
-                    && sudo rm -rf /usr/local/go \
-                    && sudo tar -C /usr/local -xzf "/tmp/$GO_PKG" \
-                    && rm "/tmp/$GO_PKG" \
-                    && check_pass "Go 1.23.8 installed to /usr/local/go" \
-                    || check_fail "Go — install failed"
-                echo -e "    ${DIM}Add to PATH: export PATH=\$PATH:/usr/local/go/bin${NC}"
-            fi
+            $INSTALL && _install_go
         fi
     else
         check_fail "go — NOT FOUND"
-        if $INSTALL; then
-            echo -e "    ${BLUE}→${NC} Installing Go 1.23.8..."
-            GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-            GO_PKG="go1.23.8.linux-${GOARCH}.tar.gz"
-            curl -fsSL "https://go.dev/dl/$GO_PKG" -o "/tmp/$GO_PKG" \
-                && sudo rm -rf /usr/local/go \
-                && sudo tar -C /usr/local -xzf "/tmp/$GO_PKG" \
-                && rm "/tmp/$GO_PKG" \
-                && check_pass "Go 1.23.8 installed to /usr/local/go" \
-                || check_fail "Go — install failed"
-            echo -e "    ${DIM}Add to PATH: export PATH=\$PATH:/usr/local/go/bin${NC}"
-        fi
+        $INSTALL && _install_go
     fi
 
     # templ (Go HTML template generator used by Atlas)
+    # Use /usr/local/go/bin/go directly in case Go was just installed and PATH not yet refreshed
+    GO_BIN_FOR_TEMPL=$(has_cmd go && echo "go" || echo "/usr/local/go/bin/go")
     if has_cmd templ; then
         check_pass "templ $(get_version templ version)"
     else
         check_fail "templ — NOT FOUND (required by Atlas dashboard)"
-        if $INSTALL && has_cmd go; then
+        if $INSTALL && [[ -x "$GO_BIN_FOR_TEMPL" ]]; then
             echo -e "    ${BLUE}→${NC} Installing templ..."
-            GOBIN=~/.local/bin go install github.com/a-h/templ/cmd/templ@latest >/dev/null 2>&1 \
+            GOBIN=$HOME/.local/bin "$GO_BIN_FOR_TEMPL" install github.com/a-h/templ/cmd/templ@latest >/dev/null 2>&1 \
                 && check_pass "templ installed to ~/.local/bin" \
-                || check_fail "templ — install failed (requires go in PATH)"
+                || check_fail "templ — install failed"
+        elif $INSTALL; then
+            check_fail "templ — skipped (go not available)"
         fi
     fi
 fi
@@ -410,25 +422,38 @@ if should_check_control; then
     done
 
     # Conan (C++ package manager — used by Agamemnon/Nestor)
-    if has_cmd conan; then
-        check_pass "conan $(get_version conan --version)"
-        if conan profile show default >/dev/null 2>&1; then
+    _conan_ensure_profile() {
+        local conan_bin="${1:-conan}"
+        if "$conan_bin" profile show default >/dev/null 2>&1; then
             check_pass "conan default profile exists"
         else
             check_fail "conan default profile missing"
             if $INSTALL; then
-                conan profile detect --force >/dev/null 2>&1 \
+                "$conan_bin" profile detect --force >/dev/null 2>&1 \
                     && check_pass "conan profile created" \
                     || check_fail "conan profile detect failed"
             fi
         fi
+    }
+
+    if has_cmd conan; then
+        check_pass "conan $(get_version conan --version)"
+        _conan_ensure_profile conan
     else
         check_fail "conan — NOT FOUND"
         if $INSTALL && has_cmd pip3; then
             pip3 install --break-system-packages conan >/dev/null 2>&1 \
-                || pip3 install --user conan >/dev/null 2>&1 \
-                && check_pass "conan installed" \
-                || check_fail "conan — install failed"
+                || pip3 install --user conan >/dev/null 2>&1
+            # Locate the freshly-installed conan (may be in ~/.local/bin or pip prefix)
+            CONAN_BIN=$(command -v conan 2>/dev/null \
+                || python3 -c "import sysconfig; print(sysconfig.get_path('scripts'))" 2>/dev/null | xargs -I{} ls {}/conan 2>/dev/null \
+                || echo "")
+            if [[ -n "$CONAN_BIN" && -x "$CONAN_BIN" ]]; then
+                check_pass "conan installed"
+                _conan_ensure_profile "$CONAN_BIN"
+            else
+                check_fail "conan — install failed"
+            fi
         fi
     fi
 fi
@@ -449,8 +474,13 @@ if [[ ${#MISSING_PATHS[@]} -eq 0 ]]; then
     check_pass "PATH includes ~/.local/bin and /usr/local/go/bin"
 else
     for dir in "${MISSING_PATHS[@]}"; do
-        check_warn "$dir not in PATH"
-        echo -e "    ${DIM}Add to ~/.bashrc or ~/.profile: export PATH=\$PATH:$dir${NC}"
+        if $INSTALL; then
+            add_to_bashrc "export PATH=\$PATH:$dir"
+            check_pass "$dir added to PATH (via ~/.bashrc)"
+        else
+            check_warn "$dir not in PATH"
+            echo -e "    ${DIM}Run with --install to add to ~/.bashrc, or: export PATH=\$PATH:$dir${NC}"
+        fi
     done
 fi
 
