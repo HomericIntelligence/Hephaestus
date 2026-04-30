@@ -147,7 +147,7 @@ fi
 # ═════════════════════════════════════════════════════════════════════════════
 section "Core Tooling"
 
-for pkg in git curl jq unzip vim universal-ctags; do
+for pkg in git curl jq unzip vim universal-ctags libssl-dev libopenblas-dev; do
     if has_cmd "$pkg"; then
         check_pass "$pkg $(get_version "$pkg" --version)"
     else
