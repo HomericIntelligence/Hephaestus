@@ -508,7 +508,7 @@ if should_check_control; then
         apt_install ninja-build && check_pass "ninja installed" || true
     fi
 
-    for pkg in gcc g++ libssl-dev clang clang-format clang-tidy gdb valgrind lcov gcovr cppcheck; do
+    for pkg in gcc g++ libssl-dev clang clang-format clang-tidy gdb valgrind lcov gcovr cppcheck ccache; do
         if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
             check_pass "$pkg"
         else
