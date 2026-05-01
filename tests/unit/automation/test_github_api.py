@@ -217,7 +217,7 @@ class TestPrefetchIssueStates:
 class TestGhCall:
     """Tests for _gh_call function."""
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.gh_subprocess.run_subprocess")
     def test_successful_call(self, mock_run: Any) -> None:
         """Test successful gh call."""
         mock_result = Mock()
@@ -229,9 +229,9 @@ class TestGhCall:
         assert result.stdout == "success"
         mock_run.assert_called_once()
 
-    @patch("hephaestus.automation.github_api.run")
-    @patch("hephaestus.automation.github_api.wait_until")
-    @patch("hephaestus.automation.github_api.detect_rate_limit")
+    @patch("hephaestus.github.gh_subprocess.run_subprocess")
+    @patch("hephaestus.github.gh_subprocess.wait_until")
+    @patch("hephaestus.github.gh_subprocess.detect_rate_limit")
     def test_retry_on_rate_limit(self, mock_detect: Any, mock_wait: Any, mock_run: Any) -> None:
         """Test retry on rate limit."""
         # First call fails with rate limit, second succeeds
@@ -249,7 +249,7 @@ class TestGhCall:
         assert mock_run.call_count == 2
         mock_wait.assert_called_once_with(1234567890)
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.gh_subprocess.run_subprocess")
     def test_fail_fast_on_permission_error(self, mock_run: Any) -> None:
         """Test that permission errors fail fast without retry."""
         mock_run.side_effect = subprocess.CalledProcessError(
@@ -262,7 +262,7 @@ class TestGhCall:
         # Should only call once, no retries
         assert mock_run.call_count == 1
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.gh_subprocess.run_subprocess")
     def test_fail_fast_on_not_found(self, mock_run: Any) -> None:
         """Test that 404 errors fail fast without retry."""
         mock_run.side_effect = subprocess.CalledProcessError(1, "gh", stderr="404 Not Found")
@@ -272,7 +272,7 @@ class TestGhCall:
 
         assert mock_run.call_count == 1
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.gh_subprocess.run_subprocess")
     def test_fail_fast_on_bad_request(self, mock_run: Any) -> None:
         """Test that 400 errors fail fast without retry."""
         mock_run.side_effect = subprocess.CalledProcessError(1, "gh", stderr="400 Bad Request")
@@ -282,8 +282,8 @@ class TestGhCall:
 
         assert mock_run.call_count == 1
 
-    @patch("hephaestus.automation.github_api.run")
-    @patch("hephaestus.automation.github_api.time.sleep")
+    @patch("hephaestus.github.gh_subprocess.run_subprocess")
+    @patch("hephaestus.github.gh_subprocess.time.sleep")
     def test_retry_on_transient_error(self, mock_sleep: Any, mock_run: Any) -> None:
         """Test retry on transient errors."""
         # Fail twice with transient error, then succeed
@@ -299,7 +299,7 @@ class TestGhCall:
         assert mock_run.call_count == 3
         assert mock_sleep.call_count == 2  # Sleep between retries
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.gh_subprocess.run_subprocess")
     def test_claude_usage_limit_detection(self, mock_run: Any) -> None:
         """Test detection of Claude usage limit."""
         mock_run.side_effect = subprocess.CalledProcessError(
@@ -310,6 +310,11 @@ class TestGhCall:
             _gh_call(["issue", "view", "123"])
 
 
+# NOTE on patch targets below: tests in TestGhCall patch
+# "hephaestus.github.gh_subprocess.*" because they test _gh_call's own internals.
+# All other tests patch "hephaestus.automation.github_api._gh_call", which is the
+# re-export binding used by every function in this module — the correct target for
+# intercepting calls that flow through github_api (not through gh_subprocess directly).
 class TestGhIssueComment:
     """Tests for gh_issue_comment function."""
 

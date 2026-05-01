@@ -307,7 +307,7 @@ async def _dispatch_swarm(
                 model="claude-sonnet-4-6",
             )
             try:
-                for message in query(prompt=prompt, options=options):
+                async for message in query(prompt=prompt, options=options):
                     text = getattr(message, "text", None) or str(message)
                     if "STATUS:" in text:
                         m = re.search(r"STATUS:\s*(\S+)", text)

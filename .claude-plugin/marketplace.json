@@ -9,11 +9,11 @@
   "plugins": [
     {
       "name": "hephaestus",
-      "description": "Shared tooling plugin for the HomericIntelligence ecosystem. Provides /skill-advisor (task routing), /advise (search skills registry), /learn (capture session learnings), /myrmidon-swarm (hierarchical agent orchestration), /brainstorm (design before code), /test-driven-development (RED-GREEN-REFACTOR), /systematic-debugging (root cause first), /verification (evidence before claims), /git-worktrees (isolated workspaces), /finish-branch (branch completion), /code-review (Sonnet reviewer + feedback), and /repo-analyze variants (repository auditing).",
+      "description": "Shared tooling plugin for the HomericIntelligence ecosystem. Provides /skill-advisor (task routing), /advise (search skills registry), /learn (capture session learnings), /myrmidon-swarm (hierarchical agent orchestration), /brainstorm (design before code), /test-driven-development (RED-GREEN-REFACTOR), /systematic-debugging (root cause first), /verification (evidence before claims), /git-worktrees (isolated workspaces), /finish-branch (branch completion), /code-review (Sonnet reviewer + feedback), /repo-analyze variants (repository auditing), /repo-analyze-full variants (full-coverage swarm auditing), /worktree-cleanup (audit + prune worktrees without deleting branches), and /tidy (rebase all branches with swarm conflict resolution).",
       "version": "3.0.0",
       "source": "./",
       "category": "tooling",
-      "tags": ["skill-advisor", "advise", "learn", "myrmidon-swarm", "brainstorm", "tdd", "test-driven-development", "debugging", "systematic-debugging", "verification", "git-worktrees", "finish-branch", "code-review", "repo-analyze", "orchestration", "skills"]
+      "tags": ["skill-advisor", "advise", "learn", "myrmidon-swarm", "brainstorm", "tdd", "test-driven-development", "debugging", "systematic-debugging", "verification", "git-worktrees", "finish-branch", "code-review", "repo-analyze", "repo-analyze-full", "repo-analyze-quick-full", "repo-analyze-strict-full", "worktree-cleanup", "tidy", "orchestration", "skills"]
     }
   ]
 }

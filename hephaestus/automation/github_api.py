@@ -16,13 +16,12 @@ import os
 import re
 import subprocess
 import tempfile
-import time
 from pathlib import Path
 from typing import Any, cast
 
-from hephaestus.github.rate_limit import detect_claude_usage_limit, detect_rate_limit, wait_until
+from hephaestus.github.gh_subprocess import _gh_call as _gh_call
 
-from .git_utils import get_repo_info, run
+from .git_utils import get_repo_info
 from .models import IssueInfo, IssueState
 
 logger = logging.getLogger(__name__)
@@ -70,90 +69,6 @@ def gh_create_label(name: str, color: str = "ededed", description: str = "") -> 
     if _label_cache is not None:
         _label_cache.add(name)
     logger.info(f"Created missing label '{name}'")
-
-
-def _gh_call(
-    args: list[str],
-    check: bool = True,
-    retry_on_rate_limit: bool = True,
-    max_retries: int = 3,
-) -> subprocess.CompletedProcess[str]:
-    """Call gh CLI with rate limit handling.
-
-    Args:
-        args: Arguments to pass to gh
-        check: Whether to raise on non-zero exit
-        retry_on_rate_limit: Whether to retry on rate limit
-        max_retries: Maximum retry attempts
-
-    Returns:
-        CompletedProcess instance
-
-    Raises:
-        subprocess.CalledProcessError: If command fails and check=True
-        RuntimeError: If Claude usage limit detected
-
-    """
-    for attempt in range(max_retries):
-        try:
-            result = run(
-                ["gh", *args],
-                check=check,
-                capture_output=True,
-                timeout=120,  # 2 minute timeout for gh CLI calls
-            )
-            return result
-        except subprocess.CalledProcessError as e:
-            stderr = e.stderr if e.stderr else ""
-
-            # Check for Claude usage limit
-            if detect_claude_usage_limit(stderr):
-                raise RuntimeError(
-                    "Claude API usage limit reached. Please check your billing."
-                ) from e
-
-            # Check for rate limit (regardless of retry_on_rate_limit flag)
-            reset_epoch = detect_rate_limit(stderr)
-            if reset_epoch is not None:
-                if retry_on_rate_limit:
-                    if reset_epoch > 0:
-                        wait_until(reset_epoch)
-                    else:
-                        # No reset time, use exponential backoff
-                        wait_seconds = min(60 * (2**attempt), 300)  # Max 5 minutes
-                        logger.warning(f"Rate limited but no reset time, waiting {wait_seconds}s")
-                        time.sleep(wait_seconds)
-                    continue
-                else:
-                    # Don't retry, but provide clear error message
-                    raise RuntimeError(
-                        f"GitHub API rate limit reached. Reset at epoch {reset_epoch}"
-                    ) from e
-
-            # Check if this is a non-transient error that shouldn't be retried
-            # Permission errors, not found, bad requests should fail fast
-            non_transient_patterns = [
-                r"403|forbidden|permission denied",
-                r"404|not found",
-                r"400|bad request",
-                r"401|unauthorized",
-                r"invalid argument",
-            ]
-            if any(re.search(pattern, stderr, re.IGNORECASE) for pattern in non_transient_patterns):
-                logger.error(f"Non-transient error detected: {stderr[:200]}")
-                raise
-
-            # Last retry attempt, re-raise
-            if attempt == max_retries - 1:
-                raise
-
-            # Transient error (network, timeout, 5xx), retry with backoff
-            wait_seconds = 2**attempt
-            logger.warning(f"gh call failed (attempt {attempt + 1}), retrying in {wait_seconds}s")
-            time.sleep(wait_seconds)
-
-    # Should not reach here, but satisfy type checker
-    raise RuntimeError("gh call failed after all retries")
 
 
 def gh_issue_json(issue_number: int) -> dict[str, Any]:

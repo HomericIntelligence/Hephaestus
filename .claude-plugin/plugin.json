@@ -1,6 +1,6 @@
 {
   "name": "hephaestus",
-  "description": "Shared tooling plugin for the HomericIntelligence ecosystem. Provides skill-advisor, advise, learn, myrmidon-swarm, brainstorm, test-driven-development, systematic-debugging, verification, git-worktrees, finish-branch, code-review, repo-analyze, and tidy commands.",
+  "description": "Shared tooling plugin for the HomericIntelligence ecosystem. Provides skill-advisor, advise, learn, myrmidon-swarm, brainstorm, test-driven-development, systematic-debugging, verification, git-worktrees, finish-branch, code-review, repo-analyze, repo-analyze-full, repo-analyze-quick-full, repo-analyze-strict-full, worktree-cleanup, and tidy commands.",
   "author": {
     "name": "HomericIntelligence"
   }
