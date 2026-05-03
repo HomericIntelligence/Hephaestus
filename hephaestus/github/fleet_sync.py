@@ -34,7 +34,6 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Any
 
-from hephaestus.github.gh_subprocess import _gh_call
 from hephaestus.github.rate_limit import detect_rate_limit, wait_until
 from hephaestus.logging.utils import get_logger
 
@@ -380,7 +379,7 @@ Rules:
                 len(conflict_files),
             )
             options = ClaudeCodeOptions(max_turns=30, cwd=str(work))
-            for message in query(prompt=prompt, options=options):  # type: ignore[attr-defined]
+            for message in query(prompt=prompt, options=options):
                 text = getattr(message, "text", None) or str(message)
                 if text:
                     logger.debug("  agent: %s", text[:200])

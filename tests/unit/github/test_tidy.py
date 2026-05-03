@@ -4,7 +4,6 @@ import pytest
 
 from hephaestus.github.tidy import parse_problem_branches
 
-
 # Fixture: clean gh-tidy run (no problem branches)
 CLEAN_OUTPUT = """\
 Checking out main and pulling the latest from remote origin...

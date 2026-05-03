@@ -197,6 +197,16 @@ omit = [
     "hephaestus/automation/planner.py",
     "hephaestus/automation/follow_up.py",
     "hephaestus/automation/learn.py",
+    "hephaestus/automation/address_review.py",
+    "hephaestus/automation/ci_driver.py",
+    "hephaestus/automation/curses_ui.py",
+    "hephaestus/automation/dependency_resolver.py",
+    "hephaestus/automation/git_utils.py",
+    "hephaestus/automation/github_api.py",
+    "hephaestus/automation/pr_reviewer.py",
+    "hephaestus/automation/worktree_manager.py",
+    "hephaestus/github/fleet_sync.py",
+    "hephaestus/github/tidy.py",
 ]
 
 [tool.coverage.report]
