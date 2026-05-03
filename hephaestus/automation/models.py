@@ -133,6 +133,10 @@ class ReviewPhase(str, Enum):
     LEARN = "learn"
     COMPLETED = "completed"
     FAILED = "failed"
+    POSTING = "posting"  # posting inline review comments to GitHub
+    WAITING_CI = "waiting_ci"  # waiting for CI checks
+    CI_FIXING = "ci_fixing"  # fixing CI failures
+    MERGED = "merged"  # PR merged
 
 
 class ReviewState(BaseModel):
@@ -148,6 +152,8 @@ class ReviewState(BaseModel):
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None
     error: str | None = None
+    posted_thread_ids: list[str] = Field(default_factory=list)  # GitHub review thread IDs posted
+    addressed_thread_ids: list[str] = Field(default_factory=list)  # thread IDs Claude addressed
 
 
 class ReviewerOptions(BaseModel):
@@ -158,6 +164,38 @@ class ReviewerOptions(BaseModel):
     dry_run: bool = False
     enable_learn: bool = True
     enable_ui: bool = True
+
+
+class PlanReviewerOptions(BaseModel):
+    """Options for the PlanReviewer."""
+
+    issues: list[int] = Field(default_factory=list)
+    max_workers: int = 3
+    dry_run: bool = False
+    enable_ui: bool = True
+    verbose: bool = False
+
+
+class AddressReviewOptions(BaseModel):
+    """Options for the AddressReview workflow."""
+
+    issues: list[int] = Field(default_factory=list)
+    max_workers: int = 3
+    dry_run: bool = False
+    enable_ui: bool = True
+    verbose: bool = False
+    resume_impl_session: bool = True  # attempt to resume implementer's Claude session
+
+
+class CIDriverOptions(BaseModel):
+    """Options for the CIDriver workflow."""
+
+    issues: list[int] = Field(default_factory=list)
+    max_workers: int = 3
+    dry_run: bool = False
+    enable_ui: bool = True
+    verbose: bool = False
+    max_fix_iterations: int = 1  # number of fix attempts before giving up
 
 
 class DependencyGraph(BaseModel):

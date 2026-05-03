@@ -439,3 +439,195 @@ Closes #{issue_number}
 
 Generated with [Claude Code](https://claude.com/claude-code)
 """
+
+
+PLAN_REVIEW_PROMPT = """
+Review the implementation plan for GitHub issue #{issue_number}.
+
+**Issue Title:** {issue_title}
+
+**Issue Description:**
+{issue_body}
+
+**Proposed Plan:**
+{plan_text}
+
+---
+
+**Your task:**
+Evaluate the plan above against the issue requirements. Consider:
+1. Does the plan fully address the issue requirements?
+2. Are the proposed changes well-scoped and safe?
+3. Are there missing steps, risky approaches, or ambiguities?
+4. Are the file paths and function names concrete and correct?
+
+**Output format:**
+Write a markdown review with your analysis. End your response with exactly one of the
+following verdict lines (including the bold markers):
+
+**Verdict: APPROVED** — Plan is sound and ready to implement.
+**Verdict: REVISE** — Plan needs changes before implementation (explain what).
+**Verdict: BLOCK** — Plan has a fundamental problem that prevents implementation (explain why).
+"""
+
+PR_REVIEW_ANALYSIS_PROMPT = """
+Analyze PR #{pr_number} linked to issue #{issue_number}.
+
+**Issue Description:**
+{issue_body}
+
+**PR Description:**
+{pr_description}
+
+**CI Status:**
+{ci_status}
+
+**PR Diff:**
+{pr_diff}
+
+---
+
+**Your task:**
+Review the PR for correctness, completeness, and code quality. Identify any issues that should
+be addressed as inline review comments.
+
+**Output format:**
+Write your analysis in prose. At the very end of your response, emit a single fenced JSON block:
+
+```json
+{{"comments": [{{"path": "...", "line": 1, "side": "RIGHT", "body": "..."}}], "summary": "..."}}
+```
+
+Rules for the JSON block:
+- `comments`: array of inline comment objects. Each must have:
+  - `path`: file path relative to repo root (string)
+  - `line`: line number in the file (integer, must be a changed line in the diff)
+  - `side`: always `"RIGHT"` for new code
+  - `body`: the review comment text (string)
+- `summary`: overall review verdict, max 200 characters
+- If there are no inline comments, emit: `{{"comments": [], "summary": "LGTM"}}`
+- Emit only one JSON block, at the very end of the response.
+"""
+
+ADDRESS_REVIEW_PROMPT = """
+Address the review threads for PR #{pr_number} (issue #{issue_number}).
+
+**Working Directory:** {worktree_path}
+
+**Review Threads to Address:**
+{threads_json}
+
+The threads_json above is a JSON array where each element has:
+- `thread_id`: GitHub GraphQL node ID of the review thread
+- `path`: file path relative to repo root
+- `line`: line number (integer or null)
+- `body`: the reviewer's comment text
+
+---
+
+**Your task:**
+For each thread, read the file at `path` in the working directory and apply the necessary
+code fix. After fixing all addressable threads:
+
+1. Run tests: `pixi run python -m pytest tests/ -v`
+2. Run pre-commit: `pre-commit run --all-files`
+3. Fix any issues found
+4. Commit all changes (do NOT push)
+
+**Output format:**
+Write your fix notes in prose. At the very end of your response, emit a single fenced JSON block:
+
+```json
+{{"addressed": ["<thread_id>", ...], "replies": {{"<thread_id>": "one-line reply"}}}}
+```
+
+Rules for the JSON block:
+- `addressed`: array of thread_id strings for threads you actually fixed in code
+- `replies`: mapping of thread_id to a one-line reply describing what you changed
+- Only include threads you genuinely fixed. Leave unaddressable threads out of `addressed`.
+- Emit only one JSON block, at the very end of the response.
+"""
+
+
+def get_plan_review_prompt(
+    issue_number: int,
+    issue_title: str,
+    issue_body: str,
+    plan_text: str,
+) -> str:
+    """Get the plan review prompt for evaluating an issue implementation plan.
+
+    Args:
+        issue_number: GitHub issue number
+        issue_title: Issue title
+        issue_body: Issue body/description
+        plan_text: The full plan text to review
+
+    Returns:
+        Formatted plan review prompt
+
+    """
+    return PLAN_REVIEW_PROMPT.format(
+        issue_number=issue_number,
+        issue_title=issue_title,
+        issue_body=issue_body,
+        plan_text=plan_text,
+    )
+
+
+def get_pr_review_analysis_prompt(
+    pr_number: int,
+    issue_number: int,
+    pr_diff: str = "",
+    issue_body: str = "",
+    ci_status: str = "",
+    pr_description: str = "",
+) -> str:
+    """Get the PR review analysis prompt for generating inline review comments.
+
+    Args:
+        pr_number: GitHub PR number
+        issue_number: Linked GitHub issue number
+        pr_diff: PR diff output
+        issue_body: Issue body/description
+        ci_status: CI check status summary
+        pr_description: PR description body
+
+    Returns:
+        Formatted PR review analysis prompt
+
+    """
+    return PR_REVIEW_ANALYSIS_PROMPT.format(
+        pr_number=pr_number,
+        issue_number=issue_number,
+        pr_diff=pr_diff,
+        issue_body=issue_body,
+        ci_status=ci_status,
+        pr_description=pr_description,
+    )
+
+
+def get_address_review_prompt(
+    pr_number: int,
+    issue_number: int,
+    worktree_path: str,
+    threads_json: str,
+) -> str:
+    """Get the address review prompt for fixing inline review thread feedback.
+
+    Args:
+        pr_number: GitHub PR number
+        issue_number: Linked GitHub issue number
+        worktree_path: Path to the git worktree containing the PR branch
+        threads_json: JSON string of unresolved review threads (array of thread dicts)
+
+    Returns:
+        Formatted address review prompt
+
+    """
+    return ADDRESS_REVIEW_PROMPT.format(
+        pr_number=pr_number,
+        issue_number=issue_number,
+        worktree_path=worktree_path,
+        threads_json=threads_json,
+    )

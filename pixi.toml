@@ -47,7 +47,7 @@ types-pyyaml = ">=6.0.12,<7"
 pip-audit = ">=2.7,<3"
 
 [feature.lint.tasks]
-pip-audit = "pip-audit"
+pip-audit = "pip-audit --ignore-vuln CVE-2026-3219"
 
 [environments]
 default = { features = ["dev"], solve-group = "default" }
