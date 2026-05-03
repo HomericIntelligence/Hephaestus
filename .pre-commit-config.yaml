@@ -91,7 +91,7 @@ repos:
       - id: check-unit-test-structure
         name: Check unit test structure
         description: Enforce tests/unit/ mirrors hephaestus/ subpackage structure
-        entry: python scripts/check_unit_test_structure.py
+        entry: python3 scripts/check_unit_test_structure.py
         language: system
         pass_filenames: false
         files: ^(hephaestus|tests/unit)/
@@ -114,7 +114,7 @@ repos:
       - id: check-python-version-consistency
         name: Check Python version consistency
         description: Ensure Python version is consistent across pyproject.toml, pixi.toml, and CI
-        entry: python scripts/check_python_version_consistency.py
+        entry: python3 scripts/check_python_version_consistency.py
         language: system
         pass_filenames: false
         files: ^(pyproject\.toml|pixi\.toml|\.github/workflows/.*\.yml)$
@@ -125,7 +125,7 @@ repos:
       - id: check-version-single-source
         name: Check version single source of truth
         description: Ensure pyproject.toml is the sole version authority, pixi.toml has no version
-        entry: python scripts/check_version_single_source.py
+        entry: python3 scripts/check_version_single_source.py
         language: system
         pass_filenames: false
         files: ^(pyproject\.toml|pixi\.toml)$
