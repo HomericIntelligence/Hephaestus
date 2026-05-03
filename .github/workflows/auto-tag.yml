@@ -18,7 +18,7 @@ jobs:
       github.event.workflow_run.actor.login != 'github-actions[bot]'
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
         with:
           fetch-depth: 0
           fetch-tags: true
