@@ -75,12 +75,29 @@ git worktree remove <path>   # no --force
 git worktree prune
 ```
 
-If `git worktree remove` fails (locked worktree), classify as `KEEP` and print the manual unlock command for the user:
+If `git worktree remove` fails because the worktree is **locked** (dead agent PID), check whether it is clean first:
 
 ```bash
-git worktree unlock <path>
-git worktree remove --force <path>
+git -C <path> status --short   # empty = clean
 ```
+
+- **Locked + clean** → unlock and remove directly (no `--force` needed):
+
+  ```bash
+  git worktree unlock <path>
+  git worktree remove <path>   # succeeds without --force on a clean worktree
+  ```
+
+- **Locked + dirty** → classify as `KEEP` and print for the user to resolve manually:
+
+  ```bash
+  # Inspect dirty files, then:
+  git worktree unlock <path>
+  # resolve uncommitted work, then:
+  git worktree remove <path>
+  ```
+
+> **Why not `--force` on locked worktrees?** The Safety Net blocks `--force` and it is never needed for clean worktrees. An unlock + clean remove is always the correct path when there is no uncommitted state to protect.
 
 ### Step 6 — Print summary
 
@@ -90,7 +107,7 @@ List all worktrees with their classification and the actions taken or recommende
 
 - **Never `git branch -D` or `git branch -d`** — branch deletion is `gh tidy`'s exclusive responsibility.
 - **Never `git push origin --delete <branch>`** — same reason.
-- **Never `git worktree remove --force`** — locked worktrees are reported, not force-removed; the unlock + force-remove command is printed for the user to run manually.
+- **Never `git worktree remove --force`** — locked + clean worktrees are unlocked then removed without `--force`; locked + dirty worktrees are reported for the user to resolve manually.
 - **Never `git stash drop`** — stashes are listed and described but never dropped.
 - **Never modifies the user's current branch or working directory**.
 - **Never auto-commits without explicit `--commit-untracked` flag** — default behavior is print-only.
@@ -131,7 +148,7 @@ The Safety Net blocks several operations that must be handed to the user manuall
 | Blocked operation | Why blocked | Manual command |
 |-------------------|-------------|----------------|
 | `git stash drop` | Destructive, irreversible | `git stash drop 'stash@{N}'` |
-| `git worktree remove --force` | Could discard uncommitted work | `git worktree unlock <path> && git worktree remove --force <path>` |
+| `git worktree remove --force` | Could discard uncommitted work | `git worktree unlock <path> && git worktree remove <path>` (clean) or resolve dirty state first |
 | `git branch -D` | Permanent | `git branch -D <branch>` (only after audit proves safety) |
 | `rm -rf .worktrees/` | Bulk deletion | Use the unlock loop above instead |
 
