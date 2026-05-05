@@ -1,7 +1,7 @@
 ---
 name: worktree-cleanup
 description: Audit every git worktree, ensure all state is committed, then prune worktrees cleanly. NEVER deletes branches — that's `gh tidy`'s job. Use when: (1) `git worktree list` shows many entries after a parallel session, (2) you suspect uncommitted work in worktrees, (3) you want to clean up before running `gh tidy`.
-argument-hint: <optional: --dry-run | --commit-untracked>
+argument-hint: <optional: --dry-run>
 allowed-tools: [Bash, Read]
 ---
 
@@ -61,7 +61,7 @@ Lifted verbatim from ProjectMnemosyne `git-worktree-cleanup-preservation-audit` 
 | State | Meaning | Skill Action |
 |-------|---------|-------------|
 | `CLEAN_PRUNE_OK` | No uncommitted changes; content provably on main | Run `git worktree remove <path>` + `git worktree prune` |
-| `NEEDS_COMMIT` | Uncommitted changes present | Print exact `git add` + `git commit` commands; do NOT auto-commit unless `--commit-untracked` passed |
+| `NEEDS_COMMIT` | Uncommitted non-artifact changes present | Auto-commit files clearly related to the branch's issue; ask user about ambiguous files; ignore artifacts |
 | `NEEDS_PUSH` | Commits present but not on remote | Print `git push -u origin <branch>` for user to run |
 | `NEEDS_PR` | Commits on remote but no open PR | Print `gh pr create` template for user |
 | `KEEP` | Open PR exists or classification is ambiguous | Report and skip — do not touch |
@@ -88,16 +88,65 @@ git -C <path> status --short   # empty = clean
   git worktree remove <path>   # succeeds without --force on a clean worktree
   ```
 
-- **Locked + dirty** → classify as `KEEP` and print for the user to resolve manually:
+- **Locked + dirty** → classify dirty files, auto-commit real work, ask user about ambiguous files, then unlock and remove:
+
+  **Step 5a — Classify dirty files**
 
   ```bash
-  # Inspect dirty files, then:
+  git -C <path> status --short
+  ```
+
+  Artifact patterns — **always ignore, never commit**:
+
+  ```
+  __pycache__/  *.pyc  *.pyo  *.pyd
+  .pytest_cache/  .mypy_cache/  .ruff_cache/
+  build/  dist/  *.egg-info/  htmlcov/
+  .coverage  .coverage.*
+  .claude-prompt-*.md  .issue_implementer
+  ```
+
+  **Step 5b — Commit real work**
+
+  For each non-artifact modified or untracked file, inspect the diff and infer which issue/branch it belongs to from the branch name and file content:
+
+  ```bash
+  git -C <path> diff HEAD -- <file>   # modified files
+  git -C <path> diff -- <file>        # untracked: show content
+  ```
+
+  Auto-commit files that clearly relate to the branch's issue (same module, same feature area). Use `git add <specific-files>` — never `-A`:
+
+  ```bash
+  git -C <path> add <file1> <file2> ...
+  git -C <path> commit -m "chore(worktree-cleanup): salvage uncommitted work on <branch>"
+  git push -u origin <branch>
+  gh pr create --head <branch> --base main \
+    --title "chore(<scope>): salvage uncommitted work from worktree cleanup" \
+    --body "Uncommitted changes recovered during worktree cleanup. Please review."
+  ```
+
+  For files that are ambiguous (unrelated module, unclear purpose), list them and ask the user:
+
+  ```
+  Worktree <path> (<branch>) has files I'm unsure about:
+    - <file>: <one-line description of what it contains>
+
+  Should I: (a) commit them to this branch, (b) skip them (leave on disk), or (c) discard them?
+  ```
+
+  Wait for user response before proceeding.
+
+  **Step 5c — Unlock and remove**
+
+  After all real work is committed (or the user has decided on ambiguous files):
+
+  ```bash
   git worktree unlock <path>
-  # resolve uncommitted work, then:
   git worktree remove <path>
   ```
 
-> **Why not `--force` on locked worktrees?** The Safety Net blocks `--force` and it is never needed for clean worktrees. An unlock + clean remove is always the correct path when there is no uncommitted state to protect.
+> **Why not `--force` on locked worktrees?** The Safety Net blocks `--force` and it is never needed once real work is committed. Unlock + clean remove is always the correct path.
 
 ### Step 6 — Print summary
 
@@ -107,22 +156,20 @@ List all worktrees with their classification and the actions taken or recommende
 
 - **Never `git branch -D` or `git branch -d`** — branch deletion is `gh tidy`'s exclusive responsibility.
 - **Never `git push origin --delete <branch>`** — same reason.
-- **Never `git worktree remove --force`** — locked + clean worktrees are unlocked then removed without `--force`; locked + dirty worktrees are reported for the user to resolve manually.
+- **Never `git worktree remove --force`** — locked + clean worktrees are unlocked then removed without `--force`; locked + dirty worktrees have real work committed first, then unlock + remove.
+- **Never `git add -A` or `git add .`** — always adds specific files by name to avoid committing artifacts or secrets.
+- **Never commits artifact files** (`__pycache__`, `*.pyc`, `.pytest_cache`, `.coverage`, `.mypy_cache`, etc.).
 - **Never `git stash drop`** — stashes are listed and described but never dropped.
 - **Never modifies the user's current branch or working directory**.
-- **Never auto-commits without explicit `--commit-untracked` flag** — default behavior is print-only.
 
 ## Usage
 
 ```bash
-# Standard: audit all worktrees, print recommendations, prune safe ones
+# Standard: audit all worktrees, commit real work, ask about ambiguous files, prune safe ones
 /hephaestus:worktree-cleanup
 
-# Dry run: report only, no removals at all
+# Dry run: report only, no commits or removals at all
 /hephaestus:worktree-cleanup --dry-run
-
-# Auto-commit dirty worktrees as wip snapshots (requires user confirmation per worktree)
-/hephaestus:worktree-cleanup --commit-untracked
 ```
 
 ## Recommended Workflow
