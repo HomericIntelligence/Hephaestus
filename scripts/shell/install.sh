@@ -19,6 +19,7 @@
 set -uo pipefail
 
 # ─── Shared helpers (colors, counters, has_cmd, apt_install, etc.) ────────────
+# shellcheck source=scripts/shell/lib/install_helpers.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/install_helpers.sh"
 
 # ─── Script-local helpers ────────────────────────────────────────────────────

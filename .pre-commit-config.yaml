@@ -138,6 +138,9 @@ repos:
         name: ShellCheck
         description: Shell script linter
         files: \.sh$
+        # -x lets shellcheck follow `# shellcheck source=...` directives
+        # (e.g. install.sh sourcing lib/install_helpers.sh).
+        args: [-x]
 
   # General file checks
   - repo: https://github.com/pre-commit/pre-commit-hooks
