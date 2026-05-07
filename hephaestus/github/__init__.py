@@ -6,6 +6,7 @@ Provides utilities for working with GitHub repositories, PRs, and automation.
 from hephaestus.github.pr_merge import detect_repo_from_remote, local_branch_exists
 from hephaestus.github.pr_merge import main as merge_prs
 from hephaestus.github.rate_limit import (
+    detect_claude_usage_cap,
     detect_claude_usage_limit,
     detect_rate_limit,
     parse_reset_epoch,
@@ -24,6 +25,7 @@ from hephaestus.github.tidy import main as tidy
 
 __all__ = [
     "collect_stats",
+    "detect_claude_usage_cap",
     "detect_claude_usage_limit",
     "detect_rate_limit",
     "detect_repo_from_remote",

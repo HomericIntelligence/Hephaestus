@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .claude_models import implementer_model
 from .curses_ui import CursesUI, ThreadLogManager
 from .git_utils import get_repo_root, run
 from .github_api import (
@@ -600,9 +601,14 @@ class AddressReviewer:
         log_file = self.state_dir / f"address-review-{issue_number}.log"
 
         def _build_cmd(with_resume: bool, sid: str | None = None) -> list[str]:
+            # When resuming, the session locks the original model — passing
+            # --model would either be ignored or rejected. Only pin a model
+            # for fresh-session invocations.
             base = ["claude", str(prompt_file), "--output-format", "json"]
             if with_resume and sid:
                 base += ["--resume", sid]
+            else:
+                base[1:1] = ["--model", implementer_model()]
             base += [
                 "--permission-mode",
                 "dontAsk",

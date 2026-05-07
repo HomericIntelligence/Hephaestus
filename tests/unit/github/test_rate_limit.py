@@ -9,6 +9,7 @@ from unittest.mock import patch
 from hephaestus.github.rate_limit import (
     ALLOWED_TIMEZONES,
     RATE_LIMIT_RE,
+    detect_claude_usage_cap,
     detect_claude_usage_limit,
     detect_rate_limit,
     parse_reset_epoch,
@@ -196,3 +197,46 @@ class TestDetectClaudeUsageLimit:
         """Detects pattern embedded in longer text."""
         text = "API call failed: usage limit exceeded, please try again later"
         assert detect_claude_usage_limit(text) is True
+
+
+class TestDetectClaudeUsageCap:
+    """Tests for detect_claude_usage_cap.
+
+    The Claude CLI emits its 429 message in two shapes:
+
+    - With a date: "resets May 8, 5pm (America/Los_Angeles)" (multi-day quota)
+    - Without:     "resets 9pm (America/Los_Angeles)"        (intra-day quota)
+
+    Both must parse to a future epoch. The previous detector only matched
+    the GitHub CLI "Limit reached ..." prefix and so missed both forms.
+    """
+
+    def test_returns_none_for_unrelated_text(self) -> None:
+        assert detect_claude_usage_cap("Normal output, nothing wrong") is None
+
+    def test_parses_date_qualified_form(self) -> None:
+        text = "You're out of extra usage \xb7 resets May 8, 5pm (America/Los_Angeles)"
+        epoch = detect_claude_usage_cap(text)
+        assert epoch is not None
+        # Reset must be in the future (or recent past for clock skew).
+        assert epoch > int(time.time()) - 86400
+
+    def test_parses_intra_day_form(self) -> None:
+        text = "Claude usage limit reached \xb7 resets 9pm (America/Los_Angeles)"
+        epoch = detect_claude_usage_cap(text)
+        assert epoch is not None
+        assert epoch > 0
+
+    def test_finds_message_inside_json_payload(self) -> None:
+        """The CLI puts this message inside JSON when --output-format=json.
+
+        Make sure the regex still finds it even with surrounding JSON
+        punctuation and escape characters.
+        """
+        json_blob = (
+            '{"is_error": true, "api_error_status": 429, '
+            '"result": "You\'re out of extra usage \xb7 resets May 8, 5pm '
+            '(America/Los_Angeles)"}'
+        )
+        epoch = detect_claude_usage_cap(json_blob)
+        assert epoch is not None

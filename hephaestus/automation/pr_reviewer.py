@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .claude_models import reviewer_model
 from .curses_ui import CursesUI, ThreadLogManager
 from .git_utils import get_repo_root, run
 from .github_api import _gh_call, fetch_issue_info, gh_pr_review_post, write_secure
@@ -347,6 +348,8 @@ class PRReviewer:
             result = run(
                 [
                     "claude",
+                    "--model",
+                    reviewer_model(),
                     str(prompt_file),
                     "--output-format",
                     "json",

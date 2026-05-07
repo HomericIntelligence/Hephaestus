@@ -34,6 +34,34 @@ RATE_LIMIT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Regex matching Claude CLI usage-cap messages, e.g.:
+#   "You're out of extra usage · resets May 8, 5pm (America/Los_Angeles)"
+#   "Claude usage limit reached · resets 9pm (America/Los_Angeles)"
+# The date portion is optional; when missing, parse_reset_epoch falls back
+# to today/tomorrow logic.
+CLAUDE_USAGE_CAP_RE = re.compile(
+    r"resets\s+(?:(?P<date>[A-Za-z]+\s+\d{1,2})\s*,?\s+)?"
+    r"(?P<time>\d{1,2}(?::\d{2})?(?:am|pm)?)\s*\((?P<tz>[^)]+)\)",
+    re.IGNORECASE,
+)
+
+# Months for parsing date-prefixed usage-cap messages
+_MONTHS = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "sept": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+
 ALLOWED_TIMEZONES: set[str] = {
     "America/Los_Angeles",
     "America/New_York",
@@ -114,6 +142,94 @@ def detect_rate_limit(text: str) -> int | None:
     if not m:
         return None
     return parse_reset_epoch(m.group("time"), m.group("tz"))
+
+
+def _parse_reset_with_date(date_str: str, time_str: str, tz: str) -> int:
+    """Parse a date+time string like ``"May 8", "5pm", "America/Los_Angeles"``.
+
+    Args:
+        date_str: Date string like ``"May 8"`` (month name + day).
+        time_str: Time string like ``"5pm"`` or ``"14:30"`` — same form
+            ``parse_reset_epoch`` accepts.
+        tz: IANA timezone, falls back to ``America/Los_Angeles``.
+
+    Returns:
+        Unix timestamp for the parsed datetime, or ``now + 3600`` on failure.
+
+    """
+    if tz not in ALLOWED_TIMEZONES:
+        tz = "America/Los_Angeles"
+
+    dm = re.match(r"^([A-Za-z]+)\s+(\d{1,2})$", date_str.strip())
+    if not dm:
+        # Date didn't parse — fall back to today/tomorrow logic
+        return parse_reset_epoch(time_str, tz)
+
+    month_name, day_str = dm.groups()
+    month = _MONTHS.get(month_name[:3].lower())
+    if month is None:
+        return parse_reset_epoch(time_str, tz)
+    day = int(day_str)
+
+    tm = re.match(r"^(\d{1,2})(?::(\d{2}))?(am|pm)?$", time_str, re.IGNORECASE)
+    if not tm:
+        return int(time.time()) + 3600
+
+    hour, minute, ampm = tm.groups()
+    hour = int(hour)
+    minute = int(minute or 0)
+    if ampm:
+        ampm = ampm.lower()
+        if ampm == "pm" and hour < _NOON_HOUR:
+            hour += _NOON_HOUR
+        if ampm == "am" and hour == _NOON_HOUR:
+            hour = _MIDNIGHT_HOUR
+
+    now_local = dt.datetime.now(timezone.utc).astimezone(ZoneInfo(tz))
+    # Year disambiguation: if the parsed month/day is more than 6 months in the
+    # past, assume next year (handles end-of-year wrap).
+    year = now_local.year
+    try:
+        candidate = dt.datetime(year, month, day, hour, minute, tzinfo=ZoneInfo(tz))
+    except ValueError:
+        return int(time.time()) + 3600
+
+    if candidate < now_local - dt.timedelta(days=180):
+        candidate = candidate.replace(year=year + 1)
+
+    return int(candidate.timestamp())
+
+
+def detect_claude_usage_cap(text: str) -> int | None:
+    """Detect a Claude CLI usage-cap message and return the reset epoch.
+
+    Recognizes messages produced by ``claude -p`` when its API quota is
+    exhausted, e.g.::
+
+        You're out of extra usage · resets May 8, 5pm (America/Los_Angeles)
+        Claude usage limit reached · resets 9pm (America/Los_Angeles)
+
+    These can appear in either the CLI's stderr OR (more often) inside the
+    ``stdout`` JSON payload as the ``result`` field of an ``is_error: true``
+    response. Callers should pass both streams.
+
+    Args:
+        text: Text to search (CLI stderr or stdout).
+
+    Returns:
+        Unix timestamp when the cap resets, or ``None`` if no usage-cap
+        message is found.
+
+    """
+    m = CLAUDE_USAGE_CAP_RE.search(text)
+    if not m:
+        return None
+    date_str = m.group("date")
+    time_str = m.group("time")
+    tz = m.group("tz")
+    if date_str:
+        return _parse_reset_with_date(date_str, time_str, tz)
+    return parse_reset_epoch(time_str, tz)
 
 
 def wait_until(epoch: int) -> None:

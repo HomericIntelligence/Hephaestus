@@ -21,8 +21,13 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from hephaestus.github.rate_limit import detect_rate_limit, wait_until
+from hephaestus.github.rate_limit import (
+    detect_claude_usage_cap,
+    detect_rate_limit,
+    wait_until,
+)
 
+from .claude_models import advise_model, planner_model
 from .git_utils import get_repo_root
 from .github_api import (
     _gh_call,
@@ -36,6 +41,23 @@ from .prompts import get_advise_prompt, get_plan_prompt
 from .status_tracker import StatusTracker
 
 logger = logging.getLogger(__name__)
+
+
+def _scan_quota_reset(*texts: str) -> int | None:
+    """Find a quota-reset epoch across one or more output streams.
+
+    Inspects each text for either form of rate-limit message — the GitHub-CLI
+    "Limit reached ..." form or the Claude-CLI "out of extra usage ·
+    resets ..." form. Uses ``is not None`` chaining so an epoch of ``0``
+    (rate-limited, reset time unknown) is preserved instead of being
+    mistaken for "no rate limit".
+    """
+    for text in texts:
+        for detect in (detect_rate_limit, detect_claude_usage_cap):
+            epoch = detect(text)
+            if epoch is not None:
+                return epoch
+    return None
 
 
 class Planner:
@@ -236,6 +258,7 @@ class Planner:
         self,
         prompt: str,
         *,
+        model: str,
         max_retries: int = 3,
         timeout: int = 300,
         extra_args: list[str] | None = None,
@@ -244,6 +267,8 @@ class Planner:
 
         Args:
             prompt: The prompt to send to Claude
+            model: Claude model ID to pass to ``--model`` (caller picks per phase
+                via :mod:`hephaestus.automation.claude_models`)
             max_retries: Maximum retry attempts for rate limits
             timeout: Timeout in seconds
             extra_args: Additional CLI arguments
@@ -255,9 +280,12 @@ class Planner:
             RuntimeError: If Claude call fails
 
         """
-        # Build command
+        # Build command. ``--model`` pins the phase-appropriate model so this
+        # call doesn't burn quota on whatever the user's CLI default is.
         cmd = [
             "claude",
+            "--model",
+            model,
             "--print",
             prompt,
             "--output-format",
@@ -296,10 +324,14 @@ class Planner:
             return response
 
         except subprocess.CalledProcessError as e:
-            stderr = e.stderr if e.stderr else ""
+            stderr = e.stderr or ""
+            stdout = e.stdout or ""
 
-            # Check for rate limit
-            reset_epoch = detect_rate_limit(stderr)
+            # Rate-limit messages may appear in either stream. The Claude CLI
+            # in particular returns its 429 ("You're out of extra usage ·
+            # resets ...") inside the stdout JSON payload as the ``result``
+            # field of an ``is_error: true`` response, not in stderr.
+            reset_epoch = _scan_quota_reset(stderr, stdout)
             if reset_epoch is not None and max_retries > 0:
                 if reset_epoch > 0:
                     wait_until(reset_epoch)
@@ -311,12 +343,16 @@ class Planner:
                 # Retry with decremented counter
                 return self._call_claude(
                     prompt,
+                    model=model,
                     max_retries=max_retries - 1,
                     timeout=timeout,
                     extra_args=extra_args,
                 )
 
-            raise RuntimeError(f"Claude failed: {stderr}") from e
+            # Surface stdout too — the CLI's 429 message lives there, and an
+            # empty stderr in the original logs hid the actual cause.
+            detail = stderr or stdout or "(no output)"
+            raise RuntimeError(f"Claude failed: {detail}") from e
 
         except subprocess.TimeoutExpired as e:
             raise RuntimeError(f"Claude timed out after {timeout}s") from e
@@ -429,9 +465,10 @@ class Planner:
                 marketplace_path=str(marketplace_path),
             )
 
-            # Call Claude with shorter timeout
+            # Call Claude with shorter timeout. /advise is light search work
+            # so it runs on the cheap model.
             logger.info(f"Running advise for issue #{issue_number}...")
-            findings = self._call_claude(advise_prompt, timeout=180)
+            findings = self._call_claude(advise_prompt, model=advise_model(), timeout=180)
 
             return findings
 
@@ -486,8 +523,9 @@ class Planner:
 
         context = "\n".join(context_parts)
 
-        # Call Claude to generate plan
-        plan = self._call_claude(context, timeout=300)
+        # Call Claude to generate plan. Plans are small but reasoning-heavy,
+        # so this is the right place to spend Opus.
+        plan = self._call_claude(context, model=planner_model(), timeout=300)
 
         return plan
 

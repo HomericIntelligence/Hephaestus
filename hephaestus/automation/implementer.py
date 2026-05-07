@@ -22,6 +22,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
+from hephaestus.github.rate_limit import (
+    detect_claude_usage_cap,
+    detect_rate_limit,
+    wait_until,
+)
+
+from .claude_models import implementer_model
 from .curses_ui import CursesUI, ThreadLogManager
 from .dependency_resolver import CyclicDependencyError, DependencyResolver
 from .follow_up import parse_follow_up_items, run_follow_up_issues
@@ -41,6 +48,23 @@ from .status_tracker import StatusTracker
 from .worktree_manager import WorktreeManager
 
 logger = logging.getLogger(__name__)
+
+
+def _claude_quota_reset_epoch(*texts: str) -> int | None:
+    """Find a quota-reset epoch across one or more output streams.
+
+    Inspects each text for either form of rate-limit message — the GitHub-CLI
+    "Limit reached ..." form or the Claude-CLI "out of extra usage ·
+    resets ..." form. Uses ``is not None`` chaining so an epoch of ``0``
+    (rate-limited, reset time unknown) is preserved instead of being
+    mistaken for "no rate limit".
+    """
+    for text in texts:
+        for detect in (detect_rate_limit, detect_claude_usage_cap):
+            epoch = detect(text)
+            if epoch is not None:
+                return epoch
+    return None
 
 
 class IssueImplementer:
@@ -743,6 +767,8 @@ class IssueImplementer:
             result = run(
                 [
                     "claude",
+                    "--model",
+                    implementer_model(),
                     str(prompt_file),
                     "--output-format",
                     "json",
@@ -757,6 +783,23 @@ class IssueImplementer:
             # Parse session_id from JSON output
             try:
                 data = json.loads(result.stdout)
+
+                # The CLI sometimes returns exit 0 with ``is_error: true`` in
+                # JSON (e.g. usage caps in some channels). Treat that as a
+                # failure so the orchestrator can wait/retry instead of
+                # silently logging a useless session_id.
+                if isinstance(data, dict) and data.get("is_error"):
+                    err_text = str(data.get("result") or "")
+                    log_file = self.state_dir / f"claude-{issue_number}.log"
+                    log_file.write_text(result.stdout or "")
+                    reset_epoch = _claude_quota_reset_epoch(err_text)
+                    if reset_epoch is not None and reset_epoch > 0:
+                        logger.warning(
+                            f"Claude usage cap hit for issue #{issue_number}; waiting for reset"
+                        )
+                        wait_until(reset_epoch)
+                    raise RuntimeError(f"Claude Code failed: {err_text or 'is_error=true'}")
+
                 session_id = data.get("session_id")
 
                 # Save successful output to log file
@@ -787,6 +830,14 @@ class IssueImplementer:
             stderr = e.stderr or ""
             output = f"EXIT CODE: {e.returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
             log_file.write_text(output)
+
+            # If the failure was a quota cap, block until reset rather than
+            # letting the orchestrator burn through every remaining issue in
+            # seconds. The Claude CLI puts its 429 message in stdout JSON.
+            reset_epoch = _claude_quota_reset_epoch(stderr, stdout)
+            if reset_epoch is not None and reset_epoch > 0:
+                logger.warning(f"Claude usage cap hit for issue #{issue_number}; waiting for reset")
+                wait_until(reset_epoch)
 
             raise RuntimeError(f"Claude Code failed: {e.stderr or e.stdout}") from e
         except subprocess.TimeoutExpired as e:

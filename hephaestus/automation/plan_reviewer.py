@@ -19,6 +19,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from typing import Any
 
+from .claude_models import reviewer_model
 from .github_api import _gh_call, gh_issue_comment, gh_issue_json
 from .models import PlanReviewerOptions, WorkerResult
 from .prompts import get_plan_review_prompt
@@ -308,7 +309,7 @@ class PlanReviewer:
 
         try:
             result = subprocess.run(
-                ["claude", "--print", "--output-format", "text"],
+                ["claude", "--model", reviewer_model(), "--print", "--output-format", "text"],
                 input=prompt,
                 capture_output=True,
                 text=True,

@@ -21,6 +21,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
+from .claude_models import implementer_model
 from .git_utils import get_repo_root, run
 from .github_api import _gh_call, gh_pr_checks
 from .models import CIDriverOptions, WorkerResult
@@ -507,8 +508,12 @@ class CIDriver:
                 f.write(prompt)
                 prompt_file_path = Path(f.name)
 
+            # Fresh sessions pin the implementer model; --resume sessions inherit
+            # the original session's model and ignore --model.
             base_cmd = [
                 "claude",
+                "--model",
+                implementer_model(),
                 "--print",
                 "--output-format",
                 "json",
