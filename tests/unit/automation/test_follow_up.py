@@ -5,7 +5,12 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from hephaestus.automation.follow_up import parse_follow_up_items, run_follow_up_issues
+from hephaestus.automation.follow_up import (
+    _create_follow_up_issues,
+    parse_follow_up_items,
+    run_follow_up_issues,
+)
+from hephaestus.automation.issue_dedup import IssueMatch
 
 
 class TestParseFollowUpItems:
@@ -107,6 +112,10 @@ class TestRunFollowUpIssues:
         with (
             patch("hephaestus.automation.follow_up.run", return_value=mock_result),
             patch(
+                "hephaestus.automation.follow_up.find_duplicate_open_issue",
+                return_value=None,
+            ),
+            patch(
                 "hephaestus.automation.follow_up.gh_issue_create", side_effect=[101, 102]
             ) as mock_create,
             patch("hephaestus.automation.follow_up.gh_issue_comment") as mock_comment,
@@ -191,6 +200,10 @@ class TestRunFollowUpIssues:
 
         with (
             patch("hephaestus.automation.follow_up.run", return_value=mock_result),
+            patch(
+                "hephaestus.automation.follow_up.find_duplicate_open_issue",
+                return_value=None,
+            ),
             patch("hephaestus.automation.follow_up.gh_issue_create", return_value=201),
             patch("hephaestus.automation.follow_up.gh_issue_comment"),
             patch("hephaestus.automation.follow_up.time.sleep"),
@@ -198,3 +211,78 @@ class TestRunFollowUpIssues:
             run_follow_up_issues("sess", worktree_path, 42, tmp_path, mock_tracker, slot_id=1)
 
         mock_tracker.update_slot.assert_called_once_with(1, "#42: Creating follow-up 1/1")
+
+
+class TestCreateFollowUpIssuesDedup:
+    """Dedup behavior in _create_follow_up_issues."""
+
+    def test_skips_creation_when_pure_duplicate(self) -> None:
+        """When dedup finds a duplicate with no new info, skip filing entirely."""
+        items = [{"title": "Add JWT helper", "body": "JWT helper missing"}]
+        existing = IssueMatch(
+            number=42, title="Add JWT helper", body="JWT helper missing", similarity=0.95
+        )
+        with (
+            patch(
+                "hephaestus.automation.follow_up.find_duplicate_open_issue",
+                return_value=existing,
+            ),
+            patch(
+                "hephaestus.automation.follow_up.extract_new_info",
+                return_value="",
+            ),
+            patch("hephaestus.automation.follow_up.gh_issue_create") as mock_create,
+            patch("hephaestus.automation.follow_up.gh_issue_comment") as mock_comment,
+            patch("hephaestus.automation.follow_up.time.sleep"),
+        ):
+            created = _create_follow_up_issues(items, 7, None, None)
+
+        assert created == []
+        mock_create.assert_not_called()
+        mock_comment.assert_not_called()
+
+    def test_comments_on_duplicate_when_new_info(self) -> None:
+        """When dedup finds a duplicate with new info, comment on existing instead of creating."""
+        items = [{"title": "Add JWT helper", "body": "old + new info"}]
+        existing = IssueMatch(number=42, title="Add JWT helper", body="old", similarity=0.92)
+        with (
+            patch(
+                "hephaestus.automation.follow_up.find_duplicate_open_issue",
+                return_value=existing,
+            ),
+            patch(
+                "hephaestus.automation.follow_up.extract_new_info",
+                return_value="new info para",
+            ),
+            patch("hephaestus.automation.follow_up.gh_issue_create") as mock_create,
+            patch("hephaestus.automation.follow_up.gh_issue_comment") as mock_comment,
+            patch("hephaestus.automation.follow_up.time.sleep"),
+        ):
+            created = _create_follow_up_issues(items, 7, None, None)
+
+        assert created == []
+        mock_create.assert_not_called()
+        mock_comment.assert_called_once()
+        assert mock_comment.call_args[0][0] == 42
+        assert "new info para" in mock_comment.call_args[0][1]
+
+    def test_creates_issue_when_no_duplicate(self) -> None:
+        """When no duplicate is found, fall through to gh_issue_create."""
+        items = [{"title": "Brand new topic", "body": "details", "labels": ["x"]}]
+        with (
+            patch(
+                "hephaestus.automation.follow_up.find_duplicate_open_issue",
+                return_value=None,
+            ),
+            patch(
+                "hephaestus.automation.follow_up.gh_issue_create",
+                return_value=999,
+            ) as mock_create,
+            patch("hephaestus.automation.follow_up.gh_issue_comment") as mock_comment,
+            patch("hephaestus.automation.follow_up.time.sleep"),
+        ):
+            created = _create_follow_up_issues(items, 7, None, None)
+
+        assert created == [999]
+        mock_create.assert_called_once()
+        mock_comment.assert_not_called()

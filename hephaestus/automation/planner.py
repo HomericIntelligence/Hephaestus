@@ -27,7 +27,8 @@ from hephaestus.github.rate_limit import (
     wait_until,
 )
 
-from .claude_models import advise_model, planner_model
+from .claude_invoke import parse_review_verdict
+from .claude_models import advise_model, learn_model, planner_model, reviewer_model
 from .git_utils import get_repo_root
 from .github_api import (
     _gh_call,
@@ -37,8 +38,14 @@ from .github_api import (
     prefetch_issue_states,
 )
 from .models import PlannerOptions, PlanResult
-from .prompts import get_advise_prompt, get_plan_prompt
+from .prompts import (
+    get_advise_prompt,
+    get_plan_loop_review_prompt,
+    get_plan_prompt,
+)
 from .status_tracker import StatusTracker
+
+MAX_REVIEW_ITERATIONS = 3
 
 logger = logging.getLogger(__name__)
 
@@ -235,13 +242,17 @@ class Planner:
                 logger.info(f"[DRY RUN] Would plan issue #{issue_number}")
                 return PlanResult(issue_number=issue_number, success=True)
 
-            # Generate plan using Claude Code
-            plan = self._generate_plan(issue_number)
+            # Run the strict review loop: advise → loop[plan → learn → review]
+            # → post final plan with last review attached. Loop terminates on
+            # the first unambiguous GO or after MAX_REVIEW_ITERATIONS.
+            plan, final_review, iterations = self._run_plan_review_loop(issue_number, slot_id)
 
-            # Post plan to issue
-            self._post_plan(issue_number, plan)
+            # Post final plan + review to issue
+            self._post_plan(issue_number, plan, final_review=final_review)
 
-            self.status_tracker.update_slot(slot_id, f"Completed issue #{issue_number}")
+            self.status_tracker.update_slot(
+                slot_id, f"Completed issue #{issue_number} ({iterations} iter)"
+            )
             return PlanResult(issue_number=issue_number, success=True)
 
         except Exception as e:
@@ -476,12 +487,27 @@ class Planner:
             logger.warning(f"Advise step failed for issue #{issue_number}: {e}")
             return ""
 
-    def _generate_plan(self, issue_number: int, max_retries: int = 3) -> str:
+    def _generate_plan(
+        self,
+        issue_number: int,
+        max_retries: int = 3,
+        *,
+        prior_review: str | None = None,
+        cached_advise: str | None = None,
+        cached_issue_data: dict[str, Any] | None = None,
+    ) -> str:
         """Generate implementation plan using Claude Code.
 
         Args:
             issue_number: Issue number to plan
             max_retries: Maximum retry attempts for rate limits
+            prior_review: When set, the previous review-loop iteration's NoGo
+                critique. Injected into the prompt so the planner can address
+                the findings on this iteration.
+            cached_advise: Pre-computed advise findings (avoids re-running advise
+                on every loop iteration). When ``None`` and advise is enabled,
+                advise runs once.
+            cached_issue_data: Pre-fetched issue JSON to avoid duplicate API calls.
 
         Returns:
             Generated plan text
@@ -491,13 +517,16 @@ class Planner:
 
         """
         # Fetch issue data
-        issue_data = gh_issue_json(issue_number)
+        if cached_issue_data is not None:
+            issue_data = cached_issue_data
+        else:
+            issue_data = gh_issue_json(issue_number)
         issue_title = issue_data.get("title", f"Issue #{issue_number}")
         issue_body = issue_data.get("body", "")
 
-        # Run advise step if enabled
-        advise_findings = ""
-        if self.options.enable_advise:
+        # Run advise step if enabled (use cache if provided)
+        advise_findings = cached_advise if cached_advise is not None else ""
+        if cached_advise is None and self.options.enable_advise:
             advise_findings = self._run_advise(issue_number, issue_title, issue_body)
 
         # Build prompt
@@ -519,6 +548,21 @@ class Planner:
                 ]
             )
 
+        # Inject prior review feedback if this is a re-plan
+        if prior_review:
+            context_parts.extend(
+                [
+                    "",
+                    "---",
+                    "",
+                    "## Prior reviewer critique — your previous plan got NOGO",
+                    "",
+                    "Address every concrete finding below in your revised plan:",
+                    "",
+                    prior_review,
+                ]
+            )
+
         context_parts.extend(["", "---", "", prompt])
 
         context = "\n".join(context_parts)
@@ -529,25 +573,216 @@ class Planner:
 
         return plan
 
-    def _post_plan(self, issue_number: int, plan: str) -> None:
+    def _post_plan(
+        self,
+        issue_number: int,
+        plan: str,
+        *,
+        final_review: str | None = None,
+    ) -> None:
         """Post plan to issue as a comment.
 
         Args:
             issue_number: Issue number
             plan: Plan text
+            final_review: When set, the last reviewer output (Grade + Verdict +
+                rationale) is appended in a collapsible section so the human
+                reviewer can see why the loop terminated.
 
         """
-        # Add header
         comment_body = f"""# Implementation Plan
 
 {plan}
+"""
 
+        if final_review:
+            comment_body += f"""
 ---
-*Generated by Claude Code Planner*
+
+<details>
+<summary>Final review verdict (from strict review loop)</summary>
+
+{final_review}
+
+</details>
+"""
+
+        comment_body += """
+---
+*Generated by Claude Code Planner (strict review loop)*
 """
 
         gh_issue_comment(issue_number, comment_body)
         logger.info(f"Posted plan to issue #{issue_number}")
+
+    # ------------------------------------------------------------------
+    # Strict review loop — advise → loop[plan → learn → review] → post
+    # ------------------------------------------------------------------
+
+    def _run_plan_review_loop(self, issue_number: int, slot_id: int) -> tuple[str, str | None, int]:
+        """Run the bounded review loop for a single issue.
+
+        Pre-fetches the issue and runs advise once, then iterates:
+        plan → capture learnings → independent review (fresh session, with
+        pr-review-strict rubric) → check verdict. Terminates on the first
+        unambiguous GO or after :data:`MAX_REVIEW_ITERATIONS`.
+
+        Args:
+            issue_number: GitHub issue number.
+            slot_id: Worker slot id for status updates.
+
+        Returns:
+            Tuple of (final plan text, final review text or None, iterations run).
+
+        """
+        # Pre-fetch issue once and cache for the whole loop
+        issue_data = gh_issue_json(issue_number)
+        issue_title = issue_data.get("title", f"Issue #{issue_number}")
+        issue_body = issue_data.get("body", "")
+
+        # Advise runs once before the loop — same findings inform every iteration
+        cached_advise = ""
+        if self.options.enable_advise:
+            cached_advise = self._run_advise(issue_number, issue_title, issue_body)
+
+        plan = ""
+        review_text: str | None = None
+        prior_review_for_plan: str | None = None
+        iterations_run = 0
+
+        for iteration in range(MAX_REVIEW_ITERATIONS):
+            iterations_run = iteration + 1
+            self.status_tracker.update_slot(slot_id, f"#{issue_number}: planning [R{iteration}]")
+
+            plan = self._generate_plan(
+                issue_number,
+                prior_review=prior_review_for_plan,
+                cached_advise=cached_advise,
+                cached_issue_data=issue_data,
+            )
+
+            self.status_tracker.update_slot(
+                slot_id, f"#{issue_number}: capturing learnings [R{iteration}]"
+            )
+            learnings = self._capture_planner_learnings(issue_number, plan)
+
+            self.status_tracker.update_slot(
+                slot_id, f"#{issue_number}: reviewing plan [R{iteration}]"
+            )
+            review_text = self._run_plan_review(
+                issue_number=issue_number,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                plan_text=plan,
+                learnings=learnings,
+                iteration=iteration,
+                prior_review=review_text,
+            )
+
+            verdict = parse_review_verdict(review_text)
+            logger.info(
+                f"#{issue_number} R{iteration}: Verdict={verdict.verdict} "
+                f"Grade={verdict.grade or '?'}"
+            )
+
+            if verdict.is_go:
+                logger.info(f"#{issue_number}: GO on iteration {iteration} — loop terminated")
+                break
+
+            # NoGo or AMBIGUOUS — feed this review back into next plan iteration
+            prior_review_for_plan = review_text
+
+        return plan, review_text, iterations_run
+
+    def _capture_planner_learnings(self, issue_number: int, plan: str) -> str:
+        """Ask Claude to summarize what the planner just learned.
+
+        These learnings are passed to the reviewer alongside the plan, giving
+        the reviewer extra signal about which aspects the planner is most/least
+        confident in. Failure here is non-fatal — return empty string and let
+        the review proceed without learnings.
+
+        Uses ``learn_model()`` (Haiku by default) per the per-phase model
+        selection in :mod:`hephaestus.automation.claude_models`.
+
+        Args:
+            issue_number: GitHub issue number (used in prompt for grounding).
+            plan: The plan text the planner just produced.
+
+        Returns:
+            Bullet-point learnings text, or "" on any failure.
+
+        """
+        prompt = (
+            f"You just produced an implementation plan for GitHub issue "
+            f"#{issue_number}. Below is the plan you wrote.\n\n"
+            "List 3-5 brief bullets describing:\n"
+            "- The most uncertain assumptions in your plan\n"
+            "- Any external sources, files, or APIs you relied on without "
+            "directly verifying them\n"
+            "- Risks the reviewer should focus on\n\n"
+            "Output only the bullets — no preamble, no headers.\n\n"
+            "---\n\n"
+            f"{plan}"
+        )
+        try:
+            return self._call_claude(prompt, model=learn_model(), timeout=120)
+        except Exception as e:
+            logger.warning(f"#{issue_number}: planner-learnings capture failed (non-fatal): {e}")
+            return ""
+
+    def _run_plan_review(
+        self,
+        *,
+        issue_number: int,
+        issue_title: str,
+        issue_body: str,
+        plan_text: str,
+        learnings: str,
+        iteration: int,
+        prior_review: str | None,
+    ) -> str:
+        """Run a fresh-session reviewer pass on the current plan.
+
+        Uses a separate ``claude --print`` invocation (no ``--resume``) so each
+        review is unbiased by the planner session. Applies the strict
+        ``review-pr-strict`` rubric embedded in the prompt. Uses
+        ``reviewer_model()`` (Sonnet by default).
+
+        Args:
+            issue_number: GitHub issue number.
+            issue_title: Issue title.
+            issue_body: Issue body.
+            plan_text: Plan to review.
+            learnings: Planner-captured learnings for this iteration.
+            iteration: Iteration index (0, 1, or 2).
+            prior_review: Previous iteration's review text, or ``None`` on iter 0.
+
+        Returns:
+            Review text. On reviewer-call failure, returns a synthetic NoGo
+            review so the loop can continue (failing safe — never silently GO).
+
+        """
+        prompt = get_plan_loop_review_prompt(
+            issue_number=issue_number,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            plan_text=plan_text,
+            learnings=learnings,
+            iteration=iteration,
+            prior_review=prior_review,
+        )
+        try:
+            return self._call_claude(prompt, model=reviewer_model(), timeout=300)
+        except Exception as e:
+            logger.error(
+                f"#{issue_number} R{iteration}: reviewer call failed: {e}; "
+                "treating as NOGO so the loop continues"
+            )
+            return (
+                f"Reviewer invocation failed at iteration {iteration}: {e}\n\n"
+                "Grade: F\nVerdict: NOGO\n"
+            )
 
     def _print_summary(self) -> None:
         """Print summary of planning results."""

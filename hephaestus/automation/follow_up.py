@@ -17,6 +17,7 @@ from typing import Any
 
 from .git_utils import run
 from .github_api import gh_issue_comment, gh_issue_create
+from .issue_dedup import extract_new_info, find_duplicate_open_issue
 from .prompts import get_follow_up_prompt
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,35 @@ def _create_follow_up_issues(
                 status_tracker.update_slot(
                     slot_id, f"#{issue_number}: Creating follow-up {i}/{len(items)}"
                 )
+
+            # Dedup: skip filing if a near-duplicate open issue already exists.
+            # When found, post a comment on the existing issue with any new
+            # information — but only if the new body actually adds something.
+            duplicate = find_duplicate_open_issue(item["title"], item["body"])
+            if duplicate is not None:
+                new_info = extract_new_info(item["body"], duplicate.body)
+                if new_info:
+                    update_comment = (
+                        f"Additional context from #{issue_number} "
+                        f"(would have been a separate issue, "
+                        f"deduplicated against this one):\n\n{new_info}"
+                    )
+                    try:
+                        gh_issue_comment(duplicate.number, update_comment)
+                        logger.info(
+                            f"Updated existing issue #{duplicate.number} with new "
+                            f"context from #{issue_number} (skipped duplicate '{item['title']}')"
+                        )
+                    except Exception as e:  # comment is best-effort
+                        logger.warning(f"Failed to comment on duplicate #{duplicate.number}: {e}")
+                else:
+                    logger.info(
+                        f"Skipped pure-duplicate follow-up '{item['title']}' "
+                        f"(matches existing #{duplicate.number}, no new info)"
+                    )
+                time.sleep(1)
+                continue
+
             body_with_ref = f"{item['body']}\n\n_Follow-up from #{issue_number}_"
             new_issue_num = gh_issue_create(
                 title=item["title"],

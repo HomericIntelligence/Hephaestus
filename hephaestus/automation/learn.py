@@ -40,6 +40,12 @@ def run_learn(
     """
     state_dir.mkdir(parents=True, exist_ok=True)
     log_file = state_dir / f"learn-{issue_number}.log"
+    # /learn is a SIMPLE-complexity task (summarization + file writes), so we
+    # default to sonnet but accept haiku as the fallback when sonnet is
+    # unavailable. We can't route through `call_claude` here because we need
+    # `--resume` semantics with full Bash/Edit tools; instead we add the model
+    # flag directly and rely on Claude CLI's own fallback messaging if sonnet
+    # is down. (The shared `call_claude` helper handles the loop-review paths.)
     try:
         result = run(
             [
@@ -53,6 +59,8 @@ def run_learn(
                     " Do NOT create files under .claude-plugin/ in this repo."
                 ),
                 "--print",
+                "--model",
+                "sonnet",
                 "--permission-mode",
                 "dontAsk",
                 "--allowedTools",

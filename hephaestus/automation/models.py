@@ -49,6 +49,7 @@ class ImplementationPhase(str, Enum):
 
     PLANNING = "planning"
     IMPLEMENTING = "implementing"
+    REVIEWING = "reviewing"  # 3x review loop between implement and test
     TESTING = "testing"
     COMMITTING = "committing"
     PUSHING = "pushing"
@@ -73,6 +74,9 @@ class ImplementationState(BaseModel):
     error: str | None = None
     attempts: int = 0
     learn_completed: bool = False
+    review_iterations: int = 0  # number of review loop iterations executed
+    last_review_verdict: str | None = None  # "GO", "NOGO", "AMBIGUOUS"
+    last_review_grade: str | None = None  # letter grade from final review
 
 
 class WorkerResult(BaseModel):

@@ -631,3 +631,283 @@ def get_address_review_prompt(
         worktree_path=worktree_path,
         threads_json=threads_json,
     )
+
+
+# ---------------------------------------------------------------------------
+# Iteration-aware review prompts (R0/R1/R2) used by the strict review loops
+# in planner.py and implementer.py.
+# ---------------------------------------------------------------------------
+
+# Rubric block embedded into every loop-review prompt. Mirrors the philosophy
+# of the `review-pr-strict` skill at:
+#   ~/.claude/plugins/marketplaces/ProjectHephaestus/skills/review-pr-strict/SKILL.md
+# Embedded inline so the spawned reviewer process does not depend on the plugin
+# being autoloaded — works in any environment that has `claude --print`.
+_STRICT_REVIEW_RUBRIC = """
+You are a ruthlessly thorough technical reviewer. Apply this rubric per the
+`review-pr-strict` skill (rubric summarized below — refer to the full skill at
+`~/.claude/plugins/marketplaces/ProjectHephaestus/skills/review-pr-strict/SKILL.md`
+if available):
+
+GRADING (every dimension starts at F; A must be EARNED with concrete evidence):
+- A  (93-100%) Exemplary, RARE
+- B  (80-89%)  Solid with notable gaps
+- C  (70-79%)  Mediocre / multiple gaps
+- D  (60-69%)  Poor / fundamental practices missing
+- F  (<60%)    Failing / misaligned / dangerous
+
+ANTI-INFLATION RULES (mandatory):
+- DEFAULT IS F. Find concrete evidence to justify ANY upgrade.
+- A requires ZERO critical or major findings.
+- B requires ZERO critical findings and ≤1 major finding.
+- "It looks done" is NOT sufficient.
+- Do NOT give credit for plans, TODOs, or future follow-up issues — grade what
+  THIS artifact delivers right now.
+- Do NOT round up.
+
+EVALUATE THESE DIMENSIONS:
+1. Alignment with the issue's stated requirements
+2. Completeness — does the artifact cover every acceptance criterion?
+3. Correctness — file paths, function names, API calls actually exist
+4. Risk / safety — no destructive ops, irreversible decisions, security holes
+5. Scope discipline — KISS / YAGNI; no speculative work
+6. Verification plan — concrete steps the reviewer can run to confirm
+"""
+
+_STRICT_REVIEW_OUTPUT_FORMAT = """
+**Required output format — MUST end with these exact lines:**
+
+```
+Grade: <A|B|C|D|F>
+Verdict: <GO|NOGO>
+```
+
+GO is reserved for cases where you are CONFIDENT the artifact is ready as-is.
+Any major finding, missing dimension coverage, or "needs another iteration"
+critique → Verdict: NOGO. When in doubt, NOGO.
+"""
+
+
+PLAN_LOOP_REVIEW_PROMPT = """
+{rubric}
+
+# Iteration {iteration_label}
+
+You are reviewing the implementation plan for GitHub issue #{issue_number}.
+This is iteration {iteration} of a maximum 3-iteration review loop. {iteration_guidance}
+
+**Issue Title:** {issue_title}
+
+**Issue Description:**
+{issue_body}
+
+---
+
+**Current Plan:**
+{plan_text}
+
+---
+
+**Learnings captured during planning:**
+{learnings}
+{prior_review_block}
+---
+
+Review the plan above against the issue requirements and the rubric. Cite
+specific paragraphs of the plan or sections of the issue when justifying
+findings. After your analysis, output your verdict.
+
+{output_format}
+"""
+
+
+IMPL_LOOP_REVIEW_PROMPT = """
+{rubric}
+
+# Iteration {iteration_label}
+
+You are reviewing the implementation for GitHub issue #{issue_number}.
+This is iteration {iteration} of a maximum 3-iteration review loop. {iteration_guidance}
+
+**Issue Title:** {issue_title}
+
+**Issue Description:**
+{issue_body}
+
+---
+
+**Diff produced by the implementer (against base branch):**
+```diff
+{diff_text}
+```
+
+---
+
+**Files changed:**
+{files_changed}
+{prior_review_block}
+---
+
+Review the diff against the issue requirements and the rubric. Cite specific
+file:line locations when justifying findings. Watch for: missing tests,
+incomplete error handling, unaddressed acceptance criteria, scope creep,
+and risky changes that the issue did not request.
+
+{output_format}
+"""
+
+
+def _iteration_label(iteration: int) -> str:
+    """Return a human-readable iteration label for review prompts."""
+    return {0: "R0 (Initial review)", 1: "R1 (Re-review)", 2: "R2 (Final review)"}.get(
+        iteration, f"R{iteration}"
+    )
+
+
+def _iteration_guidance(iteration: int) -> str:
+    """Return guidance text emphasizing the iteration's role."""
+    if iteration == 0:
+        return "Treat this as a fresh review — no prior context."
+    if iteration == 1:
+        return (
+            "The previous iteration was NOGO. Verify whether the issues raised then have "
+            "actually been resolved in this iteration."
+        )
+    return (
+        "This is the FINAL iteration. After this review the loop terminates. Be "
+        "decisive — emit an unambiguous Grade and Verdict."
+    )
+
+
+def _prior_review_block(prior_review: str | None) -> str:
+    """Format the prior review (if any) as a context block."""
+    if not prior_review:
+        return ""
+    return (
+        "\n---\n\n**Prior review (from previous iteration) — verify these findings "
+        f"have been addressed:**\n\n{prior_review}\n"
+    )
+
+
+def get_plan_loop_review_prompt(
+    *,
+    issue_number: int,
+    issue_title: str,
+    issue_body: str,
+    plan_text: str,
+    learnings: str,
+    iteration: int,
+    prior_review: str | None,
+) -> str:
+    """Build the iteration-aware plan-loop review prompt.
+
+    Args:
+        issue_number: GitHub issue number.
+        issue_title: Issue title.
+        issue_body: Full issue body.
+        plan_text: Plan to review.
+        learnings: Learnings captured by the planner this iteration.
+        iteration: Iteration index (0, 1, or 2).
+        prior_review: Previous iteration's review text, or ``None`` on iter 0.
+
+    Returns:
+        Formatted prompt for a fresh reviewer session.
+
+    """
+    return PLAN_LOOP_REVIEW_PROMPT.format(
+        rubric=_STRICT_REVIEW_RUBRIC.strip(),
+        iteration=iteration,
+        iteration_label=_iteration_label(iteration),
+        iteration_guidance=_iteration_guidance(iteration),
+        issue_number=issue_number,
+        issue_title=issue_title,
+        issue_body=issue_body,
+        plan_text=plan_text,
+        learnings=learnings or "_(no learnings captured this iteration)_",
+        prior_review_block=_prior_review_block(prior_review),
+        output_format=_STRICT_REVIEW_OUTPUT_FORMAT.strip(),
+    )
+
+
+def get_impl_loop_review_prompt(
+    *,
+    issue_number: int,
+    issue_title: str,
+    issue_body: str,
+    diff_text: str,
+    files_changed: str,
+    iteration: int,
+    prior_review: str | None,
+) -> str:
+    """Build the iteration-aware implementer-loop review prompt.
+
+    Args:
+        issue_number: GitHub issue number.
+        issue_title: Issue title.
+        issue_body: Full issue body.
+        diff_text: ``git diff <base>..HEAD`` output.
+        files_changed: Newline-separated list of changed files.
+        iteration: Iteration index (0, 1, or 2).
+        prior_review: Previous iteration's review text, or ``None`` on iter 0.
+
+    Returns:
+        Formatted prompt for a fresh reviewer session.
+
+    """
+    return IMPL_LOOP_REVIEW_PROMPT.format(
+        rubric=_STRICT_REVIEW_RUBRIC.strip(),
+        iteration=iteration,
+        iteration_label=_iteration_label(iteration),
+        iteration_guidance=_iteration_guidance(iteration),
+        issue_number=issue_number,
+        issue_title=issue_title,
+        issue_body=issue_body,
+        diff_text=diff_text or "_(no diff produced)_",
+        files_changed=files_changed or "_(no files changed)_",
+        prior_review_block=_prior_review_block(prior_review),
+        output_format=_STRICT_REVIEW_OUTPUT_FORMAT.strip(),
+    )
+
+
+# Prompt the implementer receives when resuming its session to address a
+# NoGo review verdict. Used on iterations 1 and 2 of the impl loop.
+IMPL_RESUME_FEEDBACK_PROMPT = """
+The independent reviewer for issue #{issue_number} returned **{verdict}** on
+iteration {prev_iteration} with the following critique:
+
+---
+
+{review_text}
+
+---
+
+Address every concrete finding above. Update the code (and tests, if needed)
+in this same working directory. Do NOT commit or push — those phases run
+after the review loop terminates.
+
+When done, summarize what you changed in 3-5 bullet points so the next
+review can verify the fixes were applied.
+"""
+
+
+def get_impl_resume_feedback_prompt(
+    *, issue_number: int, prev_iteration: int, verdict: str, review_text: str
+) -> str:
+    """Build the prompt sent via ``claude --resume`` to iterate on impl after NoGo.
+
+    Args:
+        issue_number: GitHub issue number.
+        prev_iteration: Iteration index of the review that produced *review_text*.
+        verdict: ``"NOGO"`` or ``"AMBIGUOUS"``.
+        review_text: Full reviewer output from the previous iteration.
+
+    Returns:
+        Prompt text to feed into the resumed implementer session.
+
+    """
+    return IMPL_RESUME_FEEDBACK_PROMPT.format(
+        issue_number=issue_number,
+        prev_iteration=prev_iteration,
+        verdict=verdict,
+        review_text=review_text,
+    )
