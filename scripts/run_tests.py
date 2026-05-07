@@ -66,8 +66,7 @@ def test_ensure_directory():
     try:
         with tempfile.TemporaryDirectory() as temp_dir:
             test_path = Path(temp_dir) / "test" / "nested" / "directory"
-            result = ensure_directory(test_path)
-            assert result
+            ensure_directory(test_path)
             assert test_path.exists()
         print("✓ ensure_directory tests passed")
         return True

@@ -18,13 +18,16 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Resolve script location so PYTHONPATH always points at ProjectHephaestus
-# regardless of where this script is invoked from.
+# Resolve the installed entry-point binaries from the Hephaestus pixi env.
+# We invoke these directly (not `python -m hephaestus.automation.*`) so that
+# CWD-shadowing — when `cd $repo` puts a stray `hephaestus/` directory at
+# sys.path[0] — cannot mask the real package.
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HEPHAESTUS_DIR="$(dirname "$SCRIPT_DIR")"
+PLAN_BIN="$(cd "$HEPHAESTUS_DIR" && pixi run which hephaestus-plan-issues)"
+IMPL_BIN="$(cd "$HEPHAESTUS_DIR" && pixi run which hephaestus-implement-issues)"
 PYTHON="$HEPHAESTUS_DIR/.pixi/envs/default/bin/python"
-export PYTHONPATH="$HEPHAESTUS_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -135,7 +138,7 @@ process_repo() {
   echo "  [$repo] Planning issues..."
   (
     cd "$dir"
-    "$PYTHON" "$SCRIPT_DIR/plan_issues.py" \
+    "$PLAN_BIN" \
       --issues "${ISSUE_NUMBERS[@]}" \
       -v \
       $DRY_RUN_FLAGS \
@@ -158,7 +161,7 @@ process_repo() {
   echo "  [$repo] Implementing issues..."
   (
     cd "$dir"
-    "$PYTHON" "$SCRIPT_DIR/implement_issues.py" \
+    "$IMPL_BIN" \
       --issues "${ISSUE_NUMBERS[@]}" \
       --max-workers "$MAX_WORKERS" \
       --no-ui \
@@ -225,7 +228,6 @@ for (( loop=1; loop<=LOOPS; loop++ )); do
     active_pids+=($!)
 
     if [[ ${#active_pids[@]} -ge "$PARALLEL_REPOS" ]]; then
-      # Wait for the oldest job to finish before launching the next
       wait "${active_pids[0]}"
       active_pids=("${active_pids[@]:1}")
     fi

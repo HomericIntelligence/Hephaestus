@@ -379,10 +379,16 @@ Rules:
                 len(conflict_files),
             )
             options = ClaudeCodeOptions(max_turns=30, cwd=str(work))
-            for message in query(prompt=prompt, options=options):
-                text = getattr(message, "text", None) or str(message)
-                if text:
-                    logger.debug("  agent: %s", text[:200])
+
+            async def _drain() -> None:
+                async for message in query(prompt=prompt, options=options):
+                    text = getattr(message, "text", None) or str(message)
+                    if text:
+                        logger.debug("  agent: %s", text[:200])
+
+            import asyncio
+
+            asyncio.run(_drain())
 
         # Verify branch was pushed
         verify = subprocess.run(

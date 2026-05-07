@@ -40,6 +40,7 @@ dev = [
     "mypy>=1.8.0,<2",
     "build>=1.0,<2",
     "pip-audit>=2.6,<3",
+    "tomli>=2.0,<3;python_version<'3.11'",
 ]
 github = [
     "PyGithub>=1.55,<3",
