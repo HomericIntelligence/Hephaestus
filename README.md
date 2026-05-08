@@ -25,7 +25,6 @@ ProjectHephaestus/
 │   ├── cli/           # CLI helpers (argument parsing, output formatting)
 │   ├── logging/       # Logging utilities (ContextLogger, setup_logging)
 │   ├── system/        # System information collection
-│   ├── git/           # Git utilities (changelog generation)
 │   ├── github/        # GitHub automation (PR merging)
 │   ├── datasets/      # Dataset downloading utilities
 │   ├── markdown/      # Markdown linting and link fixing
@@ -195,11 +194,10 @@ config = merge_with_env({}, convert_bools=True)
 
 ## CLI Commands
 
-Four command-line tools are installed as console scripts when you install the package:
+Three command-line tools are installed as console scripts when you install the package:
 
 | Command | Description |
 |---|---|
-| `hephaestus-changelog` | Generate a changelog from Git history |
 | `hephaestus-merge-prs` | Automate merging of GitHub pull requests |
 | `hephaestus-system-info` | Collect and display system/environment information |
 | `hephaestus-download-dataset` | Download datasets with retry and progress reporting |
@@ -207,9 +205,6 @@ Four command-line tools are installed as console scripts when you install the pa
 ### Examples
 
 ```bash
-# Generate changelog
-hephaestus-changelog --help
-
 # Collect system info (JSON output)
 hephaestus-system-info --json
 

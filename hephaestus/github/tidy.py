@@ -216,7 +216,6 @@ Resolution heuristics (from batch-pr-rebase-workflow v2.8.0, verified-ci):
 - `pixi.lock` → `git -C {worktree_path} show origin/{trunk}:pixi.lock > pixi.lock`;
   then run `pixi install` inside the worktree to regenerate
 - Feature code, tests → keep both sides' genuine additions; do NOT blindly take either side
-- `CHANGELOG.md` → always take trunk's version (HEAD); a consolidation PR handles the merge later
 - Generated/binary files → take trunk's version
 
 After staging all resolved files:

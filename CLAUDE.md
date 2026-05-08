@@ -32,7 +32,6 @@ ProjectHephaestus/
 │   ├── io/                     # Input/output utilities
 │   ├── cli/                    # Command-line interface tools
 │   ├── system/                 # System information collection
-│   ├── git/                    # Git utilities (changelog, commit parsing)
 │   ├── github/                 # GitHub automation (PR merging)
 │   ├── datasets/               # Dataset downloading utilities
 │   ├── markdown/               # Markdown linting and link fixing
@@ -168,8 +167,9 @@ All utility functions accepting external input must:
 
 - Maintain README.md with setup and usage instructions
 - Document API endpoints in OpenAPI format when applicable
-- Keep CHANGELOG.md updated with notable changes
 - Reference external documentation rather than duplicating
+
+**No CHANGELOG.md.** Do not create, edit, or file issues against `CHANGELOG.md`. Release notes are generated from commits at release time via `gh release create --generate-notes`. Audit reports MUST NOT flag missing/stale changelog entries.
 
 ## Claude Code Optimization
 
@@ -379,7 +379,6 @@ pre-commit run --all-files
 - `hephaestus/logging/` - Enhanced logging (ContextLogger, setup_logging)
 - `hephaestus/cli/` - CLI utilities (argument parsing, output formatting)
 - `hephaestus/system/` - System information collection
-- `hephaestus/git/` - Git utilities (changelog generation)
 - `hephaestus/github/` - GitHub automation (PR merging)
 - `tests/unit/` - Unit test suite (mirrors hephaestus/ package structure)
 - `tests/integration/` - Integration tests (package importability, smoke tests)
