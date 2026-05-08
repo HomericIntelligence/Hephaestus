@@ -16,7 +16,6 @@ This directory contains CLI wrapper scripts for ProjectHephaestus utilities.
 
 ### Git/GitHub Scripts
 
-- **generate_changelog.py** - Generate changelog from git commit history
 - **merge_prs.py** - Merge pull requests with successful CI/CD
 
 ### Version Scripts
@@ -38,9 +37,6 @@ This directory contains CLI wrapper scripts for ProjectHephaestus utilities.
 ```bash
 # Check unit test structure
 python scripts/check_unit_test_structure.py
-
-# Generate changelog
-python scripts/generate_changelog.py
 
 # Merge PRs (requires GITHUB_TOKEN)
 python scripts/merge_prs.py --dry-run

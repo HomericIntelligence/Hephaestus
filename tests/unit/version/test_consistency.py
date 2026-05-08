@@ -91,7 +91,7 @@ def test_check_version_consistency_missing_pyproject(tmp_path):
 
 
 def test_check_package_consistency_minimal(tmp_path):
-    """Pass with just pyproject.toml and no CHANGELOG."""
+    """Pass with just pyproject.toml."""
     _write_pyproject(tmp_path, "0.3.0")
     assert check_package_version_consistency(tmp_path) == 0
 
@@ -131,51 +131,6 @@ def test_check_package_consistency_no_version_in_init(tmp_path):
     init.parent.mkdir()
     init.write_text("# no version here\n")
     assert check_package_version_consistency(tmp_path, package_init=init) == 0
-
-
-def test_check_package_consistency_changelog_ok(tmp_path):
-    """Pass when CHANGELOG has no aspirational versions."""
-    _write_pyproject(tmp_path, "1.0.0")
-    (tmp_path / "CHANGELOG.md").write_text(
-        "# Changelog\n## [0.9.0]\n- Released\n## [1.0.0]\n- Current\n"
-    )
-    assert check_package_version_consistency(tmp_path) == 0
-
-
-def test_check_package_consistency_changelog_aspirational(tmp_path, capsys):
-    """Fail when CHANGELOG references a future version."""
-    _write_pyproject(tmp_path, "1.0.0")
-    (tmp_path / "CHANGELOG.md").write_text(
-        "# Changelog\n## [1.0.0]\n- Current\n## [1.1.0]\n- Coming soon\n"
-    )
-    result = check_package_version_consistency(tmp_path)
-    assert result == 1
-    err = capsys.readouterr().err
-    assert "1.1.0" in err
-
-
-def test_check_package_consistency_changelog_in_codeblock_ignored(tmp_path):
-    """Versions inside fenced code blocks are not flagged."""
-    _write_pyproject(tmp_path, "1.0.0")
-    (tmp_path / "CHANGELOG.md").write_text(
-        "# Changelog\n## [1.0.0]\nSee:\n```\nversion = 1.9.0\n```\n"
-    )
-    assert check_package_version_consistency(tmp_path) == 0
-
-
-def test_check_package_consistency_changelog_in_inline_code_ignored(tmp_path):
-    """Versions inside inline code spans are not flagged."""
-    _write_pyproject(tmp_path, "1.0.0")
-    (tmp_path / "CHANGELOG.md").write_text(
-        "# Changelog\n## [1.0.0]\nSee `version = 9.9.9` for details.\n"
-    )
-    assert check_package_version_consistency(tmp_path) == 0
-
-
-def test_check_package_consistency_no_changelog(tmp_path):
-    """Pass silently when no CHANGELOG.md exists."""
-    _write_pyproject(tmp_path, "0.5.0")
-    assert check_package_version_consistency(tmp_path) == 0
 
 
 # ---------------------------------------------------------------------------

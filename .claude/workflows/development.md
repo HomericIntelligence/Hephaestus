@@ -28,6 +28,6 @@ This file describes the typical development workflow for ProjectHephaestus.
 ## Release Process
 
 1. **Version Bump**: Update version number according to semver
-2. **Changelog**: Document changes in CHANGELOG.md
-3. **Tag Release**: Create Git tag for the release
+2. **Tag Release**: Create Git tag for the release
+3. **Release Notes**: Generate via `gh release create --generate-notes`
 4. **Publish**: Publish to package repository if applicable

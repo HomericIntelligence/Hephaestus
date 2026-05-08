@@ -79,7 +79,7 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 
 1. Deprecated symbols are announced at least one minor version before removal.
 2. Deprecated symbols emit a `DeprecationWarning` when called.
-3. Deprecated symbols are documented in `CHANGELOG.md`.
+3. Deprecated symbols are documented in the GitHub release notes for the version that introduced the deprecation.
 4. Symbols are never removed in a patch release.
 
 ## Non-Public API

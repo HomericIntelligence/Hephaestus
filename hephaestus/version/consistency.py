@@ -8,7 +8,7 @@ Provides three operations:
    with pixi.toml [workspace].version (if present) and fail if they differ.
 
 2. ``check_package_version_consistency`` — broader multi-source scan: pixi.toml,
-   ``__init__.py`` ``__version__``, CHANGELOG.md, and optional skill markdown files.
+   ``__init__.py`` ``__version__``, and optional skill markdown files.
 
 3. ``bump_version`` — compute the next semver string by incrementing a chosen part
    (major/minor/patch), then delegate writes to :class:`~hephaestus.version.manager.VersionManager`.
@@ -337,8 +337,7 @@ def check_package_version_consistency(
     Checks:
     1. pixi.toml [workspace].version matches pyproject.toml (if present).
     2. ``<package>/__init__.py`` ``__version__`` matches pyproject.toml (if present).
-    3. CHANGELOG.md has no version references higher than canonical (if present).
-    4. (opt-in) Skill markdown files have no aspirational version references.
+    3. (opt-in) Skill markdown files have no aspirational version references.
 
     Args:
         repo_root: Root directory of the repository.
@@ -361,15 +360,6 @@ def check_package_version_consistency(
     all_errors.extend(_check_init_version_errors(package_init, canonical, verbose))
 
     canonical_tuple = _parse_version_tuple(canonical)
-    changelog_path = repo_root / "CHANGELOG.md"
-    if changelog_path.is_file():
-        changelog_errors = _find_aspirational_versions(
-            changelog_path, canonical_tuple, "CHANGELOG.md"
-        )
-        all_errors.extend(changelog_errors)
-        if not changelog_errors and verbose:
-            print("PASS: CHANGELOG.md has no aspirational version references")
-
     if scan_skills:
         all_errors.extend(_check_skill_version_errors(repo_root, canonical_tuple, verbose))
 

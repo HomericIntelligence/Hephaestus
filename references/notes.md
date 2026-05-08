@@ -159,7 +159,6 @@ def test_with_tmp_file(tmp_path):
 
 - Fix remaining 4 test failures (minor assertion issues)
 - Add integration tests for CLI wrappers
-- Update CHANGELOG.md
 - Create PR for review
 - Consider adding more utilities from ProjectOdyssey
 

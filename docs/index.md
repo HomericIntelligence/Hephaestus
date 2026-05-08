@@ -14,7 +14,6 @@ ProjectHephaestus is the shared utilities and tooling library for the HomericInt
 - **hephaestus.logging** — Enhanced logging (ContextLogger, setup_logging)
 - **hephaestus.cli** — CLI argument parsing and output formatting
 - **hephaestus.system** — System information collection
-- **hephaestus.git** — Git utilities (changelog generation, commit parsing)
 - **hephaestus.github** — GitHub automation (PR merging)
 - **hephaestus.datasets** — Dataset downloading utilities
 - **hephaestus.markdown** — Markdown linting and link fixing
