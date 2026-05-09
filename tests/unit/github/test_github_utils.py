@@ -7,10 +7,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.github.pr_merge import (
-    checks_success_and_print,
+    checks_success_and_log,
     detect_repo_from_remote,
     handle_merge_result,
-    legacy_status_and_print,
+    legacy_status_and_log,
     local_branch_exists,
     run_git_cmd,
     try_push_head_branch,
@@ -113,7 +113,7 @@ class TestRunGitCmd:
 
 
 class TestChecksSuccessAndPrint:
-    """Tests for checks_success_and_print."""
+    """Tests for checks_success_and_log."""
 
     def test_all_checks_successful(self):
         """Returns True when all checks succeed."""
@@ -122,7 +122,7 @@ class TestChecksSuccessAndPrint:
         check1.name = "test"
         mock_commit.get_check_runs.return_value = [check1]
 
-        success, checks = checks_success_and_print(mock_commit)
+        success, checks = checks_success_and_log(mock_commit)
         assert success is True
         assert len(checks) == 1
 
@@ -133,7 +133,7 @@ class TestChecksSuccessAndPrint:
         check1.name = "test"
         mock_commit.get_check_runs.return_value = [check1]
 
-        success, _ = checks_success_and_print(mock_commit)
+        success, _ = checks_success_and_log(mock_commit)
         assert success is False
 
     def test_check_not_completed(self):
@@ -143,7 +143,7 @@ class TestChecksSuccessAndPrint:
         check1.name = "test"
         mock_commit.get_check_runs.return_value = [check1]
 
-        success, _ = checks_success_and_print(mock_commit)
+        success, _ = checks_success_and_log(mock_commit)
         assert success is False
 
     def test_no_checks_returns_none(self):
@@ -151,7 +151,7 @@ class TestChecksSuccessAndPrint:
         mock_commit = MagicMock()
         mock_commit.get_check_runs.return_value = []
 
-        success, checks = checks_success_and_print(mock_commit)
+        success, checks = checks_success_and_log(mock_commit)
         assert success is None
         assert checks == []
 
@@ -160,33 +160,33 @@ class TestChecksSuccessAndPrint:
         mock_commit = MagicMock()
         mock_commit.get_check_runs.side_effect = Exception("API error")
 
-        success, checks = checks_success_and_print(mock_commit)
+        success, checks = checks_success_and_log(mock_commit)
         assert success is None
         assert checks == []
 
 
 class TestLegacyStatusAndPrint:
-    """Tests for legacy_status_and_print."""
+    """Tests for legacy_status_and_log."""
 
     def test_returns_state_string(self):
         """Returns the combined status state."""
         mock_commit = MagicMock()
         mock_commit.get_combined_status.return_value = MagicMock(statuses=[], state="success")
-        result = legacy_status_and_print(mock_commit)
+        result = legacy_status_and_log(mock_commit)
         assert result == "success"
 
     def test_returns_unknown_on_exception(self):
         """Returns 'unknown' when API raises an exception."""
         mock_commit = MagicMock()
         mock_commit.get_combined_status.side_effect = Exception("API error")
-        result = legacy_status_and_print(mock_commit)
+        result = legacy_status_and_log(mock_commit)
         assert result == "unknown"
 
     def test_returns_unknown_when_state_is_none(self):
         """Returns 'unknown' when state is None."""
         mock_commit = MagicMock()
         mock_commit.get_combined_status.return_value = MagicMock(statuses=[], state=None)
-        result = legacy_status_and_print(mock_commit)
+        result = legacy_status_and_log(mock_commit)
         assert result == "unknown"
 
 

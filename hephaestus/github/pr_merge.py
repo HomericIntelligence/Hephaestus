@@ -74,7 +74,7 @@ def run_git_cmd(cmd: list[str], dry_run: bool = False, cwd: str | None = None) -
     run_subprocess(cmd, cwd=cwd, dry_run=dry_run)
 
 
-def checks_success_and_print(commit: Any) -> tuple[bool | None, list[Any]]:
+def checks_success_and_log(commit: Any) -> tuple[bool | None, list[Any]]:
     """Check if commit has successful CI/CD checks.
 
     Args:
@@ -107,8 +107,8 @@ def checks_success_and_print(commit: Any) -> tuple[bool | None, list[Any]]:
     return None, []
 
 
-def legacy_status_and_print(commit: Any) -> str:
-    """Get legacy commit status and print contexts.
+def legacy_status_and_log(commit: Any) -> str:
+    """Get legacy commit status and log contexts via logger.info.
 
     Args:
         commit: GitHub commit object
@@ -271,11 +271,11 @@ def main() -> None:  # noqa: C901
             continue
 
         logger.info("  Checks API results:")
-        success, _checks = checks_success_and_print(commit)
+        success, _checks = checks_success_and_log(commit)
 
         if success is None:
             logger.info("  No check runs found; falling back to legacy status contexts:")
-            state = legacy_status_and_print(commit)
+            state = legacy_status_and_log(commit)
             success = state == "success"
 
         # Handle push-all flag

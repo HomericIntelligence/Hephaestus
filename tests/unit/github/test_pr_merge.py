@@ -9,10 +9,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.github.pr_merge import (
-    checks_success_and_print,
+    checks_success_and_log,
     detect_repo_from_remote,
     handle_merge_result,
-    legacy_status_and_print,
+    legacy_status_and_log,
     local_branch_exists,
     run_git_cmd,
     try_push_head_branch,
@@ -85,7 +85,7 @@ class TestRunGitCmd:
 
 
 class TestChecksSuccessAndPrint:
-    """Tests for checks_success_and_print."""
+    """Tests for checks_success_and_log."""
 
     def _make_check_run(self, name: str, status: str, conclusion: str | None) -> MagicMock:
         cr = MagicMock()
@@ -101,7 +101,7 @@ class TestChecksSuccessAndPrint:
             self._make_check_run("test", "completed", "success"),
             self._make_check_run("lint", "completed", "success"),
         ]
-        success, checks = checks_success_and_print(commit)
+        success, checks = checks_success_and_log(commit)
         assert success is True
         assert len(checks) == 2
 
@@ -112,7 +112,7 @@ class TestChecksSuccessAndPrint:
             self._make_check_run("test", "completed", "success"),
             self._make_check_run("ci", "completed", "failure"),
         ]
-        success, _checks = checks_success_and_print(commit)
+        success, _checks = checks_success_and_log(commit)
         assert success is False
 
     def test_in_progress_check_returns_false(self) -> None:
@@ -121,14 +121,14 @@ class TestChecksSuccessAndPrint:
         commit.get_check_runs.return_value = [
             self._make_check_run("test", "in_progress", None),
         ]
-        success, _checks = checks_success_and_print(commit)
+        success, _checks = checks_success_and_log(commit)
         assert success is False
 
     def test_no_checks_returns_none(self) -> None:
         """Returns (None, []) when there are no check runs."""
         commit = MagicMock()
         commit.get_check_runs.return_value = []
-        success, checks = checks_success_and_print(commit)
+        success, checks = checks_success_and_log(commit)
         assert success is None
         assert checks == []
 
@@ -136,7 +136,7 @@ class TestChecksSuccessAndPrint:
         """Returns (None, []) when get_check_runs raises."""
         commit = MagicMock()
         commit.get_check_runs.side_effect = Exception("API error")
-        success, checks = checks_success_and_print(commit)
+        success, checks = checks_success_and_log(commit)
         assert success is None
         assert checks == []
 
@@ -147,7 +147,7 @@ class TestChecksSuccessAndPrint:
             self._make_check_run("test", "completed", "success"),
             self._make_check_run("optional", "completed", "skipped"),
         ]
-        success, _ = checks_success_and_print(commit)
+        success, _ = checks_success_and_log(commit)
         # 'skipped' is not in the bad set, and 'success' was seen, so True
         assert success is True
 
@@ -157,12 +157,12 @@ class TestChecksSuccessAndPrint:
         commit.get_check_runs.return_value = [
             self._make_check_run("optional", "completed", "skipped"),
         ]
-        success, _ = checks_success_and_print(commit)
+        success, _ = checks_success_and_log(commit)
         assert success is False
 
 
 class TestLegacyStatusAndPrint:
-    """Tests for legacy_status_and_print."""
+    """Tests for legacy_status_and_log."""
 
     def test_returns_state_on_success(self) -> None:
         """Returns 'success' when combined status is success."""
@@ -171,7 +171,7 @@ class TestLegacyStatusAndPrint:
         combined.state = "success"
         combined.statuses = []
         commit.get_combined_status.return_value = combined
-        result = legacy_status_and_print(commit)
+        result = legacy_status_and_log(commit)
         assert result == "success"
 
     def test_returns_failure_state(self) -> None:
@@ -181,14 +181,14 @@ class TestLegacyStatusAndPrint:
         combined.state = "failure"
         combined.statuses = []
         commit.get_combined_status.return_value = combined
-        result = legacy_status_and_print(commit)
+        result = legacy_status_and_log(commit)
         assert result == "failure"
 
     def test_returns_unknown_on_exception(self) -> None:
         """Returns 'unknown' when get_combined_status raises."""
         commit = MagicMock()
         commit.get_combined_status.side_effect = Exception("API error")
-        result = legacy_status_and_print(commit)
+        result = legacy_status_and_log(commit)
         assert result == "unknown"
 
     def test_returns_unknown_when_state_is_none(self) -> None:
@@ -198,7 +198,7 @@ class TestLegacyStatusAndPrint:
         combined.state = None
         combined.statuses = []
         commit.get_combined_status.return_value = combined
-        result = legacy_status_and_print(commit)
+        result = legacy_status_and_log(commit)
         assert result == "unknown"
 
     def test_logs_each_status_context(self) -> None:
@@ -212,7 +212,7 @@ class TestLegacyStatusAndPrint:
         ctx.description = "running"
         combined.statuses = [ctx]
         commit.get_combined_status.return_value = combined
-        result = legacy_status_and_print(commit)
+        result = legacy_status_and_log(commit)
         assert result == "pending"
 
 
