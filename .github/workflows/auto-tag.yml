@@ -10,12 +10,6 @@ jobs:
   auto-tag:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Only run when the Test workflow succeeded on main AND was not triggered
-    # by a tag-push event (prevents infinite loop — tags don't trigger workflow_run
-    # but guard anyway in case the trigger source changes).
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.actor.login != 'github-actions[bot]'
 
     steps:
       - uses: actions/checkout@v6.0.2
