@@ -572,6 +572,33 @@ packages:
   - tomli>=2.0,<3 ; python_full_version < '3.11' and extra == 'toml'
   - defusedxml>=0.7,<1 ; extra == 'xml'
   requires_python: '>=3.10'
+- pypi: ./
+  name: homericintelligence-hephaestus
+  version: 0.7.3.dev45+gf2a26b5cd
+  sha256: 9958f023f3bc01958bb60b56ad1782890f2f7e3b737ad7c73f79a781a9511a0d
+  requires_dist:
+  - packaging>=21.0
+  - pydantic>=2.0,<3
+  - pyyaml>=6.0,<7
+  - defusedxml>=0.7,<1 ; extra == 'all'
+  - jsonschema>=4.0,<5 ; extra == 'all'
+  - nats-py>=2.6,<3 ; extra == 'all'
+  - pygithub>=1.55,<3 ; extra == 'all'
+  - tomli>=2.0,<3 ; python_full_version < '3.11' and extra == 'all'
+  - build>=1.0,<2 ; extra == 'dev'
+  - mypy>=1.8.0,<2 ; extra == 'dev'
+  - pip-audit>=2.6,<3 ; extra == 'dev'
+  - pre-commit>=3.0,<5 ; extra == 'dev'
+  - pytest-cov>=7.0,<8 ; extra == 'dev'
+  - pytest>=9.0,<10 ; extra == 'dev'
+  - ruff>=0.1.0,<1 ; extra == 'dev'
+  - tomli>=2.0,<3 ; python_full_version < '3.11' and extra == 'dev'
+  - pygithub>=1.55,<3 ; extra == 'github'
+  - nats-py>=2.6,<3 ; extra == 'nats'
+  - jsonschema>=4.0,<5 ; extra == 'schema'
+  - tomli>=2.0,<3 ; python_full_version < '3.11' and extra == 'toml'
+  - defusedxml>=0.7,<1 ; extra == 'xml'
+  requires_python: '>=3.10'
 - conda: https://conda.anaconda.org/conda-forge/noarch/hpack-4.1.0-pyhd8ed1ab_0.conda
   sha256: 6ad78a180576c706aabeb5b4c8ceb97c0cb25f1e112d76495bff23e3779948ba
   md5: 0a802cb9888dd14eeefc611f05c40b6e
