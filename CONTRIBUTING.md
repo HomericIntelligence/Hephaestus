@@ -1,5 +1,8 @@
 # Contributing to ProjectHephaestus
 
+> **See also:** [`docs/contributing.md`](docs/contributing.md) for a concise summary of
+> development principles (KISS, YAGNI, DRY, SOLID, Modularity) used in this project.
+
 Thank you for considering contributing to ProjectHephaestus! We welcome contributions from the community.
 
 ## Code of Conduct

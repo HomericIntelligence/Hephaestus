@@ -1,5 +1,9 @@
 # Contributing to ProjectHephaestus
 
+> **Canonical source:** The root [`CONTRIBUTING.md`](../CONTRIBUTING.md) is the authoritative
+> contributing guide covering setup, code style, testing, and the PR process. This page
+> summarises the key development principles; refer to the root file for complete details.
+
 ## Development Guidelines
 
 Follow the principles outlined in [CLAUDE.md](../CLAUDE.md):
