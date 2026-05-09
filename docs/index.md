@@ -21,6 +21,17 @@ ProjectHephaestus is the shared utilities and tooling library for the HomericInt
 - **hephaestus.version** — Version management utilities
 - **hephaestus.validation** — README and config validation
 
+## API Reference
+
+Auto-generated API documentation can be produced with [pdoc](https://pdoc.dev/):
+
+```bash
+just docs        # outputs to docs/api/
+```
+
+The generated `docs/api/` directory is git-ignored; run the command locally to browse
+full function signatures, docstrings, and type annotations for all 37+ CLI entry points.
+
 ## Setup
 
 See the [README](../README.md) for installation and development setup instructions.

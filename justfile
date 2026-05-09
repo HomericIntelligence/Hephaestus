@@ -60,6 +60,10 @@ check: lint format-check typecheck
 audit:
     pixi run --environment lint pip-audit
 
+# Generate API reference documentation with pdoc (output: docs/api/)
+docs:
+    pixi run docs
+
 # Full CI-equivalent run: bootstrap, check, and test
 all: bootstrap check test
 

@@ -4,6 +4,9 @@
 # Build artifacts
 build/
 
+# Auto-generated API reference (pdoc output)
+docs/api/
+
 # hatch-vcs generated version file
 hephaestus/_version.py
 
