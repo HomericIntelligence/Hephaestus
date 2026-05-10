@@ -388,8 +388,14 @@ class TestEnsureMnemosyne:
         assert "pull" in cmd
         assert "gh" not in cmd
 
-    def test_lock_file_removed_after_successful_clone(self, planner: Any, tmp_path: Any) -> None:
-        """Test that the lock file is removed after a successful clone."""
+    def test_lock_file_kept_after_successful_clone(self, planner: Any, tmp_path: Any) -> None:
+        """Lock file must NOT be removed while fcntl.LOCK_EX is held (#370).
+
+        Unlinking while holding the exclusive lock lets a second process open a
+        new inode at the same path and acquire its own lock, silently breaking
+        cross-process mutual exclusion.  The sentinel should persist; its
+        presence after the clone is harmless.
+        """
         mnemosyne_root = tmp_path / "ProjectMnemosyne"
         lock_path = tmp_path / ".mnemosyne.lock"
 
@@ -399,7 +405,11 @@ class TestEnsureMnemosyne:
             result = planner._ensure_mnemosyne(mnemosyne_root)
 
         assert result is True
-        assert not lock_path.exists(), "Lock file should be removed after successful clone"
+        # After a successful clone the lock file fd is closed (LOCK_UN) but the
+        # file itself remains on disk — it is a sentinel, not a temp file.
+        assert lock_path.exists(), (
+            "Lock file should remain on disk after clone (#370 — unlink-under-lock removed)"
+        )
 
     def test_git_pull_called_when_directory_exists(self, planner: Any, tmp_path: Any) -> None:
         """Test that git pull --ff-only is called when directory already exists."""
@@ -472,3 +482,31 @@ class TestEnsureMnemosyne:
 
         assert all(results), "Both threads should return True"
         assert len(clone_calls) == 1, "Clone should only happen once"
+
+    def test_clone_timeout_returns_false(self, planner: Any, tmp_path: Any) -> None:
+        """TimeoutExpired on gh repo clone must return False without raising (#368)."""
+        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired("gh", 120)
+
+            result = planner._ensure_mnemosyne(mnemosyne_root)
+
+        assert result is False
+
+    def test_clone_call_has_timeout_parameter(self, planner: Any, tmp_path: Any) -> None:
+        """Clone call must have a timeout= argument to prevent indefinite blocking (#368).
+
+        A missing timeout causes the call to block indefinitely while holding
+        both the threading.Lock and fcntl.LOCK_EX, starving all parallel workers.
+        """
+        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+
+            planner._ensure_mnemosyne(mnemosyne_root)
+
+        call_kwargs = mock_run.call_args.kwargs
+        assert "timeout" in call_kwargs, "subprocess.run for clone must pass timeout="
+        assert call_kwargs["timeout"] == 120

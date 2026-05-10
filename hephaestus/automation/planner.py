@@ -217,14 +217,30 @@ class Planner:
             # Run the strict review loop: advise → loop[plan → learn → review]
             # → post final plan with last review attached. Loop terminates on
             # the first unambiguous GO or after MAX_REVIEW_ITERATIONS.
-            plan, final_review, iterations = self._run_plan_review_loop(issue_number, slot_id)
+            plan, final_review, iterations, verdict_is_go = self._run_plan_review_loop(
+                issue_number, slot_id
+            )
 
-            # Post final plan + review to issue
-            self._post_plan(issue_number, plan, final_review=final_review)
+            # Post final plan + review to issue regardless of verdict so
+            # operators can see what was produced (NOGO banner is appended
+            # inside _post_plan when verdict_is_go is False).
+            self._post_plan(
+                issue_number, plan, final_review=final_review, verdict_is_go=verdict_is_go
+            )
 
             self.status_tracker.update_slot(
                 slot_id, f"Completed issue #{issue_number} ({iterations} iter)"
             )
+
+            if not verdict_is_go:
+                return PlanResult(
+                    issue_number=issue_number,
+                    success=False,
+                    error=(
+                        "review loop exhausted all iterations without a GO verdict (NOGO-exhausted)"
+                    ),
+                )
+
             return PlanResult(issue_number=issue_number, success=True)
 
         except Exception as e:
@@ -394,10 +410,21 @@ class Planner:
                         check=True,
                         capture_output=True,
                         text=True,
+                        timeout=120,
                     )
                     logger.info("ProjectMnemosyne cloned successfully")
-                    lock_path.unlink(missing_ok=True)
+                    # NOTE: do NOT unlink lock_path here — the file-lock sentinel
+                    # must remain on disk until the fd closes in the finally block.
+                    # Unlinking while LOCK_EX is held lets a second process open a
+                    # new inode at the same path and grab its own lock, breaking
+                    # cross-process mutual exclusion (#370).
                     return True
+
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        "gh repo clone timed out after 120 s; ProjectMnemosyne unavailable this run"
+                    )
+                    return False
 
                 except subprocess.CalledProcessError as e:
                     logger.warning(f"Failed to clone ProjectMnemosyne: {e.stderr or e}")
@@ -561,6 +588,7 @@ class Planner:
         plan: str,
         *,
         final_review: str | None = None,
+        verdict_is_go: bool = True,
     ) -> None:
         """Post plan to issue as a comment.
 
@@ -570,11 +598,24 @@ class Planner:
             final_review: When set, the last reviewer output (Grade + Verdict +
                 rationale) is appended in a collapsible section so the human
                 reviewer can see why the loop terminated.
+            verdict_is_go: When ``False`` a visible NOGO banner is prepended to
+                the comment so operators can tell at a glance that the review loop
+                exhausted all iterations without approval (#369).
 
         """
+        nogo_banner = ""
+        if not verdict_is_go:
+            nogo_banner = (
+                "> [!WARNING]\n"
+                "> **NOGO-EXHAUSTED** — The strict review loop ran all "
+                f"{MAX_REVIEW_ITERATIONS} iterations without an unambiguous GO verdict. "
+                "This plan was posted for operator review but **should not be implemented** "
+                "until a human approves it.\n\n"
+            )
+
         comment_body = f"""# Implementation Plan
 
-{plan}
+{nogo_banner}{plan}
 """
 
         if final_review:
@@ -601,7 +642,9 @@ class Planner:
     # Strict review loop — advise → loop[plan → learn → review] → post
     # ------------------------------------------------------------------
 
-    def _run_plan_review_loop(self, issue_number: int, slot_id: int) -> tuple[str, str | None, int]:
+    def _run_plan_review_loop(
+        self, issue_number: int, slot_id: int
+    ) -> tuple[str, str | None, int, bool]:
         """Run the bounded review loop for a single issue.
 
         Pre-fetches the issue and runs advise once, then iterates:
@@ -614,7 +657,10 @@ class Planner:
             slot_id: Worker slot id for status updates.
 
         Returns:
-            Tuple of (final plan text, final review text or None, iterations run).
+            Tuple of (final plan text, final review text or None, iterations run,
+            final_verdict_is_go). The fourth element is ``True`` only when the loop
+            terminated with an unambiguous GO verdict; ``False`` when the loop
+            exhausted all iterations without a GO (NOGO-exhausted).
 
         """
         # Pre-fetch issue once and cache for the whole loop
@@ -631,6 +677,7 @@ class Planner:
         review_text: str | None = None
         prior_review_for_plan: str | None = None
         iterations_run = 0
+        final_verdict_is_go = False
 
         for iteration in range(MAX_REVIEW_ITERATIONS):
             iterations_run = iteration + 1
@@ -669,12 +716,19 @@ class Planner:
 
             if verdict.is_go:
                 logger.info(f"#{issue_number}: GO on iteration {iteration} — loop terminated")
+                final_verdict_is_go = True
                 break
 
             # NoGo or AMBIGUOUS — feed this review back into next plan iteration
             prior_review_for_plan = review_text
 
-        return plan, review_text, iterations_run
+        if not final_verdict_is_go:
+            logger.warning(
+                f"#{issue_number}: review loop exhausted {iterations_run} iteration(s) "
+                "without a GO verdict — plan posted with NOGO-exhausted status"
+            )
+
+        return plan, review_text, iterations_run, final_verdict_is_go
 
     def _capture_planner_learnings(self, issue_number: int, plan: str) -> str:
         """Ask Claude to summarize what the planner just learned.

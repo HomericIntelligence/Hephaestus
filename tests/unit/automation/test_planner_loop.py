@@ -51,13 +51,14 @@ class TestRunPlanReviewLoop:
             patch.object(planner, "_capture_planner_learnings", return_value="learn0"),
             patch.object(planner, "_run_plan_review", return_value=_go_review()) as mock_review,
         ):
-            plan, review, iters = planner._run_plan_review_loop(123, slot_id=0)
+            plan, review, iters, verdict_is_go = planner._run_plan_review_loop(123, slot_id=0)
 
         assert iters == 1
         assert plan == "plan v0"
         assert "Verdict: GO" in (review or "")
         assert mock_plan.call_count == 1
         assert mock_review.call_count == 1
+        assert verdict_is_go is True
 
     def test_runs_all_3_iterations_on_sustained_nogo(self, planner: Planner) -> None:
         """When every review says NOGO, the loop runs exactly 3 iterations."""
@@ -78,13 +79,14 @@ class TestRunPlanReviewLoop:
                 side_effect=[_nogo_review("D"), _nogo_review("C"), _nogo_review("B")],
             ) as mock_review,
         ):
-            plan, review, iters = planner._run_plan_review_loop(123, slot_id=0)
+            plan, review, iters, verdict_is_go = planner._run_plan_review_loop(123, slot_id=0)
 
         assert iters == MAX_REVIEW_ITERATIONS == 3
         assert plan == "plan v2"
         assert "Verdict: NOGO" in (review or "")
         assert mock_plan.call_count == 3
         assert mock_review.call_count == 3
+        assert verdict_is_go is False
 
     def test_terminates_on_go_at_iter1(self, planner: Planner) -> None:
         with (
@@ -102,12 +104,13 @@ class TestRunPlanReviewLoop:
                 side_effect=[_nogo_review(), _go_review()],
             ) as mock_review,
         ):
-            plan, _review, iters = planner._run_plan_review_loop(123, slot_id=0)
+            plan, _review, iters, verdict_is_go = planner._run_plan_review_loop(123, slot_id=0)
 
         assert iters == 2
         assert plan == "plan v1"
         assert mock_plan.call_count == 2
         assert mock_review.call_count == 2
+        assert verdict_is_go is True
 
     def test_prior_review_passed_to_next_plan(self, planner: Planner) -> None:
         """Iteration N+1 must receive iteration N's review as `prior_review`."""
@@ -190,3 +193,63 @@ class TestPostPlanWithReview:
         body = mock_cmt.call_args[0][1]
         assert "plan body" in body
         assert "Final review verdict" not in body
+
+    def test_post_plan_includes_nogo_banner_when_verdict_is_false(self, planner: Planner) -> None:
+        """When verdict_is_go=False a NOGO-EXHAUSTED banner must appear in the comment (#369)."""
+        with patch("hephaestus.automation.planner.gh_issue_comment") as mock_cmt:
+            planner._post_plan(
+                123,
+                "plan body",
+                final_review="Grade: D\nVerdict: NOGO",
+                verdict_is_go=False,
+            )
+        body = mock_cmt.call_args[0][1]
+        assert "NOGO-EXHAUSTED" in body
+        assert "plan body" in body
+
+    def test_post_plan_omits_nogo_banner_on_go(self, planner: Planner) -> None:
+        """A GO plan must not include the NOGO banner."""
+        with patch("hephaestus.automation.planner.gh_issue_comment") as mock_cmt:
+            planner._post_plan(
+                123,
+                "plan body",
+                final_review="Grade: A\nVerdict: GO",
+                verdict_is_go=True,
+            )
+        body = mock_cmt.call_args[0][1]
+        assert "NOGO-EXHAUSTED" not in body
+        assert "plan body" in body
+
+
+class TestPlanIssueNOGOExhausted:
+    """_plan_issue must return PlanResult.success=False when the loop is NOGO-exhausted (#369)."""
+
+    def test_nogo_exhausted_plan_result_success_false(self, planner: Planner) -> None:
+        """All-NOGO loop must produce PlanResult(success=False) not PlanResult(success=True)."""
+        with (
+            patch.object(
+                planner,
+                "_run_plan_review_loop",
+                return_value=("plan text", "Grade: D\nVerdict: NOGO\n", 3, False),
+            ),
+            patch.object(planner, "_post_plan"),
+        ):
+            result = planner._plan_issue(123)
+
+        assert result.success is False
+        assert result.error is not None
+        assert "NOGO" in result.error
+
+    def test_go_plan_result_success_true(self, planner: Planner) -> None:
+        """A GO loop must still produce PlanResult(success=True)."""
+        with (
+            patch.object(
+                planner,
+                "_run_plan_review_loop",
+                return_value=("plan text", "Grade: A\nVerdict: GO\n", 1, True),
+            ),
+            patch.object(planner, "_post_plan"),
+        ):
+            result = planner._plan_issue(123)
+
+        assert result.success is True
