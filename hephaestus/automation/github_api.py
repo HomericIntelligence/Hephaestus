@@ -22,6 +22,7 @@ from typing import Any, cast
 
 from hephaestus.github.rate_limit import detect_claude_usage_limit, detect_rate_limit, wait_until
 
+from .claude_timeouts import gh_cli_timeout
 from .git_utils import get_repo_info, run
 from .models import IssueInfo, IssueState
 
@@ -100,7 +101,7 @@ def _gh_call(
                 ["gh", *args],
                 check=check,
                 capture_output=True,
-                timeout=120,  # 2 minute timeout for gh CLI calls
+                timeout=gh_cli_timeout(),
             )
             return result
         except subprocess.CalledProcessError as e:
@@ -154,6 +155,22 @@ def _gh_call(
 
     # Should not reach here, but satisfy type checker
     raise RuntimeError("gh call failed after all retries")
+
+
+def _check_graphql_errors(data: dict[str, Any], context: str) -> None:
+    """Raise RuntimeError if a GraphQL response carries an ``errors`` array.
+
+    The GitHub GraphQL API returns HTTP 200 with ``{"errors": [...]}`` for
+    permission, validation, and visibility failures. ``gh`` exits 0 in that
+    case, so a plain exit-code check sees success while the operation has
+    actually failed. This helper is the single place we surface those.
+
+    ``context`` appears verbatim in the error message so logs identify which
+    operation failed.
+    """
+    errors = data.get("errors")
+    if errors:
+        raise RuntimeError(f"GraphQL {context} failed: {errors!r}")
 
 
 def gh_issue_json(issue_number: int) -> dict[str, Any]:
@@ -385,6 +402,7 @@ def _fetch_batch_states(batch: list[int], owner: str, repo: str) -> dict[int, Is
     try:
         result = _gh_call(["api", "graphql", "-f", f"query={query}"])
         data = json.loads(result.stdout)
+        _check_graphql_errors(data, "prefetch_issue_states")
         repo_data = data.get("data", {}).get("repository", {})
         for key, issue_data in repo_data.items():
             if key.startswith("issue") and issue_data:
@@ -634,6 +652,7 @@ mutation AddReview(
     )
 
     data = json.loads(result.stdout)
+    _check_graphql_errors(data, f"gh_pr_review_post(pr={pr_number})")
     review_data = data.get("data", {}).get("addPullRequestReview", {}).get("pullRequestReview", {})
     thread_nodes = review_data.get("pullRequest", {}).get("reviewThreads", {}).get("nodes", [])
     thread_ids: list[str] = [
@@ -690,6 +709,7 @@ query GetThreads {{
 
     result = _gh_call(["api", "graphql", "-f", f"query={query}"])
     data = json.loads(result.stdout)
+    _check_graphql_errors(data, f"gh_pr_list_unresolved_threads(pr={pr_number})")
 
     nodes = (
         data.get("data", {})
@@ -743,7 +763,7 @@ mutation AddReply($threadId: ID!, $body: String!) {
   }
 }
 """
-    _gh_call(
+    reply_result = _gh_call(
         [
             "api",
             "graphql",
@@ -755,6 +775,14 @@ mutation AddReply($threadId: ID!, $body: String!) {
             f"body={reply_body}",
         ]
     )
+    # JSONDecodeError is benign here — only an explicit ``errors`` array must
+    # surface. ``contextlib.suppress`` lets the helper raise on errors while
+    # silently absorbing the no-body case.
+    with contextlib.suppress(json.JSONDecodeError):
+        _check_graphql_errors(
+            json.loads(reply_result.stdout or "{}"),
+            f"gh_pr_resolve_thread.reply(thread={thread_id})",
+        )
 
     # Step 2: resolve the thread
     resolve_mutation = """
@@ -764,7 +792,7 @@ mutation ResolveThread($threadId: ID!) {
   }
 }
 """
-    _gh_call(
+    resolve_result = _gh_call(
         [
             "api",
             "graphql",
@@ -774,6 +802,11 @@ mutation ResolveThread($threadId: ID!) {
             f"threadId={thread_id}",
         ]
     )
+    with contextlib.suppress(json.JSONDecodeError):
+        _check_graphql_errors(
+            json.loads(resolve_result.stdout or "{}"),
+            f"gh_pr_resolve_thread.resolve(thread={thread_id})",
+        )
     logger.info(f"Resolved review thread {thread_id!r}")
 
 

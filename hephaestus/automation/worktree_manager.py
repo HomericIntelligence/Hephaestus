@@ -4,6 +4,22 @@ Provides:
 - Thread-safe worktree creation and cleanup
 - Branch management
 - Worktree state tracking
+
+Layout note
+-----------
+Worktrees live under ``<repo_root>/.worktrees/issue-{N}``. Putting them
+inside the repo (rather than ``~/.tmp``) keeps them visible to the implementer
+process even after a force-kill: an interrupted run leaves the worktree on
+disk so a subsequent invocation can either resume work or surface a
+``WorktreeDirtyError`` to the operator. The trade-off is that ``git status``
+in the parent repo can show ``.worktrees/`` as untracked if it isn't ignored;
+ensure ``.worktrees/`` is in ``.gitignore`` (or a global ignore) for any repo
+that runs the automation. Recovery procedure for a force-killed loop:
+
+    git -C <repo> worktree list
+    # Inspect each .worktrees/issue-N for unexpected modifications
+    git -C <repo> worktree remove .worktrees/issue-N    # if abandoning
+    rm -rf <repo>/.worktrees/issue-N                    # last resort
 """
 
 import logging

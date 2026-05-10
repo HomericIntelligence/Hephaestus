@@ -133,22 +133,24 @@ class TestResolveAddressedThreads:
         """Claude reports [id1] addressed, [id2] not → only id1 resolved."""
         addressed = ["thread-id-1"]
         replies: dict[str, str] = {"thread-id-1": "Fixed the issue"}
+        presented = {"thread-id-1", "thread-id-2"}
 
         with patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve:
-            reviewer._resolve_addressed_threads(addressed, replies)
+            reviewer._resolve_addressed_threads(addressed, replies, presented)
 
         mock_resolve.assert_called_once_with("thread-id-1", "Fixed the issue", dry_run=False)
 
     def test_resolve_multiple_addressed_threads(self, reviewer: AddressReviewer) -> None:
-        """All addressed threads are resolved, non-addressed ones are skipped."""
+        """All addressed threads present in the unresolved set are resolved."""
         addressed = ["thread-1", "thread-2"]
         replies: dict[str, str] = {
             "thread-1": "Renamed variable",
             "thread-2": "Added type hint",
         }
+        presented = {"thread-1", "thread-2"}
 
         with patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve:
-            reviewer._resolve_addressed_threads(addressed, replies)
+            reviewer._resolve_addressed_threads(addressed, replies, presented)
 
         assert mock_resolve.call_count == 2
         called_ids = {call[0][0] for call in mock_resolve.call_args_list}
@@ -158,16 +160,35 @@ class TestResolveAddressedThreads:
         """Individual resolve failures do not abort the rest."""
         addressed = ["thread-1", "thread-2"]
         replies: dict[str, str] = {}
+        presented = {"thread-1", "thread-2"}
 
         with patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve:
             mock_resolve.side_effect = [RuntimeError("API error"), None]
             # Should not raise
-            reviewer._resolve_addressed_threads(addressed, replies)
+            reviewer._resolve_addressed_threads(addressed, replies, presented)
 
         assert mock_resolve.call_count == 2
 
+    def test_skips_unknown_thread_ids(self, reviewer: AddressReviewer) -> None:
+        """Thread IDs Claude returns that we never presented are dropped silently.
+
+        This is the M2 trust-boundary safeguard: a hallucinated or cross-PR
+        thread ID must NOT reach gh_pr_resolve_thread.
+        """
+        addressed = ["thread-real", "thread-hallucinated"]
+        replies: dict[str, str] = {
+            "thread-real": "Fixed",
+            "thread-hallucinated": "Pretended to fix",
+        }
+        presented = {"thread-real"}  # only the real one was on this PR
+
+        with patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve:
+            reviewer._resolve_addressed_threads(addressed, replies, presented)
+
+        mock_resolve.assert_called_once_with("thread-real", "Fixed", dry_run=False)
+
     def test_dry_run_no_resolve(self, mock_options: AddressReviewOptions, tmp_path: Path) -> None:
-        """dry_run=True → gh_pr_resolve_thread never called."""
+        """dry_run=True → gh_pr_resolve_thread is called with dry_run=True."""
         mock_options.dry_run = True
 
         with (
@@ -180,11 +201,11 @@ class TestResolveAddressedThreads:
 
         addressed = ["thread-1"]
         replies: dict[str, str] = {"thread-1": "Fixed"}
+        presented = {"thread-1"}
 
         with patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve:
-            # dry_run is passed through from options via _resolve_addressed_threads
-            # The method itself passes dry_run=self.options.dry_run
-            dry_reviewer._resolve_addressed_threads(addressed, replies)
+            # dry_run is forwarded from options via _resolve_addressed_threads
+            dry_reviewer._resolve_addressed_threads(addressed, replies, presented)
 
         # With dry_run=True, gh_pr_resolve_thread is called but internally is a no-op;
         # we verify the dry_run flag is forwarded correctly.

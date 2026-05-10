@@ -5,6 +5,20 @@ Provides:
 - Cycle detection
 - Priority ordering
 - Ready issue discovery
+
+Scope note (intentional)
+------------------------
+This resolver is consulted by the **implementer phase only** — the planner,
+plan reviewer, PR reviewer, and address-review phases iterate the user's
+``--issues`` list directly, in declaration order. That is by design: those
+phases are read-mostly (or post-only), so an out-of-order plan/review
+comment is recoverable and reordering them across phases would be more
+complexity than benefit.
+
+If you change a phase to take meaningful action that depends on dependency
+order (e.g. an "implement-then-merge" pipeline that must merge #A before
+posting a plan against #B), wire :class:`DependencyResolver` into that
+phase too — see ``IssueImplementer.run`` for the canonical call shape.
 """
 
 import logging

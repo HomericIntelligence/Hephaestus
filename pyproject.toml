@@ -62,7 +62,7 @@ all = [
 [project.scripts]
 hephaestus-plan-issues = "hephaestus.automation.planner:main"
 hephaestus-implement-issues = "hephaestus.automation.implementer:main"
-hephaestus-review-prs = "hephaestus.automation.reviewer:main"
+hephaestus-review-prs = "hephaestus.automation.pr_reviewer:main"
 hephaestus-merge-prs = "hephaestus.github.pr_merge:main"
 hephaestus-fleet-sync = "hephaestus.github.fleet_sync:main"
 hephaestus-tidy = "hephaestus.github.tidy:main"
@@ -189,7 +189,6 @@ omit = [
     "*/__init__.py",
     # Orchestration modules require live claude/gh CLI — integration test territory
     "hephaestus/automation/implementer.py",
-    "hephaestus/automation/reviewer.py",
     "hephaestus/automation/pr_manager.py",
     "hephaestus/automation/planner.py",
     "hephaestus/automation/follow_up.py",

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from .claude_timeouts import learn_claude_timeout
 from .git_utils import run
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ def run_learn(
                 "Read,Write,Edit,Glob,Grep,Bash",
             ],
             cwd=worktree_path,
-            timeout=600,  # 10 minutes
+            timeout=learn_claude_timeout(),
         )
         # Write output to log file
         log_file.write_text(result.stdout or "")

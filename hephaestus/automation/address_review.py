@@ -14,7 +14,6 @@ code, then resolves only the threads Claude explicitly reports as addressed.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import logging
 import re
@@ -27,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .claude_models import implementer_model
+from .claude_timeouts import address_review_claude_timeout
 from .curses_ui import CursesUI, ThreadLogManager
 from .git_utils import get_repo_root, run
 from .github_api import (
@@ -161,11 +161,23 @@ class AddressReviewer:
                 future = executor.submit(self._address_issue, issue_num, pr_num, slot_id)
                 futures[future] = issue_num
 
+            # Backoff on repeated wait() failures so a flapping condition
+            # doesn't busy-loop silently. Resets to 0.1s on the first
+            # successful wait().
+            wait_backoff = 0.1
             while futures:
                 try:
                     done, _pending = wait(futures.keys(), timeout=1.0, return_when=FIRST_COMPLETED)
-                except Exception:
-                    time.sleep(0.1)
+                    wait_backoff = 0.1
+                except Exception as exc:
+                    logger.warning(
+                        "futures.wait() raised %s: %s — backing off %.1fs",
+                        type(exc).__name__,
+                        exc,
+                        wait_backoff,
+                    )
+                    time.sleep(wait_backoff)
+                    wait_backoff = min(wait_backoff * 2, 5.0)
                     continue
 
                 for future in done:
@@ -318,7 +330,8 @@ class AddressReviewer:
 
             # Step 11: Resolve addressed threads
             self.status_tracker.update_slot(slot_id, f"#{issue_number}: Resolving threads")
-            self._resolve_addressed_threads(addressed, replies)
+            presented_thread_ids = {t["id"] for t in threads}
+            self._resolve_addressed_threads(addressed, replies, presented_thread_ids)
 
             # Step 12: Update review state
             with self.state_lock:
@@ -549,7 +562,7 @@ class AddressReviewer:
         logger.info(f"Creating new worktree for issue #{issue_number} on branch {branch_name}")
         return self.worktree_manager.create_worktree(issue_number, branch_name)
 
-    def _run_fix_session(
+    def _run_fix_session(  # noqa: C901  # session-resume + fallback + cleanup + parse error paths
         self,
         issue_number: int,
         pr_number: int,
@@ -620,11 +633,12 @@ class AddressReviewer:
         try:
             # Attempt with session resume first if we have a session_id
             if session_id:
+                claude_timeout = address_review_claude_timeout()
                 try:
                     result = run(
                         _build_cmd(with_resume=True, sid=session_id),
                         cwd=worktree_path,
-                        timeout=1800,  # 30 minutes
+                        timeout=claude_timeout,
                     )
                 except subprocess.CalledProcessError as e:
                     stderr = e.stderr or ""
@@ -640,7 +654,7 @@ class AddressReviewer:
                         result = run(
                             _build_cmd(with_resume=False),
                             cwd=worktree_path,
-                            timeout=1800,
+                            timeout=claude_timeout,
                         )
                     else:
                         raise
@@ -648,7 +662,7 @@ class AddressReviewer:
                 result = run(
                     _build_cmd(with_resume=False),
                     cwd=worktree_path,
-                    timeout=1800,
+                    timeout=address_review_claude_timeout(),
                 )
 
             log_file.write_text(result.stdout or "")
@@ -660,7 +674,7 @@ class AddressReviewer:
             except (json.JSONDecodeError, AttributeError):
                 response_text = result.stdout or ""
 
-            parsed = self._parse_json_block(response_text)
+            parsed = self._parse_json_block(response_text, issue_number=issue_number)
             logger.info(
                 f"Fix session complete for PR #{pr_number}; "
                 f"addressed {len(parsed.get('addressed', []))} thread(s)"
@@ -679,14 +693,28 @@ class AddressReviewer:
             log_file.write_text(f"TIMEOUT after {e.timeout}s\n\nOutput:\n{e.output or ''}")
             raise RuntimeError(f"Fix session timed out for PR #{pr_number}") from e
         finally:
-            with contextlib.suppress(Exception):
+            # Narrow exception: a missing prompt file is benign cleanup,
+            # but ENOSPC / permission errors are signal we want surfaced.
+            try:
                 prompt_file.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warning("Could not unlink prompt file %s: %s", prompt_file, exc)
 
-    def _parse_json_block(self, text: str) -> dict[str, Any]:
+    def _parse_json_block(self, text: str, issue_number: int | None = None) -> dict[str, Any]:
         """Extract the last ```json ... ``` block from Claude's response.
+
+        On parse failure or missing block, writes a trace file under the state
+        dir so an empty ``addressed`` list is distinguishable from "Claude
+        reviewed and decided no fixes were warranted". Without this the two
+        cases looked identical in logs and it was hard to know whether to
+        retry, escalate, or trust the result.
 
         Args:
             text: Claude's full response text
+            issue_number: Issue number for diagnostic filenames; if None, no
+                trace is written (used by tests).
 
         Returns:
             Parsed dict with "addressed" and "replies" keys, or defaults if not found
@@ -694,24 +722,89 @@ class AddressReviewer:
         """
         matches = re.findall(r"```json\s*(.*?)\s*```", text, re.DOTALL)
         if not matches:
+            self._write_parse_trace(
+                issue_number,
+                reason="no fenced ```json block found in response",
+                text=text,
+            )
             return {"addressed": [], "replies": {}}
         try:
             return dict(json.loads(matches[-1]))
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            self._write_parse_trace(
+                issue_number,
+                reason=f"json.JSONDecodeError: {e}",
+                text=text,
+                last_block=matches[-1],
+            )
             return {"addressed": [], "replies": {}}
 
-    def _resolve_addressed_threads(self, addressed: list[str], replies: dict[str, str]) -> None:
+    def _write_parse_trace(
+        self,
+        issue_number: int | None,
+        *,
+        reason: str,
+        text: str,
+        last_block: str | None = None,
+    ) -> None:
+        """Persist a diagnostic file describing why JSON parsing failed."""
+        if issue_number is None:
+            logger.warning("Parse trace skipped (no issue_number): %s", reason)
+            return
+        trace_path = self.state_dir / f"address-{issue_number}.parse-error.log"
+        try:
+            payload = [
+                f"reason: {reason}",
+                "",
+                "=== last fenced block (if any) ===",
+                last_block or "(none)",
+                "",
+                "=== full response ===",
+                text,
+            ]
+            trace_path.write_text("\n".join(payload))
+            logger.warning(
+                "Issue #%d: address-review JSON parse failed (%s); trace at %s",
+                issue_number,
+                reason,
+                trace_path,
+            )
+        except OSError as exc:
+            logger.warning(
+                "Issue #%d: address-review JSON parse failed and trace write also failed: %s",
+                issue_number,
+                exc,
+            )
+
+    def _resolve_addressed_threads(
+        self,
+        addressed: list[str],
+        replies: dict[str, str],
+        presented_thread_ids: set[str],
+    ) -> None:
         """Resolve the review threads that Claude explicitly fixed.
 
-        Only resolves threads listed in ``addressed``. Skips threads that fail
-        to resolve with a warning rather than aborting the whole workflow.
+        Only resolves threads listed in ``addressed`` AND present in
+        ``presented_thread_ids``. Why: Claude's response is untrusted input —
+        a hallucinated or cross-PR thread ID would otherwise be passed straight
+        to ``gh api graphql resolveReviewThread``. Membership against the set
+        we actually presented to Claude is the trust boundary.
 
         Args:
             addressed: List of thread_id strings Claude reported as fixed
             replies: Mapping of thread_id to one-line reply describing the fix
+            presented_thread_ids: Set of thread IDs we presented to Claude
+                (i.e. the unresolved set on this PR at fix time)
 
         """
         for thread_id in addressed:
+            if thread_id not in presented_thread_ids:
+                logger.warning(
+                    "Skipping resolve of unknown thread_id %r — not in the "
+                    "unresolved-set presented to Claude (likely hallucinated)",
+                    thread_id,
+                )
+                continue
             reply = replies.get(thread_id, "Addressed in code.")
             try:
                 gh_pr_resolve_thread(thread_id, reply, dry_run=self.options.dry_run)

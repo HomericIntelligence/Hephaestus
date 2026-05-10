@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .claude_models import reviewer_model
+from .claude_timeouts import pr_reviewer_claude_timeout
 from .curses_ui import CursesUI, ThreadLogManager
 from .git_utils import get_repo_root, run
 from .github_api import _gh_call, fetch_issue_info, gh_pr_review_post, write_secure
@@ -251,13 +252,23 @@ class PRReviewer:
             "pr_description": "",
         }
 
-        # Fetch PR diff
-        with contextlib.suppress(Exception):
-            result = _gh_call(["pr", "diff", str(pr_number)], check=False)
-            context["pr_diff"] = (result.stdout or "")[:8000]  # Cap to avoid huge diffs
+        # Fetch PR diff. This is the only field we treat as load-bearing —
+        # an empty diff would let Claude emit "LGTM" against nothing. Failure
+        # propagates so the worker is recorded as failed rather than silently
+        # passing review.
+        result = _gh_call(["pr", "diff", str(pr_number)], check=False)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"failed to fetch PR diff for #{pr_number}: "
+                f"exit={result.returncode} stderr={(result.stderr or '')[:200]!r}"
+            )
+        context["pr_diff"] = (result.stdout or "")[:8000]  # Cap to avoid huge diffs
+        if not context["pr_diff"].strip():
+            raise RuntimeError(f"PR #{pr_number} returned an empty diff — refusing to review")
 
-        # Fetch PR description and reviews/comments
-        with contextlib.suppress(Exception):
+        # Fetch PR description and reviews/comments. Best-effort, but any
+        # failure is now logged so empty descriptions are not invisible.
+        try:
             result = _gh_call(
                 [
                     "pr",
@@ -284,9 +295,16 @@ class PRReviewer:
                 if body:
                     review_parts.append(f"@{author}: {body}")
             context["review_comments"] = "\n".join(review_parts)
+        except Exception as exc:
+            logger.warning(
+                "PR #%d: failed to gather description/comments: %s — review will "
+                "proceed without them",
+                pr_number,
+                exc,
+            )
 
-        # Fetch CI check status
-        with contextlib.suppress(Exception):
+        # Fetch CI check status (best-effort).
+        try:
             result = _gh_call(
                 ["pr", "checks", str(pr_number), "--json", "name,state,conclusion"],
                 check=False,
@@ -297,11 +315,24 @@ class PRReviewer:
                 for c in checks
             ]
             context["ci_status"] = "\n".join(status_lines)
+        except Exception as exc:
+            logger.warning(
+                "PR #%d: failed to gather CI status: %s — review will proceed without it",
+                pr_number,
+                exc,
+            )
 
-        # Fetch issue body
-        with contextlib.suppress(Exception):
+        # Fetch issue body (best-effort).
+        try:
             issue = fetch_issue_info(issue_number)
             context["issue_body"] = issue.body
+        except Exception as exc:
+            logger.warning(
+                "Issue #%d: failed to fetch body for PR #%d review: %s",
+                issue_number,
+                pr_number,
+                exc,
+            )
 
         return context
 
@@ -359,7 +390,7 @@ class PRReviewer:
                     "Read,Glob,Grep,Bash",
                 ],
                 cwd=worktree_path,
-                timeout=1200,  # 20 minutes
+                timeout=pr_reviewer_claude_timeout(),
             )
             log_file.write_text(result.stdout or "")
 

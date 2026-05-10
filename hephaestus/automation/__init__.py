@@ -9,7 +9,7 @@ from hephaestus.automation.models import (
     ReviewerOptions,
 )
 from hephaestus.automation.planner import Planner
-from hephaestus.automation.reviewer import PRReviewer
+from hephaestus.automation.pr_reviewer import PRReviewer
 
 __all__ = [
     "DependencyResolver",
