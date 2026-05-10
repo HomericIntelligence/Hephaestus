@@ -2,11 +2,13 @@
 
 ## Supported Versions
 
-| Version | Supported |
-|---------|-----------|
-| 0.4.x   | Yes       |
-| 0.3.x   | Yes       |
-| < 0.3   | No        |
+As of 2026-05-10. Python >= 3.10 required.
+
+| Version | Supported            |
+|---------|----------------------|
+| 0.7.x   | ✅ Supported         |
+| 0.6.x   | ✅ Supported         |
+| < 0.6   | ❌ End of life       |
 
 ## Reporting a Vulnerability
 

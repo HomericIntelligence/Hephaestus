@@ -11,6 +11,8 @@ ProjectHephaestus provides standardized utility functions and tools that can be 
 - **Consistency**: Standardized interfaces and patterns
 - **Reliability**: Comprehensive testing and error handling
 
+**Project Status:** See [docs/ROADMAP.md](docs/ROADMAP.md) for the public roadmap and current focus areas.
+
 ## Directory Structure
 
 ```
