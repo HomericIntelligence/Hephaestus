@@ -653,6 +653,13 @@ def gh_pr_review_post(
         for c in comments
     ]
 
+    # The mutation returns only the review-level comment nodes.  Each
+    # inline comment belongs to exactly one review thread; we ask for the
+    # ``pullRequestReviewThread`` on every comment so we can collect the
+    # thread IDs created by *this* review only — not every unresolved thread
+    # on the PR.  This fixes the "foreign thread" bug (#375) where the old
+    # approach fetched ``pullRequest { reviewThreads(last: 50) }`` and
+    # returned pre-existing threads from human reviewers.
     mutation = """
 mutation AddReview(
   $prId: ID!, $body: String!,
@@ -664,9 +671,12 @@ mutation AddReview(
   ) {
     pullRequestReview {
       id
-      pullRequest {
-        reviewThreads(last: 50) {
-          nodes { id isResolved }
+      comments(first: 50) {
+        nodes {
+          pullRequestReviewThread {
+            id
+            isResolved
+          }
         }
       }
     }
@@ -695,10 +705,21 @@ mutation AddReview(
     data = json.loads(result.stdout)
     _check_graphql_errors(data, f"gh_pr_review_post(pr={pr_number})")
     review_data = data.get("data", {}).get("addPullRequestReview", {}).get("pullRequestReview", {})
-    thread_nodes = review_data.get("pullRequest", {}).get("reviewThreads", {}).get("nodes", [])
-    thread_ids: list[str] = [
-        node["id"] for node in thread_nodes if not node.get("isResolved", True)
-    ]
+    comment_nodes = review_data.get("comments", {}).get("nodes", [])
+
+    # Deduplicate: multiple comments may belong to the same thread (e.g.
+    # multi-line comments), so collect unique thread IDs using a dict to
+    # preserve insertion order.
+    seen: dict[str, None] = {}
+    for comment_node in comment_nodes:
+        thread_info = comment_node.get("pullRequestReviewThread")
+        if thread_info is None:
+            continue
+        tid = thread_info.get("id")
+        if tid and not thread_info.get("isResolved", False):
+            seen[tid] = None
+
+    thread_ids: list[str] = list(seen)
     logger.info(f"Posted PR review on #{pr_number}; created {len(thread_ids)} thread(s)")
     return thread_ids
 

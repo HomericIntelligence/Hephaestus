@@ -200,8 +200,53 @@ class PlanReviewer:
         finally:
             self.status_tracker.release_slot(acquired_slot)
 
+    def _fetch_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
+        """Fetch all comments for an issue, caching the result per instance.
+
+        Both ``_has_existing_review`` and ``_get_latest_plan`` call this
+        helper so the ``gh issue view --comments`` API is hit only once per
+        issue per worker invocation (#A3-009).
+
+        Args:
+            issue_number: GitHub issue number.
+
+        Returns:
+            List of comment dicts (may be empty on error).
+
+        """
+        cache_attr = "_comments_cache"
+        if not hasattr(self, cache_attr):
+            object.__setattr__(self, cache_attr, {})
+        cache: dict[int, list[dict[str, Any]]] = getattr(self, cache_attr)
+
+        if issue_number in cache:
+            return cache[issue_number]
+
+        try:
+            result = _gh_call(
+                [
+                    "issue",
+                    "view",
+                    str(issue_number),
+                    "--comments",
+                    "--json",
+                    "comments",
+                ],
+            )
+            data = json.loads(result.stdout)
+            comments: list[dict[str, Any]] = data.get("comments", [])
+        except Exception as e:
+            logger.warning(f"Failed to fetch comments for issue #{issue_number}: {e}")
+            comments = []
+
+        cache[issue_number] = comments
+        return comments
+
     def _get_latest_plan(self, issue_number: int) -> str | None:
-        """Fetch comments and return the body of the last comment that looks like a plan.
+        """Return the body of the last comment that looks like a plan.
+
+        Uses :meth:`_fetch_issue_comments` so the API call is shared with
+        :meth:`_has_existing_review`.
 
         Args:
             issue_number: GitHub issue number.
@@ -210,35 +255,22 @@ class PlanReviewer:
             Plan comment body text, or None if no plan comment is found.
 
         """
-        try:
-            result = _gh_call(
-                [
-                    "issue",
-                    "view",
-                    str(issue_number),
-                    "--comments",
-                    "--json",
-                    "comments",
-                ],
-            )
-            data = json.loads(result.stdout)
-            comments: list[dict[str, Any]] = data.get("comments", [])
+        comments = self._fetch_issue_comments(issue_number)
 
-            # Walk in reverse to find the *last* plan comment
-            for comment in reversed(comments):
-                body: str = comment.get("body", "")
-                if any(marker in body for marker in _PLAN_MARKERS):
-                    logger.debug(f"Found plan comment for issue #{issue_number}")
-                    return body
+        # Walk in reverse to find the *last* plan comment
+        for comment in reversed(comments):
+            body: str = comment.get("body", "")
+            if any(marker in body for marker in _PLAN_MARKERS):
+                logger.debug(f"Found plan comment for issue #{issue_number}")
+                return body
 
-            return None
-
-        except Exception as e:
-            logger.warning(f"Failed to fetch comments for issue #{issue_number}: {e}")
-            return None
+        return None
 
     def _has_existing_review(self, issue_number: int) -> bool:
         """Check whether any comment is already a plan review.
+
+        Uses :meth:`_fetch_issue_comments` so the API call is shared with
+        :meth:`_get_latest_plan`.
 
         Args:
             issue_number: GitHub issue number.
@@ -247,31 +279,15 @@ class PlanReviewer:
             True if a review comment already exists.
 
         """
-        try:
-            result = _gh_call(
-                [
-                    "issue",
-                    "view",
-                    str(issue_number),
-                    "--comments",
-                    "--json",
-                    "comments",
-                ],
-            )
-            data = json.loads(result.stdout)
-            comments: list[dict[str, Any]] = data.get("comments", [])
+        comments = self._fetch_issue_comments(issue_number)
 
-            for comment in comments:
-                body: str = comment.get("body", "")
-                if body.startswith(_REVIEW_PREFIX):
-                    logger.debug(f"Found existing review for issue #{issue_number}")
-                    return True
+        for comment in comments:
+            body: str = comment.get("body", "")
+            if body.startswith(_REVIEW_PREFIX):
+                logger.debug(f"Found existing review for issue #{issue_number}")
+                return True
 
-            return False
-
-        except Exception as e:
-            logger.warning(f"Failed to check for existing review on issue #{issue_number}: {e}")
-            return False
+        return False
 
     def _run_claude_analysis(
         self,
@@ -316,7 +332,16 @@ class PlanReviewer:
 
         try:
             result = subprocess.run(
-                ["claude", "--model", reviewer_model(), "--print", "--output-format", "text"],
+                [
+                    "claude",
+                    "--model",
+                    reviewer_model(),
+                    "--print",
+                    "--output-format",
+                    "text",
+                    "--allowedTools",
+                    "Read,Glob,Grep",
+                ],
                 input=prompt,
                 capture_output=True,
                 text=True,

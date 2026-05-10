@@ -222,11 +222,14 @@ class TestAddressIssue:
 
     def test_no_unresolved_threads_skips(self, reviewer: AddressReviewer) -> None:
         """gh_pr_list_unresolved_threads returns [] → skip gracefully."""
-        with patch(
-            "hephaestus.automation.address_review.gh_pr_list_unresolved_threads",
-            return_value=[],
+        with (
+            patch.object(reviewer.status_tracker, "acquire_slot", return_value=0),
+            patch(
+                "hephaestus.automation.address_review.gh_pr_list_unresolved_threads",
+                return_value=[],
+            ),
         ):
-            result = reviewer._address_issue(123, 456, 0)
+            result = reviewer._address_issue(123, 456)
 
         assert result.success is True
         assert result.pr_number == 456
@@ -234,7 +237,7 @@ class TestAddressIssue:
     def test_dry_run_stops_before_resolve(
         self, mock_options: AddressReviewOptions, tmp_path: Path
     ) -> None:
-        """dry_run=True → no resolve or push calls."""
+        """dry_run=True → no worktree creation, no resolve, no push calls."""
         mock_options.dry_run = True
 
         with (
@@ -249,28 +252,26 @@ class TestAddressIssue:
             dry_reviewer = AddressReviewer(mock_options)
             dry_reviewer.state_dir = tmp_path
 
+        # Dry-run guard now fires BEFORE worktree creation, so we only need
+        # gh_pr_list_unresolved_threads to return some threads (the guard
+        # skips the rest of the flow).
         threads = [{"id": "thread-1", "path": "foo.py", "line": 5, "body": "Fix this"}]
 
         with (
-            patch.object(dry_reviewer, "_find_pr_for_issue", return_value=42),
+            patch.object(dry_reviewer.status_tracker, "acquire_slot", return_value=0),
             patch(
                 "hephaestus.automation.address_review.gh_pr_list_unresolved_threads",
                 return_value=threads,
             ),
-            patch.object(dry_reviewer, "_load_impl_session_id", return_value=None),
-            patch.object(dry_reviewer, "_load_review_state", return_value=None),
-            patch.object(dry_reviewer, "_get_or_create_worktree", return_value=tmp_path),
-            patch.object(
-                dry_reviewer,
-                "_run_fix_session",
-                return_value={"addressed": ["thread-1"], "replies": {}},
-            ),
+            patch.object(dry_reviewer, "_get_or_create_worktree") as mock_worktree,
             patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve,
             patch.object(dry_reviewer, "_push_branch") as mock_push,
         ):
-            result = dry_reviewer._address_issue(123, 456, 0)
+            result = dry_reviewer._address_issue(123, 456)
 
         assert result.success is True
+        # Dry-run guard fires before worktree creation and resolution
+        mock_worktree.assert_not_called()
         mock_resolve.assert_not_called()
         mock_push.assert_not_called()
 

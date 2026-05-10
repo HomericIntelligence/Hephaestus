@@ -25,12 +25,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ._review_utils import find_pr_for_issue
 from .claude_models import implementer_model
 from .claude_timeouts import address_review_claude_timeout
 from .curses_ui import CursesUI, ThreadLogManager
 from .git_utils import get_repo_root, run
 from .github_api import (
-    _gh_call,
     gh_pr_list_unresolved_threads,
     gh_pr_resolve_thread,
     write_secure,
@@ -156,9 +156,12 @@ class AddressReviewer:
         with ThreadPoolExecutor(max_workers=self.options.max_workers) as executor:
             futures: dict[Future[Any], int] = {}
 
-            for idx, (issue_num, pr_num) in enumerate(pr_map.items()):
-                slot_id = idx % self.options.max_workers
-                future = executor.submit(self._address_issue, issue_num, pr_num, slot_id)
+            for issue_num, pr_num in pr_map.items():
+                # Slot acquisition happens inside _address_issue via
+                # self.status_tracker.acquire_slot() so workers that exceed
+                # max_workers block rather than racing on a pre-assigned index
+                # (#A3-005).
+                future = executor.submit(self._address_issue, issue_num, pr_num)
                 futures[future] = issue_num
 
             # Backoff on repeated wait() failures so a flapping condition
@@ -202,20 +205,20 @@ class AddressReviewer:
         self._print_summary(results)
         return results
 
-    def _address_issue(self, issue_number: int, pr_number: int, slot_id: int) -> WorkerResult:
+    def _address_issue(self, issue_number: int, pr_number: int) -> WorkerResult:
         """Address unresolved review threads for a single issue.
 
         The pr_number is pre-discovered by run() — no Claude agent is ever launched
         for issues that have no open PR.
 
         Flow:
-        1. List unresolved threads
-        2. Load impl session_id from state file
-        3. Load/create review state
-        4. Checkout worktree for the PR branch
-        5. Run Claude fix session
-        6. Parse JSON from Claude output
-        7. DRY-RUN GUARD: return before any writes if dry_run
+        1. Acquire worker slot via StatusTracker
+        2. List unresolved threads
+        3. DRY-RUN GUARD: return before any worktree/state mutations if dry_run
+        4. Load impl session_id from state file
+        5. Load/create review state
+        6. Checkout worktree for the PR branch
+        7. Run Claude fix session
         8. Commit changes if any
         9. Push branch
         10. Resolve addressed threads
@@ -225,18 +228,26 @@ class AddressReviewer:
         Args:
             issue_number: GitHub issue number
             pr_number: Pre-discovered open PR number for this issue
-            slot_id: Worker slot ID for status updates
 
         Returns:
             WorkerResult
 
         """
+        # Step 1: Acquire slot (mirrors pr_reviewer/_review_pr pattern, fixes A3-005)
+        slot_id = self.status_tracker.acquire_slot()
+        if slot_id is None:
+            return WorkerResult(
+                issue_number=issue_number,
+                success=False,
+                error="Failed to acquire worker slot",
+            )
+
         thread_id = threading.get_ident()
         self.status_tracker.update_slot(slot_id, f"#{issue_number}: Starting")
         self._log("info", f"Addressing PR #{pr_number} for issue #{issue_number}", thread_id)
 
         try:
-            # Step 2: List unresolved threads
+            # Step 1: List unresolved threads
             self.status_tracker.update_slot(slot_id, f"#{issue_number}: Listing threads")
             threads = gh_pr_list_unresolved_threads(pr_number, dry_run=self.options.dry_run)
             if not threads:
@@ -256,6 +267,21 @@ class AddressReviewer:
                 f"Found {len(threads)} unresolved thread(s) on PR #{pr_number}",
                 thread_id,
             )
+
+            # Step 2: DRY-RUN GUARD — must come before any worktree creation or
+            # state mutation so that dry-run leaves no side-effects on disk (#A3-004).
+            if self.options.dry_run:
+                self._log(
+                    "info",
+                    f"[DRY RUN] Would address {len(threads)} unresolved thread(s) "
+                    f"and push for PR #{pr_number}",
+                    thread_id,
+                )
+                return WorkerResult(
+                    issue_number=issue_number,
+                    success=True,
+                    pr_number=pr_number,
+                )
 
             # Step 3: Load impl session_id
             session_id = self._load_impl_session_id(issue_number)
@@ -304,36 +330,20 @@ class AddressReviewer:
                 thread_id,
             )
 
-            # Step 8: DRY-RUN GUARD
-            if self.options.dry_run:
-                self._log(
-                    "info",
-                    f"[DRY RUN] Would resolve {len(addressed)} thread(s) "
-                    f"and push for PR #{pr_number}",
-                    thread_id,
-                )
-                return WorkerResult(
-                    issue_number=issue_number,
-                    success=True,
-                    pr_number=pr_number,
-                    branch_name=branch_name,
-                    worktree_path=str(worktree_path),
-                )
-
-            # Step 9: Commit changes if any
+            # Step 7: Commit changes if any
             self.status_tracker.update_slot(slot_id, f"#{issue_number}: Committing")
             self._commit_if_changes(issue_number, worktree_path)
 
-            # Step 10: Push branch
+            # Step 8: Push branch
             self.status_tracker.update_slot(slot_id, f"#{issue_number}: Pushing")
             self._push_branch(branch_name, worktree_path)
 
-            # Step 11: Resolve addressed threads
+            # Step 9: Resolve addressed threads
             self.status_tracker.update_slot(slot_id, f"#{issue_number}: Resolving threads")
             presented_thread_ids = {t["id"] for t in threads}
             self._resolve_addressed_threads(addressed, replies, presented_thread_ids)
 
-            # Step 12: Update review state
+            # Step 10: Update review state
             with self.state_lock:
                 existing_ids = set(review_state.addressed_thread_ids)
                 for tid in addressed:
@@ -385,7 +395,10 @@ class AddressReviewer:
     def _find_pr_for_issue(self, issue_number: int) -> int | None:
         """Find the open PR for a single issue.
 
-        Tries branch name lookup first, then falls back to body search.
+        Delegates to :func:`_review_utils.find_pr_for_issue` using the
+        three-strategy variant (branch-name, on-disk review state, body
+        search) so that the stored ``pr_number`` from a previous reviewer
+        run is also consulted.
 
         Args:
             issue_number: GitHub issue number
@@ -394,83 +407,11 @@ class AddressReviewer:
             PR number if found, None otherwise
 
         """
-        # Strategy 1: Look for branch named {issue}-auto-impl
-        branch_name = f"{issue_number}-auto-impl"
-        try:
-            result = _gh_call(
-                [
-                    "pr",
-                    "list",
-                    "--head",
-                    branch_name,
-                    "--state",
-                    "open",
-                    "--json",
-                    "number",
-                    "--limit",
-                    "1",
-                ],
-                check=False,
-            )
-            pr_data = json.loads(result.stdout or "[]")
-            if pr_data:
-                pr_number = pr_data[0]["number"]
-                logger.info(f"Found PR #{pr_number} for issue #{issue_number} via branch name")
-                return int(pr_number)
-        except Exception as e:
-            logger.debug(f"Branch-name lookup failed for issue #{issue_number}: {e}")
-
-        # Strategy 2: Check review state for stored pr_number
-        review_state = self._load_review_state(issue_number)
-        if review_state and review_state.pr_number:
-            # Verify the PR is still open
-            try:
-                result = _gh_call(
-                    [
-                        "pr",
-                        "view",
-                        str(review_state.pr_number),
-                        "--json",
-                        "number,state",
-                    ],
-                    check=False,
-                )
-                pr_data = json.loads(result.stdout or "{}")
-                if pr_data.get("state", "").upper() == "OPEN":
-                    logger.info(
-                        f"Found PR #{review_state.pr_number} for issue #{issue_number} "
-                        "via review state"
-                    )
-                    return int(review_state.pr_number)
-            except Exception as e:
-                logger.debug(f"Review state PR lookup failed for issue #{issue_number}: {e}")
-
-        # Strategy 3: Search PR body for issue reference
-        try:
-            result = _gh_call(
-                [
-                    "pr",
-                    "list",
-                    "--state",
-                    "open",
-                    "--search",
-                    f"#{issue_number} in:body",
-                    "--json",
-                    "number",
-                    "--limit",
-                    "5",
-                ],
-                check=False,
-            )
-            pr_data = json.loads(result.stdout or "[]")
-            if pr_data:
-                pr_number = pr_data[0]["number"]
-                logger.info(f"Found PR #{pr_number} for issue #{issue_number} via body search")
-                return int(pr_number)
-        except Exception as e:
-            logger.debug(f"Body search failed for issue #{issue_number}: {e}")
-
-        return None
+        return find_pr_for_issue(
+            issue_number,
+            extra_strategies=True,
+            _load_review_state_fn=lambda: self._load_review_state(issue_number),
+        )
 
     def _load_impl_session_id(self, issue_number: int) -> str | None:
         """Load the implementer's Claude session ID from state file.
@@ -641,23 +582,40 @@ class AddressReviewer:
                         timeout=claude_timeout,
                     )
                 except subprocess.CalledProcessError as e:
-                    stderr = e.stderr or ""
-                    # Fall back to fresh session on session-not-found errors
-                    if any(
-                        phrase in stderr.lower()
-                        for phrase in ("session not found", "invalid session", "session expired")
-                    ):
+                    stderr = (e.stderr or "").lower()
+                    stdout = (e.stdout or "").lower()
+                    combined = stderr + stdout
+                    # Well-known "session gone" phrases (#A3-010 extended list)
+                    session_error_phrases = (
+                        "session not found",
+                        "invalid session",
+                        "session expired",
+                        "no such session",
+                        "session does not exist",
+                        "cannot resume",
+                        "resume failed",
+                        "failed to resume",
+                    )
+                    # Fall back to fresh session on any --resume failure:
+                    # either a known "session gone" phrase in stderr/stdout,
+                    # OR any non-zero exit from a --resume invocation (the
+                    # phrase list can never be exhaustive, so we default to
+                    # fresh-session on unknown errors too — losing the resume
+                    # context is preferable to a hard failure).
+                    if any(phrase in combined for phrase in session_error_phrases) or True:
                         logger.warning(
-                            f"Session {session_id!r} not found for issue #{issue_number}; "
-                            "falling back to fresh session"
+                            "Session %r resume failed for issue #%d (exit=%d, reason=%r); "
+                            "falling back to fresh session",
+                            session_id,
+                            issue_number,
+                            e.returncode,
+                            (e.stderr or "")[:120],
                         )
                         result = run(
                             _build_cmd(with_resume=False),
                             cwd=worktree_path,
                             timeout=claude_timeout,
                         )
-                    else:
-                        raise
             else:
                 result = run(
                     _build_cmd(with_resume=False),

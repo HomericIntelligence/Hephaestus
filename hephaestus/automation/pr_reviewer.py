@@ -16,7 +16,6 @@ import argparse
 import contextlib
 import json
 import logging
-import re
 import subprocess
 import threading
 import time
@@ -25,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ._review_utils import find_pr_for_issue, parse_json_block
 from .claude_models import reviewer_model
 from .claude_timeouts import pr_reviewer_claude_timeout
 from .curses_ui import CursesUI, ThreadLogManager
@@ -41,6 +41,9 @@ logger = logging.getLogger(__name__)
 def _parse_json_block(text: str) -> dict[str, Any]:
     """Extract the last ```json ... ``` block from Claude's response.
 
+    Thin wrapper around :func:`_review_utils.parse_json_block` kept for
+    backward compatibility with existing callers and tests.
+
     Args:
         text: Claude's full response text
 
@@ -48,13 +51,7 @@ def _parse_json_block(text: str) -> dict[str, Any]:
         Parsed dict with keys "comments" and "summary", or defaults if not found
 
     """
-    matches = re.findall(r"```json\s*(.*?)\s*```", text, re.DOTALL)
-    if not matches:
-        return {"comments": [], "summary": "No structured output from analysis"}
-    try:
-        return dict(json.loads(matches[-1]))
-    except json.JSONDecodeError:
-        return {"comments": [], "summary": "Failed to parse structured output from analysis"}
+    return parse_json_block(text)
 
 
 class PRReviewer:
@@ -164,6 +161,9 @@ class PRReviewer:
     def _find_pr_for_issue(self, issue_number: int) -> int | None:
         """Find the open PR for a single issue.
 
+        Delegates to :func:`_review_utils.find_pr_for_issue` (two-strategy
+        variant: branch-name lookup then body search).
+
         Args:
             issue_number: GitHub issue number
 
@@ -171,58 +171,7 @@ class PRReviewer:
             PR number if found, None otherwise
 
         """
-        # Strategy 1: Look for branch named {issue}-auto-impl
-        branch_name = f"{issue_number}-auto-impl"
-        try:
-            result = _gh_call(
-                [
-                    "pr",
-                    "list",
-                    "--head",
-                    branch_name,
-                    "--state",
-                    "open",
-                    "--json",
-                    "number",
-                    "--limit",
-                    "1",
-                ],
-                check=False,
-            )
-            pr_data = json.loads(result.stdout or "[]")
-            if pr_data:
-                pr_number = pr_data[0]["number"]
-                logger.info(f"Found PR #{pr_number} for issue #{issue_number} via branch name")
-                return int(pr_number)
-        except Exception as e:
-            logger.debug(f"Branch-name lookup failed for issue #{issue_number}: {e}")
-
-        # Strategy 2: Search PR body for issue reference
-        try:
-            result = _gh_call(
-                [
-                    "pr",
-                    "list",
-                    "--state",
-                    "open",
-                    "--search",
-                    f"#{issue_number} in:body",
-                    "--json",
-                    "number",
-                    "--limit",
-                    "5",
-                ],
-                check=False,
-            )
-            pr_data = json.loads(result.stdout or "[]")
-            if pr_data:
-                pr_number = pr_data[0]["number"]
-                logger.info(f"Found PR #{pr_number} for issue #{issue_number} via body search")
-                return int(pr_number)
-        except Exception as e:
-            logger.debug(f"Body search failed for issue #{issue_number}: {e}")
-
-        return None
+        return find_pr_for_issue(issue_number)
 
     def _gather_pr_context(
         self,
@@ -387,7 +336,7 @@ class PRReviewer:
                     "--permission-mode",
                     "dontAsk",
                     "--allowedTools",
-                    "Read,Glob,Grep,Bash",
+                    "Read,Glob,Grep",
                 ],
                 cwd=worktree_path,
                 timeout=pr_reviewer_claude_timeout(),
@@ -436,6 +385,14 @@ class PRReviewer:
     def _get_or_create_state(self, issue_number: int, pr_number: int) -> ReviewState:
         """Get or create review state for an issue.
 
+        Checks the in-memory cache first, then falls back to the on-disk
+        state file so that a second invocation of the reviewer on the same
+        PR will find the previously-persisted COMPLETED state and skip
+        re-posting comments (#374).
+
+        A malformed or unreadable state file is treated as if it does not
+        exist — the reviewer starts fresh and overwrites the bad file.
+
         Args:
             issue_number: GitHub issue number
             pr_number: GitHub PR number
@@ -446,10 +403,33 @@ class PRReviewer:
         """
         with self.state_lock:
             if issue_number not in self.states:
-                self.states[issue_number] = ReviewState(
-                    issue_number=issue_number,
-                    pr_number=pr_number,
-                )
+                # Try to load from disk before creating a fresh state
+                state_file = self.state_dir / f"review-{issue_number}.json"
+                if state_file.exists():
+                    try:
+                        self.states[issue_number] = ReviewState.model_validate_json(
+                            state_file.read_text()
+                        )
+                        logger.debug(
+                            "Loaded review state for issue #%d from disk (phase=%s)",
+                            issue_number,
+                            self.states[issue_number].phase,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Malformed review state file for issue #%d (%s); starting fresh",
+                            issue_number,
+                            exc,
+                        )
+                        self.states[issue_number] = ReviewState(
+                            issue_number=issue_number,
+                            pr_number=pr_number,
+                        )
+                else:
+                    self.states[issue_number] = ReviewState(
+                        issue_number=issue_number,
+                        pr_number=pr_number,
+                    )
             return self.states[issue_number]
 
     def _fail_review(
@@ -510,6 +490,23 @@ class PRReviewer:
             )
 
             state = self._get_or_create_state(issue_number, pr_number)
+
+            # Idempotency guard: skip if this PR was already fully reviewed (#374)
+            if state.phase == ReviewPhase.COMPLETED:
+                self._log(
+                    "info",
+                    f"PR #{pr_number} for issue #{issue_number} already reviewed "
+                    "(state.phase=COMPLETED) — skipping to avoid duplicate comments",
+                    thread_id,
+                )
+                self.status_tracker.update_slot(
+                    slot_id, f"#{issue_number}: already reviewed, skipped"
+                )
+                return WorkerResult(
+                    issue_number=issue_number,
+                    success=True,
+                    pr_number=pr_number,
+                )
 
             # Create worktree on the PR branch (read-only usage)
             branch_name = f"{issue_number}-auto-impl"
