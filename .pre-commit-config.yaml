@@ -85,6 +85,17 @@ repos:
         pass_filenames: false
         files: ^pixi\.(toml|lock)$
 
+  # CLI table sync check
+  - repo: local
+    hooks:
+      - id: check-cli-table-sync
+        name: Check README CLI table sync
+        description: Ensure README.md CLI table documents every pyproject.toml [project.scripts] entry
+        entry: python3 scripts/check_cli_table_sync.py
+        language: system
+        pass_filenames: false
+        files: ^(README\.md|pyproject\.toml)$
+
   # Test structure enforcement
   - repo: local
     hooks:
