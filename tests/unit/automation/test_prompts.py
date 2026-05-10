@@ -61,6 +61,23 @@ class TestFollowUpPrompt:
         out = prompts.get_follow_up_prompt(123)
         assert "123" in out
 
+    def test_declares_scope_categories(self) -> None:
+        out = prompts.get_follow_up_prompt(1)
+        # The four categories the parser will accept must all be named
+        # explicitly in the prompt.
+        for category in ("core", "security", "safety", "critical_bug"):
+            assert category in out
+
+    def test_explicitly_rejects_feature_expansion(self) -> None:
+        out = prompts.get_follow_up_prompt(1)
+        # The prompt must explicitly tell Claude NOT to file follow-ups for
+        # feature expansion / nice-to-haves / documentation polish.
+        assert "OUT OF SCOPE" in out or "out of scope" in out.lower()
+        assert "rejected" in out.lower()
+        # Output schema is the new sectioned object (not the legacy flat array)
+        assert "follow_ups" in out
+        assert "category" in out
+
 
 class TestPRDescription:
     """Tests for p r description."""

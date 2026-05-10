@@ -1,4 +1,4 @@
-"""Tests for the follow_up module."""
+"""Tests for the follow_up module (consolidated-issue policy, 2026-05-10)."""
 
 import json
 from pathlib import Path
@@ -6,283 +6,361 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from hephaestus.automation.follow_up import (
-    _create_follow_up_issues,
+    FollowUpItem,
+    FollowUpResponse,
+    RejectedItem,
     parse_follow_up_items,
+    parse_follow_up_response,
+    render_rejected_for_pr_body,
     run_follow_up_issues,
 )
-from hephaestus.automation.issue_dedup import IssueMatch
 
 
-class TestParseFollowUpItems:
-    """Tests for parse_follow_up_items."""
+class TestParseFollowUpResponse:
+    """Tests for parse_follow_up_response (the new sectioned schema)."""
 
-    def test_parses_json_in_code_block(self) -> None:
-        """Extracts items from fenced JSON code block."""
-        text = '```json\n[{"title": "T1", "body": "B1", "labels": ["bug"]}]\n```'
-        items = parse_follow_up_items(text)
-        assert len(items) == 1
-        assert items[0]["title"] == "T1"
-        assert items[0]["body"] == "B1"
-        assert items[0]["labels"] == ["bug"]
-
-    def test_parses_bare_json_array(self) -> None:
-        """Extracts items from bare JSON array without code block."""
-        text = 'Some text\n[{"title": "T2", "body": "B2"}]\nmore text'
-        items = parse_follow_up_items(text)
-        assert len(items) == 1
-        assert items[0]["title"] == "T2"
-        assert items[0]["labels"] == []  # default
-
-    def test_returns_empty_on_no_json(self) -> None:
-        """Returns empty list when no JSON array found."""
-        items = parse_follow_up_items("No JSON here.")
-        assert items == []
-
-    def test_caps_at_five_items(self) -> None:
-        """Caps returned items at 5 even if more are present."""
-        raw = json.dumps([{"title": f"T{i}", "body": f"B{i}"} for i in range(10)])
-        items = parse_follow_up_items(raw)
-        assert len(items) == 5
-
-    def test_skips_items_missing_required_fields(self) -> None:
-        """Skips items without title or body."""
-        raw = json.dumps(
-            [
-                {"title": "Good", "body": "Body"},
-                {"title": "Missing body"},
-                {"body": "Missing title"},
-            ]
+    def test_parses_fenced_json_object(self) -> None:
+        text = (
+            "```json\n"
+            '{"follow_ups": [{"category": "core", "title": "T1", "body": "B1"}],'
+            ' "rejected": [{"title": "R1", "reason": "out of scope"}]}\n'
+            "```"
         )
-        items = parse_follow_up_items(raw)
-        assert len(items) == 1
-        assert items[0]["title"] == "Good"
+        response = parse_follow_up_response(text)
+        assert len(response.follow_ups) == 1
+        assert response.follow_ups[0].category == "core"
+        assert response.follow_ups[0].title == "T1"
+        assert response.follow_ups[0].body == "B1"
+        assert len(response.rejected) == 1
+        assert response.rejected[0].title == "R1"
+        assert response.rejected[0].reason == "out of scope"
 
-    def test_skips_non_dict_items(self) -> None:
-        """Skips non-dict entries in the array."""
-        raw = json.dumps(
-            [
-                {"title": "T1", "body": "B1"},
-                "not a dict",
-                42,
-            ]
+    def test_parses_bare_json_object(self) -> None:
+        text = (
+            "Some prose...\n"
+            '{"follow_ups": [{"category": "safety", "title": "T", "body": "B"}],'
+            ' "rejected": []}'
+            "\nmore prose"
         )
-        items = parse_follow_up_items(raw)
-        assert len(items) == 1
+        response = parse_follow_up_response(text)
+        assert len(response.follow_ups) == 1
+        assert response.follow_ups[0].category == "safety"
 
-    def test_ensures_labels_is_list(self) -> None:
-        """Sets labels to [] when missing or not a list."""
-        raw = json.dumps(
-            [
-                {"title": "T1", "body": "B1", "labels": "not-a-list"},
-            ]
-        )
-        items = parse_follow_up_items(raw)
-        assert items[0]["labels"] == []
+    def test_returns_empty_when_no_json(self) -> None:
+        response = parse_follow_up_response("No JSON here.")
+        assert response.follow_ups == []
+        assert response.rejected == []
+
+    def test_returns_empty_when_root_not_object(self) -> None:
+        response = parse_follow_up_response("[1, 2, 3]")
+        assert response.follow_ups == []
+        assert response.rejected == []
 
     def test_returns_empty_on_invalid_json(self) -> None:
-        """Returns empty list on malformed JSON."""
-        items = parse_follow_up_items("[{bad json")
-        assert items == []
+        response = parse_follow_up_response("{not valid")
+        assert response.follow_ups == []
 
-    def test_returns_empty_when_root_not_array(self) -> None:
-        """Returns empty list when JSON root is not an array."""
-        items = parse_follow_up_items('{"key": "value"}')
-        assert items == []
+    def test_caps_at_three_items(self) -> None:
+        items = [{"category": "core", "title": f"T{i}", "body": f"B{i}"} for i in range(10)]
+        text = json.dumps({"follow_ups": items, "rejected": []})
+        response = parse_follow_up_response(text)
+        assert len(response.follow_ups) == 3
+
+    def test_invalid_category_demoted_to_rejected(self) -> None:
+        text = json.dumps(
+            {
+                "follow_ups": [
+                    {"category": "enhancement", "title": "Bad cat", "body": "..."},
+                    {"category": "core", "title": "Good", "body": "..."},
+                ],
+                "rejected": [],
+            }
+        )
+        response = parse_follow_up_response(text)
+        assert len(response.follow_ups) == 1
+        assert response.follow_ups[0].title == "Good"
+        assert len(response.rejected) == 1
+        assert response.rejected[0].title == "Bad cat"
+        assert "enhancement" in response.rejected[0].reason
+
+    def test_skips_items_missing_required_fields(self) -> None:
+        text = json.dumps(
+            {
+                "follow_ups": [
+                    {"category": "core", "title": "Good", "body": "Body"},
+                    {"category": "core", "title": "No body"},
+                    {"category": "core", "body": "No title"},
+                    {"category": "core", "title": "", "body": "Empty title"},
+                ],
+                "rejected": [],
+            }
+        )
+        response = parse_follow_up_response(text)
+        assert len(response.follow_ups) == 1
+        assert response.follow_ups[0].title == "Good"
+
+    def test_handles_non_list_follow_ups_gracefully(self) -> None:
+        text = json.dumps({"follow_ups": "not a list", "rejected": []})
+        response = parse_follow_up_response(text)
+        assert response.follow_ups == []
+
+    def test_skips_rejected_items_with_missing_title(self) -> None:
+        text = json.dumps(
+            {
+                "follow_ups": [],
+                "rejected": [
+                    {"title": "Good", "reason": "r"},
+                    {"reason": "no title"},
+                    {"title": "", "reason": "empty"},
+                ],
+            }
+        )
+        response = parse_follow_up_response(text)
+        assert len(response.rejected) == 1
+        assert response.rejected[0].title == "Good"
+
+
+class TestParseFollowUpItemsLegacyAdapter:
+    """The legacy adapter must keep returning a flat dict list for older callers."""
+
+    def test_projects_to_legacy_shape(self) -> None:
+        text = json.dumps(
+            {
+                "follow_ups": [
+                    {"category": "security", "title": "T", "body": "B"},
+                ],
+                "rejected": [],
+            }
+        )
+        items = parse_follow_up_items(text)
+        assert len(items) == 1
+        assert items[0]["title"] == "T"
+        assert items[0]["body"] == "B"
+        assert "follow-up" in items[0]["labels"]
+        assert "security" in items[0]["labels"]
+
+    def test_returns_empty_on_no_json(self) -> None:
+        assert parse_follow_up_items("No JSON here.") == []
 
 
 class TestRunFollowUpIssues:
-    """Tests for run_follow_up_issues."""
+    """Tests for run_follow_up_issues (consolidated-issue policy)."""
 
-    def _make_claude_output(self, items: list[dict[str, Any]]) -> str:
-        """Build fake JSON claude output with follow-up items."""
-        return json.dumps({"result": json.dumps(items)})
+    def _make_claude_output(self, payload: dict[str, Any]) -> str:
+        return json.dumps({"result": json.dumps(payload)})
 
-    def test_creates_issues_and_posts_summary(self, tmp_path: Path) -> None:
-        """Creates follow-up issues and posts a summary comment."""
+    def test_files_one_consolidated_issue(self, tmp_path: Path) -> None:
         worktree_path = tmp_path / "worktree"
         worktree_path.mkdir()
 
-        items = [
-            {"title": "Follow 1", "body": "Body 1", "labels": []},
-            {"title": "Follow 2", "body": "Body 2", "labels": []},
-        ]
+        payload = {
+            "follow_ups": [
+                {"category": "core", "title": "C1", "body": "BC1"},
+                {"category": "safety", "title": "S1", "body": "BS1"},
+            ],
+            "rejected": [],
+        }
         mock_result = MagicMock()
-        mock_result.stdout = self._make_claude_output(items)
+        mock_result.stdout = self._make_claude_output(payload)
 
         with (
             patch("hephaestus.automation.follow_up.run", return_value=mock_result),
             patch(
-                "hephaestus.automation.follow_up.find_duplicate_open_issue",
-                return_value=None,
-            ),
-            patch(
-                "hephaestus.automation.follow_up.gh_issue_create", side_effect=[101, 102]
+                "hephaestus.automation.follow_up.gh_issue_create", return_value=999
             ) as mock_create,
             patch("hephaestus.automation.follow_up.gh_issue_comment") as mock_comment,
-            patch("hephaestus.automation.follow_up.time.sleep"),
         ):
-            run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+            response = run_follow_up_issues("sess", worktree_path, 42, tmp_path)
 
-        assert mock_create.call_count == 2
+        assert response is not None
+        assert len(response.follow_ups) == 2
+        # Exactly ONE issue filed regardless of item count
+        mock_create.assert_called_once()
+        title = mock_create.call_args.kwargs["title"]
+        body = mock_create.call_args.kwargs["body"]
+        labels = mock_create.call_args.kwargs["labels"]
+        assert "Follow-up from #42" in title
+        assert "## Core library" in body
+        assert "## Safety" in body
+        assert "follow-up" in labels
+        assert "core" in labels
+        assert "safety" in labels
+        # Summary comment posted on parent
         mock_comment.assert_called_once()
-        comment_body = mock_comment.call_args[0][1]
-        assert "#101" in comment_body
-        assert "#102" in comment_body
+        assert "#999" in mock_comment.call_args.args[1]
 
     def test_no_items_skips_issue_creation(self, tmp_path: Path) -> None:
-        """Does nothing when no items are identified."""
         worktree_path = tmp_path / "worktree"
         worktree_path.mkdir()
 
         mock_result = MagicMock()
-        mock_result.stdout = json.dumps({"result": "No follow-ups needed."})
+        mock_result.stdout = self._make_claude_output({"follow_ups": [], "rejected": []})
 
         with (
             patch("hephaestus.automation.follow_up.run", return_value=mock_result),
             patch("hephaestus.automation.follow_up.gh_issue_create") as mock_create,
+            patch("hephaestus.automation.follow_up.gh_issue_comment") as mock_comment,
         ):
-            run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+            response = run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+
+        assert response is not None
+        mock_create.assert_not_called()
+        mock_comment.assert_not_called()
+
+    def test_persists_rejected_list(self, tmp_path: Path) -> None:
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+
+        payload = {
+            "follow_ups": [
+                {"category": "core", "title": "Real", "body": "..."},
+            ],
+            "rejected": [
+                {"title": "Web dashboard", "reason": "Feature expansion."},
+                {"title": "README polish", "reason": "Doc polish."},
+            ],
+        }
+        mock_result = MagicMock()
+        mock_result.stdout = self._make_claude_output(payload)
+
+        with (
+            patch("hephaestus.automation.follow_up.run", return_value=mock_result),
+            patch("hephaestus.automation.follow_up.gh_issue_create", return_value=1234),
+            patch("hephaestus.automation.follow_up.gh_issue_comment"),
+        ):
+            response = run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+
+        rejected_path = tmp_path / "follow-up-rejected-42.json"
+        assert rejected_path.exists()
+        persisted = json.loads(rejected_path.read_text())
+        assert len(persisted) == 2
+        assert persisted[0]["title"] == "Web dashboard"
+        # Returned response carries the rejected list too
+        assert response is not None
+        assert len(response.rejected) == 2
+
+    def test_dry_run_suppresses_github_calls(self, tmp_path: Path) -> None:
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+
+        payload = {
+            "follow_ups": [
+                {"category": "core", "title": "T", "body": "B"},
+            ],
+            "rejected": [],
+        }
+        mock_result = MagicMock()
+        mock_result.stdout = self._make_claude_output(payload)
+
+        with (
+            patch("hephaestus.automation.follow_up.run", return_value=mock_result),
+            patch("hephaestus.automation.follow_up.gh_issue_create") as mock_create,
+            patch("hephaestus.automation.follow_up.gh_issue_comment") as mock_comment,
+        ):
+            run_follow_up_issues("sess", worktree_path, 42, tmp_path, dry_run=True)
 
         mock_create.assert_not_called()
+        mock_comment.assert_not_called()
 
     def test_failure_writes_log_and_does_not_raise(self, tmp_path: Path) -> None:
-        """On failure, writes FAILED log and does not propagate exception."""
         worktree_path = tmp_path / "worktree"
         worktree_path.mkdir()
 
         with patch(
-            "hephaestus.automation.follow_up.run", side_effect=RuntimeError("claude failed")
+            "hephaestus.automation.follow_up.run",
+            side_effect=RuntimeError("claude failed"),
         ):
-            # Should not raise
-            run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+            response = run_follow_up_issues("sess", worktree_path, 42, tmp_path)
 
+        assert response is None
         log_file = tmp_path / "follow-up-42.log"
         assert log_file.exists()
         assert log_file.read_text().startswith("FAILED:")
 
     def test_cleans_up_prompt_file_on_success(self, tmp_path: Path) -> None:
-        """Prompt file is removed after successful run."""
         worktree_path = tmp_path / "worktree"
         worktree_path.mkdir()
 
         mock_result = MagicMock()
-        mock_result.stdout = json.dumps({"result": "[]"})
+        mock_result.stdout = self._make_claude_output({"follow_ups": [], "rejected": []})
 
-        with (
-            patch("hephaestus.automation.follow_up.run", return_value=mock_result),
-            patch("hephaestus.automation.follow_up.time.sleep"),
-        ):
+        with patch("hephaestus.automation.follow_up.run", return_value=mock_result):
             run_follow_up_issues("sess", worktree_path, 42, tmp_path)
 
         prompt_file = worktree_path / ".claude-followup-42.md"
         assert not prompt_file.exists()
 
     def test_cleans_up_prompt_file_on_failure(self, tmp_path: Path) -> None:
-        """Prompt file is removed even after failure."""
         worktree_path = tmp_path / "worktree"
         worktree_path.mkdir()
 
-        with patch("hephaestus.automation.follow_up.run", side_effect=RuntimeError("fail")):
+        with patch(
+            "hephaestus.automation.follow_up.run",
+            side_effect=RuntimeError("fail"),
+        ):
             run_follow_up_issues("sess", worktree_path, 42, tmp_path)
 
         prompt_file = worktree_path / ".claude-followup-42.md"
         assert not prompt_file.exists()
 
-    def test_status_tracker_updated_per_item(self, tmp_path: Path) -> None:
-        """Status tracker is called for each item when slot_id is provided."""
+    def test_status_tracker_updated_once_for_consolidated_issue(self, tmp_path: Path) -> None:
         worktree_path = tmp_path / "worktree"
         worktree_path.mkdir()
 
-        items = [{"title": "T1", "body": "B1", "labels": []}]
+        payload = {
+            "follow_ups": [
+                {"category": "core", "title": "T1", "body": "B1"},
+                {"category": "core", "title": "T2", "body": "B2"},
+            ],
+            "rejected": [],
+        }
         mock_result = MagicMock()
-        mock_result.stdout = self._make_claude_output(items)
+        mock_result.stdout = self._make_claude_output(payload)
         mock_tracker = MagicMock()
 
         with (
             patch("hephaestus.automation.follow_up.run", return_value=mock_result),
-            patch(
-                "hephaestus.automation.follow_up.find_duplicate_open_issue",
-                return_value=None,
-            ),
             patch("hephaestus.automation.follow_up.gh_issue_create", return_value=201),
             patch("hephaestus.automation.follow_up.gh_issue_comment"),
-            patch("hephaestus.automation.follow_up.time.sleep"),
         ):
             run_follow_up_issues("sess", worktree_path, 42, tmp_path, mock_tracker, slot_id=1)
 
-        mock_tracker.update_slot.assert_called_once_with(1, "#42: Creating follow-up 1/1")
+        # New policy: tracker is updated ONCE for the consolidated filing,
+        # not once per item.
+        mock_tracker.update_slot.assert_called_once()
+        assert "consolidated" in mock_tracker.update_slot.call_args.args[1]
 
 
-class TestCreateFollowUpIssuesDedup:
-    """Dedup behavior in _create_follow_up_issues."""
+class TestRenderRejectedForPRBody:
+    """Tests for render_rejected_for_pr_body."""
 
-    def test_skips_creation_when_pure_duplicate(self) -> None:
-        """When dedup finds a duplicate with no new info, skip filing entirely."""
-        items = [{"title": "Add JWT helper", "body": "JWT helper missing"}]
-        existing = IssueMatch(
-            number=42, title="Add JWT helper", body="JWT helper missing", similarity=0.95
-        )
-        with (
-            patch(
-                "hephaestus.automation.follow_up.find_duplicate_open_issue",
-                return_value=existing,
-            ),
-            patch(
-                "hephaestus.automation.follow_up.extract_new_info",
-                return_value="",
-            ),
-            patch("hephaestus.automation.follow_up.gh_issue_create") as mock_create,
-            patch("hephaestus.automation.follow_up.gh_issue_comment") as mock_comment,
-            patch("hephaestus.automation.follow_up.time.sleep"),
-        ):
-            created = _create_follow_up_issues(items, 7, None, None)
+    def test_returns_empty_when_none_rejected(self) -> None:
+        assert render_rejected_for_pr_body([]) == ""
 
-        assert created == []
-        mock_create.assert_not_called()
-        mock_comment.assert_not_called()
+    def test_renders_markdown_section(self) -> None:
+        rejected = [
+            RejectedItem(title="Add web dashboard", reason="Feature expansion."),
+            RejectedItem(title="README polish", reason="Doc polish."),
+        ]
+        rendered = render_rejected_for_pr_body(rejected)
+        assert "## Considered & rejected follow-ups" in rendered
+        assert "Add web dashboard" in rendered
+        assert "Feature expansion." in rendered
+        assert "README polish" in rendered
 
-    def test_comments_on_duplicate_when_new_info(self) -> None:
-        """When dedup finds a duplicate with new info, comment on existing instead of creating."""
-        items = [{"title": "Add JWT helper", "body": "old + new info"}]
-        existing = IssueMatch(number=42, title="Add JWT helper", body="old", similarity=0.92)
-        with (
-            patch(
-                "hephaestus.automation.follow_up.find_duplicate_open_issue",
-                return_value=existing,
-            ),
-            patch(
-                "hephaestus.automation.follow_up.extract_new_info",
-                return_value="new info para",
-            ),
-            patch("hephaestus.automation.follow_up.gh_issue_create") as mock_create,
-            patch("hephaestus.automation.follow_up.gh_issue_comment") as mock_comment,
-            patch("hephaestus.automation.follow_up.time.sleep"),
-        ):
-            created = _create_follow_up_issues(items, 7, None, None)
 
-        assert created == []
-        mock_create.assert_not_called()
-        mock_comment.assert_called_once()
-        assert mock_comment.call_args[0][0] == 42
-        assert "new info para" in mock_comment.call_args[0][1]
+class TestDataclasses:
+    """Tests for the frozen dataclasses exposed by follow_up."""
 
-    def test_creates_issue_when_no_duplicate(self) -> None:
-        """When no duplicate is found, fall through to gh_issue_create."""
-        items = [{"title": "Brand new topic", "body": "details", "labels": ["x"]}]
-        with (
-            patch(
-                "hephaestus.automation.follow_up.find_duplicate_open_issue",
-                return_value=None,
-            ),
-            patch(
-                "hephaestus.automation.follow_up.gh_issue_create",
-                return_value=999,
-            ) as mock_create,
-            patch("hephaestus.automation.follow_up.gh_issue_comment") as mock_comment,
-            patch("hephaestus.automation.follow_up.time.sleep"),
-        ):
-            created = _create_follow_up_issues(items, 7, None, None)
+    def test_follow_up_item_is_frozen(self) -> None:
+        item = FollowUpItem(category="core", title="T", body="B")
+        try:
+            item.title = "other"  # type: ignore[misc]
+        except Exception:
+            return
+        raise AssertionError("FollowUpItem should be frozen")
 
-        assert created == [999]
-        mock_create.assert_called_once()
-        mock_comment.assert_not_called()
+    def test_follow_up_response_defaults(self) -> None:
+        r = FollowUpResponse()
+        assert r.follow_ups == []
+        assert r.rejected == []
