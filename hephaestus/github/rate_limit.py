@@ -276,6 +276,10 @@ def wait_until(epoch: int) -> None:
 def detect_claude_usage_limit(stderr: str) -> bool:
     """Detect Claude API usage limit from error output.
 
+    Only matches Claude-specific usage-limit messages, not GitHub's own
+    "API usage limit" messages.  The patterns are ordered from most-specific
+    to least-specific.
+
     Args:
         stderr: Standard error output
 
@@ -284,7 +288,11 @@ def detect_claude_usage_limit(stderr: str) -> bool:
 
     """
     patterns = [
-        r"usage limit",
+        # Claude-specific usage-limit phrasing (A5-01: tightened to avoid
+        # false-triggering on GitHub's own "API usage limit" messages)
+        r"Claude.*usage limit",
+        r"out of extra usage",
+        r"claude\.com/upgrade",
         r"quota exceeded",
         r"credit.*exhausted",
         r"billing.*limit|billing.*exceeded",  # More specific to avoid false positives

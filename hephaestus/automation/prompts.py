@@ -17,7 +17,46 @@ block (last-fence-wins for JSON; verdict parsers should likewise prefer the
 last matching line in Claude's free-form prose).
 """
 
+import logging
 import secrets
+from pathlib import Path
+
+_prompts_logger = logging.getLogger(__name__)
+
+
+def _relativize_path(path: str, repo_root: str | None) -> str:
+    """Return *path* relative to *repo_root* when possible.
+
+    If *repo_root* is ``None`` or *path* is not under *repo_root*, the
+    original *path* is returned unchanged and a warning is logged so
+    operators know an absolute path is being injected.
+
+    Args:
+        path: Filesystem path to relativize.
+        repo_root: Absolute repository root directory, or ``None``.
+
+    Returns:
+        A repo-relative path string (e.g. ``"worktrees/123-fix"``), or
+        the original *path* if it cannot be made relative.
+
+    """
+    if not path:
+        return path
+    if repo_root is None:
+        _prompts_logger.warning(
+            "repo_root not provided; injecting absolute path into prompt: %s", path
+        )
+        return path
+    try:
+        return str(Path(path).relative_to(repo_root))
+    except ValueError:
+        _prompts_logger.warning(
+            "Path %r is not under repo_root %r; injecting absolute path into prompt.",
+            path,
+            repo_root,
+        )
+        return path
+
 
 IMPLEMENTATION_PROMPT = """
 Implement GitHub issue #{issue_number}.
@@ -193,6 +232,7 @@ def get_implementation_prompt(
     issue_body: str = "",
     branch_name: str = "",
     worktree_path: str = "",
+    repo_root: str | None = None,
 ) -> str:
     """Get the implementation prompt for an issue.
 
@@ -202,17 +242,21 @@ def get_implementation_prompt(
         issue_body: Issue body/description (optional, for backward compatibility)
         branch_name: Git branch name (optional, for backward compatibility)
         worktree_path: Working directory path (optional, for backward compatibility)
+        repo_root: Absolute path to the repository root.  When provided,
+            *worktree_path* is relativized to avoid leaking the operator's
+            filesystem layout into the prompt.
 
     Returns:
         Formatted implementation prompt
 
     """
+    safe_worktree_path = _relativize_path(worktree_path, repo_root)
     return IMPLEMENTATION_PROMPT.format(
         issue_number=issue_number,
         issue_title=issue_title,
         issue_body=issue_body,
         branch_name=branch_name,
-        worktree_path=worktree_path,
+        worktree_path=safe_worktree_path,
     )
 
 
@@ -226,6 +270,7 @@ def get_advise_prompt(
     issue_title: str,
     issue_body: str,
     marketplace_path: str,
+    repo_root: str | None = None,
 ) -> str:
     """Get the advise prompt for searching team knowledge.
 
@@ -234,16 +279,20 @@ def get_advise_prompt(
         issue_title: Issue title
         issue_body: Issue body/description
         marketplace_path: Path to marketplace.json
+        repo_root: Absolute path to the repository root.  When provided,
+            *marketplace_path* is relativized to avoid leaking the operator's
+            filesystem layout into the prompt.
 
     Returns:
         Formatted advise prompt
 
     """
+    safe_marketplace_path = _relativize_path(marketplace_path, repo_root)
     return ADVISE_PROMPT.format(
         issue_number=issue_number,
         issue_title=issue_title,
         issue_body=issue_body,
-        marketplace_path=marketplace_path,
+        marketplace_path=safe_marketplace_path,
     )
 
 

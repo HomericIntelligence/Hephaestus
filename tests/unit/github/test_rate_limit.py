@@ -184,8 +184,12 @@ class TestDetectClaudeUsageLimit:
         assert result is False
 
     def test_case_insensitive_detection(self) -> None:
-        """Detects usage limit regardless of case."""
-        result = detect_claude_usage_limit("USAGE LIMIT reached")
+        """Detects Claude-specific usage limit regardless of case (A5-01).
+
+        The tightened pattern requires "Claude" before "usage limit" to avoid
+        false-triggering on GitHub's own "API usage limit" messages.
+        """
+        result = detect_claude_usage_limit("CLAUDE usage limit reached")
         assert result is True
 
     def test_returns_false_for_unrelated_error(self) -> None:
@@ -194,9 +198,29 @@ class TestDetectClaudeUsageLimit:
         assert result is False
 
     def test_partial_match_in_longer_text(self) -> None:
-        """Detects pattern embedded in longer text."""
-        text = "API call failed: usage limit exceeded, please try again later"
+        """Detects Claude-specific usage-limit pattern embedded in longer text (A5-01).
+
+        Plain "usage limit" without "Claude" must NOT match any more — it would
+        false-trigger on GitHub's own "API usage limit" messages.
+        """
+        # Claude-prefixed form should still be detected
+        text = "Claude API call failed: claude usage limit exceeded"
         assert detect_claude_usage_limit(text) is True
+
+    def test_github_api_usage_limit_not_detected(self) -> None:
+        """GitHub's own 'API usage limit' message must not be detected as Claude's (A5-01)."""
+        text = "API call failed: usage limit exceeded, please try again later"
+        assert detect_claude_usage_limit(text) is False
+
+    def test_out_of_extra_usage_detected(self) -> None:
+        """Detects 'out of extra usage' phrase used by Claude CLI."""
+        result = detect_claude_usage_limit("You're out of extra usage for this period")
+        assert result is True
+
+    def test_upgrade_url_detected(self) -> None:
+        """Detects claude.com/upgrade URL in error output."""
+        result = detect_claude_usage_limit("Visit claude.com/upgrade to increase limits")
+        assert result is True
 
 
 class TestDetectClaudeUsageCap:

@@ -301,13 +301,43 @@ class TestGhCall:
 
     @patch("hephaestus.automation.github_api.run")
     def test_claude_usage_limit_detection(self, mock_run: Any) -> None:
-        """Test detection of Claude usage limit."""
+        """Test detection of Claude usage limit (A5-01/A5-02).
+
+        The error must carry a Claude-specific phrase; a plain "usage limit"
+        without the "Claude" prefix must no longer trigger the detector so
+        GitHub's own API-rate-limit messages are not misidentified.
+        """
         mock_run.side_effect = subprocess.CalledProcessError(
-            1, "gh", stderr="Usage limit exceeded for your account"
+            1, "gh", stderr="Claude AI usage limit exceeded for your account"
         )
 
-        with pytest.raises(RuntimeError, match="Claude API usage limit"):
+        # ClaudeUsageCapError is a RuntimeError subclass, so existing
+        # 'except RuntimeError' callers continue to work.
+        from hephaestus.automation.github_api import ClaudeUsageCapError
+
+        with pytest.raises(ClaudeUsageCapError):
             _gh_call(["issue", "view", "123"])
+
+    @patch("hephaestus.automation.github_api.run")
+    def test_github_usage_limit_not_misidentified(self, mock_run: Any) -> None:
+        """GitHub's own 'usage limit' message must not raise ClaudeUsageCapError (A5-01).
+
+        It should be treated as a transient error and retried instead.
+        """
+        success = Mock()
+        success.stdout = "success"
+        success.returncode = 0
+        # First call fails with a bare "usage limit" (GitHub's message, not Claude's);
+        # second call succeeds to confirm it was retried.
+        mock_run.side_effect = [
+            subprocess.CalledProcessError(1, "gh", stderr="API usage limit exceeded"),
+            success,
+        ]
+
+        with patch("hephaestus.automation.github_api.time.sleep"):
+            result = _gh_call(["issue", "view", "123"], max_retries=2)
+
+        assert result.stdout == "success"
 
 
 # NOTE on patch targets: tests in TestGhCall patch "hephaestus.automation.github_api.run"

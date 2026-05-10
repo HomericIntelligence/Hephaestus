@@ -20,7 +20,12 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-from hephaestus.github.rate_limit import detect_claude_usage_limit, detect_rate_limit, wait_until
+from hephaestus.github.rate_limit import (
+    detect_claude_usage_cap,
+    detect_claude_usage_limit,
+    detect_rate_limit,
+    wait_until,
+)
 
 from .claude_timeouts import gh_cli_timeout
 from .git_utils import get_repo_info, run
@@ -29,6 +34,30 @@ from .models import IssueInfo, IssueState
 logger = logging.getLogger(__name__)
 
 _label_cache: set[str] | None = None
+
+
+class ClaudeUsageCapError(RuntimeError):
+    """Raised when the Claude CLI reports that the per-period usage cap has been hit.
+
+    Subclasses :class:`RuntimeError` so that existing ``except RuntimeError``
+    handlers continue to catch it.
+
+    Attributes:
+        reset_epoch: Unix timestamp at which the cap resets, or ``None`` if the
+            reset time could not be determined.
+
+    """
+
+    def __init__(self, message: str, reset_epoch: int | None = None) -> None:
+        """Initialise the error with an optional reset epoch.
+
+        Args:
+            message: Human-readable error description.
+            reset_epoch: Unix timestamp at which the cap resets, or ``None``.
+
+        """
+        super().__init__(message)
+        self.reset_epoch: int | None = reset_epoch
 
 
 def gh_list_labels(refresh: bool = False) -> set[str]:
@@ -92,7 +121,8 @@ def _gh_call(
 
     Raises:
         subprocess.CalledProcessError: If command fails and check=True
-        RuntimeError: If Claude usage limit detected
+        ClaudeUsageCapError: If a Claude per-period usage cap is detected.
+        RuntimeError: For other non-transient or exhausted-retry failures.
 
     """
     for attempt in range(max_retries):
@@ -107,10 +137,18 @@ def _gh_call(
         except subprocess.CalledProcessError as e:
             stderr = e.stderr if e.stderr else ""
 
-            # Check for Claude usage limit
+            # Check for Claude usage cap first (has reset epoch); fall back to
+            # the simpler usage-limit detector when no epoch is available.
+            reset_epoch = detect_claude_usage_cap(stderr)
+            if reset_epoch is not None:
+                raise ClaudeUsageCapError(
+                    f"Claude API usage cap reached. Resets at epoch {reset_epoch}.",
+                    reset_epoch=reset_epoch,
+                ) from e
             if detect_claude_usage_limit(stderr):
-                raise RuntimeError(
-                    "Claude API usage limit reached. Please check your billing."
+                raise ClaudeUsageCapError(
+                    "Claude API usage limit reached. Please check your billing.",
+                    reset_epoch=None,
                 ) from e
 
             # Check for rate limit (regardless of retry_on_rate_limit flag)
@@ -132,12 +170,15 @@ def _gh_call(
                     ) from e
 
             # Check if this is a non-transient error that shouldn't be retried
-            # Permission errors, not found, bad requests should fail fast
+            # Permission errors, not found, bad requests should fail fast.
+            # Each pattern is a standalone alternative; we avoid mixing HTTP
+            # status codes with text phrases in the same regex so a bare "403"
+            # in an unrelated part of stderr doesn't false-trigger.
             non_transient_patterns = [
-                r"403|forbidden|permission denied",
-                r"404|not found",
-                r"400|bad request",
-                r"401|unauthorized",
+                r"(?:^|\s)403(?:\s|$)|forbidden|permission denied",
+                r"(?:^|\s)404(?:\s|$)|not found",
+                r"(?:^|\s)400(?:\s|$)|bad request",
+                r"(?:^|\s)401(?:\s|$)|unauthorized",
                 r"invalid argument",
             ]
             if any(re.search(pattern, stderr, re.IGNORECASE) for pattern in non_transient_patterns):

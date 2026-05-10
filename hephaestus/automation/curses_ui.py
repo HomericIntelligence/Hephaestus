@@ -191,8 +191,12 @@ class CursesUI:
                 self._refresh_display()
                 time.sleep(0.5)  # Update twice per second
             except curses.error:
-                # Terminal too small or other display error
-                pass
+                # Terminal resize (SIGWINCH) or too-small terminal.
+                # Inform curses of the new dimensions and retry the refresh
+                # so the TUI recovers gracefully instead of silently freezing.
+                if self.stdscr is not None:
+                    with contextlib.suppress(curses.error):
+                        curses.resizeterm(*self.stdscr.getmaxyx())
             except KeyboardInterrupt:
                 break
 

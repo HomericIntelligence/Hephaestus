@@ -100,3 +100,46 @@ class TestRunLearn:
             result = run_learn("session-abc", worktree_path, 42, tmp_path, slot_id=3)
 
         assert result is True
+
+    def test_uses_learn_model_not_hardcoded_sonnet(self, tmp_path: Path) -> None:
+        """run_learn passes learn_model() to --model instead of hardcoding 'sonnet' (A5-12)."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+
+        mock_result = MagicMock()
+        mock_result.stdout = "done"
+
+        with (
+            patch("hephaestus.automation.learn.run", return_value=mock_result) as mock_run,
+            patch(
+                "hephaestus.automation.learn.learn_model", return_value="claude-haiku-4-5"
+            ) as mock_learn_model,
+        ):
+            run_learn("session-abc", worktree_path, 42, tmp_path)
+
+        mock_learn_model.assert_called_once()
+        # Verify "--model" "claude-haiku-4-5" appears in the command args
+        cmd_args = mock_run.call_args[0][0]
+        assert "--model" in cmd_args
+        model_idx = cmd_args.index("--model")
+        assert cmd_args[model_idx + 1] == "claude-haiku-4-5"
+
+    def test_learn_model_env_override_respected(self, tmp_path: Path) -> None:
+        """HEPH_LEARN_MODEL env override is used by run_learn (A5-12)."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+
+        mock_result = MagicMock()
+        mock_result.stdout = "done"
+
+        import os
+
+        with (
+            patch.dict(os.environ, {"HEPH_LEARN_MODEL": "claude-opus-4-7"}),
+            patch("hephaestus.automation.learn.run", return_value=mock_result) as mock_run,
+        ):
+            run_learn("session-abc", worktree_path, 42, tmp_path)
+
+        cmd_args = mock_run.call_args[0][0]
+        model_idx = cmd_args.index("--model")
+        assert cmd_args[model_idx + 1] == "claude-opus-4-7"

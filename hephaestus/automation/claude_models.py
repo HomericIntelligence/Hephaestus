@@ -10,21 +10,55 @@ reflects the cost/quality tradeoff for each phase:
 
 Each function honors a ``HEPH_<PHASE>_MODEL`` environment variable so an
 operator can override without code changes (e.g. when one tier's quota is
-exhausted).
+exhausted).  Unknown overrides emit a **warning** but are still accepted so
+operators can experiment with preview models without a code change.
 """
 
 from __future__ import annotations
 
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 OPUS = "claude-opus-4-7"
 SONNET = "claude-sonnet-4-6"
 HAIKU = "claude-haiku-4-5"
 
+# The set of model IDs the automation suite is tested against.  Overrides
+# to values outside this set are accepted (operators may have preview access)
+# but will trigger a one-time warning so misconfigured env vars are visible.
+_KNOWN_MODELS: frozenset[str] = frozenset({OPUS, SONNET, HAIKU})
+
+
+def _resolve_model(env_var: str, default: str) -> str:
+    """Return the model ID for *env_var*, warning if the value is unknown.
+
+    Args:
+        env_var: Name of the environment variable to check.
+        default: Default model ID to use when the variable is unset.
+
+    Returns:
+        The resolved model ID string.
+
+    """
+    value = os.environ.get(env_var)
+    if value is None:
+        return default
+    if value not in _KNOWN_MODELS:
+        logger.warning(
+            "Unknown model %r set in %s (known: %s). "
+            "Proceeding, but verify the model ID is correct.",
+            value,
+            env_var,
+            ", ".join(sorted(_KNOWN_MODELS)),
+        )
+    return value
+
 
 def planner_model() -> str:
     """Model used to generate implementation plans from issue text."""
-    return os.environ.get("HEPH_PLANNER_MODEL", OPUS)
+    return _resolve_model("HEPH_PLANNER_MODEL", OPUS)
 
 
 def implementer_model() -> str:
@@ -34,19 +68,19 @@ def implementer_model() -> str:
     (e.g. address-review, ci-driver), since ``claude --resume`` is locked
     to the model that created the session.
     """
-    return os.environ.get("HEPH_IMPLEMENTER_MODEL", HAIKU)
+    return _resolve_model("HEPH_IMPLEMENTER_MODEL", HAIKU)
 
 
 def reviewer_model() -> str:
     """Model used by plan/PR reviewers and the review-fix loop."""
-    return os.environ.get("HEPH_REVIEWER_MODEL", SONNET)
+    return _resolve_model("HEPH_REVIEWER_MODEL", SONNET)
 
 
 def advise_model() -> str:
     """Model used by the /advise step inside the planner."""
-    return os.environ.get("HEPH_ADVISE_MODEL", HAIKU)
+    return _resolve_model("HEPH_ADVISE_MODEL", HAIKU)
 
 
 def learn_model() -> str:
     """Model used by /learn and follow-up issue filing."""
-    return os.environ.get("HEPH_LEARN_MODEL", HAIKU)
+    return _resolve_model("HEPH_LEARN_MODEL", HAIKU)

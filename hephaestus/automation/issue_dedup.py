@@ -69,6 +69,11 @@ _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]+")
 DEFAULT_TITLE_THRESHOLD = 0.85
 DEFAULT_PARAGRAPH_NEW_THRESHOLD = 0.6
 
+# Titles with fewer than this many content tokens after stopword removal fall
+# back to character tri-gram similarity, which is more reliable for short strings
+# like "Fix typo" or "Add index".
+_SHORT_TITLE_TOKEN_THRESHOLD = 3
+
 
 @dataclass(frozen=True)
 class IssueMatch:
@@ -97,6 +102,52 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     if not union:
         return 0.0
     return len(a & b) / len(union)
+
+
+def _trigrams(text: str) -> set[str]:
+    """Return the set of character tri-grams from *text* (lowercased, spaces collapsed)."""
+    normalized = re.sub(r"\s+", " ", text.lower().strip())
+    if len(normalized) < 3:
+        return {normalized} if normalized else set()
+    return {normalized[i : i + 3] for i in range(len(normalized) - 2)}
+
+
+def _trigram_similarity(a: str, b: str) -> float:
+    """Jaccard similarity over character tri-grams of *a* and *b*.
+
+    Used as a fallback similarity measure for short titles that don't have
+    enough content tokens for reliable Jaccard-on-words scoring.
+    """
+    tg_a = _trigrams(a)
+    tg_b = _trigrams(b)
+    return _jaccard(tg_a, tg_b)
+
+
+def _title_similarity(a: str, b: str) -> float:
+    """Compute the best available similarity score between two issue titles.
+
+    For titles with at least ``_SHORT_TITLE_TOKEN_THRESHOLD`` content tokens,
+    uses token-level Jaccard (fast, high precision).  For shorter titles (e.g.
+    "Fix typo", "Add index") it falls back to character tri-gram Jaccard, which
+    handles short strings far better than the word-level metric.
+
+    Args:
+        a: First issue title.
+        b: Second issue title.
+
+    Returns:
+        Similarity score in [0, 1].
+
+    """
+    tokens_a = _tokens(a)
+    tokens_b = _tokens(b)
+    if (
+        len(tokens_a) >= _SHORT_TITLE_TOKEN_THRESHOLD
+        and len(tokens_b) >= _SHORT_TITLE_TOKEN_THRESHOLD
+    ):
+        return _jaccard(tokens_a, tokens_b)
+    # Short-title fallback: tri-gram similarity
+    return _trigram_similarity(a, b)
 
 
 def _search_keywords(title: str, max_terms: int = 3) -> str:
@@ -157,11 +208,10 @@ def find_duplicate_open_issue(
         logger.warning(f"Duplicate search failed for '{title[:60]}': {e}")
         return None
 
-    candidate_tokens = _tokens(title)
     best: IssueMatch | None = None
     for c in candidates:
         c_title = c.get("title", "") or ""
-        score = _jaccard(candidate_tokens, _tokens(c_title))
+        score = _title_similarity(title, c_title)
         if score >= threshold and (best is None or score > best.similarity):
             best = IssueMatch(
                 number=int(c["number"]),

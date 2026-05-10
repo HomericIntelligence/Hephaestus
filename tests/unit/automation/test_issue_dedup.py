@@ -126,3 +126,59 @@ class TestIssueMatchDataclass:
         m = IssueMatch(number=1, title="t", body="b", similarity=0.9)
         assert m.number == 1
         assert m.similarity == 0.9
+
+
+class TestShortTitleFallback:
+    """A5-06: short titles (<3 content tokens) use tri-gram fallback."""
+
+    def test_fix_typo_matches_fix_typo(self) -> None:
+        """Identical two-token titles should match above threshold (A5-06)."""
+        candidates = [{"number": 7, "title": "Fix typo", "body": ""}]
+        with patch(
+            "hephaestus.automation.issue_dedup._gh_call",
+            return_value=_mock_gh(candidates),
+        ):
+            match = find_duplicate_open_issue("Fix typo", "", threshold=0.5)
+        assert match is not None
+        assert match.number == 7
+
+    def test_fix_typo_does_not_match_unrelated_short_title(self) -> None:
+        """Dissimilar two-token titles should NOT match above threshold (A5-06)."""
+        candidates = [{"number": 8, "title": "Add index", "body": ""}]
+        with patch(
+            "hephaestus.automation.issue_dedup._gh_call",
+            return_value=_mock_gh(candidates),
+        ):
+            match = find_duplicate_open_issue("Fix typo", "", threshold=0.5)
+        assert match is None
+
+    def test_trigrams_function_basic(self) -> None:
+        """_trigrams returns expected character tri-grams."""
+        from hephaestus.automation.issue_dedup import _trigrams
+
+        tg = _trigrams("abc")
+        assert "abc" in tg
+
+    def test_trigram_similarity_identical(self) -> None:
+        """Identical strings have trigram similarity of 1.0."""
+        from hephaestus.automation.issue_dedup import _trigram_similarity
+
+        assert _trigram_similarity("hello world", "hello world") == 1.0
+
+    def test_trigram_similarity_different(self) -> None:
+        """Completely different strings have low trigram similarity."""
+        from hephaestus.automation.issue_dedup import _trigram_similarity
+
+        score = _trigram_similarity("fix typo", "add index")
+        assert score < 0.5
+
+    def test_title_similarity_long_uses_jaccard(self) -> None:
+        """Titles with >=3 content tokens use token Jaccard, not tri-grams."""
+        from hephaestus.automation.issue_dedup import _title_similarity
+
+        # These titles each have 3+ content tokens — should use word Jaccard.
+        score = _title_similarity(
+            "Refactor database connection pool",
+            "Refactor database connection pool",
+        )
+        assert score == 1.0

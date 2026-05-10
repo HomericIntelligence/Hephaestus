@@ -24,6 +24,48 @@ from .prompts import get_follow_up_prompt
 logger = logging.getLogger(__name__)
 
 
+def _extract_outer_json_array(text: str) -> str | None:
+    """Find and return the outermost JSON array ``[...]`` in *text*.
+
+    Uses a balanced-bracket scan to avoid the greedy/non-greedy pitfall of
+    regex-based extraction, which either over-consumes (greedy ``.*``) or
+    stops too early inside nested structures (non-greedy ``.*?``).
+
+    Args:
+        text: String that may contain a JSON array.
+
+    Returns:
+        The first outermost ``[...]`` substring, or ``None`` if not found.
+
+    """
+    start = text.find("[")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
 def parse_follow_up_items(text: str) -> list[dict[str, Any]]:
     """Parse follow-up items from Claude's JSON response.
 
@@ -34,16 +76,18 @@ def parse_follow_up_items(text: str) -> list[dict[str, Any]]:
         List of follow-up item dictionaries with title, body, labels
 
     """
-    # Try to extract JSON from code blocks or bare JSON
+    # Try to extract JSON from code blocks or bare JSON.
+    # Code-block extraction uses a non-greedy inner match to stop at the
+    # first closing fence.  The bare-JSON fallback previously used a greedy
+    # `.*` which would over-consume when multiple arrays were present.
+    # We now use a balanced-bracket scanner to find the outermost `[...]`
+    # block reliably (A5-07).
     json_match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
     if json_match:
         json_str = json_match.group(1)
     else:
-        # Try to find bare JSON array
-        json_match = re.search(r"(\[.*\])", text, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1)
-        else:
+        json_str = _extract_outer_json_array(text)
+        if json_str is None:
             logger.warning("No JSON array found in follow-up response")
             return []
 
