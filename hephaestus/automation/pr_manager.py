@@ -13,23 +13,13 @@ import logging
 from pathlib import Path
 from typing import cast
 
+from ._secret_patterns import SECRET_FILE_EXTENSIONS, SECRET_FILE_NAMES
 from .git_utils import run
 from .github_api import _gh_call, fetch_issue_info, gh_pr_create
 from .prompts import get_pr_description
 from .status_tracker import StatusTracker
 
 logger = logging.getLogger(__name__)
-
-_SECRET_FILES = {
-    ".env",
-    ".secret",
-    "credentials.json",
-    "id_rsa",
-    "id_dsa",
-    "id_ecdsa",
-    "id_ed25519",
-}
-_SECRET_EXTENSIONS = {".key", ".pem", ".pfx", ".p12"}
 
 
 def commit_changes(issue_number: int, worktree_path: Path) -> None:
@@ -85,7 +75,8 @@ def commit_changes(issue_number: int, worktree_path: Path) -> None:
         filename = Path(filename_part).name
 
         # Skip secret files (never stage these)
-        if filename in _SECRET_FILES or any(filename.endswith(ext) for ext in _SECRET_EXTENSIONS):
+        has_secret_ext = any(filename.endswith(ext) for ext in SECRET_FILE_EXTENSIONS)
+        if filename in SECRET_FILE_NAMES or has_secret_ext:
             logger.warning(f"Skipping potential secret file: {filename_part}")
             continue
 
