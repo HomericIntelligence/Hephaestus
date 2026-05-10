@@ -181,6 +181,68 @@ class TestDryRunSkipsPost:
         assert "DRY RUN" in result["summary"]
 
 
+class TestIdempotencyGuard:
+    """Tests for the COMPLETED-state idempotency guard (#374)."""
+
+    def test_completed_state_on_disk_skips_review(
+        self, mock_options: ReviewerOptions, tmp_path: Path
+    ) -> None:
+        """review-{n}.json on disk shows COMPLETED → _review_pr succeeds without posting."""
+        from hephaestus.automation.models import ReviewPhase, ReviewState
+
+        # Write a completed review state to disk
+        state_dir = tmp_path / ".issue_implementer"
+        state_dir.mkdir()
+        completed_state = ReviewState(issue_number=123, pr_number=42, phase=ReviewPhase.COMPLETED)
+        (state_dir / "review-123.json").write_text(completed_state.model_dump_json())
+
+        with (
+            patch("hephaestus.automation.pr_reviewer.get_repo_root", return_value=tmp_path),
+            patch("hephaestus.automation.pr_reviewer.WorktreeManager") as mock_wm_cls,
+            patch("hephaestus.automation.pr_reviewer.StatusTracker"),
+        ):
+            mock_wm = MagicMock()
+            mock_wm_cls.return_value = mock_wm
+            live_reviewer = PRReviewer(mock_options)
+
+        with patch("hephaestus.automation.pr_reviewer.gh_pr_review_post") as mock_post:
+            result = live_reviewer._review_pr(issue_number=123, pr_number=42)
+
+        assert result.success is True
+        mock_post.assert_not_called()
+        # Worktree should NOT have been created
+        mock_wm.create_worktree.assert_not_called()
+
+    def test_malformed_state_file_starts_fresh(
+        self, mock_options: ReviewerOptions, tmp_path: Path
+    ) -> None:
+        """Malformed state file → warning logged, fresh state created."""
+        state_dir = tmp_path / ".issue_implementer"
+        state_dir.mkdir()
+        (state_dir / "review-123.json").write_text("{not valid json!!!}")
+
+        with (
+            patch("hephaestus.automation.pr_reviewer.get_repo_root", return_value=tmp_path),
+            patch("hephaestus.automation.pr_reviewer.WorktreeManager") as mock_wm_cls,
+            patch("hephaestus.automation.pr_reviewer.StatusTracker"),
+        ):
+            mock_wm = MagicMock()
+            mock_wm.create_worktree.return_value = tmp_path
+            mock_wm_cls.return_value = mock_wm
+            live_reviewer = PRReviewer(mock_options)
+
+        analysis = {"comments": [], "summary": "clean"}
+        with (
+            patch.object(live_reviewer, "_gather_pr_context", return_value={}),
+            patch.object(live_reviewer, "_run_analysis_session", return_value=analysis),
+            patch("hephaestus.automation.pr_reviewer.gh_pr_review_post", return_value=[]),
+        ):
+            result = live_reviewer._review_pr(issue_number=123, pr_number=42)
+
+        # Should succeed with fresh state (bad file ignored, review proceeds)
+        assert result.success is True
+
+
 class TestReviewPostsInlineComments:
     """Tests for inline comment posting flow."""
 

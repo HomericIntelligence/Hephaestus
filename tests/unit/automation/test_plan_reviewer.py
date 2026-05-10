@@ -247,3 +247,51 @@ class TestReviewIssue:
 
         assert result.success is False
         assert result.error is not None
+
+
+class TestFetchIssueCommentsCache:
+    """Tests for the _fetch_issue_comments caching helper (#A3-009)."""
+
+    def test_api_called_only_once_for_same_issue(self, reviewer: PlanReviewer) -> None:
+        """Calling both _has_existing_review and _get_latest_plan should hit the API once."""
+        comments = [
+            {"body": "## Implementation Plan\n\nDo stuff"},
+        ]
+        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
+            mock_gh.return_value = _make_gh_result({"comments": comments})
+
+            # Call both methods that internally use _fetch_issue_comments
+            reviewer._has_existing_review(123)
+            reviewer._get_latest_plan(123)
+
+        assert mock_gh.call_count == 1, "Expected single API call due to caching"
+
+    def test_api_called_once_per_issue(self, reviewer: PlanReviewer) -> None:
+        """Different issue numbers each get their own API call."""
+        comments_123 = [{"body": "## Implementation Plan\n\nIssue 123"}]
+        comments_456 = [{"body": "## Implementation Plan\n\nIssue 456"}]
+
+        call_count = 0
+
+        def _side_effect(args: Any, **kw: Any) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if "123" in args:
+                return _make_gh_result({"comments": comments_123})
+            return _make_gh_result({"comments": comments_456})
+
+        with patch("hephaestus.automation.plan_reviewer._gh_call", side_effect=_side_effect):
+            reviewer._get_latest_plan(123)
+            reviewer._get_latest_plan(123)  # should use cache
+            reviewer._get_latest_plan(456)  # new issue → new API call
+            reviewer._get_latest_plan(456)  # should use cache
+
+        assert call_count == 2
+
+    def test_api_error_returns_empty_list(self, reviewer: PlanReviewer) -> None:
+        """API failure → _fetch_issue_comments returns empty list, not exception."""
+        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
+            mock_gh.side_effect = RuntimeError("network error")
+            result = reviewer._fetch_issue_comments(999)
+
+        assert result == []
