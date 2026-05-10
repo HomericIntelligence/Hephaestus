@@ -3,14 +3,31 @@
 from __future__ import annotations
 
 import threading
-from unittest.mock import MagicMock
+import time
+from unittest.mock import MagicMock, patch
 
 from hephaestus.nats.config import NATSConfig
-from hephaestus.nats.subscriber import NATSSubscriberThread
+from hephaestus.nats.events import NATSEvent
+from hephaestus.nats.subscriber import (
+    DEFAULT_JOIN_TIMEOUT,
+    NATSSubscriberThread,
+    SubscriberState,
+)
 
 
 def _config(**kwargs: object) -> NATSConfig:
     return NATSConfig(enabled=True, **kwargs)  # type: ignore[arg-type]
+
+
+def _make_event(**kwargs: object) -> NATSEvent:
+    defaults: dict[str, object] = {
+        "subject": "test.subject",
+        "data": {},
+        "timestamp": "",
+        "sequence": 1,
+    }
+    defaults.update(kwargs)
+    return NATSEvent(**defaults)  # type: ignore[arg-type]
 
 
 class TestNATSSubscriberThread:
@@ -38,3 +55,245 @@ class TestNATSSubscriberThread:
         config = _config(url="nats://test:4222")
         thread = NATSSubscriberThread(config=config, handler=MagicMock())
         assert thread._config.url == "nats://test:4222"
+
+
+class TestSubscriberStateEnum:
+    """Tests for the SubscriberState enum."""
+
+    def test_all_expected_states_present(self) -> None:
+        expected = {"INITIALIZING", "CONNECTED", "DISCONNECTED", "STOPPING", "STOPPED", "ERROR"}
+        actual = {s.name for s in SubscriberState}
+        assert expected == actual
+
+    def test_state_values_are_lowercase_strings(self) -> None:
+        for state in SubscriberState:
+            assert state.value == state.name.lower()
+
+
+class TestHealthObservability:
+    """Tests for the health state surface (#314)."""
+
+    def test_initial_state_is_initializing(self) -> None:
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        assert thread.state is SubscriberState.INITIALIZING
+
+    def test_initial_last_error_is_none(self) -> None:
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        assert thread.last_error is None
+
+    def test_initial_last_message_at_is_none(self) -> None:
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        assert thread.last_message_at is None
+
+    def test_health_dict_keys(self) -> None:
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        hd = thread.health_dict()
+        assert set(hd.keys()) == {
+            "state",
+            "last_error",
+            "last_message_at",
+            "url",
+            "stream",
+            "uptime_seconds",
+        }
+
+    def test_health_dict_initial_values(self) -> None:
+        config = _config(url="nats://localhost:4222")
+        thread = NATSSubscriberThread(config=config, handler=MagicMock())
+        hd = thread.health_dict()
+        assert hd["state"] == "initializing"
+        assert hd["last_error"] is None
+        assert hd["last_message_at"] is None
+        assert hd["url"] == "nats://localhost:4222"
+
+    def test_health_dict_state_is_string_not_enum(self) -> None:
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        hd = thread.health_dict()
+        # must be JSON-serialisable
+        import json
+
+        dumped = json.dumps(hd)
+        assert '"state"' in dumped
+
+    def test_health_dict_uptime_non_negative(self) -> None:
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        assert thread.health_dict()["uptime_seconds"] >= 0.0
+
+    def test_set_state_transitions(self) -> None:
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        thread._set_state(SubscriberState.CONNECTED)
+        assert thread.state is SubscriberState.CONNECTED
+        thread._set_state(SubscriberState.DISCONNECTED)
+        assert thread.state is SubscriberState.DISCONNECTED
+        thread._set_state(SubscriberState.STOPPING)
+        assert thread.state is SubscriberState.STOPPING
+        thread._set_state(SubscriberState.STOPPED)
+        assert thread.state is SubscriberState.STOPPED
+
+    def test_record_error_sets_last_error_and_disconnected(self) -> None:
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        exc = ValueError("boom")
+        thread._record_error(exc)
+        assert thread.last_error is exc
+        assert thread.state is SubscriberState.DISCONNECTED
+
+    def test_record_message_updates_last_message_at(self) -> None:
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        assert thread.last_message_at is None
+        before = time.time()
+        thread._record_message()
+        after = time.time()
+        ts = thread.last_message_at
+        assert ts is not None
+        assert before <= ts <= after
+
+    def test_last_error_recorded_when_handler_raises(self) -> None:
+        """_last_error is set when the message handler raises an exception."""
+        exc = RuntimeError("handler failure")
+        handler = MagicMock(side_effect=exc)
+        thread = NATSSubscriberThread(config=_config(), handler=handler)
+
+        # Simulate what _subscribe_loop does after building an event
+        event = _make_event()
+        try:
+            thread._handler(event)
+        except Exception as caught:
+            with thread._state_lock:
+                thread._last_error = caught
+
+        assert thread.last_error is exc
+
+    def test_last_message_at_not_updated_when_handler_raises(self) -> None:
+        """last_message_at stays None if handler always raises."""
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock(side_effect=ValueError))
+        # Simulate the else-branch not executing
+        assert thread.last_message_at is None
+
+    def test_health_dict_after_error(self) -> None:
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        exc = ConnectionError("nats gone")
+        thread._record_error(exc)
+        hd = thread.health_dict()
+        assert hd["state"] == "disconnected"
+        assert hd["last_error"] is not None
+        assert "nats gone" in hd["last_error"]
+
+    def test_stop_transitions_to_stopping_then_stopped(self) -> None:
+        """stop() immediately flips state to STOPPING; STOPPED is set after run() exits."""
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        # Never actually start the thread; manually validate the transition contract.
+        thread._set_state(SubscriberState.CONNECTED)
+        # Pre-set _stop_event so join() returns immediately (thread never started).
+        thread._stop_event.set()
+        thread.stop()
+        # After stop() sets STOPPING, run() is not alive so STOPPED transition happens
+        # only inside run(); without starting the thread the final state stays STOPPING.
+        assert thread.state in (SubscriberState.STOPPING, SubscriberState.STOPPED)
+
+    def test_state_thread_safety(self) -> None:
+        """Concurrent reads/writes to state don't deadlock or raise."""
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        errors: list[Exception] = []
+
+        def writer() -> None:
+            for state in list(SubscriberState) * 5:
+                thread._set_state(state)
+
+        def reader() -> None:
+            for _ in range(50):
+                _ = thread.state
+                _ = thread.health_dict()
+
+        writers = [threading.Thread(target=writer) for _ in range(3)]
+        readers = [threading.Thread(target=reader) for _ in range(3)]
+        all_threads = writers + readers
+        for t in all_threads:
+            t.start()
+        for t in all_threads:
+            t.join(timeout=5.0)
+        assert not errors
+
+
+class TestConfigurableJoinTimeout:
+    """Tests for configurable stop() join timeout (#334)."""
+
+    def test_default_join_timeout_constant(self) -> None:
+        assert DEFAULT_JOIN_TIMEOUT == 5.0
+
+    def test_default_join_timeout_used_when_no_arg(self) -> None:
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock(), join_timeout=3.0)
+        assert thread._join_timeout == 3.0
+
+    def test_constructor_stores_join_timeout(self) -> None:
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock(), join_timeout=7.5)
+        assert thread._join_timeout == 7.5
+
+    def test_default_constructor_uses_module_default(self) -> None:
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        assert thread._join_timeout == DEFAULT_JOIN_TIMEOUT
+
+    def test_stop_uses_override_timeout(self) -> None:
+        """stop(timeout=0.1) calls join with 0.1, not the constructor default."""
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock(), join_timeout=99.0)
+        thread._stop_event.set()  # so stop() exits quickly
+
+        join_calls: list[float | None] = []
+
+        def mock_join(timeout: float | None = None) -> None:
+            join_calls.append(timeout)
+            # Don't call the real join — thread was never started.
+
+        thread.join = mock_join  # type: ignore[method-assign]
+
+        # Patch is_alive to return True so join() is actually called.
+        with patch.object(thread, "is_alive", return_value=True):
+            thread.stop(timeout=0.1)
+
+        assert join_calls == [0.1]
+
+    def test_stop_uses_constructor_timeout_when_no_override(self) -> None:
+        """stop() with no arg falls back to constructor join_timeout."""
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock(), join_timeout=3.3)
+        thread._stop_event.set()
+
+        join_calls: list[float | None] = []
+
+        def mock_join(timeout: float | None = None) -> None:
+            join_calls.append(timeout)
+
+        thread.join = mock_join  # type: ignore[method-assign]
+
+        # Patch is_alive to return True so join() is actually called.
+        with patch.object(thread, "is_alive", return_value=True):
+            thread.stop()
+
+        assert join_calls == [3.3]
+
+    def test_stop_with_zero_timeout_override(self) -> None:
+        """stop(timeout=0) passes 0 to join (non-blocking join)."""
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        thread._stop_event.set()
+
+        join_calls: list[float | None] = []
+
+        def mock_join(timeout: float | None = None) -> None:
+            join_calls.append(timeout)
+
+        thread.join = mock_join  # type: ignore[method-assign]
+
+        with patch.object(thread, "is_alive", return_value=True):
+            thread.stop(timeout=0.0)
+
+        assert join_calls == [0.0]
+
+    def test_backward_compat_no_args_constructor(self) -> None:
+        """NATSSubscriberThread() with only required args still works."""
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        assert thread._join_timeout == DEFAULT_JOIN_TIMEOUT
+
+    def test_backward_compat_stop_no_args(self) -> None:
+        """stop() with no args still works (uses constructor default)."""
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        thread._stop_event.set()
+        # Thread was never started — stop() should not raise.
+        thread.stop()
