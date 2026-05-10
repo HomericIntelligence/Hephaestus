@@ -1,5 +1,4 @@
 {
-  "hooks": {},
   "enabledPlugins": {
     "hephaestus@ProjectHephaestus": true,
     "safety-net@cc-marketplace": true
