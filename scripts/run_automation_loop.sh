@@ -202,6 +202,9 @@ process_repo() {
     echo "  [$repo] Driving PRs to green CI..."
     (
       cd "$dir"
+      # Defence-in-depth: ci_driver also checks these envs and refuses to run
+      # unless HEPH_LOOP_INDEX == HEPH_TOTAL_LOOPS or --force-run is given.
+      HEPH_LOOP_INDEX="$loop" HEPH_TOTAL_LOOPS="$LOOPS" \
       "$PYTHON" "$SCRIPT_DIR/drive_prs_green.py" \
         --issues "${ISSUE_NUMBERS[@]}" \
         --max-workers "$MAX_WORKERS" \

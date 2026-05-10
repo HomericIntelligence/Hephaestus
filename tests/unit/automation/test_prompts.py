@@ -62,22 +62,6 @@ class TestFollowUpPrompt:
         assert "123" in out
 
 
-class TestReviewPrompts:
-    """Tests for review prompts."""
-
-    def test_analysis_substitutes_numbers(self) -> None:
-        out = prompts.get_review_analysis_prompt(pr_number=11, issue_number=22, pr_diff="diff")
-        assert "11" in out
-        assert "22" in out
-
-    def test_fix_substitutes_plan(self) -> None:
-        out = prompts.get_review_fix_prompt(
-            pr_number=11, issue_number=22, plan="THE PLAN", worktree_path="/wt"
-        )
-        assert "THE PLAN" in out
-        assert "/wt" in out
-
-
 class TestPRDescription:
     """Tests for p r description."""
 

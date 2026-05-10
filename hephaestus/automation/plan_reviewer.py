@@ -19,22 +19,21 @@ import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from typing import Any
 
+from hephaestus.github.rate_limit import wait_until
+
+from .claude_invoke import scan_quota_reset
 from .claude_models import reviewer_model
+from .claude_timeouts import plan_reviewer_claude_timeout
 from .github_api import _gh_call, gh_issue_comment, gh_issue_json
-from .models import PlanReviewerOptions, WorkerResult
+from .models import PLAN_COMMENT_MARKERS, PlanReviewerOptions, WorkerResult
 from .prompts import get_plan_review_prompt
 from .status_tracker import StatusTracker
 
 logger = logging.getLogger(__name__)
 
-# Marker used by the planner when posting plan comments.
-_PLAN_MARKERS = [
-    "# Implementation Plan",
-    "## Implementation Plan",
-    "# Plan",
-    "## Plan",
-    "## Objective",
-]
+# Plan-comment markers live in models.PLAN_COMMENT_MARKERS — re-exported here
+# under the existing private name so test files that imported it still work.
+_PLAN_MARKERS = PLAN_COMMENT_MARKERS
 
 # Prefix used by this reviewer when posting review comments.
 _REVIEW_PREFIX = "## 🔍 Plan Review"
@@ -280,17 +279,25 @@ class PlanReviewer:
         issue_title: str,
         issue_body: str,
         plan_text: str,
+        max_retries: int = 3,
     ) -> str | None:
         """Run Claude to produce a plan review.
 
         Calls ``claude --print`` with the review prompt piped to stdin.
         No filesystem tools are needed — the review is purely text-based.
 
+        Why a retry loop: a 429 from the Claude CLI used to be silently
+        swallowed (caught as generic Exception → None), so a single Anthropic
+        outage corrupted the entire review phase. This now mirrors the
+        planner's rate-limit handling — see :func:`scan_quota_reset` and
+        :func:`wait_until`.
+
         Args:
             issue_number: GitHub issue number.
             issue_title: Issue title.
             issue_body: Issue body/description.
             plan_text: The full plan text to review.
+            max_retries: Maximum retry attempts on rate-limit detection.
 
         Returns:
             Review text produced by Claude, or None on failure.
@@ -313,14 +320,30 @@ class PlanReviewer:
                 input=prompt,
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=plan_reviewer_claude_timeout(),
                 env=env,
             )
 
             if result.returncode != 0:
+                stderr = result.stderr or ""
+                stdout = result.stdout or ""
+                reset_epoch = scan_quota_reset(stderr, stdout)
+                if reset_epoch is not None and max_retries > 0:
+                    if reset_epoch > 0:
+                        wait_until(reset_epoch)
+                    else:
+                        time.sleep(5)
+                    return self._run_claude_analysis(
+                        issue_number,
+                        issue_title,
+                        issue_body,
+                        plan_text,
+                        max_retries=max_retries - 1,
+                    )
+
                 logger.error(
                     f"Claude returned exit code {result.returncode} for issue #{issue_number}: "
-                    f"{result.stderr[:200]}"
+                    f"{(stderr or stdout)[:200]}"
                 )
                 return None
 
@@ -437,7 +460,11 @@ Examples:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would be done without posting any comments",
+        help=(
+            "Suppress GitHub mutations (no review comments posted). NOTE: Claude "
+            "is still invoked to analyse plans — dry-run still incurs full "
+            "Claude token cost. It is for correctness rehearsal, not cost preview."
+        ),
     )
     parser.add_argument(
         "--no-ui",
@@ -465,6 +492,11 @@ def main() -> int:
     _setup_logging(args.verbose)
 
     log = logging.getLogger(__name__)
+
+    # Dedupe while preserving order — ``--issues 123 123`` would otherwise
+    # post two reviews on the same issue.
+    args.issues = list(dict.fromkeys(args.issues))
+
     log.info(f"Starting plan review for issues: {args.issues}")
 
     try:

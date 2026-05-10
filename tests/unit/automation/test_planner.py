@@ -84,21 +84,25 @@ class TestCallClaude:
                 planner._call_claude("Test prompt", model="claude-opus-4-7", timeout=300)
 
     def test_rate_limit_retry(self, planner: Any) -> None:
-        """Test rate limit retry logic."""
+        """Test rate limit retry logic.
+
+        Patches ``scan_quota_reset`` (the shared helper that wraps
+        ``detect_rate_limit`` + ``detect_claude_usage_cap``). The first call
+        returns 0 (rate-limited, no reset time) so the retry path triggers; the
+        second returns None on the success path.
+        """
         import subprocess
 
         with (
             patch("subprocess.run") as mock_run,
-            patch("hephaestus.automation.planner.detect_rate_limit") as mock_detect,
+            patch("hephaestus.automation.planner.scan_quota_reset") as mock_scan,
         ):
-            # First call fails with rate limit, second succeeds
             mock_run.side_effect = [
                 subprocess.CalledProcessError(1, "claude", stderr="rate limit exceeded"),
                 MagicMock(stdout="Success", returncode=0),
             ]
 
-            # First detect returns a reset epoch (rate limited), then None (no rate limit)
-            mock_detect.side_effect = [0, None]
+            mock_scan.side_effect = [0, None]
 
             with patch("time.sleep"):  # Don't actually sleep
                 result = planner._call_claude("Test prompt", model="claude-opus-4-7", max_retries=3)
@@ -177,16 +181,22 @@ class TestRunAdvise:
                 assert "Found 3 skills" in result
 
     def test_graceful_failure_on_error(self, planner: Any) -> None:
-        """Test graceful failure when advise errors."""
+        """When advise errors, return a sentinel-comment (not silent ``""``).
+
+        N2 turned the silent-empty fallback into a marked-skipped breadcrumb so
+        downstream readers can tell "advise failed" apart from "advise found
+        nothing".
+        """
         with patch("hephaestus.automation.planner.get_repo_root") as mock_get_repo:
             mock_get_repo.side_effect = RuntimeError("Git error")
 
             result = planner._run_advise(123, "Test Issue", "Issue body")
 
-            assert result == ""
+            assert result.startswith("<!-- advise step skipped:")
+            assert "Git error" in result
 
     def test_skips_when_mnemosyne_missing_and_clone_fails(self, planner: Any) -> None:
-        """Test returns empty string when ProjectMnemosyne is missing and clone fails."""
+        """Returns sentinel-comment when ProjectMnemosyne is missing and clone fails."""
         with (
             patch("hephaestus.automation.planner.get_repo_root") as mock_get_repo,
             patch.object(planner, "_ensure_mnemosyne", return_value=False) as mock_ensure,
@@ -196,7 +206,8 @@ class TestRunAdvise:
             with patch.object(Path, "exists", return_value=False):
                 result = planner._run_advise(123, "Test Issue", "Issue body")
 
-            assert result == ""
+            assert result.startswith("<!-- advise step skipped:")
+            assert "ProjectMnemosyne unavailable" in result
             mock_ensure.assert_called_once()
 
     def test_clones_mnemosyne_when_missing(self, planner: Any) -> None:
@@ -251,8 +262,8 @@ class TestRunAdvise:
         mock_ensure.assert_called_once()
         assert "Found Skills" in result
 
-    def test_marketplace_missing_reclone_fails_returns_empty(self, planner: Any) -> None:
-        """Test that missing marketplace.json with failed re-clone returns empty string."""
+    def test_marketplace_missing_reclone_fails_returns_sentinel(self, planner: Any) -> None:
+        """Missing marketplace.json + failed re-clone returns the skipped sentinel."""
 
         def patched_exists(p: Path) -> bool:
             # mnemosyne_root exists but marketplace.json is always absent
@@ -271,7 +282,8 @@ class TestRunAdvise:
 
         mock_rmtree.assert_called_once()
         mock_ensure.assert_called_once()
-        assert result == ""
+        assert result.startswith("<!-- advise step skipped:")
+        assert "marketplace.json missing" in result
 
 
 class TestGeneratePlan:

@@ -14,6 +14,18 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+# Markers that identify a plan comment posted by the planner. Used by both
+# the planner (to skip already-posted plans) and plan_reviewer (to locate
+# the plan to review). Single source of truth — adding a new heading style
+# only requires one edit.
+PLAN_COMMENT_MARKERS: tuple[str, ...] = (
+    "# Implementation Plan",
+    "## Implementation Plan",
+    "# Plan",
+    "## Plan",
+    "## Objective",
+)
+
 
 class IssueState(str, Enum):
     """GitHub issue state."""

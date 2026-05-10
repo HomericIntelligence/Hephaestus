@@ -21,14 +21,11 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from hephaestus.github.rate_limit import (
-    detect_claude_usage_cap,
-    detect_rate_limit,
-    wait_until,
-)
+from hephaestus.github.rate_limit import wait_until
 
-from .claude_invoke import parse_review_verdict
+from .claude_invoke import parse_review_verdict, scan_quota_reset
 from .claude_models import advise_model, learn_model, planner_model, reviewer_model
+from .claude_timeouts import planner_claude_timeout
 from .git_utils import get_repo_root
 from .github_api import (
     _gh_call,
@@ -37,7 +34,7 @@ from .github_api import (
     gh_list_open_issues,
     prefetch_issue_states,
 )
-from .models import PlannerOptions, PlanResult
+from .models import PLAN_COMMENT_MARKERS, PlannerOptions, PlanResult
 from .prompts import (
     get_advise_prompt,
     get_plan_loop_review_prompt,
@@ -48,23 +45,6 @@ from .status_tracker import StatusTracker
 MAX_REVIEW_ITERATIONS = 3
 
 logger = logging.getLogger(__name__)
-
-
-def _scan_quota_reset(*texts: str) -> int | None:
-    """Find a quota-reset epoch across one or more output streams.
-
-    Inspects each text for either form of rate-limit message — the GitHub-CLI
-    "Limit reached ..." form or the Claude-CLI "out of extra usage ·
-    resets ..." form. Uses ``is not None`` chaining so an epoch of ``0``
-    (rate-limited, reset time unknown) is preserved instead of being
-    mistaken for "no rate limit".
-    """
-    for text in texts:
-        for detect in (detect_rate_limit, detect_claude_usage_cap):
-            epoch = detect(text)
-            if epoch is not None:
-                return epoch
-    return None
 
 
 class Planner:
@@ -196,18 +176,10 @@ class Planner:
             data = json.loads(result.stdout)
             comments = data.get("comments", [])
 
-            # Look for plan markers in comments
-            plan_markers = [
-                "# Implementation Plan",
-                "## Implementation Plan",
-                "# Plan",
-                "## Plan",
-                "## Objective",
-            ]
-
+            # Look for plan markers in comments (shared with plan_reviewer)
             for comment in comments:
                 body = comment.get("body", "")
-                if any(marker in body for marker in plan_markers):
+                if any(marker in body for marker in PLAN_COMMENT_MARKERS):
                     logger.debug(f"Found existing plan for issue #{issue_number}")
                     return True
 
@@ -342,7 +314,7 @@ class Planner:
             # in particular returns its 429 ("You're out of extra usage ·
             # resets ...") inside the stdout JSON payload as the ``result``
             # field of an ``is_error: true`` response, not in stderr.
-            reset_epoch = _scan_quota_reset(stderr, stdout)
+            reset_epoch = scan_quota_reset(stderr, stdout)
             if reset_epoch is not None and max_retries > 0:
                 if reset_epoch > 0:
                     wait_until(reset_epoch)
@@ -452,7 +424,7 @@ class Planner:
             mnemosyne_root = repo_root / "build" / "ProjectMnemosyne"
 
             if not mnemosyne_root.exists() and not self._ensure_mnemosyne(mnemosyne_root):
-                return ""
+                return self._advise_skipped("ProjectMnemosyne unavailable")
 
             marketplace_path = mnemosyne_root / ".claude-plugin" / "marketplace.json"
             if not marketplace_path.exists():
@@ -466,7 +438,7 @@ class Planner:
                         f"Recovery failed: marketplace.json still missing at {marketplace_path}; "
                         "skipping advise step"
                     )
-                    return ""
+                    return self._advise_skipped(f"marketplace.json missing at {marketplace_path}")
 
             # Build advise prompt
             advise_prompt = get_advise_prompt(
@@ -485,7 +457,17 @@ class Planner:
 
         except Exception as e:
             logger.warning(f"Advise step failed for issue #{issue_number}: {e}")
-            return ""
+            return self._advise_skipped(f"unexpected error: {e}")
+
+    @staticmethod
+    def _advise_skipped(reason: str) -> str:
+        """Return a marker string for plans that ran without advise findings.
+
+        A silent ``""`` made it impossible for the implementer (or a human
+        reading the plan) to tell whether advise wasn't attempted, was
+        attempted but found nothing, or actually failed.
+        """
+        return f"<!-- advise step skipped: {reason} -->"
 
     def _generate_plan(
         self,
@@ -569,7 +551,7 @@ class Planner:
 
         # Call Claude to generate plan. Plans are small but reasoning-heavy,
         # so this is the right place to spend Opus.
-        plan = self._call_claude(context, model=planner_model(), timeout=300)
+        plan = self._call_claude(context, model=planner_model(), timeout=planner_claude_timeout())
 
         return plan
 
@@ -773,7 +755,9 @@ class Planner:
             prior_review=prior_review,
         )
         try:
-            return self._call_claude(prompt, model=reviewer_model(), timeout=300)
+            return self._call_claude(
+                prompt, model=reviewer_model(), timeout=planner_claude_timeout()
+            )
         except Exception as e:
             logger.error(
                 f"#{issue_number} R{iteration}: reviewer call failed: {e}; "
@@ -859,7 +843,11 @@ Examples:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would be done without actually doing it",
+        help=(
+            "Suppress GitHub mutations (no issue comments posted). NOTE: Claude "
+            "is still invoked to generate plans — dry-run still incurs full "
+            "Claude token cost. It is for correctness rehearsal, not cost preview."
+        ),
     )
     parser.add_argument(
         "--force",
@@ -916,6 +904,11 @@ def main() -> int:
         discovered = gh_list_open_issues()
         log.info(f"No --issues given; discovered {len(discovered)} open issues: {discovered}")
         args.issues = discovered
+
+    # Dedupe while preserving first-seen order. dict.fromkeys is the
+    # canonical "ordered set" trick. Without this, ``--issues 123 123``
+    # would race two workers on the same issue and produce double-posts.
+    args.issues = list(dict.fromkeys(args.issues))
 
     log.info(f"Issues to plan: {args.issues}")
 

@@ -13,6 +13,7 @@ import argparse
 import contextlib
 import json
 import logging
+import os
 import subprocess
 import tempfile
 import threading
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from .claude_models import implementer_model
+from .claude_timeouts import ci_driver_claude_timeout
 from .git_utils import get_repo_root, run
 from .github_api import _gh_call, gh_pr_checks
 from .models import CIDriverOptions, WorkerResult
@@ -37,7 +39,7 @@ class CIDriver:
     Features:
     - Parallel CI check polling across multiple issues
     - Distinguishes required vs non-required checks
-    - Single fix iteration per failing PR (configurable via max_fix_iterations)
+    - Up to ``max_fix_iterations`` fix attempts per failing PR (default 1)
     - Enables auto-merge once all required checks are green
     - Dry-run mode exits before any write or push
     """
@@ -543,7 +545,7 @@ class CIDriver:
                 capture_output=True,
                 text=True,
                 cwd=worktree_path,
-                timeout=1800,
+                timeout=ci_driver_claude_timeout(),
             )
 
             # If --resume failed, retry without it
@@ -557,7 +559,7 @@ class CIDriver:
                     capture_output=True,
                     text=True,
                     cwd=worktree_path,
-                    timeout=1800,
+                    timeout=ci_driver_claude_timeout(),
                 )
 
             if result.returncode == 0:
@@ -722,8 +724,49 @@ Examples:
         action="store_true",
         help="Enable verbose logging",
     )
+    parser.add_argument(
+        "--force-run",
+        action="store_true",
+        help=(
+            "Bypass the final-loop-only gate. By default, the driver refuses to "
+            "run unless HEPH_LOOP_INDEX == HEPH_TOTAL_LOOPS or both are unset; "
+            "use --force-run to override (e.g. ad-hoc invocation outside the "
+            "automation loop). Setting HEPH_CI_DRIVER_FORCE=1 has the same effect."
+        ),
+    )
 
     return parser.parse_args()
+
+
+def _final_loop_gate_passes(force: bool) -> tuple[bool, str]:
+    """Return (allowed, reason) for the final-loop-only gate.
+
+    The shell loop sets HEPH_LOOP_INDEX (1-based current loop) and
+    HEPH_TOTAL_LOOPS so this module can refuse to run on non-final loops.
+    Both unset means "not running under the loop" — allowed (CI debugging,
+    one-shot invocations). Either set without the other is treated as a
+    misconfiguration and the gate fails closed.
+    """
+    if force or os.environ.get("HEPH_CI_DRIVER_FORCE") == "1":
+        return True, "force flag set"
+
+    idx_raw = os.environ.get("HEPH_LOOP_INDEX")
+    total_raw = os.environ.get("HEPH_TOTAL_LOOPS")
+    if idx_raw is None and total_raw is None:
+        return True, "no loop env set (standalone invocation)"
+    if idx_raw is None or total_raw is None:
+        return False, (
+            "only one of HEPH_LOOP_INDEX/HEPH_TOTAL_LOOPS is set "
+            f"(idx={idx_raw!r}, total={total_raw!r}); fail-closed"
+        )
+    try:
+        idx = int(idx_raw)
+        total = int(total_raw)
+    except ValueError:
+        return False, (f"non-integer loop env: idx={idx_raw!r} total={total_raw!r}")
+    if idx != total:
+        return False, f"loop {idx}/{total} — drive-green is final-loop-only"
+    return True, f"final loop {idx}/{total}"
 
 
 def main() -> int:
@@ -737,6 +780,17 @@ def main() -> int:
     _setup_logging(args.verbose)
 
     log = logging.getLogger(__name__)
+
+    allowed, reason = _final_loop_gate_passes(force=args.force_run)
+    if not allowed:
+        log.error(
+            "ci_driver refused to run: %s. Pass --force-run (or set "
+            "HEPH_CI_DRIVER_FORCE=1) to override.",
+            reason,
+        )
+        return 2
+    log.debug("ci_driver gate passed: %s", reason)
+
     log.info(f"Starting CI driver for issues: {args.issues}")
 
     try:

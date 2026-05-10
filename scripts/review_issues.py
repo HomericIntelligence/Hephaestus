@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Thin wrapper — delegates to hephaestus.automation.reviewer.main()."""
+"""Thin wrapper — delegates to hephaestus.automation.pr_reviewer.main()."""
 
 import sys
 

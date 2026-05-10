@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .claude_timeouts import follow_up_claude_timeout
 from .git_utils import run
 from .github_api import gh_issue_comment, gh_issue_create
 from .issue_dedup import extract_new_info, find_duplicate_open_issue
@@ -79,6 +80,7 @@ def _create_follow_up_issues(
     issue_number: int,
     status_tracker: Any | None,
     slot_id: int | None,
+    dry_run: bool = False,
 ) -> list[int]:
     """Create GitHub issues from follow-up item list.
 
@@ -87,9 +89,13 @@ def _create_follow_up_issues(
         issue_number: Parent issue number (for cross-references and status labels).
         status_tracker: Optional StatusTracker for slot updates.
         slot_id: Worker slot ID for status updates.
+        dry_run: If True, log what would be filed without calling
+            ``gh_issue_create`` or ``gh_issue_comment``. Defence-in-depth: the
+            implementer phase already short-circuits the entire post-impl
+            block under dry-run, but this guards future callers.
 
     Returns:
-        List of created issue numbers.
+        List of created issue numbers (empty in dry-run).
 
     """
     created_issues = []
@@ -112,14 +118,26 @@ def _create_follow_up_issues(
                         f"(would have been a separate issue, "
                         f"deduplicated against this one):\n\n{new_info}"
                     )
-                    try:
-                        gh_issue_comment(duplicate.number, update_comment)
+                    if dry_run:
                         logger.info(
-                            f"Updated existing issue #{duplicate.number} with new "
-                            f"context from #{issue_number} (skipped duplicate '{item['title']}')"
+                            "[DRY RUN] Would update duplicate #%d with new context "
+                            "from #%d (skipped duplicate %r)",
+                            duplicate.number,
+                            issue_number,
+                            item["title"],
                         )
-                    except Exception as e:  # comment is best-effort
-                        logger.warning(f"Failed to comment on duplicate #{duplicate.number}: {e}")
+                    else:
+                        try:
+                            gh_issue_comment(duplicate.number, update_comment)
+                            logger.info(
+                                f"Updated existing issue #{duplicate.number} with new "
+                                f"context from #{issue_number} "
+                                f"(skipped duplicate '{item['title']}')"
+                            )
+                        except Exception as e:  # comment is best-effort
+                            logger.warning(
+                                f"Failed to comment on duplicate #{duplicate.number}: {e}"
+                            )
                 else:
                     logger.info(
                         f"Skipped pure-duplicate follow-up '{item['title']}' "
@@ -129,12 +147,19 @@ def _create_follow_up_issues(
                 continue
 
             body_with_ref = f"{item['body']}\n\n_Follow-up from #{issue_number}_"
-            new_issue_num = gh_issue_create(
-                title=item["title"],
-                body=body_with_ref,
-                labels=item.get("labels"),
-            )
-            created_issues.append(new_issue_num)
+            if dry_run:
+                logger.info(
+                    "[DRY RUN] Would create follow-up issue %r (parent #%d)",
+                    item["title"],
+                    issue_number,
+                )
+            else:
+                new_issue_num = gh_issue_create(
+                    title=item["title"],
+                    body=body_with_ref,
+                    labels=item.get("labels"),
+                )
+                created_issues.append(new_issue_num)
             time.sleep(1)
         except (
             Exception
@@ -150,6 +175,7 @@ def run_follow_up_issues(
     state_dir: Path,
     status_tracker: Any | None = None,
     slot_id: int | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Resume Claude session to identify and file follow-up issues.
 
@@ -160,6 +186,9 @@ def run_follow_up_issues(
         state_dir: Directory for state/log files
         status_tracker: StatusTracker instance for slot updates (optional)
         slot_id: Worker slot ID for status updates
+        dry_run: If True, run Claude analysis but suppress
+            ``gh_issue_create``/``gh_issue_comment``. Defence-in-depth (the
+            implementer-phase caller already short-circuits in dry-run).
 
     """
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -180,7 +209,7 @@ def run_follow_up_issues(
                 "json",
             ],
             cwd=worktree_path,
-            timeout=600,  # 10 minutes
+            timeout=follow_up_claude_timeout(),
         )
 
         # Save successful output to log file
@@ -202,18 +231,23 @@ def run_follow_up_issues(
             logger.info(f"No follow-up items identified for issue #{issue_number}")
             return
 
-        created_issues = _create_follow_up_issues(items, issue_number, status_tracker, slot_id)
+        created_issues = _create_follow_up_issues(
+            items, issue_number, status_tracker, slot_id, dry_run=dry_run
+        )
 
-        # Post summary comment on parent issue
+        # Post summary comment on parent issue (suppressed in dry-run)
         if created_issues:
             summary = f"Created {len(created_issues)} follow-up issue(s): " + ", ".join(
                 f"#{num}" for num in created_issues
             )
-            try:
-                gh_issue_comment(issue_number, summary)
-                logger.info(f"Posted follow-up summary to issue #{issue_number}")
-            except Exception as e:  # broad catch: GitHub API call; non-critical summary post
-                logger.warning(f"Failed to post follow-up summary: {e}")
+            if dry_run:
+                logger.info("[DRY RUN] Would post follow-up summary to #%d", issue_number)
+            else:
+                try:
+                    gh_issue_comment(issue_number, summary)
+                    logger.info(f"Posted follow-up summary to issue #{issue_number}")
+                except Exception as e:  # broad catch: GitHub API call; non-critical summary post
+                    logger.warning(f"Failed to post follow-up summary: {e}")
 
         logger.info(
             f"Follow-up issues completed for #{issue_number}: created {len(created_issues)}"

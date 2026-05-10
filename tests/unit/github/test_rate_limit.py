@@ -215,11 +215,19 @@ class TestDetectClaudeUsageCap:
         assert detect_claude_usage_cap("Normal output, nothing wrong") is None
 
     def test_parses_date_qualified_form(self) -> None:
-        text = "You're out of extra usage \xb7 resets May 8, 5pm (America/Los_Angeles)"
+        # Build the date dynamically — a hardcoded "May 8, 5pm" fails by
+        # date drift (the original assertion was "epoch > now-86400", which
+        # only held if the test ran within ~24h of May 8).
+        from datetime import datetime, timedelta, timezone
+
+        future = datetime.now(timezone.utc) + timedelta(days=2)
+        date_str = future.strftime("%b %-d")  # e.g. "May 12"
+        text = f"You're out of extra usage \xb7 resets {date_str}, 5pm (America/Los_Angeles)"
         epoch = detect_claude_usage_cap(text)
         assert epoch is not None
-        # Reset must be in the future (or recent past for clock skew).
-        assert epoch > int(time.time()) - 86400
+        # Parsed epoch should be close to the future date we asked for
+        # (within a 36h window covers DST + tz offset to America/Los_Angeles).
+        assert abs(epoch - int(future.timestamp())) < 36 * 3600
 
     def test_parses_intra_day_form(self) -> None:
         text = "Claude usage limit reached \xb7 resets 9pm (America/Los_Angeles)"

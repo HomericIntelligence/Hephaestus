@@ -1,4 +1,4 @@
-"""Review-verdict parsing for the strict review loops.
+"""Shared Claude-CLI helpers: verdict parsing and rate-limit detection.
 
 The original version of this module also implemented a Claude CLI invocation
 helper with a sonnet→opus/haiku fallback chain. That role was superseded by
@@ -6,14 +6,34 @@ helper with a sonnet→opus/haiku fallback chain. That role was superseded by
 phase and supports per-phase ``HEPH_<PHASE>_MODEL`` env-var overrides for
 operator-driven tier swapping.
 
-What remains here is the parser used by the strict review loops in
-:mod:`hephaestus.automation.planner` and :mod:`hephaestus.automation.implementer`.
+What remains here is:
+- the verdict parser used by the strict review loops
+- :func:`scan_quota_reset` — a shared cross-stream rate-limit scanner so all
+  phases (planner, plan_reviewer, ...) get identical 429 handling.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+
+from hephaestus.github.rate_limit import detect_claude_usage_cap, detect_rate_limit
+
+
+def scan_quota_reset(*texts: str) -> int | None:
+    """Find a quota-reset epoch across one or more output streams.
+
+    Inspects each text for either form of rate-limit message — the GitHub-CLI
+    "Limit reached ..." form or the Claude-CLI "out of extra usage · resets
+    ..." form. ``is not None`` chaining preserves an epoch of ``0`` (rate-
+    limited, reset time unknown) instead of confusing it with "no rate limit".
+    """
+    for text in texts:
+        for detect in (detect_rate_limit, detect_claude_usage_cap):
+            epoch = detect(text)
+            if epoch is not None:
+                return epoch
+    return None
 
 
 @dataclass(frozen=True)

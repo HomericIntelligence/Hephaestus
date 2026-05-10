@@ -31,6 +31,7 @@ from hephaestus.github.rate_limit import (
 
 from .claude_invoke import parse_review_verdict
 from .claude_models import implementer_model, reviewer_model
+from .claude_timeouts import implementer_claude_timeout
 from .curses_ui import CursesUI, ThreadLogManager
 from .dependency_resolver import CyclicDependencyError, DependencyResolver
 from .follow_up import parse_follow_up_items, run_follow_up_issues
@@ -701,6 +702,7 @@ class IssueImplementer:
             self.state_dir,
             self.status_tracker,
             slot_id,
+            dry_run=self.options.dry_run,
         )
 
     def _learn_needs_rerun(self, issue_number: int) -> bool:
@@ -927,7 +929,7 @@ class IssueImplementer:
                     "Read,Write,Edit,Glob,Grep,Bash",
                 ],
                 cwd=worktree_path,
-                timeout=1800,
+                timeout=implementer_claude_timeout(),
             )
             return True
         except Exception as e:  # broad: resume is best-effort, never crash the loop
@@ -1101,7 +1103,7 @@ class IssueImplementer:
                     "Read,Write,Edit,Glob,Grep,Bash",
                 ],
                 cwd=worktree_path,
-                timeout=1800,  # 30 minutes
+                timeout=implementer_claude_timeout(),
             )
             # Parse session_id from JSON output
             try:
