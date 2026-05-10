@@ -184,3 +184,65 @@ class TestDependencyResolver:
         # Should not appear in ready issues
         ready = resolver.get_ready_issues()
         assert 1 not in [i.number for i in ready]
+
+
+class TestLoadDependenciesIterative:
+    """Tests for the iterative BFS _load_dependencies (A5-03)."""
+
+    def test_visited_set_prevents_revisiting(self) -> None:
+        """A dependency already in the graph is not loaded twice (A5-03)."""
+        from unittest.mock import patch
+
+        resolver = DependencyResolver(skip_closed=False)
+        # Pre-populate issue 1 so the BFS should skip re-fetching it.
+        resolver.add_issue(IssueInfo(number=1, title="Already loaded"))
+        issue_with_dep = IssueInfo(number=2, title="Has dep", dependencies=[1])
+
+        with patch("hephaestus.automation.dependency_resolver.fetch_issue_info") as mock_fetch:
+            resolver._load_dependencies(issue_with_dep, {})
+
+        # fetch_issue_info must NOT have been called for dep 1 (already in graph)
+        mock_fetch.assert_not_called()
+
+    def test_depth_cap_raises_runtime_error(self) -> None:
+        """Exceeding _MAX_DEPENDENCY_DEPTH raises RuntimeError (A5-03)."""
+        from unittest.mock import patch
+
+        resolver = DependencyResolver(skip_closed=False)
+        root = IssueInfo(number=0, title="Root", dependencies=[1])
+
+        # Each fetched issue depends on the next, creating a chain of depth > 100.
+        def _make_issue(n: int) -> IssueInfo:
+            return IssueInfo(number=n, title=f"Issue {n}", dependencies=[n + 1])
+
+        with patch(
+            "hephaestus.automation.dependency_resolver.fetch_issue_info",
+            side_effect=lambda n: _make_issue(n),
+        ):
+            with pytest.raises(RuntimeError, match="exceeded"):
+                resolver._load_dependencies(root, {})
+
+    def test_normal_chain_loads_all(self) -> None:
+        """A finite chain (depth < limit) loads all dependencies without error (A5-03)."""
+        from unittest.mock import patch
+
+        resolver = DependencyResolver(skip_closed=False)
+        root = IssueInfo(number=10, title="Root", dependencies=[9])
+
+        # 9 -> 8 -> 7 (depth 3, well within limit)
+        dep_map = {
+            9: IssueInfo(number=9, title="D9", dependencies=[8]),
+            8: IssueInfo(number=8, title="D8", dependencies=[7]),
+            7: IssueInfo(number=7, title="D7", dependencies=[]),
+        }
+
+        with patch(
+            "hephaestus.automation.dependency_resolver.fetch_issue_info",
+            side_effect=lambda n: dep_map[n],
+        ):
+            resolver._load_dependencies(root, {})
+
+        # All three deps should now be in the graph
+        assert 9 in resolver.graph.issues
+        assert 8 in resolver.graph.issues
+        assert 7 in resolver.graph.issues

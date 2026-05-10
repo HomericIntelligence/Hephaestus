@@ -152,19 +152,48 @@ class DependencyResolver:
 
         return list(set(sub_issues))  # Remove duplicates
 
+    _MAX_DEPENDENCY_DEPTH = 100
+
     def _load_dependencies(
         self,
         issue: IssueInfo,
         cached_states: dict[int, IssueState],
     ) -> None:
-        """Recursively load issue dependencies.
+        """Load issue dependencies iteratively using BFS (bounded depth).
+
+        Replaces the previous recursive implementation to avoid Python's
+        default recursion limit on deep or wide dependency chains and to make
+        the depth cap explicit and configurable via ``_MAX_DEPENDENCY_DEPTH``.
 
         Args:
-            issue: Issue to load dependencies for
-            cached_states: Cache of issue states
+            issue: Root issue whose dependencies to load.
+            cached_states: Cache of issue states (consulted before fetching).
+
+        Raises:
+            RuntimeError: If the dependency graph exceeds ``_MAX_DEPENDENCY_DEPTH``
+                levels, which almost certainly indicates a cycle that escaped the
+                cycle-detection pass.
 
         """
+        # BFS queue entries are (issue_number, depth)
+        queue: deque[tuple[int, int]] = deque()
+        visited: set[int] = set()
+
+        # Seed the queue with the direct dependencies of the root issue
         for dep_num in issue.dependencies:
+            queue.append((dep_num, 1))
+            visited.add(dep_num)
+
+        while queue:
+            dep_num, depth = queue.popleft()
+
+            if depth > self._MAX_DEPENDENCY_DEPTH:
+                raise RuntimeError(
+                    f"Dependency graph exceeded {self._MAX_DEPENDENCY_DEPTH} levels "
+                    f"starting from issue #{issue.number}. "
+                    "Check for cycles or reduce the dependency chain depth."
+                )
+
             if dep_num in self.graph.issues or dep_num in self.completed:
                 continue
 
@@ -176,7 +205,11 @@ class DependencyResolver:
             try:
                 dep_issue = fetch_issue_info(dep_num)
                 self.add_issue(dep_issue)
-                self._load_dependencies(dep_issue, cached_states)
+                # Enqueue this issue's own dependencies for the next BFS level
+                for child_dep in dep_issue.dependencies:
+                    if child_dep not in visited:
+                        visited.add(child_dep)
+                        queue.append((child_dep, depth + 1))
             except Exception as e:
                 logger.error(f"Failed to load dependency #{dep_num}: {e}")
 
