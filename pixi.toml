@@ -17,7 +17,6 @@ python = ">=3.10"
 pip = "*"
 pydantic = ">=2.12.5,<3"
 pygments = ">=2.20.0"  # CVE-2026-4539
-requests = ">=2.33.0"  # CVE-2026-25645
 pygithub = ">=2.9.1,<3"
 
 [pypi-dependencies]
@@ -33,6 +32,7 @@ ruff = ">=0.1.0,<1"
 mypy = ">=1.8.0,<2"
 yamllint = ">=1.35.0,<2"
 just = ">=1.25.0,<2"
+bats-core = ">=1.11.0,<2"
 
 [feature.dev.pypi-dependencies]
 pip-audit = ">=2.7,<3"

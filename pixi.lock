@@ -12,6 +12,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/annotated-types-0.7.0-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/backports.zstd-1.4.0-py314h680f03e_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/bats-core-1.13.0-ha770c72_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/brotli-python-1.2.0-py314he299d4b_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/bzip2-1.0.8-hda65f42_9.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/ca-certificates-2026.4.22-hbd8a1cb_0.conda
@@ -267,6 +268,14 @@ packages:
   purls: []
   size: 7546
   timestamp: 1777848733980
+- conda: https://conda.anaconda.org/conda-forge/linux-64/bats-core-1.13.0-ha770c72_0.conda
+  sha256: fab4ddcbe6769acf4c2e28e474cb40d1d7dc17c78fef9c248230ed4dbb7fea96
+  md5: 09b12d1a94df246266ab95a7a2fe9d35
+  license: MIT
+  license_family: MIT
+  purls: []
+  size: 48710
+  timestamp: 1762537439832
 - pypi: https://files.pythonhosted.org/packages/e5/ca/78d423b324b8d77900030fa59c4aa9054261ef0925631cd2501dd015b7b7/boolean_py-5.0-py3-none-any.whl
   name: boolean-py
   version: '5.0'
@@ -547,10 +556,10 @@ packages:
   requires_python: '>=3.10'
 - pypi: ./
   name: homericintelligence-hephaestus
-  version: 0.7.3.dev49+g3d8f5f5b6.d20260510
-  sha256: 443585e139d25a0897b8e6bda1dc0d06f5223a38e2235770b9f53fac825cee54
+  version: 0.7.3.dev54+gd2cb8afa5
+  sha256: 19a74c22876a0d3a8d92b72f58cefa118e02645d3323040b7b3a86ff62d3cec4
   requires_dist:
-  - packaging>=21.0
+  - packaging>=21.0,<27
   - pydantic>=2.0,<3
   - pyyaml>=6.0,<7
   - defusedxml>=0.7,<1 ; extra == 'all'
