@@ -1,8 +1,22 @@
-"""Follow-up issue creation functions for issue implementation.
+"""Follow-up issue creation for issue implementation.
 
-Provides:
-- Parsing follow-up items from Claude JSON responses
-- Creating follow-up GitHub issues after implementation
+Policy (2026-05-10): one consolidated GitHub issue per implementation, sectioned
+by category (core / security / safety / critical_bug). Follow-ups are tightly
+scoped — see ``prompts.FOLLOW_UP_PROMPT`` for the rules. Out-of-scope items
+that the model considered but rejected are returned to the caller so they can
+be recorded in the PR body rather than filed as separate issues.
+
+Public surface:
+
+- ``parse_follow_up_response(text)`` — returns a typed result with
+  ``follow_ups`` and ``rejected`` lists.
+- ``run_follow_up_issues(...)`` — resumes the Claude session, parses the
+  response, files at most one consolidated issue, and returns the parsed
+  ``FollowUpResponse`` (or ``None`` if Claude failed). The rejected list is
+  also persisted to ``state_dir/follow-up-rejected-{issue_number}.json``
+  so callers that don't read the return value still have access.
+- ``render_rejected_for_pr_body(rejected)`` — markdown helper for embedding
+  the rejected list into a PR body.
 """
 
 from __future__ import annotations
@@ -11,34 +25,69 @@ import contextlib
 import json
 import logging
 import re
-import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .claude_timeouts import follow_up_claude_timeout
 from .git_utils import run
 from .github_api import gh_issue_comment, gh_issue_create
-from .issue_dedup import extract_new_info, find_duplicate_open_issue
 from .prompts import get_follow_up_prompt
 
 logger = logging.getLogger(__name__)
 
 
-def _extract_outer_json_array(text: str) -> str | None:
-    """Find and return the outermost JSON array ``[...]`` in *text*.
+_ALLOWED_CATEGORIES: frozenset[str] = frozenset({"core", "security", "safety", "critical_bug"})
+_MAX_FOLLOW_UPS = 3
+_CATEGORY_LABELS: dict[str, list[str]] = {
+    "core": ["follow-up", "core"],
+    "security": ["follow-up", "security"],
+    "safety": ["follow-up", "safety"],
+    "critical_bug": ["follow-up", "bug"],
+}
+_SECTION_HEADINGS: dict[str, str] = {
+    "core": "## Core library",
+    "security": "## Security",
+    "safety": "## Safety",
+    "critical_bug": "## Critical bug",
+}
 
-    Uses a balanced-bracket scan to avoid the greedy/non-greedy pitfall of
-    regex-based extraction, which either over-consumes (greedy ``.*``) or
-    stops too early inside nested structures (non-greedy ``.*?``).
 
-    Args:
-        text: String that may contain a JSON array.
+@dataclass(frozen=True)
+class FollowUpItem:
+    """A single accepted follow-up item under one of the four categories."""
 
-    Returns:
-        The first outermost ``[...]`` substring, or ``None`` if not found.
+    category: str
+    title: str
+    body: str
 
+
+@dataclass(frozen=True)
+class RejectedItem:
+    """A follow-up the model considered but excluded under the scope rules."""
+
+    title: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class FollowUpResponse:
+    """Parsed result of the follow-up Claude session."""
+
+    follow_ups: list[FollowUpItem] = field(default_factory=list)
+    rejected: list[RejectedItem] = field(default_factory=list)
+
+
+def _extract_outer_json_object(text: str) -> str | None:
+    """Find and return the outermost JSON object ``{...}`` in *text*.
+
+    Uses a balanced-brace scan so prose containing additional ``{`` or
+    nested objects does not confuse the boundary detection. Carries the
+    A5-07 lesson (originally applied to the array variant in the prior
+    schema): a greedy regex over-consumes, a non-greedy regex stops too
+    early inside nested structures.
     """
-    start = text.find("[")
+    start = text.find("{")
     if start == -1:
         return None
     depth = 0
@@ -52,164 +101,260 @@ def _extract_outer_json_array(text: str) -> str | None:
         if ch == "\\" and in_string:
             escape_next = True
             continue
-        if ch == '"' and not escape_next:
+        if ch == '"':
             in_string = not in_string
             continue
         if in_string:
             continue
-        if ch == "[":
+        if ch == "{":
             depth += 1
-        elif ch == "]":
+        elif ch == "}":
             depth -= 1
             if depth == 0:
                 return text[start : i + 1]
     return None
 
 
-def parse_follow_up_items(text: str) -> list[dict[str, Any]]:
-    """Parse follow-up items from Claude's JSON response.
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    """Extract the first JSON object from ``text``.
 
-    Args:
-        text: Claude's response text (may contain JSON in code blocks)
-
-    Returns:
-        List of follow-up item dictionaries with title, body, labels
-
+    Looks for a fenced ```json ... ``` block first, then falls back to a
+    balanced-brace scan over the bare text. Returns ``None`` if nothing
+    parseable is found.
     """
-    # Try to extract JSON from code blocks or bare JSON.
-    # Code-block extraction uses a non-greedy inner match to stop at the
-    # first closing fence.  The bare-JSON fallback previously used a greedy
-    # `.*` which would over-consume when multiple arrays were present.
-    # We now use a balanced-bracket scanner to find the outermost `[...]`
-    # block reliably (A5-07).
-    json_match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
-    if json_match:
-        json_str = json_match.group(1)
-    else:
-        json_str = _extract_outer_json_array(text)
-        if json_str is None:
-            logger.warning("No JSON array found in follow-up response")
-            return []
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    candidate = fenced.group(1) if fenced else _extract_outer_json_object(text)
+    if candidate is None:
+        return None
 
     try:
-        items = json.loads(json_str)
-        if not isinstance(items, list):
-            logger.warning("Follow-up response is not a JSON array")
-            return []
-
-        # Validate and filter items
-        valid_items = []
-        for item in items[:5]:  # Cap at 5
-            if not isinstance(item, dict):
-                continue
-            if "title" not in item or "body" not in item:
-                logger.warning(f"Skipping follow-up item missing required fields: {item}")
-                continue
-
-            # Ensure labels is a list
-            if "labels" not in item or not isinstance(item["labels"], list):
-                item["labels"] = []
-
-            valid_items.append(item)
-
-        return valid_items
-
-    except json.JSONDecodeError as e:
-        logger.warning(f"Failed to parse follow-up JSON: {e}")
-        return []
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
 
 
-def _create_follow_up_issues(
-    items: list[dict[str, Any]],
+def _classify_follow_up_entry(
+    item: Any,
+) -> tuple[FollowUpItem, None] | tuple[None, RejectedItem | None]:
+    """Validate one ``follow_ups`` entry.
+
+    Returns ``(item, None)`` if accepted, ``(None, RejectedItem)`` if demoted
+    due to an invalid category, or ``(None, None)`` if the entry should be
+    silently dropped (missing required fields).
+    """
+    if not isinstance(item, dict):
+        return None, None
+    category = item.get("category")
+    title = item.get("title")
+    body = item.get("body")
+    if not isinstance(title, str) or not isinstance(body, str) or not title.strip():
+        logger.warning("Skipping follow-up with missing title/body: %r", item)
+        return None, None
+    if category not in _ALLOWED_CATEGORIES:
+        logger.warning("Demoting follow-up %r to rejected: invalid category %r", title, category)
+        reason = f"Invalid category {category!r}; allowed values are {sorted(_ALLOWED_CATEGORIES)}."
+        return None, RejectedItem(title=title, reason=reason)
+    return FollowUpItem(category=category, title=title.strip(), body=body), None
+
+
+def _parse_rejected_entry(item: Any) -> RejectedItem | None:
+    """Validate one ``rejected`` entry, returning ``None`` if it should be dropped."""
+    if not isinstance(item, dict):
+        return None
+    title = item.get("title")
+    reason = item.get("reason", "")
+    if not isinstance(title, str) or not title.strip():
+        return None
+    if not isinstance(reason, str):
+        reason = str(reason)
+    return RejectedItem(title=title.strip(), reason=reason.strip())
+
+
+def parse_follow_up_response(text: str) -> FollowUpResponse:
+    """Parse the sectioned follow-up schema from Claude's response.
+
+    Tolerates fenced JSON, bare JSON, and silently drops malformed items
+    (logged at WARNING). Items with categories outside the allowed set are
+    demoted to the rejected list with a synthesised reason — the model is
+    supposed to enforce categories itself, but defence in depth.
+    """
+    obj = _extract_json_object(text)
+    if obj is None:
+        logger.warning("No JSON object found in follow-up response")
+        return FollowUpResponse()
+
+    raw_follow_ups = obj.get("follow_ups", [])
+    raw_rejected = obj.get("rejected", [])
+    if not isinstance(raw_follow_ups, list):
+        logger.warning("follow_ups was not a list; ignoring")
+        raw_follow_ups = []
+    if not isinstance(raw_rejected, list):
+        logger.warning("rejected was not a list; ignoring")
+        raw_rejected = []
+
+    accepted: list[FollowUpItem] = []
+    rejected: list[RejectedItem] = []
+
+    for item in raw_follow_ups[:_MAX_FOLLOW_UPS]:
+        good, demoted = _classify_follow_up_entry(item)
+        if good is not None:
+            accepted.append(good)
+        elif demoted is not None:
+            rejected.append(demoted)
+
+    if len(raw_follow_ups) > _MAX_FOLLOW_UPS:
+        logger.warning(
+            "Follow-up cap exceeded: model returned %d items, kept first %d",
+            len(raw_follow_ups),
+            _MAX_FOLLOW_UPS,
+        )
+
+    for item in raw_rejected:
+        parsed = _parse_rejected_entry(item)
+        if parsed is not None:
+            rejected.append(parsed)
+
+    return FollowUpResponse(follow_ups=accepted, rejected=rejected)
+
+
+def parse_follow_up_items(text: str) -> list[dict[str, Any]]:
+    """Backward-compatible adapter returning a flat list of dicts.
+
+    Pre-2026-05-10 callers expected ``[{"title", "body", "labels"}, ...]``.
+    The new schema is structured differently, so this adapter projects
+    accepted follow-ups into the legacy shape. Rejected items are NOT
+    surfaced through this function — call ``parse_follow_up_response`` to
+    see them.
+    """
+    response = parse_follow_up_response(text)
+    return [
+        {
+            "title": item.title,
+            "body": item.body,
+            "labels": list(_CATEGORY_LABELS.get(item.category, ["follow-up"])),
+        }
+        for item in response.follow_ups
+    ]
+
+
+def _build_consolidated_body(
+    response: FollowUpResponse,
+    issue_number: int,
+) -> str:
+    """Render a single sectioned issue body covering all accepted follow-ups."""
+    lines: list[str] = [
+        f"_Consolidated follow-up from implementation of #{issue_number}._",
+        "",
+        (
+            "Each section below lists scope-checked follow-up items discovered "
+            "during implementation. Items are restricted to core library "
+            "defects, security, safety hazards, or critical functional bugs."
+        ),
+        "",
+    ]
+    by_category: dict[str, list[FollowUpItem]] = {}
+    for item in response.follow_ups:
+        by_category.setdefault(item.category, []).append(item)
+
+    for category in ("critical_bug", "safety", "security", "core"):
+        if not by_category.get(category):
+            continue
+        lines.append(_SECTION_HEADINGS[category])
+        lines.append("")
+        for entry in by_category[category]:
+            lines.append(f"### {entry.title}")
+            lines.append("")
+            lines.append(entry.body.strip())
+            lines.append("")
+
+    if response.rejected:
+        lines.append("---")
+        lines.append("")
+        lines.append(
+            "_The implementer also considered the items below and rejected "
+            "them as out of scope; they are recorded in the PR body, not "
+            "filed as separate issues._"
+        )
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _consolidated_labels(response: FollowUpResponse) -> list[str]:
+    """Pick labels for the consolidated issue based on which categories appear."""
+    labels: set[str] = {"follow-up"}
+    for item in response.follow_ups:
+        labels.update(_CATEGORY_LABELS.get(item.category, []))
+    return sorted(labels)
+
+
+def _file_consolidated_issue(
+    response: FollowUpResponse,
     issue_number: int,
     status_tracker: Any | None,
     slot_id: int | None,
-    dry_run: bool = False,
-) -> list[int]:
-    """Create GitHub issues from follow-up item list.
+    dry_run: bool,
+) -> int | None:
+    """File the single consolidated follow-up issue.
 
-    Args:
-        items: List of follow-up item dicts with title, body, and optional labels.
-        issue_number: Parent issue number (for cross-references and status labels).
-        status_tracker: Optional StatusTracker for slot updates.
-        slot_id: Worker slot ID for status updates.
-        dry_run: If True, log what would be filed without calling
-            ``gh_issue_create`` or ``gh_issue_comment``. Defence-in-depth: the
-            implementer phase already short-circuits the entire post-impl
-            block under dry-run, but this guards future callers.
-
-    Returns:
-        List of created issue numbers (empty in dry-run).
-
+    Returns the new issue number on success, ``None`` if there was nothing
+    to file or the call was suppressed by ``dry_run``. Failures are logged
+    and swallowed — follow-up filing must never block the PR pipeline.
     """
-    created_issues = []
-    for i, item in enumerate(items, 1):
-        try:
-            if slot_id is not None and status_tracker is not None:
-                status_tracker.update_slot(
-                    slot_id, f"#{issue_number}: Creating follow-up {i}/{len(items)}"
-                )
+    if not response.follow_ups:
+        return None
 
-            # Dedup: skip filing if a near-duplicate open issue already exists.
-            # When found, post a comment on the existing issue with any new
-            # information — but only if the new body actually adds something.
-            duplicate = find_duplicate_open_issue(item["title"], item["body"])
-            if duplicate is not None:
-                new_info = extract_new_info(item["body"], duplicate.body)
-                if new_info:
-                    update_comment = (
-                        f"Additional context from #{issue_number} "
-                        f"(would have been a separate issue, "
-                        f"deduplicated against this one):\n\n{new_info}"
-                    )
-                    if dry_run:
-                        logger.info(
-                            "[DRY RUN] Would update duplicate #%d with new context "
-                            "from #%d (skipped duplicate %r)",
-                            duplicate.number,
-                            issue_number,
-                            item["title"],
-                        )
-                    else:
-                        try:
-                            gh_issue_comment(duplicate.number, update_comment)
-                            logger.info(
-                                f"Updated existing issue #{duplicate.number} with new "
-                                f"context from #{issue_number} "
-                                f"(skipped duplicate '{item['title']}')"
-                            )
-                        except Exception as e:  # comment is best-effort
-                            logger.warning(
-                                f"Failed to comment on duplicate #{duplicate.number}: {e}"
-                            )
-                else:
-                    logger.info(
-                        f"Skipped pure-duplicate follow-up '{item['title']}' "
-                        f"(matches existing #{duplicate.number}, no new info)"
-                    )
-                time.sleep(1)
-                continue
+    if slot_id is not None and status_tracker is not None:
+        status_tracker.update_slot(
+            slot_id, f"#{issue_number}: Filing 1 consolidated follow-up issue"
+        )
 
-            body_with_ref = f"{item['body']}\n\n_Follow-up from #{issue_number}_"
-            if dry_run:
-                logger.info(
-                    "[DRY RUN] Would create follow-up issue %r (parent #%d)",
-                    item["title"],
-                    issue_number,
-                )
-            else:
-                new_issue_num = gh_issue_create(
-                    title=item["title"],
-                    body=body_with_ref,
-                    labels=item.get("labels"),
-                )
-                created_issues.append(new_issue_num)
-            time.sleep(1)
-        except (
-            Exception
-        ) as e:  # broad catch: GitHub API can fail in many ways; continue with others
-            logger.warning(f"Failed to create follow-up issue '{item['title']}': {e}")
-    return created_issues
+    categories = sorted({i.category for i in response.follow_ups})
+    title = (
+        f"Follow-up from #{issue_number}: "
+        f"{len(response.follow_ups)} item(s) ({', '.join(categories)})"
+    )
+    if len(title) > 80:
+        title = f"Follow-up from #{issue_number} ({len(response.follow_ups)} items)"
+
+    body = _build_consolidated_body(response, issue_number)
+    labels = _consolidated_labels(response)
+
+    if dry_run:
+        logger.info(
+            "[DRY RUN] Would create consolidated follow-up issue %r (parent #%d, %d items)",
+            title,
+            issue_number,
+            len(response.follow_ups),
+        )
+        return None
+
+    try:
+        return gh_issue_create(title=title, body=body, labels=labels)
+    except Exception as e:  # broad: GitHub API can fail in many ways; non-blocking
+        logger.warning(
+            "Failed to create consolidated follow-up issue for #%d: %s",
+            issue_number,
+            e,
+        )
+        return None
+
+
+def _persist_rejected(
+    rejected: list[RejectedItem],
+    issue_number: int,
+    state_dir: Path,
+) -> None:
+    """Write rejected items to a JSON file for offline inspection / PR-body rendering."""
+    if not rejected:
+        return
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / f"follow-up-rejected-{issue_number}.json"
+    payload = [{"title": r.title, "reason": r.reason} for r in rejected]
+    with contextlib.suppress(Exception):
+        path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
 def run_follow_up_issues(
@@ -220,29 +365,30 @@ def run_follow_up_issues(
     status_tracker: Any | None = None,
     slot_id: int | None = None,
     dry_run: bool = False,
-) -> None:
-    """Resume Claude session to identify and file follow-up issues.
+) -> FollowUpResponse | None:
+    """Resume the implementation Claude session and file ONE consolidated follow-up issue.
 
-    Args:
-        session_id: Claude session ID to resume
-        worktree_path: Path to git worktree
-        issue_number: Parent issue number
-        state_dir: Directory for state/log files
-        status_tracker: StatusTracker instance for slot updates (optional)
-        slot_id: Worker slot ID for status updates
-        dry_run: If True, run Claude analysis but suppress
-            ``gh_issue_create``/``gh_issue_comment``. Defence-in-depth (the
-            implementer-phase caller already short-circuits in dry-run).
+    Returns the parsed ``FollowUpResponse`` so callers can render the rejected
+    items into the PR body. Returns ``None`` if Claude failed or the response
+    was unparseable — in that case the caller should not block the PR
+    pipeline.
 
+    Side effects:
+
+    - Creates ``state_dir`` if missing.
+    - Writes ``state_dir/follow-up-{issue_number}.log`` with the raw Claude output.
+    - Writes ``state_dir/follow-up-rejected-{issue_number}.json`` with the
+      rejected list.
+    - Files at most ONE GitHub issue (the consolidated one), and posts a single
+      summary comment on the parent issue when something was filed.
+    - In ``dry_run`` mode, all GitHub side effects are suppressed.
     """
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write follow-up prompt to temp file in worktree
     prompt_file = worktree_path / f".claude-followup-{issue_number}.md"
     prompt_file.write_text(get_follow_up_prompt(issue_number))
 
     try:
-        # Resume session and get follow-up items
         result = run(
             [
                 "claude",
@@ -256,63 +402,89 @@ def run_follow_up_issues(
             timeout=follow_up_claude_timeout(),
         )
 
-        # Save successful output to log file
         follow_up_log = state_dir / f"follow-up-{issue_number}.log"
         follow_up_log.write_text(result.stdout or "")
 
-        # Parse JSON output
         try:
             data = json.loads(result.stdout)
             response_text = data.get("result", "")
         except (json.JSONDecodeError, AttributeError) as e:
-            logger.warning(f"Could not parse follow-up response for issue #{issue_number}: {e}")
-            return
+            logger.warning("Could not parse follow-up response for issue #%d: %s", issue_number, e)
+            return None
 
-        # Extract follow-up items
-        items = parse_follow_up_items(response_text)
+        response = parse_follow_up_response(response_text)
+        _persist_rejected(response.rejected, issue_number, state_dir)
 
-        if not items:
-            logger.info(f"No follow-up items identified for issue #{issue_number}")
-            return
+        if not response.follow_ups and not response.rejected:
+            logger.info("No follow-up items identified for issue #%d", issue_number)
+            return response
 
-        created_issues = _create_follow_up_issues(
-            items, issue_number, status_tracker, slot_id, dry_run=dry_run
+        new_issue = _file_consolidated_issue(
+            response, issue_number, status_tracker, slot_id, dry_run=dry_run
         )
 
-        # Post summary comment on parent issue (suppressed in dry-run)
-        if created_issues:
-            summary = f"Created {len(created_issues)} follow-up issue(s): " + ", ".join(
-                f"#{num}" for num in created_issues
+        if new_issue is not None:
+            summary = (
+                f"Filed consolidated follow-up issue #{new_issue} covering "
+                f"{len(response.follow_ups)} item(s)"
             )
-            if dry_run:
-                logger.info("[DRY RUN] Would post follow-up summary to #%d", issue_number)
-            else:
-                try:
-                    gh_issue_comment(issue_number, summary)
-                    logger.info(f"Posted follow-up summary to issue #{issue_number}")
-                except Exception as e:  # broad catch: GitHub API call; non-critical summary post
-                    logger.warning(f"Failed to post follow-up summary: {e}")
+            if response.rejected:
+                summary += (
+                    f"; {len(response.rejected)} additional item(s) were "
+                    "considered and rejected as out of scope (see PR body)."
+                )
+            try:
+                gh_issue_comment(issue_number, summary)
+                logger.info("Posted follow-up summary to issue #%d", issue_number)
+            except Exception as e:  # non-critical summary post
+                logger.warning("Failed to post follow-up summary: %s", e)
 
         logger.info(
-            f"Follow-up issues completed for #{issue_number}: created {len(created_issues)}"
+            "Follow-up complete for #%d: filed=%s accepted=%d rejected=%d",
+            issue_number,
+            new_issue if new_issue is not None else "none",
+            len(response.follow_ups),
+            len(response.rejected),
         )
+        return response
 
     except (
         Exception
-    ) as e:  # broad catch: top-level follow-up boundary; non-blocking, must not propagate
-        logger.warning(f"Follow-up issues failed for issue #{issue_number}: {e}")
-
-        # Save failure output to log file
+    ) as e:  # broad: top-level boundary; follow-up failure must NEVER block the PR pipeline
+        logger.warning("Follow-up issues failed for issue #%d: %s", issue_number, e)
         follow_up_log = state_dir / f"follow-up-{issue_number}.log"
         error_output = f"FAILED: {e}\n"
         if hasattr(e, "stdout"):
             error_output += f"\nSTDOUT:\n{e.stdout or ''}"
         if hasattr(e, "stderr"):
             error_output += f"\nSTDERR:\n{e.stderr or ''}"
-        follow_up_log.write_text(error_output)
-
-        # Non-blocking: never re-raise
+        with contextlib.suppress(Exception):
+            follow_up_log.write_text(error_output)
+        return None
     finally:
-        # Clean up temp file
         with contextlib.suppress(Exception):
             prompt_file.unlink()
+
+
+def render_rejected_for_pr_body(rejected: list[RejectedItem]) -> str:
+    """Render the rejected list as a markdown section suitable for inclusion in a PR body.
+
+    Returns an empty string if there are no rejected items so the caller can
+    unconditionally append the result.
+    """
+    if not rejected:
+        return ""
+    lines = [
+        "",
+        "## Considered & rejected follow-ups",
+        "",
+        (
+            "_The implementer considered the items below during the follow-up "
+            "scope check and rejected them under the policy "
+            "(core / security / safety / critical_bug only)._"
+        ),
+        "",
+    ]
+    for item in rejected:
+        lines.append(f"- **{item.title}** — {item.reason}".rstrip())
+    return "\n".join(lines).rstrip() + "\n"
