@@ -164,19 +164,22 @@ def retry_on_network_error(
     )
 
 
-# Compatibility function that matches Hephaestus existing API
+# Backwards-compatibility shim — delegates to retry_with_backoff to avoid DRY violation.
+# Deprecated: call retry_with_backoff(jitter=True, max_delay=...) directly instead.
 def retry_with_jitter(
     func: Callable[..., Any], max_retries: int = 3, base_delay: float = 1.0, max_delay: float = 60.0
 ) -> Any:
     """Retry a function with exponential backoff and jitter.
 
-    Compatible with existing Hephaestus retry utilities.
+    .. deprecated::
+        Use :func:`retry_with_backoff` with ``jitter=True`` and ``max_delay`` directly.
+        This shim will be removed in a future major version.
 
     Args:
         func: Function to retry
         max_retries: Maximum number of retry attempts
-        base_delay: Base delay in seconds
-        max_delay: Maximum delay between retries
+        base_delay: Base delay in seconds (``initial_delay`` in retry_with_backoff)
+        max_delay: Maximum delay cap between retries
 
     Returns:
         Result of successful function call
@@ -185,22 +188,20 @@ def retry_with_jitter(
         Exception: Last exception raised if all retries fail
 
     """
-    last_exception: Exception | None = None
+    import warnings
 
-    for attempt in range(max_retries + 1):
-        try:
-            return func()
-        except Exception as e:  # broad catch intentional: generic retry must handle all exceptions
-            last_exception = e
-            if attempt < max_retries:
-                # Calculate delay with exponential backoff and jitter
-                delay = min(base_delay * (2**attempt), max_delay)
-                # Add jitter (±25%)
-                jitter = random.uniform(-0.25 * delay, 0.25 * delay)
-                time.sleep(max(0.1, delay + jitter))
-            else:
-                break
+    warnings.warn(
+        "retry_with_jitter() is deprecated; use "
+        "retry_with_backoff(jitter=True, max_delay=...) instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
-    if last_exception is not None:
-        raise last_exception
-    raise RuntimeError("retry_with_jitter: no exception but no return value")
+    decorated = retry_with_backoff(
+        max_retries=max_retries,
+        initial_delay=base_delay,
+        backoff_factor=2,
+        jitter=True,
+        max_delay=max_delay,
+    )
+    return decorated(func)()

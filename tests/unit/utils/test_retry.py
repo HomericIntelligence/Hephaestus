@@ -201,12 +201,18 @@ class TestRetryOnNetworkError:
 
 
 class TestRetryWithJitter:
-    """Tests for retry_with_jitter function."""
+    """Tests for retry_with_jitter backwards-compatibility shim.
+
+    retry_with_jitter() is deprecated — it now delegates to retry_with_backoff().
+    All tests assert that a DeprecationWarning is emitted and that the
+    behaviour is identical to the direct retry_with_backoff(jitter=True) call.
+    """
 
     @patch("time.sleep")
     def test_succeeds_on_first_call(self, mock_sleep):
         """Succeeds without retrying when first call works."""
-        result = retry_with_jitter(lambda: 99, max_retries=3, base_delay=0.01)
+        with pytest.warns(DeprecationWarning, match="retry_with_jitter"):
+            result = retry_with_jitter(lambda: 99, max_retries=3, base_delay=0.01)
         assert result == 99
         mock_sleep.assert_not_called()
 
@@ -222,19 +228,21 @@ class TestRetryWithJitter:
                 raise RuntimeError("fail")
             return "done"
 
-        result = retry_with_jitter(flaky, max_retries=3, base_delay=0.01)
+        with pytest.warns(DeprecationWarning, match="retry_with_jitter"):
+            result = retry_with_jitter(flaky, max_retries=3, base_delay=0.01)
         assert result == "done"
         assert call_count == 3
 
     @patch("time.sleep")
     def test_raises_after_exhaustion(self, mock_sleep):
         """Raises exception when all retries fail."""
-        with pytest.raises(RuntimeError, match="always fails"):
-            retry_with_jitter(
-                lambda: (_ for _ in ()).throw(RuntimeError("always fails")),
-                max_retries=2,
-                base_delay=0.01,
-            )
+        with pytest.warns(DeprecationWarning, match="retry_with_jitter"):
+            with pytest.raises(RuntimeError, match="always fails"):
+                retry_with_jitter(
+                    lambda: (_ for _ in ()).throw(RuntimeError("always fails")),
+                    max_retries=2,
+                    base_delay=0.01,
+                )
 
     @patch("time.sleep")
     def test_max_delay_respected(self, mock_sleep):
@@ -248,7 +256,13 @@ class TestRetryWithJitter:
                 raise RuntimeError("fail")
             return "ok"
 
-        retry_with_jitter(flaky, max_retries=4, base_delay=1.0, max_delay=2.0)
+        with pytest.warns(DeprecationWarning, match="retry_with_jitter"):
+            retry_with_jitter(flaky, max_retries=4, base_delay=1.0, max_delay=2.0)
         # All sleep calls should be <= max_delay * 1.25 (jitter upper bound)
         for c in mock_sleep.call_args_list:
             assert c[0][0] <= 2.0 * 1.25 + 0.1
+
+    def test_emits_deprecation_warning(self):
+        """retry_with_jitter() always emits DeprecationWarning."""
+        with pytest.warns(DeprecationWarning, match="retry_with_backoff"):
+            retry_with_jitter(lambda: None)

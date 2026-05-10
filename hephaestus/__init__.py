@@ -67,6 +67,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "human_readable_size": ("hephaestus.utils", "human_readable_size"),
     "install_package": ("hephaestus.utils", "install_package"),
     "retry_with_backoff": ("hephaestus.utils", "retry_with_backoff"),
+    # Deprecated shim — prefer retry_with_backoff(jitter=True, max_delay=...) directly.
+    # Retained for backwards compatibility; will be removed in a future major version.
+    "retry_with_jitter": ("hephaestus.utils", "retry_with_jitter"),
     "run_subprocess": ("hephaestus.utils", "run_subprocess"),
     "slugify": ("hephaestus.utils", "slugify"),
     # validation (v0.5.0)
