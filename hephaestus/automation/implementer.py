@@ -371,6 +371,92 @@ class IssueImplementer:
         self._print_summary(results)
         return results
 
+    def _finalize_pr(
+        self,
+        issue_number: int,
+        branch_name: str,
+        worktree_path: Path,
+        state: ImplementationState,
+        slot_id: int | None,
+    ) -> int:
+        """Ensure commit is pushed and PR is created, then persist the PR number.
+
+        Extracted from :meth:`_implement_issue` to satisfy SRP: this unit owns
+        only the "gate the work behind a merged PR" concern, independently of
+        the learn/follow-up post-processing that follows.
+
+        Args:
+            issue_number: GitHub issue number.
+            branch_name: Implementation branch name.
+            worktree_path: Path to the git worktree.
+            state: Mutable implementation state (pr_number updated in-place).
+            slot_id: Worker slot id for status updates.
+
+        Returns:
+            PR number created or located by :func:`ensure_pr_created`.
+
+        """
+        with self.state_lock:
+            state.phase = ImplementationPhase.CREATING_PR
+        self._save_state(state)
+
+        pr_number = self._ensure_pr_created(issue_number, branch_name, worktree_path, slot_id)
+        with self.state_lock:
+            state.pr_number = pr_number
+        self._save_state(state)
+        return pr_number
+
+    def _run_post_pr_followup(
+        self,
+        issue_number: int,
+        worktree_path: Path,
+        state: ImplementationState,
+        slot_id: int | None,
+    ) -> None:
+        """Run /learn and file follow-up issues after the PR is created.
+
+        Extracted from :meth:`_implement_issue` to satisfy SRP: this unit owns
+        only the knowledge-capture and issue-hygiene concerns that follow a
+        successful PR, independently of the PR-creation logic.
+
+        Marks ``state.phase = COMPLETED`` and sets ``state.completed_at``
+        regardless of whether the optional learn/follow-up steps succeed, so
+        the issue is never left stuck in a non-terminal phase.
+
+        Args:
+            issue_number: GitHub issue number.
+            worktree_path: Path to the git worktree.
+            state: Mutable implementation state (updated in-place).
+            slot_id: Worker slot id for status updates.
+
+        """
+        # Learn phase (after CREATING_PR, before COMPLETED)
+        if self.options.enable_learn and state.session_id:
+            if slot_id is not None:
+                self.status_tracker.update_slot(slot_id, f"#{issue_number}: Running learn")
+            with self.state_lock:
+                state.phase = ImplementationPhase.LEARN
+            self._save_state(state)
+            retro_success = self._run_learn(state.session_id, worktree_path, issue_number, slot_id)
+            with self.state_lock:
+                state.learn_completed = retro_success
+            self._save_state(state)
+
+        # Follow-up issues phase (after LEARN, before COMPLETED)
+        if self.options.enable_follow_up and state.session_id:
+            if slot_id is not None:
+                self.status_tracker.update_slot(slot_id, f"#{issue_number}: Identifying follow-ups")
+            with self.state_lock:
+                state.phase = ImplementationPhase.FOLLOW_UP_ISSUES
+            self._save_state(state)
+            self._run_follow_up_issues(state.session_id, worktree_path, issue_number, slot_id)
+
+        # Mark as completed
+        with self.state_lock:
+            state.phase = ImplementationPhase.COMPLETED
+            state.completed_at = datetime.now(timezone.utc)
+        self._save_state(state)
+
     def _implement_issue(self, issue_number: int) -> WorkerResult:  # noqa: C901  # orchestration with many retry/outcome paths
         """Implement a single issue.
 
@@ -479,42 +565,9 @@ class IssueImplementer:
                 state.last_review_grade = last_grade
             self._save_state(state)
 
-            # Verify commit, push, and PR were created by Claude
-            with self.state_lock:
-                state.phase = ImplementationPhase.CREATING_PR
-            self._save_state(state)
-
-            pr_number = self._ensure_pr_created(issue_number, branch_name, worktree_path, slot_id)
-            with self.state_lock:
-                state.pr_number = pr_number
-            self._save_state(state)
-
-            # Learn phase (after CREATING_PR, before COMPLETED)
-            if self.options.enable_learn and state.session_id:
-                self.status_tracker.update_slot(slot_id, f"#{issue_number}: Running learn")
-                with self.state_lock:
-                    state.phase = ImplementationPhase.LEARN
-                self._save_state(state)
-                retro_success = self._run_learn(
-                    state.session_id, worktree_path, issue_number, slot_id
-                )
-                with self.state_lock:
-                    state.learn_completed = retro_success
-                self._save_state(state)
-
-            # Follow-up issues phase (after LEARN, before COMPLETED)
-            if self.options.enable_follow_up and state.session_id:
-                self.status_tracker.update_slot(slot_id, f"#{issue_number}: Identifying follow-ups")
-                with self.state_lock:
-                    state.phase = ImplementationPhase.FOLLOW_UP_ISSUES
-                self._save_state(state)
-                self._run_follow_up_issues(state.session_id, worktree_path, issue_number, slot_id)
-
-            # Mark as completed
-            with self.state_lock:
-                state.phase = ImplementationPhase.COMPLETED
-                state.completed_at = datetime.now(timezone.utc)
-            self._save_state(state)
+            # Verify commit, push, PR creation; then run /learn and follow-ups.
+            pr_number = self._finalize_pr(issue_number, branch_name, worktree_path, state, slot_id)
+            self._run_post_pr_followup(issue_number, worktree_path, state, slot_id)
 
             self._log("info", f"Issue #{issue_number} completed: PR #{pr_number}", thread_id)
 
@@ -612,8 +665,6 @@ class IssueImplementer:
                 error=str(e),
             )
         finally:
-            # Brief pause so UI shows final status before going idle
-            time.sleep(1)
             self.status_tracker.release_slot(slot_id)
 
     def _has_plan(self, issue_number: int) -> bool:
