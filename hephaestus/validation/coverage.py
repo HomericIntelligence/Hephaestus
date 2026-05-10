@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import logging
 import sys
 from pathlib import Path
 from typing import Any, cast
 
 from hephaestus.utils.helpers import get_repo_root
+
+logger = logging.getLogger(__name__)
 
 tomllib = None
 for _mod_name in ("tomllib", "tomli"):
@@ -53,10 +56,7 @@ def load_coverage_config(config_file: Path | None = None) -> dict[str, Any]:
         return _default_config()
 
     if tomllib is None:
-        print(
-            "WARNING: tomllib/tomli not available, using default coverage config",
-            file=sys.stderr,
-        )
+        logger.warning("tomllib/tomli not available, using default coverage config")
         return _default_config()
 
     try:
@@ -64,10 +64,7 @@ def load_coverage_config(config_file: Path | None = None) -> dict[str, Any]:
             config = tomllib.load(f)
         return cast(dict[Any, Any], config)
     except Exception as e:
-        print(
-            f"WARNING: Failed to load config from {config_file}: {e}",
-            file=sys.stderr,
-        )
+        logger.warning("Failed to load config from %s: %s", config_file, e)
         return _default_config()
 
 
@@ -113,16 +110,15 @@ def parse_coverage_report(coverage_file: Path) -> float | None:
 
     """
     if not coverage_file.exists():
-        print(f"Coverage file not found: {coverage_file}", file=sys.stderr)
+        logger.error("Coverage file not found: %s", coverage_file)
         return None
 
     try:
         import defusedxml.ElementTree as ElementTree
     except ImportError:
-        print(
-            "WARNING: defusedxml not installed. "
-            "Install with: pip install HomericIntelligence-Hephaestus[xml]",
-            file=sys.stderr,
+        logger.warning(
+            "defusedxml not installed. "
+            "Install with: pip install HomericIntelligence-Hephaestus[xml]"
         )
         return None
 
@@ -132,10 +128,10 @@ def parse_coverage_report(coverage_file: Path) -> float | None:
         line_rate = root.get("line-rate")
         if line_rate is not None:
             return float(line_rate) * 100.0
-        print(f"Warning: No line-rate found in {coverage_file}", file=sys.stderr)
+        logger.warning("No line-rate found in %s", coverage_file)
         return None
     except Exception as e:
-        print(f"Error parsing coverage file: {e}", file=sys.stderr)
+        logger.error("Error parsing coverage file: %s", e)
         return None
 
 
@@ -155,11 +151,13 @@ def check_coverage(threshold: float, path: str, coverage_file: Path) -> bool:
     coverage = parse_coverage_report(coverage_file)
 
     if coverage is None:
+        # User-facing CLI report output — intentionally written to stdout.
         print(f"\nCoverage Report: {path}")
         print("  Status: Coverage data not available")
         print("  PASSED - Coverage check skipped")
         return True
 
+    # User-facing CLI report output — intentionally written to stdout.
     print(f"\nCoverage Report: {path}")
     print(f"  Coverage: {coverage:.2f}%")
     print(f"  Threshold: {threshold:.2f}%")
@@ -224,12 +222,15 @@ def main() -> int:
         threshold = get_module_threshold(args.path, config)
 
     if args.verbose:
+        # User-facing CLI verbose output — intentionally written to stdout.
         print("Checking coverage with settings:")
         print(f"  Threshold: {threshold}%")
         print(f"  Path: {args.path}")
         print(f"  Coverage file: {args.coverage_file}")
 
     if not args.coverage_file.exists():
+        # User-facing actionable guidance — intentionally written to stderr so
+        # the message appears even when stdout is redirected to a file.
         print(f"\nWARNING: Coverage file not found: {args.coverage_file}", file=sys.stderr)
         print(
             "\nRun tests with coverage first: pytest --cov=<package> --cov-report=xml",
