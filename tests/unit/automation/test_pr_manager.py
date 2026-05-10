@@ -124,3 +124,64 @@ class TestCreatePR:
         assert "Add feature X" in kwargs["title"]
         assert kwargs["auto_merge"] is True
         assert "Closes #5" in kwargs["body"]
+
+
+# ---------------------------------------------------------------------------
+# #382/A4-08: Co-Authored-By uses implementer_model() not hardcoded string
+# ---------------------------------------------------------------------------
+
+
+class TestCoAuthorLine:
+    """Tests that commit_changes uses implementer_model() for Co-Authored-By (#382/A4-08)."""
+
+    def test_coauthor_uses_implementer_model(self) -> None:
+        """Co-Authored-By line reflects whatever implementer_model() returns."""
+        porcelain = " M src/feature.py\n"
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="Add feature")
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(
+                pr_manager, "implementer_model", return_value="claude-test-model-9"
+            ) as mock_model,
+        ):
+            pr_manager.commit_changes(10, Path("/tmp/wt"))
+
+        # The commit call must include the dynamic model name, not a hardcoded string
+        commit_call = run_mock.call_args_list[2].args[0]
+        commit_msg = commit_call[-1]  # last arg is the -m message
+        assert "claude-test-model-9" in commit_msg
+        assert "Claude Sonnet 4.6" not in commit_msg  # old hardcoded value must be gone
+        mock_model.assert_called_once()
+
+    def test_coauthor_reflects_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When HEPH_IMPLEMENTER_MODEL is set, commit uses that model name."""
+        monkeypatch.setenv("HEPH_IMPLEMENTER_MODEL", "claude-env-override-5")
+
+        porcelain = " M foo.py\n"
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),
+                _status(""),
+                _status(""),
+            ]
+        )
+        issue = MagicMock(title="env override test")
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+        ):
+            pr_manager.commit_changes(20, Path("/tmp/wt"))
+
+        commit_call = run_mock.call_args_list[2].args[0]
+        commit_msg = commit_call[-1]
+        assert "claude-env-override-5" in commit_msg

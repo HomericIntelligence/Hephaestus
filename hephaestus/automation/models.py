@@ -212,6 +212,7 @@ class CIDriverOptions(BaseModel):
     enable_ui: bool = True
     verbose: bool = False
     max_fix_iterations: int = 1  # number of fix attempts before giving up
+    force_merge_on_stall: bool = False  # attempt squash-merge fallback if rebase auto-merge fails
 
 
 class DependencyGraph(BaseModel):

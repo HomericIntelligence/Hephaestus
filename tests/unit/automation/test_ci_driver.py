@@ -1,9 +1,10 @@
 """Tests for the CIDriver automation (ci_driver.py)."""
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -315,3 +316,293 @@ class TestNoCiChecks:
 
         assert result.success is True
         assert result.pr_number == 456
+
+
+# ---------------------------------------------------------------------------
+# #376: _enable_auto_merge fallback + return value
+# ---------------------------------------------------------------------------
+
+
+class TestEnableAutoMerge:
+    """Tests for _enable_auto_merge fallback logic (#376)."""
+
+    def test_rebase_success_returns_true(self, driver: CIDriver) -> None:
+        """Successful --auto --rebase returns True."""
+        with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh:
+            result = driver._enable_auto_merge(99)
+
+        assert result is True
+        assert mock_gh.call_count == 1
+
+    def test_rebase_failure_no_fallback_flag_returns_false(self, driver: CIDriver) -> None:
+        """--auto --rebase fails; force_merge_on_stall=False → returns False, no fallback."""
+        driver.options.force_merge_on_stall = False
+        with patch(
+            "hephaestus.automation.ci_driver._gh_call",
+            side_effect=subprocess.CalledProcessError(1, "gh"),
+        ) as mock_gh:
+            result = driver._enable_auto_merge(99)
+
+        assert result is False
+        # Only 1 gh call (the failed --auto --rebase); no fallback call
+        assert mock_gh.call_count == 1
+
+    def test_rebase_failure_with_fallback_flag_tries_squash(self, driver: CIDriver) -> None:
+        """--auto --rebase fails; force_merge_on_stall=True → tries squash, returns True."""
+        driver.options.force_merge_on_stall = True
+        call_results = [
+            subprocess.CalledProcessError(1, "gh"),  # first call: --auto fails
+            MagicMock(),  # second call: squash succeeds
+        ]
+        with patch("hephaestus.automation.ci_driver._gh_call", side_effect=call_results) as mock_gh:
+            result = driver._enable_auto_merge(99)
+
+        assert result is True
+        assert mock_gh.call_count == 2
+        squash_call_args = mock_gh.call_args_list[1][0][0]
+        assert "--squash" in squash_call_args
+
+    def test_both_strategies_fail_returns_false(self, driver: CIDriver) -> None:
+        """Both --auto and --squash fail → returns False."""
+        driver.options.force_merge_on_stall = True
+        with patch(
+            "hephaestus.automation.ci_driver._gh_call",
+            side_effect=subprocess.CalledProcessError(1, "gh"),
+        ):
+            result = driver._enable_auto_merge(99)
+
+        assert result is False
+
+    def test_auto_merge_failure_propagates_to_drive_issue(self, driver: CIDriver) -> None:
+        """When _enable_auto_merge returns False, _drive_issue returns success=False."""
+        checks = [_make_check("test", required=True)]
+        with (
+            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
+            patch.object(driver, "_enable_auto_merge", return_value=False),
+        ):
+            result = driver._drive_issue(123, 456, 0)
+
+        assert result.success is False
+        assert result.error is not None
+
+
+# ---------------------------------------------------------------------------
+# #377: CI poll loop for pending checks
+# ---------------------------------------------------------------------------
+
+
+class TestCIPollLoop:
+    """Tests for the bounded CI poll loop (#377)."""
+
+    def test_polls_until_checks_complete(
+        self, driver: CIDriver, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """gh_pr_checks returns queued×2 then success×1; loop polls 3 times."""
+        pending_check = _make_check("test", status="queued", conclusion="", required=True)
+        completed_check = _make_check(
+            "test", status="completed", conclusion="success", required=True
+        )
+
+        call_count = {"n": 0}
+
+        def side_effect(pr_number: int, **kwargs: Any) -> list[dict[str, Any]]:
+            call_count["n"] += 1
+            if call_count["n"] < 3:
+                return [pending_check]
+            return [completed_check]
+
+        monkeypatch.setenv("HEPH_CI_POLL_MAX_WAIT", "3600")
+        with (
+            patch("hephaestus.automation.ci_driver.gh_pr_checks", side_effect=side_effect),
+            patch("hephaestus.automation.ci_driver.time.sleep"),
+            patch.object(driver, "_enable_auto_merge", return_value=True),
+        ):
+            result = driver._drive_issue(123, 456, 0)
+
+        assert call_count["n"] == 3, f"Expected 3 poll calls, got {call_count['n']}"
+        assert result.success is True
+
+    def test_pending_check_exceeds_timeout_returns_success(
+        self, driver: CIDriver, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All checks stay pending → returns success=True after timeout (not our job to wait)."""
+        pending_check = _make_check("test", status="in_progress", conclusion="", required=True)
+
+        monkeypatch.setenv("HEPH_CI_POLL_MAX_WAIT", "0")
+        with (
+            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[pending_check]),
+            patch("hephaestus.automation.ci_driver.time.sleep"),
+        ):
+            result = driver._drive_issue(123, 456, 0)
+
+        assert result.success is True
+
+
+# ---------------------------------------------------------------------------
+# #378: CIDriver.run() cleanup_all in finally + preserved reporting
+# ---------------------------------------------------------------------------
+
+
+class TestRunCleanup:
+    """Tests that CIDriver.run() cleans up worktrees in a finally block (#378).
+
+    Note: cleanup_all is only reached when _discover_prs returns a non-empty
+    map (i.e. there are PRs to process). The early-return for no-PR cases
+    bypasses the try/finally intentionally — there are no worktrees to clean.
+    """
+
+    def _make_driver_with_mock_wm(
+        self,
+        mock_options: CIDriverOptions,
+        tmp_path: Path,
+        preserved: list,
+    ) -> tuple["CIDriver", MagicMock]:
+        """Create a CIDriver with a MagicMock WorktreeManager."""
+        with (
+            patch("hephaestus.automation.ci_driver.get_repo_root", return_value=tmp_path),
+            patch("hephaestus.automation.ci_driver.StatusTracker"),
+        ):
+            mock_wm = MagicMock()
+            mock_wm.preserved = preserved
+            with patch("hephaestus.automation.ci_driver.WorktreeManager", return_value=mock_wm):
+                d = CIDriver(mock_options)
+                d.state_dir = tmp_path
+        return d, mock_wm
+
+    def test_cleanup_all_called_on_success(
+        self, mock_options: CIDriverOptions, tmp_path: Path
+    ) -> None:
+        """cleanup_all() is called when _drive_issue completes normally."""
+        d, mock_wm = self._make_driver_with_mock_wm(mock_options, tmp_path, [])
+
+        # Provide a non-empty PR map so we enter the try/finally block
+        green_check = _make_check("test", required=True)
+        with (
+            patch.object(d, "_discover_prs", return_value={1: 10}),
+            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[green_check]),
+            patch.object(d, "_enable_auto_merge", return_value=True),
+        ):
+            d.run()
+
+        mock_wm.cleanup_all.assert_called_once()
+
+    def test_cleanup_all_called_even_on_exception(
+        self, mock_options: CIDriverOptions, tmp_path: Path
+    ) -> None:
+        """cleanup_all() is called even when _drive_issue raises."""
+        d, mock_wm = self._make_driver_with_mock_wm(mock_options, tmp_path, [])
+
+        with (
+            patch.object(d, "_discover_prs", return_value={1: 10}),
+            patch.object(d, "_drive_issue", side_effect=RuntimeError("boom")),
+        ):
+            results = d.run()
+
+        mock_wm.cleanup_all.assert_called_once()
+        assert results[1].success is False
+
+    def test_preserved_worktrees_are_logged(
+        self, mock_options: CIDriverOptions, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """After cleanup_all, preserved worktrees are logged at INFO."""
+        import logging
+
+        preserved_path = tmp_path / "issue-1"
+        d, _mock_wm = self._make_driver_with_mock_wm(mock_options, tmp_path, [(1, preserved_path)])
+
+        green_check = _make_check("test", required=True)
+        with (
+            patch.object(d, "_discover_prs", return_value={1: 10}),
+            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[green_check]),
+            patch.object(d, "_enable_auto_merge", return_value=True),
+            caplog.at_level(logging.INFO, logger="hephaestus.automation.ci_driver"),
+        ):
+            d.run()
+
+        logs = caplog.text
+        assert "Preserved worktrees" in logs
+        assert str(preserved_path) in logs
+
+
+# ---------------------------------------------------------------------------
+# #379: _get_failing_ci_logs scoped to PR's branch
+# ---------------------------------------------------------------------------
+
+
+class TestGetFailingCiLogs:
+    """Tests that _get_failing_ci_logs scopes runs to the PR's branch (#379)."""
+
+    def test_uses_pr_branch_in_gh_call(self, driver: CIDriver) -> None:
+        """``gh run list`` must include ``--branch <branch>`` from the PR."""
+        driver.options.dry_run = False
+        with (
+            patch.object(driver, "_get_pr_branch", return_value="123-auto-impl"),
+            patch("hephaestus.automation.ci_driver._gh_call") as mock_gh,
+        ):
+            mock_gh.return_value = MagicMock(stdout="[]")
+            driver._get_failing_ci_logs(pr_number=456)
+
+        call_args = mock_gh.call_args[0][0]
+        assert "--branch" in call_args
+        assert "123-auto-impl" in call_args
+
+    def test_does_not_use_repo_wide_list(self, driver: CIDriver) -> None:
+        """``gh run list`` must NOT be called without a ``--branch`` filter."""
+        with (
+            patch.object(driver, "_get_pr_branch", return_value="my-branch"),
+            patch("hephaestus.automation.ci_driver._gh_call") as mock_gh,
+        ):
+            mock_gh.return_value = MagicMock(stdout="[]")
+            driver._get_failing_ci_logs(pr_number=10)
+
+        call_args = mock_gh.call_args[0][0]
+        # Without --branch this would be a repo-wide list which we must avoid
+        assert "--branch" in call_args
+
+
+# ---------------------------------------------------------------------------
+# #382/A4-09: No dead tempfile in _run_ci_fix_session
+# ---------------------------------------------------------------------------
+
+
+class TestNoDeadTempfile:
+    """Tests that _run_ci_fix_session no longer creates an unused tempfile (#382/A4-09)."""
+
+    def test_no_tempfile_created(self, driver: CIDriver, tmp_path: Path) -> None:
+        """_run_ci_fix_session must not create any .txt files in worktree_path."""
+        with (
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=1, stderr="fail", stdout="")
+            driver._run_ci_fix_session(
+                issue_number=1,
+                pr_number=2,
+                worktree_path=tmp_path,
+                ci_logs="",
+                session_id=None,
+            )
+
+        txt_files = list(tmp_path.glob("*.txt"))
+        assert txt_files == [], f"Unexpected temp files: {txt_files}"
+
+
+# ---------------------------------------------------------------------------
+# #382/A4-10: Body search uses 'Closes #N in:body'
+# ---------------------------------------------------------------------------
+
+
+class TestBodySearch:
+    """Tests that _find_pr_for_issue uses 'Closes #N in:body' (#382/A4-10)."""
+
+    def test_body_search_uses_closes_pattern(self, driver: CIDriver) -> None:
+        """The search string must use 'Closes #<N> in:body'."""
+        # Make the branch-name lookup return nothing so we fall through to body search
+        with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh:
+            mock_gh.return_value = MagicMock(stdout="[]")
+            driver._find_pr_for_issue(42)
+
+        # The second gh call should be the body search
+        body_search_calls = [c for c in mock_gh.call_args_list if "search" in str(c)]
+        assert body_search_calls, "No gh call with --search found"
+        search_arg = str(body_search_calls[0])
+        assert "Closes #42" in search_arg

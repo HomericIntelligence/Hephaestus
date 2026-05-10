@@ -335,3 +335,35 @@ class TestInstallPackage:
         """Rejects URL-based requirements for security."""
         with pytest.raises(ValueError, match="URL-based requirements are not supported"):
             install_package("pkg @ https://evil.com/malware.tar.gz")
+
+
+class TestRunSubprocessTimeoutLogging:
+    """Tests that run_subprocess logs TimeoutExpired correctly (#382/A4-07)."""
+
+    def test_timeout_expired_is_logged_and_reraised(self) -> None:
+        """TimeoutExpired triggers an error log then re-raises the exception."""
+        from unittest.mock import patch as _patch
+
+        import hephaestus.utils.helpers as _helpers
+
+        exc = subprocess.TimeoutExpired(cmd=["sleep", "99"], timeout=1)
+        with (
+            _patch("subprocess.run", side_effect=exc),
+            _patch.object(_helpers.logger, "error") as mock_error,
+        ):
+            with pytest.raises(subprocess.TimeoutExpired):
+                run_subprocess(["sleep", "99"], timeout=1)
+
+        # logger.error must have been called with a message that mentions the timeout
+        assert mock_error.called
+        call_args = mock_error.call_args_list
+        messages = " ".join(str(a) for call in call_args for a in call.args)
+        assert "1" in messages  # timeout value included
+        assert "sleep" in messages  # command name included
+
+    def test_timeout_does_not_suppress_exception(self) -> None:
+        """TimeoutExpired is always re-raised (not swallowed)."""
+        exc = subprocess.TimeoutExpired(cmd=["ls"], timeout=5)
+        with patch("subprocess.run", side_effect=exc):
+            with pytest.raises(subprocess.TimeoutExpired):
+                run_subprocess(["ls"], timeout=5)

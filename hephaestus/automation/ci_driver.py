@@ -15,7 +15,6 @@ import json
 import logging
 import os
 import subprocess
-import tempfile
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -60,7 +59,7 @@ class CIDriver:
         self.status_tracker = StatusTracker(options.max_workers)
         self.lock = threading.Lock()
 
-    def run(self) -> dict[int, WorkerResult]:
+    def run(self) -> dict[int, WorkerResult]:  # noqa: C901  # thread pool + finally + preserve report
         """Run the CI driver on all configured issues.
 
         Returns:
@@ -87,38 +86,57 @@ class CIDriver:
 
         results: dict[int, WorkerResult] = {}
 
-        with ThreadPoolExecutor(max_workers=self.options.max_workers) as executor:
-            futures: dict[Future[Any], int] = {}
+        try:
+            with ThreadPoolExecutor(max_workers=self.options.max_workers) as executor:
+                futures: dict[Future[Any], int] = {}
 
-            for idx, (issue_num, pr_num) in enumerate(pr_map.items()):
-                future = executor.submit(self._drive_issue, issue_num, pr_num, idx)
-                futures[future] = issue_num
+                for idx, (issue_num, pr_num) in enumerate(pr_map.items()):
+                    future = executor.submit(self._drive_issue, issue_num, pr_num, idx)
+                    futures[future] = issue_num
 
-            while futures:
-                try:
-                    done, _pending = wait(futures.keys(), timeout=1.0, return_when=FIRST_COMPLETED)
-                except Exception:
-                    time.sleep(0.1)
-                    continue
-
-                for future in done:
-                    issue_num = futures.pop(future)
+                while futures:
                     try:
-                        result = future.result()
-                        with self.lock:
-                            results[issue_num] = result
-                        if result.success:
-                            logger.info(f"Issue #{issue_num}: CI drive completed")
-                        else:
-                            logger.error(f"Issue #{issue_num}: CI drive failed: {result.error}")
-                    except Exception as e:
-                        logger.error(f"Issue #{issue_num} raised exception: {e}")
-                        with self.lock:
-                            results[issue_num] = WorkerResult(
-                                issue_number=issue_num,
-                                success=False,
-                                error=str(e),
-                            )
+                        done, _pending = wait(
+                            futures.keys(), timeout=1.0, return_when=FIRST_COMPLETED
+                        )
+                    except Exception:
+                        time.sleep(0.1)
+                        continue
+
+                    for future in done:
+                        issue_num = futures.pop(future)
+                        try:
+                            result = future.result()
+                            with self.lock:
+                                results[issue_num] = result
+                            if result.success:
+                                logger.info(f"Issue #{issue_num}: CI drive completed")
+                            else:
+                                logger.error(f"Issue #{issue_num}: CI drive failed: {result.error}")
+                        except Exception as e:
+                            logger.error(f"Issue #{issue_num} raised exception: {e}")
+                            with self.lock:
+                                results[issue_num] = WorkerResult(
+                                    issue_number=issue_num,
+                                    success=False,
+                                    error=str(e),
+                                )
+        finally:
+            # Always clean up worktrees, even on KeyboardInterrupt or exception.
+            # Mirror the pattern from implementer.py:178-185.
+            if not self.options.dry_run:
+                try:
+                    self.worktree_manager.cleanup_all()
+                except Exception:
+                    logger.exception("Error during worktree cleanup in CIDriver.run()")
+
+            # Report any worktrees that were preserved due to uncommitted changes.
+            preserved = self.worktree_manager.preserved
+            if preserved:
+                logger.info("Preserved worktrees (contain uncommitted changes):")
+                for issue_num, path in preserved:
+                    logger.info("  #%d: %s", issue_num, path)
+                logger.info("Inspect or discard them with: git worktree remove --force <path>")
 
         self._print_summary(results)
         return results
@@ -142,7 +160,9 @@ class CIDriver:
                 logger.info(f"Issue #{issue_num}: no open PR found, skipping")
         return pr_map
 
-    def _drive_issue(self, issue_number: int, pr_number: int, slot_id: int) -> WorkerResult:
+    def _drive_issue(  # noqa: C901  # poll loop + required-check classification + fix path
+        self, issue_number: int, pr_number: int, slot_id: int
+    ) -> WorkerResult:
         """Drive a single issue's PR toward green CI.
 
         The pr_number is pre-discovered by run() — no Claude agent is ever launched
@@ -165,24 +185,73 @@ class CIDriver:
                 error="Failed to acquire worker slot",
             )
 
+        # Maximum wall-clock seconds to poll for pending CI checks before giving up.
+        _ci_poll_max_wait: int = int(os.environ.get("HEPH_CI_POLL_MAX_WAIT", "600"))
+
         try:
             self.status_tracker.update_slot(acquired_slot, f"#{issue_number}: fetching checks")
 
-            # 2. Get CI checks
-            checks = gh_pr_checks(pr_number, dry_run=self.options.dry_run)
-            if not checks:
-                logger.info(f"Issue #{issue_number}: no CI checks found for PR #{pr_number}")
-                return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+            # 2. Get CI checks — bounded poll loop for pending state.
+            # The module docstring advertises "Parallel CI check polling" but the
+            # original code returned success=True immediately for pending checks,
+            # which meant stalled PRs were silently declared complete.  We now
+            # wait up to HEPH_CI_POLL_MAX_WAIT seconds (default 600 s) using
+            # exponential backoff before giving up.
+            poll_elapsed = 0
+            poll_attempt = 0
+            checks: list[dict[str, Any]] = []
+            required_checks: list[dict[str, Any]] = []
+            all_green = False
+            failing: list[dict[str, Any]] = []
 
-            # 3. Classify: required vs non-required
-            required_checks = [c for c in checks if c.get("required", False)]
-            if not required_checks:
-                # No required checks defined — treat ALL checks as required
-                required_checks = checks
+            while True:
+                checks = gh_pr_checks(pr_number, dry_run=self.options.dry_run)
+                if not checks:
+                    logger.info(f"Issue #{issue_number}: no CI checks found for PR #{pr_number}")
+                    return WorkerResult(
+                        issue_number=issue_number, success=True, pr_number=pr_number
+                    )
 
-            # 4. Check if all required checks are green
-            all_completed = all(c["status"] == "completed" for c in required_checks)
-            all_green = all_completed and all(
+                # 3. Classify: required vs non-required
+                required_checks = [c for c in checks if c.get("required", False)]
+                if not required_checks:
+                    # No required checks defined — treat ALL checks as required
+                    required_checks = checks
+
+                # 4. Check if all required checks have a definitive conclusion.
+                # "queued" / "in_progress" / "waiting" / "requested" are pending states.
+                all_concluded = all(c["status"] == "completed" for c in required_checks)
+
+                if all_concluded:
+                    # All checks have a conclusion; evaluate pass/fail below.
+                    break
+
+                # At least one check is still pending.
+                sleep_secs = min(2**poll_attempt, 60)
+                if poll_elapsed + sleep_secs > _ci_poll_max_wait:
+                    logger.warning(
+                        f"Issue #{issue_number}: CI checks still pending after "
+                        f"{poll_elapsed}s (limit {_ci_poll_max_wait}s), "
+                        f"treating as not yet failing"
+                    )
+                    return WorkerResult(
+                        issue_number=issue_number, success=True, pr_number=pr_number
+                    )
+
+                self.status_tracker.update_slot(
+                    acquired_slot,
+                    f"#{issue_number}: waiting for CI checks (attempt {poll_attempt + 1}, "
+                    f"{poll_elapsed}s elapsed)",
+                )
+                logger.debug(
+                    f"Issue #{issue_number}: CI checks pending, sleeping {sleep_secs}s "
+                    f"(attempt {poll_attempt + 1}, {poll_elapsed}s elapsed)"
+                )
+                time.sleep(sleep_secs)
+                poll_elapsed += sleep_secs
+                poll_attempt += 1
+
+            all_green = all(
                 c.get("conclusion") in ("success", "skipped", "neutral") for c in required_checks
             )
 
@@ -199,15 +268,22 @@ class CIDriver:
                     return WorkerResult(
                         issue_number=issue_number, success=True, pr_number=pr_number
                     )
-                self._enable_auto_merge(pr_number)
-                return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+                merge_ok = self._enable_auto_merge(pr_number)
+                return WorkerResult(
+                    issue_number=issue_number,
+                    success=merge_ok,
+                    pr_number=pr_number,
+                    error=None if merge_ok else f"auto-merge failed for PR #{pr_number}",
+                )
 
-            # 5. Some required checks failed — check if any are still pending
+            # 5. Some required checks failed
             failing = [c for c in required_checks if c.get("conclusion") == "failure"]
             if not failing:
-                # Checks still pending — not our job to wait here
+                # All concluded but none are green and none are "failure" —
+                # e.g. all cancelled.  Nothing for us to fix.
                 logger.info(
-                    f"Issue #{issue_number}: PR #{pr_number} has pending CI checks, not yet failing"
+                    f"Issue #{issue_number}: PR #{pr_number} checks concluded with "
+                    "non-green, non-failure conclusions (e.g. cancelled)"
                 )
                 return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
@@ -322,7 +398,9 @@ class CIDriver:
         except Exception as e:
             logger.debug(f"Branch-name lookup failed for issue #{issue_number}: {e}")
 
-        # Strategy 2: Search PR body for issue reference
+        # Strategy 2: Search PR body for issue reference using the canonical
+        # "Closes #N" pattern so we don't accidentally match a PR that merely
+        # mentions the issue number in passing (e.g. "related to #123").
         try:
             result = _gh_call(
                 [
@@ -331,9 +409,9 @@ class CIDriver:
                     "--state",
                     "open",
                     "--search",
-                    f"#{issue_number} in:body",
+                    f"Closes #{issue_number} in:body",
                     "--json",
-                    "number",
+                    "number,title",
                     "--limit",
                     "5",
                 ],
@@ -342,7 +420,10 @@ class CIDriver:
             pr_data = json.loads(result.stdout or "[]")
             if pr_data:
                 pr_number = pr_data[0]["number"]
-                logger.info(f"Found PR #{pr_number} for issue #{issue_number} via body search")
+                logger.info(
+                    f"Found PR #{pr_number} for issue #{issue_number} via body search "
+                    f"(title: {pr_data[0].get('title', '')!r})"
+                )
                 return int(pr_number)
         except Exception as e:
             logger.debug(f"Body search failed for issue #{issue_number}: {e}")
@@ -402,6 +483,11 @@ class CIDriver:
     def _get_failing_ci_logs(self, pr_number: int) -> str:
         """Fetch combined failure logs for recent failed CI runs on a PR.
 
+        Scopes the ``gh run list`` query to the PR's head branch so we only
+        see runs that belong to this PR rather than the most-recent repo-wide
+        runs (the previous repo-wide query could return runs for other PRs
+        and even other branches, making the logs useless for fixing *this* PR).
+
         Args:
             pr_number: GitHub PR number.
 
@@ -410,10 +496,15 @@ class CIDriver:
 
         """
         try:
+            branch = self._get_pr_branch(pr_number)
             result2 = _gh_call(
                 [
                     "run",
                     "list",
+                    "--branch",
+                    branch,
+                    "--status",
+                    "failure",
                     "--limit",
                     "10",
                     "--json",
@@ -502,14 +593,7 @@ class CIDriver:
             f"Commit message: fix: Address CI failures for PR #{pr_number}\n"
         )
 
-        prompt_file_path: Path | None = None
         try:
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".txt", delete=False, dir=worktree_path
-            ) as f:
-                f.write(prompt)
-                prompt_file_path = Path(f.name)
-
             # Fresh sessions pin the implementer model; --resume sessions inherit
             # the original session's model and ignore --model.
             base_cmd = [
@@ -586,23 +670,50 @@ class CIDriver:
         except Exception as e:
             logger.error(f"Issue #{issue_number}: CI fix session failed for PR #{pr_number}: {e}")
             return False
-        finally:
-            if prompt_file_path is not None:
-                with contextlib.suppress(Exception):
-                    prompt_file_path.unlink()
 
-    def _enable_auto_merge(self, pr_number: int) -> None:
+    def _enable_auto_merge(self, pr_number: int) -> bool:
         """Enable auto-merge for the given PR using rebase strategy.
+
+        First attempts ``gh pr merge --auto --rebase``. On failure, if
+        ``options.force_merge_on_stall`` is set, falls back to a direct
+        squash merge (``gh pr merge --squash --delete-branch``). If both
+        strategies fail, logs an ERROR and returns False.
 
         Args:
             pr_number: GitHub PR number.
+
+        Returns:
+            True if auto-merge was enabled (or fallback merge succeeded),
+            False if both strategies failed.
 
         """
         try:
             _gh_call(["pr", "merge", str(pr_number), "--auto", "--rebase"])
             logger.info(f"Enabled auto-merge for PR #{pr_number}")
-        except Exception as e:
-            logger.warning(f"Could not enable auto-merge for PR #{pr_number}: {e}")
+            return True
+        except subprocess.CalledProcessError as e:
+            logger.warning(
+                f"Could not enable auto-merge (--rebase) for PR #{pr_number}: {e}; "
+                "will attempt squash-merge fallback if force_merge_on_stall is set"
+            )
+
+        if not self.options.force_merge_on_stall:
+            logger.error(
+                f"PR #{pr_number}: auto-merge failed and force_merge_on_stall is not set; "
+                "skipping squash-merge fallback"
+            )
+            return False
+
+        # Fallback: direct squash merge
+        try:
+            _gh_call(["pr", "merge", str(pr_number), "--squash", "--delete-branch"])
+            logger.info(f"Squash-merged PR #{pr_number} via fallback")
+            return True
+        except subprocess.CalledProcessError as fallback_err:
+            logger.error(
+                f"PR #{pr_number}: both auto-merge and squash-merge fallback failed: {fallback_err}"
+            )
+            return False
 
     def _parse_json_block(self, text: str) -> dict[str, Any]:
         """Extract and parse the first JSON block from a text string.

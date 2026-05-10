@@ -281,3 +281,81 @@ class TestAddressIssue:
             results = reviewer.run()
 
         assert results == {}
+
+
+# ---------------------------------------------------------------------------
+# #382/A4-06: AddressReviewer.run() must report preserved worktrees after cleanup_all
+# ---------------------------------------------------------------------------
+
+
+class TestAddressReviewerPreservedReporting:
+    """Tests that AddressReviewer.run() logs preserved worktrees (#382/A4-06).
+
+    Note: cleanup_all is only reached after the _address_all() call completes.
+    The early-return for no-PR cases bypasses the try/finally intentionally.
+    Tests must supply a non-empty pr_map so the code reaches the finally block.
+    """
+
+    def _make_reviewer_with_mock_wm(
+        self,
+        mock_options: AddressReviewOptions,
+        tmp_path: Path,
+        preserved: list,
+    ) -> tuple["AddressReviewer", MagicMock]:
+        """Create an AddressReviewer with a MagicMock WorktreeManager."""
+        with (
+            patch("hephaestus.automation.address_review.get_repo_root", return_value=tmp_path),
+            patch("hephaestus.automation.address_review.StatusTracker"),
+        ):
+            mock_wm = MagicMock()
+            mock_wm.preserved = preserved
+            with patch(
+                "hephaestus.automation.address_review.WorktreeManager", return_value=mock_wm
+            ):
+                ar = AddressReviewer(mock_options)
+                ar.state_dir = tmp_path
+        return ar, mock_wm
+
+    def test_preserved_worktrees_logged_after_cleanup(
+        self,
+        mock_options: AddressReviewOptions,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """If cleanup_all preserves dirty worktrees, they are logged at INFO."""
+        import logging
+
+        preserved_path = tmp_path / "issue-1"
+        ar, _ = self._make_reviewer_with_mock_wm(mock_options, tmp_path, [(1, preserved_path)])
+
+        with (
+            # Provide a non-empty pr_map so we reach the finally block
+            patch.object(ar, "_discover_prs", return_value={123: 456}),
+            patch.object(
+                ar,
+                "_address_all",
+                return_value={123: MagicMock(success=True)},
+            ),
+            caplog.at_level(logging.INFO, logger="hephaestus.automation.address_review"),
+        ):
+            ar.run()
+
+        logs = caplog.text
+        assert "Preserved worktrees" in logs
+        assert str(preserved_path) in logs
+
+    def test_cleanup_all_called_when_prs_exist(
+        self,
+        mock_options: AddressReviewOptions,
+        tmp_path: Path,
+    ) -> None:
+        """cleanup_all() is called when there are PRs to process."""
+        ar, mock_wm = self._make_reviewer_with_mock_wm(mock_options, tmp_path, [])
+
+        with (
+            patch.object(ar, "_discover_prs", return_value={123: 456}),
+            patch.object(ar, "_address_all", return_value={}),
+        ):
+            ar.run()
+
+        mock_wm.cleanup_all.assert_called_once()

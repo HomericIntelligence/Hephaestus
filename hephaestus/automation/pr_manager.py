@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import cast
 
 from ._secret_patterns import SECRET_FILE_EXTENSIONS, SECRET_FILE_NAMES
+from .claude_models import implementer_model
 from .git_utils import run
 from .github_api import _gh_call, fetch_issue_info, gh_pr_create
 from .prompts import get_pr_description
@@ -99,7 +100,7 @@ def commit_changes(issue_number: int, worktree_path: Path) -> None:
 
 Closes #{issue_number}
 
-Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+Co-Authored-By: {implementer_model()} <noreply@anthropic.com>
 """
 
     # Commit

@@ -53,7 +53,8 @@ class WorktreeManager:
 
         Args:
             base_dir: Base directory for worktrees (default: repo_root/.worktrees)
-            base_branch: Base branch for worktrees (default: auto-detect from origin/HEAD)
+            base_branch: Base branch for worktrees (default: auto-detect from origin/HEAD
+                lazily on first use)
 
         """
         self.repo_root = get_repo_root()
@@ -62,43 +63,58 @@ class WorktreeManager:
         self.base_dir = base_dir
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
-        # Auto-detect base branch if not specified
-        if base_branch is None:
-            try:
-                result = run(
-                    ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
-                    cwd=self.repo_root,
-                    capture_output=True,
-                    log_errors=False,
-                )
-                base_branch = result.stdout.strip()
-                logger.debug(f"Auto-detected base branch: {base_branch}")
-            except Exception:
-                # Fallback: probe which branch actually exists
-                for candidate in ("origin/main", "origin/master"):
-                    try:
-                        run(
-                            ["git", "rev-parse", "--verify", candidate],
-                            cwd=self.repo_root,
-                            capture_output=True,
-                        )
-                        base_branch = candidate
-                        logger.warning(f"Could not auto-detect base branch, found {candidate}")
-                        break
-                    except Exception:
-                        continue
-                if base_branch is None:
-                    base_branch = "origin/main"
-                    logger.warning("Could not auto-detect base branch, defaulting to origin/main")
-
-        self.base_branch = base_branch
+        # Base-branch detection is deferred to first use so that constructing
+        # a WorktreeManager in test fixtures or environments without origin/*
+        # refs does not raise. The hard error from #382 / A4-05 still fires —
+        # it is just delayed until create_worktree() actually needs the value.
+        self._base_branch_override = base_branch
+        self._base_branch_resolved: str | None = None
         self.worktrees: dict[int, Path] = {}
         self.preserved: list[tuple[int, Path]] = []
         self.lock = threading.Lock()
 
-        logger.debug(
-            f"Initialized WorktreeManager at {self.base_dir}, base branch: {self.base_branch}"
-        )
+        logger.debug(f"Initialized WorktreeManager at {self.base_dir}")
+
+    @property
+    def base_branch(self) -> str:
+        """The base branch, auto-detected on first access."""
+        if self._base_branch_resolved is not None:
+            return self._base_branch_resolved
+        if self._base_branch_override is not None:
+            self._base_branch_resolved = self._base_branch_override
+            return self._base_branch_resolved
+        self._base_branch_resolved = self._detect_base_branch()
+        return self._base_branch_resolved
+
+    def _detect_base_branch(self) -> str:
+        try:
+            result = run(
+                ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
+                cwd=self.repo_root,
+                capture_output=True,
+                log_errors=False,
+            )
+            detected = result.stdout.strip()
+            logger.debug("Auto-detected base branch: %s", detected)
+            return detected
+        except Exception:
+            for candidate in ("origin/main", "origin/master"):
+                try:
+                    run(
+                        ["git", "rev-parse", "--verify", candidate],
+                        cwd=self.repo_root,
+                        capture_output=True,
+                    )
+                    logger.warning("Could not auto-detect base branch, found %s", candidate)
+                    return candidate
+                except Exception:
+                    continue
+            raise RuntimeError(
+                "Could not auto-detect the remote base branch. "
+                "Neither 'origin/main' nor 'origin/master' exists. "
+                "Run 'git remote set-head origin --auto' or pass "
+                "base_branch= explicitly to WorktreeManager()."
+            ) from None
 
     def create_worktree(
         self,

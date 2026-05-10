@@ -120,7 +120,19 @@ class AddressReviewer:
             if self.ui:
                 self.ui.stop()
             if not self.options.dry_run:
-                self.worktree_manager.cleanup_all()
+                try:
+                    self.worktree_manager.cleanup_all()
+                except Exception:
+                    logger.exception("Error during worktree cleanup in AddressReviewer.run()")
+
+            # Report preserved worktrees (contain uncommitted changes after cleanup_all).
+            # Mirror implementer.py:1263-1275 so operators know which worktrees survived.
+            preserved = self.worktree_manager.preserved
+            if preserved:
+                logger.info("Preserved worktrees (contain uncommitted changes):")
+                for issue_num, path in preserved:
+                    logger.info("  #%d: %s", issue_num, path)
+                logger.info("Inspect or discard them with: git worktree remove --force <path>")
 
     def _discover_prs(self, issue_numbers: list[int]) -> dict[int, int]:
         """Pre-discover open PRs for all issues.
