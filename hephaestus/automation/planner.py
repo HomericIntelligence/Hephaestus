@@ -237,8 +237,7 @@ class Planner:
                     issue_number=issue_number,
                     success=False,
                     error=(
-                        "review loop exhausted all iterations without a GO verdict"
-                        " (NOGO-exhausted)"
+                        "review loop exhausted all iterations without a GO verdict (NOGO-exhausted)"
                     ),
                 )
 
@@ -423,8 +422,7 @@ class Planner:
 
                 except subprocess.TimeoutExpired:
                     logger.warning(
-                        "gh repo clone timed out after 120 s; "
-                        "ProjectMnemosyne unavailable this run"
+                        "gh repo clone timed out after 120 s; ProjectMnemosyne unavailable this run"
                     )
                     return False
 

@@ -194,9 +194,7 @@ class TestPostPlanWithReview:
         assert "plan body" in body
         assert "Final review verdict" not in body
 
-    def test_post_plan_includes_nogo_banner_when_verdict_is_false(
-        self, planner: Planner
-    ) -> None:
+    def test_post_plan_includes_nogo_banner_when_verdict_is_false(self, planner: Planner) -> None:
         """When verdict_is_go=False a NOGO-EXHAUSTED banner must appear in the comment (#369)."""
         with patch("hephaestus.automation.planner.gh_issue_comment") as mock_cmt:
             planner._post_plan(
