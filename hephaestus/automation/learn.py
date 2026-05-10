@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from .claude_models import learn_model
 from .claude_timeouts import learn_claude_timeout
 from .git_utils import run
 
@@ -42,11 +43,11 @@ def run_learn(
     state_dir.mkdir(parents=True, exist_ok=True)
     log_file = state_dir / f"learn-{issue_number}.log"
     # /learn is a SIMPLE-complexity task (summarization + file writes), so we
-    # default to sonnet but accept haiku as the fallback when sonnet is
-    # unavailable. We can't route through `call_claude` here because we need
-    # `--resume` semantics with full Bash/Edit tools; instead we add the model
-    # flag directly and rely on Claude CLI's own fallback messaging if sonnet
-    # is down. (The shared `call_claude` helper handles the loop-review paths.)
+    # use the configured learn model (default: Haiku) but accept operator
+    # overrides via HEPH_LEARN_MODEL. We can't route through `call_claude`
+    # here because we need `--resume` semantics with full Bash/Edit tools;
+    # instead we add the model flag directly.
+    # (The shared `call_claude` helper handles the loop-review paths.)
     try:
         result = run(
             [
@@ -61,7 +62,7 @@ def run_learn(
                 ),
                 "--print",
                 "--model",
-                "sonnet",
+                learn_model(),
                 "--permission-mode",
                 "dontAsk",
                 "--allowedTools",
