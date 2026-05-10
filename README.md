@@ -194,13 +194,89 @@ config = merge_with_env({}, convert_bools=True)
 
 ## CLI Commands
 
-Three command-line tools are installed as console scripts when you install the package:
+<!-- CLI table generated from pyproject.toml [project.scripts]. Keep in sync via
+     `python3 scripts/check_cli_table_sync.py` (also enforced in pre-commit). -->
+
+38 console scripts are installed when you install the package.  Run any command
+with `--help` to see full usage.
+
+### Automation
 
 | Command | Description |
 |---|---|
-| `hephaestus-merge-prs` | Automate merging of GitHub pull requests |
-| `hephaestus-system-info` | Collect and display system/environment information |
-| `hephaestus-download-dataset` | Download datasets with retry and progress reporting |
+| `hephaestus-plan-issues` | Bulk issue planning using Claude Code |
+| `hephaestus-implement-issues` | Bulk issue implementation using Claude Code in parallel worktrees |
+| `hephaestus-review-prs` | Read-only PR review automation using Claude Code in parallel worktrees |
+
+### GitHub
+
+| Command | Description |
+|---|---|
+| `hephaestus-fleet-sync` | Sync all PRs across the HomericIntelligence fleet |
+| `hephaestus-github-stats` | GitHub contribution statistics via the `gh` CLI |
+| `hephaestus-merge-prs` | Merge open PRs with successful CI/CD using GitHub API |
+| `hephaestus-tidy` | Single-repo gh-tidy wrapper with Myrmidon swarm for conflict resolution |
+
+### System & Data
+
+| Command | Description |
+|---|---|
+| `hephaestus-agent-stats` | Agent statistics aggregation and reporting |
+| `hephaestus-download-dataset` | Dataset downloading utilities for ProjectHephaestus |
+| `hephaestus-system-info` | System information collection utilities for ProjectHephaestus |
+
+### Validation
+
+| Command | Description |
+|---|---|
+| `hephaestus-audit-doc-policy` | Audit documentation command examples for policy violations |
+| `hephaestus-check-complexity` | Check cyclomatic complexity against a threshold |
+| `hephaestus-check-coverage` | Check test coverage against configurable thresholds |
+| `hephaestus-check-doc-config` | Enforce consistency between documentation metric values and authoritative config sources |
+| `hephaestus-check-docstrings` | Check Python docstrings for genuine sentence fragments |
+| `hephaestus-check-python-version` | Check Python version consistency across project configuration files |
+| `hephaestus-check-readmes` | Markdown validation utilities for HomericIntelligence projects |
+| `hephaestus-check-stale-scripts` | Detect scripts in `scripts/` with no references in CI configs or other scripts |
+| `hephaestus-check-test-structure` | Validate unit test directory structure |
+| `hephaestus-check-tier-labels` | Enforce tier label consistency across all project Markdown files |
+| `hephaestus-check-type-aliases` | Detect type alias shadowing patterns in Python code |
+| `hephaestus-filter-audit` | Filter pip-audit JSON output to fail only on HIGH/CRITICAL severity vulnerabilities |
+| `hephaestus-mypy-each-file` | Run mypy on each file individually to avoid duplicate-module-name errors |
+| `hephaestus-validate-agents` | YAML frontmatter extraction and validation for agent markdown files |
+| `hephaestus-validate-links` | Markdown validation utilities for HomericIntelligence projects |
+| `hephaestus-validate-schemas` | Validate YAML configuration files against JSON schemas |
+
+### Markdown
+
+| Command | Description |
+|---|---|
+| `hephaestus-check-links` | Fix or validate invalid absolute path links in markdown files |
+| `hephaestus-fix-markdown` | Markdown linting fixer utilities for ProjectHephaestus |
+| `hephaestus-validate-anchors` | Validate anchor fragments in markdown links against actual headings |
+
+### CI / Pre-commit
+
+| Command | Description |
+|---|---|
+| `hephaestus-bench-precommit` | Pre-commit CI utilities for GitHub Actions integration (benchmark) |
+| `hephaestus-check-precommit-versions` | Pre-commit CI utilities for GitHub Actions integration (version check) |
+| `hephaestus-check-workflow-inventory` | GitHub Actions workflow validation utilities (inventory check) |
+| `hephaestus-validate-workflow-checkout` | GitHub Actions workflow validation utilities (checkout validation) |
+
+### Configuration & Dependencies
+
+| Command | Description |
+|---|---|
+| `hephaestus-check-dep-sync` | Validate and synchronize dependency declarations across project config files |
+| `hephaestus-sync-requirements` | Synchronize dependency declarations across project config files |
+
+### Version Management
+
+| Command | Description |
+|---|---|
+| `hephaestus-bump-version` | Version consistency checks and atomic version bumping |
+| `hephaestus-check-package-versions` | Check package version consistency across config files |
+| `hephaestus-check-version-consistency` | Version consistency checks across config files |
 
 ### Examples
 
@@ -216,6 +292,10 @@ hephaestus-download-dataset --help
 
 # Merge open PRs
 hephaestus-merge-prs --help
+
+# Run all validation checks
+hephaestus-check-coverage --help
+hephaestus-check-complexity --help
 ```
 
 ## Development Guidelines
