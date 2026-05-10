@@ -56,6 +56,26 @@ from .worktree_manager import WorktreeManager
 
 MAX_REVIEW_ITERATIONS = 3
 
+# Default Claude implementation timeout in seconds. Actual runtime value is
+# read from the ``HEPH_IMPLEMENTER_CLAUDE_TIMEOUT`` env-var by
+# :func:`.claude_timeouts.implementer_claude_timeout`; this constant serves
+# as the documented default and can be used in tests.
+_CLAUDE_IMPL_TIMEOUT: int = 1800
+
+# Session-expired phrases that indicate a ``--resume`` call hit a pruned
+# session rather than a transient error. Keep in sync with
+# ``address_review._run_fix_session`` (#A3-010).
+_SESSION_EXPIRED_PHRASES: tuple[str, ...] = (
+    "session not found",
+    "invalid session",
+    "session expired",
+    "no such session",
+    "session does not exist",
+    "cannot resume",
+    "resume failed",
+    "failed to resume",
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -400,6 +420,18 @@ class IssueImplementer:
             state.phase = ImplementationPhase.CREATING_PR
         self._save_state(state)
 
+        # A2-004: optional pre-PR test gate (opt-in via run_pre_pr_tests=True).
+        if self.options.run_pre_pr_tests:
+            if slot_id is not None:
+                self.status_tracker.update_slot(slot_id, f"#{issue_number}: Running pre-PR tests")
+            tests_passed = self._run_tests_in_worktree(worktree_path, issue_number)
+            if not tests_passed:
+                logger.warning(
+                    "#%d: pre-PR tests failed; PR will still be created but "
+                    "manual review is required before merging",
+                    issue_number,
+                )
+
         pr_number = self._ensure_pr_created(issue_number, branch_name, worktree_path, slot_id)
         with self.state_lock:
             state.pr_number = pr_number
@@ -478,14 +510,34 @@ class IssueImplementer:
         thread_id = threading.get_ident()
 
         try:
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: Creating worktree")
+            self.status_tracker.update_slot(slot_id, f"#{issue_number}: Starting")
             self._log("info", f"Starting issue #{issue_number}", thread_id)
 
             # Initialize state
             state = self._get_or_create_state(issue_number)
 
-            # Create worktree
             branch_name = f"{issue_number}-auto-impl"
+
+            # In dry-run mode skip all real side-effects (worktree creation,
+            # Claude calls, PR creation).  This guard must come BEFORE
+            # create_worktree() so --dry-run never leaves real .worktrees/
+            # directories or branches behind (#371).
+            if self.options.dry_run:
+                self._log(
+                    "info",
+                    f"[DRY RUN] Would create worktree, run Claude Code, review, "
+                    f"create PR for #{issue_number}",
+                    thread_id,
+                )
+                return WorkerResult(
+                    issue_number=issue_number,
+                    success=True,
+                    branch_name=branch_name,
+                    worktree_path=None,
+                )
+
+            # Create worktree (only in non-dry-run mode)
+            self.status_tracker.update_slot(slot_id, f"#{issue_number}: Creating worktree")
             worktree_path = self.worktree_manager.create_worktree(issue_number, branch_name)
 
             with self.state_lock:
@@ -528,20 +580,6 @@ class IssueImplementer:
                 state.session_id = session_id
             self._save_state(state)
 
-            # In dry-run mode, skip all post-implementation steps
-            if self.options.dry_run:
-                self._log(
-                    "info",
-                    f"[DRY RUN] Skipping review loop, PR, learn, follow-up for #{issue_number}",
-                    thread_id,
-                )
-                return WorkerResult(
-                    issue_number=issue_number,
-                    success=True,
-                    branch_name=branch_name,
-                    worktree_path=str(worktree_path),
-                )
-
             # Strict review loop — re-uses the implementer session across
             # iterations (via `claude --resume`) but uses a fresh reviewer
             # session each iteration. Loop terminates on first unambiguous GO
@@ -558,6 +596,7 @@ class IssueImplementer:
                 session_id=session_id,
                 slot_id=slot_id,
                 thread_id=thread_id,
+                state=state,
             )
             with self.state_lock:
                 state.review_iterations = iterations
@@ -837,6 +876,7 @@ class IssueImplementer:
         session_id: str | None,
         slot_id: int | None,
         thread_id: int | None,
+        state: ImplementationState | None = None,
     ) -> tuple[int, str | None, str | None]:
         """Run the bounded review loop for an implementation.
 
@@ -895,6 +935,7 @@ class IssueImplementer:
                     review_text=prior_review or "",
                     prev_iteration=iteration - 1,
                     verdict=last_verdict or "NOGO",
+                    state=state,
                 )
                 if not resumed:
                     self._log(
@@ -934,6 +975,11 @@ class IssueImplementer:
                 thread_id,
             )
 
+            # A2-005: Persist review iteration progress so --resume can skip
+            # already-completed iterations.  Persist BEFORE breaking out so
+            # the final iteration's data is always on disk.
+            self._save_review_iteration_state(issue_number, iterations_run, review_text)
+
             if verdict.is_go:
                 self._log(
                     "info",
@@ -944,6 +990,20 @@ class IssueImplementer:
 
             # Save this review for next iteration's context
             prior_review = review_text
+
+        # A2-003: Surface AMBIGUOUS verdict distinctly so operators can triage
+        # without inspecting raw log files.
+        if last_verdict == "AMBIGUOUS" or (
+            iterations_run == MAX_REVIEW_ITERATIONS and last_verdict not in (None, "GO")
+        ):
+            logger.warning(
+                "#%d: review loop ended without clear GO — "
+                "final verdict=%r after %d iteration(s); "
+                "PR created but manual review is recommended",
+                issue_number,
+                last_verdict,
+                iterations_run,
+            )
 
         return iterations_run, last_verdict, last_grade
 
@@ -956,8 +1016,37 @@ class IssueImplementer:
         review_text: str,
         prev_iteration: int,
         verdict: str,
+        state: ImplementationState | None = None,
     ) -> bool:
-        """Resume the impl session and feed reviewer feedback as the next prompt."""
+        """Resume the impl session and feed reviewer feedback as the next prompt.
+
+        On ``CalledProcessError`` the method distinguishes two cases (#372):
+
+        * **Session-expired** — the ``--resume`` target no longer exists in
+          the Claude CLI's session store. Detected by checking ``e.stderr`` /
+          ``e.stdout`` against :data:`_SESSION_EXPIRED_PHRASES`. When detected
+          sets ``state.error = "session_expired:<session_id>"`` (if *state* is
+          provided) and returns ``False`` so the loop stops gracefully.
+          Partial work in the worktree is preserved for later inspection.
+
+        * **Transient / other failure** — logs at ERROR with the full stderr so
+          operators see useful diagnostics rather than a bare warning.
+
+        Args:
+            session_id: Claude session id to resume.
+            worktree_path: CWD for the claude invocation.
+            issue_number: For log messages.
+            review_text: Reviewer critique to feed back to the implementer.
+            prev_iteration: Zero-based index of the review that produced the
+                critique (used in the prompt and log messages).
+            verdict: Last verdict string (``"NOGO"`` / ``"AMBIGUOUS"``).
+            state: Optional mutable implementation state; updated in-place
+                when session expiry is detected.
+
+        Returns:
+            ``True`` if the resume completed successfully, ``False`` otherwise.
+
+        """
         prompt = get_impl_resume_feedback_prompt(
             issue_number=issue_number,
             prev_iteration=prev_iteration,
@@ -983,9 +1072,43 @@ class IssueImplementer:
                 timeout=implementer_claude_timeout(),
             )
             return True
+        except subprocess.CalledProcessError as e:
+            # Distinguish session-expired from generic transient failures.
+            stderr = (e.stderr or "").lower()
+            stdout = (e.stdout or "").lower()
+            combined = stderr + stdout
+            if any(phrase in combined for phrase in _SESSION_EXPIRED_PHRASES):
+                # Session pruned — partial work may still be committable;
+                # don't treat this as an unrecoverable failure.
+                error_tag = f"session_expired:{session_id}"
+                logger.warning(
+                    "#%d: impl session %r expired before R%d; "
+                    "stopping review loop (partial work preserved)",
+                    issue_number,
+                    session_id,
+                    prev_iteration + 1,
+                )
+                if state is not None:
+                    with self.state_lock:
+                        state.error = error_tag
+                    self._save_state(state)
+            else:
+                # Unknown / transient error — log at ERROR with full stderr so
+                # operators can diagnose it.
+                logger.error(
+                    "#%d: failed to resume impl session for R%d (exit=%d): %s",
+                    issue_number,
+                    prev_iteration + 1,
+                    e.returncode,
+                    (e.stderr or e.stdout or "")[:500],
+                )
+            return False
         except Exception as e:  # broad: resume is best-effort, never crash the loop
-            logger.warning(
-                f"#{issue_number}: failed to resume impl session for R{prev_iteration + 1}: {e}"
+            logger.error(
+                "#%d: unexpected error resuming impl session for R%d: %s",
+                issue_number,
+                prev_iteration + 1,
+                e,
             )
             return False
 
@@ -1113,6 +1236,98 @@ class IssueImplementer:
             log_file.write_text(review_text)
         except Exception as e:
             logger.warning(f"#{issue_number}: failed to save review log r{iteration}: {e}")
+
+    def _save_review_iteration_state(
+        self, issue_number: int, iterations_run: int, prior_review: str
+    ) -> None:
+        """Persist review loop progress for ``--resume`` continuity (A2-005).
+
+        Writes two files per issue:
+
+        * ``review-iter-{N}.json`` — JSON with ``iterations_run`` so resume
+          can skip already-completed iterations.
+        * ``review-prior-{N}.txt`` — the last reviewer critique so it can be
+          reloaded as ``prior_review`` on resume.
+
+        Failures are logged and swallowed — persistence is best-effort.
+        """
+        try:
+            iter_file = self.state_dir / f"review-iter-{issue_number}.json"
+            iter_file.write_text(json.dumps({"iterations_run": iterations_run}))
+        except Exception as e:
+            logger.warning("#%d: failed to persist review iteration count: %s", issue_number, e)
+        try:
+            prior_file = self.state_dir / f"review-prior-{issue_number}.txt"
+            prior_file.write_text(prior_review)
+        except Exception as e:
+            logger.warning("#%d: failed to persist prior review text: %s", issue_number, e)
+
+    def _load_review_iteration_state(self, issue_number: int) -> tuple[int, str | None]:
+        """Load persisted review iteration progress for ``--resume`` (A2-005).
+
+        Returns:
+            Tuple of ``(iterations_run, prior_review_text)`` loaded from disk.
+            Returns ``(0, None)`` if no persisted state exists.
+
+        """
+        iterations_run = 0
+        prior_review: str | None = None
+        try:
+            iter_file = self.state_dir / f"review-iter-{issue_number}.json"
+            if iter_file.exists():
+                data = json.loads(iter_file.read_text())
+                iterations_run = int(data.get("iterations_run", 0))
+        except Exception as e:
+            logger.warning(
+                "#%d: failed to load persisted review iteration count: %s", issue_number, e
+            )
+        try:
+            prior_file = self.state_dir / f"review-prior-{issue_number}.txt"
+            if prior_file.exists():
+                prior_review = prior_file.read_text()
+        except Exception as e:
+            logger.warning("#%d: failed to load persisted prior review text: %s", issue_number, e)
+        return iterations_run, prior_review
+
+    def _run_tests_in_worktree(self, worktree_path: Path, issue_number: int) -> bool:
+        """Run the unit test suite inside the worktree as a pre-PR gate (A2-004).
+
+        Invokes ``pixi run pytest tests/unit -q --tb=short`` with a generous
+        timeout. On non-zero exit, logs a warning and returns ``False`` so the
+        caller can decide whether to block the PR or log-and-continue.
+
+        Args:
+            worktree_path: Path to the git worktree where the tests are run.
+            issue_number: For log messages.
+
+        Returns:
+            ``True`` if all tests pass, ``False`` on failure or timeout.
+
+        """
+        try:
+            result = subprocess.run(
+                ["pixi", "run", "pytest", "tests/unit", "-q", "--tb=short"],
+                cwd=worktree_path,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            if result.returncode == 0:
+                logger.info("#%d: pre-PR tests passed", issue_number)
+                return True
+            logger.warning(
+                "#%d: pre-PR tests FAILED (exit %d):\n%s",
+                issue_number,
+                result.returncode,
+                (result.stdout + result.stderr)[-2000:],
+            )
+            return False
+        except subprocess.TimeoutExpired:
+            logger.warning("#%d: pre-PR tests timed out after 600s", issue_number)
+            return False
+        except Exception as e:
+            logger.warning("#%d: pre-PR tests could not run: %s", issue_number, e)
+            return False
 
     def _run_claude_code(
         self, issue_number: int, worktree_path: Path, prompt: str, slot_id: int | None = None

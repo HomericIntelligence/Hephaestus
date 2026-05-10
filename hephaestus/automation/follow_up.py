@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hephaestus.github.rate_limit import detect_claude_usage_cap, wait_until
+
 from .claude_timeouts import follow_up_claude_timeout
 from .git_utils import run
 from .github_api import gh_issue_comment, gh_issue_create
@@ -357,7 +359,7 @@ def _persist_rejected(
         path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
-def run_follow_up_issues(
+def run_follow_up_issues(  # noqa: C901  # quota-check + parse + file paths are unavoidably coupled
     session_id: str,
     worktree_path: Path,
     issue_number: int,
@@ -407,11 +409,31 @@ def run_follow_up_issues(
 
         try:
             data = json.loads(result.stdout)
-            response_text = data.get("result", "")
         except (json.JSONDecodeError, AttributeError) as e:
             logger.warning("Could not parse follow-up response for issue #%d: %s", issue_number, e)
             return None
 
+        # A2-006: detect usage-cap / is_error responses before extracting
+        # the result text. Mirror the same guard in
+        # IssueImplementer._run_claude_code.
+        if isinstance(data, dict) and data.get("is_error"):
+            err_text = str(data.get("result") or "")
+            reset_epoch = detect_claude_usage_cap(err_text)
+            if reset_epoch is not None and reset_epoch > 0:
+                logger.error(
+                    "Claude usage cap hit during follow-up for issue #%d; waiting for reset",
+                    issue_number,
+                )
+                wait_until(reset_epoch)
+            else:
+                logger.error(
+                    "Claude returned is_error=true for follow-up of issue #%d: %s",
+                    issue_number,
+                    err_text[:200],
+                )
+            return None
+
+        response_text = data.get("result", "") if isinstance(data, dict) else ""
         response = parse_follow_up_response(response_text)
         _persist_rejected(response.rejected, issue_number, state_dir)
 

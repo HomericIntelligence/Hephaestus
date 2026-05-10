@@ -138,6 +138,8 @@ class ImplementerOptions(BaseModel):
     enable_learn: bool = True
     enable_follow_up: bool = True
     enable_ui: bool = True
+    # A2-004: opt-in pre-PR test gate; defaults to False for rollout safety.
+    run_pre_pr_tests: bool = False
 
 
 class ReviewPhase(str, Enum):

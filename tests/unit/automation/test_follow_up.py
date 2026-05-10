@@ -364,3 +364,77 @@ class TestDataclasses:
         r = FollowUpResponse()
         assert r.follow_ups == []
         assert r.rejected == []
+
+
+class TestRunFollowUpIsErrorHandling:
+    """A2-006: run_follow_up_issues must detect is_error=True and handle it without crashing."""
+
+    def test_is_error_true_returns_none(self, tmp_path: Path) -> None:
+        """Claude returning is_error=true must cause run_follow_up_issues to return None."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+
+        # Simulate Claude JSON output with is_error=True (no usage-cap reset epoch)
+        error_output = json.dumps({"is_error": True, "result": "Something went wrong"})
+        mock_result = MagicMock()
+        mock_result.stdout = error_output
+
+        with (
+            patch("hephaestus.automation.follow_up.run", return_value=mock_result),
+            patch("hephaestus.automation.follow_up.gh_issue_create") as mock_create,
+        ):
+            response = run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+
+        assert response is None
+        mock_create.assert_not_called()
+
+    def test_is_error_with_usage_cap_waits(self, tmp_path: Path) -> None:
+        """is_error=True with a quota-reset epoch must call wait_until before returning None."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+
+        # Simulate a usage-cap message that detect_claude_usage_cap would parse.
+        # We patch detect_claude_usage_cap to return a future epoch.
+        import time
+
+        future_epoch = int(time.time()) + 3600
+        error_output = json.dumps(
+            {"is_error": True, "result": "out of extra usage · resets at ..."}
+        )
+        mock_result = MagicMock()
+        mock_result.stdout = error_output
+
+        with (
+            patch("hephaestus.automation.follow_up.run", return_value=mock_result),
+            patch(
+                "hephaestus.automation.follow_up.detect_claude_usage_cap",
+                return_value=future_epoch,
+            ),
+            patch("hephaestus.automation.follow_up.wait_until") as mock_wait,
+            patch("hephaestus.automation.follow_up.gh_issue_create") as mock_create,
+        ):
+            response = run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+
+        assert response is None
+        mock_wait.assert_called_once_with(future_epoch)
+        mock_create.assert_not_called()
+
+    def test_is_error_false_proceeds_normally(self, tmp_path: Path) -> None:
+        """is_error=False (or absent) must not trigger the error path."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+
+        payload: dict[str, list[Any]] = {"follow_ups": [], "rejected": []}
+        normal_output = json.dumps({"is_error": False, "result": json.dumps(payload)})
+        mock_result = MagicMock()
+        mock_result.stdout = normal_output
+
+        with (
+            patch("hephaestus.automation.follow_up.run", return_value=mock_result),
+            patch("hephaestus.automation.follow_up.gh_issue_create") as mock_create,
+        ):
+            response = run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+
+        # No error — response parsed normally
+        assert response is not None
+        mock_create.assert_not_called()  # no items means no issue created

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from hephaestus.automation.implementer import MAX_REVIEW_ITERATIONS, IssueImplementer
-from hephaestus.automation.models import ImplementerOptions
+from hephaestus.automation.models import ImplementationState, ImplementerOptions
 
 
 @pytest.fixture
@@ -248,3 +249,188 @@ class TestResumeImplWithFeedback:
                 verdict="NOGO",
             )
         assert ok is False
+
+    def test_session_expired_sets_state_error(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """CalledProcessError with session-expired stderr must tag state.error (#372)."""
+        err = subprocess.CalledProcessError(1, ["claude"], stderr="session not found")
+        state = ImplementationState(issue_number=1)
+
+        with patch("hephaestus.automation.implementer.run", side_effect=err):
+            ok = implementer._resume_impl_with_feedback(
+                session_id="ses123",
+                worktree_path=tmp_path,
+                issue_number=1,
+                review_text="r",
+                prev_iteration=0,
+                verdict="NOGO",
+                state=state,
+            )
+
+        assert ok is False
+        assert state.error is not None
+        assert state.error == "session_expired:ses123"
+
+    def test_generic_process_error_does_not_set_session_expired(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """Non-session CalledProcessError must NOT set the session_expired tag (#372)."""
+        err = subprocess.CalledProcessError(1, ["claude"], stderr="network timeout")
+        state = ImplementationState(issue_number=1)
+
+        with patch("hephaestus.automation.implementer.run", side_effect=err):
+            ok = implementer._resume_impl_with_feedback(
+                session_id="ses999",
+                worktree_path=tmp_path,
+                issue_number=1,
+                review_text="r",
+                prev_iteration=0,
+                verdict="NOGO",
+                state=state,
+            )
+
+        assert ok is False
+        # Generic error: state.error must NOT carry the session_expired prefix
+        assert state.error is None or not state.error.startswith("session_expired:")
+
+
+class TestAmbiguousVerdictWarning:
+    """A2-003: AMBIGUOUS or maxed-out loop must emit a warning."""
+
+    def test_ambiguous_verdict_logs_warning(
+        self, implementer: IssueImplementer, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """AMBIGUOUS verdict at end of loop must produce a logger.warning."""
+        import logging
+
+        ambiguous_text = "Not sure.\n\nGrade: C\nVerdict: AMBIGUOUS\n"
+        with (
+            patch.object(implementer, "_collect_diff", return_value="diff"),
+            patch.object(implementer, "_collect_changed_files", return_value="files"),
+            patch.object(implementer, "_run_impl_review", return_value=ambiguous_text),
+            patch.object(implementer, "_resume_impl_with_feedback", return_value=True),
+        ):
+            with caplog.at_level(logging.WARNING):
+                _iters, verdict, _ = implementer._run_impl_review_loop(
+                    issue_number=1,
+                    worktree_path=tmp_path,
+                    branch_name="b",
+                    issue_title="t",
+                    issue_body="ib",
+                    session_id="sess",
+                    slot_id=None,
+                    thread_id=None,
+                )
+
+        assert verdict == "AMBIGUOUS"
+        # At least one WARNING must mention the ambiguity
+        warning_msgs = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("review loop ended" in m or "AMBIGUOUS" in m for m in warning_msgs), (
+            f"Expected ambiguous-loop warning; got: {warning_msgs}"
+        )
+
+    def test_nogo_exhausted_loop_logs_warning(
+        self, implementer: IssueImplementer, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Exhausting MAX_REVIEW_ITERATIONS with NOGO must also log a warning."""
+        import logging
+
+        with (
+            patch.object(implementer, "_collect_diff", return_value="diff"),
+            patch.object(implementer, "_collect_changed_files", return_value="files"),
+            patch.object(
+                implementer,
+                "_run_impl_review",
+                side_effect=[_nogo("D"), _nogo("D"), _nogo("D")],
+            ),
+            patch.object(implementer, "_resume_impl_with_feedback", return_value=True),
+        ):
+            with caplog.at_level(logging.WARNING):
+                iters, verdict, _ = implementer._run_impl_review_loop(
+                    issue_number=1,
+                    worktree_path=tmp_path,
+                    branch_name="b",
+                    issue_title="t",
+                    issue_body="ib",
+                    session_id="sess",
+                    slot_id=None,
+                    thread_id=None,
+                )
+
+        assert iters == MAX_REVIEW_ITERATIONS
+        assert verdict == "NOGO"
+        warning_msgs = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("review loop ended" in m for m in warning_msgs), (
+            f"Expected exhausted-loop warning; got: {warning_msgs}"
+        )
+
+
+class TestReviewIterationStatePersistence:
+    """A2-005: review iteration count and prior review must be persisted per iteration."""
+
+    def test_save_review_iteration_state_called_each_iteration(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """_save_review_iteration_state must be called once per iteration."""
+        with (
+            patch.object(implementer, "_collect_diff", return_value="diff"),
+            patch.object(implementer, "_collect_changed_files", return_value="files"),
+            patch.object(
+                implementer,
+                "_run_impl_review",
+                side_effect=[_nogo("D"), _nogo("C"), _go()],
+            ),
+            patch.object(implementer, "_resume_impl_with_feedback", return_value=True),
+            patch.object(implementer, "_save_review_iteration_state") as mock_persist,
+        ):
+            iters, _, _ = implementer._run_impl_review_loop(
+                issue_number=1,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=None,
+                thread_id=None,
+            )
+
+        # Loop ran 3 iterations (NOGO, NOGO, GO)
+        assert iters == 3
+        # Persist called once per iteration
+        assert mock_persist.call_count == 3
+
+    def test_persist_files_written_to_state_dir(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """_save_review_iteration_state must write iter JSON + prior-review text files."""
+        implementer._save_review_iteration_state(
+            issue_number=42, iterations_run=2, prior_review="prior text"
+        )
+
+        iter_file = implementer.state_dir / "review-iter-42.json"
+        prior_file = implementer.state_dir / "review-prior-42.txt"
+        assert iter_file.exists(), "review-iter-42.json not created"
+        assert prior_file.exists(), "review-prior-42.txt not created"
+
+        import json
+
+        data = json.loads(iter_file.read_text())
+        assert data["iterations_run"] == 2
+        assert prior_file.read_text() == "prior text"
+
+    def test_load_review_iteration_state_round_trips(self, implementer: IssueImplementer) -> None:
+        """Round-trip: save then load must return the same values."""
+        implementer._save_review_iteration_state(
+            issue_number=7, iterations_run=1, prior_review="reviewer critique"
+        )
+        loaded_iters, loaded_prior = implementer._load_review_iteration_state(7)
+
+        assert loaded_iters == 1
+        assert loaded_prior == "reviewer critique"
+
+    def test_load_returns_defaults_when_missing(self, implementer: IssueImplementer) -> None:
+        """Loading state for a never-run issue returns (0, None)."""
+        iters, prior = implementer._load_review_iteration_state(9999)
+        assert iters == 0
+        assert prior is None
