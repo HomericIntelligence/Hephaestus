@@ -14,6 +14,7 @@ Usage:
 import contextlib
 import json
 import os
+import warnings
 from pathlib import Path
 from typing import Any, cast
 
@@ -284,18 +285,34 @@ def merge_with_env(
     return merge_configs(config, env_config)
 
 
-# Example usage function
 def get_config_value(
     key_path: str,
     default: Any | None = None,
     config_files: list[str] | None = None,
     convert_bools: bool = False,
 ) -> Any:
-    """High-level function to get a configuration value with full merging.
+    """High-level convenience wrapper — **deprecated**, use :func:`get_setting` instead.
 
-    Loads defaults, then user config, then environment variables.
-    Environment variables use double underscores (``__``) as nesting
-    delimiters — see :func:`merge_with_env` for details.
+    ``get_config_value`` and ``get_setting`` have overlapping apparent purpose,
+    violating POLA.  ``get_setting`` is the canonical function for retrieving a
+    value from an already-loaded config dict using dot-notation.
+
+    Migration path::
+
+        # Old (deprecated):
+        value = get_config_value("database.host", default="localhost",
+                                 config_files=["config.yaml"])
+
+        # New (explicit pipeline — preferred):
+        config = load_config("config.yaml")
+        config = merge_with_env(config)
+        value = get_setting(config, "database.host", default="localhost")
+
+    This wrapper will be removed in a future release.
+
+    .. deprecated::
+        Use :func:`load_config`, :func:`merge_with_env`, and :func:`get_setting`
+        together to build an explicit, auditable configuration pipeline.
 
     Args:
         key_path: Dot-separated path to setting
@@ -309,7 +326,15 @@ def get_config_value(
         Configuration value or default
 
     """
-    config = {}
+    warnings.warn(
+        "get_config_value() is deprecated and will be removed in a future release. "
+        "Use load_config(), merge_with_env(), and get_setting() to build an explicit "
+        "configuration pipeline instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+    config: dict[str, Any] = {}
 
     # Load default config if exists
     default_config_path = Path("config/default.yaml")

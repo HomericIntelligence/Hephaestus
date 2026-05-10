@@ -550,31 +550,65 @@ class TestLoadYamlConfig:
 
 
 class TestGetConfigValue:
-    """Tests for get_config_value."""
+    """Tests for get_config_value (deprecated wrapper around get_setting).
+
+    All calls to get_config_value must pass through pytest.warns(DeprecationWarning)
+    because the function emits a DeprecationWarning on every call.
+    """
+
+    def test_emits_deprecation_warning(self):
+        """get_config_value emits a DeprecationWarning on every call."""
+        with pytest.warns(DeprecationWarning, match="get_config_value\\(\\) is deprecated"):
+            get_config_value("nonexistent.key", default="fallback")
+
+    def test_deprecation_warning_mentions_get_setting(self):
+        """DeprecationWarning message references the replacement functions."""
+        with pytest.warns(DeprecationWarning) as warning_list:
+            get_config_value("nonexistent.key")
+        assert len(warning_list) == 1
+        msg = str(warning_list[0].message)
+        assert "get_setting" in msg
 
     def test_returns_default_when_not_found(self):
         """Returns default when config key is not found."""
-        result = get_config_value("nonexistent.key", default="fallback")
+        with pytest.warns(DeprecationWarning):
+            result = get_config_value("nonexistent.key", default="fallback")
         assert result == "fallback"
 
     def test_returns_none_when_no_default(self):
         """Returns None when key not found and no default given."""
-        result = get_config_value("nonexistent.key")
+        with pytest.warns(DeprecationWarning):
+            result = get_config_value("nonexistent.key")
         assert result is None
 
     def test_with_config_files(self, tmp_config_yaml):
         """Loads from provided config_files list."""
-        result = get_config_value("database.host", config_files=[str(tmp_config_yaml)])
+        with pytest.warns(DeprecationWarning):
+            result = get_config_value("database.host", config_files=[str(tmp_config_yaml)])
         assert result == "localhost"
 
     def test_convert_bools_false_by_default(self, monkeypatch):
         """Boolean-like env vars stay as strings by default."""
         monkeypatch.setenv("HEPHAESTUS_FLAG", "true")
-        result = get_config_value("flag")
+        with pytest.warns(DeprecationWarning):
+            result = get_config_value("flag")
         assert result == "true"
 
     def test_convert_bools_propagated_to_merge_with_env(self, monkeypatch):
         """convert_bools=True converts boolean-like env var strings to bool."""
         monkeypatch.setenv("HEPHAESTUS_FEATURE__ENABLED", "yes")
-        result = get_config_value("feature.enabled", convert_bools=True)
+        with pytest.warns(DeprecationWarning):
+            result = get_config_value("feature.enabled", convert_bools=True)
         assert result is True
+
+    def test_delegates_to_get_setting(self, tmp_config_yaml):
+        """get_config_value delegates to get_setting for the actual lookup."""
+        # Verify the result matches what the explicit pipeline would return.
+        with pytest.warns(DeprecationWarning):
+            deprecated_result = get_config_value(
+                "database.port", config_files=[str(tmp_config_yaml)]
+            )
+        config = load_config(tmp_config_yaml)
+        config = merge_with_env(config)
+        canonical_result = get_setting(config, "database.port")
+        assert deprecated_result == canonical_result
