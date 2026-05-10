@@ -1,6 +1,9 @@
 name: Release
 
 on:
+  push:
+    tags:
+      - "v*"  # fires automatically when auto-tag.yml pushes a vX.Y.Z tag
   workflow_dispatch:
     inputs:
       tag:
@@ -87,9 +90,13 @@ jobs:
         id: tag
         shell: bash
         run: |
+          # Priority: explicit input > tag-push ref > latest tag
           INPUT_TAG="${{ github.event.inputs.tag }}"
+          REF_TAG="${{ github.ref }}"
           if [ -n "$INPUT_TAG" ]; then
             TAG="$INPUT_TAG"
+          elif [[ "$REF_TAG" == refs/tags/* ]]; then
+            TAG="${REF_TAG#refs/tags/}"
           else
             TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
           fi

@@ -1,7 +1,12 @@
 name: Auto Tag Release
 
 on:
-  workflow_dispatch:  # manual only — auto-tagging is disabled
+  workflow_dispatch:
+    inputs:
+      bump_kind:
+        description: "Version component to bump: patch | minor | major"
+        required: false
+        default: "patch"
 
 permissions:
   contents: write
@@ -23,13 +28,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Compute next patch version and push tag
+      - name: Compute next version and push tag
         shell: bash
+        env:
+          BUMP_KIND: ${{ github.event.inputs.bump_kind || 'patch' }}
         run: |
-          # Find the highest existing vX.Y.Z tag and increment patch
+          # Find the highest existing vX.Y.Z tag and increment the requested component
           LATEST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
           if [ -z "${LATEST_TAG}" ]; then
-            # No tags yet — start at v0.7.1 (first auto-tagged release)
+            # No tags yet — start at v0.7.0 base
             LATEST="0.7.0"
           else
             LATEST="${LATEST_TAG#v}"
@@ -38,7 +45,18 @@ jobs:
           MAJOR=$(echo "${LATEST}" | cut -d. -f1)
           MINOR=$(echo "${LATEST}" | cut -d. -f2)
           PATCH=$(echo "${LATEST}" | cut -d. -f3)
-          NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+
+          case "${BUMP_KIND}" in
+            major)
+              NEXT="$((MAJOR + 1)).0.0"
+              ;;
+            minor)
+              NEXT="${MAJOR}.$((MINOR + 1)).0"
+              ;;
+            patch|*)
+              NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+              ;;
+          esac
           TAG="v${NEXT}"
 
           # Idempotent: skip if tag already exists
@@ -47,7 +65,8 @@ jobs:
             exit 0
           fi
 
-          echo "Creating tag: ${TAG}"
+          echo "Creating tag: ${TAG} (bump: ${BUMP_KIND})"
           git tag "${TAG}"
           git push origin "${TAG}"
           echo "Created and pushed tag: ${TAG}"
+          # release.yml triggers automatically on push: tags: ['v*']
