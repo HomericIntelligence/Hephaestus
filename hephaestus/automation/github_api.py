@@ -80,7 +80,7 @@ def gh_list_labels(refresh: bool = False) -> set[str]:
         _label_cache = {item["name"] for item in data}
         return _label_cache
     except Exception as e:
-        logger.warning(f"Could not fetch label list: {e}; proceeding without validation")
+        logger.warning("Could not fetch label list: %s; proceeding without validation", e)
         return set()
 
 
@@ -99,7 +99,7 @@ def gh_create_label(name: str, color: str = "ededed", description: str = "") -> 
     _gh_call(cmd)
     if _label_cache is not None:
         _label_cache.add(name)
-    logger.info(f"Created missing label '{name}'")
+    logger.info("Created missing label '%s'", name)
 
 
 def _gh_call(
@@ -160,7 +160,7 @@ def _gh_call(
                     else:
                         # No reset time, use exponential backoff
                         wait_seconds = min(60 * (2**attempt), 300)  # Max 5 minutes
-                        logger.warning(f"Rate limited but no reset time, waiting {wait_seconds}s")
+                        logger.warning("Rate limited but no reset time, waiting %ss", wait_seconds)
                         time.sleep(wait_seconds)
                     continue
                 else:
@@ -182,7 +182,7 @@ def _gh_call(
                 r"invalid argument",
             ]
             if any(re.search(pattern, stderr, re.IGNORECASE) for pattern in non_transient_patterns):
-                logger.error(f"Non-transient error detected: {stderr[:200]}")
+                logger.error("Non-transient error detected: %s", stderr[:200])
                 raise
 
             # Last retry attempt, re-raise
@@ -191,7 +191,9 @@ def _gh_call(
 
             # Transient error (network, timeout, 5xx), retry with backoff
             wait_seconds = 2**attempt
-            logger.warning(f"gh call failed (attempt {attempt + 1}), retrying in {wait_seconds}s")
+            logger.warning(
+                "gh call failed (attempt %s), retrying in %ss", attempt + 1, wait_seconds
+            )
             time.sleep(wait_seconds)
 
     # Should not reach here, but satisfy type checker
@@ -249,7 +251,7 @@ def gh_issue_comment(issue_number: int, body: str) -> None:
     """
     try:
         _gh_call(["issue", "comment", str(issue_number), "--body", body])
-        logger.info(f"Posted comment to issue #{issue_number}")
+        logger.info("Posted comment to issue #%s", issue_number)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to post comment to issue #{issue_number}: {e}") from e
 
@@ -304,7 +306,7 @@ def gh_issue_create(title: str, body: str, labels: list[str] | None = None) -> i
             if m and labels:
                 missing_label = m.group(1)
                 logger.warning(
-                    f"Label '{missing_label}' not found after pre-create; recreating and retrying"
+                    "Label '%s' not found after pre-create; recreating and retrying", missing_label
                 )
                 gh_create_label(missing_label)
                 result = _gh_call(cmd)
@@ -317,7 +319,7 @@ def gh_issue_create(title: str, body: str, labels: list[str] | None = None) -> i
         except (ValueError, IndexError) as e:
             raise RuntimeError(f"Failed to parse issue number from output: {output}") from e
 
-        logger.info(f"Created issue #{issue_number}")
+        logger.info("Created issue #%s", issue_number)
         return issue_number
 
     except subprocess.CalledProcessError as e:
@@ -401,15 +403,15 @@ def gh_pr_create(
         except (ValueError, IndexError) as e:
             raise RuntimeError(f"Failed to parse PR number from output: {output}") from e
 
-        logger.info(f"Created PR #{pr_number}")
+        logger.info("Created PR #%s", pr_number)
 
         # Enable auto-merge if requested
         if auto_merge:
             try:
                 _gh_call(["pr", "merge", str(pr_number), "--auto", "--rebase"])
-                logger.info(f"Enabled auto-merge for PR #{pr_number}")
+                logger.info("Enabled auto-merge for PR #%s", pr_number)
             except Exception as e:
-                logger.warning(f"Failed to enable auto-merge for PR #{pr_number}: {e}")
+                logger.warning("Failed to enable auto-merge for PR #%s: %s", pr_number, e)
 
         return pr_number
 
@@ -448,15 +450,15 @@ def _fetch_batch_states(batch: list[int], owner: str, repo: str) -> dict[int, Is
         for key, issue_data in repo_data.items():
             if key.startswith("issue") and issue_data:
                 states[issue_data["number"]] = IssueState(issue_data["state"])
-        logger.debug(f"Fetched states for {len(batch)} issues")
+        logger.debug("Fetched states for %s issues", len(batch))
     except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError) as e:
-        logger.warning(f"Failed to batch fetch issue states: {e}")
+        logger.warning("Failed to batch fetch issue states: %s", e)
         for num in batch:
             try:
                 issue_data = gh_issue_json(num)
                 states[num] = IssueState(issue_data["state"])
             except Exception as e2:
-                logger.warning(f"Failed to fetch state for issue #{num}: {e2}")
+                logger.warning("Failed to fetch state for issue #%s: %s", num, e2)
     return states
 
 
@@ -476,13 +478,13 @@ def prefetch_issue_states(issue_numbers: list[int]) -> dict[int, IssueState]:
     try:
         owner, repo = get_repo_info()
     except RuntimeError as e:
-        logger.warning(f"Failed to get repo info: {e}")
+        logger.warning("Failed to get repo info: %s", e)
         return {}
 
     # Sanitize owner and repo to prevent GraphQL injection
     # Owner and repo should be alphanumeric with hyphens/underscores
     if not re.match(r"^[a-zA-Z0-9_-]+$", owner) or not re.match(r"^[a-zA-Z0-9_-]+$", repo):
-        logger.error(f"Invalid owner/repo format: {owner}/{repo}")
+        logger.error("Invalid owner/repo format: %s/%s", owner, repo)
         return {}
 
     batch_size = 100
@@ -512,7 +514,7 @@ def is_issue_closed(issue_number: int, cached_states: dict[int, IssueState] | No
         issue_data = gh_issue_json(issue_number)
         return cast(bool, issue_data["state"] == "CLOSED")
     except Exception as e:
-        logger.warning(f"Failed to check if issue #{issue_number} is closed: {e}")
+        logger.warning("Failed to check if issue #%s is closed: %s", issue_number, e)
         return False
 
 
@@ -602,7 +604,7 @@ def write_secure(path: Path, content: str) -> None:
         with os.fdopen(fd, "w") as f:
             f.write(content)
         os.replace(temp_path, path)
-        logger.debug(f"Wrote {len(content)} bytes to {path}")
+        logger.debug("Wrote %s bytes to %s", len(content), path)
     except Exception:
         # Clean up temp file on error
         with contextlib.suppress(OSError):
@@ -632,7 +634,9 @@ def gh_pr_review_post(
     """
     if dry_run:
         logger.info(
-            f"[dry_run] Would post PR review on #{pr_number} with {len(comments)} inline comments"
+            "[dry_run] Would post PR review on #%s with %s inline comments",
+            pr_number,
+            len(comments),
         )
         return []
 
@@ -720,7 +724,7 @@ mutation AddReview(
             seen[tid] = None
 
     thread_ids: list[str] = list(seen)
-    logger.info(f"Posted PR review on #{pr_number}; created {len(thread_ids)} thread(s)")
+    logger.info("Posted PR review on #%s; created %s thread(s)", pr_number, len(thread_ids))
     return thread_ids
 
 
@@ -739,14 +743,14 @@ def gh_pr_list_unresolved_threads(
 
     """
     if dry_run:
-        logger.info(f"[dry_run] Would list unresolved threads for PR #{pr_number}")
+        logger.info("[dry_run] Would list unresolved threads for PR #%s", pr_number)
         return []
 
     owner, repo = get_repo_info()
 
     # Sanitize owner/repo to prevent injection (same pattern as prefetch_issue_states)
     if not re.match(r"^[a-zA-Z0-9_-]+$", owner) or not re.match(r"^[a-zA-Z0-9_-]+$", repo):
-        logger.error(f"Invalid owner/repo format: {owner}/{repo}")
+        logger.error("Invalid owner/repo format: %s/%s", owner, repo)
         return []
 
     query = f"""
@@ -796,7 +800,7 @@ query GetThreads {{
             }
         )
 
-    logger.debug(f"Found {len(threads)} unresolved thread(s) on PR #{pr_number}")
+    logger.debug("Found %s unresolved thread(s) on PR #%s", len(threads), pr_number)
     return threads
 
 
@@ -814,7 +818,7 @@ def gh_pr_resolve_thread(
 
     """
     if dry_run:
-        logger.info(f"[dry_run] Would resolve thread {thread_id!r} with reply: {reply_body!r}")
+        logger.info("[dry_run] Would resolve thread %r with reply: %r", thread_id, reply_body)
         return
 
     # Step 1: post a reply to the thread via GraphQL addPullRequestReviewComment
@@ -869,7 +873,7 @@ mutation ResolveThread($threadId: ID!) {
             json.loads(resolve_result.stdout or "{}"),
             f"gh_pr_resolve_thread.resolve(thread={thread_id})",
         )
-    logger.info(f"Resolved review thread {thread_id!r}")
+    logger.info("Resolved review thread %r", thread_id)
 
 
 def gh_pr_checks(
@@ -888,7 +892,7 @@ def gh_pr_checks(
 
     """
     if dry_run:
-        logger.info(f"[dry_run] Would fetch CI checks for PR #{pr_number}")
+        logger.info("[dry_run] Would fetch CI checks for PR #%s", pr_number)
         return []
 
     result = _gh_call(
@@ -906,5 +910,5 @@ def gh_pr_checks(
         for item in raw
     ]
 
-    logger.debug(f"Fetched {len(checks)} CI check(s) for PR #{pr_number}")
+    logger.debug("Fetched %s CI check(s) for PR #%s", len(checks), pr_number)
     return checks

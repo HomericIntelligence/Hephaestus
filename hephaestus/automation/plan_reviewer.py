@@ -68,8 +68,9 @@ class PlanReviewer:
 
         """
         logger.info(
-            f"Reviewing plans for {len(self.options.issues)} issue(s) "
-            f"with {self.options.max_workers} parallel workers"
+            "Reviewing plans for %s issue(s) with %s parallel workers",
+            len(self.options.issues),
+            self.options.max_workers,
         )
 
         if not self.options.issues:
@@ -99,11 +100,13 @@ class PlanReviewer:
                         with self.lock:
                             results[issue_num] = result
                         if result.success:
-                            logger.info(f"Issue #{issue_num}: plan review completed")
+                            logger.info("Issue #%s: plan review completed", issue_num)
                         else:
-                            logger.error(f"Issue #{issue_num}: plan review failed: {result.error}")
+                            logger.error(
+                                "Issue #%s: plan review failed: %s", issue_num, result.error
+                            )
                     except Exception as e:
-                        logger.error(f"Issue #{issue_num} raised exception: {e}")
+                        logger.error("Issue #%s raised exception: %s", issue_num, e)
                         with self.lock:
                             results[issue_num] = WorkerResult(
                                 issue_number=issue_num,
@@ -140,13 +143,13 @@ class PlanReviewer:
 
             # Skip if already reviewed
             if self._has_existing_review(issue_number):
-                logger.info(f"Issue #{issue_number}: already has a plan review, skipping")
+                logger.info("Issue #%s: already has a plan review, skipping", issue_number)
                 return WorkerResult(issue_number=issue_number, success=True)
 
             # Skip if no plan exists
             plan_text = self._get_latest_plan(issue_number)
             if plan_text is None:
-                logger.info(f"Issue #{issue_number}: no plan comment found, skipping")
+                logger.info("Issue #%s: no plan comment found, skipping", issue_number)
                 return WorkerResult(issue_number=issue_number, success=True)
 
             # Fetch issue details for context
@@ -178,8 +181,10 @@ class PlanReviewer:
             # --- DRY-RUN GUARD: no GitHub writes beyond this point ---
             if self.options.dry_run:
                 logger.info(
-                    f"[DRY RUN] Would post plan review to issue #{issue_number}:\n"
-                    f"{_REVIEW_PREFIX}\n{review_text[:200]}..."
+                    "[DRY RUN] Would post plan review to issue #%s:\n%s\n%s...",
+                    issue_number,
+                    _REVIEW_PREFIX,
+                    review_text[:200],
                 )
                 return WorkerResult(issue_number=issue_number, success=True)
 
@@ -190,7 +195,7 @@ class PlanReviewer:
             return WorkerResult(issue_number=issue_number, success=True)
 
         except Exception as e:
-            logger.error(f"Issue #{issue_number}: unexpected error: {e}")
+            logger.error("Issue #%s: unexpected error: %s", issue_number, e)
             return WorkerResult(
                 issue_number=issue_number,
                 success=False,
@@ -236,7 +241,7 @@ class PlanReviewer:
             data = json.loads(result.stdout)
             comments: list[dict[str, Any]] = data.get("comments", [])
         except Exception as e:
-            logger.warning(f"Failed to fetch comments for issue #{issue_number}: {e}")
+            logger.warning("Failed to fetch comments for issue #%s: %s", issue_number, e)
             comments = []
 
         cache[issue_number] = comments
@@ -261,7 +266,7 @@ class PlanReviewer:
         for comment in reversed(comments):
             body: str = comment.get("body", "")
             if any(marker in body for marker in _PLAN_MARKERS):
-                logger.debug(f"Found plan comment for issue #{issue_number}")
+                logger.debug("Found plan comment for issue #%s", issue_number)
                 return body
 
         return None
@@ -284,7 +289,7 @@ class PlanReviewer:
         for comment in comments:
             body: str = comment.get("body", "")
             if body.startswith(_REVIEW_PREFIX):
-                logger.debug(f"Found existing review for issue #{issue_number}")
+                logger.debug("Found existing review for issue #%s", issue_number)
                 return True
 
         return False
@@ -367,26 +372,28 @@ class PlanReviewer:
                     )
 
                 logger.error(
-                    f"Claude returned exit code {result.returncode} for issue #{issue_number}: "
-                    f"{(stderr or stdout)[:200]}"
+                    "Claude returned exit code %s for issue #%s: %s",
+                    result.returncode,
+                    issue_number,
+                    (stderr or stdout)[:200],
                 )
                 return None
 
             output: str = (result.stdout or "").strip()
             if not output:
-                logger.error(f"Claude returned empty output for issue #{issue_number}")
+                logger.error("Claude returned empty output for issue #%s", issue_number)
                 return None
 
             return output
 
         except subprocess.TimeoutExpired:
-            logger.error(f"Claude timed out reviewing plan for issue #{issue_number}")
+            logger.error("Claude timed out reviewing plan for issue #%s", issue_number)
             return None
         except FileNotFoundError:
             logger.error("'claude' CLI not found in PATH; cannot run plan review")
             return None
         except Exception as e:
-            logger.error(f"Unexpected error calling Claude for issue #{issue_number}: {e}")
+            logger.error("Unexpected error calling Claude for issue #%s: %s", issue_number, e)
             return None
 
     def _post_review(self, issue_number: int, review_text: str) -> None:
@@ -399,7 +406,7 @@ class PlanReviewer:
         """
         comment_body = f"{_REVIEW_PREFIX}\n\n{review_text}"
         gh_issue_comment(issue_number, comment_body)
-        logger.info(f"Posted plan review to issue #{issue_number}")
+        logger.info("Posted plan review to issue #%s", issue_number)
 
     def _print_summary(self, results: dict[int, WorkerResult]) -> None:
         """Print a summary of plan review results.
@@ -415,15 +422,15 @@ class PlanReviewer:
         logger.info("=" * 60)
         logger.info("Plan Review Summary")
         logger.info("=" * 60)
-        logger.info(f"Total issues: {total}")
-        logger.info(f"Successful: {successful}")
-        logger.info(f"Failed: {failed}")
+        logger.info("Total issues: %s", total)
+        logger.info("Successful: %s", successful)
+        logger.info("Failed: %s", failed)
 
         if failed > 0:
             logger.info("Failed issues:")
             for issue_num, result in results.items():
                 if not result.success:
-                    logger.info(f"  #{issue_num}: {result.error}")
+                    logger.info("  #%s: %s", issue_num, result.error)
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +529,7 @@ def main() -> int:
     # post two reviews on the same issue.
     args.issues = list(dict.fromkeys(args.issues))
 
-    log.info(f"Starting plan review for issues: {args.issues}")
+    log.info("Starting plan review for issues: %s", args.issues)
 
     try:
         options = PlanReviewerOptions(
@@ -538,7 +545,7 @@ def main() -> int:
 
         failed = [num for num, result in results.items() if not result.success]
         if failed:
-            log.error(f"Failed to review {len(failed)} plan(s) for issue(s): {failed}")
+            log.error("Failed to review %s plan(s) for issue(s): %s", len(failed), failed)
             return 1
 
         log.info("Plan review complete")

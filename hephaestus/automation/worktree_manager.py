@@ -73,7 +73,7 @@ class WorktreeManager:
         self.preserved: list[tuple[int, Path]] = []
         self.lock = threading.Lock()
 
-        logger.debug(f"Initialized WorktreeManager at {self.base_dir}")
+        logger.debug("Initialized WorktreeManager at %s", self.base_dir)
 
     @property
     def base_branch(self) -> str:
@@ -136,7 +136,7 @@ class WorktreeManager:
         """
         with self.lock:
             if issue_number in self.worktrees:
-                logger.warning(f"Worktree for issue #{issue_number} already exists")
+                logger.warning("Worktree for issue #%s already exists", issue_number)
                 return self.worktrees[issue_number]
 
             if branch_name is None:
@@ -146,7 +146,7 @@ class WorktreeManager:
 
             # Remove existing directory if present
             if worktree_path.exists():
-                logger.warning(f"Removing existing worktree directory: {worktree_path}")
+                logger.warning("Removing existing worktree directory: %s", worktree_path)
                 # Try git worktree remove first to clean up git metadata
                 try:
                     run(
@@ -155,7 +155,7 @@ class WorktreeManager:
                         check=False,
                     )
                 except Exception as e:
-                    logger.debug(f"git worktree remove failed (expected if not a worktree): {e}")
+                    logger.debug("git worktree remove failed (expected if not a worktree): %s", e)
 
                 # Fallback to direct directory removal
                 if worktree_path.exists():
@@ -165,7 +165,7 @@ class WorktreeManager:
                 try:
                     run(["git", "worktree", "prune"], cwd=self.repo_root, check=False)
                 except Exception as e:
-                    logger.debug(f"git worktree prune failed: {e}")
+                    logger.debug("git worktree prune failed: %s", e)
 
             try:
                 # Check if branch already exists
@@ -182,7 +182,7 @@ class WorktreeManager:
                     branch_exists = False
 
                 if branch_exists:
-                    logger.info(f"Branch {branch_name} already exists, reusing it")
+                    logger.info("Branch %s already exists, reusing it", branch_name)
                     # Create worktree from existing branch
                     run(
                         [
@@ -210,7 +210,7 @@ class WorktreeManager:
                     )
 
                 self.worktrees[issue_number] = worktree_path
-                logger.info(f"Created worktree for issue #{issue_number} at {worktree_path}")
+                logger.info("Created worktree for issue #%s at %s", issue_number, worktree_path)
                 return worktree_path
 
             except Exception as e:
@@ -230,7 +230,7 @@ class WorktreeManager:
         """
         with self.lock:
             if issue_number not in self.worktrees:
-                logger.warning(f"No worktree found for issue #{issue_number}")
+                logger.warning("No worktree found for issue #%s", issue_number)
                 return
 
             worktree_path = self.worktrees[issue_number]
@@ -246,7 +246,7 @@ class WorktreeManager:
                 run(cmd, cwd=self.repo_root)
 
                 del self.worktrees[issue_number]
-                logger.info(f"Removed worktree for issue #{issue_number}")
+                logger.info("Removed worktree for issue #%s", issue_number)
 
             except Exception as e:
                 raise RuntimeError(f"Failed to remove worktree: {e}") from e
@@ -287,10 +287,10 @@ class WorktreeManager:
             try:
                 self.remove_worktree(issue_num, force=force)
             except WorktreeDirtyError as e:
-                logger.info(f"Preserved dirty worktree for issue #{e.issue_number} at {e.path}")
+                logger.info("Preserved dirty worktree for issue #%s at %s", e.issue_number, e.path)
                 self.preserved.append((e.issue_number, e.path))
             except Exception as e:
-                logger.error(f"Failed to remove worktree for issue #{issue_num}: {e}")
+                logger.error("Failed to remove worktree for issue #%s: %s", issue_num, e)
 
     def prune_worktrees(self) -> None:
         """Prune stale worktree administrative files.
@@ -301,7 +301,7 @@ class WorktreeManager:
             run(["git", "worktree", "prune"], cwd=self.repo_root)
             logger.info("Pruned stale worktrees")
         except Exception as e:
-            logger.error(f"Failed to prune worktrees: {e}")
+            logger.error("Failed to prune worktrees: %s", e)
 
     def list_worktrees(self) -> list[dict[str, str]]:
         """List all git worktrees in the repository.
@@ -341,7 +341,7 @@ class WorktreeManager:
             return worktrees
 
         except Exception as e:
-            logger.error(f"Failed to list worktrees: {e}")
+            logger.error("Failed to list worktrees: %s", e)
             return []
 
     def ensure_branch_deleted(self, branch_name: str) -> None:
@@ -358,9 +358,9 @@ class WorktreeManager:
                 cwd=self.repo_root,
                 check=False,
             )
-            logger.debug(f"Deleted local branch {branch_name}")
+            logger.debug("Deleted local branch %s", branch_name)
         except Exception as e:
-            logger.warning(f"Failed to delete local branch {branch_name}: {e}")
+            logger.warning("Failed to delete local branch %s: %s", branch_name, e)
 
         # Delete remote branch
         try:
@@ -369,6 +369,6 @@ class WorktreeManager:
                 cwd=self.repo_root,
                 check=False,
             )
-            logger.debug(f"Deleted remote branch {branch_name}")
+            logger.debug("Deleted remote branch %s", branch_name)
         except Exception as e:
-            logger.warning(f"Failed to delete remote branch {branch_name}: {e}")
+            logger.warning("Failed to delete remote branch %s: %s", branch_name, e)

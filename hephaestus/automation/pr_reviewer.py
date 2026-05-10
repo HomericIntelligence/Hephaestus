@@ -109,7 +109,7 @@ class PRReviewer:
             Dictionary mapping issue number to WorkerResult
 
         """
-        logger.info(f"Starting PR review for issues: {self.options.issues}")
+        logger.info("Starting PR review for issues: %s", self.options.issues)
 
         # Discover PRs for all issues
         pr_map = self._discover_prs(self.options.issues)
@@ -118,7 +118,7 @@ class PRReviewer:
             logger.warning("No open PRs found for the specified issues")
             return {}
 
-        logger.info(f"Found {len(pr_map)} PR(s) to review: {pr_map}")
+        logger.info("Found %s PR(s) to review: %s", len(pr_map), pr_map)
 
         # Start UI if enabled
         if not self.options.dry_run and self.options.enable_ui:
@@ -154,7 +154,7 @@ class PRReviewer:
             if pr_number is not None:
                 pr_map[issue_num] = pr_number
             else:
-                logger.warning(f"No open PR found for issue #{issue_num}")
+                logger.warning("No open PR found for issue #%s", issue_num)
 
         return pr_map
 
@@ -307,7 +307,7 @@ class PRReviewer:
 
         """
         if self.options.dry_run:
-            logger.info(f"[DRY RUN] Would run analysis session for PR #{pr_number}")
+            logger.info("[DRY RUN] Would run analysis session for PR #%s", pr_number)
             return {"comments": [], "summary": "[DRY RUN] analysis skipped"}
 
         prompt = get_pr_review_analysis_prompt(
@@ -352,8 +352,9 @@ class PRReviewer:
 
             parsed = _parse_json_block(response_text)
             logger.info(
-                f"Analysis complete for PR #{pr_number}; "
-                f"found {len(parsed.get('comments', []))} inline comment(s)"
+                "Analysis complete for PR #%s; found %s inline comment(s)",
+                pr_number,
+                len(parsed.get("comments", [])),
             )
             return parsed
 
@@ -637,11 +638,11 @@ class PRReviewer:
                         result = future.result()
                         results[issue_num] = result
                         if result.success:
-                            logger.info(f"Issue #{issue_num} PR review completed")
+                            logger.info("Issue #%s PR review completed", issue_num)
                         else:
-                            logger.error(f"Issue #{issue_num} PR review failed: {result.error}")
+                            logger.error("Issue #%s PR review failed: %s", issue_num, result.error)
                     except Exception as e:
-                        logger.error(f"Issue #{issue_num} raised exception: {e}")
+                        logger.error("Issue #%s raised exception: %s", issue_num, e)
                         results[issue_num] = WorkerResult(
                             issue_number=issue_num,
                             success=False,
@@ -665,15 +666,15 @@ class PRReviewer:
         logger.info("=" * 60)
         logger.info("PR Review Summary")
         logger.info("=" * 60)
-        logger.info(f"Total PRs: {total}")
-        logger.info(f"Successful: {successful}")
-        logger.info(f"Failed: {failed}")
+        logger.info("Total PRs: %s", total)
+        logger.info("Successful: %s", successful)
+        logger.info("Failed: %s", failed)
 
         if failed > 0:
             logger.info("\nFailed issues:")
             for issue_num, result in results.items():
                 if not result.success:
-                    logger.info(f"  #{issue_num}: {result.error}")
+                    logger.info("  #%s: %s", issue_num, result.error)
 
 
 def _setup_logging(verbose: bool = False) -> None:
@@ -758,7 +759,7 @@ def main() -> int:
     _setup_logging(args.verbose)
 
     log = logging.getLogger(__name__)
-    log.info(f"Starting PR review for issues: {args.issues}")
+    log.info("Starting PR review for issues: %s", args.issues)
 
     from hephaestus.automation.models import ReviewerOptions
     from hephaestus.utils.terminal import terminal_guard
@@ -777,7 +778,7 @@ def main() -> int:
 
             failed = [num for num, result in results.items() if not result.success]
             if failed:
-                log.error(f"Failed to review {len(failed)} PR(s) for issue(s): {failed}")
+                log.error("Failed to review %s PR(s) for issue(s): %s", len(failed), failed)
                 return 1
 
             log.info("PR review complete")

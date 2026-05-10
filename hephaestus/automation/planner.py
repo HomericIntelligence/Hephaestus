@@ -76,8 +76,9 @@ class Planner:
 
         """
         logger.info(
-            f"Planning {len(self.options.issues)} issues "
-            f"with {self.options.parallel} parallel workers"
+            "Planning %s issues with %s parallel workers",
+            len(self.options.issues),
+            self.options.parallel,
         )
 
         # Filter closed issues if requested
@@ -103,7 +104,7 @@ class Planner:
                     with self.lock:
                         self.results[issue_num] = result
                 except Exception as e:
-                    logger.error(f"Failed to plan issue #{issue_num}: {e}")
+                    logger.error("Failed to plan issue #%s: %s", issue_num, e)
                     with self.lock:
                         self.results[issue_num] = PlanResult(
                             issue_number=issue_num,
@@ -131,7 +132,7 @@ class Planner:
         for issue_num in self.options.issues:
             # Check if already planned (unless force)
             if not self.options.force and self._has_existing_plan(issue_num):
-                logger.info(f"Issue #{issue_num} already has a plan, skipping")
+                logger.info("Issue #%s already has a plan, skipping", issue_num)
                 with self.lock:
                     self.results[issue_num] = PlanResult(
                         issue_number=issue_num,
@@ -144,7 +145,7 @@ class Planner:
             if self.options.skip_closed:
                 state = cached_states.get(issue_num)
                 if state and state.value == "CLOSED":
-                    logger.info(f"Issue #{issue_num} is closed, skipping")
+                    logger.info("Issue #%s is closed, skipping", issue_num)
                     continue
 
             issues_to_plan.append(issue_num)
@@ -180,13 +181,13 @@ class Planner:
             for comment in comments:
                 body = comment.get("body", "")
                 if any(marker in body for marker in PLAN_COMMENT_MARKERS):
-                    logger.debug(f"Found existing plan for issue #{issue_number}")
+                    logger.debug("Found existing plan for issue #%s", issue_number)
                     return True
 
             return False
 
         except Exception as e:
-            logger.warning(f"Failed to check for existing plan on issue #{issue_number}: {e}")
+            logger.warning("Failed to check for existing plan on issue #%s: %s", issue_number, e)
             return False
 
     def _plan_issue(self, issue_number: int) -> PlanResult:
@@ -211,7 +212,7 @@ class Planner:
             self.status_tracker.update_slot(slot_id, f"Planning issue #{issue_number}")
 
             if self.options.dry_run:
-                logger.info(f"[DRY RUN] Would plan issue #{issue_number}")
+                logger.info("[DRY RUN] Would plan issue #%s", issue_number)
                 return PlanResult(issue_number=issue_number, success=True)
 
             # Run the strict review loop: advise → loop[plan → learn → review]
@@ -244,7 +245,7 @@ class Planner:
             return PlanResult(issue_number=issue_number, success=True)
 
         except Exception as e:
-            logger.error(f"Failed to plan issue #{issue_number}: {e}")
+            logger.error("Failed to plan issue #%s: %s", issue_number, e)
             return PlanResult(
                 issue_number=issue_number,
                 success=False,
@@ -381,10 +382,10 @@ class Planner:
                         text=True,
                         timeout=30,
                     )
-                    logger.debug(f"ProjectMnemosyne refreshed at {mnemosyne_root}")
+                    logger.debug("ProjectMnemosyne refreshed at %s", mnemosyne_root)
                 except Exception as e:
                     logger.warning(
-                        f"Failed to refresh ProjectMnemosyne (using existing clone): {e}"
+                        "Failed to refresh ProjectMnemosyne (using existing clone): %s", e
                     )
                 return True
 
@@ -398,7 +399,7 @@ class Planner:
                     if mnemosyne_root.exists():
                         return True
 
-                    logger.info(f"Cloning ProjectMnemosyne to {mnemosyne_root}...")
+                    logger.info("Cloning ProjectMnemosyne to %s...", mnemosyne_root)
                     subprocess.run(
                         [
                             "gh",
@@ -427,7 +428,7 @@ class Planner:
                     return False
 
                 except subprocess.CalledProcessError as e:
-                    logger.warning(f"Failed to clone ProjectMnemosyne: {e.stderr or e}")
+                    logger.warning("Failed to clone ProjectMnemosyne: %s", e.stderr or e)
                     return False
 
                 finally:
@@ -456,14 +457,16 @@ class Planner:
             marketplace_path = mnemosyne_root / ".claude-plugin" / "marketplace.json"
             if not marketplace_path.exists():
                 logger.warning(
-                    f"Marketplace file not found at {marketplace_path}; "
-                    "attempting recovery re-clone of ProjectMnemosyne"
+                    "Marketplace file not found at %s; "
+                    "attempting recovery re-clone of ProjectMnemosyne",
+                    marketplace_path,
                 )
                 shutil.rmtree(mnemosyne_root, ignore_errors=True)
                 if not self._ensure_mnemosyne(mnemosyne_root) or not marketplace_path.exists():
                     logger.error(
-                        f"Recovery failed: marketplace.json still missing at {marketplace_path}; "
-                        "skipping advise step"
+                        "Recovery failed: marketplace.json still missing at %s; "
+                        "skipping advise step",
+                        marketplace_path,
                     )
                     return self._advise_skipped(f"marketplace.json missing at {marketplace_path}")
 
@@ -477,13 +480,13 @@ class Planner:
 
             # Call Claude with shorter timeout. /advise is light search work
             # so it runs on the cheap model.
-            logger.info(f"Running advise for issue #{issue_number}...")
+            logger.info("Running advise for issue #%s...", issue_number)
             findings = self._call_claude(advise_prompt, model=advise_model(), timeout=180)
 
             return findings
 
         except Exception as e:
-            logger.warning(f"Advise step failed for issue #{issue_number}: {e}")
+            logger.warning("Advise step failed for issue #%s: %s", issue_number, e)
             return self._advise_skipped(f"unexpected error: {e}")
 
     @staticmethod
@@ -636,7 +639,7 @@ class Planner:
 """
 
         gh_issue_comment(issue_number, comment_body)
-        logger.info(f"Posted plan to issue #{issue_number}")
+        logger.info("Posted plan to issue #%s", issue_number)
 
     # ------------------------------------------------------------------
     # Strict review loop — advise → loop[plan → learn → review] → post
@@ -710,12 +713,15 @@ class Planner:
 
             verdict = parse_review_verdict(review_text)
             logger.info(
-                f"#{issue_number} R{iteration}: Verdict={verdict.verdict} "
-                f"Grade={verdict.grade or '?'}"
+                "#%s R%s: Verdict=%s Grade=%s",
+                issue_number,
+                iteration,
+                verdict.verdict,
+                verdict.grade or "?",
             )
 
             if verdict.is_go:
-                logger.info(f"#{issue_number}: GO on iteration {iteration} — loop terminated")
+                logger.info("#%s: GO on iteration %s — loop terminated", issue_number, iteration)
                 final_verdict_is_go = True
                 break
 
@@ -724,8 +730,10 @@ class Planner:
 
         if not final_verdict_is_go:
             logger.warning(
-                f"#{issue_number}: review loop exhausted {iterations_run} iteration(s) "
-                "without a GO verdict — plan posted with NOGO-exhausted status"
+                "#%s: review loop exhausted %s iteration(s) without a GO verdict — "
+                "plan posted with NOGO-exhausted status",
+                issue_number,
+                iterations_run,
             )
 
         return plan, review_text, iterations_run, final_verdict_is_go
@@ -764,7 +772,7 @@ class Planner:
         try:
             return self._call_claude(prompt, model=learn_model(), timeout=120)
         except Exception as e:
-            logger.warning(f"#{issue_number}: planner-learnings capture failed (non-fatal): {e}")
+            logger.warning("#%s: planner-learnings capture failed (non-fatal): %s", issue_number, e)
             return ""
 
     def _run_plan_review(
@@ -814,8 +822,10 @@ class Planner:
             )
         except Exception as e:
             logger.error(
-                f"#{issue_number} R{iteration}: reviewer call failed: {e}; "
-                "treating as NOGO so the loop continues"
+                "#%s R%s: reviewer call failed: %s; treating as NOGO so the loop continues",
+                issue_number,
+                iteration,
+                e,
             )
             return (
                 f"Reviewer invocation failed at iteration {iteration}: {e}\n\n"
@@ -832,16 +842,16 @@ class Planner:
         logger.info("=" * 60)
         logger.info("Planning Summary")
         logger.info("=" * 60)
-        logger.info(f"Total issues: {total}")
-        logger.info(f"Successfully planned: {successful - already_planned}")
-        logger.info(f"Already planned: {already_planned}")
-        logger.info(f"Failed: {failed}")
+        logger.info("Total issues: %s", total)
+        logger.info("Successfully planned: %s", successful - already_planned)
+        logger.info("Already planned: %s", already_planned)
+        logger.info("Failed: %s", failed)
 
         if failed > 0:
             logger.info("\nFailed issues:")
             for issue_num, result in self.results.items():
                 if not result.success:
-                    logger.info(f"  #{issue_num}: {result.error}")
+                    logger.info("  #%s: %s", issue_num, result.error)
 
 
 def _setup_logging(verbose: bool = False) -> None:
@@ -956,7 +966,7 @@ def main() -> int:
 
     if not args.issues:
         discovered = gh_list_open_issues()
-        log.info(f"No --issues given; discovered {len(discovered)} open issues: {discovered}")
+        log.info("No --issues given; discovered %s open issues: %s", len(discovered), discovered)
         args.issues = discovered
 
     # Dedupe while preserving first-seen order. dict.fromkeys is the
@@ -964,7 +974,7 @@ def main() -> int:
     # would race two workers on the same issue and produce double-posts.
     args.issues = list(dict.fromkeys(args.issues))
 
-    log.info(f"Issues to plan: {args.issues}")
+    log.info("Issues to plan: %s", args.issues)
 
     try:
         options = PlannerOptions(
@@ -982,7 +992,7 @@ def main() -> int:
 
         failed = [num for num, result in results.items() if not result.success]
         if failed:
-            log.error(f"Failed to plan {len(failed)} issue(s): {failed}")
+            log.error("Failed to plan %s issue(s): %s", len(failed), failed)
             return 1
 
         log.info("Planning complete")

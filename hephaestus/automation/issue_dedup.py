@@ -205,7 +205,7 @@ def find_duplicate_open_issue(
     except Exception as e:
         # Search is best-effort; on failure, behave as if no duplicate exists
         # so the caller files the issue normally.
-        logger.warning(f"Duplicate search failed for '{title[:60]}': {e}")
+        logger.warning("Duplicate search failed for '%s': %s", title[:60], e)
         return None
 
     best: IssueMatch | None = None
@@ -222,8 +222,11 @@ def find_duplicate_open_issue(
 
     if best:
         logger.info(
-            f"Duplicate detected: '{title[:60]}' ~ #{best.number} "
-            f"'{best.title[:60]}' (score={best.similarity:.2f})"
+            "Duplicate detected: '%s' ~ #%s '%s' (score=%.2f)",
+            title[:60],
+            best.number,
+            best.title[:60],
+            best.similarity,
         )
     return best
 

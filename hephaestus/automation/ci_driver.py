@@ -67,8 +67,9 @@ class CIDriver:
 
         """
         logger.info(
-            f"Starting CI driver for {len(self.options.issues)} issue(s) "
-            f"with {self.options.max_workers} parallel workers"
+            "Starting CI driver for %s issue(s) with %s parallel workers",
+            len(self.options.issues),
+            self.options.max_workers,
         )
 
         if not self.options.issues:
@@ -82,7 +83,7 @@ class CIDriver:
             logger.warning("No open PRs found for the specified issues — nothing to drive")
             return {}
 
-        logger.info(f"Found {len(pr_map)} PR(s) to drive to green: {pr_map}")
+        logger.info("Found %s PR(s) to drive to green: %s", len(pr_map), pr_map)
 
         results: dict[int, WorkerResult] = {}
 
@@ -110,11 +111,13 @@ class CIDriver:
                             with self.lock:
                                 results[issue_num] = result
                             if result.success:
-                                logger.info(f"Issue #{issue_num}: CI drive completed")
+                                logger.info("Issue #%s: CI drive completed", issue_num)
                             else:
-                                logger.error(f"Issue #{issue_num}: CI drive failed: {result.error}")
+                                logger.error(
+                                    "Issue #%s: CI drive failed: %s", issue_num, result.error
+                                )
                         except Exception as e:
-                            logger.error(f"Issue #{issue_num} raised exception: {e}")
+                            logger.error("Issue #%s raised exception: %s", issue_num, e)
                             with self.lock:
                                 results[issue_num] = WorkerResult(
                                     issue_number=issue_num,
@@ -157,7 +160,7 @@ class CIDriver:
             if pr_number is not None:
                 pr_map[issue_num] = pr_number
             else:
-                logger.info(f"Issue #{issue_num}: no open PR found, skipping")
+                logger.info("Issue #%s: no open PR found, skipping", issue_num)
         return pr_map
 
     def _drive_issue(  # noqa: C901  # poll loop + required-check classification + fix path
@@ -207,7 +210,7 @@ class CIDriver:
             while True:
                 checks = gh_pr_checks(pr_number, dry_run=self.options.dry_run)
                 if not checks:
-                    logger.info(f"Issue #{issue_number}: no CI checks found for PR #{pr_number}")
+                    logger.info("Issue #%s: no CI checks found for PR #%s", issue_number, pr_number)
                     return WorkerResult(
                         issue_number=issue_number, success=True, pr_number=pr_number
                     )
@@ -230,9 +233,11 @@ class CIDriver:
                 sleep_secs = min(2**poll_attempt, 60)
                 if poll_elapsed + sleep_secs > _ci_poll_max_wait:
                     logger.warning(
-                        f"Issue #{issue_number}: CI checks still pending after "
-                        f"{poll_elapsed}s (limit {_ci_poll_max_wait}s), "
-                        f"treating as not yet failing"
+                        "Issue #%s: CI checks still pending after %ss (limit %ss), "
+                        "treating as not yet failing",
+                        issue_number,
+                        poll_elapsed,
+                        _ci_poll_max_wait,
                     )
                     return WorkerResult(
                         issue_number=issue_number, success=True, pr_number=pr_number
@@ -244,8 +249,11 @@ class CIDriver:
                     f"{poll_elapsed}s elapsed)",
                 )
                 logger.debug(
-                    f"Issue #{issue_number}: CI checks pending, sleeping {sleep_secs}s "
-                    f"(attempt {poll_attempt + 1}, {poll_elapsed}s elapsed)"
+                    "Issue #%s: CI checks pending, sleeping %ss (attempt %s, %ss elapsed)",
+                    issue_number,
+                    sleep_secs,
+                    poll_attempt + 1,
+                    poll_elapsed,
                 )
                 time.sleep(sleep_secs)
                 poll_elapsed += sleep_secs
@@ -262,8 +270,9 @@ class CIDriver:
                 # DRY-RUN GUARD before auto-merge
                 if self.options.dry_run:
                     logger.info(
-                        f"[dry_run] Would enable auto-merge for PR #{pr_number} "
-                        f"(issue #{issue_number})"
+                        "[dry_run] Would enable auto-merge for PR #%s (issue #%s)",
+                        pr_number,
+                        issue_number,
                     )
                     return WorkerResult(
                         issue_number=issue_number, success=True, pr_number=pr_number
@@ -282,8 +291,10 @@ class CIDriver:
                 # All concluded but none are green and none are "failure" —
                 # e.g. all cancelled.  Nothing for us to fix.
                 logger.info(
-                    f"Issue #{issue_number}: PR #{pr_number} checks concluded with "
-                    "non-green, non-failure conclusions (e.g. cancelled)"
+                    "Issue #%s: PR #%s checks concluded with non-green, non-failure conclusions "
+                    "(e.g. cancelled)",
+                    issue_number,
+                    pr_number,
                 )
                 return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
@@ -300,7 +311,7 @@ class CIDriver:
             )
 
         except Exception as e:
-            logger.error(f"Issue #{issue_number}: unexpected error: {e}")
+            logger.error("Issue #%s: unexpected error: %s", issue_number, e)
             return WorkerResult(
                 issue_number=issue_number,
                 success=False,
@@ -338,8 +349,10 @@ class CIDriver:
 
             if self.options.dry_run:
                 logger.info(
-                    f"[dry_run] Would run CI fix session for PR #{pr_number} "
-                    f"(issue #{issue_number}, iteration {iteration + 1})"
+                    "[dry_run] Would run CI fix session for PR #%s (issue #%s, iteration %s)",
+                    pr_number,
+                    issue_number,
+                    iteration + 1,
                 )
                 return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
@@ -352,11 +365,13 @@ class CIDriver:
             )
             if fixed:
                 logger.info(
-                    f"Issue #{issue_number}: CI fix applied successfully (attempt {iteration + 1})"
+                    "Issue #%s: CI fix applied successfully (attempt %s)",
+                    issue_number,
+                    iteration + 1,
                 )
                 return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
-            logger.warning(f"Issue #{issue_number}: CI fix attempt {iteration + 1} failed")
+            logger.warning("Issue #%s: CI fix attempt %s failed", issue_number, iteration + 1)
 
         return None
 
@@ -393,10 +408,10 @@ class CIDriver:
             pr_data = json.loads(result.stdout or "[]")
             if pr_data:
                 pr_number = pr_data[0]["number"]
-                logger.info(f"Found PR #{pr_number} for issue #{issue_number} via branch name")
+                logger.info("Found PR #%s for issue #%s via branch name", pr_number, issue_number)
                 return int(pr_number)
         except Exception as e:
-            logger.debug(f"Branch-name lookup failed for issue #{issue_number}: {e}")
+            logger.debug("Branch-name lookup failed for issue #%s: %s", issue_number, e)
 
         # Strategy 2: Search PR body for issue reference using the canonical
         # "Closes #N" pattern so we don't accidentally match a PR that merely
@@ -421,12 +436,14 @@ class CIDriver:
             if pr_data:
                 pr_number = pr_data[0]["number"]
                 logger.info(
-                    f"Found PR #{pr_number} for issue #{issue_number} via body search "
-                    f"(title: {pr_data[0].get('title', '')!r})"
+                    "Found PR #%s for issue #%s via body search (title: %r)",
+                    pr_number,
+                    issue_number,
+                    pr_data[0].get("title", ""),
                 )
                 return int(pr_number)
         except Exception as e:
-            logger.debug(f"Body search failed for issue #{issue_number}: {e}")
+            logger.debug("Body search failed for issue #%s: %s", issue_number, e)
 
         return None
 
@@ -449,7 +466,7 @@ class CIDriver:
             branch: str = data.get("headRefName", f"pr-{pr_number}")
             return branch
         except Exception as e:
-            logger.warning(f"Could not fetch branch for PR #{pr_number}: {e}")
+            logger.warning("Could not fetch branch for PR #%s: %s", pr_number, e)
             return f"pr-{pr_number}"
 
     def _get_worktree_path(self, issue_number: int, pr_number: int) -> Path:
@@ -474,7 +491,7 @@ class CIDriver:
                     if wt.exists():
                         return wt
             except Exception as e:
-                logger.debug(f"Could not read review state for issue #{issue_number}: {e}")
+                logger.debug("Could not read review state for issue #%s: %s", issue_number, e)
 
         # Fallback: create a new worktree for the PR head branch
         branch = self._get_pr_branch(pr_number)
@@ -528,12 +545,12 @@ class CIDriver:
                     )
                     logs.append(f"=== {run_name} ===\n{log_result.stdout[:3000]}")
                 except Exception as log_err:
-                    logger.debug(f"Could not fetch log for run {run_id}: {log_err}")
+                    logger.debug("Could not fetch log for run %s: %s", run_id, log_err)
 
             return "\n\n".join(logs)[:10000]
 
         except Exception as e:
-            logger.warning(f"Could not fetch CI logs for PR #{pr_number}: {e}")
+            logger.warning("Could not fetch CI logs for PR #%s: %s", pr_number, e)
             return ""
 
     def _load_impl_session_id(self, issue_number: int) -> str | None:
@@ -548,17 +565,17 @@ class CIDriver:
         """
         state_file = self.state_dir / f"state-{issue_number}.json"
         if not state_file.exists():
-            logger.debug(f"No implementer state file for issue #{issue_number}")
+            logger.debug("No implementer state file for issue #%s", issue_number)
             return None
 
         try:
             data = json.loads(state_file.read_text())
             session_id: str | None = data.get("session_id")
             if session_id:
-                logger.debug(f"Loaded session_id for issue #{issue_number}: {session_id[:8]}...")
+                logger.debug("Loaded session_id for issue #%s: %s...", issue_number, session_id[:8])
             return session_id
         except Exception as e:
-            logger.warning(f"Could not load session_id for issue #{issue_number}: {e}")
+            logger.warning("Could not load session_id for issue #%s: %s", issue_number, e)
             return None
 
     def _run_ci_fix_session(
@@ -635,7 +652,7 @@ class CIDriver:
             # If --resume failed, retry without it
             if result.returncode != 0 and session_id:
                 logger.warning(
-                    f"Issue #{issue_number}: --resume session failed, retrying without it"
+                    "Issue #%s: --resume session failed, retrying without it", issue_number
                 )
                 result = subprocess.run(
                     base_cmd,
@@ -650,25 +667,31 @@ class CIDriver:
                 # Push the fixes
                 try:
                     run(["git", "push", "origin", "HEAD"], cwd=worktree_path)
-                    logger.info(f"Issue #{issue_number}: pushed CI fixes for PR #{pr_number}")
+                    logger.info("Issue #%s: pushed CI fixes for PR #%s", issue_number, pr_number)
                     return True
                 except Exception as push_err:
-                    logger.error(f"Issue #{issue_number}: git push failed after CI fix: {push_err}")
+                    logger.error(
+                        "Issue #%s: git push failed after CI fix: %s", issue_number, push_err
+                    )
                     return False
 
             logger.error(
-                f"Issue #{issue_number}: Claude CI fix session returned exit code "
-                f"{result.returncode}: {result.stderr[:300]}"
+                "Issue #%s: Claude CI fix session returned exit code %s: %s",
+                issue_number,
+                result.returncode,
+                result.stderr[:300],
             )
             return False
 
         except subprocess.TimeoutExpired:
             logger.error(
-                f"Issue #{issue_number}: Claude CI fix session timed out for PR #{pr_number}"
+                "Issue #%s: Claude CI fix session timed out for PR #%s", issue_number, pr_number
             )
             return False
         except Exception as e:
-            logger.error(f"Issue #{issue_number}: CI fix session failed for PR #{pr_number}: {e}")
+            logger.error(
+                "Issue #%s: CI fix session failed for PR #%s: %s", issue_number, pr_number, e
+            )
             return False
 
     def _enable_auto_merge(self, pr_number: int) -> bool:
@@ -689,29 +712,34 @@ class CIDriver:
         """
         try:
             _gh_call(["pr", "merge", str(pr_number), "--auto", "--rebase"])
-            logger.info(f"Enabled auto-merge for PR #{pr_number}")
+            logger.info("Enabled auto-merge for PR #%s", pr_number)
             return True
         except subprocess.CalledProcessError as e:
             logger.warning(
-                f"Could not enable auto-merge (--rebase) for PR #{pr_number}: {e}; "
-                "will attempt squash-merge fallback if force_merge_on_stall is set"
+                "Could not enable auto-merge (--rebase) for PR #%s: %s; "
+                "will attempt squash-merge fallback if force_merge_on_stall is set",
+                pr_number,
+                e,
             )
 
         if not self.options.force_merge_on_stall:
             logger.error(
-                f"PR #{pr_number}: auto-merge failed and force_merge_on_stall is not set; "
-                "skipping squash-merge fallback"
+                "PR #%s: auto-merge failed and force_merge_on_stall is not set; "
+                "skipping squash-merge fallback",
+                pr_number,
             )
             return False
 
         # Fallback: direct squash merge
         try:
             _gh_call(["pr", "merge", str(pr_number), "--squash", "--delete-branch"])
-            logger.info(f"Squash-merged PR #{pr_number} via fallback")
+            logger.info("Squash-merged PR #%s via fallback", pr_number)
             return True
         except subprocess.CalledProcessError as fallback_err:
             logger.error(
-                f"PR #{pr_number}: both auto-merge and squash-merge fallback failed: {fallback_err}"
+                "PR #%s: both auto-merge and squash-merge fallback failed: %s",
+                pr_number,
+                fallback_err,
             )
             return False
 
@@ -752,15 +780,15 @@ class CIDriver:
         logger.info("=" * 60)
         logger.info("CI Driver Summary")
         logger.info("=" * 60)
-        logger.info(f"Total issues: {total}")
-        logger.info(f"Successful: {successful}")
-        logger.info(f"Failed: {failed}")
+        logger.info("Total issues: %s", total)
+        logger.info("Successful: %s", successful)
+        logger.info("Failed: %s", failed)
 
         if failed > 0:
             logger.info("Failed issues:")
             for issue_num, result in results.items():
                 if not result.success:
-                    logger.info(f"  #{issue_num}: {result.error}")
+                    logger.info("  #%s: %s", issue_num, result.error)
 
 
 # ---------------------------------------------------------------------------
@@ -902,7 +930,7 @@ def main() -> int:
         return 2
     log.debug("ci_driver gate passed: %s", reason)
 
-    log.info(f"Starting CI driver for issues: {args.issues}")
+    log.info("Starting CI driver for issues: %s", args.issues)
 
     try:
         options = CIDriverOptions(
@@ -918,7 +946,7 @@ def main() -> int:
 
         failed = [num for num, result in results.items() if not result.success]
         if failed:
-            log.error(f"CI drive failed for {len(failed)} issue(s): {failed}")
+            log.error("CI drive failed for %s issue(s): %s", len(failed), failed)
             return 1
 
         log.info("CI driver complete")

@@ -74,7 +74,7 @@ class DependencyResolver:
             RuntimeError: If epic cannot be loaded
 
         """
-        logger.info(f"Loading epic #{epic_number}")
+        logger.info("Loading epic #%s", epic_number)
 
         # Fetch epic issue
         epic = fetch_issue_info(epic_number)
@@ -84,7 +84,7 @@ class DependencyResolver:
         sub_issues = self._parse_sub_issues(epic)
 
         if not sub_issues:
-            logger.warning(f"Epic #{epic_number} has no sub-issues")
+            logger.warning("Epic #%s has no sub-issues", epic_number)
             return
 
         # Prefetch states for efficiency
@@ -93,7 +93,7 @@ class DependencyResolver:
         # Fetch each sub-issue and its dependencies
         for issue_num in sub_issues:
             if self.skip_closed and cached_states.get(issue_num) == IssueState.CLOSED:
-                logger.info(f"Skipping closed issue #{issue_num}")
+                logger.info("Skipping closed issue #%s", issue_num)
                 self.completed.add(issue_num)
                 continue
 
@@ -105,9 +105,9 @@ class DependencyResolver:
                 self._load_dependencies(issue, cached_states)
 
             except Exception as e:
-                logger.error(f"Failed to load issue #{issue_num}: {e}")
+                logger.error("Failed to load issue #%s: %s", issue_num, e)
 
-        logger.info(f"Loaded {len(self.graph.issues)} issues from epic")
+        logger.info("Loaded %s issues from epic", len(self.graph.issues))
 
     def _parse_sub_issues(self, epic: IssueInfo) -> list[int]:
         """Parse sub-issue numbers from epic body.
@@ -198,7 +198,7 @@ class DependencyResolver:
                 continue
 
             if self.skip_closed and cached_states.get(dep_num) == IssueState.CLOSED:
-                logger.info(f"Dependency #{dep_num} is closed, marking complete")
+                logger.info("Dependency #%s is closed, marking complete", dep_num)
                 self.completed.add(dep_num)
                 continue
 
@@ -211,7 +211,7 @@ class DependencyResolver:
                         visited.add(child_dep)
                         queue.append((child_dep, depth + 1))
             except Exception as e:
-                logger.error(f"Failed to load dependency #{dep_num}: {e}")
+                logger.error("Failed to load dependency #%s: %s", dep_num, e)
 
     def detect_cycles(self) -> list[list[int]]:
         """Detect cyclic dependencies in the graph.
@@ -251,7 +251,7 @@ class DependencyResolver:
 
         for issue_num in self.graph.issues:
             if issue_num not in visited and dfs(issue_num, set(), []):
-                logger.error(f"Cycle detected: {cycles[-1]}")
+                logger.error("Cycle detected: %s", cycles[-1])
 
         if cycles:
             raise CyclicDependencyError(f"Found {len(cycles)} dependency cycle(s): {cycles}")
@@ -291,7 +291,7 @@ class DependencyResolver:
 
         """
         self.completed.add(issue_number)
-        logger.debug(f"Marked issue #{issue_number} as completed")
+        logger.debug("Marked issue #%s as completed", issue_number)
 
     def topological_sort(self) -> list[int]:
         """Perform topological sort of the dependency graph.

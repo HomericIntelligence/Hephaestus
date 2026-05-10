@@ -163,7 +163,7 @@ class CursesUI:
         try:
             curses.wrapper(self._curses_main)
         except Exception as e:
-            logger.error(f"CursesUI error: {e}")
+            logger.error("CursesUI error: %s", e)
         finally:
             # Always reset running flag so UI can be restarted
             self.running = False

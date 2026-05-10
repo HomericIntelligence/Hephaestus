@@ -157,17 +157,17 @@ class IssueImplementer:
 
         # Load issues or epic and resolve dependencies
         if self.options.issues:
-            logger.info(f"Loading issues: {self.options.issues}")
+            logger.info("Loading issues: %s", self.options.issues)
             self._load_issues(self.options.issues)
         else:
-            logger.info(f"Loading epic #{self.options.epic_number}")
+            logger.info("Loading epic #%s", self.options.epic_number)
             self.resolver.load_epic(self.options.epic_number)
 
         # Detect cycles
         try:
             self.resolver.detect_cycles()
         except CyclicDependencyError as e:
-            logger.error(f"Dependency cycle detected: {e}")
+            logger.error("Dependency cycle detected: %s", e)
             return {}
 
         # Analyze only mode
@@ -181,7 +181,7 @@ class IssueImplementer:
         if self.options.enable_learn:
             retro_results = self._rerun_failed_learns()
             if retro_results:
-                logger.info(f"Re-ran {len(retro_results)} failed learn(s)")
+                logger.info("Re-ran %s failed learn(s)", len(retro_results))
 
         # Start UI if enabled and not in dry run
         if not self.options.dry_run and self.options.enable_ui:
@@ -215,7 +215,7 @@ class IssueImplementer:
 
         for issue_num in issue_numbers:
             if self.options.skip_closed and cached_states.get(issue_num) == IssueState.CLOSED:
-                logger.info(f"Skipping closed issue #{issue_num}")
+                logger.info("Skipping closed issue #%s", issue_num)
                 self.resolver.completed.add(issue_num)
                 continue
 
@@ -229,9 +229,9 @@ class IssueImplementer:
             except (
                 Exception
             ) as e:  # broad catch: network errors, API failures, JSON parsing all possible
-                logger.error(f"Failed to load issue #{issue_num}: {e}")
+                logger.error("Failed to load issue #%s: %s", issue_num, e)
 
-        logger.info(f"Loaded {len(self.resolver.graph.issues)} issues")
+        logger.info("Loaded %s issues", len(self.resolver.graph.issues))
 
     def _health_check(self) -> dict[int, WorkerResult]:
         """Perform health check of dependencies and environment.
@@ -247,21 +247,21 @@ class IssueImplementer:
             run(["gh", "--version"], check=True)
             logger.info("gh CLI available")
         except (subprocess.CalledProcessError, FileNotFoundError, OSError) as e:
-            logger.error(f"gh CLI not available: {e}")
+            logger.error("gh CLI not available: %s", e)
 
         # Check git
         try:
             run(["git", "--version"], check=True)
             logger.info("git available")
         except (subprocess.CalledProcessError, FileNotFoundError, OSError) as e:
-            logger.error(f"git not available: {e}")
+            logger.error("git not available: %s", e)
 
         # Check Claude Code
         try:
             run(["claude", "--version"], check=True)
             logger.info("Claude Code available")
         except (subprocess.CalledProcessError, FileNotFoundError, OSError) as e:
-            logger.error(f"Claude Code not available: {e}")
+            logger.error("Claude Code not available: %s", e)
 
         # Check repository
         try:
@@ -269,9 +269,9 @@ class IssueImplementer:
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                 capture_output=True,
             ).stdout.strip()
-            logger.info(f"In git repository (branch: {branch})")
+            logger.info("In git repository (branch: %s)", branch)
         except (subprocess.CalledProcessError, FileNotFoundError, OSError) as e:
-            logger.error(f"Not in git repository: {e}")
+            logger.error("Not in git repository: %s", e)
 
         logger.info("Health check complete")
         return {}
@@ -287,10 +287,10 @@ class IssueImplementer:
         logger.info("=" * 60)
 
         stats = self.resolver.get_stats()
-        logger.info(f"Total issues: {stats['total_issues']}")
-        logger.info(f"Completed: {stats['completed_issues']}")
-        logger.info(f"Remaining: {stats['remaining_issues']}")
-        logger.info(f"Ready: {stats['ready_issues']}")
+        logger.info("Total issues: %s", stats["total_issues"])
+        logger.info("Completed: %s", stats["completed_issues"])
+        logger.info("Remaining: %s", stats["remaining_issues"])
+        logger.info("Ready: %s", stats["ready_issues"])
 
         # Show topological order
         try:
@@ -300,9 +300,9 @@ class IssueImplementer:
                 issue = self.resolver.graph.issues[issue_num]
                 deps = self.resolver.graph.get_dependencies(issue_num)
                 dep_str = f" (depends on: {deps})" if deps else ""
-                logger.info(f"  {i}. #{issue_num}: {issue.title}{dep_str}")
+                logger.info("  %s. #%s: %s%s", i, issue_num, issue.title, dep_str)
         except CyclicDependencyError as e:
-            logger.error(f"Failed to compute topological order: {e}")
+            logger.error("Failed to compute topological order: %s", e)
 
         return {}
 
@@ -360,12 +360,12 @@ class IssueImplementer:
 
                         if result.success:
                             self.resolver.mark_completed(issue_num)
-                            logger.info(f"Issue #{issue_num} completed successfully")
+                            logger.info("Issue #%s completed successfully", issue_num)
                         else:
-                            logger.error(f"Issue #{issue_num} failed: {result.error}")
+                            logger.error("Issue #%s failed: %s", issue_num, result.error)
 
                     except Exception as e:  # broad catch: worker threads can raise any exception
-                        logger.error(f"Issue #{issue_num} raised exception: {e}")
+                        logger.error("Issue #%s raised exception: %s", issue_num, e)
                         results[issue_num] = WorkerResult(
                             issue_number=issue_num,
                             success=False,
@@ -382,11 +382,11 @@ class IssueImplementer:
         skipped_issues = all_issues - attempted_issues - self.resolver.completed
 
         if skipped_issues:
-            logger.warning(f"Skipped {len(skipped_issues)} issue(s) due to failed dependencies:")
+            logger.warning("Skipped %s issue(s) due to failed dependencies:", len(skipped_issues))
             for issue_num in sorted(skipped_issues):
                 deps = self.resolver.graph.get_dependencies(issue_num)
                 failed_deps = [d for d in deps if d not in self.resolver.completed]
-                logger.warning(f"  #{issue_num}: blocked by failed issue(s) {failed_deps}")
+                logger.warning("  #%s: blocked by failed issue(s) %s", issue_num, failed_deps)
 
         self._print_summary(results)
         return results
@@ -823,16 +823,16 @@ class IssueImplementer:
 
             # Verify worktree exists
             if not state.worktree_path:
-                logger.warning(f"Skipping learn re-run for #{issue_number}: no worktree_path")
+                logger.warning("Skipping learn re-run for #%s: no worktree_path", issue_number)
                 continue
 
             worktree_path = Path(state.worktree_path)
             if not worktree_path.exists():
-                logger.warning(f"Skipping learn re-run for #{issue_number}: worktree not found")
+                logger.warning("Skipping learn re-run for #%s: worktree not found", issue_number)
                 continue
 
             # Re-run learn
-            logger.info(f"Re-running failed learn for issue #{issue_number}")
+            logger.info("Re-running failed learn for issue #%s", issue_number)
             success = self._run_learn(state.session_id, worktree_path, issue_number, slot_id=None)
 
             # Update and save state
@@ -845,8 +845,10 @@ class IssueImplementer:
         if results:
             success_count = sum(1 for s in results.values() if s)
             logger.info(
-                f"Re-ran {len(results)} learn(s): {success_count} succeeded, "
-                f"{len(results) - success_count} failed"
+                "Re-ran %s learn(s): %s succeeded, %s failed",
+                len(results),
+                success_count,
+                len(results) - success_count,
             )
 
         return results
@@ -1163,8 +1165,10 @@ class IssueImplementer:
             return output
         except Exception as e:
             logger.error(
-                f"#{issue_number} R{iteration}: impl reviewer call failed: {e}; "
-                "treating as NOGO so the loop continues"
+                "#%s R%s: impl reviewer call failed: %s; treating as NOGO so the loop continues",
+                issue_number,
+                iteration,
+                e,
             )
             return (
                 f"Reviewer invocation failed at iteration {iteration}: {e}\n\n"
@@ -1196,7 +1200,7 @@ class IssueImplementer:
                 )
                 diff = fb.stdout or ""
         except Exception as e:
-            logger.warning(f"diff collection failed for {branch_name}: {e}")
+            logger.warning("diff collection failed for %s: %s", branch_name, e)
             return ""
 
         max_chars = 200_000
@@ -1226,7 +1230,7 @@ class IssueImplementer:
             )
             return (fb.stdout or "").strip()
         except Exception as e:
-            logger.warning(f"changed-files collection failed for {branch_name}: {e}")
+            logger.warning("changed-files collection failed for %s: %s", branch_name, e)
             return ""
 
     def _save_review_log(self, issue_number: int, iteration: int, review_text: str) -> None:
@@ -1235,7 +1239,7 @@ class IssueImplementer:
             log_file = self.state_dir / f"review-{issue_number}-r{iteration}.log"
             log_file.write_text(review_text)
         except Exception as e:
-            logger.warning(f"#{issue_number}: failed to save review log r{iteration}: {e}")
+            logger.warning("#%s: failed to save review log r%s: %s", issue_number, iteration, e)
 
     def _save_review_iteration_state(
         self, issue_number: int, iterations_run: int, prior_review: str
@@ -1345,7 +1349,7 @@ class IssueImplementer:
 
         """
         if self.options.dry_run:
-            logger.info(f"[DRY RUN] Would run Claude Code for issue #{issue_number}")
+            logger.info("[DRY RUN] Would run Claude Code for issue #%s", issue_number)
             return None
 
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -1386,7 +1390,7 @@ class IssueImplementer:
                     reset_epoch = _claude_quota_reset_epoch(err_text)
                     if reset_epoch is not None and reset_epoch > 0:
                         logger.warning(
-                            f"Claude usage cap hit for issue #{issue_number}; waiting for reset"
+                            "Claude usage cap hit for issue #%s; waiting for reset", issue_number
                         )
                         wait_until(reset_epoch)
                     raise RuntimeError(f"Claude Code failed: {err_text or 'is_error=true'}")
@@ -1399,8 +1403,8 @@ class IssueImplementer:
 
                 return cast(str | None, session_id)
             except (json.JSONDecodeError, AttributeError):
-                logger.warning(f"Could not parse session_id for issue #{issue_number}")
-                logger.debug(f"Claude stdout: {result.stdout[:500]}")
+                logger.warning("Could not parse session_id for issue #%s", issue_number)
+                logger.debug("Claude stdout: %s", result.stdout[:500])
 
                 # Save output even if JSON parsing failed
                 log_file = self.state_dir / f"claude-{issue_number}.log"
@@ -1408,12 +1412,12 @@ class IssueImplementer:
 
                 return None
         except subprocess.CalledProcessError as e:
-            logger.error(f"Claude Code failed for issue #{issue_number}")
-            logger.error(f"Exit code: {e.returncode}")
+            logger.error("Claude Code failed for issue #%s", issue_number)
+            logger.error("Exit code: %s", e.returncode)
             if e.stdout:
-                logger.error(f"Stdout: {e.stdout[:1000]}")
+                logger.error("Stdout: %s", e.stdout[:1000])
             if e.stderr:
-                logger.error(f"Stderr: {e.stderr[:1000]}")
+                logger.error("Stderr: %s", e.stderr[:1000])
 
             # Save failure output to log file
             log_file = self.state_dir / f"claude-{issue_number}.log"
@@ -1427,7 +1431,9 @@ class IssueImplementer:
             # seconds. The Claude CLI puts its 429 message in stdout JSON.
             reset_epoch = _claude_quota_reset_epoch(stderr, stdout)
             if reset_epoch is not None and reset_epoch > 0:
-                logger.warning(f"Claude usage cap hit for issue #{issue_number}; waiting for reset")
+                logger.warning(
+                    "Claude usage cap hit for issue #%s; waiting for reset", issue_number
+                )
                 wait_until(reset_epoch)
 
             raise RuntimeError(f"Claude Code failed: {e.stderr or e.stdout}") from e
@@ -1495,9 +1501,9 @@ class IssueImplementer:
                     state = ImplementationState.model_validate_json(f.read())
                     with self.state_lock:
                         self.states[state.issue_number] = state
-                logger.info(f"Loaded state for issue #{state.issue_number}")
+                logger.info("Loaded state for issue #%s", state.issue_number)
             except (json.JSONDecodeError, ValueError, OSError) as e:
-                logger.error(f"Failed to load state from {state_file}: {e}")
+                logger.error("Failed to load state from %s: %s", state_file, e)
 
     def _print_summary(self, results: dict[int, WorkerResult]) -> None:
         """Print implementation summary."""
@@ -1510,21 +1516,21 @@ class IssueImplementer:
         logger.info("=" * 60)
         logger.info("Implementation Summary")
         logger.info("=" * 60)
-        logger.info(f"Total issues: {total}")
-        logger.info(f"Successful: {successful}")
-        logger.info(f"Failed: {failed}")
+        logger.info("Total issues: %s", total)
+        logger.info("Successful: %s", successful)
+        logger.info("Failed: %s", failed)
 
         if successful > 0:
             logger.info("\nSuccessful PRs:")
             for issue_num, result in results.items():
                 if result.success and result.pr_number:
-                    logger.info(f"  #{issue_num}: PR #{result.pr_number}")
+                    logger.info("  #%s: PR #%s", issue_num, result.pr_number)
 
         if failed > 0:
             logger.info("\nFailed issues:")
             for issue_num, result in results.items():
                 if not result.success:
-                    logger.info(f"  #{issue_num}: {result.error}")
+                    logger.info("  #%s: %s", issue_num, result.error)
 
         preserved = self.worktree_manager.preserved
         if preserved:
@@ -1533,12 +1539,12 @@ class IssueImplementer:
             issues_arg = " ".join(str(n) for n in issue_nums)
             logger.info("\nPreserved worktrees (contain uncommitted changes):")
             for issue_num, path in preserved:
-                logger.info(f"  #{issue_num}: {path}")
+                logger.info("  #%s: %s", issue_num, path)
             logger.info("\nRerun these issues after inspecting/cleaning the worktrees:")
-            logger.info(f"  {script} --issues {issues_arg} --resume")
+            logger.info("  %s --issues %s --resume", script, issues_arg)
             logger.info("To discard them instead:")
             for _, path in preserved:
-                logger.info(f"  git worktree remove --force {path}")
+                logger.info("  git worktree remove --force %s", path)
 
 
 def _setup_logging(verbose: bool = False, log_dir: Path | None = None) -> None:
@@ -1689,7 +1695,7 @@ def main() -> int:
     if not args.health_check and not args.epic and not args.issues:
         discovered = gh_list_open_issues()
         log.info(
-            f"No --issues/--epic given; discovered {len(discovered)} open issues: {discovered}"
+            "No --issues/--epic given; discovered %s open issues: %s", len(discovered), discovered
         )
         args.issues = discovered
 
@@ -1711,9 +1717,9 @@ def main() -> int:
     if args.health_check:
         log.info("Running health check")
     elif args.issues:
-        log.info(f"Starting implementation of issues: {args.issues}")
+        log.info("Starting implementation of issues: %s", args.issues)
     else:
-        log.info(f"Starting implementation of epic #{args.epic}")
+        log.info("Starting implementation of epic #%s", args.epic)
 
     from hephaestus.utils.terminal import terminal_guard
 
@@ -1725,7 +1731,7 @@ def main() -> int:
             if not args.health_check and not args.analyze:
                 failed = [num for num, result in results.items() if not result.success]
                 if failed:
-                    log.error(f"Failed to implement {len(failed)} issue(s): {failed}")
+                    log.error("Failed to implement %s issue(s): %s", len(failed), failed)
                     return 1
 
             log.info("Complete")

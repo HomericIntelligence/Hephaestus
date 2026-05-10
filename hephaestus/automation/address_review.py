@@ -97,7 +97,7 @@ class AddressReviewer:
             Dictionary mapping issue number to WorkerResult
 
         """
-        logger.info(f"Starting address review for issues: {self.options.issues}")
+        logger.info("Starting address review for issues: %s", self.options.issues)
 
         # Pre-discover PRs — only submit workers for issues that have an open PR.
         # This prevents Claude from being launched for issues with no PR at all.
@@ -106,7 +106,7 @@ class AddressReviewer:
             logger.warning("No open PRs found for the specified issues — nothing to address")
             return {}
 
-        logger.info(f"Found {len(pr_map)} PR(s) to address: {pr_map}")
+        logger.info("Found %s PR(s) to address: %s", len(pr_map), pr_map)
 
         # Start UI if enabled and not dry run
         if not self.options.dry_run and self.options.enable_ui:
@@ -150,7 +150,7 @@ class AddressReviewer:
             if pr_number is not None:
                 pr_map[issue_num] = pr_number
             else:
-                logger.info(f"Issue #{issue_num}: no open PR found, skipping")
+                logger.info("Issue #%s: no open PR found, skipping", issue_num)
         return pr_map
 
     def _address_all(self, pr_map: dict[int, int]) -> dict[int, WorkerResult]:
@@ -201,13 +201,13 @@ class AddressReviewer:
                         result = future.result()
                         results[issue_num] = result
                         if result.success:
-                            logger.info(f"Issue #{issue_num} address review completed")
+                            logger.info("Issue #%s address review completed", issue_num)
                         else:
                             logger.error(
-                                f"Issue #{issue_num} address review failed: {result.error}"
+                                "Issue #%s address review failed: %s", issue_num, result.error
                             )
                     except Exception as e:
-                        logger.error(f"Issue #{issue_num} raised exception: {e}")
+                        logger.error("Issue #%s raised exception: %s", issue_num, e)
                         results[issue_num] = WorkerResult(
                             issue_number=issue_num,
                             success=False,
@@ -438,7 +438,7 @@ class AddressReviewer:
         state_file = self.state_dir / f"issue-{issue_number}.json"
         if not state_file.exists():
             logger.warning(
-                f"No implementation state for issue #{issue_number}, will use fresh session"
+                "No implementation state for issue #%s, will use fresh session", issue_number
             )
             return None
         try:
@@ -446,7 +446,7 @@ class AddressReviewer:
             session_id: str | None = data.get("session_id")
             return session_id
         except Exception as e:
-            logger.warning(f"Could not load impl session for #{issue_number}: {e}")
+            logger.warning("Could not load impl session for #%s: %s", issue_number, e)
             return None
 
     def _load_review_state(self, issue_number: int) -> ReviewState | None:
@@ -466,7 +466,7 @@ class AddressReviewer:
             data = json.loads(state_file.read_text())
             return ReviewState.model_validate(data)
         except Exception as e:
-            logger.warning(f"Could not load review state for #{issue_number}: {e}")
+            logger.warning("Could not load review state for #%s: %s", issue_number, e)
             return None
 
     def _save_review_state(self, state: ReviewState) -> None:
@@ -504,7 +504,7 @@ class AddressReviewer:
             existing_path = Path(review_state.worktree_path)
             if existing_path.exists() and (existing_path / ".git").exists():
                 logger.info(
-                    f"Reusing existing worktree at {existing_path} for issue #{issue_number}"
+                    "Reusing existing worktree at %s for issue #%s", existing_path, issue_number
                 )
                 # Register with worktree manager so cleanup works
                 with self.worktree_manager.lock:
@@ -512,7 +512,7 @@ class AddressReviewer:
                 return existing_path
 
         # Create new worktree
-        logger.info(f"Creating new worktree for issue #{issue_number} on branch {branch_name}")
+        logger.info("Creating new worktree for issue #%s on branch %s", issue_number, branch_name)
         return self.worktree_manager.create_worktree(issue_number, branch_name)
 
     def _run_fix_session(  # noqa: C901  # session-resume + fallback + cleanup + parse error paths
@@ -540,7 +540,7 @@ class AddressReviewer:
 
         """
         if self.options.dry_run:
-            logger.info(f"[DRY RUN] Would run fix session for PR #{pr_number}")
+            logger.info("[DRY RUN] Would run fix session for PR #%s", pr_number)
             return {"addressed": [], "replies": {}}
 
         threads_json = json.dumps(
@@ -646,8 +646,9 @@ class AddressReviewer:
 
             parsed = self._parse_json_block(response_text, issue_number=issue_number)
             logger.info(
-                f"Fix session complete for PR #{pr_number}; "
-                f"addressed {len(parsed.get('addressed', []))} thread(s)"
+                "Fix session complete for PR #%s; addressed %s thread(s)",
+                pr_number,
+                len(parsed.get("addressed", [])),
             )
             return parsed
 
@@ -779,7 +780,7 @@ class AddressReviewer:
             try:
                 gh_pr_resolve_thread(thread_id, reply, dry_run=self.options.dry_run)
             except Exception as e:
-                logger.warning(f"Could not resolve thread {thread_id}: {e}")
+                logger.warning("Could not resolve thread %s: %s", thread_id, e)
 
     def _commit_if_changes(self, issue_number: int, worktree_path: Path) -> None:
         """Commit any pending changes in the worktree.
@@ -797,17 +798,17 @@ class AddressReviewer:
             capture_output=True,
         )
         if not result.stdout.strip():
-            logger.info(f"No changes to commit for issue #{issue_number}")
+            logger.info("No changes to commit for issue #%s", issue_number)
             return
 
         try:
             from .pr_manager import commit_changes
 
             commit_changes(issue_number, worktree_path)
-            logger.info(f"Committed fix changes for issue #{issue_number}")
+            logger.info("Committed fix changes for issue #%s", issue_number)
         except RuntimeError as e:
             # commit_changes raises RuntimeError if nothing to commit; already checked above
-            logger.warning(f"Commit skipped for issue #{issue_number}: {e}")
+            logger.warning("Commit skipped for issue #%s: %s", issue_number, e)
 
     def _push_branch(self, branch_name: str, worktree_path: Path) -> None:
         """Push the branch to origin.
@@ -825,7 +826,7 @@ class AddressReviewer:
                 ["git", "push", "origin", branch_name],
                 cwd=worktree_path,
             )
-            logger.info(f"Pushed branch {branch_name} to origin")
+            logger.info("Pushed branch %s to origin", branch_name)
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Failed to push branch {branch_name}: {e}") from e
 
@@ -869,15 +870,15 @@ class AddressReviewer:
         logger.info("=" * 60)
         logger.info("Address Review Summary")
         logger.info("=" * 60)
-        logger.info(f"Total issues: {total}")
-        logger.info(f"Successful: {successful}")
-        logger.info(f"Failed: {failed}")
+        logger.info("Total issues: %s", total)
+        logger.info("Successful: %s", successful)
+        logger.info("Failed: %s", failed)
 
         if failed > 0:
             logger.info("\nFailed issues:")
             for issue_num, result in results.items():
                 if not result.success:
-                    logger.info(f"  #{issue_num}: {result.error}")
+                    logger.info("  #%s: %s", issue_num, result.error)
 
 
 def _setup_logging(verbose: bool = False) -> None:
@@ -962,7 +963,7 @@ def main() -> int:
     _setup_logging(args.verbose)
 
     log = logging.getLogger(__name__)
-    log.info(f"Starting address review for issues: {args.issues}")
+    log.info("Starting address review for issues: %s", args.issues)
 
     from hephaestus.utils.terminal import terminal_guard
 
@@ -981,7 +982,7 @@ def main() -> int:
 
             failed = [num for num, result in results.items() if not result.success]
             if failed:
-                log.error(f"Failed to address review for {len(failed)} issue(s): {failed}")
+                log.error("Failed to address review for %s issue(s): %s", len(failed), failed)
                 return 1
 
             log.info("Address review complete")

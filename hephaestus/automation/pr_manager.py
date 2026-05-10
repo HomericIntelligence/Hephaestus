@@ -78,7 +78,7 @@ def commit_changes(issue_number: int, worktree_path: Path) -> None:
         # Skip secret files (never stage these)
         has_secret_ext = any(filename.endswith(ext) for ext in SECRET_FILE_EXTENSIONS)
         if filename in SECRET_FILE_NAMES or has_secret_ext:
-            logger.warning(f"Skipping potential secret file: {filename_part}")
+            logger.warning("Skipping potential secret file: %s", filename_part)
             continue
 
         files_to_add.append(filename_part)
@@ -152,7 +152,7 @@ def ensure_pr_created(
             f"No commit found for issue #{issue_number}. Claude did not create any commits."
         )
 
-    logger.info(f"Commit exists: {result.stdout.strip()[:80]}")
+    logger.info("Commit exists: %s", result.stdout.strip()[:80])
 
     # Check if branch was pushed, if not push it
     _update_slot(f"#{issue_number}: Pushing branch")
@@ -163,11 +163,11 @@ def ensure_pr_created(
         check=False,
     )
     if not result.stdout.strip():
-        logger.warning(f"Branch {branch_name} not pushed, pushing now...")
+        logger.warning("Branch %s not pushed, pushing now...", branch_name)
         run(["git", "push", "-u", "origin", branch_name], cwd=worktree_path)
-        logger.info(f"Pushed branch {branch_name} to origin")
+        logger.info("Pushed branch %s to origin", branch_name)
     else:
-        logger.info(f"Branch {branch_name} already on origin")
+        logger.info("Branch %s already on origin", branch_name)
 
     # Check if PR exists, if not create it
     _update_slot(f"#{issue_number}: Creating PR")
@@ -177,15 +177,15 @@ def ensure_pr_created(
         pr_data = json.loads(result.stdout)
         if pr_data and len(pr_data) > 0:
             pr_number = cast(int, pr_data[0]["number"])
-            logger.info(f"PR #{pr_number} already exists")
+            logger.info("PR #%s already exists", pr_number)
             return pr_number
     except Exception as e:  # broad catch: gh CLI + JSON parsing; fallback is to create PR
-        logger.debug(f"Could not find existing PR: {e}")
+        logger.debug("Could not find existing PR: %s", e)
 
     # PR doesn't exist, create it
-    logger.warning(f"No PR found for branch {branch_name}, creating one...")
+    logger.warning("No PR found for branch %s, creating one...", branch_name)
     pr_number = create_pr(issue_number, branch_name, auto_merge)
-    logger.info(f"Created PR #{pr_number}")
+    logger.info("Created PR #%s", pr_number)
     return pr_number
 
 

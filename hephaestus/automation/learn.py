@@ -73,11 +73,11 @@ def run_learn(
         )
         # Write output to log file
         log_file.write_text(result.stdout or "")
-        logger.info(f"Learn completed for issue #{issue_number}")
-        logger.info(f"Learn log: {log_file}")
+        logger.info("Learn completed for issue #%s", issue_number)
+        logger.info("Learn log: %s", log_file)
         return True
     except Exception as e:  # broad catch: external claude process; non-blocking, must not propagate
-        logger.warning(f"Learn failed for issue #{issue_number}: {e}")
+        logger.warning("Learn failed for issue #%s: %s", issue_number, e)
 
         # Save failure output to log file
         error_output = f"FAILED: {e}\n"
