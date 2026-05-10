@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from unittest.mock import patch
 
 import pytest
 
@@ -10,6 +11,7 @@ from hephaestus.resilience.circuit_breaker import reset_all_circuit_breakers
 from hephaestus.resilience.subprocess_resilience import (
     TRANSIENT_ERROR_PATTERNS,
     is_transient_subprocess_error,
+    resilient_call,
 )
 
 
@@ -93,3 +95,54 @@ class TestTransientErrorPatterns:
         ]
         for pattern in essential:
             assert pattern in TRANSIENT_ERROR_PATTERNS, f"Missing pattern: {pattern}"
+
+
+class TestResilientCall:
+    """Tests for resilient_call() — especially max_delay enforcement."""
+
+    def test_succeeds_on_first_call(self) -> None:
+        """resilient_call returns the function result on first success."""
+        result = resilient_call(lambda: 42)
+        assert result == 42
+
+    @patch("time.sleep")
+    def test_max_delay_is_honored(self, mock_sleep) -> None:
+        """No individual retry sleep substantially exceeds max_delay.
+
+        Sets max_delay=0.1 with a high initial_delay so that without capping
+        the delays would far exceed 0.1 s (initial_delay=10.0 → first raw
+        delay = 10.0 s).  Asserts every time.sleep() call stays within
+        max_delay + 25% jitter headroom, which is the documented contract of
+        retry_with_backoff: the cap is applied *before* jitter so the actual
+        sleep value can reach max_delay * 1.25 at most.
+        """
+        call_count = 0
+
+        def transient_flaky() -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ConnectionError("connection refused")
+
+        max_delay = 0.1
+        resilient_call(transient_flaky, max_retries=3, initial_delay=10.0, max_delay=max_delay)
+
+        # Without max_delay the first sleep would be ~10 s; confirm it is
+        # effectively capped near max_delay (allowing ±25% jitter on top).
+        upper_bound = max_delay * 1.25 + 0.001  # 1 ms floating-point headroom
+        for call in mock_sleep.call_args_list:
+            assert call[0][0] <= upper_bound, (
+                f"Sleep of {call[0][0]:.4f}s exceeds max_delay cap of {upper_bound:.4f}s; "
+                "max_delay is not being honored."
+            )
+
+    @patch("time.sleep")
+    def test_raises_after_max_retries(self, mock_sleep) -> None:
+        """Raises the last exception when all retries are exhausted."""
+        with pytest.raises(ConnectionError, match="always fails"):
+            resilient_call(
+                lambda: (_ for _ in ()).throw(ConnectionError("always fails")),
+                max_retries=2,
+                initial_delay=0.01,
+                max_delay=0.1,
+            )

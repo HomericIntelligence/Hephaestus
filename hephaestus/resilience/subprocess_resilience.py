@@ -115,16 +115,11 @@ def resilient_call(
     if circuit_breaker_name:
         cb = get_circuit_breaker(circuit_breaker_name)
 
-    # Compute a backoff_factor that approximates max_delay capping.
-    # retry_with_backoff uses: delay = initial_delay * (backoff_factor ** attempt)
-    # We use factor=2 and rely on max_retries to bound total wait.
-    # max_delay is accepted for API compatibility but not directly enforced here.
-    _ = max_delay  # acknowledged: Hephaestus retry_with_backoff has no max_delay param
-
     @retry_with_backoff(
         max_retries=max_retries,
         initial_delay=initial_delay,
         backoff_factor=2,
+        max_delay=max_delay,
         retry_on=TRANSIENT_SUBPROCESS_ERRORS,
         logger=logger.warning,
         jitter=True,
