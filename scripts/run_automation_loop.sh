@@ -104,15 +104,23 @@ process_repo() {
   echo ""
   echo "── $repo ──────────────────────────────────────────────────────"
 
-  # Fetch open issue numbers (up to 1000)
+  # Fetch open issue numbers (up to 1000). Capture once with explicit fallback
+  # so a transient gh failure doesn't silently look like "no open issues".
   local -a ISSUE_NUMBERS
-  mapfile -t ISSUE_NUMBERS < <(
-    gh issue list --repo "$ORG/$repo" \
+  local _issue_list
+  if ! _issue_list=$(gh issue list --repo "$ORG/$repo" \
       --state open \
       --limit 1000 \
       --json number \
-      --jq '.[].number' 2>/dev/null || true
-  )
+      --jq '.[].number' 2>/dev/null); then
+    echo "  [$repo] warn: gh issue list failed, treating as no issues" >&2
+    _issue_list=''
+  fi
+  mapfile -t ISSUE_NUMBERS <<< "$_issue_list"
+  # mapfile on empty string yields a single empty element — strip it.
+  if [[ ${#ISSUE_NUMBERS[@]} -eq 1 && -z "${ISSUE_NUMBERS[0]}" ]]; then
+    ISSUE_NUMBERS=()
+  fi
 
   if [[ ${#ISSUE_NUMBERS[@]} -eq 0 ]]; then
     echo "  [$repo] No open issues — skipping"

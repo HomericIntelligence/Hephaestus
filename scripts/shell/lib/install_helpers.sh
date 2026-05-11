@@ -32,7 +32,14 @@ section()    { echo -e "\n${BOLD}${CYAN}$1${NC}"; }
 
 # ─── Utility helpers ─────────────────────────────────────────────────────────
 has_cmd()     { command -v "$1" &>/dev/null; }
-get_version() { "$@" 2>&1 | head -1 | grep -oP '\d+\.\d+[\.\d]*' | head -1; }
+get_version() {
+    # Capture the command's output once, then probe it; this avoids
+    # `cmd | grep | head || true` swallowing real exit codes from cmd.
+    # Empty result means "no version found".
+    local _out
+    _out="$("$@" 2>&1)" || _out=''
+    printf '%s\n' "$_out" | grep -oP '\d+\.\d+[\.\d]*' | head -1 || printf ''
+}
 
 # Compare versions: returns 0 if $1 >= $2
 version_gte() { printf '%s\n%s\n' "$2" "$1" | sort -V | head -1 | grep -qF "$2"; }

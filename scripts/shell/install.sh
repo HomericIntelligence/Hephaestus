@@ -30,8 +30,11 @@ add_to_bashrc() {
         echo "$line" >> ~/.bashrc
         echo -e "    ${BLUE}→${NC} Added to ~/.bashrc: $line"
     fi
-    # Apply to current shell immediately
-    eval "$line" 2>/dev/null || true
+    # Apply to current shell immediately; the line is user/installer-controlled
+    # and may legitimately fail (e.g. shellenv against a not-yet-extant brew).
+    if ! eval "$line" 2>/dev/null; then
+        echo "warn: failed to apply '$line' to current shell" >&2
+    fi
 }
 
 should_check_worker()  { [[ "$ROLE" == "all" || "$ROLE" == "worker" ]]; }
@@ -86,7 +89,9 @@ else
     if [[ -n "$BREW_BIN" ]]; then
         check_pass "brew (found at $BREW_BIN)"
         add_to_bashrc "eval \"\$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)\""
-        eval "$("$BREW_BIN" shellenv)" 2>/dev/null || true
+        if ! eval "$("$BREW_BIN" shellenv)" 2>/dev/null; then
+            echo "warn: failed to apply brew shellenv from $BREW_BIN" >&2
+        fi
     else
         check_fail "brew — NOT FOUND"
         if $INSTALL; then
@@ -99,7 +104,9 @@ else
                 check_pass "brew installed"
                 # Linuxbrew standard shellenv
                 add_to_bashrc "eval \"\$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)\""
-                eval "$("$BREW_BIN" shellenv)" 2>/dev/null || true
+                if ! eval "$("$BREW_BIN" shellenv)" 2>/dev/null; then
+                    echo "warn: failed to apply brew shellenv from $BREW_BIN" >&2
+                fi
             else
                 check_fail "brew — install failed (see https://brew.sh)"
             fi
@@ -117,7 +124,7 @@ for pkg in git curl jq unzip vim universal-ctags libssl-dev libopenblas-dev; do
         check_pass "$pkg $(get_version "$pkg" --version)"
     else
         check_fail "$pkg — NOT FOUND"
-        apt_install "$pkg" && check_pass "$pkg installed" || true
+        if apt_install "$pkg"; then check_pass "$pkg installed"; fi
     fi
 done
 
@@ -227,7 +234,7 @@ if has_cmd python3; then
     fi
 else
     check_fail "python3 — NOT FOUND"
-    apt_install python3 && check_pass "python3 installed" || true
+    if apt_install python3; then check_pass "python3 installed"; fi
 fi
 
 # pip3 (needed to install nats-py and other Python deps)
@@ -236,8 +243,11 @@ if has_cmd pip3; then
 else
     check_fail "pip3 — NOT FOUND"
     if $INSTALL; then
-        apt_install python3-pip && check_pass "pip3 installed" || \
-            (python3 -m ensurepip --upgrade >/dev/null 2>&1 && check_pass "pip3 bootstrapped via ensurepip") || true
+        if apt_install python3-pip; then
+            check_pass "pip3 installed"
+        elif python3 -m ensurepip --upgrade >/dev/null 2>&1; then
+            check_pass "pip3 bootstrapped via ensurepip"
+        fi
     fi
 fi
 
@@ -440,7 +450,7 @@ if should_check_worker; then
         check_pass "podman $(get_version podman --version)"
     else
         check_fail "podman — NOT FOUND"
-        apt_install podman && check_pass "podman installed" || true
+        if apt_install podman; then check_pass "podman installed"; fi
     fi
 
     if has_cmd podman && podman compose version >/dev/null 2>&1; then
@@ -448,7 +458,7 @@ if should_check_worker; then
         check_pass "podman compose $COMPOSE_VER"
     else
         check_fail "podman compose — NOT FOUND"
-        apt_install podman-compose && check_pass "podman-compose installed" || true
+        if apt_install podman-compose; then check_pass "podman-compose installed"; fi
     fi
 
     # Podman socket (required for some compose operations)
@@ -478,18 +488,18 @@ if should_check_control; then
             check_pass "cmake $CMAKE_VER (>= $CMAKE_MIN)"
         else
             check_fail "cmake $CMAKE_VER — need >= $CMAKE_MIN"
-            apt_install cmake && check_pass "cmake installed" || true
+            if apt_install cmake; then check_pass "cmake installed"; fi
         fi
     else
         check_fail "cmake — NOT FOUND"
-        apt_install cmake && check_pass "cmake installed" || true
+        if apt_install cmake; then check_pass "cmake installed"; fi
     fi
 
     if has_cmd ninja; then
         check_pass "ninja $(get_version ninja --version)"
     else
         check_fail "ninja — NOT FOUND"
-        apt_install ninja-build && check_pass "ninja installed" || true
+        if apt_install ninja-build; then check_pass "ninja installed"; fi
     fi
 
     for pkg in gcc g++ libssl-dev clang clang-format clang-tidy gdb valgrind lcov gcovr cppcheck ccache; do
@@ -497,7 +507,7 @@ if should_check_control; then
             check_pass "$pkg"
         else
             check_fail "$pkg — NOT FOUND"
-            apt_install "$pkg" && check_pass "$pkg installed" || true
+            if apt_install "$pkg"; then check_pass "$pkg installed"; fi
         fi
     done
 
