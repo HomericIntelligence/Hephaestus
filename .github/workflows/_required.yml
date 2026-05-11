@@ -64,6 +64,35 @@ jobs:
           fi
           echo 'OK: no "continue-on-error: true" found'
 
+      - name: "Reject advisory annotation pattern"
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files -- '.github/workflows/*.yml' '.github/workflows/*.yaml')
+          # The advisory-annotation pattern in workflow run blocks is morally
+          # equivalent to continue-on-error: true: it lets a tool fail without
+          # failing the CI step. The runbook (Bucket F) requires every tool
+          # to be fail-fast. The only legitimate annotation is informational
+          # text not tied to a tool's exit code — those should use
+          # echo "WARN:" to stdout instead. See docs/runbooks/no-silent-failures.md.
+          declare -a scan_files=()
+          for f in "${files[@]}"; do
+            # Exempt this workflow file (heredoc would otherwise self-match).
+            case "$f" in
+              .github/workflows/_required.yml) continue ;;
+            esac
+            scan_files+=("$f")
+          done
+          if [ "${#scan_files[@]}" -eq 0 ]; then
+            echo "No files to scan"
+            exit 0
+          fi
+          if grep -nF '::warning::' "${scan_files[@]}"; then
+            echo ""
+            echo '::error::Found advisory annotations above. Make the underlying tool fail-fast or use echo "WARN:" to stdout. See HomericIntelligence/Odysseus#282 Bucket F.'
+            exit 1
+          fi
+          echo 'OK: no advisory annotations found'
+
   lint:
     name: lint
     runs-on: ubuntu-24.04
@@ -148,7 +177,7 @@ jobs:
           if [ -f pixi.lock ]; then
             pixi install --locked
           else
-            echo "::warning::pixi.toml present but pixi.lock missing — running unlocked"
+            echo "WARN: pixi.toml present but pixi.lock missing — running unlocked"
             pixi install
           fi
 
@@ -395,20 +424,16 @@ jobs:
       - name: Validate GitHub workflow schemas
         run: |
           set -euo pipefail
-          # Probe the remote schema first so a schemastore.org outage emits a
-          # clear notice instead of being swallowed by `continue-on-error: true`.
-          schema_url="https://json.schemastore.org/github-workflow"
-          if ! curl -fsSL --max-time 15 -o /tmp/github-workflow.schema.json "$schema_url"; then
-            echo "::warning::Could not fetch $schema_url — skipping schema validation"
-            exit 0
-          fi
+          # Use check-jsonschema's bundled `vendor.github-workflows` schema so
+          # the job is network-free and fail-fast. No schemastore.org probe and
+          # no advisory `::warning::` outage fallback (Bucket F anti-pattern).
           mapfile -t wf_files < <(find .github/workflows -name "*.yml")
           if [ "${#wf_files[@]}" -eq 0 ]; then
             echo "No workflow files to validate"
             exit 0
           fi
           check-jsonschema \
-            --schemafile /tmp/github-workflow.schema.json \
+            --builtin-schema vendor.github-workflows \
             "${wf_files[@]}"
 
   deps-version-sync:
