@@ -51,15 +51,22 @@ cleanup_on_signal() {
   echo "▶ Interrupted ($sig). Stopping ${#ACTIVE_PIDS[@]} background repo job(s)..." >&2
   trap - INT TERM HUP    # disarm to prevent re-entry mid-cleanup
 
+  # Documented set +e/set -e bracket: signalling a process group that has
+  # already exited returns ESRCH (kill exit 1). That is the expected outcome
+  # during teardown — we do not want it to abort the cleanup loop. We also
+  # suppress kill's stderr so "No such process" doesn't clutter the log when
+  # children exit between our two passes.
+  set +e
   for pid in "${ACTIVE_PIDS[@]}"; do
     # Negative pid = entire process group (the `set -m` job).
     # SIGTERM first; SIGKILL after a short grace.
-    kill -TERM -"$pid" 2>/dev/null || true
+    kill -TERM -"$pid" 2>/dev/null
   done
   sleep 2
   for pid in "${ACTIVE_PIDS[@]}"; do
-    kill -KILL -"$pid" 2>/dev/null || true
+    kill -KILL -"$pid" 2>/dev/null
   done
+  set -e
   exit 130
 }
 trap 'cleanup_on_signal INT'  INT
@@ -304,14 +311,21 @@ for (( loop=1; loop<=LOOPS; loop++ )); do
     ACTIVE_PIDS+=($!)
 
     if [[ ${#ACTIVE_PIDS[@]} -ge "$PARALLEL_REPOS" ]]; then
-      wait "${ACTIVE_PIDS[0]}" || true
+      # A non-zero exit from process_repo just means one repo's phase warned;
+      # the per-phase blocks already logged the warning and the orchestrator
+      # continues with the remaining repos. Surface the exit code explicitly.
+      if ! wait "${ACTIVE_PIDS[0]}"; then
+        echo "  Warning: repo job pid=${ACTIVE_PIDS[0]} exited non-zero (continuing)" >&2
+      fi
       ACTIVE_PIDS=("${ACTIVE_PIDS[@]:1}")
     fi
   done
 
   # Drain any remaining background jobs
   for pid in "${ACTIVE_PIDS[@]}"; do
-    wait "$pid" || true
+    if ! wait "$pid"; then
+      echo "  Warning: repo job pid=$pid exited non-zero (continuing)" >&2
+    fi
   done
   ACTIVE_PIDS=()
 
