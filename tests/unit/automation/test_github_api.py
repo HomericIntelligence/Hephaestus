@@ -297,7 +297,12 @@ class TestGhCall:
 
         assert result.stdout == "success"
         assert mock_run.call_count == 3
-        assert mock_sleep.call_count == 2  # Sleep between retries
+        # Expect the two retry backoffs (1s, 2s) to be present. Other
+        # `time.sleep` calls may come from the per-thread gh throttle, so we
+        # check for the retry sleeps explicitly rather than counting totals.
+        sleep_durations = [c.args[0] for c in mock_sleep.call_args_list if c.args]
+        assert 1 in sleep_durations, f"missing 1s retry backoff; got {sleep_durations}"
+        assert 2 in sleep_durations, f"missing 2s retry backoff; got {sleep_durations}"
 
     @patch("hephaestus.automation.github_api.run")
     def test_claude_usage_limit_detection(self, mock_run: Any) -> None:
@@ -734,3 +739,81 @@ class TestWriteSecure:
         finally:
             # Restore permissions for cleanup
             test_file.parent.chmod(0o755)
+
+
+class TestGhCallThrottle:
+    """Tests for the per-thread `gh` call throttle inside _gh_call."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_throttle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Reset the per-thread throttle state and force a known rate so tests
+        # don't inherit clock state from earlier suite calls.
+        _github_api_module._GH_THROTTLE = __import__("threading").local()
+        monkeypatch.setenv("GH_RATE_LIMIT_PER_SEC", "5")
+
+    @patch("hephaestus.automation.github_api.run")
+    def test_consecutive_calls_are_paced_to_min_interval(self, mock_run: Any) -> None:
+        """Pace consecutive calls to the configured min interval.
+
+        At 5 calls/sec, two back-to-back calls in the same thread must be
+        separated by at least ~0.2s.
+        """
+        mock_run.return_value = Mock(stdout="", stderr="", returncode=0)
+
+        import time as _time
+
+        t0 = _time.monotonic()
+        _gh_call(["api", "/rate_limit"])
+        _gh_call(["api", "/rate_limit"])
+        elapsed = _time.monotonic() - t0
+
+        # Allow a small slack below the theoretical 0.2s for clock granularity.
+        assert elapsed >= 0.18, f"throttle did not pace; elapsed={elapsed:.3f}s"
+
+    @patch("hephaestus.automation.github_api.run")
+    def test_throttle_disabled_when_rate_zero(
+        self, mock_run: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GH_RATE_LIMIT_PER_SEC=0 disables pacing entirely."""
+        monkeypatch.setenv("GH_RATE_LIMIT_PER_SEC", "0")
+        mock_run.return_value = Mock(stdout="", stderr="", returncode=0)
+
+        import time as _time
+
+        t0 = _time.monotonic()
+        for _ in range(5):
+            _gh_call(["api", "/rate_limit"])
+        elapsed = _time.monotonic() - t0
+
+        # 5 calls with no throttle should finish well under one min-interval.
+        assert elapsed < 0.05, f"unexpected delay with throttle off; elapsed={elapsed:.3f}s"
+
+    @patch("hephaestus.automation.github_api.run")
+    def test_buckets_are_per_thread(self, mock_run: Any) -> None:
+        """Each thread has its own bucket.
+
+        Two threads each making one call should not block each other.
+        """
+        import threading as _t
+        import time as _time
+
+        mock_run.return_value = Mock(stdout="", stderr="", returncode=0)
+
+        # Pre-warm thread A's bucket so a second call from A would block.
+        _gh_call(["api", "/rate_limit"])
+
+        elapsed_b: list[float] = []
+
+        def thread_b() -> None:
+            t0 = _time.monotonic()
+            _gh_call(["api", "/rate_limit"])
+            elapsed_b.append(_time.monotonic() - t0)
+
+        worker = _t.Thread(target=thread_b)
+        worker.start()
+        worker.join()
+
+        # Thread B has its own bucket and should not have been throttled.
+        assert elapsed_b[0] < 0.05, (
+            f"per-thread isolation broken; thread B waited {elapsed_b[0]:.3f}s"
+        )

@@ -3,19 +3,75 @@
 #
 # Clones all HomericIntelligence repos (excluding Odysseus), then runs
 # 6-phase pipeline: plan → review-plans → implement → review-PRs → address-review → drive-green
-# in a loop N times for every repo that has open issues.
-# drive-green only runs on final loop. Up to PARALLEL_REPOS repos are processed concurrently.
+# in a loop N times for every repo.
+# drive-green only runs on the final loop. Up to PARALLEL_REPOS repos are processed concurrently.
+#
+# Issue discovery is delegated to each phase's Python entrypoint
+# (gh_list_open_issues), so issues opened mid-loop are picked up by later phases.
 #
 # Usage:
-#   ./scripts/run_automation_loop.sh [--dry-run] [--loops N] [--max-workers N] [--parallel-repos N]
+#   ./scripts/run_automation_loop.sh [options]
 #
 # Options:
-#   --dry-run           Pass --dry-run to plan, implement, and review (default: off)
-#   --loops N           Number of loop iterations (default: 5)
-#   --max-workers N     Parallel workers per repo per phase (default: 3)
-#   --parallel-repos N  Repos processed in parallel (default: 3)
+#   --dry-run                 Pass --dry-run to every phase (default: off)
+#   --loops N                 Number of loop iterations (default: 5)
+#   --max-workers N           Parallel workers per repo per phase (default: 3)
+#   --parallel-repos N        Repos processed in parallel (default: 3)
+#   --phases LIST             Comma-separated subset of phases to run.
+#                             Valid: plan,review-plans,implement,review-prs,address-review,drive-green
+#                             Default: all six.
+#                             Normal gates still apply (drive-green only on final loop).
+#   --planner-model MODEL     Set HEPH_PLANNER_MODEL for child processes
+#   --reviewer-model MODEL    Set HEPH_REVIEWER_MODEL (covers plan-review and PR-review)
+#   --implementer-model MODEL Set HEPH_IMPLEMENTER_MODEL (covers implement, address-review,
+#                             ci-driver fresh sessions; --resume sites correctly omit --model)
+#   -h, --help                Show this help and exit
 
 set -euo pipefail
+
+# Job control: each backgrounded `process_repo` runs in its own process group,
+# so we can SIGTERM the whole subtree (repo subshell → Python phase →
+# claude/gh descendants) by signalling the negative pgid.
+set -m
+
+usage() {
+  sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+# ---------------------------------------------------------------------------
+# Cleanup: when interrupted (Ctrl-C, SIGTERM, SIGHUP), kill every backgrounded
+# repo subtree. We only fire on real signals — a normal exit (including
+# `exit 1` from bad args) skips the kill because there are no children yet
+# OR the main loop already drained them with `wait`.
+# ---------------------------------------------------------------------------
+ACTIVE_PIDS=()
+cleanup_on_signal() {
+  local sig="$1"
+  echo "" >&2
+  echo "▶ Interrupted ($sig). Stopping ${#ACTIVE_PIDS[@]} background repo job(s)..." >&2
+  trap - INT TERM HUP    # disarm to prevent re-entry mid-cleanup
+
+  # Documented set +e/set -e bracket: signalling a process group that has
+  # already exited returns ESRCH (kill exit 1). That is the expected outcome
+  # during teardown — we do not want it to abort the cleanup loop. We also
+  # suppress kill's stderr so "No such process" doesn't clutter the log when
+  # children exit between our two passes.
+  set +e
+  for pid in "${ACTIVE_PIDS[@]}"; do
+    # Negative pid = entire process group (the `set -m` job).
+    # SIGTERM first; SIGKILL after a short grace.
+    kill -TERM -"$pid" 2>/dev/null
+  done
+  sleep 2
+  for pid in "${ACTIVE_PIDS[@]}"; do
+    kill -KILL -"$pid" 2>/dev/null
+  done
+  set -e
+  exit 130
+}
+trap 'cleanup_on_signal INT'  INT
+trap 'cleanup_on_signal TERM' TERM
+trap 'cleanup_on_signal HUP'  HUP
 
 # ---------------------------------------------------------------------------
 # Resolve the installed entry-point binaries from the Hephaestus pixi env.
@@ -39,18 +95,52 @@ PARALLEL_REPOS=3
 PROJECTS_DIR="$HOME/Projects"
 ORG="HomericIntelligence"
 
+ALL_PHASES="plan,review-plans,implement,review-prs,address-review,drive-green"
+PHASES="$ALL_PHASES"
+
+PLANNER_MODEL=""
+REVIEWER_MODEL=""
+IMPLEMENTER_MODEL=""
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dry-run)         DRY_RUN=1; shift ;;
-    --loops)           LOOPS="$2"; shift 2 ;;
-    --max-workers)     MAX_WORKERS="$2"; shift 2 ;;
-    --parallel-repos)  PARALLEL_REPOS="$2"; shift 2 ;;
-    *) echo "Unknown argument: $1" >&2; exit 1 ;;
+    -h|--help)            usage; exit 0 ;;
+    --dry-run)            DRY_RUN=1; shift ;;
+    --loops)              LOOPS="$2"; shift 2 ;;
+    --max-workers)        MAX_WORKERS="$2"; shift 2 ;;
+    --parallel-repos)     PARALLEL_REPOS="$2"; shift 2 ;;
+    --phases)             PHASES="$2"; shift 2 ;;
+    --planner-model)      PLANNER_MODEL="$2"; shift 2 ;;
+    --reviewer-model)     REVIEWER_MODEL="$2"; shift 2 ;;
+    --implementer-model)  IMPLEMENTER_MODEL="$2"; shift 2 ;;
+    *) echo "Unknown argument: $1" >&2; echo "Run with --help for usage." >&2; exit 1 ;;
   esac
 done
+
+# Validate --phases against the canonical list. Typos must fail loudly.
+IFS=',' read -r -a PHASE_ARRAY <<< "$PHASES"
+for p in "${PHASE_ARRAY[@]}"; do
+  case ",${ALL_PHASES}," in
+    *",${p},"*) ;;
+    *) echo "Unknown phase: $p (valid: $ALL_PHASES)" >&2; exit 1 ;;
+  esac
+done
+
+phase_enabled() {
+  case ",${PHASES}," in
+    *",$1,"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Forward model selections via env vars to all child processes.
+# claude_models.py honours these and falls back to its own defaults if unset.
+[[ -n "$PLANNER_MODEL" ]]     && export HEPH_PLANNER_MODEL="$PLANNER_MODEL"
+[[ -n "$REVIEWER_MODEL" ]]    && export HEPH_REVIEWER_MODEL="$REVIEWER_MODEL"
+[[ -n "$IMPLEMENTER_MODEL" ]] && export HEPH_IMPLEMENTER_MODEL="$IMPLEMENTER_MODEL"
 
 DRY_RUN_FLAGS=""
 if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -75,6 +165,8 @@ fi
 
 echo "Repos to process: ${REPOS[*]}"
 echo "Loops: $LOOPS | Max workers: $MAX_WORKERS | Parallel repos: $PARALLEL_REPOS | Dry run: $DRY_RUN"
+echo "Phases: $PHASES"
+echo "Models: planner=${HEPH_PLANNER_MODEL:-<default>} reviewer=${HEPH_REVIEWER_MODEL:-<default>} implementer=${HEPH_IMPLEMENTER_MODEL:-<default>}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # ---------------------------------------------------------------------------
@@ -95,6 +187,7 @@ done
 # ---------------------------------------------------------------------------
 # process_repo: 6-phase pipeline for a single repo.
 # Runs in a subshell so multiple repos can execute in parallel.
+# Each phase entrypoint auto-discovers open issues via gh_list_open_issues().
 # ---------------------------------------------------------------------------
 process_repo() {
   local repo="$1"
@@ -103,31 +196,6 @@ process_repo() {
 
   echo ""
   echo "── $repo ──────────────────────────────────────────────────────"
-
-  # Fetch open issue numbers (up to 1000). Capture once with explicit fallback
-  # so a transient gh failure doesn't silently look like "no open issues".
-  local -a ISSUE_NUMBERS
-  local _issue_list
-  if ! _issue_list=$(gh issue list --repo "$ORG/$repo" \
-      --state open \
-      --limit 1000 \
-      --json number \
-      --jq '.[].number' 2>/dev/null); then
-    echo "  [$repo] warn: gh issue list failed, treating as no issues" >&2
-    _issue_list=''
-  fi
-  mapfile -t ISSUE_NUMBERS <<< "$_issue_list"
-  # mapfile on empty string yields a single empty element — strip it.
-  if [[ ${#ISSUE_NUMBERS[@]} -eq 1 && -z "${ISSUE_NUMBERS[0]}" ]]; then
-    ISSUE_NUMBERS=()
-  fi
-
-  if [[ ${#ISSUE_NUMBERS[@]} -eq 0 ]]; then
-    echo "  [$repo] No open issues — skipping"
-    return 0
-  fi
-
-  echo "  [$repo] Open issues (${#ISSUE_NUMBERS[@]}): ${ISSUE_NUMBERS[*]}"
 
   # Rebase main before starting work
   echo "  [$repo] Rebasing main..."
@@ -143,70 +211,75 @@ process_repo() {
   fi
 
   # --- Phase 1: Plan ---
-  echo "  [$repo] Planning issues..."
-  (
-    cd "$dir"
-    "$PLAN_BIN" \
-      --issues "${ISSUE_NUMBERS[@]}" \
-      -v \
-      $DRY_RUN_FLAGS \
-      || echo "  [$repo] Warning: plan-issues exited non-zero (loop $loop)"
-  )
+  if phase_enabled plan; then
+    echo "  [$repo] Planning issues..."
+    (
+      cd "$dir"
+      "$PLAN_BIN" \
+        -v \
+        $DRY_RUN_FLAGS \
+        || echo "  [$repo] Warning: plan-issues exited non-zero (loop $loop)"
+    )
+  fi
 
   # --- Phase 2: Review Plans ---
-  echo "  [$repo] Reviewing plans..."
-  (
-    cd "$dir"
-    "$PYTHON" "$SCRIPT_DIR/review_plans.py" \
-      --issues "${ISSUE_NUMBERS[@]}" \
-      --max-workers "$MAX_WORKERS" \
-      -v \
-      $DRY_RUN_FLAGS \
-      || echo "  [$repo] Warning: review-plans exited non-zero (loop $loop)"
-  )
+  if phase_enabled review-plans; then
+    echo "  [$repo] Reviewing plans..."
+    (
+      cd "$dir"
+      "$PYTHON" "$SCRIPT_DIR/review_plans.py" \
+        --max-workers "$MAX_WORKERS" \
+        -v \
+        $DRY_RUN_FLAGS \
+        || echo "  [$repo] Warning: review-plans exited non-zero (loop $loop)"
+    )
+  fi
 
   # --- Phase 3: Implement ---
-  echo "  [$repo] Implementing issues..."
-  (
-    cd "$dir"
-    "$IMPL_BIN" \
-      --issues "${ISSUE_NUMBERS[@]}" \
-      --max-workers "$MAX_WORKERS" \
-      --no-ui \
-      -v \
-      $FOLLOW_UP_FLAG \
-      $DRY_RUN_FLAGS \
-      || echo "  [$repo] Warning: implement-issues exited non-zero (loop $loop)"
-  )
+  if phase_enabled implement; then
+    echo "  [$repo] Implementing issues..."
+    (
+      cd "$dir"
+      "$IMPL_BIN" \
+        --max-workers "$MAX_WORKERS" \
+        --no-ui \
+        -v \
+        $FOLLOW_UP_FLAG \
+        $DRY_RUN_FLAGS \
+        || echo "  [$repo] Warning: implement-issues exited non-zero (loop $loop)"
+    )
+  fi
 
   # --- Phase 4: Review PRs (inline comments) ---
-  echo "  [$repo] Reviewing PRs..."
-  (
-    cd "$dir"
-    "$PYTHON" "$SCRIPT_DIR/review_issues.py" \
-      --issues "${ISSUE_NUMBERS[@]}" \
-      --max-workers "$MAX_WORKERS" \
-      --no-ui \
-      -v \
-      $DRY_RUN_FLAGS \
-      || echo "  [$repo] Warning: review-issues exited non-zero (loop $loop)"
-  )
+  if phase_enabled review-prs; then
+    echo "  [$repo] Reviewing PRs..."
+    (
+      cd "$dir"
+      "$PYTHON" "$SCRIPT_DIR/review_issues.py" \
+        --max-workers "$MAX_WORKERS" \
+        --no-ui \
+        -v \
+        $DRY_RUN_FLAGS \
+        || echo "  [$repo] Warning: review-issues exited non-zero (loop $loop)"
+    )
+  fi
 
   # --- Phase 5: Address Review Comments ---
-  echo "  [$repo] Addressing review comments..."
-  (
-    cd "$dir"
-    "$PYTHON" "$SCRIPT_DIR/address_review.py" \
-      --issues "${ISSUE_NUMBERS[@]}" \
-      --max-workers "$MAX_WORKERS" \
-      --no-ui \
-      -v \
-      $DRY_RUN_FLAGS \
-      || echo "  [$repo] Warning: address-review exited non-zero (loop $loop)"
-  )
+  if phase_enabled address-review; then
+    echo "  [$repo] Addressing review comments..."
+    (
+      cd "$dir"
+      "$PYTHON" "$SCRIPT_DIR/address_review.py" \
+        --max-workers "$MAX_WORKERS" \
+        --no-ui \
+        -v \
+        $DRY_RUN_FLAGS \
+        || echo "  [$repo] Warning: address-review exited non-zero (loop $loop)"
+    )
+  fi
 
   # --- Phase 6: Drive PRs to Green CI (final loop only) ---
-  if [[ "$loop" -eq "$LOOPS" ]]; then
+  if phase_enabled drive-green && [[ "$loop" -eq "$LOOPS" ]]; then
     echo "  [$repo] Driving PRs to green CI..."
     (
       cd "$dir"
@@ -214,7 +287,6 @@ process_repo() {
       # unless HEPH_LOOP_INDEX == HEPH_TOTAL_LOOPS or --force-run is given.
       HEPH_LOOP_INDEX="$loop" HEPH_TOTAL_LOOPS="$LOOPS" \
       "$PYTHON" "$SCRIPT_DIR/drive_prs_green.py" \
-        --issues "${ISSUE_NUMBERS[@]}" \
         --max-workers "$MAX_WORKERS" \
         --no-ui \
         -v \
@@ -233,21 +305,29 @@ for (( loop=1; loop<=LOOPS; loop++ )); do
   echo "▶ LOOP $loop / $LOOPS"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-  active_pids=()
+  ACTIVE_PIDS=()
   for repo in "${REPOS[@]}"; do
     process_repo "$repo" "$loop" &
-    active_pids+=($!)
+    ACTIVE_PIDS+=($!)
 
-    if [[ ${#active_pids[@]} -ge "$PARALLEL_REPOS" ]]; then
-      wait "${active_pids[0]}"
-      active_pids=("${active_pids[@]:1}")
+    if [[ ${#ACTIVE_PIDS[@]} -ge "$PARALLEL_REPOS" ]]; then
+      # A non-zero exit from process_repo just means one repo's phase warned;
+      # the per-phase blocks already logged the warning and the orchestrator
+      # continues with the remaining repos. Surface the exit code explicitly.
+      if ! wait "${ACTIVE_PIDS[0]}"; then
+        echo "  Warning: repo job pid=${ACTIVE_PIDS[0]} exited non-zero (continuing)" >&2
+      fi
+      ACTIVE_PIDS=("${ACTIVE_PIDS[@]:1}")
     fi
   done
 
   # Drain any remaining background jobs
-  for pid in "${active_pids[@]}"; do
-    wait "$pid"
+  for pid in "${ACTIVE_PIDS[@]}"; do
+    if ! wait "$pid"; then
+      echo "  Warning: repo job pid=$pid exited non-zero (continuing)" >&2
+    fi
   done
+  ACTIVE_PIDS=()
 
   echo ""
   echo "  Loop $loop complete."

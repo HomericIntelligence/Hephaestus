@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -34,6 +35,27 @@ from .models import IssueInfo, IssueState
 logger = logging.getLogger(__name__)
 
 _label_cache: set[str] | None = None
+
+# Per-thread proactive throttle for `gh` invocations. Default 5 calls/sec
+# per worker thread; the GH_RATE_LIMIT_PER_SEC env var overrides for ops
+# tuning, and 0 disables. With max-workers=3 the aggregate is ~15/sec,
+# well below GitHub's per-token REST limits and tame enough that GH
+# secondary rate limits stay quiet during phase bursts (e.g. a planner
+# fetching N issue bodies back-to-back).
+_GH_THROTTLE = threading.local()
+
+
+def _gh_throttle_wait() -> None:
+    rate = float(os.environ.get("GH_RATE_LIMIT_PER_SEC", "5"))
+    if rate <= 0:
+        return
+    min_interval = 1.0 / rate
+    last = getattr(_GH_THROTTLE, "last_call", 0.0)
+    now = time.monotonic()
+    elapsed = now - last
+    if elapsed < min_interval:
+        time.sleep(min_interval - elapsed)
+    _GH_THROTTLE.last_call = time.monotonic()
 
 
 class ClaudeUsageCapError(RuntimeError):
@@ -127,6 +149,7 @@ def _gh_call(
     """
     for attempt in range(max_retries):
         try:
+            _gh_throttle_wait()
             result = run(
                 ["gh", *args],
                 check=check,
