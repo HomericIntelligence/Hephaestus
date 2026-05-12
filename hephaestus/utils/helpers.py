@@ -112,6 +112,26 @@ def get_repo_root(start_path: str | Path | None = None) -> Path:
     return start_path
 
 
+_LOG_ARG_MAX = 200
+
+
+def _format_cmd_for_log(cmd: list[str]) -> str:
+    """Render *cmd* for a log line, truncating any argument longer than 200 chars.
+
+    Defense-in-depth: large argv values (e.g. a forgotten ``--body`` with a
+    multi-KB string) would otherwise dump straight into ERROR logs on
+    subprocess failure. Truncation keeps each log line bounded while still
+    leaving enough of each argument to identify the command.
+    """
+    parts: list[str] = []
+    for arg in cmd:
+        if len(arg) > _LOG_ARG_MAX:
+            parts.append(f"{arg[:_LOG_ARG_MAX]}…({len(arg) - _LOG_ARG_MAX} more chars)")
+        else:
+            parts.append(arg)
+    return " ".join(parts)
+
+
 def run_subprocess(
     cmd: list[str],
     cwd: str | None = None,
@@ -156,13 +176,14 @@ def run_subprocess(
         logger.error(
             "Command timed out after %ds: %s",
             timeout,
-            " ".join(cmd),
+            _format_cmd_for_log(cmd),
         )
         raise
     except subprocess.CalledProcessError as e:
         if log_on_error:
-            logger.error("Command failed: %s", " ".join(cmd))
-            logger.error("stderr: %s", e.stderr)
+            logger.error("Command failed: %s", _format_cmd_for_log(cmd))
+            stderr = e.stderr or ""
+            logger.error("stderr: %s", stderr[:_LOG_ARG_MAX])
         raise
 
 

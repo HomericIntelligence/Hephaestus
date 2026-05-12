@@ -7,7 +7,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import hephaestus.utils.helpers as _helpers
 from hephaestus.utils.helpers import (
+    _format_cmd_for_log,
     flatten_dict,
     get_proj_root,
     get_repo_root,
@@ -177,11 +179,7 @@ class TestRunSubprocess:
 
     def test_log_on_error_false_suppresses_error_log(self):
         """When log_on_error=False, failure does not call logger.error."""
-        from unittest.mock import patch as _patch
-
-        import hephaestus.utils.helpers as _helpers
-
-        with _patch.object(_helpers.logger, "error") as mock_error:
+        with patch.object(_helpers.logger, "error") as mock_error:
             with pytest.raises(subprocess.CalledProcessError):
                 run_subprocess(["false"], log_on_error=False)
 
@@ -189,15 +187,42 @@ class TestRunSubprocess:
 
     def test_log_on_error_true_emits_error_log(self):
         """When log_on_error=True (default), failure calls logger.error."""
-        from unittest.mock import patch as _patch
-
-        import hephaestus.utils.helpers as _helpers
-
-        with _patch.object(_helpers.logger, "error") as mock_error:
+        with patch.object(_helpers.logger, "error") as mock_error:
             with pytest.raises(subprocess.CalledProcessError):
                 run_subprocess(["false"], log_on_error=True)
 
         assert mock_error.called
+
+    def test_long_argv_truncated_in_error_log(self):
+        """Long argv values are truncated in the failure log line.
+
+        Defense-in-depth: even with ``--body-file`` in place upstream, any
+        future caller passing a multi-KB ``--body`` shouldn't blow up logs.
+        """
+        long_arg = "x" * 10_000
+
+        with patch.object(_helpers.logger, "error") as mock_error:
+            with pytest.raises(subprocess.CalledProcessError):
+                run_subprocess(["false", long_arg])
+
+        rendered = str(mock_error.call_args_list)
+        assert long_arg not in rendered, "full long arg leaked into log"
+        assert "more chars" in rendered, "truncation marker missing"
+
+
+class TestFormatCmdForLog:
+    """Tests for _format_cmd_for_log (private helper)."""
+
+    def test_short_args_unchanged(self):
+        out = _format_cmd_for_log(["gh", "issue", "view", "123"])
+        assert out == "gh issue view 123"
+
+    def test_long_arg_truncated(self):
+        long = "a" * 500
+        out = _format_cmd_for_log(["gh", "issue", "comment", "--body", long])
+        assert long not in out
+        assert "more chars" in out
+        assert "a" * 100 in out
 
 
 class TestGetProjRoot:
