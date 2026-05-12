@@ -345,9 +345,7 @@ class TestGhCall:
         assert result.stdout == "success"
 
     @patch("hephaestus.automation.github_api.run")
-    def test_token_scope_error_is_non_transient(
-        self, mock_run: Any, caplog: Any
-    ) -> None:
+    def test_token_scope_error_is_non_transient(self, mock_run: Any, caplog: Any) -> None:
         """The GraphQL "Resource not accessible by …" error fails fast.
 
         Regression test for the log-spam incident where this error was treated
@@ -370,9 +368,7 @@ class TestGhCall:
         assert "gh auth status" in joined
 
     @patch("hephaestus.automation.github_api.run")
-    def test_token_scope_error_for_integration_also_non_transient(
-        self, mock_run: Any
-    ) -> None:
+    def test_token_scope_error_for_integration_also_non_transient(self, mock_run: Any) -> None:
         """GitHub-App variant of the scope error is recognised too."""
         stderr = "GraphQL: Resource not accessible by integration (addComment)"
         mock_run.side_effect = subprocess.CalledProcessError(1, "gh", stderr=stderr)
@@ -419,9 +415,7 @@ class TestGhIssueComment:
             gh_issue_comment(123, "Test comment")
 
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_comment_body_argv_does_not_contain_large_body(
-        self, mock_gh_call: Any
-    ) -> None:
+    def test_comment_body_argv_does_not_contain_large_body(self, mock_gh_call: Any) -> None:
         """A large body (e.g. an implementation plan) never appears inline."""
         mock_gh_call.return_value = Mock()
         large_body = "x" * 50_000
