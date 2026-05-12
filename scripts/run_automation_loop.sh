@@ -163,6 +163,43 @@ if [[ ${#REPOS[@]} -eq 0 ]]; then
   exit 1
 fi
 
+# Preflight: every phase posts comments / creates PRs, so a token without
+# write scope fails after long delays mid-run. Skip on dry-run since no writes
+# happen then.
+preflight_token_scopes() {
+  local first_repo="${REPOS[0]}"
+  local probe_err
+  if ! probe_err=$(gh api -H "Accept: application/vnd.github+json" \
+        "/repos/$ORG/$first_repo" --jq '.permissions' 2>&1); then
+    cat >&2 <<EOF
+ERROR: \`gh\` cannot read $ORG/$first_repo with the current token.
+
+  $probe_err
+
+  Required scopes for this script:
+    - Classic PAT:   repo  (full)             — covers issue:write + pr:write
+    - Fine-grained:  Issues:        Read & Write
+                     Pull requests: Read & Write
+                     Contents:      Read & Write   (if pushes are needed)
+
+  How to fix:
+    1. Check which token gh is using:  gh auth status
+    2. If GITHUB_TOKEN is set in your env, it overrides gh's stored creds.
+       Either:
+         a) unset GITHUB_TOKEN  (lets gh use its own login), or
+         b) regenerate the PAT with the scopes above:
+            https://github.com/settings/tokens
+    3. Re-run with:  GITHUB_TOKEN= $(basename "${BASH_SOURCE[0]}") …
+       (the leading \`GITHUB_TOKEN=\` blanks the env var for one command)
+EOF
+    exit 1
+  fi
+  if [[ "$probe_err" == "null" ]] || [[ "$probe_err" == "{}" ]]; then
+    echo "WARNING: token permissions on $ORG/$first_repo are empty; PR/issue writes will fail." >&2
+  fi
+}
+[[ "$DRY_RUN" -eq 0 ]] && preflight_token_scopes
+
 echo "Repos to process: ${REPOS[*]}"
 echo "Loops: $LOOPS | Max workers: $MAX_WORKERS | Parallel repos: $PARALLEL_REPOS | Dry run: $DRY_RUN"
 echo "Phases: $PHASES"

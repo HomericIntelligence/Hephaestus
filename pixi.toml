@@ -53,7 +53,9 @@ pip-audit = ">=2.7,<3"
 # CVE-2026-3219: pip vendored library issue, no fix available we can pin
 # CVE-2026-6357: pip 26.0.1 → 26.1 fix; pip is bundled by the runner Python
 # and our deps don't pin it, so ignore until the runner ships a newer pip.
-pip-audit = "pip-audit --ignore-vuln CVE-2026-3219 --ignore-vuln CVE-2026-6357"
+# CVE-2026-44431 / CVE-2026-44432: urllib3 2.6.3 → 2.7.0 fix; 2.7.0 is not yet
+# packaged on conda-forge, so we can't bump until upstream publishes it.
+pip-audit = "pip-audit --ignore-vuln CVE-2026-3219 --ignore-vuln CVE-2026-6357 --ignore-vuln CVE-2026-44431 --ignore-vuln CVE-2026-44432"
 
 [environments]
 default = { features = ["dev"], solve-group = "default" }

@@ -124,6 +124,116 @@ def gh_create_label(name: str, color: str = "ededed", description: str = "") -> 
     logger.info("Created missing label '%s'", name)
 
 
+# GraphQL emits "Resource not accessible by …" with HTTP 200 when the token
+# is valid but lacks scope for the mutation (e.g. addComment outside the PAT's
+# allowed orgs). None of the HTTP-status patterns above match it, so without
+# this entry the call gets retried and dumps the full body on every attempt.
+_TOKEN_SCOPE_PATTERN = re.compile(
+    r"resource not accessible by (personal access token|integration)",
+    re.IGNORECASE,
+)
+
+_NON_TRANSIENT_PATTERNS = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"(?:^|\s)403(?:\s|$)|forbidden|permission denied",
+        r"(?:^|\s)404(?:\s|$)|not found",
+        r"(?:^|\s)400(?:\s|$)|bad request",
+        r"(?:^|\s)401(?:\s|$)|unauthorized",
+        r"invalid argument",
+    )
+]
+_NON_TRANSIENT_PATTERNS.append(_TOKEN_SCOPE_PATTERN)
+
+
+def _is_token_scope_error(stderr: str) -> bool:
+    return bool(_TOKEN_SCOPE_PATTERN.search(stderr))
+
+
+def _is_non_transient_error(stderr: str) -> bool:
+    return any(p.search(stderr) for p in _NON_TRANSIENT_PATTERNS)
+
+
+def _raise_if_claude_usage(stderr: str, cause: subprocess.CalledProcessError) -> None:
+    """Convert Claude usage-cap/usage-limit stderr into ClaudeUsageCapError.
+
+    Returns silently when *stderr* matches neither pattern. Hoisted out of
+    :func:`_gh_call` to keep its cyclomatic complexity under the linter cap.
+    """
+    reset_epoch = detect_claude_usage_cap(stderr)
+    if reset_epoch is not None:
+        raise ClaudeUsageCapError(
+            f"Claude API usage cap reached. Resets at epoch {reset_epoch}.",
+            reset_epoch=reset_epoch,
+        ) from cause
+    if detect_claude_usage_limit(stderr):
+        raise ClaudeUsageCapError(
+            "Claude API usage limit reached. Please check your billing.",
+            reset_epoch=None,
+        ) from cause
+
+
+@contextlib.contextmanager
+def _body_file(body: str):  # type: ignore[no-untyped-def]
+    """Yield a path to a temporary file containing *body*, deleted on exit.
+
+    Use with ``gh <subcmd> --body-file <path>`` instead of ``--body <body>`` so
+    large bodies (e.g. multi-KB implementation plans) don't bloat error logs or
+    risk hitting argv-size limits. The CLAUDE.md convention says temporary
+    files belong under ``build/`` of the current repo; if that directory
+    exists we use it, otherwise we fall back to the system tempdir.
+    """
+    build_dir = Path.cwd() / "build"
+    tmp_dir = str(build_dir) if build_dir.is_dir() else None
+    fd, path = tempfile.mkstemp(
+        prefix="gh-body-",
+        suffix=".md",
+        dir=tmp_dir,
+    )
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(body)
+        yield path
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+
+
+def _log_token_scope_remediation(args: list[str], stderr: str) -> None:
+    """Log a one-shot, actionable remediation block for token-scope failures.
+
+    Fires from the non-transient branch in :func:`_gh_call` so it logs exactly
+    once per failed call (no retry spam). The message names the gh subcommand
+    that failed, the required token scopes, and the GITHUB_TOKEN=-blanking
+    workaround for the common case where a low-scope env token shadows gh's
+    stored credentials.
+    """
+    subcommand = " ".join(args[:2]) if args else "<unknown>"
+    logger.error(
+        "Cannot run `gh %s`: GitHub token lacks required scopes.\n"
+        "\n"
+        "  Required scopes for this script:\n"
+        "    - Classic PAT:   repo  (full)             — covers issue:write + pr:write\n"
+        "    - Fine-grained:  Issues:        Read & Write\n"
+        "                     Pull requests: Read & Write\n"
+        "                     Contents:      Read & Write   (if pushes are needed)\n"
+        "\n"
+        "  How to fix:\n"
+        "    1. Check which token gh is using:  gh auth status\n"
+        "    2. If GITHUB_TOKEN is set in your env, it overrides gh's stored creds.\n"
+        "       Either:\n"
+        "         a) unset GITHUB_TOKEN  (lets gh use its own login), or\n"
+        "         b) regenerate the PAT with the scopes above:\n"
+        "            https://github.com/settings/tokens\n"
+        "    3. Re-run with:  GITHUB_TOKEN= <your-command>\n"
+        "       (the leading `GITHUB_TOKEN=` blanks the env var for one command)\n"
+        "\n"
+        "  Original error: %s",
+        subcommand,
+        stderr.strip()[:200],
+    )
+
+
 def _gh_call(
     args: list[str],
     check: bool = True,
@@ -160,19 +270,7 @@ def _gh_call(
         except subprocess.CalledProcessError as e:
             stderr = e.stderr if e.stderr else ""
 
-            # Check for Claude usage cap first (has reset epoch); fall back to
-            # the simpler usage-limit detector when no epoch is available.
-            reset_epoch = detect_claude_usage_cap(stderr)
-            if reset_epoch is not None:
-                raise ClaudeUsageCapError(
-                    f"Claude API usage cap reached. Resets at epoch {reset_epoch}.",
-                    reset_epoch=reset_epoch,
-                ) from e
-            if detect_claude_usage_limit(stderr):
-                raise ClaudeUsageCapError(
-                    "Claude API usage limit reached. Please check your billing.",
-                    reset_epoch=None,
-                ) from e
+            _raise_if_claude_usage(stderr, e)
 
             # Check for rate limit (regardless of retry_on_rate_limit flag)
             reset_epoch = detect_rate_limit(stderr)
@@ -192,20 +290,10 @@ def _gh_call(
                         f"GitHub API rate limit reached. Reset at epoch {reset_epoch}"
                     ) from e
 
-            # Check if this is a non-transient error that shouldn't be retried
-            # Permission errors, not found, bad requests should fail fast.
-            # Each pattern is a standalone alternative; we avoid mixing HTTP
-            # status codes with text phrases in the same regex so a bare "403"
-            # in an unrelated part of stderr doesn't false-trigger.
-            non_transient_patterns = [
-                r"(?:^|\s)403(?:\s|$)|forbidden|permission denied",
-                r"(?:^|\s)404(?:\s|$)|not found",
-                r"(?:^|\s)400(?:\s|$)|bad request",
-                r"(?:^|\s)401(?:\s|$)|unauthorized",
-                r"invalid argument",
-            ]
-            if any(re.search(pattern, stderr, re.IGNORECASE) for pattern in non_transient_patterns):
+            if _is_non_transient_error(stderr):
                 logger.error("Non-transient error detected: %s", stderr[:200])
+                if _is_token_scope_error(stderr):
+                    _log_token_scope_remediation(args, stderr)
                 raise
 
             # Last retry attempt, re-raise
@@ -273,7 +361,8 @@ def gh_issue_comment(issue_number: int, body: str) -> None:
 
     """
     try:
-        _gh_call(["issue", "comment", str(issue_number), "--body", body])
+        with _body_file(body) as path:
+            _gh_call(["issue", "comment", str(issue_number), "--body-file", path])
         logger.info("Posted comment to issue #%s", issue_number)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to post comment to issue #{issue_number}: {e}") from e
@@ -315,26 +404,30 @@ def gh_issue_create(title: str, body: str, labels: list[str] | None = None) -> i
         if labels:
             _ensure_labels_exist(labels)
 
-        cmd = ["issue", "create", "--title", title, "--body", body]
-        if labels:
-            for label in labels:
-                cmd.extend(["--label", label])
+        with _body_file(body) as body_path:
+            cmd = ["issue", "create", "--title", title, "--body-file", body_path]
+            if labels:
+                for label in labels:
+                    cmd.extend(["--label", label])
 
-        try:
-            result = _gh_call(cmd)
-        except subprocess.CalledProcessError as e:
-            # On a label-not-found error (race or cache miss), create the label and retry once.
-            stderr = e.stderr if e.stderr else ""
-            m = re.search(r"could not add label:\s*'([^']+)'\s*not found", stderr, re.IGNORECASE)
-            if m and labels:
-                missing_label = m.group(1)
-                logger.warning(
-                    "Label '%s' not found after pre-create; recreating and retrying", missing_label
-                )
-                gh_create_label(missing_label)
+            try:
                 result = _gh_call(cmd)
-            else:
-                raise
+            except subprocess.CalledProcessError as e:
+                # On a label-not-found error (race or cache miss), create the label and retry once.
+                stderr = e.stderr if e.stderr else ""
+                m = re.search(
+                    r"could not add label:\s*'([^']+)'\s*not found", stderr, re.IGNORECASE
+                )
+                if m and labels:
+                    missing_label = m.group(1)
+                    logger.warning(
+                        "Label '%s' not found after pre-create; recreating and retrying",
+                        missing_label,
+                    )
+                    gh_create_label(missing_label)
+                    result = _gh_call(cmd)
+                else:
+                    raise
 
         output = result.stdout.strip()
         try:
@@ -404,18 +497,19 @@ def gh_pr_create(
     """
     try:
         # Create PR
-        result = _gh_call(
-            [
-                "pr",
-                "create",
-                "--head",
-                branch,
-                "--title",
-                title,
-                "--body",
-                body,
-            ]
-        )
+        with _body_file(body) as body_path:
+            result = _gh_call(
+                [
+                    "pr",
+                    "create",
+                    "--head",
+                    branch,
+                    "--title",
+                    title,
+                    "--body-file",
+                    body_path,
+                ]
+            )
 
         # Extract PR number from URL in output
         output = result.stdout.strip()

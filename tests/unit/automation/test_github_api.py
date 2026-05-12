@@ -344,6 +344,40 @@ class TestGhCall:
 
         assert result.stdout == "success"
 
+    @patch("hephaestus.automation.github_api.run")
+    def test_token_scope_error_is_non_transient(self, mock_run: Any, caplog: Any) -> None:
+        """The GraphQL "Resource not accessible by …" error fails fast.
+
+        Regression test for the log-spam incident where this error was treated
+        as transient, causing 3× retries that each logged the full
+        multi-kilobyte ``--body`` argument.
+        """
+        stderr = "GraphQL: Resource not accessible by personal access token (addComment)"
+        mock_run.side_effect = subprocess.CalledProcessError(1, "gh", stderr=stderr)
+
+        with caplog.at_level("ERROR", logger="hephaestus.automation.github_api"):
+            with pytest.raises(subprocess.CalledProcessError):
+                _gh_call(["issue", "comment", "584", "--body-file", "/tmp/x"])
+
+        # Must not retry: exactly one underlying gh invocation.
+        assert mock_run.call_count == 1
+        # Must log the actionable remediation message.
+        joined = "\n".join(r.getMessage() for r in caplog.records)
+        assert "token lacks required scopes" in joined
+        assert "GITHUB_TOKEN=" in joined
+        assert "gh auth status" in joined
+
+    @patch("hephaestus.automation.github_api.run")
+    def test_token_scope_error_for_integration_also_non_transient(self, mock_run: Any) -> None:
+        """GitHub-App variant of the scope error is recognised too."""
+        stderr = "GraphQL: Resource not accessible by integration (addComment)"
+        mock_run.side_effect = subprocess.CalledProcessError(1, "gh", stderr=stderr)
+
+        with pytest.raises(subprocess.CalledProcessError):
+            _gh_call(["issue", "comment", "1", "--body-file", "/tmp/x"])
+
+        assert mock_run.call_count == 1
+
 
 # NOTE on patch targets: tests in TestGhCall patch "hephaestus.automation.github_api.run"
 # because _gh_call (defined in github_api) calls run() imported from .git_utils.
@@ -354,14 +388,23 @@ class TestGhIssueComment:
 
     @patch("hephaestus.automation.github_api._gh_call")
     def test_successful_comment(self, mock_gh_call: Any) -> None:
-        """Test successful comment posting."""
+        """Comment body is passed via --body-file, not inline --body.
+
+        See ``_body_file``: large bodies on the command line bloat error logs
+        and risk argv-size limits, so we route every comment through a
+        tempfile.
+        """
         mock_gh_call.return_value = Mock()
 
         gh_issue_comment(123, "Test comment")
 
         mock_gh_call.assert_called_once()
         call_args = mock_gh_call.call_args[0][0]
-        assert call_args == ["issue", "comment", "123", "--body", "Test comment"]
+        # Expect: ["issue", "comment", "123", "--body-file", "<tmp path>"]
+        assert call_args[:4] == ["issue", "comment", "123", "--body-file"]
+        assert isinstance(call_args[4], str) and call_args[4]
+        # Inline body must not appear anywhere in argv.
+        assert "Test comment" not in call_args
 
     @patch("hephaestus.automation.github_api._gh_call")
     def test_failed_comment(self, mock_gh_call: Any) -> None:
@@ -370,6 +413,20 @@ class TestGhIssueComment:
 
         with pytest.raises(RuntimeError, match="Failed to post comment"):
             gh_issue_comment(123, "Test comment")
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_comment_body_argv_does_not_contain_large_body(self, mock_gh_call: Any) -> None:
+        """A large body (e.g. an implementation plan) never appears inline."""
+        mock_gh_call.return_value = Mock()
+        large_body = "x" * 50_000
+
+        gh_issue_comment(456, large_body)
+
+        call_args = mock_gh_call.call_args[0][0]
+        assert "--body-file" in call_args
+        assert "--body" not in call_args  # the inline flag must not be used
+        for arg in call_args:
+            assert large_body not in arg
 
 
 class TestGhIssueCreate:
@@ -390,7 +447,11 @@ class TestGhIssueCreate:
         assert issue_number == 789
         mock_gh_call.assert_called_once()
         call_args = mock_gh_call.call_args[0][0]
-        assert call_args == ["issue", "create", "--title", "Test issue", "--body", "Test body"]
+        # Body is now passed via --body-file <tmp path>, not inline --body.
+        assert call_args[:4] == ["issue", "create", "--title", "Test issue"]
+        assert call_args[4] == "--body-file"
+        assert isinstance(call_args[5], str) and call_args[5]
+        assert "Test body" not in call_args
 
     @patch("hephaestus.automation.github_api.gh_list_labels", return_value={"bug", "enhancement"})
     @patch("hephaestus.automation.github_api._gh_call")
