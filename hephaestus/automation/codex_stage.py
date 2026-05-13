@@ -55,6 +55,28 @@ def read_prompt(prompt_file: Path, skill_file: Path | None, stage: str) -> str:
     )
 
 
+def codex_approval_args(approval: str) -> list[str]:
+    """Return approval arguments supported by the installed Codex CLI."""
+    try:
+        result = subprocess.run(
+            ["codex", "exec", "--help"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+    help_text = result.stdout or ""
+    if "--approval-policy" in help_text:
+        return ["--approval-policy", approval]
+    if "--ask-for-approval" in help_text:
+        return ["--ask-for-approval", approval]
+    return []
+
+
 def run_codex(args: argparse.Namespace) -> int:
     """Run Codex for one automation stage and persist its output/log files."""
     repo_root = Path(args.repo_root).expanduser().resolve()
@@ -75,12 +97,11 @@ def run_codex(args: argparse.Namespace) -> int:
         str(repo_root),
         "--sandbox",
         args.sandbox,
-        "--ask-for-approval",
-        args.approval,
         "--output-last-message",
         str(output_file),
         "-",
     ]
+    cmd[8:8] = codex_approval_args(args.approval)
     if args.model:
         cmd[2:2] = ["--model", args.model]
 
