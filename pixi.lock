@@ -556,8 +556,8 @@ packages:
   requires_python: '>=3.10'
 - pypi: ./
   name: homericintelligence-hephaestus
-  version: 0.7.3.dev54+gd2cb8afa5
-  sha256: 19a74c22876a0d3a8d92b72f58cefa118e02645d3323040b7b3a86ff62d3cec4
+  version: 0.7.3.dev73+g4daf52ee4.d20260514
+  sha256: 53e77628ae3774b1106045f7836319071b25e3d861edec7c23b330b8bba25c3b
   requires_dist:
   - packaging>=21.0,<27
   - pydantic>=2.0,<3
