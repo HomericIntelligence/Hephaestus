@@ -199,7 +199,7 @@ config = merge_with_env({}, convert_bools=True)
 <!-- CLI table generated from pyproject.toml [project.scripts]. Keep in sync via
      `python3 scripts/check_cli_table_sync.py` (also enforced in pre-commit). -->
 
-38 console scripts are installed when you install the package.  Run any command
+40 console scripts are installed when you install the package.  Run any command
 with `--help` to see full usage.
 
 ### Automation
@@ -226,6 +226,13 @@ with `--help` to see full usage.
 | `hephaestus-agent-stats` | Agent statistics aggregation and reporting |
 | `hephaestus-download-dataset` | Dataset downloading utilities for ProjectHephaestus |
 | `hephaestus-system-info` | System information collection utilities for ProjectHephaestus |
+
+### Debugging & Forensics
+
+| Command | Description |
+|---|---|
+| `hephaestus-coredump-handler` | Kernel pipe-mode `core_pattern` handler for capturing cores from containerized crashes |
+| `hephaestus-run-under-gdb` | Run any command under `gdb -batch` to capture a real core before a runtime's own signal handler swallows the fault |
 
 ### Validation
 
