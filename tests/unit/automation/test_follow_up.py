@@ -189,6 +189,24 @@ class TestRunFollowUpIssues:
         mock_comment.assert_called_once()
         assert "#999" in mock_comment.call_args.args[1]
 
+    def test_codex_skips_legacy_claude_session(self, tmp_path: Path) -> None:
+        """Legacy sessions must not be resumed through Codex."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+
+        with patch("hephaestus.automation.follow_up.resume_codex_session") as mock_resume:
+            response = run_follow_up_issues(
+                "sess",
+                worktree_path,
+                42,
+                tmp_path,
+                agent="codex",
+            )
+
+        assert response is None
+        mock_resume.assert_not_called()
+        assert (tmp_path / "follow-up-42.log").read_text().startswith("FAILED:")
+
     def test_no_items_skips_issue_creation(self, tmp_path: Path) -> None:
         worktree_path = tmp_path / "worktree"
         worktree_path.mkdir()

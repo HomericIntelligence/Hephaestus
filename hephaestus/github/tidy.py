@@ -21,7 +21,9 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
+from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_text
 from hephaestus.github.pr_merge import detect_repo_from_remote
 from hephaestus.logging.utils import get_logger
 
@@ -266,18 +268,16 @@ NOTE: <one sentence summary>
 """
 
 
-async def _dispatch_swarm(
-    branches: list[str],
-    trunk: str,
-    repo_path: Path,
-    repo_slug: str,
-    max_concurrent: int,
-    dry_run: bool,
-) -> dict[str, str]:
-    """Spawn one Sonnet agent per branch (capped at max_concurrent).
+def _status_from_agent_text(text: str) -> str | None:
+    """Extract a Myrmidon status marker from agent output."""
+    if "STATUS:" not in text:
+        return None
+    match = re.search(r"STATUS:\s*(\S+)", text)
+    return match.group(1) if match else None
 
-    Returns a dict of branch -> status string.
-    """
+
+def _load_claude_swarm() -> tuple[Any, Any] | None:
+    """Load Claude SDK objects for swarm dispatch."""
     try:
         from claude_code_sdk import ClaudeCodeOptions, query
     except ImportError:
@@ -285,6 +285,34 @@ async def _dispatch_swarm(
             "claude_code_sdk not available — cannot dispatch swarm. "
             "Install with: pip install claude-code-sdk",
         )
+        return None
+    return ClaudeCodeOptions, query
+
+
+def _claude_options(options_factory: Any, repo_path: Path) -> object:
+    """Construct Claude SDK options without leaking SDK names into callers."""
+    return options_factory(
+        max_turns=40,
+        cwd=str(repo_path),
+        model="claude-sonnet-4-6",
+    )
+
+
+async def _dispatch_swarm(
+    branches: list[str],
+    trunk: str,
+    repo_path: Path,
+    repo_slug: str,
+    max_concurrent: int,
+    dry_run: bool,
+    agent: str,
+) -> dict[str, str]:
+    """Spawn one Sonnet agent per branch (capped at max_concurrent).
+
+    Returns a dict of branch -> status string.
+    """
+    claude_swarm = None if is_codex(agent) else _load_claude_swarm()
+    if not is_codex(agent) and claude_swarm is None:
         return dict.fromkeys(branches, "failed (claude_code_sdk missing)")
 
     results: dict[str, str] = {}
@@ -294,32 +322,66 @@ async def _dispatch_swarm(
         async with sem:
             prompt = _make_agent_prompt(branch, trunk, repo_path, repo_slug)
             if dry_run:
-                logger.info("[dry-run] Would spawn Sonnet agent for branch: %s", branch)
+                logger.info("[dry-run] Would spawn %s agent for branch: %s", agent, branch)
                 results[branch] = "dry-run"
                 return
 
             logger.info("Spawning agent for branch: %s", branch)
-            status = "failed"
-            options = ClaudeCodeOptions(
-                max_turns=40,
-                cwd=str(repo_path),
-                model="claude-sonnet-4-6",
+            if is_codex(agent):
+                results[branch] = await asyncio.to_thread(
+                    _run_codex_rebase_agent,
+                    prompt,
+                    branch,
+                    repo_path,
+                )
+                return
+
+            results[branch] = await _run_claude_rebase_agent(
+                prompt, branch, repo_path, claude_swarm
             )
-            try:
-                async for message in query(prompt=prompt, options=options):
-                    text = getattr(message, "text", None) or str(message)
-                    if "STATUS:" in text:
-                        m = re.search(r"STATUS:\s*(\S+)", text)
-                        if m:
-                            status = m.group(1)
-                    if text:
-                        logger.debug("[%s] agent: %s", branch, text[:300])
-            except Exception as e:
-                logger.error("[%s] agent exception: %s", branch, e)
-            results[branch] = status
 
     await asyncio.gather(*(_run_one(b) for b in branches))
     return results
+
+
+def _run_codex_rebase_agent(prompt: str, branch: str, repo_path: Path) -> str:
+    """Run one Codex rebase-fix agent and return its status marker."""
+    try:
+        result = run_codex_text(
+            prompt,
+            cwd=repo_path,
+            timeout=2400,
+            sandbox="workspace-write",
+        )
+        text = result.stdout or ""
+        logger.debug("[%s] agent: %s", branch, text[:300])
+        return _status_from_agent_text(text) or "failed"
+    except Exception as e:
+        logger.error("[%s] agent exception: %s", branch, e)
+        return "failed"
+
+
+async def _run_claude_rebase_agent(
+    prompt: str,
+    branch: str,
+    repo_path: Path,
+    claude_swarm: tuple[Any, Any] | None,
+) -> str:
+    """Run one Claude SDK rebase-fix agent and return its status marker."""
+    if claude_swarm is None:
+        return "failed"
+    options_factory, query = claude_swarm
+    options = _claude_options(options_factory, repo_path)
+    status = "failed"
+    try:
+        async for message in query(prompt=prompt, options=options):
+            text = getattr(message, "text", None) or str(message)
+            status = _status_from_agent_text(text) or status
+            if text:
+                logger.debug("[%s] agent: %s", branch, text[:300])
+    except Exception as e:
+        logger.error("[%s] agent exception: %s", branch, e)
+    return status
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -351,6 +413,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Max parallel swarm agents (default: 5)",
     )
+    add_agent_argument(parser)
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
     return parser
 
@@ -470,6 +533,7 @@ def main() -> int:
             repo_slug,
             args.max_concurrent,
             dry_run=args.dry_run,
+            agent=args.agent,
         )
     )
 

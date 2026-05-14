@@ -74,6 +74,45 @@ class TestRunLearn:
         assert log_file.exists()
         assert log_file.read_text().startswith("FAILED:")
 
+    def test_codex_skips_legacy_claude_session(self, tmp_path: Path) -> None:
+        """Legacy sessions must not be resumed through Codex."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+
+        with patch("hephaestus.automation.learn.resume_codex_session") as mock_resume:
+            result = run_learn(
+                "session-abc",
+                worktree_path,
+                42,
+                tmp_path,
+                agent="codex",
+            )
+
+        assert result is False
+        mock_resume.assert_not_called()
+        assert (tmp_path / "learn-42.log").read_text().startswith("FAILED:")
+
+    def test_codex_resumes_matching_codex_session(self, tmp_path: Path) -> None:
+        """Codex sessions with provider metadata should resume through Codex."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+
+        mock_result = MagicMock()
+        mock_result.stdout = "learned"
+
+        with patch("hephaestus.automation.learn.resume_codex_session", return_value=mock_result):
+            result = run_learn(
+                "session-abc",
+                worktree_path,
+                42,
+                tmp_path,
+                agent="codex",
+                session_agent="codex",
+            )
+
+        assert result is True
+        assert (tmp_path / "learn-42.log").read_text() == "learned"
+
     def test_creates_state_dir_if_missing(self, tmp_path: Path) -> None:
         """Creates state_dir if it does not exist."""
         state_dir = tmp_path / "nested" / "state"

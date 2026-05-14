@@ -23,6 +23,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
+from hephaestus.agents.runtime import (
+    add_agent_argument,
+    is_codex,
+    resume_codex_session,
+    run_codex_session,
+    run_codex_text,
+    session_agent_matches,
+)
 from hephaestus.github.rate_limit import (
     detect_claude_usage_cap,
     detect_rate_limit,
@@ -256,12 +264,14 @@ class IssueImplementer:
         except (subprocess.CalledProcessError, FileNotFoundError, OSError) as e:
             logger.error("git not available: %s", e)
 
-        # Check Claude Code
+        # Check selected agent runtime
+        agent_binary = "codex" if is_codex(self.options.agent) else "claude"
+        agent_name = "Codex" if is_codex(self.options.agent) else "Claude Code"
         try:
-            run(["claude", "--version"], check=True)
-            logger.info("Claude Code available")
+            run([agent_binary, "--version"], check=True)
+            logger.info("%s available", agent_name)
         except (subprocess.CalledProcessError, FileNotFoundError, OSError) as e:
-            logger.error("Claude Code not available: %s", e)
+            logger.error("%s not available: %s", agent_name, e)
 
         # Check repository
         try:
@@ -463,25 +473,38 @@ class IssueImplementer:
 
         """
         # Learn phase (after CREATING_PR, before COMPLETED)
-        if self.options.enable_learn and state.session_id:
+        can_resume_session = self._can_resume_state_session(state)
+        if self.options.enable_learn and can_resume_session and state.session_id:
             if slot_id is not None:
                 self.status_tracker.update_slot(slot_id, f"#{issue_number}: Running learn")
             with self.state_lock:
                 state.phase = ImplementationPhase.LEARN
             self._save_state(state)
-            retro_success = self._run_learn(state.session_id, worktree_path, issue_number, slot_id)
+            retro_success = self._run_learn(
+                state.session_id,
+                worktree_path,
+                issue_number,
+                slot_id,
+                session_agent=state.session_agent,
+            )
             with self.state_lock:
                 state.learn_completed = retro_success
             self._save_state(state)
 
         # Follow-up issues phase (after LEARN, before COMPLETED)
-        if self.options.enable_follow_up and state.session_id:
+        if self.options.enable_follow_up and can_resume_session and state.session_id:
             if slot_id is not None:
                 self.status_tracker.update_slot(slot_id, f"#{issue_number}: Identifying follow-ups")
             with self.state_lock:
                 state.phase = ImplementationPhase.FOLLOW_UP_ISSUES
             self._save_state(state)
-            self._run_follow_up_issues(state.session_id, worktree_path, issue_number, slot_id)
+            self._run_follow_up_issues(
+                state.session_id,
+                worktree_path,
+                issue_number,
+                slot_id,
+                session_agent=state.session_agent,
+            )
 
         # Mark as completed
         with self.state_lock:
@@ -525,7 +548,7 @@ class IssueImplementer:
             if self.options.dry_run:
                 self._log(
                     "info",
-                    f"[DRY RUN] Would create worktree, run Claude Code, review, "
+                    f"[DRY RUN] Would create worktree, run {self.options.agent}, review, "
                     f"create PR for #{issue_number}",
                     thread_id,
                 )
@@ -561,9 +584,11 @@ class IssueImplementer:
                 state.phase = ImplementationPhase.IMPLEMENTING
             self._save_state(state)
 
-            # Run Claude Code
+            # Run the selected implementation agent
             issue = fetch_issue_info(issue_number)
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: Running Claude Code")
+            self.status_tracker.update_slot(
+                slot_id, f"#{issue_number}: Running {self.options.agent}"
+            )
             session_id = self._run_claude_code(
                 issue_number,
                 worktree_path,
@@ -578,12 +603,12 @@ class IssueImplementer:
             )
             with self.state_lock:
                 state.session_id = session_id
+                state.session_agent = self.options.agent if session_id else None
             self._save_state(state)
 
-            # Strict review loop — re-uses the implementer session across
-            # iterations (via `claude --resume`) but uses a fresh reviewer
-            # session each iteration. Loop terminates on first unambiguous GO
-            # or after MAX_REVIEW_ITERATIONS.
+            # Strict review loop re-uses the selected agent session when a
+            # session id was captured. Reviewer calls are always fresh so
+            # their judgment is unbiased.
             with self.state_lock:
                 state.phase = ImplementationPhase.REVIEWING
             self._save_state(state)
@@ -737,7 +762,7 @@ class IssueImplementer:
         entry_point = shutil.which("hephaestus-plan-issues")
         if entry_point:
             run(
-                [entry_point, "--issues", str(issue_number)],
+                [entry_point, "--issues", str(issue_number), "--agent", self.options.agent],
                 timeout=600,
             )
             return
@@ -751,6 +776,8 @@ class IssueImplementer:
                     "hephaestus.automation.planner",
                     "--issues",
                     str(issue_number),
+                    "--agent",
+                    self.options.agent,
                 ],
                 timeout=600,
             )
@@ -777,14 +804,30 @@ class IssueImplementer:
         """Parse follow-up items from Claude's JSON response."""
         return parse_follow_up_items(text)
 
+    def _can_resume_state_session(self, state: ImplementationState) -> bool:
+        """Return True when the saved session can be resumed by the selected agent."""
+        if not state.session_id:
+            return False
+        if session_agent_matches(state.session_agent, self.options.agent):
+            return True
+        logger.info(
+            "Skipping session resume for issue #%s: session belongs to %s, selected agent is %s",
+            state.issue_number,
+            state.session_agent or "claude",
+            self.options.agent,
+        )
+        return False
+
     def _run_follow_up_issues(
         self,
         session_id: str,
         worktree_path: Path,
         issue_number: int,
         slot_id: int | None = None,
+        *,
+        session_agent: str | None = None,
     ) -> None:
-        """Resume Claude session to identify and file follow-up issues."""
+        """Resume the selected agent session to identify and file follow-up issues."""
         run_follow_up_issues(
             session_id,
             worktree_path,
@@ -793,6 +836,8 @@ class IssueImplementer:
             self.status_tracker,
             slot_id,
             dry_run=self.options.dry_run,
+            agent=self.options.agent,
+            session_agent=session_agent,
         )
 
     def _learn_needs_rerun(self, issue_number: int) -> bool:
@@ -813,7 +858,7 @@ class IssueImplementer:
             if (
                 state.phase != ImplementationPhase.COMPLETED
                 or state.learn_completed
-                or not state.session_id
+                or not self._can_resume_state_session(state)
             ):
                 continue
 
@@ -826,6 +871,10 @@ class IssueImplementer:
                 logger.warning("Skipping learn re-run for #%s: no worktree_path", issue_number)
                 continue
 
+            session_id = state.session_id
+            if session_id is None:
+                continue
+
             worktree_path = Path(state.worktree_path)
             if not worktree_path.exists():
                 logger.warning("Skipping learn re-run for #%s: worktree not found", issue_number)
@@ -833,7 +882,13 @@ class IssueImplementer:
 
             # Re-run learn
             logger.info("Re-running failed learn for issue #%s", issue_number)
-            success = self._run_learn(state.session_id, worktree_path, issue_number, slot_id=None)
+            success = self._run_learn(
+                session_id,
+                worktree_path,
+                issue_number,
+                slot_id=None,
+                session_agent=state.session_agent,
+            )
 
             # Update and save state
             with self.state_lock:
@@ -859,9 +914,19 @@ class IssueImplementer:
         worktree_path: Path,
         issue_number: int,
         slot_id: int | None = None,
+        *,
+        session_agent: str | None = None,
     ) -> bool:
-        """Resume Claude session to run /learn."""
-        return run_learn(session_id, worktree_path, issue_number, self.state_dir, slot_id)
+        """Resume the selected agent session to run /learn."""
+        return run_learn(
+            session_id,
+            worktree_path,
+            issue_number,
+            self.state_dir,
+            slot_id,
+            agent=self.options.agent,
+            session_agent=session_agent,
+        )
 
     # ------------------------------------------------------------------
     # Strict review loop for implementer sessions
@@ -882,10 +947,11 @@ class IssueImplementer:
     ) -> tuple[int, str | None, str | None]:
         """Run the bounded review loop for an implementation.
 
-        The implementer session is re-used across iterations via
-        ``claude --resume <session_id>``, fed each iteration's NoGo critique as
-        the next prompt. The reviewer is a separate, fresh session each
-        iteration (no ``--resume``) so its judgment is unbiased.
+        Agent sessions are re-used across iterations. Claude uses
+        ``claude --resume <session_id>``; Codex uses
+        ``codex exec resume <session_id>`` with the session UUID captured from
+        the JSONL ``session_meta`` event. The reviewer is a separate, fresh
+        session each iteration so its judgment is unbiased.
 
         Iteration 0 reviews the just-completed initial run. Iterations 1 and 2
         first resume the impl session with feedback, then re-review the
@@ -897,10 +963,9 @@ class IssueImplementer:
             branch_name: Implementation branch name (for diff base resolution).
             issue_title: Issue title (review prompt context).
             issue_body: Issue body (review prompt context).
-            session_id: Implementer's Claude session id, captured by
-                :meth:`_run_claude_code`. ``None`` if capture failed — the loop
-                runs a single review (iteration 0) and stops, since we cannot
-                re-iterate without a session to resume.
+            session_id: Implementer's agent session id. ``None`` if capture
+                failed — the loop runs a single review (iteration 0) and stops,
+                since we cannot re-iterate without a session to resume.
             slot_id: Worker slot id for status updates.
             thread_id: Thread id for log routing.
 
@@ -918,7 +983,7 @@ class IssueImplementer:
             # critique, so the implementer can fix the flagged issues before
             # the next review.
             if iteration > 0:
-                if not session_id:
+                if session_id is None:
                     self._log(
                         "warning",
                         f"#{issue_number}: cannot iterate (no session_id from initial run); "
@@ -1022,7 +1087,9 @@ class IssueImplementer:
     ) -> bool:
         """Resume the impl session and feed reviewer feedback as the next prompt.
 
-        On ``CalledProcessError`` the method distinguishes two cases (#372):
+        Claude resumes with ``claude --resume <session_id>`` and Codex resumes
+        with ``codex exec resume <session_id>``. On Claude ``CalledProcessError``
+        the method distinguishes two cases (#372):
 
         * **Session-expired** — the ``--resume`` target no longer exists in
           the Claude CLI's session store. Detected by checking ``e.stderr`` /
@@ -1035,7 +1102,7 @@ class IssueImplementer:
           operators see useful diagnostics rather than a bare warning.
 
         Args:
-            session_id: Claude session id to resume.
+            session_id: Agent session id to resume.
             worktree_path: CWD for the claude invocation.
             issue_number: For log messages.
             review_text: Reviewer critique to feed back to the implementer.
@@ -1055,6 +1122,36 @@ class IssueImplementer:
             verdict=verdict,
             review_text=review_text,
         )
+        if is_codex(self.options.agent):
+            try:
+                result = resume_codex_session(
+                    session_id,
+                    prompt,
+                    cwd=worktree_path,
+                    timeout=implementer_claude_timeout(),
+                )
+                log_file = (
+                    self.state_dir / f"codex-feedback-{issue_number}-r{prev_iteration + 1}.log"
+                )
+                log_file.write_text(result.stdout or "")
+                return True
+            except subprocess.CalledProcessError as e:
+                logger.error(
+                    "#%d: Codex failed to address R%d feedback (exit=%d): %s",
+                    issue_number,
+                    prev_iteration + 1,
+                    e.returncode,
+                    (e.stderr or e.stdout or "")[:500],
+                )
+                return False
+            except subprocess.TimeoutExpired:
+                logger.error(
+                    "#%d: Codex timed out addressing R%d feedback",
+                    issue_number,
+                    prev_iteration + 1,
+                )
+                return False
+
         try:
             run(
                 [
@@ -1141,6 +1238,18 @@ class IssueImplementer:
             prior_review=prior_review,
         )
         try:
+            if is_codex(self.options.agent):
+                result = run_codex_text(
+                    prompt,
+                    cwd=self.repo_root,
+                    timeout=600,
+                    sandbox="read-only",
+                )
+                output = (result.stdout or "").strip()
+                if not output:
+                    raise RuntimeError("reviewer returned empty output")
+                return output
+
             env = os.environ.copy()
             env["CLAUDECODE"] = ""
             result = subprocess.run(
@@ -1336,7 +1445,7 @@ class IssueImplementer:
     def _run_claude_code(
         self, issue_number: int, worktree_path: Path, prompt: str, slot_id: int | None = None
     ) -> str | None:
-        """Run Claude Code in a worktree.
+        """Run the selected implementation agent in a worktree.
 
         Args:
             issue_number: Issue number
@@ -1349,11 +1458,20 @@ class IssueImplementer:
 
         """
         if self.options.dry_run:
-            logger.info("[DRY RUN] Would run Claude Code for issue #%s", issue_number)
+            logger.info("[DRY RUN] Would run %s for issue #%s", self.options.agent, issue_number)
             return None
 
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
+        if is_codex(self.options.agent):
+            return self._run_codex_code(issue_number, worktree_path, prompt)
+
+        return self._run_claude_impl_session(issue_number, worktree_path, prompt)
+
+    def _run_claude_impl_session(
+        self, issue_number: int, worktree_path: Path, prompt: str
+    ) -> str | None:
+        """Run Claude implementation prompt and return its session id."""
         # Write prompt to temp file in worktree
         prompt_file = worktree_path / f".claude-prompt-{issue_number}.md"
         prompt_file.write_text(prompt)
@@ -1447,6 +1565,32 @@ class IssueImplementer:
             # Clean up temp file
             with contextlib.suppress(Exception):
                 prompt_file.unlink()
+
+    def _run_codex_code(self, issue_number: int, worktree_path: Path, prompt: str) -> str | None:
+        """Run Codex implementation prompt in a worktree."""
+        log_file = self.state_dir / f"codex-{issue_number}.log"
+        try:
+            result = run_codex_session(
+                prompt,
+                cwd=worktree_path,
+                timeout=implementer_claude_timeout(),
+                sandbox="workspace-write",
+            )
+            log_file.write_text(result.stdout or "")
+            return result.session_id
+        except subprocess.CalledProcessError as e:
+            stdout = e.stdout or ""
+            stderr = e.stderr or ""
+            output = f"EXIT CODE: {e.returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
+            log_file.write_text(output)
+            reset_epoch = _claude_quota_reset_epoch(stderr, stdout)
+            if reset_epoch is not None and reset_epoch > 0:
+                logger.warning("Codex usage cap hit for issue #%s; waiting for reset", issue_number)
+                wait_until(reset_epoch)
+            raise RuntimeError(f"Codex failed: {stderr or stdout}") from e
+        except subprocess.TimeoutExpired as e:
+            log_file.write_text(f"TIMEOUT after {e.timeout}s\n\nOutput:\n{e.output or ''}")
+            raise RuntimeError("Codex timed out") from e
 
     def _commit_changes(self, issue_number: int, worktree_path: Path) -> None:
         """Commit changes in worktree."""
@@ -1609,6 +1753,7 @@ Examples:
         nargs="+",
         help="Specific issue numbers to implement (alternative to --epic)",
     )
+    add_agent_argument(parser)
     parser.add_argument(
         "--analyze",
         action="store_true",
@@ -1702,6 +1847,7 @@ def main() -> int:
     options = ImplementerOptions(
         epic_number=args.epic or 0,
         issues=args.issues or [],
+        agent=args.agent,
         analyze_only=args.analyze,
         health_check=args.health_check,
         resume=args.resume,

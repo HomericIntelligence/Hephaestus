@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.runtime import codex_json_stdout, resume_codex_session, session_agent_matches
 from hephaestus.github.rate_limit import detect_claude_usage_cap, wait_until
 
 from .claude_timeouts import follow_up_claude_timeout
@@ -367,6 +368,8 @@ def run_follow_up_issues(  # noqa: C901  # quota-check + parse + file paths are 
     status_tracker: Any | None = None,
     slot_id: int | None = None,
     dry_run: bool = False,
+    agent: str = "claude",
+    session_agent: str | None = None,
 ) -> FollowUpResponse | None:
     """Resume the implementation Claude session and file ONE consolidated follow-up issue.
 
@@ -386,29 +389,47 @@ def run_follow_up_issues(  # noqa: C901  # quota-check + parse + file paths are 
     - In ``dry_run`` mode, all GitHub side effects are suppressed.
     """
     state_dir.mkdir(parents=True, exist_ok=True)
+    follow_up_log = state_dir / f"follow-up-{issue_number}.log"
+    if not session_agent_matches(session_agent, agent):
+        message = (
+            f"Session belongs to {session_agent or 'claude'}, "
+            f"but selected agent is {agent}; skipping follow-up resume"
+        )
+        logger.warning("Follow-up skipped for issue #%d: %s", issue_number, message)
+        follow_up_log.write_text(f"FAILED: {message}\n")
+        return None
 
     prompt_file = worktree_path / f".claude-followup-{issue_number}.md"
     prompt_file.write_text(get_follow_up_prompt(issue_number))
 
     try:
-        result = run(
-            [
-                "claude",
-                "--resume",
+        if agent == "codex":
+            codex_result = resume_codex_session(
                 session_id,
-                str(prompt_file),
-                "--output-format",
-                "json",
-            ],
-            cwd=worktree_path,
-            timeout=follow_up_claude_timeout(),
-        )
+                prompt_file.read_text(),
+                cwd=worktree_path,
+                timeout=follow_up_claude_timeout(),
+            )
+            stdout = codex_json_stdout(codex_result.stdout, codex_result.session_id)
+        else:
+            result = run(
+                [
+                    "claude",
+                    "--resume",
+                    session_id,
+                    str(prompt_file),
+                    "--output-format",
+                    "json",
+                ],
+                cwd=worktree_path,
+                timeout=follow_up_claude_timeout(),
+            )
+            stdout = result.stdout or ""
 
-        follow_up_log = state_dir / f"follow-up-{issue_number}.log"
-        follow_up_log.write_text(result.stdout or "")
+        follow_up_log.write_text(stdout)
 
         try:
-            data = json.loads(result.stdout)
+            data = json.loads(stdout)
         except (json.JSONDecodeError, AttributeError) as e:
             logger.warning("Could not parse follow-up response for issue #%d: %s", issue_number, e)
             return None
@@ -474,7 +495,6 @@ def run_follow_up_issues(  # noqa: C901  # quota-check + parse + file paths are 
         Exception
     ) as e:  # broad: top-level boundary; follow-up failure must NEVER block the PR pipeline
         logger.warning("Follow-up issues failed for issue #%d: %s", issue_number, e)
-        follow_up_log = state_dir / f"follow-up-{issue_number}.log"
         error_output = f"FAILED: {e}\n"
         if hasattr(e, "stdout"):
             error_output += f"\nSTDOUT:\n{e.stdout or ''}"

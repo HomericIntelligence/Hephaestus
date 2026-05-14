@@ -63,6 +63,7 @@ all = [
 hephaestus-plan-issues = "hephaestus.automation.planner:main"
 hephaestus-implement-issues = "hephaestus.automation.implementer:main"
 hephaestus-review-prs = "hephaestus.automation.pr_reviewer:main"
+hephaestus-agent-stage = "hephaestus.automation.agent_stage:main"
 hephaestus-merge-prs = "hephaestus.github.pr_merge:main"
 hephaestus-fleet-sync = "hephaestus.github.fleet_sync:main"
 hephaestus-tidy = "hephaestus.github.tidy:main"

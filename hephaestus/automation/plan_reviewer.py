@@ -17,8 +17,10 @@ import subprocess
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_text
 from hephaestus.github.rate_limit import wait_until
 
 from .claude_invoke import scan_quota_reset
@@ -331,6 +333,9 @@ class PlanReviewer:
             plan_text=plan_text,
         )
 
+        if is_codex(self.options.agent):
+            return self._run_codex_analysis(issue_number, prompt, max_retries=max_retries)
+
         env = os.environ.copy()
         # Avoid nested-session guard used by the planner / implementer
         env["CLAUDECODE"] = ""
@@ -379,12 +384,12 @@ class PlanReviewer:
                 )
                 return None
 
-            output: str = (result.stdout or "").strip()
-            if not output:
+            claude_output: str = (result.stdout or "").strip()
+            if not claude_output:
                 logger.error("Claude returned empty output for issue #%s", issue_number)
                 return None
 
-            return output
+            return claude_output
 
         except subprocess.TimeoutExpired:
             logger.error("Claude timed out reviewing plan for issue #%s", issue_number)
@@ -394,6 +399,56 @@ class PlanReviewer:
             return None
         except Exception as e:
             logger.error("Unexpected error calling Claude for issue #%s: %s", issue_number, e)
+            return None
+
+    def _run_codex_analysis(
+        self,
+        issue_number: int,
+        prompt: str,
+        max_retries: int = 3,
+    ) -> str | None:
+        """Run Codex to produce a plan review."""
+        try:
+            result = run_codex_text(
+                prompt,
+                cwd=Path.cwd(),
+                timeout=plan_reviewer_claude_timeout(),
+                sandbox="read-only",
+            )
+            output = (result.stdout or "").strip()
+            if not output:
+                logger.error("Codex returned empty output for issue #%s", issue_number)
+                return None
+            return output
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr or ""
+            stdout = e.stdout or ""
+            reset_epoch = scan_quota_reset(stderr, stdout)
+            if reset_epoch is not None and max_retries > 0:
+                if reset_epoch > 0:
+                    wait_until(reset_epoch)
+                else:
+                    time.sleep(5)
+                return self._run_codex_analysis(
+                    issue_number,
+                    prompt,
+                    max_retries=max_retries - 1,
+                )
+            logger.error(
+                "Codex returned exit code %s for issue #%s: %s",
+                e.returncode,
+                issue_number,
+                (stderr or stdout)[:200],
+            )
+            return None
+        except subprocess.TimeoutExpired:
+            logger.error("Codex timed out reviewing plan for issue #%s", issue_number)
+            return None
+        except FileNotFoundError:
+            logger.error("'codex' CLI not found in PATH; cannot run plan review")
+            return None
+        except Exception as e:
+            logger.error("Unexpected error calling Codex for issue #%s: %s", issue_number, e)
             return None
 
     def _post_review(self, issue_number: int, review_text: str) -> None:
@@ -481,6 +536,7 @@ Examples:
         required=True,
         help="Issue numbers whose plans should be reviewed",
     )
+    add_agent_argument(parser)
     parser.add_argument(
         "--max-workers",
         type=int,
@@ -534,6 +590,7 @@ def main() -> int:
     try:
         options = PlanReviewerOptions(
             issues=args.issues,
+            agent=args.agent,
             max_workers=args.max_workers,
             dry_run=args.dry_run,
             enable_ui=not args.no_ui,

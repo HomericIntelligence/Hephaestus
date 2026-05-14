@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.agents.runtime import AgentRunResult
 from hephaestus.automation.ci_driver import CIDriver
 from hephaestus.automation.models import CIDriverOptions
 
@@ -70,7 +71,7 @@ class TestLoadImplSessionId:
     """Tests for _load_impl_session_id."""
 
     def test_returns_session_id_when_present(self, driver: CIDriver, tmp_path: Path) -> None:
-        """state-{issue}.json with session_id → returns it."""
+        """Legacy state file with Claude session_id returns it for Claude."""
         state_file = tmp_path / "state-123.json"
         state_file.write_text(json.dumps({"session_id": "sess-xyz"}))
         driver.state_dir = tmp_path
@@ -78,6 +79,28 @@ class TestLoadImplSessionId:
         result = driver._load_impl_session_id(123)
 
         assert result == "sess-xyz"
+
+    def test_skips_legacy_session_for_codex(self, driver: CIDriver, tmp_path: Path) -> None:
+        """Legacy state files contain Claude sessions and must not resume as Codex."""
+        state_file = tmp_path / "state-123.json"
+        state_file.write_text(json.dumps({"session_id": "sess-xyz"}))
+        driver.state_dir = tmp_path
+        driver.options.agent = "codex"
+
+        result = driver._load_impl_session_id(123)
+
+        assert result is None
+
+    def test_returns_matching_codex_session(self, driver: CIDriver, tmp_path: Path) -> None:
+        """Provider metadata allows Codex sessions to be resumed by Codex."""
+        state_file = tmp_path / "state-123.json"
+        state_file.write_text(json.dumps({"session_id": "codex-sess", "session_agent": "codex"}))
+        driver.state_dir = tmp_path
+        driver.options.agent = "codex"
+
+        result = driver._load_impl_session_id(123)
+
+        assert result == "codex-sess"
 
     def test_returns_none_when_no_file(self, driver: CIDriver, tmp_path: Path) -> None:
         """No state file → returns None."""
@@ -123,6 +146,40 @@ class TestParseJsonBlock:
         """Returns {} for unparseable input."""
         result = driver._parse_json_block("not json at all")
         assert result == {}
+
+
+def test_codex_ci_fix_session_falls_back_to_fresh_on_resume_failure(
+    driver: CIDriver,
+    tmp_path: Path,
+) -> None:
+    """Codex CI repair should retry fresh when a saved session cannot resume."""
+    driver.options.agent = "codex"
+    resume_error = subprocess.CalledProcessError(
+        1,
+        ["codex"],
+        stderr="session not found",
+    )
+    fresh_result = AgentRunResult(stdout="fixed", stderr="", session_id="fresh-session")
+
+    with (
+        patch("hephaestus.automation.ci_driver.resume_codex_session", side_effect=resume_error),
+        patch(
+            "hephaestus.automation.ci_driver.run_codex_session",
+            return_value=fresh_result,
+        ) as mock_fresh,
+        patch("hephaestus.automation.ci_driver.run") as mock_run,
+    ):
+        result = driver._run_ci_fix_session(
+            issue_number=123,
+            pr_number=456,
+            worktree_path=tmp_path,
+            ci_logs="failed",
+            session_id="old-session",
+        )
+
+    assert result is True
+    mock_fresh.assert_called_once()
+    mock_run.assert_called_once_with(["git", "push", "origin", "HEAD"], cwd=tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -249,11 +306,14 @@ class TestRequiredVsNonRequired:
         mock_fix.assert_called_once()
         assert result.success is True
 
-    def test_pending_checks_skip_fix(self, driver: CIDriver) -> None:
+    def test_pending_checks_skip_fix(
+        self, driver: CIDriver, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """All checks pending (not completed) → no fix attempted."""
         checks = [
             _make_check("test", status="in_progress", conclusion="", required=True),
         ]
+        monkeypatch.setenv("HEPH_CI_POLL_MAX_WAIT", "0")
         with (
             patch.object(driver, "_find_pr_for_issue", return_value=42),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),

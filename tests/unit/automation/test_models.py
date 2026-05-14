@@ -81,6 +81,7 @@ class TestImplementationState:
         assert state.branch_name is None
         assert state.pr_number is None
         assert state.session_id is None
+        assert state.session_agent is None
         assert isinstance(state.started_at, datetime)
         assert state.completed_at is None
         assert state.error is None
@@ -94,6 +95,7 @@ class TestImplementationState:
             worktree_path="/tmp/worktree",
             branch_name="123-test",
             session_id="abc123",
+            session_agent="codex",
         )
 
         # Serialize to JSON
@@ -108,6 +110,7 @@ class TestImplementationState:
         assert restored.phase == state.phase
         assert restored.worktree_path == state.worktree_path
         assert restored.session_id == state.session_id
+        assert restored.session_agent == state.session_agent
 
     def test_learn_phase(self) -> None:
         """Test LEARN phase in ImplementationPhase enum."""

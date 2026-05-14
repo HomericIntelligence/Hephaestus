@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_text
+
 from ._review_utils import find_pr_for_issue, parse_json_block
 from .claude_models import reviewer_model
 from .claude_timeouts import pr_reviewer_claude_timeout
@@ -325,6 +327,22 @@ class PRReviewer:
         log_file = self.state_dir / f"pr-review-analysis-{issue_number}.log"
 
         try:
+            if is_codex(self.options.agent):
+                result = run_codex_text(
+                    prompt,
+                    cwd=worktree_path,
+                    timeout=pr_reviewer_claude_timeout(),
+                    sandbox="read-only",
+                )
+                log_file.write_text(result.stdout or "")
+                parsed = _parse_json_block(result.stdout or "")
+                logger.info(
+                    "Analysis complete for PR #%s; found %s inline comment(s)",
+                    pr_number,
+                    len(parsed.get("comments", [])),
+                )
+                return parsed
+
             result = run(
                 [
                     "claude",
@@ -720,6 +738,7 @@ Examples:
         required=True,
         help="Issue numbers whose linked PRs should be reviewed",
     )
+    add_agent_argument(parser)
     parser.add_argument(
         "--max-workers",
         type=int,
@@ -766,6 +785,7 @@ def main() -> int:
 
     options = ReviewerOptions(
         issues=args.issues,
+        agent=args.agent,
         max_workers=args.max_workers,
         dry_run=args.dry_run,
         enable_ui=not args.no_ui,

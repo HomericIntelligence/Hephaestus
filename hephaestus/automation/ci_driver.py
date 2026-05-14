@@ -21,6 +21,14 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.runtime import (
+    add_agent_argument,
+    is_codex,
+    resume_codex_session,
+    run_codex_session,
+    session_agent_matches,
+)
+
 from .claude_models import implementer_model
 from .claude_timeouts import ci_driver_claude_timeout
 from .git_utils import get_repo_root, run
@@ -571,6 +579,16 @@ class CIDriver:
         try:
             data = json.loads(state_file.read_text())
             session_id: str | None = data.get("session_id")
+            session_agent: str | None = data.get("session_agent")
+            if session_id and not session_agent_matches(session_agent, self.options.agent):
+                logger.info(
+                    "Skipping impl session for issue #%s: session belongs to %s, "
+                    "selected agent is %s",
+                    issue_number,
+                    session_agent or "claude",
+                    self.options.agent,
+                )
+                return None
             if session_id:
                 logger.debug("Loaded session_id for issue #%s: %s...", issue_number, session_id[:8])
             return session_id
@@ -578,7 +596,7 @@ class CIDriver:
             logger.warning("Could not load session_id for issue #%s: %s", issue_number, e)
             return None
 
-    def _run_ci_fix_session(
+    def _run_ci_fix_session(  # noqa: C901  # provider resume/fallback paths are intentionally coupled
         self,
         issue_number: int,
         pr_number: int,
@@ -611,6 +629,62 @@ class CIDriver:
         )
 
         try:
+            if is_codex(self.options.agent):
+                try:
+                    if session_id:
+                        try:
+                            codex_result = resume_codex_session(
+                                session_id,
+                                prompt,
+                                cwd=worktree_path,
+                                timeout=ci_driver_claude_timeout(),
+                            )
+                        except subprocess.CalledProcessError as e:
+                            logger.warning(
+                                "Issue #%s: Codex resume session %r failed for PR #%s; "
+                                "falling back to fresh session: %s",
+                                issue_number,
+                                session_id,
+                                pr_number,
+                                (e.stderr or e.stdout or "")[:300],
+                            )
+                            codex_result = run_codex_session(
+                                prompt,
+                                cwd=worktree_path,
+                                timeout=ci_driver_claude_timeout(),
+                                sandbox="workspace-write",
+                            )
+                    else:
+                        codex_result = run_codex_session(
+                            prompt,
+                            cwd=worktree_path,
+                            timeout=ci_driver_claude_timeout(),
+                            sandbox="workspace-write",
+                        )
+                    logger.debug(
+                        "Issue #%s: Codex CI fix output: %s",
+                        issue_number,
+                        codex_result.stdout[:500],
+                    )
+                except subprocess.CalledProcessError as e:
+                    logger.error(
+                        "Issue #%s: Codex CI fix session returned exit code %s: %s",
+                        issue_number,
+                        e.returncode,
+                        (e.stderr or e.stdout or "")[:300],
+                    )
+                    return False
+
+                try:
+                    run(["git", "push", "origin", "HEAD"], cwd=worktree_path)
+                    logger.info("Issue #%s: pushed CI fixes for PR #%s", issue_number, pr_number)
+                    return True
+                except Exception as push_err:
+                    logger.error(
+                        "Issue #%s: git push failed after CI fix: %s", issue_number, push_err
+                    )
+                    return False
+
             # Fresh sessions pin the implementer model; --resume sessions inherit
             # the original session's model and ignore --model.
             base_cmd = [
@@ -640,7 +714,7 @@ class CIDriver:
             else:
                 cmd = base_cmd
 
-            result = subprocess.run(
+            claude_result = subprocess.run(
                 cmd,
                 input=prompt,
                 capture_output=True,
@@ -650,11 +724,11 @@ class CIDriver:
             )
 
             # If --resume failed, retry without it
-            if result.returncode != 0 and session_id:
+            if claude_result.returncode != 0 and session_id:
                 logger.warning(
                     "Issue #%s: --resume session failed, retrying without it", issue_number
                 )
-                result = subprocess.run(
+                claude_result = subprocess.run(
                     base_cmd,
                     input=prompt,
                     capture_output=True,
@@ -663,7 +737,7 @@ class CIDriver:
                     timeout=ci_driver_claude_timeout(),
                 )
 
-            if result.returncode == 0:
+            if claude_result.returncode == 0:
                 # Push the fixes
                 try:
                     run(["git", "push", "origin", "HEAD"], cwd=worktree_path)
@@ -678,8 +752,8 @@ class CIDriver:
             logger.error(
                 "Issue #%s: Claude CI fix session returned exit code %s: %s",
                 issue_number,
-                result.returncode,
-                result.stderr[:300],
+                claude_result.returncode,
+                claude_result.stderr[:300],
             )
             return False
 
@@ -839,6 +913,7 @@ Examples:
         required=True,
         help="Issue numbers whose PRs should be driven to green CI",
     )
+    add_agent_argument(parser)
     parser.add_argument(
         "--max-workers",
         type=int,
@@ -935,6 +1010,7 @@ def main() -> int:
     try:
         options = CIDriverOptions(
             issues=args.issues,
+            agent=args.agent,
             max_workers=args.max_workers,
             dry_run=args.dry_run,
             enable_ui=not args.no_ui,

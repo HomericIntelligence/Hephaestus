@@ -199,16 +199,17 @@ config = merge_with_env({}, convert_bools=True)
 <!-- CLI table generated from pyproject.toml [project.scripts]. Keep in sync via
      `python3 scripts/check_cli_table_sync.py` (also enforced in pre-commit). -->
 
-40 console scripts are installed when you install the package.  Run any command
+41 console scripts are installed when you install the package.  Run any command
 with `--help` to see full usage.
 
 ### Automation
 
 | Command | Description |
 |---|---|
-| `hephaestus-plan-issues` | Bulk issue planning using Claude Code |
-| `hephaestus-implement-issues` | Bulk issue implementation using Claude Code in parallel worktrees |
-| `hephaestus-review-prs` | Read-only PR review automation using Claude Code in parallel worktrees |
+| `hephaestus-plan-issues` | Bulk issue planning using Claude Code or Codex |
+| `hephaestus-implement-issues` | Bulk issue implementation using Claude Code or Codex in parallel worktrees |
+| `hephaestus-review-prs` | Read-only PR review automation using Claude Code or Codex in parallel worktrees |
+| `hephaestus-agent-stage` | Run one Claude or Codex automation stage with prompt and skill context |
 
 ### GitHub
 

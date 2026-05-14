@@ -1,11 +1,13 @@
 """Tests for the AddressReviewer automation (address_review.py)."""
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.agents.runtime import AgentRunResult
 from hephaestus.automation.address_review import AddressReviewer
 from hephaestus.automation.models import AddressReviewOptions
 
@@ -48,7 +50,7 @@ class TestLoadImplSessionId:
     """Tests for _load_impl_session_id method."""
 
     def test_load_impl_session_id_found(self, reviewer: AddressReviewer, tmp_path: Path) -> None:
-        """State file exists with session_id → returns it."""
+        """Legacy state file exists with Claude session_id → returns it for Claude."""
         state_file = tmp_path / "issue-123.json"
         state_file.write_text(json.dumps({"session_id": "abc-session-123"}))
         reviewer.state_dir = tmp_path
@@ -56,6 +58,34 @@ class TestLoadImplSessionId:
         result = reviewer._load_impl_session_id(123)
 
         assert result == "abc-session-123"
+
+    def test_load_impl_session_id_skips_legacy_session_for_codex(
+        self, reviewer: AddressReviewer, tmp_path: Path
+    ) -> None:
+        """Legacy state files contain Claude sessions and must not resume as Codex."""
+        state_file = tmp_path / "issue-123.json"
+        state_file.write_text(json.dumps({"session_id": "abc-session-123"}))
+        reviewer.state_dir = tmp_path
+        reviewer.options.agent = "codex"
+
+        result = reviewer._load_impl_session_id(123)
+
+        assert result is None
+
+    def test_load_impl_session_id_returns_matching_codex_session(
+        self, reviewer: AddressReviewer, tmp_path: Path
+    ) -> None:
+        """Provider metadata allows Codex sessions to be resumed by Codex."""
+        state_file = tmp_path / "issue-123.json"
+        state_file.write_text(
+            json.dumps({"session_id": "codex-session-123", "session_agent": "codex"})
+        )
+        reviewer.state_dir = tmp_path
+        reviewer.options.agent = "codex"
+
+        result = reviewer._load_impl_session_id(123)
+
+        assert result == "codex-session-123"
 
     def test_load_impl_session_id_missing_file(
         self, reviewer: AddressReviewer, tmp_path: Path
@@ -119,6 +149,46 @@ class TestParseJsonBlock:
         """Invalid json block → returns defaults."""
         result = reviewer._parse_json_block("```json\n{broken!!}\n```")
         assert result == {"addressed": [], "replies": {}}
+
+
+def test_codex_fix_session_falls_back_to_fresh_on_resume_failure(
+    reviewer: AddressReviewer,
+    tmp_path: Path,
+) -> None:
+    """Codex review repair should retry fresh when a saved session cannot resume."""
+    reviewer.options.agent = "codex"
+    threads = [{"id": "thread-1", "path": "file.py", "line": 10, "body": "fix this"}]
+    resume_error = subprocess.CalledProcessError(
+        1,
+        ["codex"],
+        stderr="session not found",
+    )
+    fresh_result = AgentRunResult(
+        stdout='```json\n{"addressed": ["thread-1"], "replies": {}}\n```',
+        stderr="",
+        session_id="fresh-session",
+    )
+
+    with (
+        patch(
+            "hephaestus.automation.address_review.resume_codex_session",
+            side_effect=resume_error,
+        ),
+        patch(
+            "hephaestus.automation.address_review.run_codex_session",
+            return_value=fresh_result,
+        ) as mock_fresh,
+    ):
+        parsed = reviewer._run_fix_session(
+            issue_number=123,
+            pr_number=456,
+            worktree_path=tmp_path,
+            threads=threads,
+            session_id="old-session",
+        )
+
+    assert parsed["addressed"] == ["thread-1"]
+    mock_fresh.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

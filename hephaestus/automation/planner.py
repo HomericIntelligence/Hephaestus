@@ -21,6 +21,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_text
 from hephaestus.github.rate_limit import wait_until
 
 from .claude_invoke import parse_review_verdict, scan_quota_reset
@@ -280,6 +281,9 @@ class Planner:
             RuntimeError: If Claude call fails
 
         """
+        if is_codex(self.options.agent):
+            return self._call_codex(prompt, model=model, max_retries=max_retries, timeout=timeout)
+
         # Build command. ``--model`` pins the phase-appropriate model so this
         # call doesn't burn quota on whatever the user's CLI default is.
         cmd = [
@@ -356,6 +360,45 @@ class Planner:
 
         except subprocess.TimeoutExpired as e:
             raise RuntimeError(f"Claude timed out after {timeout}s") from e
+
+    def _call_codex(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        max_retries: int = 3,
+        timeout: int = 300,
+    ) -> str:
+        """Call Codex CLI with retry logic for rate limits."""
+        try:
+            result = run_codex_text(
+                prompt,
+                cwd=get_repo_root(),
+                timeout=timeout,
+                sandbox="workspace-write",
+            )
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr or ""
+            stdout = e.stdout or ""
+            reset_epoch = scan_quota_reset(stderr, stdout)
+            if reset_epoch is not None and reset_epoch > 0 and max_retries > 0:
+                logger.warning("Codex usage cap hit; waiting for reset")
+                wait_until(reset_epoch)
+                return self._call_codex(
+                    prompt,
+                    model=model,
+                    max_retries=max_retries - 1,
+                    timeout=timeout,
+                )
+            detail = stderr or stdout or str(e)
+            raise RuntimeError(f"Codex failed: {detail}") from e
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f"Codex timed out after {timeout}s") from e
+
+        response = (result.stdout or "").strip()
+        if not response:
+            raise RuntimeError("Codex returned empty response")
+        return response
 
     def _ensure_mnemosyne(self, mnemosyne_root: Path) -> bool:
         """Clone ProjectMnemosyne if it does not exist locally.
@@ -904,6 +947,7 @@ Examples:
         nargs="+",
         help="Issue numbers to plan (default: all open issues)",
     )
+    add_agent_argument(parser)
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -979,6 +1023,7 @@ def main() -> int:
     try:
         options = PlannerOptions(
             issues=args.issues,
+            agent=args.agent,
             dry_run=args.dry_run,
             force=args.force,
             parallel=args.parallel,

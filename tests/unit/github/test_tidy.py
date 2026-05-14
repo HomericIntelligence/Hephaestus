@@ -1,8 +1,14 @@
 """Unit tests for hephaestus.github.tidy — focusing on parse_problem_branches."""
 
+import asyncio
+import importlib
+from pathlib import Path
+
 import pytest
 
 from hephaestus.github.tidy import parse_problem_branches
+
+tidy_module = importlib.import_module("hephaestus.github.tidy")
 
 # Fixture: clean gh-tidy run (no problem branches)
 CLEAN_OUTPUT = """\
@@ -116,3 +122,33 @@ def test_various_branch_name_formats(branch: str) -> None:
         "Finished tidying!\n"
     )
     assert parse_problem_branches(output) == [branch]
+
+
+def test_dispatch_swarm_runs_codex_agents_in_threads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex swarm dispatch should preserve max_concurrent semantics."""
+    calls: list[tuple[object, tuple[object, ...]]] = []
+
+    async def fake_to_thread(func: object, *args: object) -> str:
+        calls.append((func, args))
+        return "fixed"
+
+    monkeypatch.setattr(tidy_module.asyncio, "to_thread", fake_to_thread)
+
+    result = asyncio.run(
+        tidy_module._dispatch_swarm(
+            ["feature/a"],
+            "main",
+            tmp_path,
+            "owner/repo",
+            max_concurrent=1,
+            dry_run=False,
+            agent="codex",
+        )
+    )
+
+    assert result == {"feature/a": "fixed"}
+    assert calls
+    assert calls[0][0] is tidy_module._run_codex_rebase_agent

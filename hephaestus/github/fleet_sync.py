@@ -34,6 +34,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_text
 from hephaestus.github.rate_limit import detect_rate_limit, wait_until
 from hephaestus.logging.utils import get_logger
 
@@ -276,18 +277,50 @@ def rebase_and_resign(pr: PRInfo, clone_dir: Path, dry_run: bool = False) -> boo
         return False
 
 
-def resolve_conflict_with_agent(pr: PRInfo, clone_dir: Path, dry_run: bool = False) -> bool:
-    """Spawn a Claude agent to semantically resolve merge conflicts, then re-sign."""
+def _run_conflict_agent(agent: str, prompt: str, work: Path, pr_number: int) -> bool:
+    """Run the selected conflict-resolution agent."""
+    if is_codex(agent):
+        result = run_codex_text(
+            prompt,
+            cwd=work,
+            timeout=2400,
+            sandbox="workspace-write",
+        )
+        if result.stdout:
+            logger.debug("  agent: %s", result.stdout[:200])
+        return True
+
     try:
         from claude_code_sdk import ClaudeCodeOptions, query
     except ImportError:
         logger.warning(
             "claude_code_sdk not available — skipping agent resolution for PR #%d. "
             "Install with: pip install claude-code-sdk",
-            pr.number,
+            pr_number,
         )
         return False
 
+    options = ClaudeCodeOptions(max_turns=30, cwd=str(work))
+
+    async def _drain() -> None:
+        async for message in query(prompt=prompt, options=options):
+            text = getattr(message, "text", None) or str(message)
+            if text:
+                logger.debug("  agent: %s", text[:200])
+
+    import asyncio
+
+    asyncio.run(_drain())
+    return True
+
+
+def resolve_conflict_with_agent(
+    pr: PRInfo,
+    clone_dir: Path,
+    dry_run: bool = False,
+    agent: str = "claude",
+) -> bool:
+    """Spawn the selected agent to semantically resolve merge conflicts, then re-sign."""
     repo_url = f"https://github.com/{ORG}/{pr.repo}.git"
     branch = pr.head_ref
     base = pr.base_ref
@@ -375,20 +408,12 @@ Rules:
 - All commits must be GPG-signed (-S flag)
 """
             logger.info(
-                "  Spawning Claude agent to resolve %d conflict(s)...",
+                "  Spawning %s agent to resolve %d conflict(s)...",
+                agent,
                 len(conflict_files),
             )
-            options = ClaudeCodeOptions(max_turns=30, cwd=str(work))
-
-            async def _drain() -> None:
-                async for message in query(prompt=prompt, options=options):
-                    text = getattr(message, "text", None) or str(message)
-                    if text:
-                        logger.debug("  agent: %s", text[:200])
-
-            import asyncio
-
-            asyncio.run(_drain())
+            if not _run_conflict_agent(agent, prompt, work, pr.number):
+                return False
 
         # Verify branch was pushed
         verify = subprocess.run(
@@ -468,7 +493,12 @@ def process_repo(
                 logger.info("  → Skipping (--skip-conflict-resolution)")
                 counts["skipped"] += 1
             else:
-                ok = resolve_conflict_with_agent(pr, clone_dir, dry_run=args.dry_run)
+                ok = resolve_conflict_with_agent(
+                    pr,
+                    clone_dir,
+                    dry_run=args.dry_run,
+                    agent=args.agent,
+                )
                 counts["conflict_resolved" if ok else "failed"] += 1
 
         else:
@@ -497,6 +527,7 @@ def main() -> int:
         action="store_true",
         help="Skip Claude agent swarm for conflicted PRs",
     )
+    add_agent_argument(parser)
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
     args = parser.parse_args()
 
