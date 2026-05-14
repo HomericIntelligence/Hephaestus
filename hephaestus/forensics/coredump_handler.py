@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Kernel pipe-mode ``core_pattern`` handler for capturing core dumps.
+r"""Kernel pipe-mode ``core_pattern`` handler for capturing core dumps.
 
 When a process that runs inside a container (Podman/Docker) crashes, a plain
 file-path ``core_pattern`` is resolved against the *container's* mount
@@ -14,6 +14,15 @@ core pattern handler::
 
     HANDLER=$(command -v hephaestus-coredump-handler)
     echo "|${HANDLER} %p %e %t %s %P" | sudo tee /proc/sys/kernel/core_pattern
+
+The kernel invokes a pipe handler with a *minimal environment*, so the
+``COREDUMP_TARGET_DIRS`` env var cannot reach it. When a specific output
+directory is required (e.g. a CI workspace path that a container bind-mount
+maps to), pass it as a literal ``--target-dir`` argument in the
+``core_pattern`` line — the kernel forwards literal args verbatim::
+
+    echo "|${HANDLER} --target-dir /workspace/crash-bundle/cores %p %e %t %s %P" \\
+      | sudo tee /proc/sys/kernel/core_pattern
 
 ``core_pattern`` format tokens (order matters, must match the install line):
 
@@ -159,6 +168,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "with the core ELF on stdin; not meant to be run interactively."
         ),
     )
+    parser.add_argument(
+        "--target-dir",
+        default=None,
+        help=(
+            "explicit output directory for the core file. Takes precedence over "
+            "COREDUMP_TARGET_DIRS and the built-in default. The kernel invokes a "
+            "core_pattern pipe handler with a minimal environment, so an env var "
+            "cannot reach it — pass this literal flag in the core_pattern line "
+            "when a specific directory (e.g. a CI workspace path) is required."
+        ),
+    )
     parser.add_argument("pid", help="PID of the crashing process (%%p)")
     parser.add_argument("exe", help="executable basename (%%e)")
     parser.add_argument("crash_time", help="crash time, seconds since epoch (%%t)")
@@ -175,10 +195,14 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``hephaestus-coredump-handler`` console script.
 
-    Reads configuration from the environment:
+    Configuration precedence for the output directory:
 
-    * ``COREDUMP_TARGET_DIRS`` — colon-separated candidate output dirs.
-    * ``COREDUMP_MAX_BYTES`` — integer cap on core size in bytes.
+    1. ``--target-dir`` CLI option (highest — survives the kernel's minimal
+       handler environment).
+    2. ``COREDUMP_TARGET_DIRS`` env var — colon-separated candidate dirs.
+    3. :data:`DEFAULT_TARGET_DIRS` — the built-in fallback.
+
+    ``COREDUMP_MAX_BYTES`` (env var) caps the core size in bytes.
 
     Args:
         argv: Argument vector (defaults to ``sys.argv[1:]``).
@@ -203,8 +227,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    target_dirs = os.environ.get("COREDUMP_TARGET_DIRS")
-    candidates = target_dirs.split(":") if target_dirs else list(DEFAULT_TARGET_DIRS)
+    # --target-dir wins over the env var, which wins over the built-in default.
+    if args.target_dir:
+        candidates = [args.target_dir]
+    else:
+        target_dirs = os.environ.get("COREDUMP_TARGET_DIRS")
+        candidates = target_dirs.split(":") if target_dirs else list(DEFAULT_TARGET_DIRS)
 
     max_bytes_env = os.environ.get("COREDUMP_MAX_BYTES")
     max_bytes = int(max_bytes_env) if max_bytes_env else DEFAULT_MAX_BYTES
