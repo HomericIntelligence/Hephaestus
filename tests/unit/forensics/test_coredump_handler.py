@@ -10,9 +10,20 @@ import pytest
 
 from hephaestus.forensics.coredump_handler import (
     DEFAULT_MAX_BYTES,
+    main,
     resolve_target_dir,
     write_core,
 )
+
+
+class _FakeStdin:
+    """Minimal non-TTY stdin stand-in: ``isatty()`` is False, ``buffer`` reads bytes."""
+
+    def __init__(self, data: bytes) -> None:
+        self.buffer = io.BytesIO(data)
+
+    def isatty(self) -> bool:
+        return False
 
 
 class TestResolveTargetDir:
@@ -105,3 +116,55 @@ class TestWriteCore:
     def test_default_max_bytes_is_4_gib(self) -> None:
         """The documented default cap is 4 GiB."""
         assert DEFAULT_MAX_BYTES == 4 * 1024 * 1024 * 1024
+
+
+class TestMainTargetDir:
+    """Tests for the --target-dir CLI option and its precedence in main()."""
+
+    def test_target_dir_option_directs_the_core_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--target-dir places the core file in the given directory."""
+        cores = tmp_path / "explicit" / "cores"
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b"ELF"))
+        rc = main(["--target-dir", str(cores), "7", "proc", "100", "11"])
+        assert rc == 0
+        assert (cores / "core.7.proc.100.sig11").read_bytes() == b"ELF"
+
+    def test_target_dir_overrides_env_var(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--target-dir wins over COREDUMP_TARGET_DIRS."""
+        env_dir = tmp_path / "from-env"
+        env_dir.mkdir()
+        cli_dir = tmp_path / "from-cli"
+        monkeypatch.setenv("COREDUMP_TARGET_DIRS", str(env_dir))
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b"core"))
+        rc = main(["--target-dir", str(cli_dir), "1", "p", "0", "6"])
+        assert rc == 0
+        assert (cli_dir / "core.1.p.0.sig6").is_file()
+        # The env-var directory must NOT have received the core.
+        assert not list(env_dir.iterdir())
+
+    def test_env_var_used_when_no_target_dir_option(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without --target-dir, COREDUMP_TARGET_DIRS is honored."""
+        env_dir = tmp_path / "env-cores"
+        monkeypatch.setenv("COREDUMP_TARGET_DIRS", str(env_dir))
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b"x"))
+        rc = main(["2", "q", "0", "4"])
+        assert rc == 0
+        assert (env_dir / "core.2.q.0.sig4").is_file()
+
+    def test_tty_stdin_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A TTY stdin is refused with exit code 1 (would otherwise block)."""
+
+        class _TtyStdin:
+            buffer = io.BytesIO(b"")
+
+            def isatty(self) -> bool:
+                return True
+
+        monkeypatch.setattr("sys.stdin", _TtyStdin())
+        assert main(["1", "p", "0", "6"]) == 1
