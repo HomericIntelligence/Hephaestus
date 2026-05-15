@@ -126,7 +126,11 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           TAG_VERSION="${TAG#v}"
-          PKG_VERSION=$(pixi run python -c "import hephaestus; print(hephaestus.__version__)")
+          # Resolve the version straight from hatch-vcs against the checked-out git
+          # tree. This reads the tag, not installed-package metadata, so it is
+          # immune to a stale editable install restored from the actions cache
+          # (the previous `import hephaestus` check returned "unknown" that way).
+          PKG_VERSION=$(pixi run hatchling version)
           if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
             echo "::error::Tag version ($TAG_VERSION) does not match package version ($PKG_VERSION)"
             exit 1
@@ -134,7 +138,17 @@ jobs:
           echo "Version check passed: $TAG_VERSION"
 
       - name: Build package
-        run: pixi run python -m build
+        shell: bash
+        run: |
+          # hatch-vcs derives the version from git; a dirty tree would taint it
+          # with a +dirty/.devN suffix and publish a wrong version.
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Working tree is dirty — refusing to build"
+            git status --porcelain
+            exit 1
+          fi
+          pixi run python -m build
+          ls -1 dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
