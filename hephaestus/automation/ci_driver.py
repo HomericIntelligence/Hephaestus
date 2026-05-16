@@ -31,7 +31,7 @@ from hephaestus.agents.runtime import (
 
 from .claude_models import implementer_model
 from .claude_timeouts import ci_driver_claude_timeout
-from .git_utils import get_repo_root, run
+from .git_utils import get_repo_root, issue_ref, pr_ref, run
 from .github_api import _gh_call, gh_pr_checks
 from .models import CIDriverOptions, WorkerResult
 from .status_tracker import StatusTracker
@@ -200,7 +200,9 @@ class CIDriver:
         _ci_poll_max_wait: int = int(os.environ.get("HEPH_CI_POLL_MAX_WAIT", "600"))
 
         try:
-            self.status_tracker.update_slot(acquired_slot, f"#{issue_number}: fetching checks")
+            self.status_tracker.update_slot(
+                acquired_slot, f"{issue_ref(issue_number)}: fetching checks"
+            )
 
             # 2. Get CI checks — bounded poll loop for pending state.
             # The module docstring advertises "Parallel CI check polling" but the
@@ -251,10 +253,11 @@ class CIDriver:
                         issue_number=issue_number, success=True, pr_number=pr_number
                     )
 
+                iref = issue_ref(issue_number)
                 self.status_tracker.update_slot(
                     acquired_slot,
-                    f"#{issue_number}: waiting for CI checks (attempt {poll_attempt + 1}, "
-                    f"{poll_elapsed}s elapsed)",
+                    f"{iref}: waiting for CI checks "
+                    f"(attempt {poll_attempt + 1}, {poll_elapsed}s elapsed)",
                 )
                 logger.debug(
                     "Issue #%s: CI checks pending, sleeping %ss (attempt %s, %ss elapsed)",
@@ -273,7 +276,7 @@ class CIDriver:
 
             if all_green:
                 self.status_tracker.update_slot(
-                    acquired_slot, f"#{issue_number}: enabling auto-merge"
+                    acquired_slot, f"{issue_ref(issue_number)}: enabling auto-merge"
                 )
                 # DRY-RUN GUARD before auto-merge
                 if self.options.dry_run:
@@ -290,7 +293,7 @@ class CIDriver:
                     issue_number=issue_number,
                     success=merge_ok,
                     pr_number=pr_number,
-                    error=None if merge_ok else f"auto-merge failed for PR #{pr_number}",
+                    error=None if merge_ok else f"auto-merge failed for PR {pr_ref(pr_number)}",
                 )
 
             # 5. Some required checks failed
@@ -349,7 +352,7 @@ class CIDriver:
         for iteration in range(self.options.max_fix_iterations):
             self.status_tracker.update_slot(
                 acquired_slot,
-                f"#{issue_number}: fetching CI logs (attempt {iteration + 1})",
+                f"{issue_ref(issue_number)}: fetching CI logs (attempt {iteration + 1})",
             )
             ci_logs = self._get_failing_ci_logs(pr_number)
             session_id = self._load_impl_session_id(issue_number)
@@ -366,7 +369,7 @@ class CIDriver:
 
             self.status_tracker.update_slot(
                 acquired_slot,
-                f"#{issue_number}: running CI fix session (attempt {iteration + 1})",
+                f"{issue_ref(issue_number)}: running CI fix session (attempt {iteration + 1})",
             )
             fixed = self._run_ci_fix_session(
                 issue_number, pr_number, worktree_path, ci_logs, session_id
@@ -618,14 +621,14 @@ class CIDriver:
 
         """
         prompt = (
-            f"Fix the CI failures for PR #{pr_number} (issue #{issue_number}).\n\n"
+            f"Fix the CI failures for PR {pr_ref(pr_number)} (issue {issue_ref(issue_number)}).\n\n"
             f"Working directory: {worktree_path}\n\n"
             f"CI failure logs:\n{ci_logs}\n\n"
             "Fix the code to make the CI checks pass. After fixing:\n"
             "1. Run: pixi run python -m pytest tests/ -v\n"
             "2. Run: pre-commit run --all-files\n"
             "3. Commit changes (do NOT push)\n\n"
-            f"Commit message: fix: Address CI failures for PR #{pr_number}\n"
+            f"Commit message: fix: Address CI failures for PR {pr_ref(pr_number)}\n"
         )
 
         try:

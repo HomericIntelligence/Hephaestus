@@ -33,7 +33,7 @@ from hephaestus.agents.runtime import codex_json_stdout, resume_codex_session, s
 from hephaestus.github.rate_limit import detect_claude_usage_cap, wait_until
 
 from .claude_timeouts import follow_up_claude_timeout
-from .git_utils import run
+from .git_utils import issue_ref, run
 from .github_api import gh_issue_comment, gh_issue_create
 from .prompts import get_follow_up_prompt
 
@@ -311,7 +311,7 @@ def _file_consolidated_issue(
 
     if slot_id is not None and status_tracker is not None:
         status_tracker.update_slot(
-            slot_id, f"#{issue_number}: Filing 1 consolidated follow-up issue"
+            slot_id, f"{issue_ref(issue_number)}: Filing 1 consolidated follow-up issue"
         )
 
     categories = sorted({i.category for i in response.follow_ups})

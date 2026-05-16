@@ -30,7 +30,7 @@ from ._review_utils import find_pr_for_issue, parse_json_block
 from .claude_models import reviewer_model
 from .claude_timeouts import pr_reviewer_claude_timeout
 from .curses_ui import CursesUI, ThreadLogManager
-from .git_utils import get_repo_root, run
+from .git_utils import get_repo_root, issue_ref, pr_ref, run
 from .github_api import _gh_call, fetch_issue_info, gh_pr_review_post, write_secure
 from .models import ReviewerOptions, ReviewPhase, ReviewState, WorkerResult
 from .prompts import get_pr_review_analysis_prompt
@@ -215,7 +215,9 @@ class PRReviewer:
             )
         context["pr_diff"] = (result.stdout or "")[:8000]  # Cap to avoid huge diffs
         if not context["pr_diff"].strip():
-            raise RuntimeError(f"PR #{pr_number} returned an empty diff — refusing to review")
+            raise RuntimeError(
+                f"PR {pr_ref(pr_number)} returned an empty diff — refusing to review"
+            )
 
         # Fetch PR description and reviews/comments. Best-effort, but any
         # failure is now logged so empty descriptions are not invisible.
@@ -382,11 +384,11 @@ class PRReviewer:
             error_output = f"EXIT CODE: {e.returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
             log_file.write_text(error_output)
             raise RuntimeError(
-                f"Analysis session failed for PR #{pr_number}: {e.stderr or e.stdout}"
+                f"Analysis session failed for PR {pr_ref(pr_number)}: {e.stderr or e.stdout}"
             ) from e
         except subprocess.TimeoutExpired as e:
             log_file.write_text(f"TIMEOUT after {e.timeout}s\n\nOutput:\n{e.output or ''}")
-            raise RuntimeError(f"Analysis session timed out for PR #{pr_number}") from e
+            raise RuntimeError(f"Analysis session timed out for PR {pr_ref(pr_number)}") from e
         finally:
             with contextlib.suppress(Exception):
                 prompt_file.unlink()
@@ -468,7 +470,9 @@ class PRReviewer:
             WorkerResult with success=False
 
         """
-        self.status_tracker.update_slot(slot_id, f"#{issue_number}: FAILED - {error_msg[:50]}")
+        self.status_tracker.update_slot(
+            slot_id, f"{issue_ref(issue_number)}: FAILED - {error_msg[:50]}"
+        )
         err_state = self.states.get(issue_number)
         if err_state:
             with self.state_lock:
@@ -502,10 +506,12 @@ class PRReviewer:
 
         try:
             self.status_tracker.update_slot(
-                slot_id, f"#{issue_number}: PR #{pr_number} Creating worktree"
+                slot_id, f"{issue_ref(issue_number)}: PR {pr_ref(pr_number)} Creating worktree"
             )
             self._log(
-                "info", f"Starting review of PR #{pr_number} for issue #{issue_number}", thread_id
+                "info",
+                f"Starting review of PR {pr_ref(pr_number)} for issue {issue_ref(issue_number)}",
+                thread_id,
             )
 
             state = self._get_or_create_state(issue_number, pr_number)
@@ -514,12 +520,12 @@ class PRReviewer:
             if state.phase == ReviewPhase.COMPLETED:
                 self._log(
                     "info",
-                    f"PR #{pr_number} for issue #{issue_number} already reviewed "
+                    f"PR {pr_ref(pr_number)} for issue {issue_ref(issue_number)} already reviewed "
                     "(state.phase=COMPLETED) — skipping to avoid duplicate comments",
                     thread_id,
                 )
                 self.status_tracker.update_slot(
-                    slot_id, f"#{issue_number}: already reviewed, skipped"
+                    slot_id, f"{issue_ref(issue_number)}: already reviewed, skipped"
                 )
                 return WorkerResult(
                     issue_number=issue_number,
@@ -538,12 +544,14 @@ class PRReviewer:
 
             # Gather context
             self.status_tracker.update_slot(
-                slot_id, f"#{issue_number}: PR #{pr_number} Gathering context"
+                slot_id, f"{issue_ref(issue_number)}: PR {pr_ref(pr_number)} Gathering context"
             )
             context = self._gather_pr_context(pr_number, issue_number, worktree_path)
 
             # Phase: ANALYZING — run Claude read-only analysis
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: PR #{pr_number} Analyzing")
+            self.status_tracker.update_slot(
+                slot_id, f"{issue_ref(issue_number)}: PR {pr_ref(pr_number)} Analyzing"
+            )
             with self.state_lock:
                 state.phase = ReviewPhase.ANALYZING
             self._save_state(state)
@@ -556,15 +564,18 @@ class PRReviewer:
             summary: str = analysis.get("summary", "")
 
             # Phase: POSTING — post inline review comments to GitHub
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: PR #{pr_number} Posting")
+            self.status_tracker.update_slot(
+                slot_id, f"{issue_ref(issue_number)}: PR {pr_ref(pr_number)} Posting"
+            )
             with self.state_lock:
                 state.phase = ReviewPhase.POSTING
             self._save_state(state)
 
             if self.options.dry_run:
+                pref = pr_ref(pr_number)
                 self._log(
                     "info",
-                    f"[DRY RUN] Would post {len(comments)} inline comment(s) on PR #{pr_number}",
+                    f"[DRY RUN] Would post {len(comments)} inline comment(s) on PR {pref}",
                     thread_id,
                 )
                 thread_ids: list[str] = []
@@ -577,7 +588,7 @@ class PRReviewer:
                 )
                 self._log(
                     "info",
-                    f"Posted {len(thread_ids)} review thread(s) on PR #{pr_number}",
+                    f"Posted {len(thread_ids)} review thread(s) on PR {pr_ref(pr_number)}",
                     thread_id,
                 )
 
@@ -588,7 +599,9 @@ class PRReviewer:
             self._save_state(state)
 
             self._log(
-                "info", f"PR #{pr_number} review complete for issue #{issue_number}", thread_id
+                "info",
+                f"PR {pr_ref(pr_number)} review complete for issue {issue_ref(issue_number)}",
+                thread_id,
             )
 
             return WorkerResult(

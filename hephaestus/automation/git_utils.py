@@ -117,6 +117,45 @@ def get_repo_info(repo_root: Path | None = None) -> tuple[str, str]:
         raise RuntimeError(f"Failed to get git remote URL: {e}") from e
 
 
+_repo_slug_cache: str | None = None
+
+
+def get_repo_slug(repo_root: Path | None = None) -> str:
+    """Return the short repo name for log/status prefixes (e.g. ``AchaeanFleet``).
+
+    Cached for the lifetime of the process so that hot log paths do not
+    re-invoke ``git remote`` on every call. Falls back to ``"repo"`` if the
+    remote URL cannot be parsed so callers can always interpolate the result
+    into status strings without exception handling.
+
+    Args:
+        repo_root: Repository root (defaults to auto-detect)
+
+    Returns:
+        Short repository name (no owner prefix), or ``"repo"`` on failure.
+
+    """
+    global _repo_slug_cache
+    if _repo_slug_cache is not None:
+        return _repo_slug_cache
+    try:
+        _, repo = get_repo_info(repo_root)
+        _repo_slug_cache = repo
+    except (RuntimeError, subprocess.CalledProcessError):
+        _repo_slug_cache = "repo"
+    return _repo_slug_cache
+
+
+def issue_ref(issue_number: int | str) -> str:
+    """Return a ``<repo>#<number>`` reference string for logs and status lines."""
+    return f"{get_repo_slug()}#{issue_number}"
+
+
+def pr_ref(pr_number: int | str) -> str:
+    """Return a ``<repo>#<number>`` reference string for PRs (same format as issues)."""
+    return f"{get_repo_slug()}#{pr_number}"
+
+
 def safe_git_fetch(repo_root: Path, retries: int = 3) -> bool:
     """Safely fetch from git remote with retry and exponential backoff.
 

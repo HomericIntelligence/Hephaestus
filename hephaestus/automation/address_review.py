@@ -37,7 +37,7 @@ from ._review_utils import find_pr_for_issue
 from .claude_models import implementer_model
 from .claude_timeouts import address_review_claude_timeout
 from .curses_ui import CursesUI, ThreadLogManager
-from .git_utils import get_repo_root, run
+from .git_utils import get_repo_root, issue_ref, pr_ref, run
 from .github_api import (
     gh_pr_list_unresolved_threads,
     gh_pr_resolve_thread,
@@ -263,17 +263,23 @@ class AddressReviewer:
             )
 
         thread_id = threading.get_ident()
-        self.status_tracker.update_slot(slot_id, f"#{issue_number}: Starting")
-        self._log("info", f"Addressing PR #{pr_number} for issue #{issue_number}", thread_id)
+        self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Starting")
+        self._log(
+            "info",
+            f"Addressing PR {pr_ref(pr_number)} for issue {issue_ref(issue_number)}",
+            thread_id,
+        )
 
         try:
             # Step 1: List unresolved threads
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: Listing threads")
+            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Listing threads")
             threads = gh_pr_list_unresolved_threads(pr_number, dry_run=self.options.dry_run)
             if not threads:
+                iref = issue_ref(issue_number)
+                pref = pr_ref(pr_number)
                 self._log(
                     "info",
-                    f"No unresolved threads on PR #{pr_number} for issue #{issue_number}",
+                    f"No unresolved threads on PR {pref} for issue {iref}",
                     thread_id,
                 )
                 return WorkerResult(
@@ -284,7 +290,7 @@ class AddressReviewer:
 
             self._log(
                 "info",
-                f"Found {len(threads)} unresolved thread(s) on PR #{pr_number}",
+                f"Found {len(threads)} unresolved thread(s) on PR {pr_ref(pr_number)}",
                 thread_id,
             )
 
@@ -294,7 +300,7 @@ class AddressReviewer:
                 self._log(
                     "info",
                     f"[DRY RUN] Would address {len(threads)} unresolved thread(s) "
-                    f"and push for PR #{pr_number}",
+                    f"and push for PR {pr_ref(pr_number)}",
                     thread_id,
                 )
                 return WorkerResult(
@@ -322,7 +328,9 @@ class AddressReviewer:
             branch_name = review_state.branch_name or f"{issue_number}-auto-impl"
 
             # Step 5: Checkout worktree
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: Setting up worktree")
+            self.status_tracker.update_slot(
+                slot_id, f"{issue_ref(issue_number)}: Setting up worktree"
+            )
             worktree_path = self._get_or_create_worktree(issue_number, branch_name, review_state)
 
             with self.state_lock:
@@ -332,7 +340,9 @@ class AddressReviewer:
             self._save_review_state(review_state)
 
             # Step 6: Run Claude fix session
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: Running Claude fix")
+            self.status_tracker.update_slot(
+                slot_id, f"{issue_ref(issue_number)}: Running Claude fix"
+            )
             fix_result = self._run_fix_session(
                 issue_number=issue_number,
                 pr_number=pr_number,
@@ -346,20 +356,22 @@ class AddressReviewer:
 
             self._log(
                 "info",
-                f"Claude addressed {len(addressed)} thread(s) on PR #{pr_number}",
+                f"Claude addressed {len(addressed)} thread(s) on PR {pr_ref(pr_number)}",
                 thread_id,
             )
 
             # Step 7: Commit changes if any
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: Committing")
+            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Committing")
             self._commit_if_changes(issue_number, worktree_path)
 
             # Step 8: Push branch
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: Pushing")
+            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Pushing")
             self._push_branch(branch_name, worktree_path)
 
             # Step 9: Resolve addressed threads
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: Resolving threads")
+            self.status_tracker.update_slot(
+                slot_id, f"{issue_ref(issue_number)}: Resolving threads"
+            )
             presented_thread_ids = {t["id"] for t in threads}
             self._resolve_addressed_threads(addressed, replies, presented_thread_ids)
 
@@ -373,10 +385,11 @@ class AddressReviewer:
                 review_state.completed_at = datetime.now(timezone.utc)
             self._save_review_state(review_state)
 
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: Done")
+            iref = issue_ref(issue_number)
+            self.status_tracker.update_slot(slot_id, f"{iref}: Done")
             self._log(
                 "info",
-                f"Address review complete for issue #{issue_number} (PR #{pr_number})",
+                f"Address review complete for issue {iref} (PR {pr_ref(pr_number)})",
                 thread_id,
             )
 
@@ -719,11 +732,11 @@ class AddressReviewer:
             error_output = f"EXIT CODE: {e.returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
             log_file.write_text(error_output)
             raise RuntimeError(
-                f"Fix session failed for PR #{pr_number}: {e.stderr or e.stdout}"
+                f"Fix session failed for PR {pr_ref(pr_number)}: {e.stderr or e.stdout}"
             ) from e
         except subprocess.TimeoutExpired as e:
             log_file.write_text(f"TIMEOUT after {e.timeout}s\n\nOutput:\n{e.output or ''}")
-            raise RuntimeError(f"Fix session timed out for PR #{pr_number}") from e
+            raise RuntimeError(f"Fix session timed out for PR {pr_ref(pr_number)}") from e
         finally:
             # Narrow exception: a missing prompt file is benign cleanup,
             # but ENOSPC / permission errors are signal we want surfaced.
@@ -908,7 +921,9 @@ class AddressReviewer:
             WorkerResult with success=False
 
         """
-        self.status_tracker.update_slot(slot_id, f"#{issue_number}: FAILED - {error_msg[:50]}")
+        self.status_tracker.update_slot(
+            slot_id, f"{issue_ref(issue_number)}: FAILED - {error_msg[:50]}"
+        )
         err_state = self.states.get(issue_number)
         if err_state:
             with self.state_lock:

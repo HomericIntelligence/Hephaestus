@@ -26,6 +26,7 @@ from hephaestus.github.rate_limit import wait_until
 from .claude_invoke import scan_quota_reset
 from .claude_models import reviewer_model
 from .claude_timeouts import plan_reviewer_claude_timeout
+from .git_utils import issue_ref
 from .github_api import _gh_call, gh_issue_comment, gh_issue_json
 from .models import PLAN_COMMENT_MARKERS, PlanReviewerOptions, WorkerResult
 from .prompts import get_plan_review_prompt
@@ -139,7 +140,7 @@ class PlanReviewer:
             )
 
         try:
-            self.status_tracker.update_slot(acquired_slot, f"#{issue_number}: checking")
+            self.status_tracker.update_slot(acquired_slot, f"{issue_ref(issue_number)}: checking")
 
             # --- Read-only checks (safe in dry-run) ---
 
@@ -155,7 +156,9 @@ class PlanReviewer:
                 return WorkerResult(issue_number=issue_number, success=True)
 
             # Fetch issue details for context
-            self.status_tracker.update_slot(acquired_slot, f"#{issue_number}: fetching issue")
+            self.status_tracker.update_slot(
+                acquired_slot, f"{issue_ref(issue_number)}: fetching issue"
+            )
             try:
                 issue_data = gh_issue_json(issue_number)
             except Exception as e:
@@ -169,7 +172,9 @@ class PlanReviewer:
             issue_body: str = issue_data.get("body", "")
 
             # Run Claude analysis
-            self.status_tracker.update_slot(acquired_slot, f"#{issue_number}: running Claude")
+            self.status_tracker.update_slot(
+                acquired_slot, f"{issue_ref(issue_number)}: running Claude"
+            )
             review_text = self._run_claude_analysis(
                 issue_number, issue_title, issue_body, plan_text
             )
@@ -191,7 +196,9 @@ class PlanReviewer:
                 return WorkerResult(issue_number=issue_number, success=True)
 
             # Post review comment
-            self.status_tracker.update_slot(acquired_slot, f"#{issue_number}: posting review")
+            self.status_tracker.update_slot(
+                acquired_slot, f"{issue_ref(issue_number)}: posting review"
+            )
             self._post_review(issue_number, review_text)
 
             return WorkerResult(issue_number=issue_number, success=True)

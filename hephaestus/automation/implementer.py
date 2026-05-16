@@ -43,7 +43,7 @@ from .claude_timeouts import implementer_claude_timeout
 from .curses_ui import CursesUI, ThreadLogManager
 from .dependency_resolver import CyclicDependencyError, DependencyResolver
 from .follow_up import parse_follow_up_items, run_follow_up_issues
-from .git_utils import get_repo_root, run
+from .git_utils import get_repo_root, issue_ref, pr_ref, run
 from .github_api import fetch_issue_info, gh_list_open_issues
 from .learn import learn_needs_rerun, run_learn
 from .models import (
@@ -433,7 +433,9 @@ class IssueImplementer:
         # A2-004: optional pre-PR test gate (opt-in via run_pre_pr_tests=True).
         if self.options.run_pre_pr_tests:
             if slot_id is not None:
-                self.status_tracker.update_slot(slot_id, f"#{issue_number}: Running pre-PR tests")
+                self.status_tracker.update_slot(
+                    slot_id, f"{issue_ref(issue_number)}: Running pre-PR tests"
+                )
             tests_passed = self._run_tests_in_worktree(worktree_path, issue_number)
             if not tests_passed:
                 logger.warning(
@@ -476,7 +478,9 @@ class IssueImplementer:
         can_resume_session = self._can_resume_state_session(state)
         if self.options.enable_learn and can_resume_session and state.session_id:
             if slot_id is not None:
-                self.status_tracker.update_slot(slot_id, f"#{issue_number}: Running learn")
+                self.status_tracker.update_slot(
+                    slot_id, f"{issue_ref(issue_number)}: Running learn"
+                )
             with self.state_lock:
                 state.phase = ImplementationPhase.LEARN
             self._save_state(state)
@@ -494,7 +498,9 @@ class IssueImplementer:
         # Follow-up issues phase (after LEARN, before COMPLETED)
         if self.options.enable_follow_up and can_resume_session and state.session_id:
             if slot_id is not None:
-                self.status_tracker.update_slot(slot_id, f"#{issue_number}: Identifying follow-ups")
+                self.status_tracker.update_slot(
+                    slot_id, f"{issue_ref(issue_number)}: Identifying follow-ups"
+                )
             with self.state_lock:
                 state.phase = ImplementationPhase.FOLLOW_UP_ISSUES
             self._save_state(state)
@@ -533,8 +539,8 @@ class IssueImplementer:
         thread_id = threading.get_ident()
 
         try:
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: Starting")
-            self._log("info", f"Starting issue #{issue_number}", thread_id)
+            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Starting")
+            self._log("info", f"Starting issue {issue_ref(issue_number)}", thread_id)
 
             # Initialize state
             state = self._get_or_create_state(issue_number)
@@ -560,7 +566,9 @@ class IssueImplementer:
                 )
 
             # Create worktree (only in non-dry-run mode)
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: Creating worktree")
+            self.status_tracker.update_slot(
+                slot_id, f"{issue_ref(issue_number)}: Creating worktree"
+            )
             worktree_path = self.worktree_manager.create_worktree(issue_number, branch_name)
 
             with self.state_lock:
@@ -569,9 +577,11 @@ class IssueImplementer:
             self._save_state(state)
 
             # Check for existing plan
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: Checking plan")
+            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Checking plan")
             if not self._has_plan(issue_number):
-                self.status_tracker.update_slot(slot_id, f"#{issue_number}: Generating plan")
+                self.status_tracker.update_slot(
+                    slot_id, f"{issue_ref(issue_number)}: Generating plan"
+                )
                 self._log("info", f"Issue #{issue_number} has no plan, generating...", thread_id)
                 with self.state_lock:
                     state.phase = ImplementationPhase.PLANNING
@@ -579,7 +589,7 @@ class IssueImplementer:
                 self._generate_plan(issue_number)
 
             # Fetch issue info for context
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: Fetching issue")
+            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Fetching issue")
             with self.state_lock:
                 state.phase = ImplementationPhase.IMPLEMENTING
             self._save_state(state)
@@ -587,7 +597,7 @@ class IssueImplementer:
             # Run the selected implementation agent
             issue = fetch_issue_info(issue_number)
             self.status_tracker.update_slot(
-                slot_id, f"#{issue_number}: Running {self.options.agent}"
+                slot_id, f"{issue_ref(issue_number)}: Running {self.options.agent}"
             )
             session_id = self._run_claude_code(
                 issue_number,
@@ -634,7 +644,7 @@ class IssueImplementer:
             pr_number = self._finalize_pr(issue_number, branch_name, worktree_path, state, slot_id)
             self._run_post_pr_followup(issue_number, worktree_path, state, slot_id)
 
-            self._log("info", f"Issue #{issue_number} completed: PR #{pr_number}", thread_id)
+            self._log("info", f"Issue #{issue_number} completed: PR {pr_ref(pr_number)}", thread_id)
 
             return WorkerResult(
                 issue_number=issue_number,
@@ -649,7 +659,9 @@ class IssueImplementer:
             self._log("error", error_msg, thread_id)
 
             # Show failure in UI before releasing slot
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: FAILED - {error_msg[:50]}")
+            self.status_tracker.update_slot(
+                slot_id, f"{issue_ref(issue_number)}: FAILED - {error_msg[:50]}"
+            )
 
             err_state = self._get_state(issue_number)
             if err_state:
@@ -672,7 +684,9 @@ class IssueImplementer:
                 self._log("error", f"stderr: {e.stderr[:300]}", thread_id)
 
             # Show failure in UI before releasing slot
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: FAILED - {error_msg[:50]}")
+            self.status_tracker.update_slot(
+                slot_id, f"{issue_ref(issue_number)}: FAILED - {error_msg[:50]}"
+            )
 
             err_state = self._get_state(issue_number)
             if err_state:
@@ -693,7 +707,9 @@ class IssueImplementer:
 
             # Show failure in UI before releasing slot
             error_msg = str(e)[:80]
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: FAILED - {error_msg[:50]}")
+            self.status_tracker.update_slot(
+                slot_id, f"{issue_ref(issue_number)}: FAILED - {error_msg[:50]}"
+            )
 
             err_state = self._get_state(issue_number)
             if err_state:
@@ -714,7 +730,9 @@ class IssueImplementer:
 
             # Show failure in UI before releasing slot
             error_msg = str(e)[:80]
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: FAILED - {error_msg[:50]}")
+            self.status_tracker.update_slot(
+                slot_id, f"{issue_ref(issue_number)}: FAILED - {error_msg[:50]}"
+            )
 
             err_state = self._get_state(issue_number)
             if err_state:
@@ -985,16 +1003,17 @@ class IssueImplementer:
             # the next review.
             if iteration > 0:
                 if session_id is None:
+                    ref = issue_ref(issue_number)
                     self._log(
                         "warning",
-                        f"#{issue_number}: cannot iterate (no session_id from initial run); "
+                        f"{ref}: cannot iterate (no session_id from initial run); "
                         "stopping review loop",
                         thread_id,
                     )
                     break
                 if slot_id is not None:
                     self.status_tracker.update_slot(
-                        slot_id, f"#{issue_number}: addressing review [R{iteration}]"
+                        slot_id, f"{issue_ref(issue_number)}: addressing review [R{iteration}]"
                     )
                 resumed = self._resume_impl_with_feedback(
                     session_id=session_id,
@@ -1006,9 +1025,10 @@ class IssueImplementer:
                     state=state,
                 )
                 if not resumed:
+                    ref = issue_ref(issue_number)
                     self._log(
                         "warning",
-                        f"#{issue_number}: resume failed at R{iteration}; stopping review loop",
+                        f"{ref}: resume failed at R{iteration}; stopping review loop",
                         thread_id,
                     )
                     break
@@ -1016,7 +1036,7 @@ class IssueImplementer:
             # Compute the diff and changed-files list for the reviewer.
             if slot_id is not None:
                 self.status_tracker.update_slot(
-                    slot_id, f"#{issue_number}: reviewing impl [R{iteration}]"
+                    slot_id, f"{issue_ref(issue_number)}: reviewing impl [R{iteration}]"
                 )
             diff_text = self._collect_diff(worktree_path, branch_name)
             files_changed = self._collect_changed_files(worktree_path, branch_name)
@@ -1038,7 +1058,7 @@ class IssueImplementer:
             last_grade = verdict.grade
             self._log(
                 "info",
-                f"#{issue_number} R{iteration}: Verdict={verdict.verdict} "
+                f"{issue_ref(issue_number)} R{iteration}: Verdict={verdict.verdict} "
                 f"Grade={verdict.grade or '?'}",
                 thread_id,
             )
@@ -1049,9 +1069,10 @@ class IssueImplementer:
             self._save_review_iteration_state(issue_number, iterations_run, review_text)
 
             if verdict.is_go:
+                ref = issue_ref(issue_number)
                 self._log(
                     "info",
-                    f"#{issue_number}: GO on iteration {iteration} — review loop terminated",
+                    f"{ref}: GO on iteration {iteration} — review loop terminated",
                     thread_id,
                 )
                 break

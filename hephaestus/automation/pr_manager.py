@@ -15,7 +15,7 @@ from typing import cast
 
 from ._secret_patterns import SECRET_FILE_EXTENSIONS, SECRET_FILE_NAMES
 from .claude_models import implementer_model
-from .git_utils import run
+from .git_utils import issue_ref, run
 from .github_api import _gh_call, fetch_issue_info, gh_pr_create
 from .prompts import get_pr_description
 from .status_tracker import StatusTracker
@@ -43,7 +43,7 @@ def commit_changes(issue_number: int, worktree_path: Path) -> None:
 
     if not result.stdout.strip():
         raise RuntimeError(
-            f"No changes to commit for issue #{issue_number}. "
+            f"No changes to commit for issue {issue_ref(issue_number)}. "
             "Check if the implementation was successful or if the plan needs revision."
         )
 
@@ -85,7 +85,7 @@ def commit_changes(issue_number: int, worktree_path: Path) -> None:
 
     if not files_to_add:
         raise RuntimeError(
-            f"No non-secret files to commit for issue #{issue_number}. "
+            f"No non-secret files to commit for issue {issue_ref(issue_number)}. "
             "All changes appear to be secret files."
         )
 
@@ -141,7 +141,7 @@ def ensure_pr_created(
             status_tracker.update_slot(slot_id, msg)
 
     # Check if commit exists
-    _update_slot(f"#{issue_number}: Checking commit")
+    _update_slot(f"{issue_ref(issue_number)}: Checking commit")
     result = run(
         ["git", "log", "-1", "--oneline"],
         cwd=worktree_path,
@@ -149,13 +149,14 @@ def ensure_pr_created(
     )
     if not result.stdout.strip():
         raise RuntimeError(
-            f"No commit found for issue #{issue_number}. Claude did not create any commits."
+            f"No commit found for issue {issue_ref(issue_number)}. "
+            "Claude did not create any commits."
         )
 
     logger.info("Commit exists: %s", result.stdout.strip()[:80])
 
     # Check if branch was pushed, if not push it
-    _update_slot(f"#{issue_number}: Pushing branch")
+    _update_slot(f"{issue_ref(issue_number)}: Pushing branch")
     result = run(
         ["git", "ls-remote", "--heads", "origin", branch_name],
         cwd=worktree_path,
@@ -170,7 +171,7 @@ def ensure_pr_created(
         logger.info("Branch %s already on origin", branch_name)
 
     # Check if PR exists, if not create it
-    _update_slot(f"#{issue_number}: Creating PR")
+    _update_slot(f"{issue_ref(issue_number)}: Creating PR")
     pr_number = None
     try:
         result = _gh_call(["pr", "list", "--head", branch_name, "--json", "number", "--limit", "1"])

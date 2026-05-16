@@ -27,7 +27,6 @@ class StatusTracker:
         self.slots: list[str | None] = [None] * num_slots
         self.lock = threading.Lock()
         self.condition = threading.Condition(self.lock)
-        logger.debug("Initialized StatusTracker with %d slots", num_slots)
 
     def acquire_slot(self, timeout: float | None = None) -> int | None:
         """Acquire an available slot, waiting if necessary.
@@ -45,7 +44,6 @@ class StatusTracker:
                 for i, slot in enumerate(self.slots):
                     if slot is None:
                         self.slots[i] = "acquired"
-                        logger.debug("Acquired slot %d", i)
                         return i
 
                 # No slots available, wait
@@ -63,7 +61,6 @@ class StatusTracker:
         with self.condition:
             if 0 <= slot_id < self.num_slots:
                 self.slots[slot_id] = None
-                logger.debug("Released slot %d", slot_id)
                 self.condition.notify_all()  # Wake all waiters
             else:
                 logger.error("Invalid slot_id: %d", slot_id)
@@ -79,7 +76,6 @@ class StatusTracker:
         with self.lock:
             if 0 <= slot_id < self.num_slots:
                 self.slots[slot_id] = status
-                logger.debug("Slot %d: %s", slot_id, status)
             else:
                 logger.error("Invalid slot_id: %d", slot_id)
 
@@ -139,5 +135,4 @@ class StatusTracker:
         """Clear all slot statuses."""
         with self.condition:
             self.slots = [None] * self.num_slots
-            logger.debug("Cleared all slots")
             self.condition.notify_all()  # Wake all waiters

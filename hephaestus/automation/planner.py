@@ -27,7 +27,7 @@ from hephaestus.github.rate_limit import wait_until
 from .claude_invoke import parse_review_verdict, scan_quota_reset
 from .claude_models import advise_model, learn_model, planner_model, reviewer_model
 from .claude_timeouts import planner_claude_timeout
-from .git_utils import get_repo_root
+from .git_utils import get_repo_root, issue_ref
 from .github_api import (
     GitHubRateLimitError,
     _gh_call,
@@ -106,7 +106,7 @@ class Planner:
                     with self.lock:
                         self.results[issue_num] = result
                 except Exception as e:
-                    logger.error("Failed to plan issue #%s: %s", issue_num, e)
+                    logger.error("Failed to plan %s: %s", issue_ref(issue_num), e)
                     with self.lock:
                         self.results[issue_num] = PlanResult(
                             issue_number=issue_num,
@@ -183,13 +183,15 @@ class Planner:
             for comment in comments:
                 body = comment.get("body", "")
                 if any(marker in body for marker in PLAN_COMMENT_MARKERS):
-                    logger.debug("Found existing plan for issue #%s", issue_number)
+                    logger.debug("Found existing plan for %s", issue_ref(issue_number))
                     return True
 
             return False
 
         except Exception as e:
-            logger.warning("Failed to check for existing plan on issue #%s: %s", issue_number, e)
+            logger.warning(
+                "Failed to check for existing plan on %s: %s", issue_ref(issue_number), e
+            )
             return False
 
     def _plan_issue(self, issue_number: int) -> PlanResult:
@@ -211,10 +213,10 @@ class Planner:
             )
 
         try:
-            self.status_tracker.update_slot(slot_id, f"Planning issue #{issue_number}")
+            self.status_tracker.update_slot(slot_id, f"Planning {issue_ref(issue_number)}")
 
             if self.options.dry_run:
-                logger.info("[DRY RUN] Would plan issue #%s", issue_number)
+                logger.info("[DRY RUN] Would plan %s", issue_ref(issue_number))
                 return PlanResult(issue_number=issue_number, success=True)
 
             # Run the strict review loop: advise → loop[plan → learn → review]
@@ -232,7 +234,7 @@ class Planner:
             )
 
             self.status_tracker.update_slot(
-                slot_id, f"Completed issue #{issue_number} ({iterations} iter)"
+                slot_id, f"Completed {issue_ref(issue_number)} ({iterations} iter)"
             )
 
             if not verdict_is_go:
@@ -247,7 +249,7 @@ class Planner:
             return PlanResult(issue_number=issue_number, success=True)
 
         except Exception as e:
-            logger.error("Failed to plan issue #%s: %s", issue_number, e)
+            logger.error("Failed to plan %s: %s", issue_ref(issue_number), e)
             return PlanResult(
                 issue_number=issue_number,
                 success=False,
@@ -525,13 +527,13 @@ class Planner:
 
             # Call Claude with shorter timeout. /advise is light search work
             # so it runs on the cheap model.
-            logger.info("Running advise for issue #%s...", issue_number)
+            logger.info("Running advise for %s...", issue_ref(issue_number))
             findings = self._call_claude(advise_prompt, model=advise_model(), timeout=180)
 
             return findings
 
         except Exception as e:
-            logger.warning("Advise step failed for issue #%s: %s", issue_number, e)
+            logger.warning("Advise step failed for %s: %s", issue_ref(issue_number), e)
             return self._advise_skipped(f"unexpected error: {e}")
 
     @staticmethod
@@ -684,7 +686,7 @@ class Planner:
 """
 
         gh_issue_comment(issue_number, comment_body)
-        logger.info("Posted plan to issue #%s", issue_number)
+        logger.info("Posted plan to %s", issue_ref(issue_number))
 
     # ------------------------------------------------------------------
     # Strict review loop — advise → loop[plan → learn → review] → post
@@ -729,7 +731,9 @@ class Planner:
 
         for iteration in range(MAX_REVIEW_ITERATIONS):
             iterations_run = iteration + 1
-            self.status_tracker.update_slot(slot_id, f"#{issue_number}: planning [R{iteration}]")
+            self.status_tracker.update_slot(
+                slot_id, f"{issue_ref(issue_number)}: planning [R{iteration}]"
+            )
 
             plan = self._generate_plan(
                 issue_number,
@@ -739,12 +743,12 @@ class Planner:
             )
 
             self.status_tracker.update_slot(
-                slot_id, f"#{issue_number}: capturing learnings [R{iteration}]"
+                slot_id, f"{issue_ref(issue_number)}: capturing learnings [R{iteration}]"
             )
             learnings = self._capture_planner_learnings(issue_number, plan)
 
             self.status_tracker.update_slot(
-                slot_id, f"#{issue_number}: reviewing plan [R{iteration}]"
+                slot_id, f"{issue_ref(issue_number)}: reviewing plan [R{iteration}]"
             )
             review_text = self._run_plan_review(
                 issue_number=issue_number,
@@ -758,15 +762,19 @@ class Planner:
 
             verdict = parse_review_verdict(review_text)
             logger.info(
-                "#%s R%s: Verdict=%s Grade=%s",
-                issue_number,
+                "%s R%s: Verdict=%s Grade=%s",
+                issue_ref(issue_number),
                 iteration,
                 verdict.verdict,
                 verdict.grade or "?",
             )
 
             if verdict.is_go:
-                logger.info("#%s: GO on iteration %s — loop terminated", issue_number, iteration)
+                logger.info(
+                    "%s: GO on iteration %s — loop terminated",
+                    issue_ref(issue_number),
+                    iteration,
+                )
                 final_verdict_is_go = True
                 break
 
@@ -775,9 +783,9 @@ class Planner:
 
         if not final_verdict_is_go:
             logger.warning(
-                "#%s: review loop exhausted %s iteration(s) without a GO verdict — "
+                "%s: review loop exhausted %s iteration(s) without a GO verdict — "
                 "plan posted with NOGO-exhausted status",
-                issue_number,
+                issue_ref(issue_number),
                 iterations_run,
             )
 
@@ -817,7 +825,9 @@ class Planner:
         try:
             return self._call_claude(prompt, model=learn_model(), timeout=120)
         except Exception as e:
-            logger.warning("#%s: planner-learnings capture failed (non-fatal): %s", issue_number, e)
+            logger.warning(
+                "%s: planner-learnings capture failed (non-fatal): %s", issue_ref(issue_number), e
+            )
             return ""
 
     def _run_plan_review(
@@ -867,8 +877,8 @@ class Planner:
             )
         except Exception as e:
             logger.error(
-                "#%s R%s: reviewer call failed: %s; treating as NOGO so the loop continues",
-                issue_number,
+                "%s R%s: reviewer call failed: %s; treating as NOGO so the loop continues",
+                issue_ref(issue_number),
                 iteration,
                 e,
             )
