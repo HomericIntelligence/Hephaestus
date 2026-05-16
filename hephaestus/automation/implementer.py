@@ -598,6 +598,7 @@ class IssueImplementer:
                     issue_body=issue.body,
                     branch_name=branch_name,
                     worktree_path=str(worktree_path),
+                    repo_root=str(self.repo_root),
                 ),
                 slot_id=slot_id,
             )

@@ -520,6 +520,7 @@ class Planner:
                 issue_title=issue_title,
                 issue_body=issue_body,
                 marketplace_path=str(marketplace_path),
+                repo_root=str(repo_root),
             )
 
             # Call Claude with shorter timeout. /advise is light search work
