@@ -655,33 +655,34 @@ class TestGhListOpenIssues:
             gh_list_open_issues()
 
 
+_POLICY_BODY = "## Summary\nfoo\n\nCloses #1\n"
+
+
 class TestGhPrCreate:
     """Tests for gh_pr_create function."""
 
+    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_successful_pr_creation(self, mock_gh_call: Any) -> None:
+    def test_successful_pr_creation(self, mock_gh_call: Any, _mock_signed: Any) -> None:
         """Test successful PR creation."""
-        # Mock PR creation response
         mock_create_result = Mock()
         mock_create_result.stdout = "https://github.com/owner/repo/pull/456"
-
-        # Mock auto-merge response
         mock_merge_result = Mock()
-
         mock_gh_call.side_effect = [mock_create_result, mock_merge_result]
 
         pr_number = gh_pr_create(
             branch="feature-branch",
             title="Test PR",
-            body="Test body",
+            body=_POLICY_BODY,
             auto_merge=True,
         )
 
         assert pr_number == 456
         assert mock_gh_call.call_count == 2  # create + auto-merge
 
+    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_pr_creation_without_auto_merge(self, mock_gh_call: Any) -> None:
+    def test_pr_creation_without_auto_merge(self, mock_gh_call: Any, _mock_signed: Any) -> None:
         """Test PR creation without auto-merge."""
         mock_result = Mock()
         mock_result.stdout = "https://github.com/owner/repo/pull/789"
@@ -690,15 +691,16 @@ class TestGhPrCreate:
         pr_number = gh_pr_create(
             branch="feature-branch",
             title="Test PR",
-            body="Test body",
+            body=_POLICY_BODY,
             auto_merge=False,
         )
 
         assert pr_number == 789
         assert mock_gh_call.call_count == 1  # Only create, no auto-merge
 
+    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_pr_creation_with_fallback_parsing(self, mock_gh_call: Any) -> None:
+    def test_pr_creation_with_fallback_parsing(self, mock_gh_call: Any, _mock_signed: Any) -> None:
         """Test PR number extraction fallback."""
         mock_result = Mock()
         # URL without /pull/ pattern
@@ -708,33 +710,125 @@ class TestGhPrCreate:
         pr_number = gh_pr_create(
             branch="feature-branch",
             title="Test PR",
-            body="Test body",
+            body=_POLICY_BODY,
             auto_merge=False,
         )
 
         assert pr_number == 123
 
+    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_pr_creation_auto_merge_failure(self, mock_gh_call: Any) -> None:
-        """Test PR creation when auto-merge fails."""
+    def test_pr_creation_auto_merge_failure_raises(
+        self, mock_gh_call: Any, _mock_signed: Any
+    ) -> None:
+        """Auto-merge is mandatory; a failure must raise, not warn."""
         mock_create_result = Mock()
         mock_create_result.stdout = "https://github.com/owner/repo/pull/456"
 
-        # Auto-merge fails but shouldn't crash
         mock_gh_call.side_effect = [
             mock_create_result,
             subprocess.CalledProcessError(1, "gh"),
         ]
 
+        with pytest.raises(RuntimeError, match="Auto-merge could not be enabled"):
+            gh_pr_create(
+                branch="feature-branch",
+                title="Test PR",
+                body=_POLICY_BODY,
+                auto_merge=True,
+            )
+
+    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_rejects_body_without_closes(self, mock_gh_call: Any, _mock_signed: Any) -> None:
+        """A PR body lacking 'Closes #N' must raise before any gh call."""
+        with pytest.raises(ValueError, match="Closes #N"):
+            gh_pr_create(
+                branch="feature-branch",
+                title="Test PR",
+                body="## Summary\nNo issue link here\n",
+                auto_merge=True,
+            )
+        mock_gh_call.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "## Summary\nfix\n\nFixes #1\n",
+            "## Summary\nfix\n\nResolves #1\n",
+            "## Summary\nfix\n\ncloses #1\n",
+            "## Summary\nfix\n\nCloses: #1\n",
+            "## Summary\nfix\n\nSee Closes #1 mid-line\n",
+        ],
+    )
+    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_rejects_close_variants(self, mock_gh_call: Any, _mock_signed: Any, body: str) -> None:
+        """Only the literal 'Closes #N' on its own line satisfies policy."""
+        with pytest.raises(ValueError, match="Closes #N"):
+            gh_pr_create(
+                branch="feature-branch",
+                title="Test PR",
+                body=body,
+                auto_merge=True,
+            )
+        mock_gh_call.assert_not_called()
+
+    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_rejects_unsigned_commit(self, mock_gh_call: Any, mock_run: Any) -> None:
+        """An 'N' (no signature) commit must abort PR creation."""
+        # First run() call: git fetch (best-effort, contextlib.suppress); ignored
+        # Second run() call: git log --format='%H %G?' against origin/<base>
+        fetch_result = Mock(returncode=0, stdout="", stderr="")
+        log_result = Mock(returncode=0, stdout="aaa111bbb N\nccc222ddd G\n", stderr="")
+        mock_run.side_effect = [fetch_result, log_result]
+
+        with pytest.raises(ValueError, match="Unsigned or invalid commits"):
+            gh_pr_create(
+                branch="feature-branch",
+                title="Test PR",
+                body=_POLICY_BODY,
+                auto_merge=True,
+            )
+        mock_gh_call.assert_not_called()
+
+    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_rejects_bad_signature(self, mock_gh_call: Any, mock_run: Any) -> None:
+        """A 'B' (bad signature) commit must abort PR creation."""
+        fetch_result = Mock(returncode=0, stdout="", stderr="")
+        log_result = Mock(returncode=0, stdout="aaa111bbb B\n", stderr="")
+        mock_run.side_effect = [fetch_result, log_result]
+
+        with pytest.raises(ValueError, match="Unsigned or invalid commits"):
+            gh_pr_create(
+                branch="feature-branch",
+                title="Test PR",
+                body=_POLICY_BODY,
+                auto_merge=True,
+            )
+        mock_gh_call.assert_not_called()
+
+    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_accepts_good_untrusted_signature(self, mock_gh_call: Any, mock_run: Any) -> None:
+        """'U' (good sig, untrusted key) is accepted; GitHub re-validates server-side."""
+        fetch_result = Mock(returncode=0, stdout="", stderr="")
+        log_result = Mock(returncode=0, stdout="aaa111bbb U\nccc222ddd G\n", stderr="")
+        mock_run.side_effect = [fetch_result, log_result]
+
+        mock_create_result = Mock(stdout="https://github.com/owner/repo/pull/42")
+        mock_merge_result = Mock()
+        mock_gh_call.side_effect = [mock_create_result, mock_merge_result]
+
         pr_number = gh_pr_create(
             branch="feature-branch",
             title="Test PR",
-            body="Test body",
+            body=_POLICY_BODY,
             auto_merge=True,
         )
-
-        # Should still return PR number
-        assert pr_number == 456
+        assert pr_number == 42
 
 
 class TestWriteSecure:

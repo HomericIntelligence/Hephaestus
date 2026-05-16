@@ -559,27 +559,125 @@ def gh_list_open_issues(limit: int = 500) -> list[int]:
         raise RuntimeError(f"Failed to list open issues: {e}") from e
 
 
+# Repo policy: every PR body must contain a literal "Closes #N" line on its own.
+# Variants (Fixes, Resolves, lowercase, trailing colon) are rejected even though
+# GitHub recognises them, because the CI gate and the reviewer prompt match this
+# exact regex. Keep the regex in sync across:
+#   - this module (creation-time gate)
+#   - prompts.PR_REVIEW_ANALYSIS_PROMPT (review-time gate)
+#   - .github/workflows/_required.yml job `pr-policy` (CI gate)
+_CLOSES_LINE_RE = re.compile(r"^Closes #\d+\s*$", re.MULTILINE)
+
+
+def _assert_body_has_closes(body: str) -> None:
+    """Raise if *body* does not contain a 'Closes #N' line.
+
+    Hard-fail rather than auto-fix: a missing closes line means the caller did
+    not link a tracking issue, and silently appending one would just hide the
+    bug. See repo PR policy.
+    """
+    if not _CLOSES_LINE_RE.search(body):
+        raise ValueError(
+            "PR body must contain a 'Closes #N' line per repo policy "
+            "(must match ^Closes #\\d+$ on its own line, case-sensitive)"
+        )
+
+
+# %G? in `git log --format` returns a single character per commit indicating
+# signature status. "G" = good signature, "U" = good but key not in local
+# trust DB (acceptable — GitHub's isValid is the source of truth at PR time),
+# anything else ("N" no sig, "B" bad sig, "X" expired sig, "Y" expired key,
+# "R" revoked key, "E" can't check) is a policy violation.
+_ACCEPTABLE_SIG_STATUSES = frozenset({"G", "U"})
+
+
+def _assert_branch_commits_signed(branch: str, base: str = "main") -> None:
+    """Raise if any commit on *branch* (since *base*) is unsigned or invalid.
+
+    Uses ``git log --format='%H %G?'`` to enumerate commits and their signature
+    status. The base ref is fetched first to ensure the range is meaningful in
+    detached/shallow clones; failure to fetch is non-fatal because the existing
+    local ref is sufficient when present.
+    """
+    # Best-effort fetch of the base ref. Don't fail signing checks just because
+    # the operator is offline — the local base is usually fresh enough.
+    with contextlib.suppress(Exception):
+        run(["git", "fetch", "origin", base, "--quiet"], check=False, timeout=gh_cli_timeout())
+
+    result = run(
+        ["git", "log", "--format=%H %G?", f"origin/{base}..{branch}"],
+        check=False,
+        timeout=gh_cli_timeout(),
+    )
+    if result.returncode != 0:
+        # Fall back to a non-origin range if origin/<base> is unknown locally
+        result = run(
+            ["git", "log", "--format=%H %G?", f"{base}..{branch}"],
+            check=True,
+            timeout=gh_cli_timeout(),
+        )
+
+    bad: list[tuple[str, str]] = []
+    for line in (result.stdout or "").splitlines():
+        if not line.strip():
+            continue
+        parts = line.split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        oid, status = parts[0], parts[1].strip()
+        if status not in _ACCEPTABLE_SIG_STATUSES:
+            bad.append((oid, status))
+
+    if bad:
+        bad_str = ", ".join(f"{oid[:10]}={status!r}" for oid, status in bad)
+        raise ValueError(
+            f"Unsigned or invalid commits on branch {branch!r} (vs {base}): {bad_str}. "
+            "Every commit MUST be cryptographically signed per repo policy."
+        )
+
+
 def gh_pr_create(
     branch: str,
     title: str,
     body: str,
     auto_merge: bool = True,
+    base: str = "main",
 ) -> int:
     """Create a pull request.
+
+    Enforces three policy properties at creation time:
+
+    1. *body* must contain a literal ``Closes #N`` line.
+    2. Every commit on *branch* (vs *base*) must be cryptographically signed.
+    3. Auto-merge MUST be enabled when ``auto_merge=True`` (the default); a
+       failure to enable auto-merge raises instead of warning.
+
+    The CI gate (``.github/workflows/_required.yml`` job ``pr-policy``) and the
+    PR review prompt re-check the same three properties, so a slip past one
+    layer will surface at the next.
 
     Args:
         branch: Branch name
         title: PR title
         body: PR description
-        auto_merge: Whether to enable auto-merge
+        auto_merge: Whether to enable auto-merge (default True; required by policy)
+        base: Base branch to compare against for signed-commit validation
 
     Returns:
         PR number
 
     Raises:
-        RuntimeError: If PR creation fails
+        ValueError: If *body* lacks ``Closes #N`` or *branch* has unsigned commits.
+        RuntimeError: If the underlying ``gh`` CLI call fails, or auto-merge
+            cannot be enabled when ``auto_merge=True``.
 
     """
+    # Policy gate #1: PR body must reference the closing issue.
+    _assert_body_has_closes(body)
+
+    # Policy gate #2: every commit on the branch must be signed.
+    _assert_branch_commits_signed(branch, base=base)
+
     try:
         # Create PR
         with _body_file(body) as body_path:
@@ -607,13 +705,20 @@ def gh_pr_create(
 
         logger.info("Created PR #%s", pr_number)
 
-        # Enable auto-merge if requested
+        # Policy gate #3: auto-merge is mandatory when requested. A failure here
+        # used to log a warning; under the new policy it must raise so the
+        # operator sees the violation.
         if auto_merge:
             try:
                 _gh_call(["pr", "merge", str(pr_number), "--auto", "--rebase"])
                 logger.info("Enabled auto-merge for PR #%s", pr_number)
             except Exception as e:
-                logger.warning("Failed to enable auto-merge for PR #%s: %s", pr_number, e)
+                logger.error("Failed to enable auto-merge for PR #%s: %s", pr_number, e)
+                raise RuntimeError(
+                    f"Auto-merge could not be enabled for PR #{pr_number}: {e}. "
+                    "Auto-merge is required by repo policy; resolve the underlying "
+                    "issue (e.g. branch protection, merge method) and re-run."
+                ) from e
 
         return pr_number
 

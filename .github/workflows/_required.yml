@@ -247,6 +247,103 @@ jobs:
           # the bug class that broke the AchaeanFleet automation loop.
           shellcheck --severity=error "${files[@]}"
 
+  pr-policy:
+    name: pr-policy
+    # Enforces repo PR policy on every PR. Three independent checks (each
+    # gated by `if: always()` so one failure still surfaces the others):
+    #   1. PR body contains `Closes #N` on its own line.
+    #   2. Auto-merge is enabled on the PR.
+    #   3. Every commit on the PR has a verified signature.
+    # Push events are skipped because there is no PR to inspect.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: "Fetch PR metadata"
+        id: fetch
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          # `gh pr view --json body,autoMergeRequest` exposes body + auto-merge
+          # state but DOES NOT expose per-commit signatures; we use the GraphQL
+          # API for that. Two separate queries are fine here — the workflow
+          # runs at most once per PR event and the policy gate must be cheap
+          # to read and debug.
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --json body,autoMergeRequest \
+            > pr.json
+          gh api graphql \
+            -f query='query($owner:String!,$name:String!,$pr:Int!) {
+              repository(owner:$owner, name:$name) {
+                pullRequest(number:$pr) {
+                  commits(first:100) {
+                    nodes {
+                      commit {
+                        oid
+                        signature { isValid state }
+                      }
+                    }
+                  }
+                }
+              }
+            }' \
+            -F owner="$REPO_OWNER" -F name="$REPO_NAME" -F pr="$PR_NUMBER" \
+            > commits.json
+          echo "Fetched metadata for PR #$PR_NUMBER"
+
+      - name: "Check 1: PR body contains 'Closes #N'"
+        if: always() && steps.fetch.outcome == 'success'
+        run: |
+          set -euo pipefail
+          # jq -r reads the untrusted body into a shell variable; downstream
+          # use is `printf '%s\n' "$body" | grep`, which never word-splits or
+          # interprets the body as a command, so injection is not possible.
+          body=$(jq -r '.body // ""' pr.json)
+          if printf '%s\n' "$body" | grep -qE '^Closes #[0-9]+[[:space:]]*$'; then
+            echo "OK: PR body contains a Closes #N line"
+          else
+            echo '::error::PR body must contain a line matching `^Closes #N$` (literal "Closes", capital C, on its own line). See CLAUDE.md PR policy.'
+            exit 1
+          fi
+
+      - name: "Check 2: auto-merge enabled"
+        if: always() && steps.fetch.outcome == 'success'
+        run: |
+          set -euo pipefail
+          state=$(jq -r '.autoMergeRequest' pr.json)
+          if [ "$state" = "null" ] || [ -z "$state" ]; then
+            echo "::error::Auto-merge is not enabled on this PR. Run: gh pr merge $PR_NUMBER --auto --rebase  (or --squash if rebase is disallowed)"
+            exit 1
+          fi
+          echo "OK: auto-merge is enabled"
+
+      - name: "Check 3: every commit is signed"
+        if: always() && steps.fetch.outcome == 'success'
+        run: |
+          set -euo pipefail
+          # Build "<oid> <isValid>" rows from the GraphQL response. A null
+          # signature object means an unsigned commit, which the // false
+          # default coerces to false (rather than dropping the row).
+          bad=$(jq -r '.data.repository.pullRequest.commits.nodes[]
+                       | "\(.commit.oid) \(.commit.signature.isValid // false)"' commits.json \
+                | awk '$2 != "true" { print $1 }')
+          if [ -n "$bad" ]; then
+            echo "::error::The following commits are unsigned or have invalid signatures:"
+            # shellcheck disable=SC2086  # word-splitting of $bad is intentional
+            printf '  %s\n' $bad
+            echo "::error::Every commit MUST be cryptographically signed. Re-sign with: git rebase --exec 'git commit --amend --no-edit -S' origin/main"
+            exit 1
+          fi
+          echo "OK: all commits have verified signatures"
+
   unit-tests:
     name: unit-tests
     runs-on: ubuntu-24.04
