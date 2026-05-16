@@ -31,6 +31,63 @@ class TestImplementationPrompt:
         out = prompts.get_implementation_prompt(issue_number=1)
         assert "1" in out
 
+    def test_enforces_pr_policy(self) -> None:
+        """Implementer prompt must require Closes #N, auto-merge, and signed commits."""
+        out = prompts.get_implementation_prompt(issue_number=42)
+        # All three policy properties must be named in the prompt.
+        assert "Closes #42" in out
+        assert "MANDATORY" in out
+        assert "git commit -S" in out
+        assert "--auto --rebase" in out
+        # Verification command must include all three fields.
+        assert "autoMergeRequest" in out
+        assert "isValid" in out
+        # The agent must be told to abort on failure (no "best-effort" wording).
+        assert "abort" in out.lower() or "non-negotiable" in out.lower()
+
+
+class TestPRReviewAnalysisPrompt:
+    """Tests for the policy-aware PR review analysis prompt."""
+
+    def test_renders_with_minimal_args(self) -> None:
+        out = prompts.get_pr_review_analysis_prompt(pr_number=10, issue_number=5)
+        assert "PR #10" in out
+        assert "issue #5" in out
+
+    def test_lists_three_policy_checks(self) -> None:
+        out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
+        # Each of the three policy checks must be explicitly enumerated.
+        assert "Closes #N" in out or "Closes #\\d" in out
+        assert "auto_merge_enabled" in out
+        assert "signature_valid" in out
+        # The BLOCK / POLICY VIOLATION sentinels must be present.
+        assert "POLICY VIOLATION" in out
+        assert "Verdict: BLOCK" in out
+
+    def test_passes_auto_merge_state(self) -> None:
+        on = prompts.get_pr_review_analysis_prompt(
+            pr_number=1, issue_number=1, auto_merge_enabled=True
+        )
+        off = prompts.get_pr_review_analysis_prompt(
+            pr_number=1, issue_number=1, auto_merge_enabled=False
+        )
+        assert "auto_merge_enabled=true" in on
+        assert "auto_merge_enabled=false" in off
+
+    def test_passes_commit_signing_state(self) -> None:
+        out = prompts.get_pr_review_analysis_prompt(
+            pr_number=1,
+            issue_number=1,
+            commits_signing_state=[
+                {"oid": "abc123", "signature_valid": True, "signer": "alice"},
+                {"oid": "def456", "signature_valid": False, "signer": None},
+            ],
+        )
+        # The JSON-serialized state must round-trip into the fenced block.
+        assert "abc123" in out
+        assert "def456" in out
+        assert "signature_valid" in out
+
 
 class TestPlanPrompt:
     """Tests for plan prompt."""

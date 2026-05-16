@@ -17,9 +17,11 @@ block (last-fence-wins for JSON; verdict parsers should likewise prefer the
 last matching line in Claude's free-form prose).
 """
 
+import json
 import logging
 import secrets
 from pathlib import Path
+from typing import Any
 
 _prompts_logger = logging.getLogger(__name__)
 
@@ -100,17 +102,33 @@ Implement GitHub issue #{issue_number}.
 - Clean up any backup files before finishing
 - Only stage actual implementation files
 
-**Git Workflow:**
+**Git Workflow (MANDATORY — non-negotiable policy):**
 After implementation is complete and tests pass:
-1. Create a git commit using the /commit-commands:commit skill
-   - Use a descriptive commit message following conventional commits format
-   - Include "Closes #{issue_number}" in the commit message
-2. Push the changes to origin
-3. Create a pull request using the /commit-commands:commit-push-pr skill
-   - Link the PR to this issue
-   - Include a clear summary of changes and testing done
+1. Create git commits. EVERY commit MUST be cryptographically signed.
+   - Use `git commit -S` (or have `commit.gpgsign=true` configured globally).
+   - NEVER pass `--no-gpg-sign` or otherwise bypass signing.
+   - Verify with `git log --show-signature -1` after each commit; abort if the
+     signature is missing or shows "BAD signature".
+   - Use a descriptive commit message following conventional commits format.
+2. Push the changes to origin (`git push -u origin <branch>`).
+3. Create a pull request. The PR body MUST contain the EXACT line:
+       Closes #{issue_number}
+   on its own line, with the literal keyword `Closes` (capital C). The
+   variants `Fixes #N`, `Resolves #N`, `Closes: #N`, `closes #n` are NOT
+   accepted by the policy check — even though GitHub recognizes them.
+4. IMMEDIATELY after PR creation, enable auto-merge:
+       gh pr merge <PR#> --auto --rebase
+   Fall back to `--squash` ONLY if rebase merging is disabled for the repo.
+5. Verify all three policy properties before declaring done:
+       gh pr view <PR#> --json body,autoMergeRequest,commits \\
+         -q '.body, .autoMergeRequest, [.commits[].commit.signature.isValid] | all'
+   - `.body` must contain a line matching `^Closes #\\d+$`.
+   - `.autoMergeRequest` must be non-null.
+   - The signature-validity list must reduce to `true`.
+   If any check fails, fix it before reporting completion.
 
-When you're done, the PR should be created and ready for review.
+A PR that fails any of these three checks will be BLOCKED at code review and
+by the required CI gate. This policy applies to every PR — no exceptions.
 """
 
 PLAN_PROMPT = """
@@ -465,14 +483,52 @@ Analyze PR #{pr_number} linked to issue #{issue_number}.
 **PR Diff (untrusted):**
 {pr_diff_block}
 
+**Auto-merge State (untrusted):**
+{auto_merge_state_block}
+
+**Commit Signing State (untrusted):**
+{commits_signing_block}
+
 ---
 
-**Your task:**
+**Policy checks (MANDATORY — run these BEFORE any code-quality review):**
+
+This repository enforces three non-negotiable PR properties. If ANY check fails,
+your summary MUST begin with `POLICY VIOLATION:` and your final verdict line
+MUST be `**Verdict: BLOCK**`. Inline code-quality findings can be reported in
+addition, but the BLOCK verdict cannot be overridden by them.
+
+1. **Closes #N:** the PR Description above must contain a line matching the
+   regex `^Closes #\\d+\\s*$` (case-sensitive `Closes`, hash + number, on its
+   own line). `Fixes`, `Resolves`, `closes`, `Closes:` do NOT satisfy the
+   policy. If absent, BLOCK and quote the relevant lines of the description.
+2. **Auto-merge enabled:** the Auto-merge State block above contains a single
+   line. If it reads `auto_merge_enabled=true`, the check passes. If it reads
+   `auto_merge_enabled=false`, BLOCK with a note explaining auto-merge must be
+   turned on via `gh pr merge <N> --auto --rebase`.
+3. **Signed commits:** the Commit Signing State block above is a JSON array
+   where each element is `{{"oid": "<sha>", "signature_valid": <bool>,
+   "signer": "<login or null>"}}`. EVERY element must have
+   `signature_valid: true`. If any commit has `signature_valid: false` or the
+   array is empty, BLOCK and list the offending OIDs.
+
+If all three checks pass, proceed to code-quality review below.
+
+---
+
+**Code-quality review (only if policy checks pass):**
+
 Review the PR for correctness, completeness, and code quality. Identify any issues that should
 be addressed as inline review comments.
 
 **Output format:**
-Write your analysis in prose. At the very end of your response, emit a single fenced JSON block:
+Write your analysis in prose. End your response with exactly one of the following verdict
+lines (the parser takes the LAST matching line):
+
+**Verdict: APPROVED** — Policy passes and code is acceptable.
+**Verdict: BLOCK** — Policy violation OR fundamental code problem.
+
+After the verdict line, emit a single fenced JSON block:
 
 ```json
 {{"comments": [{{"path": "...", "line": 1, "side": "RIGHT", "body": "..."}}], "summary": "..."}}
@@ -484,8 +540,11 @@ Rules for the JSON block:
   - `line`: line number in the file (integer, must be a changed line in the diff)
   - `side`: always `"RIGHT"` for new code
   - `body`: the review comment text (string)
-- `summary`: overall review verdict, max 200 characters
-- If there are no inline comments, emit: `{{"comments": [], "summary": "LGTM"}}`
+- `summary`: overall review verdict, max 200 characters. If any policy check
+  failed, this MUST start with `POLICY VIOLATION:` followed by the failing
+  check name(s) (e.g. `POLICY VIOLATION: Closes, signed-commits`).
+- If there are no inline comments AND all policy checks pass, emit:
+  `{{"comments": [], "summary": "LGTM"}}`
 - Emit only one JSON block, at the very end of your response (the parser takes the LAST one).
 """
 
@@ -577,6 +636,8 @@ def get_pr_review_analysis_prompt(
     issue_body: str = "",
     ci_status: str = "",
     pr_description: str = "",
+    auto_merge_enabled: bool = False,
+    commits_signing_state: list[dict[str, Any]] | None = None,
 ) -> str:
     """Get the PR review analysis prompt for generating inline review comments.
 
@@ -589,12 +650,22 @@ def get_pr_review_analysis_prompt(
         issue_body: Issue body/description
         ci_status: CI check status summary
         pr_description: PR description body
+        auto_merge_enabled: Whether GitHub auto-merge is currently enabled on
+            the PR. Callers MUST pass the real value; the default ``False``
+            exists only to keep the signature backward-compatible and will
+            cause the reviewer to emit a BLOCK verdict.
+        commits_signing_state: List of per-commit signing summaries. Each
+            element must be a dict with keys ``oid`` (str), ``signature_valid``
+            (bool), and ``signer`` (str or None). Defaults to an empty list,
+            which the reviewer treats as a policy failure.
 
     Returns:
         Formatted PR review analysis prompt
 
     """
     nonce = secrets.token_hex(8).upper()
+    auto_merge_state = f"auto_merge_enabled={'true' if auto_merge_enabled else 'false'}"
+    signing_state_json = json.dumps(commits_signing_state or [])
     return PR_REVIEW_ANALYSIS_PROMPT.format(
         pr_number=pr_number,
         issue_number=issue_number,
@@ -602,6 +673,8 @@ def get_pr_review_analysis_prompt(
         issue_body_block=_fence_untrusted("ISSUE_BODY", issue_body, nonce),
         ci_status_block=_fence_untrusted("CI_STATUS", ci_status, nonce),
         pr_description_block=_fence_untrusted("PR_DESCRIPTION", pr_description, nonce),
+        auto_merge_state_block=_fence_untrusted("AUTO_MERGE_STATE", auto_merge_state, nonce),
+        commits_signing_block=_fence_untrusted("COMMITS_SIGNING_STATE", signing_state_json, nonce),
         untrusted_notice=_UNTRUSTED_NOTICE,
     )
 

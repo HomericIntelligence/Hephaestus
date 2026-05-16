@@ -77,7 +77,9 @@ Which option?
 # Push branch
 git push -u origin <feature-branch>
 
-# Create PR using conventional format
+# Create PR. Per repo policy: body MUST contain a literal "Closes #N" line,
+# every commit MUST be signed, and auto-merge MUST be enabled. The CI gate
+# pr-policy blocks any PR that violates one of these.
 gh pr create \
   --title "feat(scope): description" \
   --body "$(cat <<'EOF'
@@ -91,11 +93,13 @@ gh pr create \
 - [ ] Linter clean
 - [ ] Pre-commit hooks pass
 
+Closes #<issue-number>
+
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 EOF
 )"
 
-# Enable auto-merge
+# Enable auto-merge (mandatory under repo PR policy)
 gh pr merge --auto --rebase
 ```
 

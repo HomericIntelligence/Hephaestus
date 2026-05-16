@@ -40,6 +40,27 @@ from .worktree_manager import WorktreeManager
 logger = logging.getLogger(__name__)
 
 
+def _extract_signing_state(commits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reduce the ``commits`` array from ``gh pr view --json`` to policy state.
+
+    Each output element is a dict ``{"oid", "signature_valid", "signer"}``.
+    GitHub returns ``commit.signature == null`` for unsigned commits, which
+    we coerce to ``signature_valid=False`` rather than dropping the row.
+    """
+    out: list[dict[str, Any]] = []
+    for commit in commits:
+        inner = commit.get("commit") or {}
+        signature = inner.get("signature") or {}
+        out.append(
+            {
+                "oid": commit.get("oid", ""),
+                "signature_valid": bool(signature.get("isValid", False)),
+                "signer": (signature.get("signer") or {}).get("login"),
+            }
+        )
+    return out
+
+
 def _parse_json_block(text: str) -> dict[str, Any]:
     """Extract the last ```json ... ``` block from Claude's response.
 
@@ -180,10 +201,11 @@ class PRReviewer:
         pr_number: int,
         issue_number: int,
         worktree_path: Path,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Gather all context needed for PR analysis.
 
-        Fetches diff, CI status, existing comments, and issue body.
+        Fetches diff, CI status, existing comments, issue body, and policy
+        state (auto-merge enabled? every commit signed?).
 
         Args:
             pr_number: GitHub PR number
@@ -192,15 +214,18 @@ class PRReviewer:
 
         Returns:
             Dictionary with keys: pr_diff, issue_body, ci_status,
-            review_comments, pr_description
+            review_comments, pr_description, auto_merge_enabled,
+            commits_signing_state.
 
         """
-        context: dict[str, str] = {
+        context: dict[str, Any] = {
             "pr_diff": "",
             "issue_body": "",
             "ci_status": "",
             "review_comments": "",
             "pr_description": "",
+            "auto_merge_enabled": False,
+            "commits_signing_state": [],
         }
 
         # Fetch PR diff. This is the only field we treat as load-bearing —
@@ -219,8 +244,10 @@ class PRReviewer:
                 f"PR {pr_ref(pr_number)} returned an empty diff — refusing to review"
             )
 
-        # Fetch PR description and reviews/comments. Best-effort, but any
-        # failure is now logged so empty descriptions are not invisible.
+        # Fetch PR description, reviews/comments, and policy state. Best-effort
+        # for everything except policy state — but the reviewer prompt treats
+        # an empty signing-state list as a BLOCK, so a failure here surfaces
+        # as a policy violation rather than silently passing.
         try:
             result = _gh_call(
                 [
@@ -228,11 +255,16 @@ class PRReviewer:
                     "view",
                     str(pr_number),
                     "--json",
-                    "body,reviews,comments",
+                    "body,reviews,comments,autoMergeRequest,commits",
                 ],
             )
             pr_data = json.loads(result.stdout or "{}")
             context["pr_description"] = pr_data.get("body", "")
+
+            # Policy state: auto-merge + per-commit signing. Extracted to a
+            # helper so this method stays under the C901 complexity ceiling.
+            context["auto_merge_enabled"] = pr_data.get("autoMergeRequest") is not None
+            context["commits_signing_state"] = _extract_signing_state(pr_data.get("commits", []))
 
             # Aggregate review comments
             review_parts: list[str] = []
@@ -250,8 +282,8 @@ class PRReviewer:
             context["review_comments"] = "\n".join(review_parts)
         except Exception as exc:
             logger.warning(
-                "PR #%d: failed to gather description/comments: %s — review will "
-                "proceed without them",
+                "PR #%d: failed to gather description/comments/policy state: %s — "
+                "review will proceed; missing policy state will trigger a BLOCK verdict",
                 pr_number,
                 exc,
             )
@@ -294,7 +326,7 @@ class PRReviewer:
         pr_number: int,
         issue_number: int,
         worktree_path: Path,
-        context: dict[str, str],
+        context: dict[str, Any],
         slot_id: int | None = None,
     ) -> dict[str, Any]:
         """Run the read-only Claude analysis session to generate inline review comments.
@@ -321,6 +353,8 @@ class PRReviewer:
             issue_body=context.get("issue_body", ""),
             ci_status=context.get("ci_status", ""),
             pr_description=context.get("pr_description", ""),
+            auto_merge_enabled=bool(context.get("auto_merge_enabled", False)),
+            commits_signing_state=context.get("commits_signing_state") or [],
         )
 
         prompt_file = worktree_path / f".claude-pr-review-{issue_number}.md"

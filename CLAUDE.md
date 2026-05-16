@@ -259,13 +259,25 @@ gh issue comment <number> --body "Completed implementation of new logging utilit
 
 **IMPORTANT**: The `main` branch is protected. All changes must go through a pull request.
 
+**PR policy (enforced by required CI gate `pr-policy` and by the PR reviewer):**
+
+1. The PR body MUST contain the literal line `Closes #<issue-number>` (capital
+   `C`, no colon, on its own line). `Fixes`, `Resolves`, `closes`, and
+   `Closes:` are NOT accepted.
+2. Auto-merge MUST be enabled (`gh pr merge --auto --rebase`).
+3. Every commit MUST be cryptographically signed (`git commit -S`).
+
+CI blocks PRs that fail any of these checks. No exceptions, including
+Dependabot and dependency-bump PRs.
+
 ```bash
 # 1. Create feature branch
 git checkout -b <issue-number>-description
 
-# 2. Make changes and commit
+# 2. Make changes and commit (signed)
 git add <files>
-git commit -m "type(scope): description"
+git commit -S -m "type(scope): description"
+git log --show-signature -1   # verify the signature took
 
 # 3. Push feature branch
 git push -u origin <branch-name>
@@ -273,10 +285,9 @@ git push -u origin <branch-name>
 # 4. Create pull request
 gh pr create \
   --title "[Type] Brief description" \
-  --body "Closes #<issue-number>" \
-  --label "appropriate-label"
+  --body "$(printf 'Summary of change.\n\nCloses #<issue-number>\n')"
 
-# 5. Enable auto-merge
+# 5. Enable auto-merge (mandatory)
 gh pr merge --auto --rebase
 ```
 
