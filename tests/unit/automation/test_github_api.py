@@ -9,6 +9,8 @@ import pytest
 
 import hephaestus.automation.github_api as _github_api_module
 from hephaestus.automation.github_api import (
+    GitHubRateLimitError,
+    _check_graphql_errors,
     _gh_call,
     fetch_issue_info,
     gh_create_label,
@@ -878,3 +880,102 @@ class TestGhCallThrottle:
         assert elapsed_b[0] < 0.05, (
             f"per-thread isolation broken; thread B waited {elapsed_b[0]:.3f}s"
         )
+
+
+class TestGraphQLRateLimitDetection:
+    """Tests for GitHubRateLimitError raised from GraphQL JSON payloads."""
+
+    def test_raises_on_rate_limited_type(self) -> None:
+        data = {"errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]}
+        with patch(
+            "hephaestus.automation.github_api.gh_rate_limit_reset_epoch",
+            return_value=1700000000,
+        ):
+            with pytest.raises(GitHubRateLimitError) as ei:
+                _check_graphql_errors(data, "test")
+        assert ei.value.reset_epoch == 1700000000
+
+    def test_raises_on_rate_limit_in_message(self) -> None:
+        data = {"errors": [{"message": "API rate limit exceeded for user 1"}]}
+        with patch(
+            "hephaestus.automation.github_api.gh_rate_limit_reset_epoch",
+            return_value=None,
+        ):
+            with pytest.raises(GitHubRateLimitError) as ei:
+                _check_graphql_errors(data, "ctx")
+        # Probe returned None → reset_epoch sentinel 0
+        assert ei.value.reset_epoch == 0
+
+    def test_raises_runtimeerror_for_other_errors(self) -> None:
+        data = {"errors": [{"type": "FORBIDDEN", "message": "no perms"}]}
+        with pytest.raises(RuntimeError) as ei:
+            _check_graphql_errors(data, "ctx")
+        assert not isinstance(ei.value, GitHubRateLimitError)
+
+    def test_no_raise_when_no_errors(self) -> None:
+        _check_graphql_errors({"data": {"viewer": {"login": "x"}}}, "ctx")
+
+
+class TestGhCallRateLimitFromStdout:
+    """Tests for _gh_call detecting rate-limit messages on stdout.
+
+    These tests mock both the per-thread and cross-process throttles, the
+    real wait callsite, and ``gh_rate_limit_reset_epoch`` in the namespace
+    where ``detect_rate_limit`` looks it up. Skipping any one of those
+    mocks lets the test reach real I/O or a wait loop — the latter, in
+    combination with mocking ``time.sleep`` at the module level, can
+    runaway-print until the process hits OOM (because ``time`` is shared
+    and ``wait_until`` polls in ``while True``).
+    """
+
+    @patch("hephaestus.github.rate_limit.gh_rate_limit_reset_epoch")
+    @patch("hephaestus.automation.github_api.gh_global_throttle_acquire")
+    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.automation.github_api.wait_until")
+    def test_retries_on_graphql_message_in_stdout(
+        self,
+        mock_wait: Any,
+        mock_run: Any,
+        _mock_throttle: Any,
+        mock_probe: Any,
+    ) -> None:
+        """Cover detection of GraphQL rate-limit messages on stderr.
+
+        ``gh issue list`` emits the GraphQL message on stderr; the JSON
+        payload may also appear on stdout in some failure modes — both must
+        be inspected.
+        """
+        mock_probe.return_value = 1_700_000_000  # arbitrary past epoch
+        mock_run.side_effect = [
+            subprocess.CalledProcessError(
+                1,
+                "gh",
+                "",
+                "GraphQL: API rate limit already exceeded for user ID 1",
+            ),
+            Mock(stdout="ok"),
+        ]
+        result = _gh_call(["issue", "list"])
+        assert result.stdout == "ok"
+        assert mock_run.call_count == 2
+        mock_wait.assert_called_once()
+
+    @patch("hephaestus.github.rate_limit.gh_rate_limit_reset_epoch")
+    @patch("hephaestus.automation.github_api.gh_global_throttle_acquire")
+    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.automation.github_api.wait_until")
+    @patch("hephaestus.automation.github_api.time.sleep")
+    def test_raises_after_exhausting_retries(
+        self,
+        _mock_sleep: Any,
+        _mock_wait: Any,
+        mock_run: Any,
+        _mock_throttle: Any,
+        mock_probe: Any,
+    ) -> None:
+        mock_probe.return_value = None  # forces detect_rate_limit -> 0 sentinel
+        mock_run.side_effect = subprocess.CalledProcessError(
+            1, "gh", "", "GraphQL: API rate limit already exceeded for user ID 1"
+        )
+        with pytest.raises(GitHubRateLimitError):
+            _gh_call(["issue", "list"], max_retries=2)

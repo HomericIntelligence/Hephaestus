@@ -368,6 +368,24 @@ for (( loop=1; loop<=LOOPS; loop++ )); do
 
   echo ""
   echo "  Loop $loop complete."
+
+  # Inter-loop GraphQL budget probe. Runs unless HEPHAESTUS_RATE_GUARD=0.
+  # When the remaining budget would be exhausted by the next loop (default
+  # threshold 200 calls), sleep until the upstream reset rather than burning
+  # the next loop on retry storms.
+  if [[ "${HEPHAESTUS_RATE_GUARD:-1}" != "0" && "$loop" -lt "$LOOPS" ]]; then
+    threshold="${HEPHAESTUS_RATE_GUARD_THRESHOLD:-200}"
+    remaining=$(gh api rate_limit --jq '.resources.graphql.remaining' 2>/dev/null || echo "")
+    reset=$(gh api rate_limit --jq '.resources.graphql.reset' 2>/dev/null || echo "")
+    if [[ -n "$remaining" && -n "$reset" && "$remaining" -lt "$threshold" ]]; then
+      now=$(date +%s)
+      wait=$((reset - now + 5))
+      if (( wait > 0 )); then
+        echo "  Rate budget low (${remaining}/${threshold} GraphQL remaining); sleeping ${wait}s until reset"
+        sleep "$wait"
+      fi
+    fi
+  fi
 done
 
 echo ""

@@ -8,10 +8,14 @@ from unittest.mock import patch
 
 from hephaestus.github.rate_limit import (
     ALLOWED_TIMEZONES,
+    GRAPHQL_RATE_LIMIT_RE,
     RATE_LIMIT_RE,
+    _rate_limit_probe_cache,
     detect_claude_usage_cap,
     detect_claude_usage_limit,
     detect_rate_limit,
+    gh_global_throttle_acquire,
+    gh_rate_limit_reset_epoch,
     parse_reset_epoch,
     wait_until,
 )
@@ -272,3 +276,128 @@ class TestDetectClaudeUsageCap:
         )
         epoch = detect_claude_usage_cap(json_blob)
         assert epoch is not None
+
+
+class TestGraphQLRateLimit:
+    """Tests for the GraphQL rate-limit code path in detect_rate_limit()."""
+
+    def setup_method(self) -> None:
+        # Each test starts with a clean probe cache so mocks behave deterministically.
+        _rate_limit_probe_cache.clear()
+
+    def test_regex_matches_already_exceeded(self) -> None:
+        text = "GraphQL: API rate limit already exceeded for user ID 4211002"
+        assert GRAPHQL_RATE_LIMIT_RE.search(text) is not None
+
+    def test_regex_matches_plain_exceeded(self) -> None:
+        text = "API rate limit exceeded for installation ID 99"
+        assert GRAPHQL_RATE_LIMIT_RE.search(text) is not None
+
+    def test_regex_no_match_on_unrelated(self) -> None:
+        assert GRAPHQL_RATE_LIMIT_RE.search("everything is fine") is None
+
+    def test_detect_rate_limit_uses_probe_when_graphql_message_seen(self) -> None:
+        """When the GraphQL phrase appears, fall back to gh_rate_limit_reset_epoch."""
+        text = "GraphQL: API rate limit already exceeded for user ID 4211002"
+        with patch(
+            "hephaestus.github.rate_limit.gh_rate_limit_reset_epoch",
+            return_value=1_700_000_000,
+        ):
+            assert detect_rate_limit(text) == 1_700_000_000
+
+    def test_detect_rate_limit_returns_zero_sentinel_when_probe_fails(self) -> None:
+        text = "GraphQL: API rate limit exceeded for user ID 1"
+        with patch("hephaestus.github.rate_limit.gh_rate_limit_reset_epoch", return_value=None):
+            assert detect_rate_limit(text) == 0
+
+    def test_detect_rate_limit_prefers_rest_message_over_graphql(self) -> None:
+        """REST message has a real reset time embedded; prefer it."""
+        text = (
+            "Limit reached for resource core, resets 2:30pm (UTC). "
+            "GraphQL: API rate limit already exceeded."
+        )
+        # Should not call the probe — the REST regex matches first.
+        with patch("hephaestus.github.rate_limit.gh_rate_limit_reset_epoch") as mock_probe:
+            result = detect_rate_limit(text)
+            mock_probe.assert_not_called()
+        assert isinstance(result, int)
+        assert result > 0
+
+
+class TestGhRateLimitResetEpoch:
+    """Tests for gh_rate_limit_reset_epoch() probe and cache."""
+
+    def setup_method(self) -> None:
+        _rate_limit_probe_cache.clear()
+
+    def test_returns_reset_from_gh_api(self) -> None:
+        payload = '{"resources": {"graphql": {"reset": 1700000000, "remaining": 0}}}'
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.stdout = payload
+            mock_run.return_value.returncode = 0
+            assert gh_rate_limit_reset_epoch() == 1700000000
+
+    def test_caches_within_ttl(self) -> None:
+        """Second call within TTL must not re-invoke gh."""
+        payload = '{"resources": {"graphql": {"reset": 1700000000}}}'
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.stdout = payload
+            mock_run.return_value.returncode = 0
+            gh_rate_limit_reset_epoch()
+            gh_rate_limit_reset_epoch()
+            assert mock_run.call_count == 1
+
+    def test_returns_none_on_subprocess_failure(self) -> None:
+        import subprocess as sp
+
+        with patch("subprocess.run", side_effect=sp.CalledProcessError(1, "gh")):
+            assert gh_rate_limit_reset_epoch() is None
+
+    def test_returns_none_on_invalid_json(self) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.stdout = "not json"
+            mock_run.return_value.returncode = 0
+            assert gh_rate_limit_reset_epoch() is None
+
+    def test_returns_none_when_resource_missing(self) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.stdout = '{"resources": {}}'
+            mock_run.return_value.returncode = 0
+            assert gh_rate_limit_reset_epoch() is None
+
+
+class TestGlobalThrottle:
+    """Tests for gh_global_throttle_acquire (cross-process token bucket)."""
+
+    def test_no_op_when_rate_zero(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.setenv("HEPHAESTUS_GH_GLOBAL_RATE", "0")
+        monkeypatch.setenv("HEPHAESTUS_RATE_DIR", str(tmp_path))
+        # Should return effectively immediately and never touch the state file.
+        before = time.monotonic()
+        gh_global_throttle_acquire()
+        elapsed = time.monotonic() - before
+        assert elapsed < 0.05
+        assert not (tmp_path / "hephaestus_gh_rate.json").exists()
+
+    def test_first_call_succeeds_immediately_with_full_burst(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.setenv("HEPHAESTUS_GH_GLOBAL_RATE", "1000")
+        monkeypatch.setenv("HEPHAESTUS_GH_GLOBAL_BURST", "10")
+        monkeypatch.setenv("HEPHAESTUS_RATE_DIR", str(tmp_path))
+        before = time.monotonic()
+        gh_global_throttle_acquire()
+        elapsed = time.monotonic() - before
+        assert elapsed < 0.1
+        assert (tmp_path / "hephaestus_gh_rate.json").exists()
+
+    def test_rapid_calls_eventually_throttle(self, monkeypatch, tmp_path) -> None:
+        """With burst=2 and rate=10/sec, the third call must wait ~0.1s."""
+        monkeypatch.setenv("HEPHAESTUS_GH_GLOBAL_RATE", "10")
+        monkeypatch.setenv("HEPHAESTUS_GH_GLOBAL_BURST", "2")
+        monkeypatch.setenv("HEPHAESTUS_RATE_DIR", str(tmp_path))
+        gh_global_throttle_acquire()
+        gh_global_throttle_acquire()
+        before = time.monotonic()
+        gh_global_throttle_acquire()
+        elapsed = time.monotonic() - before
+        # Refilling 1 token at 10/sec costs ~0.1s. Accept generous bounds for CI noise.
+        assert elapsed >= 0.05

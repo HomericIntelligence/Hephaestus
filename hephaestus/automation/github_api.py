@@ -25,6 +25,8 @@ from hephaestus.github.rate_limit import (
     detect_claude_usage_cap,
     detect_claude_usage_limit,
     detect_rate_limit,
+    gh_global_throttle_acquire,
+    gh_rate_limit_reset_epoch,
     wait_until,
 )
 
@@ -56,6 +58,35 @@ def _gh_throttle_wait() -> None:
     if elapsed < min_interval:
         time.sleep(min_interval - elapsed)
     _GH_THROTTLE.last_call = time.monotonic()
+
+
+class GitHubRateLimitError(RuntimeError):
+    """Raised when GitHub reports the API rate limit has been exceeded.
+
+    Subclasses :class:`RuntimeError` so existing ``except RuntimeError``
+    handlers continue to catch it; callers that want rate-limit-specific
+    handling (e.g. exit cleanly instead of aborting a batch) should catch
+    this class explicitly.
+
+    Attributes:
+        reset_epoch: Unix timestamp at which the relevant rate-limit
+            window resets, or ``0`` if the reset time could not be
+            determined.
+
+    """
+
+    def __init__(self, message: str, reset_epoch: int = 0) -> None:
+        """Initialise the error with an optional reset epoch.
+
+        Args:
+            message: Human-readable error description, typically the
+                upstream GitHub message.
+            reset_epoch: Unix timestamp at which the limit resets, or
+                ``0`` if unknown.
+
+        """
+        super().__init__(message)
+        self.reset_epoch: int = reset_epoch
 
 
 class ClaudeUsageCapError(RuntimeError):
@@ -238,7 +269,7 @@ def _gh_call(
     args: list[str],
     check: bool = True,
     retry_on_rate_limit: bool = True,
-    max_retries: int = 3,
+    max_retries: int = 6,
 ) -> subprocess.CompletedProcess[str]:
     """Call gh CLI with rate limit handling.
 
@@ -259,6 +290,7 @@ def _gh_call(
     """
     for attempt in range(max_retries):
         try:
+            gh_global_throttle_acquire()
             _gh_throttle_wait()
             result = run(
                 ["gh", *args],
@@ -269,26 +301,18 @@ def _gh_call(
             return result
         except subprocess.CalledProcessError as e:
             stderr = e.stderr if e.stderr else ""
-
             _raise_if_claude_usage(stderr, e)
 
-            # Check for rate limit (regardless of retry_on_rate_limit flag)
-            reset_epoch = detect_rate_limit(stderr)
+            reset_epoch = _extract_reset_epoch(e)
             if reset_epoch is not None:
-                if retry_on_rate_limit:
-                    if reset_epoch > 0:
-                        wait_until(reset_epoch)
-                    else:
-                        # No reset time, use exponential backoff
-                        wait_seconds = min(60 * (2**attempt), 300)  # Max 5 minutes
-                        logger.warning("Rate limited but no reset time, waiting %ss", wait_seconds)
-                        time.sleep(wait_seconds)
-                    continue
-                else:
-                    # Don't retry, but provide clear error message
-                    raise RuntimeError(
-                        f"GitHub API rate limit reached. Reset at epoch {reset_epoch}"
-                    ) from e
+                _handle_rate_limit_attempt(
+                    reset_epoch=reset_epoch,
+                    attempt=attempt,
+                    max_retries=max_retries,
+                    retry_on_rate_limit=retry_on_rate_limit,
+                    cause=e,
+                )
+                continue
 
             if _is_non_transient_error(stderr):
                 logger.error("Non-transient error detected: %s", stderr[:200])
@@ -296,19 +320,71 @@ def _gh_call(
                     _log_token_scope_remediation(args, stderr)
                 raise
 
-            # Last retry attempt, re-raise
             if attempt == max_retries - 1:
                 raise
 
-            # Transient error (network, timeout, 5xx), retry with backoff
             wait_seconds = 2**attempt
             logger.warning(
                 "gh call failed (attempt %s), retrying in %ss", attempt + 1, wait_seconds
             )
             time.sleep(wait_seconds)
+        except GitHubRateLimitError as e:
+            # Raised from inside _check_graphql_errors when the JSON payload
+            # carries a RATE_LIMITED entry (HTTP 200, gh exits 0).
+            _handle_rate_limit_attempt(
+                reset_epoch=e.reset_epoch,
+                attempt=attempt,
+                max_retries=max_retries,
+                retry_on_rate_limit=retry_on_rate_limit,
+                cause=e,
+            )
+            continue
 
     # Should not reach here, but satisfy type checker
     raise RuntimeError("gh call failed after all retries")
+
+
+def _extract_reset_epoch(e: subprocess.CalledProcessError) -> int | None:
+    """Return a rate-limit reset epoch parsed from a failed ``gh`` invocation.
+
+    Inspects stderr first (REST CLI message form) and falls back to stdout
+    because GraphQL rate-limit errors arrive in the JSON payload that gh
+    streams to stdout. Returns ``None`` if the failure is not rate-limit-
+    related.
+    """
+    stderr = e.stderr if e.stderr else ""
+    epoch = detect_rate_limit(stderr)
+    if epoch is None and e.stdout:
+        epoch = detect_rate_limit(e.stdout)
+    return epoch
+
+
+def _handle_rate_limit_attempt(
+    *,
+    reset_epoch: int,
+    attempt: int,
+    max_retries: int,
+    retry_on_rate_limit: bool,
+    cause: BaseException,
+) -> None:
+    """Wait for a rate-limit reset, or raise :class:`GitHubRateLimitError`.
+
+    Centralises the "we got rate-limited; should we retry?" decision so the
+    two except-blocks in :func:`_gh_call` share identical behavior. Raises
+    immediately if retries are disabled or exhausted; otherwise sleeps and
+    returns so the caller can ``continue`` the retry loop.
+    """
+    if not retry_on_rate_limit or attempt == max_retries - 1:
+        raise GitHubRateLimitError(
+            f"GitHub API rate limit reached. Reset at epoch {reset_epoch}",
+            reset_epoch=reset_epoch,
+        ) from cause
+    if reset_epoch > 0:
+        wait_until(reset_epoch)
+        return
+    wait_seconds = min(60 * (2**attempt), 300)  # cap at 5 minutes
+    logger.warning("Rate limited but no reset time, waiting %ss", wait_seconds)
+    time.sleep(wait_seconds)
 
 
 def _check_graphql_errors(data: dict[str, Any], context: str) -> None:
@@ -323,8 +399,17 @@ def _check_graphql_errors(data: dict[str, Any], context: str) -> None:
     operation failed.
     """
     errors = data.get("errors")
-    if errors:
-        raise RuntimeError(f"GraphQL {context} failed: {errors!r}")
+    if not errors:
+        return
+
+    for err in errors:
+        msg = err.get("message", "") if isinstance(err, dict) else ""
+        err_type = err.get("type", "") if isinstance(err, dict) else ""
+        if err_type == "RATE_LIMITED" or "rate limit" in msg.lower():
+            reset = gh_rate_limit_reset_epoch() or 0
+            raise GitHubRateLimitError(f"GraphQL {context} rate-limited: {msg}", reset_epoch=reset)
+
+    raise RuntimeError(f"GraphQL {context} failed: {errors!r}")
 
 
 def gh_issue_json(issue_number: int) -> dict[str, Any]:
