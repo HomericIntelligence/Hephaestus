@@ -14,11 +14,16 @@ Usage:
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
+import os
 import re
 import signal
+import subprocess
+import tempfile
 import time
 from datetime import timezone
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +36,15 @@ except ImportError:  # pragma: no cover – Python 3.8 backport
 #   "Limit reached ... resets 2:30pm (America/Los_Angeles)"
 RATE_LIMIT_RE = re.compile(
     r"Limit reached.*resets\s+(?P<time>[0-9:apm]+)\s*\((?P<tz>[^)]+)\)",
+    re.IGNORECASE,
+)
+
+# Regex matching GitHub GraphQL rate-limit messages, e.g.:
+#   "GraphQL: API rate limit exceeded for user ID 4211002"
+#   "GraphQL: API rate limit already exceeded for user ID 4211002"
+# Also matches the bare phrase inside JSON error payloads.
+GRAPHQL_RATE_LIMIT_RE = re.compile(
+    r"(?:GraphQL:\s*)?API rate limit (?:already )?exceeded",
     re.IGNORECASE,
 )
 
@@ -130,18 +144,173 @@ def parse_reset_epoch(time_str: str, tz: str) -> int:
 def detect_rate_limit(text: str) -> int | None:
     """Detect a rate-limit message in *text* and return the reset epoch.
 
+    Recognises two phrasings:
+
+    * The ``gh`` CLI REST limit message that includes a reset time and
+      timezone, e.g. ``"Limit reached ... resets 2:30pm (America/Los_Angeles)"``.
+    * The GraphQL limit message, e.g. ``"GraphQL: API rate limit exceeded
+      for user ID NNNN"`` — this form does not embed a reset time, so the
+      function falls back to :func:`gh_rate_limit_reset_epoch` (a one-shot
+      ``gh api rate_limit`` probe with a short cache). When that probe
+      cannot answer, ``0`` is returned as a sentinel meaning "rate limited
+      with unknown reset" — callers should interpret it as a request to
+      back off without a fixed deadline.
+
     Args:
-        text: Text to search (typically ``gh`` CLI stderr output).
+        text: Text to search (typically ``gh`` CLI stderr output, or a
+            GraphQL JSON error payload rendered as a string).
 
     Returns:
-        Unix timestamp when the rate limit resets, or ``None`` if no
-        rate-limit message is found.
+        Unix timestamp when the rate limit resets, ``0`` if rate-limited
+        with unknown reset, or ``None`` if no rate-limit message is found.
 
     """
     m = RATE_LIMIT_RE.search(text)
-    if not m:
-        return None
-    return parse_reset_epoch(m.group("time"), m.group("tz"))
+    if m:
+        return parse_reset_epoch(m.group("time"), m.group("tz"))
+    if GRAPHQL_RATE_LIMIT_RE.search(text):
+        probed = gh_rate_limit_reset_epoch()
+        return probed if probed is not None else 0
+    return None
+
+
+# Cached ``gh api rate_limit`` probe. Keyed by () — the cache holds the
+# most recent (epoch, fetched_at_monotonic) tuple. The TTL is short
+# because the reset window itself only updates hourly, but we still
+# revalidate every ~30s so that after a wait the next caller doesn't
+# act on a stale "0 remaining" view.
+_RATE_LIMIT_PROBE_TTL = 30.0
+_rate_limit_probe_cache: dict[str, tuple[int | None, float]] = {}
+
+
+def gh_rate_limit_reset_epoch(resource: str = "graphql") -> int | None:
+    """Return the upcoming reset epoch for a GitHub API resource, or ``None``.
+
+    Calls ``gh api rate_limit`` to fetch the current rate-limit window for
+    *resource* (one of ``"graphql"``, ``"core"``, ``"search"``, …). Results
+    are cached for :data:`_RATE_LIMIT_PROBE_TTL` seconds to avoid recursive
+    probe storms when rate-limit detection is happening in tight loops.
+
+    Args:
+        resource: Resource name as it appears under ``.resources`` in the
+            ``gh api rate_limit`` JSON. Defaults to ``"graphql"`` since
+            that is what hephaestus's hot paths consume.
+
+    Returns:
+        Unix timestamp when the resource's window resets, or ``None`` if
+        the probe failed (gh missing, auth missing, network error, etc.).
+
+    """
+    cached = _rate_limit_probe_cache.get(resource)
+    now = time.monotonic()
+    if cached is not None and (now - cached[1]) < _RATE_LIMIT_PROBE_TTL:
+        return cached[0]
+
+    try:
+        result = subprocess.run(
+            ["gh", "api", "rate_limit"],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=10,
+        )
+        payload = json.loads(result.stdout)
+        reset_val = payload.get("resources", {}).get(resource, {}).get("reset")
+        epoch = int(reset_val) if reset_val is not None else None
+    except (subprocess.SubprocessError, json.JSONDecodeError, ValueError, OSError) as e:
+        logger.debug("gh api rate_limit probe failed: %s", e)
+        epoch = None
+
+    _rate_limit_probe_cache[resource] = (epoch, now)
+    return epoch
+
+
+# ---------------------------------------------------------------------------
+# Cross-process token-bucket throttle
+#
+# The per-thread throttle in github_api.py only paces a single Python
+# process. When run_automation_loop.sh fans out 3 repos × 3 planner
+# workers, we get up to 9 independent processes hammering ``gh`` at
+# their own per-thread cap. The bucket below is shared via a flock'd
+# state file so all callers compose into a single global rate budget.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_GLOBAL_RATE = 10.0  # tokens per second
+_DEFAULT_BURST = 30.0  # max tokens stored
+
+
+def _global_throttle_state_path() -> Path:
+    base = os.environ.get("HEPHAESTUS_RATE_DIR")
+    if not base:
+        runtime = os.environ.get("XDG_RUNTIME_DIR")
+        base = runtime if runtime else tempfile.gettempdir()
+    return Path(base) / "hephaestus_gh_rate.json"
+
+
+def gh_global_throttle_acquire() -> None:
+    """Block until one token from the global ``gh`` rate budget is available.
+
+    The bucket is shared across all processes on this machine via a small
+    JSON state file guarded by ``fcntl.flock``. Refill rate defaults to
+    ``10`` tokens/sec with a burst of ``30``; both can be overridden with
+    ``HEPHAESTUS_GH_GLOBAL_RATE`` (calls/sec) and ``HEPHAESTUS_GH_GLOBAL_BURST``.
+    Setting the rate to ``0`` disables the throttle entirely (useful for
+    tests and for callers that already hold a known budget).
+
+    On platforms without ``fcntl`` (Windows) the throttle silently no-ops;
+    the per-thread throttle in :mod:`hephaestus.automation.github_api`
+    still applies.
+    """
+    rate = float(os.environ.get("HEPHAESTUS_GH_GLOBAL_RATE", _DEFAULT_GLOBAL_RATE))
+    if rate <= 0:
+        return
+    burst = float(os.environ.get("HEPHAESTUS_GH_GLOBAL_BURST", _DEFAULT_BURST))
+
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover — Windows path
+        return
+
+    state_path = _global_throttle_state_path()
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Loop because the bucket may be empty when we first acquire the lock;
+    # we sleep for the time required to refill one token, then retry.
+    while True:
+        with state_path.open("a+") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                fh.seek(0)
+                raw = fh.read()
+                try:
+                    state = json.loads(raw) if raw else {}
+                except json.JSONDecodeError:
+                    state = {}
+
+                tokens = float(state.get("tokens", burst))
+                updated = float(state.get("updated", 0.0))
+                now = time.monotonic()
+                if updated <= 0.0:
+                    updated = now
+
+                tokens = min(burst, tokens + (now - updated) * rate)
+                wait = 0.0
+                if tokens >= 1.0:
+                    tokens -= 1.0
+                else:
+                    wait = (1.0 - tokens) / rate
+                    # Don't deduct when waiting — we'll re-acquire and try
+                    # again with a refilled budget.
+
+                fh.seek(0)
+                fh.truncate()
+                json.dump({"tokens": tokens, "updated": now}, fh)
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+        if wait <= 0.0:
+            return
+        time.sleep(wait)
 
 
 def _parse_reset_with_date(date_str: str, time_str: str, tz: str) -> int:
@@ -251,6 +420,15 @@ def wait_until(epoch: int) -> None:
         nonlocal interrupted
         interrupted = True
 
+    # Defensive safety: if ``time.sleep`` returns instantly (e.g. because a
+    # test has monkeypatched it), the print-driven countdown loop below
+    # would otherwise busy-spin and OOM the process. Watch monotonic_ns
+    # across iterations and bail out if too many iterations occur in too
+    # little wall-clock time.
+    start_mono = time.monotonic_ns()
+    iterations = 0
+    iteration_cap = 100_000  # ~27hrs at 1Hz; well above any real countdown
+
     old_handler = signal.signal(signal.SIGINT, handler)
     try:
         while True:
@@ -269,6 +447,16 @@ def wait_until(epoch: int) -> None:
                 flush=True,
             )
             time.sleep(1)
+            iterations += 1
+            if iterations >= iteration_cap:
+                # Either the system clock is broken or sleep is mocked;
+                # either way, stop spinning and let the caller proceed.
+                elapsed_s = (time.monotonic_ns() - start_mono) / 1e9
+                logger.warning(
+                    "wait_until iteration cap reached after %.2fs; bailing out", elapsed_s
+                )
+                print()
+                return
     finally:
         signal.signal(signal.SIGINT, old_handler)
 

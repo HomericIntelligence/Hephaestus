@@ -29,6 +29,7 @@ from .claude_models import advise_model, learn_model, planner_model, reviewer_mo
 from .claude_timeouts import planner_claude_timeout
 from .git_utils import get_repo_root
 from .github_api import (
+    GitHubRateLimitError,
     _gh_call,
     gh_issue_comment,
     gh_issue_json,
@@ -1009,7 +1010,18 @@ def main() -> int:
     log.info("Starting issue planner")
 
     if not args.issues:
-        discovered = gh_list_open_issues()
+        try:
+            discovered = gh_list_open_issues()
+        except GitHubRateLimitError as e:
+            # Don't smear a 100-line traceback across the driver's loop output
+            # when the only problem is that the GraphQL hourly budget is gone.
+            # Exit cleanly so run_automation_loop.sh moves on to the next repo.
+            log.error(
+                "GitHub API rate-limited; cannot discover issues this run "
+                "(reset at epoch %s). Skipping cleanly.",
+                e.reset_epoch,
+            )
+            return 0
         log.info("No --issues given; discovered %s open issues: %s", len(discovered), discovered)
         args.issues = discovered
 
