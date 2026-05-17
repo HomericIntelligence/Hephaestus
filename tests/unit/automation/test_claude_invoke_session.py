@@ -163,19 +163,51 @@ class TestSessionExpiredFallback:
         assert "--session-id" in second_argv
         assert "--resume" not in second_argv
 
-    def test_other_errors_propagate(self, fake_home: Path) -> None:
+    def test_resume_failure_always_falls_back(self, fake_home: Path) -> None:
+        """Any --resume non-zero exit triggers recreate, not just SESSION_EXPIRED.
+
+        The deleted ``address_review`` code had ``or True`` on its fallback
+        guard for exactly this reason: a transient CLI error on resume
+        should still recreate rather than lose the call entirely. Quota
+        detection lives one layer up in each phase's wrapper.
+        """
         cwd = fake_home / "work"
         cwd.mkdir()
         sid = session_uuid("R", 1, AGENT_PLANNER, "x")
         _make_existing_jsonl(fake_home, cwd, sid)
 
+        transient = subprocess.CalledProcessError(
+            returncode=2, cmd=["claude"], output="", stderr="some unclassified error"
+        )
+        ok = MagicMock(stdout="ok", stderr="", returncode=0)
+        with patch(
+            "hephaestus.automation.claude_invoke.subprocess.run",
+            side_effect=[transient, ok],
+        ) as m:
+            out, _ = invoke_claude_with_session(
+                repo="R",
+                issue=1,
+                agent=AGENT_PLANNER,
+                githash="x",
+                prompt="hi",
+                model="sonnet",
+                cwd=cwd,
+            )
+        assert out == "ok"
+        assert m.call_count == 2
+        assert "--session-id" in _argv(m.call_args_list[1])
+
+    def test_create_failure_propagates(self, fake_home: Path) -> None:
+        """A first-call (--session-id) failure is not retried."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
         other = subprocess.CalledProcessError(
             returncode=2, cmd=["claude"], output="", stderr="quota exhausted"
         )
         with patch(
             "hephaestus.automation.claude_invoke.subprocess.run",
             side_effect=other,
-        ):
+        ) as m:
             with pytest.raises(subprocess.CalledProcessError):
                 invoke_claude_with_session(
                     repo="R",
@@ -186,6 +218,7 @@ class TestSessionExpiredFallback:
                     model="sonnet",
                     cwd=cwd,
                 )
+        assert m.call_count == 1
 
 
 class TestArgvAssembly:

@@ -37,6 +37,9 @@ from hephaestus.github.rate_limit import (
     wait_until,
 )
 
+from .claude_invoke import (
+    SESSION_EXPIRED_PHRASES as _SESSION_EXPIRED_PHRASES,
+)
 from .claude_invoke import invoke_claude_with_session, parse_review_verdict
 from .claude_models import implementer_model, reviewer_model
 from .claude_timeouts import implementer_claude_timeout
@@ -71,9 +74,6 @@ MAX_REVIEW_ITERATIONS = 3
 # as the documented default and can be used in tests.
 _CLAUDE_IMPL_TIMEOUT: int = 1800
 
-# Session-expired phrases live in ``claude_invoke.SESSION_EXPIRED_PHRASES``
-# so every phase shares the same expired-session detection.
-from .claude_invoke import SESSION_EXPIRED_PHRASES as _SESSION_EXPIRED_PHRASES  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -1484,17 +1484,7 @@ class IssueImplementer:
     def _run_claude_impl_session(
         self, issue_number: int, worktree_path: Path, prompt: str
     ) -> str | None:
-        """Run Claude implementation prompt and return its session id.
-
-        The session UUID is deterministic per
-        ``(repo, issue, AGENT_IMPLEMENTER, trunk_githash)`` — first call for
-        a tuple creates the session, subsequent calls (e.g. the same issue
-        on the next loop iteration before trunk advances) resume it. The
-        returned session_id matches the one ``--output-format json`` reports
-        in stdout, so the within-PR ``_resume_impl_with_feedback`` path
-        keeps working unchanged.
-        """
-        # Write prompt to temp file in worktree for debugging / log capture.
+        """Run Claude implementation prompt and return its session id."""
         prompt_file = worktree_path / f".claude-prompt-{issue_number}.md"
         prompt_file.write_text(prompt)
 

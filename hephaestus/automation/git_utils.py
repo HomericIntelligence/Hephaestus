@@ -117,16 +117,20 @@ def get_repo_info(repo_root: Path | None = None) -> tuple[str, str]:
         raise RuntimeError(f"Failed to get git remote URL: {e}") from e
 
 
-_repo_slug_cache: str | None = None
+# Keyed by the *resolved* repo_root path so a process that iterates multiple
+# repositories (the automation loop, the myrmidon swarm) gets the right slug
+# per repo instead of the first-cached one for all of them. The ``None`` key
+# holds the result of the auto-detect branch.
+_repo_slug_cache: dict[Path | None, str] = {}
 
 
 def get_repo_slug(repo_root: Path | None = None) -> str:
     """Return the short repo name for log/status prefixes (e.g. ``AchaeanFleet``).
 
-    Cached for the lifetime of the process so that hot log paths do not
-    re-invoke ``git remote`` on every call. Falls back to ``"repo"`` if the
-    remote URL cannot be parsed so callers can always interpolate the result
-    into status strings without exception handling.
+    Cached per ``repo_root`` for the lifetime of the process so hot log
+    paths do not re-invoke ``git remote`` on every call. Falls back to
+    ``"repo"`` if the remote URL cannot be parsed so callers can always
+    interpolate the result into status strings without exception handling.
 
     Args:
         repo_root: Repository root (defaults to auto-detect)
@@ -135,15 +139,16 @@ def get_repo_slug(repo_root: Path | None = None) -> str:
         Short repository name (no owner prefix), or ``"repo"`` on failure.
 
     """
-    global _repo_slug_cache
-    if _repo_slug_cache is not None:
-        return _repo_slug_cache
+    key = repo_root.resolve() if repo_root is not None else None
+    cached = _repo_slug_cache.get(key)
+    if cached is not None:
+        return cached
     try:
         _, repo = get_repo_info(repo_root)
-        _repo_slug_cache = repo
     except (RuntimeError, subprocess.CalledProcessError):
-        _repo_slug_cache = "repo"
-    return _repo_slug_cache
+        repo = "repo"
+    _repo_slug_cache[key] = repo
+    return repo
 
 
 def issue_ref(issue_number: int | str) -> str:

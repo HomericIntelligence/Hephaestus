@@ -644,14 +644,8 @@ class AddressReviewer:
                 )
                 return parsed
 
-            # The Claude path now derives the session deterministically from
-            # ``(repo, issue, AGENT_IMPLEMENTER, githash)`` so it resumes the
-            # implementer's session for this issue. ``session_id`` is still
-            # accepted by the function signature (codex path), but ignored
-            # for Claude — the legacy state-file lookup is no longer needed.
-            # ``invoke_claude_with_session`` handles --session-id (create)
-            # vs --resume (continue) and the SESSION_EXPIRED fallback in one
-            # place.
+            # ``session_id`` is consumed only by the codex path above; the
+            # Claude path resumes the implementer's deterministic session.
             githash = os.environ.get("HEPH_TRUNK_GITHASH", "unknown")
             repo_slug = get_repo_slug(self.repo_root)
             stdout, _ = invoke_claude_with_session(

@@ -12,8 +12,8 @@ What lives here:
 - :func:`invoke_claude_with_session` — the single entry point every
   automation phase must use. Picks ``--session-id`` (first call) vs
   ``--resume`` (subsequent calls) based on whether the session's JSONL
-  transcript already exists, and falls back to ``--session-id`` if a resume
-  hits :data:`SESSION_EXPIRED_PHRASES`.
+  transcript already exists, and falls back to ``--session-id`` on any
+  resume failure.
 """
 
 from __future__ import annotations
@@ -22,23 +22,18 @@ import logging
 import os
 import re
 import subprocess
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from hephaestus.automation.session_naming import (
-    session_jsonl_path,
-    session_name,
-    session_uuid,
-)
+from hephaestus.automation.session_naming import session_jsonl_path, session_name
 from hephaestus.github.rate_limit import detect_claude_usage_cap, detect_rate_limit
 
 logger = logging.getLogger(__name__)
 
 
 # Substrings the Claude CLI returns when ``--resume`` targets a session that
-# no longer exists in local persistence. Originally defined in
-# implementer.py; centralized here so every phase shares the same
-# expired-session detection.
+# no longer exists in local persistence.
 SESSION_EXPIRED_PHRASES: tuple[str, ...] = (
     "session not found",
     "invalid session",
@@ -78,8 +73,8 @@ def invoke_claude_with_session(
 
     First call for the ``(repo, issue, agent, githash)`` tuple uses
     ``--session-id <uuid>`` to create the session. Every later call uses
-    ``--resume <uuid>``. On a SESSION_EXPIRED CLI error the helper retries
-    once with ``--session-id`` to recreate.
+    ``--resume <uuid>``. Any ``--resume`` failure retries once with
+    ``--session-id`` to recreate; quota-cap detection happens one layer up.
 
     Args:
         repo: Repository slug (e.g. ``"ProjectScylla"``).
@@ -112,19 +107,17 @@ def invoke_claude_with_session(
         ``--output-format=json`` would report as ``session_id``.
 
     Raises:
-        subprocess.CalledProcessError: If the CLI exits non-zero for any
-            reason other than the expired-session retry path.
+        subprocess.CalledProcessError: If a ``--session-id`` create call
+            exits non-zero, or if both the ``--resume`` and the subsequent
+            recreate attempt fail.
         subprocess.TimeoutExpired: If the call exceeds ``timeout``.
 
     """
-    sid = session_uuid(repo, issue, agent, githash)
     display_name = session_name(repo, issue, agent, githash)
+    sid = str(uuid.uuid5(uuid.NAMESPACE_DNS, display_name))
     transcript = session_jsonl_path(sid, cwd)
     should_resume = transcript.exists()
 
-    # ``base_tail`` is everything after the session-mode flag pair.
-    # We assemble the full argv with ``[claude, <mode flags>, ...base_tail]``
-    # so the create and resume branches stay in lock-step.
     base_tail: list[str] = ["--model", model, "--output-format", output_format]
     if system_prompt_file is not None and system_prompt_file.exists():
         base_tail += ["--system-prompt", str(system_prompt_file)]
@@ -148,11 +141,11 @@ def invoke_claude_with_session(
 
     def _run(create: bool) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
-        # Avoid the nested-session guard that the CLI applies when
-        # CLAUDECODE is set by a wrapping Claude Code process.
+        # CLAUDECODE is set by an outer Claude Code process to refuse nested
+        # invocations; clear it so the automation subprocess can launch.
         env["CLAUDECODE"] = ""
         cmd = _build(create)
-        logger.info(
+        logger.debug(
             "claude invoke: agent=%s issue=%s sid=%s mode=%s",
             agent,
             issue,
@@ -171,18 +164,26 @@ def invoke_claude_with_session(
             cwd=str(cwd),
         )
 
-    try:
-        result = _run(create=not should_resume)
-    except subprocess.CalledProcessError as exc:
-        if should_resume and _session_expired(exc.stderr or "", exc.stdout or ""):
-            logger.warning(
-                "claude session %s expired; recreating with --session-id", sid
-            )
-            result = _run(create=True)
-        else:
-            raise
+    if not should_resume:
+        return _run(create=True).stdout, sid
 
-    return result.stdout, sid
+    try:
+        return _run(create=False).stdout, sid
+    except subprocess.CalledProcessError as exc:
+        # Any --resume failure falls back to a fresh session. The known
+        # SESSION_EXPIRED phrases are the common case; transient failures
+        # (the CLI itself crashed, a corrupted transcript, etc.) also
+        # benefit from recreating rather than re-raising and losing the
+        # call entirely. Quota-cap detection happens one layer up.
+        expired = _session_expired(exc.stderr or "", exc.stdout or "")
+        log = logger.warning if expired else logger.info
+        log(
+            "claude --resume %s failed (exit=%s, expired=%s); recreating session",
+            sid,
+            exc.returncode,
+            expired,
+        )
+        return _run(create=True).stdout, sid
 
 
 def scan_quota_reset(*texts: str) -> int | None:

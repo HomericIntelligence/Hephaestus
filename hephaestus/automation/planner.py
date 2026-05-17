@@ -859,13 +859,11 @@ class Planner:
     ) -> str:
         """Run a reviewer pass on the current plan.
 
-        The reviewer runs in a session whose ID is derived from
-        ``(repo, issue, AGENT_PLAN_REVIEWER, githash)``. That UUID is
-        distinct from the planner's session (different ``agent`` string), so
-        the reviewer is unbiased by the planner's internal state. Across
-        review iterations the reviewer DOES resume itself, both for prompt-
-        cache reuse and so it can naturally build on its own prior critique.
-        Uses ``reviewer_model()`` (Sonnet by default).
+        The reviewer's session is distinct from the planner's (different
+        ``agent`` string in the session UUID) so it stays unbiased by the
+        planner's internal state, but it resumes itself across review
+        iterations so successive critiques compound. Uses ``reviewer_model()``
+        (Sonnet by default).
 
         Args:
             issue_number: GitHub issue number.

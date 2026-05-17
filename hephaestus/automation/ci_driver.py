@@ -690,11 +690,8 @@ class CIDriver:
                     )
                     return False
 
-            # The CI fix is a continuation of the implementer's work for this
-            # issue, so we resume the AGENT_IMPLEMENTER session. The legacy
-            # ``session_id`` argument is ignored on the Claude path — the
-            # session is now derived deterministically from
-            # ``(repo, issue, AGENT_IMPLEMENTER, trunk_githash)``.
+            # CI fix continues the implementer's session for this issue;
+            # ``session_id`` is honored only on the codex path above.
             githash = os.environ.get("HEPH_TRUNK_GITHASH", "unknown")
             repo_slug = get_repo_slug(self.repo_root)
             try:
