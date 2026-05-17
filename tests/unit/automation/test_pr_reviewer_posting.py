@@ -191,8 +191,8 @@ class TestIdempotencyGuard:
         from hephaestus.automation.models import ReviewPhase, ReviewState
 
         # Write a completed review state to disk
-        state_dir = tmp_path / ".issue_implementer"
-        state_dir.mkdir()
+        state_dir = tmp_path / "build" / ".issue_implementer"
+        state_dir.mkdir(parents=True)
         completed_state = ReviewState(issue_number=123, pr_number=42, phase=ReviewPhase.COMPLETED)
         (state_dir / "review-123.json").write_text(completed_state.model_dump_json())
 
@@ -217,8 +217,8 @@ class TestIdempotencyGuard:
         self, mock_options: ReviewerOptions, tmp_path: Path
     ) -> None:
         """Malformed state file → warning logged, fresh state created."""
-        state_dir = tmp_path / ".issue_implementer"
-        state_dir.mkdir()
+        state_dir = tmp_path / "build" / ".issue_implementer"
+        state_dir.mkdir(parents=True)
         (state_dir / "review-123.json").write_text("{not valid json!!!}")
 
         with (

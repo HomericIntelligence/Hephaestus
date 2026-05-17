@@ -33,132 +33,176 @@ def planner(mock_options: Any) -> Any:
 
 
 class TestCallClaude:
-    """Tests for _call_claude method."""
+    """Tests for _call_claude method.
+
+    The planner delegates to
+    :func:`hephaestus.automation.claude_invoke.invoke_claude_with_session`, so
+    these tests patch ``subprocess.run`` in *that* module and exercise the
+    full session-naming code path. Each test pins HEPH_TRUNK_GITHASH and
+    isolates HOME so the session-file probe stays predictable.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch: Any, tmp_path: Any) -> None:
+        monkeypatch.setenv("HEPH_TRUNK_GITHASH", "abc1234")
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+    def _patch_repo(self) -> Any:
+        """Stub get_repo_root + get_repo_slug to deterministic values."""
+        from contextlib import ExitStack
+
+        stack = ExitStack()
+        stack.enter_context(
+            patch("hephaestus.automation.planner.get_repo_root", return_value=Path("/repo"))
+        )
+        stack.enter_context(
+            patch("hephaestus.automation.planner.get_repo_slug", return_value="TestRepo")
+        )
+        return stack
 
     def test_successful_call(self, planner: Any) -> None:
-        """Test successful Claude call."""
-        with patch("subprocess.run") as mock_run:
+        with (
+            self._patch_repo(),
+            patch("hephaestus.automation.claude_invoke.subprocess.run") as mock_run,
+        ):
             mock_run.return_value = MagicMock(stdout="This is a plan", returncode=0)
 
-            result = planner._call_claude("Test prompt", model="claude-opus-4-7")
+            result = planner._call_claude(
+                "Test prompt",
+                model="claude-opus-4-7",
+                agent="planner",
+                issue_number=123,
+            )
 
             assert result == "This is a plan"
             mock_run.assert_called_once()
             args = mock_run.call_args[0][0]
             assert args[0] == "claude"
-            # --model <id> is pinned first so the call doesn't burn the user's
-            # default-model quota (regression test for issue causing every
-            # automation call to fall back to Opus and 429).
-            assert args[1] == "--model"
-            assert args[2] == "claude-opus-4-7"
+            # First call has no existing JSONL → --session-id path.
+            assert "--session-id" in args
+            assert "--name" in args
+            assert "--model" in args
+            assert "claude-opus-4-7" in args
             assert "--print" in args
-            assert "Test prompt" in args
+            # Prompt is the last positional arg.
+            assert args[-1] == "Test prompt"
             assert "--output-format" in args
             assert "text" in args
 
     def test_model_kwarg_pins_argv(self, planner: Any) -> None:
-        """The model kwarg controls which --model id is sent to the CLI."""
-        with patch("subprocess.run") as mock_run:
+        with (
+            self._patch_repo(),
+            patch("hephaestus.automation.claude_invoke.subprocess.run") as mock_run,
+        ):
             mock_run.return_value = MagicMock(stdout="ok", returncode=0)
-            planner._call_claude("p", model="claude-haiku-4-5")
+            planner._call_claude("p", model="claude-haiku-4-5", agent="planner", issue_number=1)
             args = mock_run.call_args[0][0]
-            assert args[1] == "--model"
-            assert args[2] == "claude-haiku-4-5"
+            assert "--model" in args
+            i = args.index("--model")
+            assert args[i + 1] == "claude-haiku-4-5"
 
     def test_empty_response(self, planner: Any) -> None:
-        """Test handling of empty response."""
-        with patch("subprocess.run") as mock_run:
+        with (
+            self._patch_repo(),
+            patch("hephaestus.automation.claude_invoke.subprocess.run") as mock_run,
+        ):
             mock_run.return_value = MagicMock(stdout="   ", returncode=0)
 
             with pytest.raises(RuntimeError, match="empty response"):
-                planner._call_claude("Test prompt", model="claude-opus-4-7")
+                planner._call_claude(
+                    "Test prompt",
+                    model="claude-opus-4-7",
+                    agent="planner",
+                    issue_number=1,
+                )
 
     def test_timeout(self, planner: Any) -> None:
-        """Test timeout handling."""
-        import subprocess
-
-        with patch("subprocess.run") as mock_run:
+        with (
+            self._patch_repo(),
+            patch("hephaestus.automation.claude_invoke.subprocess.run") as mock_run,
+        ):
             mock_run.side_effect = subprocess.TimeoutExpired("claude", 300)
 
             with pytest.raises(RuntimeError, match="timed out"):
-                planner._call_claude("Test prompt", model="claude-opus-4-7", timeout=300)
+                planner._call_claude(
+                    "Test prompt",
+                    model="claude-opus-4-7",
+                    agent="planner",
+                    issue_number=1,
+                    timeout=300,
+                )
 
     def test_rate_limit_retry(self, planner: Any) -> None:
-        """Test rate limit retry logic.
-
-        Patches ``scan_quota_reset`` (the shared helper that wraps
-        ``detect_rate_limit`` + ``detect_claude_usage_cap``). The first call
-        returns 0 (rate-limited, no reset time) so the retry path triggers; the
-        second returns None on the success path.
-        """
-        import subprocess
-
         with (
-            patch("subprocess.run") as mock_run,
+            self._patch_repo(),
+            patch("hephaestus.automation.claude_invoke.subprocess.run") as mock_run,
             patch("hephaestus.automation.planner.scan_quota_reset") as mock_scan,
         ):
             mock_run.side_effect = [
                 subprocess.CalledProcessError(1, "claude", stderr="rate limit exceeded"),
                 MagicMock(stdout="Success", returncode=0),
             ]
-
             mock_scan.side_effect = [0, None]
-
-            with patch("time.sleep"):  # Don't actually sleep
-                result = planner._call_claude("Test prompt", model="claude-opus-4-7", max_retries=3)
-
+            with patch("time.sleep"):
+                result = planner._call_claude(
+                    "Test prompt",
+                    model="claude-opus-4-7",
+                    agent="planner",
+                    issue_number=1,
+                    max_retries=3,
+                )
             assert result == "Success"
             assert mock_run.call_count == 2
 
     def test_claude_usage_cap_in_stdout_triggers_wait(self, planner: Any) -> None:
-        """Claude CLI puts its 429 message in stdout JSON, not stderr.
-
-        Regression test: prior to the fix, `_call_claude` only inspected
-        ``stderr`` for rate-limit text, so the ``"You're out of extra usage ·
-        resets ..."`` message inside the stdout JSON was missed and the
-        retry path never fired — every automation call died in seconds.
-        """
-        import subprocess as sp
-
         usage_json = (
             '{"is_error": true, "api_error_status": 429, '
             '"result": "You\'re out of extra usage \xb7 resets May 8, 5pm '
             '(America/Los_Angeles)"}'
         )
         with (
-            patch("subprocess.run") as mock_run,
+            self._patch_repo(),
+            patch("hephaestus.automation.claude_invoke.subprocess.run") as mock_run,
             patch("hephaestus.automation.planner.wait_until") as mock_wait,
         ):
             mock_run.side_effect = [
-                sp.CalledProcessError(1, "claude", output=usage_json, stderr=""),
+                subprocess.CalledProcessError(1, "claude", output=usage_json, stderr=""),
                 MagicMock(stdout="Success", returncode=0),
             ]
-            result = planner._call_claude("p", model="claude-opus-4-7", max_retries=2)
+            result = planner._call_claude(
+                "p",
+                model="claude-opus-4-7",
+                agent="planner",
+                issue_number=1,
+                max_retries=2,
+            )
 
             assert result == "Success"
             assert mock_run.call_count == 2
-            # wait_until must have been called with the parsed reset epoch,
-            # not skipped (which is what the bug looked like).
             mock_wait.assert_called_once()
             (epoch,) = mock_wait.call_args[0]
             assert epoch > 0
 
-    def test_system_prompt_passthrough(self, mock_options: Any) -> None:
-        """Test system prompt file is passed through."""
-        mock_options.system_prompt_file = Path("/tmp/system.md")
+    def test_system_prompt_passthrough(self, mock_options: Any, tmp_path: Any) -> None:
+        sys_prompt = tmp_path / "system.md"
+        sys_prompt.write_text("hi")
+        mock_options.system_prompt_file = sys_prompt
+        planner = Planner(mock_options)
 
-        # Create the file so exists() returns True
-        with patch.object(Path, "exists", return_value=True):
-            planner = Planner(mock_options)
-
-            with patch("subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(stdout="Response", returncode=0)
-
-                planner._call_claude("Test prompt", model="claude-opus-4-7")
-
-                args = mock_run.call_args[0][0]
-                assert "--system-prompt" in args
-                assert str(mock_options.system_prompt_file) in args
+        with (
+            self._patch_repo(),
+            patch("hephaestus.automation.claude_invoke.subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(stdout="Response", returncode=0)
+            planner._call_claude(
+                "Test prompt",
+                model="claude-opus-4-7",
+                agent="planner",
+                issue_number=1,
+            )
+            args = mock_run.call_args[0][0]
+            assert "--system-prompt" in args
+            assert str(sys_prompt) in args
 
 
 class TestRunAdvise:

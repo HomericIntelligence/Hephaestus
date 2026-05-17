@@ -13,7 +13,6 @@ import argparse
 import fcntl
 import json
 import logging
-import os
 import shutil
 import subprocess
 import threading
@@ -24,10 +23,14 @@ from typing import Any
 from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_text
 from hephaestus.github.rate_limit import wait_until
 
-from .claude_invoke import parse_review_verdict, scan_quota_reset
+from .claude_invoke import (
+    invoke_claude_with_session,
+    parse_review_verdict,
+    scan_quota_reset,
+)
 from .claude_models import advise_model, learn_model, planner_model, reviewer_model
 from .claude_timeouts import planner_claude_timeout
-from .git_utils import get_repo_root, issue_ref
+from .git_utils import get_repo_root, get_repo_slug, issue_ref
 from .github_api import (
     GitHubRateLimitError,
     _gh_call,
@@ -41,6 +44,13 @@ from .prompts import (
     get_advise_prompt,
     get_plan_loop_review_prompt,
     get_plan_prompt,
+)
+from .session_naming import (
+    AGENT_ADVISE,
+    AGENT_LEARNINGS,
+    AGENT_PLAN_REVIEWER,
+    AGENT_PLANNER,
+    current_trunk_githash,
 )
 from .status_tracker import StatusTracker
 
@@ -263,71 +273,61 @@ class Planner:
         prompt: str,
         *,
         model: str,
+        agent: str,
+        issue_number: int | str,
         max_retries: int = 3,
         timeout: int = 300,
         extra_args: list[str] | None = None,
     ) -> str:
-        """Call Claude CLI with retry logic for rate limits.
+        """Call Claude CLI on a deterministic session with rate-limit retry.
+
+        The session UUID is derived from ``(repo, issue_number, agent,
+        trunk_githash)`` via :func:`session_naming.session_uuid`. First call
+        for a tuple creates the session; every later call resumes it. Cross-
+        agent independence (planner vs reviewer) is preserved because the
+        ``agent`` string is part of the hash.
 
         Args:
-            prompt: The prompt to send to Claude
-            model: Claude model ID to pass to ``--model`` (caller picks per phase
-                via :mod:`hephaestus.automation.claude_models`)
-            max_retries: Maximum retry attempts for rate limits
-            timeout: Timeout in seconds
-            extra_args: Additional CLI arguments
+            prompt: The prompt to send to Claude.
+            model: Claude model ID for ``--model`` (caller picks per phase).
+            agent: One of the ``AGENT_*`` constants from
+                :mod:`hephaestus.automation.session_naming`. Different agents
+                map to different session IDs.
+            issue_number: GitHub issue number; participates in the session ID.
+            max_retries: Maximum retry attempts for rate limits.
+            timeout: Subprocess timeout in seconds.
+            extra_args: Additional CLI arguments.
 
         Returns:
-            Claude's response text
+            Claude's response text (stdout, stripped).
 
         Raises:
-            RuntimeError: If Claude call fails
+            RuntimeError: If Claude call fails.
 
         """
         if is_codex(self.options.agent):
             return self._call_codex(prompt, model=model, max_retries=max_retries, timeout=timeout)
 
-        # Build command. ``--model`` pins the phase-appropriate model so this
-        # call doesn't burn quota on whatever the user's CLI default is.
-        cmd = [
-            "claude",
-            "--model",
-            model,
-            "--print",
-            prompt,
-            "--output-format",
-            "text",
-        ]
+        repo_root = get_repo_root()
+        repo = get_repo_slug(repo_root)
+        githash = current_trunk_githash(repo_root)
 
-        # Add system prompt if configured
-        if self.options.system_prompt_file and self.options.system_prompt_file.exists():
-            cmd.extend(["--system-prompt", str(self.options.system_prompt_file)])
-
-        # Add extra args
-        if extra_args:
-            cmd.extend(extra_args)
-
-        # Invoke Claude
         try:
-            # Preserve existing environment and set CLAUDECODE
-            env = os.environ.copy()
-            env["CLAUDECODE"] = ""
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True,
+            stdout, _ = invoke_claude_with_session(
+                repo=repo,
+                issue=issue_number,
+                agent=agent,
+                githash=githash,
+                prompt=prompt,
+                model=model,
+                cwd=repo_root,
                 timeout=timeout,
-                env=env,  # Avoid nested-session guard
-                stdin=subprocess.DEVNULL,
+                system_prompt_file=self.options.system_prompt_file,
+                extra_args=extra_args,
             )
-
-            response = result.stdout.strip()
-
+            response = stdout.strip()
             if not response:
                 raise RuntimeError("Claude returned empty response")
-
             return response
 
         except subprocess.CalledProcessError as e:
@@ -343,21 +343,19 @@ class Planner:
                 if reset_epoch > 0:
                     wait_until(reset_epoch)
                 else:
-                    # No reset time, wait a bit
                     import time
 
                     time.sleep(5)
-                # Retry with decremented counter
                 return self._call_claude(
                     prompt,
                     model=model,
+                    agent=agent,
+                    issue_number=issue_number,
                     max_retries=max_retries - 1,
                     timeout=timeout,
                     extra_args=extra_args,
                 )
 
-            # Surface stdout too — the CLI's 429 message lives there, and an
-            # empty stderr in the original logs hid the actual cause.
             detail = stderr or stdout or "(no output)"
             raise RuntimeError(f"Claude failed: {detail}") from e
 
@@ -528,7 +526,13 @@ class Planner:
             # Call Claude with shorter timeout. /advise is light search work
             # so it runs on the cheap model.
             logger.info("Running advise for %s...", issue_ref(issue_number))
-            findings = self._call_claude(advise_prompt, model=advise_model(), timeout=180)
+            findings = self._call_claude(
+                advise_prompt,
+                model=advise_model(),
+                agent=AGENT_ADVISE,
+                issue_number=issue_number,
+                timeout=180,
+            )
 
             return findings
 
@@ -628,7 +632,13 @@ class Planner:
 
         # Call Claude to generate plan. Plans are small but reasoning-heavy,
         # so this is the right place to spend Opus.
-        plan = self._call_claude(context, model=planner_model(), timeout=planner_claude_timeout())
+        plan = self._call_claude(
+            context,
+            model=planner_model(),
+            agent=AGENT_PLANNER,
+            issue_number=issue_number,
+            timeout=planner_claude_timeout(),
+        )
 
         return plan
 
@@ -823,7 +833,13 @@ class Planner:
             f"{plan}"
         )
         try:
-            return self._call_claude(prompt, model=learn_model(), timeout=120)
+            return self._call_claude(
+                prompt,
+                model=learn_model(),
+                agent=AGENT_LEARNINGS,
+                issue_number=issue_number,
+                timeout=120,
+            )
         except Exception as e:
             logger.warning(
                 "%s: planner-learnings capture failed (non-fatal): %s", issue_ref(issue_number), e
@@ -841,12 +857,13 @@ class Planner:
         iteration: int,
         prior_review: str | None,
     ) -> str:
-        """Run a fresh-session reviewer pass on the current plan.
+        """Run a reviewer pass on the current plan.
 
-        Uses a separate ``claude --print`` invocation (no ``--resume``) so each
-        review is unbiased by the planner session. Applies the strict
-        ``review-pr-strict`` rubric embedded in the prompt. Uses
-        ``reviewer_model()`` (Sonnet by default).
+        The reviewer's session is distinct from the planner's (different
+        ``agent`` string in the session UUID) so it stays unbiased by the
+        planner's internal state, but it resumes itself across review
+        iterations so successive critiques compound. Uses ``reviewer_model()``
+        (Sonnet by default).
 
         Args:
             issue_number: GitHub issue number.
@@ -873,7 +890,11 @@ class Planner:
         )
         try:
             return self._call_claude(
-                prompt, model=reviewer_model(), timeout=planner_claude_timeout()
+                prompt,
+                model=reviewer_model(),
+                agent=AGENT_PLAN_REVIEWER,
+                issue_number=issue_number,
+                timeout=planner_claude_timeout(),
             )
         except Exception as e:
             logger.error(

@@ -27,13 +27,15 @@ from typing import Any
 from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_text
 
 from ._review_utils import find_pr_for_issue, parse_json_block
+from .claude_invoke import invoke_claude_with_session
 from .claude_models import reviewer_model
 from .claude_timeouts import pr_reviewer_claude_timeout
 from .curses_ui import CursesUI, ThreadLogManager
-from .git_utils import get_repo_info, get_repo_root, issue_ref, pr_ref, run
+from .git_utils import get_repo_info, get_repo_root, get_repo_slug, issue_ref, pr_ref
 from .github_api import _gh_call, fetch_issue_info, gh_pr_review_post, write_secure
 from .models import ReviewerOptions, ReviewPhase, ReviewState, WorkerResult
 from .prompts import get_pr_review_analysis_prompt
+from .session_naming import AGENT_PR_REVIEWER, current_trunk_githash
 from .status_tracker import StatusTracker
 from .worktree_manager import WorktreeManager
 
@@ -150,7 +152,7 @@ class PRReviewer:
         """
         self.options = options
         self.repo_root = get_repo_root()
-        self.state_dir = self.repo_root / ".issue_implementer"
+        self.state_dir = self.repo_root / "build" / ".issue_implementer"
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
         self.worktree_manager = WorktreeManager()
@@ -436,30 +438,30 @@ class PRReviewer:
                 )
                 return parsed
 
-            result = run(
-                [
-                    "claude",
-                    "--model",
-                    reviewer_model(),
-                    str(prompt_file),
-                    "--output-format",
-                    "json",
-                    "--permission-mode",
-                    "dontAsk",
-                    "--allowedTools",
-                    "Read,Glob,Grep",
-                ],
+            repo_root = get_repo_root()
+            githash = current_trunk_githash(repo_root)
+            repo_slug = get_repo_slug(repo_root)
+            stdout, _ = invoke_claude_with_session(
+                repo=repo_slug,
+                issue=issue_number,
+                agent=AGENT_PR_REVIEWER,
+                githash=githash,
+                prompt=prompt,
+                model=reviewer_model(),
                 cwd=worktree_path,
                 timeout=pr_reviewer_claude_timeout(),
+                output_format="json",
+                permission_mode="dontAsk",
+                allowed_tools="Read,Glob,Grep",
             )
-            log_file.write_text(result.stdout or "")
+            log_file.write_text(stdout or "")
 
             # Extract the response text from Claude's JSON wrapper
             try:
-                data = json.loads(result.stdout or "{}")
-                response_text: str = data.get("result", result.stdout or "")
+                data = json.loads(stdout or "{}")
+                response_text: str = data.get("result", stdout or "")
             except (json.JSONDecodeError, AttributeError):
-                response_text = result.stdout or ""
+                response_text = stdout or ""
 
             parsed = _parse_json_block(response_text)
             logger.info(

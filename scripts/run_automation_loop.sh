@@ -256,6 +256,14 @@ process_repo() {
     || git -C "$dir" reset --hard origin/main --quiet 2>/dev/null \
     || echo "  [$repo] Warning: could not rebase, continuing anyway"
 
+  # Capture the trunk SHA once per repo loop iteration. Every child phase
+  # reads $HEPH_TRUNK_GITHASH to build deterministic Claude session IDs
+  # (see hephaestus.automation.session_naming). When trunk advances on the
+  # next iteration a fresh session family opens automatically.
+  HEPH_TRUNK_GITHASH=$(git -C "$dir" rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
+  export HEPH_TRUNK_GITHASH
+  echo "  [$repo] trunk=$HEPH_TRUNK_GITHASH (loop $loop)"
+
   # On loop 3+, suppress follow-up issue filing to avoid noise
   local FOLLOW_UP_FLAG=""
   if [[ "$loop" -ge 3 ]]; then

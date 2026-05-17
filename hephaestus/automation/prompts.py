@@ -293,7 +293,7 @@ items where the rejection itself is informative.
 {{
   "category": "safety",
   "title": "Worktree leaks on SIGINT at implementer.py:402",
-  "body": "Worktree created before the dry-run guard; SIGINT leaks .worktrees/issue-N."
+  "body": "Worktree created before the dry-run guard; SIGINT leaks build/.worktrees/issue-N."
 }}
 ```
 

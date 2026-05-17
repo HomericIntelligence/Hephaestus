@@ -209,12 +209,28 @@ class TestRunImplReviewFailsSafe:
 
 
 class TestResumeImplWithFeedback:
-    """Resume must use --resume <session_id> and pass the feedback prompt."""
+    """Resume routes through invoke_claude_with_session.
+
+    The Claude path derives the session UUID deterministically from
+    ``(repo, issue, AGENT_IMPLEMENTER, githash)``, so the legacy
+    ``session_id`` argument is consumed only for the error tag and the
+    log message. ``invoke_claude_with_session(recreate_on_resume_failure=
+    False)`` re-raises ``CalledProcessError`` so this method can decide
+    whether to stop the review loop (expired) or just log (transient).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _repo_lookup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hephaestus.automation.implementer.get_repo_slug", lambda _: "TestRepo")
+        monkeypatch.setattr(
+            "hephaestus.automation.implementer.current_trunk_githash", lambda _: "abc1234"
+        )
 
     def test_resume_uses_session_id_and_prompt(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
-        with patch("hephaestus.automation.implementer.run") as mock_run:
+        with patch("hephaestus.automation.implementer.invoke_claude_with_session") as mock_invoke:
+            mock_invoke.return_value = ("ok", "uuid")
             ok = implementer._resume_impl_with_feedback(
                 session_id="abc",
                 worktree_path=tmp_path,
@@ -225,19 +241,17 @@ class TestResumeImplWithFeedback:
             )
 
         assert ok is True
-        cmd = mock_run.call_args[0][0]
-        assert cmd[0] == "claude"
-        assert "--resume" in cmd
-        assert "abc" in cmd
-        # The feedback prompt is one of the positional args; must reference iteration 0 critique
-        joined = " ".join(cmd)
-        assert "Grade: D" in joined or "NOGO" in joined
+        kwargs = mock_invoke.call_args.kwargs
+        assert kwargs["agent"] == "implementer"
+        assert kwargs["issue"] == 1
+        assert kwargs["recreate_on_resume_failure"] is False
+        assert "Grade: D" in kwargs["prompt"] or "NOGO" in kwargs["prompt"]
 
     def test_resume_failure_returns_false(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
         with patch(
-            "hephaestus.automation.implementer.run",
+            "hephaestus.automation.implementer.invoke_claude_with_session",
             side_effect=RuntimeError("resume down"),
         ):
             ok = implementer._resume_impl_with_feedback(
@@ -257,7 +271,7 @@ class TestResumeImplWithFeedback:
         err = subprocess.CalledProcessError(1, ["claude"], stderr="session not found")
         state = ImplementationState(issue_number=1)
 
-        with patch("hephaestus.automation.implementer.run", side_effect=err):
+        with patch("hephaestus.automation.implementer.invoke_claude_with_session", side_effect=err):
             ok = implementer._resume_impl_with_feedback(
                 session_id="ses123",
                 worktree_path=tmp_path,
@@ -279,7 +293,7 @@ class TestResumeImplWithFeedback:
         err = subprocess.CalledProcessError(1, ["claude"], stderr="network timeout")
         state = ImplementationState(issue_number=1)
 
-        with patch("hephaestus.automation.implementer.run", side_effect=err):
+        with patch("hephaestus.automation.implementer.invoke_claude_with_session", side_effect=err):
             ok = implementer._resume_impl_with_feedback(
                 session_id="ses999",
                 worktree_path=tmp_path,

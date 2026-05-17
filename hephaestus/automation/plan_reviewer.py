@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import subprocess
 import threading
 import time
@@ -23,13 +22,14 @@ from typing import Any
 from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_text
 from hephaestus.github.rate_limit import wait_until
 
-from .claude_invoke import scan_quota_reset
+from .claude_invoke import invoke_claude_with_session, scan_quota_reset
 from .claude_models import reviewer_model
 from .claude_timeouts import plan_reviewer_claude_timeout
-from .git_utils import issue_ref
+from .git_utils import get_repo_root, get_repo_slug, issue_ref
 from .github_api import _gh_call, gh_issue_comment, gh_issue_json
 from .models import PLAN_COMMENT_MARKERS, PlanReviewerOptions, WorkerResult
 from .prompts import get_plan_review_prompt
+from .session_naming import AGENT_PLAN_REVIEWER, current_trunk_githash
 from .status_tracker import StatusTracker
 
 logger = logging.getLogger(__name__)
@@ -343,60 +343,53 @@ class PlanReviewer:
         if is_codex(self.options.agent):
             return self._run_codex_analysis(issue_number, prompt, max_retries=max_retries)
 
-        env = os.environ.copy()
-        # Avoid nested-session guard used by the planner / implementer
-        env["CLAUDECODE"] = ""
+        repo_root = get_repo_root()
+        repo = get_repo_slug(repo_root)
+        githash = current_trunk_githash(repo_root)
 
         try:
-            result = subprocess.run(
-                [
-                    "claude",
-                    "--model",
-                    reviewer_model(),
-                    "--print",
-                    "--output-format",
-                    "text",
-                    "--allowedTools",
-                    "Read,Glob,Grep",
-                ],
-                input=prompt,
-                capture_output=True,
-                text=True,
+            stdout, _ = invoke_claude_with_session(
+                repo=repo,
+                issue=issue_number,
+                agent=AGENT_PLAN_REVIEWER,
+                githash=githash,
+                prompt=prompt,
+                model=reviewer_model(),
+                cwd=repo_root,
                 timeout=plan_reviewer_claude_timeout(),
-                env=env,
+                allowed_tools="Read,Glob,Grep",
+                input_via_stdin=True,
             )
-
-            if result.returncode != 0:
-                stderr = result.stderr or ""
-                stdout = result.stdout or ""
-                reset_epoch = scan_quota_reset(stderr, stdout)
-                if reset_epoch is not None and max_retries > 0:
-                    if reset_epoch > 0:
-                        wait_until(reset_epoch)
-                    else:
-                        time.sleep(5)
-                    return self._run_claude_analysis(
-                        issue_number,
-                        issue_title,
-                        issue_body,
-                        plan_text,
-                        max_retries=max_retries - 1,
-                    )
-
-                logger.error(
-                    "Claude returned exit code %s for issue #%s: %s",
-                    result.returncode,
-                    issue_number,
-                    (stderr or stdout)[:200],
-                )
-                return None
-
-            claude_output: str = (result.stdout or "").strip()
+            claude_output = (stdout or "").strip()
             if not claude_output:
                 logger.error("Claude returned empty output for issue #%s", issue_number)
                 return None
-
             return claude_output
+
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr or ""
+            stdout_text = exc.stdout or ""
+            reset_epoch = scan_quota_reset(stderr, stdout_text)
+            if reset_epoch is not None and max_retries > 0:
+                if reset_epoch > 0:
+                    wait_until(reset_epoch)
+                else:
+                    time.sleep(5)
+                return self._run_claude_analysis(
+                    issue_number,
+                    issue_title,
+                    issue_body,
+                    plan_text,
+                    max_retries=max_retries - 1,
+                )
+
+            logger.error(
+                "Claude returned exit code %s for issue #%s: %s",
+                exc.returncode,
+                issue_number,
+                (stderr or stdout_text)[:200],
+            )
+            return None
 
         except subprocess.TimeoutExpired:
             logger.error("Claude timed out reviewing plan for issue #%s", issue_number)
