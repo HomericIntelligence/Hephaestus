@@ -146,6 +146,7 @@ EXCLUDED_PREFIXES: tuple[str, ...] = (
     "tests/claude-code/",
     ".pixi/",
     ".worktrees/",
+    "build/.worktrees/",
     ".claude/worktrees/",
     "build/",
     "node_modules/",

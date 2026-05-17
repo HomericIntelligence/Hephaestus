@@ -540,7 +540,7 @@ class IssueImplementer:
 
             # In dry-run mode skip all real side-effects (worktree creation,
             # Claude calls, PR creation).  This guard must come BEFORE
-            # create_worktree() so --dry-run never leaves real .worktrees/
+            # create_worktree() so --dry-run never leaves real build/.worktrees/
             # directories or branches behind (#371).
             if self.options.dry_run:
                 self._log(

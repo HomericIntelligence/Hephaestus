@@ -25,7 +25,7 @@ class TestWorktreeManager:
         manager = WorktreeManager()
 
         assert manager.repo_root == tmp_path
-        assert manager.base_dir == tmp_path / ".worktrees"
+        assert manager.base_dir == tmp_path / "build" / ".worktrees"
         assert manager.worktrees == {}
 
     @patch("hephaestus.automation.worktree_manager.run")
@@ -355,7 +355,7 @@ class TestWorktreeManager:
 HEAD abc123
 branch refs/heads/main
 
-worktree /repo/.worktrees/issue-123
+worktree /repo/build/.worktrees/issue-123
 HEAD def456
 branch refs/heads/123-feature
 """
@@ -366,7 +366,7 @@ branch refs/heads/123-feature
         assert len(worktrees) == 2
         assert worktrees[0]["path"] == "/repo"
         assert worktrees[0]["branch"] == "refs/heads/main"
-        assert worktrees[1]["path"] == "/repo/.worktrees/issue-123"
+        assert worktrees[1]["path"] == "/repo/build/.worktrees/issue-123"
         assert worktrees[1]["branch"] == "refs/heads/123-feature"
 
     @patch("hephaestus.automation.worktree_manager.run")

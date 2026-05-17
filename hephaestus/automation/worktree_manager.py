@@ -7,19 +7,19 @@ Provides:
 
 Layout note
 -----------
-Worktrees live under ``<repo_root>/.worktrees/issue-{N}``. Putting them
+Worktrees live under ``<repo_root>/build/.worktrees/issue-{N}``. Putting them
 inside the repo (rather than ``~/.tmp``) keeps them visible to the implementer
 process even after a force-kill: an interrupted run leaves the worktree on
 disk so a subsequent invocation can either resume work or surface a
 ``WorktreeDirtyError`` to the operator. The trade-off is that ``git status``
-in the parent repo can show ``.worktrees/`` as untracked if it isn't ignored;
-ensure ``.worktrees/`` is in ``.gitignore`` (or a global ignore) for any repo
+in the parent repo can show ``build/.worktrees/`` as untracked if it isn't ignored;
+ensure ``build/.worktrees/`` is in ``.gitignore`` (or a global ignore) for any repo
 that runs the automation. Recovery procedure for a force-killed loop:
 
     git -C <repo> worktree list
-    # Inspect each .worktrees/issue-N for unexpected modifications
-    git -C <repo> worktree remove .worktrees/issue-N    # if abandoning
-    rm -rf <repo>/.worktrees/issue-N                    # last resort
+    # Inspect each build/.worktrees/issue-N for unexpected modifications
+    git -C <repo> worktree remove build/.worktrees/issue-N    # if abandoning
+    rm -rf <repo>/build/.worktrees/issue-N                    # last resort
 """
 
 import logging
@@ -52,14 +52,14 @@ class WorktreeManager:
         """Initialize worktree manager.
 
         Args:
-            base_dir: Base directory for worktrees (default: repo_root/.worktrees)
+            base_dir: Base directory for worktrees (default: repo_root/build/.worktrees)
             base_branch: Base branch for worktrees (default: auto-detect from origin/HEAD
                 lazily on first use)
 
         """
         self.repo_root = get_repo_root()
         if base_dir is None:
-            base_dir = self.repo_root / ".worktrees"
+            base_dir = self.repo_root / "build" / ".worktrees"
         self.base_dir = base_dir
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
