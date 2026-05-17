@@ -91,7 +91,7 @@ PYTHON="$HEPHAESTUS_DIR/.pixi/envs/default/bin/python"
 DRY_RUN=0
 LOOPS=5
 MAX_WORKERS=3
-PARALLEL_REPOS=3
+PARALLEL_REPOS=1
 PROJECTS_DIR="$HOME/Projects"
 ORG="HomericIntelligence"
 
@@ -148,18 +148,33 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Repos to process (all non-archived, excluding Odysseus)
+# Repos to process (all non-archived, excluding Odysseus),
+# sorted ascending by open-issue count so smallest backlogs run first.
 # ---------------------------------------------------------------------------
-mapfile -t REPOS < <(
+mapfile -t CANDIDATE_REPOS < <(
   gh repo list "$ORG" \
     --json name,isArchived \
     --limit 50 \
-    --jq '[.[] | select(.isArchived == false and .name != "Odysseus") | .name] | sort[]'
+    --jq '.[] | select(.isArchived == false and .name != "Odysseus") | .name'
+)
+
+if [[ ${#CANDIDATE_REPOS[@]} -eq 0 ]]; then
+  echo "ERROR: No repos returned from gh repo list — possible GitHub API rate limit." >&2
+  echo "Check: gh api rate_limit" >&2
+  exit 1
+fi
+
+echo "Counting open issues per repo to order by smallest backlog..."
+mapfile -t REPOS < <(
+  for repo in "${CANDIDATE_REPOS[@]}"; do
+    count=$(gh issue list --repo "$ORG/$repo" --state open --limit 1000 \
+              --json number --jq 'length' 2>/dev/null || echo 0)
+    printf '%d\t%s\n' "$count" "$repo"
+  done | sort -n -k1,1 | cut -f2
 )
 
 if [[ ${#REPOS[@]} -eq 0 ]]; then
-  echo "ERROR: No repos returned from gh repo list — possible GitHub API rate limit." >&2
-  echo "Check: gh api rate_limit" >&2
+  echo "ERROR: Failed to enumerate repos after issue-count sort." >&2
   exit 1
 fi
 
