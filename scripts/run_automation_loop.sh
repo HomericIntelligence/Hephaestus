@@ -165,13 +165,9 @@ if [[ ${#CANDIDATE_REPOS[@]} -eq 0 ]]; then
 fi
 
 echo "Counting open issues per repo to order by smallest backlog..."
-mapfile -t REPOS < <(
-  for repo in "${CANDIDATE_REPOS[@]}"; do
-    count=$(gh issue list --repo "$ORG/$repo" --state open --limit 1000 \
-              --json number --jq 'length' 2>/dev/null || echo 0)
-    printf '%d\t%s\n' "$count" "$repo"
-  done | sort -n -k1,1 | cut -f2
-)
+# shellcheck source=scripts/shell/lib/repo_ordering.sh
+source "$SCRIPT_DIR/shell/lib/repo_ordering.sh"
+mapfile -t REPOS < <(sort_repos_by_open_count "$ORG" "${CANDIDATE_REPOS[@]}")
 
 if [[ ${#REPOS[@]} -eq 0 ]]; then
   echo "ERROR: Failed to enumerate repos after issue-count sort." >&2

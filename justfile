@@ -33,6 +33,10 @@ test-unit:
 test-integration:
     pixi run pytest {{ integration_test_dir }}
 
+# Run BATS shell tests (recursive under tests/shell)
+test-shell:
+    pixi run test-shell
+
 # Run linter
 lint:
     pixi run ruff check {{ src_dirs }}

@@ -6,6 +6,7 @@ platforms = ["linux-64"] # Do not re-enable, "win-64", "osx-64", "osx-arm64"]
 
 [tasks]
 test = "pytest"
+test-shell = "bats --recursive tests/shell"
 lint = "ruff check hephaestus scripts tests"
 format = "ruff format hephaestus scripts tests"
 mypy = "mypy hephaestus/ scripts/ tests/"
