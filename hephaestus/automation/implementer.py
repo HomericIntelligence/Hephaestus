@@ -67,6 +67,16 @@ from .session_naming import AGENT_IMPLEMENTER, current_trunk_githash
 from .status_tracker import StatusTracker
 from .worktree_manager import WorktreeManager
 
+# Public API of this module. `_CLAUDE_IMPL_TIMEOUT` keeps its leading underscore
+# (it is an internal default, not for general use) but is exported because
+# tests assert on it as the documented default.
+__all__ = [
+    "MAX_REVIEW_ITERATIONS",
+    "_CLAUDE_IMPL_TIMEOUT",
+    "IssueImplementer",
+    "main",
+]
+
 MAX_REVIEW_ITERATIONS = 3
 
 # Default Claude implementation timeout in seconds. Actual runtime value is

@@ -96,9 +96,13 @@ def test_link_fixer_dry_run(tmp_path):
     options = LinkFixerOptions(verbose=False, dry_run=True)
     fixer = LinkFixer(options)
 
-    _modified, _system_fixes, _absolute_fixes = fixer.fix_file(test_file)
+    modified, system_fixes, absolute_fixes = fixer.fix_file(test_file)
 
-    # Should report as modified but not actually change file
+    # The /home/... link is a system path: report one system-path fix and the
+    # file as modified, but a dry run must not write the change to disk.
+    assert modified is True
+    assert system_fixes == 1
+    assert absolute_fixes == 0
     assert test_file.read_text() == original_content
 
 
