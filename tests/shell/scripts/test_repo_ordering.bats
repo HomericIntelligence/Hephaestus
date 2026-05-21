@@ -144,9 +144,9 @@ write_counts() {
 
 
 @test "count_open_issues: empty gh stdout returns 0" {
-    # Repo not in counts file → fake gh emits "0" because awk's awk-then-
-    # default branch handles missing keys. Verifies the caller does NOT
-    # propagate an empty string.
+    # Repo not in counts file → fake gh emits "0" because awk's awk-then-default
+    # branch handles missing keys. Verifies the caller does NOT propagate an
+    # empty string.
     run count_open_issues "TestOrg" Missing
     [ "$status" -eq 0 ]
     [ "$output" = "0" ]
