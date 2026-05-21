@@ -5,6 +5,7 @@ Collects comprehensive system information for debugging, reporting, and environm
 Gathers OS details, Python versions, Git information, and environment variables.
 """
 
+import contextlib
 import os
 import platform
 import sys
@@ -57,7 +58,8 @@ def get_os_info() -> str:
         # Try to read /etc/os-release
         os_release_path = Path("/etc/os-release")
         if os_release_path.exists():
-            try:
+            # /etc/os-release parsing is best-effort; any failure is non-fatal.
+            with contextlib.suppress(Exception):
                 with open(os_release_path) as f:
                     lines = f.readlines()
                     os_data = {}
@@ -70,8 +72,6 @@ def get_os_info() -> str:
                     name = os_data.get("NAME", "Linux")
                     version = os_data.get("VERSION", "")
                     return f"{name} {version}".strip()
-            except Exception:  # /etc/os-release parsing is best-effort; any failure is non-fatal
-                pass
         return "Linux (unknown distribution)"
 
     elif system == "Darwin":

@@ -778,8 +778,9 @@ class IssueImplementer:
             )
             return
 
-        # Fall back to python -m invocation (works when PYTHONPATH is set)
-        try:
+        # Fall back to python -m invocation (works when PYTHONPATH is set).
+        # On failure, fall through to the legacy scripts/plan_issues.py path.
+        with contextlib.suppress(subprocess.SubprocessError, OSError):
             run(
                 [
                     sys.executable,
@@ -793,8 +794,6 @@ class IssueImplementer:
                 timeout=600,
             )
             return
-        except (subprocess.SubprocessError, OSError):
-            pass
 
         # Legacy fallback: local scripts/plan_issues.py (ProjectScylla layout)
         plan_script = self.repo_root / "scripts" / "plan_issues.py"
@@ -1665,8 +1664,6 @@ class IssueImplementer:
 
     def _print_summary(self, results: dict[int, WorkerResult]) -> None:
         """Print implementation summary."""
-        import sys
-
         total = len(results)
         successful = sum(1 for r in results.values() if r.success)
         failed = total - successful
@@ -1902,6 +1899,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    import sys
-
     sys.exit(main())

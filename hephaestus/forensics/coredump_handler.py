@@ -43,6 +43,7 @@ signal that the handler did not run at all.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sys
 from datetime import datetime, timezone
@@ -99,12 +100,10 @@ def _log(log_dir: Path, message: str) -> None:
 
     """
     stamp = datetime.now(timezone.utc).isoformat()
-    try:
+    # No safe way to surface a logging failure here — see the function docstring.
+    with contextlib.suppress(OSError):
         with open(log_dir / "handler.log", "a", encoding="utf-8") as handle:
             handle.write(f"{stamp} {message}\n")
-    except OSError:
-        # No safe way to surface this — see the function docstring.
-        pass
 
 
 def write_core(

@@ -20,10 +20,9 @@ from typing import ClassVar
 
 from hephaestus.utils.helpers import get_repo_root
 
-# Command classification by language tag
+# Command classification by language tag — only these fenced languages are run;
+# every other language tag is skipped implicitly.
 EXECUTE_LANGUAGES = {"bash", "shell", "sh"}
-SKIP_LANGUAGES = {"text", "plaintext", "output", "console", "markdown", ""}
-SYNTAX_CHECK_LANGUAGES = {"python"}
 
 # Skip markers - commands with these comments are not executed
 SKIP_MARKERS = ["# SKIP-VALIDATION", "# OPTIONAL", "# EXAMPLE"]
