@@ -12,6 +12,9 @@ on:
     - cron: "0 8 * * 1"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   pip-audit:
     name: Dependency vulnerability scan
