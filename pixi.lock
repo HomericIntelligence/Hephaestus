@@ -5,8 +5,6 @@ environments:
     - url: https://conda.anaconda.org/conda-forge/
     indexes:
     - https://pypi.org/simple
-    options:
-      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
@@ -31,7 +29,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/hpack-4.1.0-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/hyperframe-6.1.0-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/identify-1.2.2-py_0.tar.bz2
-      - conda: https://conda.anaconda.org/conda-forge/noarch/idna-3.13-pyhcf101f3_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/idna-3.15-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/importlib-metadata-8.8.0-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/iniconfig-2.3.0-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/just-1.50.0-hdab8a38_0.conda
@@ -121,14 +119,12 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/c7/18/c86eb8e0202e32dd3df50d43d7ff9854f8e0603945ff398974c1d91ac1ef/tomli_w-1.2.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d6/bb/fbdc4e57731efb86b4209ffdd2519520782bf27b3c961beac3e5c20d2b87/trove_classifiers-2026.4.28.13-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e6/60/73603fbcdbe5e803855bcce4414f94eaeed449083bd8183e67161af78188/vcs_versioning-1.1.1-py3-none-any.whl
-      - pypi: ./
+      - pypi: .
   lint:
     channels:
     - url: https://conda.anaconda.org/conda-forge/
     indexes:
     - https://pypi.org/simple
-    options:
-      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
@@ -149,7 +145,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/hpack-4.1.0-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/hyperframe-6.1.0-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/identify-1.2.2-py_0.tar.bz2
-      - conda: https://conda.anaconda.org/conda-forge/noarch/idna-3.13-pyhcf101f3_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/idna-3.15-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/importlib-metadata-8.8.0-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/ld_impl_linux-64-2.45.1-default_hbd61a6d_102.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libexpat-2.8.0-hecca717_0.conda
@@ -230,7 +226,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/c7/18/c86eb8e0202e32dd3df50d43d7ff9854f8e0603945ff398974c1d91ac1ef/tomli_w-1.2.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d6/bb/fbdc4e57731efb86b4209ffdd2519520782bf27b3c961beac3e5c20d2b87/trove_classifiers-2026.4.28.13-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e6/60/73603fbcdbe5e803855bcce4414f94eaeed449083bd8183e67161af78188/vcs_versioning-1.1.1-py3-none-any.whl
-      - pypi: ./
+      - pypi: .
 packages:
 - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
   build_number: 20
@@ -554,9 +550,9 @@ packages:
   - tomli>=1.2.2 ; python_full_version < '3.11'
   - trove-classifiers
   requires_python: '>=3.10'
-- pypi: ./
+- pypi: .
   name: homericintelligence-hephaestus
-  version: 0.7.5.dev7+g992bc8a10
+  version: 0.8.1.dev8+g3567875be
   sha256: 0e1e9ff398da4f0fab717cee776f27ff4e4c9372529b080e054b3a0b9382d282
   requires_dist:
   - packaging>=21.0,<27
@@ -581,6 +577,7 @@ packages:
   - tomli>=2.0,<3 ; python_full_version < '3.11' and extra == 'toml'
   - defusedxml>=0.7,<1 ; extra == 'xml'
   requires_python: '>=3.10'
+  editable: true
 - conda: https://conda.anaconda.org/conda-forge/noarch/hpack-4.1.0-pyhd8ed1ab_0.conda
   sha256: 6ad78a180576c706aabeb5b4c8ceb97c0cb25f1e112d76495bff23e3779948ba
   md5: 0a802cb9888dd14eeefc611f05c40b6e
@@ -614,18 +611,17 @@ packages:
   - pkg:pypi/identify?source=hash-mapping
   size: 11608
   timestamp: 1550184469537
-- conda: https://conda.anaconda.org/conda-forge/noarch/idna-3.13-pyhcf101f3_0.conda
-  sha256: 9ab620e6f64bb67737bd7bc1ad6f480770124e304c6710617aba7fe60b089f48
-  md5: fb7130c190f9b4ec91219840a05ba3ac
+- conda: https://conda.anaconda.org/conda-forge/noarch/idna-3.15-pyhcf101f3_0.conda
+  sha256: 3d25f9f6f7ab3e1ce6429fc8c8aae0335cf446692e715068488536d220cc43de
+  md5: 1b9083b7f00609605d1483dbc6071a81
   depends:
   - python >=3.10
   - python
   license: BSD-3-Clause
-  license_family: BSD
   purls:
   - pkg:pypi/idna?source=compressed-mapping
-  size: 59038
-  timestamp: 1776947141407
+  size: 62642
+  timestamp: 1779294335905
 - conda: https://conda.anaconda.org/conda-forge/noarch/importlib-metadata-8.8.0-pyhcf101f3_0.conda
   sha256: 82ab2a0d91ca1e7e63ab6a4939356667ef683905dea631bc2121aa534d347b16
   md5: 080594bf4493e6bae2607e65390c520a

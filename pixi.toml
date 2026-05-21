@@ -56,7 +56,9 @@ pip-audit = ">=2.7,<3"
 # and our deps don't pin it, so ignore until the runner ships a newer pip.
 # CVE-2026-44431 / CVE-2026-44432: urllib3 2.6.3 → 2.7.0 fix; 2.7.0 is not yet
 # packaged on conda-forge, so we can't bump until upstream publishes it.
-pip-audit = "pip-audit --ignore-vuln CVE-2026-3219 --ignore-vuln CVE-2026-6357 --ignore-vuln CVE-2026-44431 --ignore-vuln CVE-2026-44432"
+# PYSEC-2025-183: pyjwt 2.12.1 has no fix version published upstream; ignore
+# until pyjwt ships a patched release.
+pip-audit = "pip-audit --ignore-vuln CVE-2026-3219 --ignore-vuln CVE-2026-6357 --ignore-vuln CVE-2026-44431 --ignore-vuln CVE-2026-44432 --ignore-vuln PYSEC-2025-183"
 
 [environments]
 default = { features = ["dev"], solve-group = "default" }
