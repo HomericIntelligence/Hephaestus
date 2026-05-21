@@ -17,6 +17,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import re
 import sys
 from pathlib import Path
@@ -90,12 +91,10 @@ def extract_frontmatter_parsed(
     if not match:
         return None
     frontmatter = match.group(1)
-    try:
+    with contextlib.suppress(_yaml.YAMLError):
         parsed = _yaml.safe_load(frontmatter)
         if isinstance(parsed, dict):
             return (frontmatter, parsed)
-    except _yaml.YAMLError:
-        pass
     return None
 
 
@@ -117,13 +116,11 @@ def extract_frontmatter_full(
     if not match:
         return None
     frontmatter = match.group(1)
-    try:
+    with contextlib.suppress(_yaml.YAMLError):
         parsed = _yaml.safe_load(frontmatter)
         if isinstance(parsed, dict):
             end_line = content[: match.end()].count("\n")
             return (frontmatter, parsed, 1, end_line)
-    except _yaml.YAMLError:
-        pass
     return None
 
 

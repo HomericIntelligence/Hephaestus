@@ -50,8 +50,6 @@ and only with `git worktree remove` (without --force).  If that fails, leave
 the worktree in place and report it.
 """
 
-FLEET_NOREPLY = "4211002+mvillmow@users.noreply.github.com"
-
 
 def _detect_default_branch(override: str | None) -> str:
     """Return the repo's default branch, using override if supplied."""

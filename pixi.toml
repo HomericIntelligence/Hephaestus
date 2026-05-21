@@ -56,8 +56,11 @@ pip-audit = ">=2.7,<3"
 # and our deps don't pin it, so ignore until the runner ships a newer pip.
 # CVE-2026-44431 / CVE-2026-44432: urllib3 2.6.3 → 2.7.0 fix; 2.7.0 is not yet
 # packaged on conda-forge, so we can't bump until upstream publishes it.
-# PYSEC-2025-183: pyjwt 2.12.1 has no fix version published upstream; ignore
-# until pyjwt ships a patched release.
+# PYSEC-2025-183 (CVE-2025-45768): affects every pyjwt release (0.1.1-2.12.1) with
+# no fixed version, and is disputed by the pyjwt maintainers — it concerns the key
+# length chosen by the calling application, not a library defect. pyjwt is only a
+# transitive dependency of pygithub (we never import it directly), so there is no
+# version bump or code change that resolves it. Ignored as unfixable + disputed.
 pip-audit = "pip-audit --ignore-vuln CVE-2026-3219 --ignore-vuln CVE-2026-6357 --ignore-vuln CVE-2026-44431 --ignore-vuln CVE-2026-44432 --ignore-vuln PYSEC-2025-183"
 
 [environments]

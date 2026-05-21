@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from typing import Any
@@ -99,3 +100,18 @@ def __getattr__(name: str) -> Any:
         globals()[name] = value
         return value
     raise AttributeError(f"module 'hephaestus' has no attribute {name!r}")
+
+
+# Static declarations for the lazily-loaded names in __all__. These are
+# annotation-only statements: with ``from __future__ import annotations`` they
+# are never evaluated, create no module attribute, and trigger no import — so
+# __getattr__ above still resolves each name on first access (PEP 562). They
+# exist purely so static analysers see every __all__ entry as defined.
+ContextLogger: type
+ensure_directory: Callable[..., Any]
+get_logger: Callable[..., Any]
+get_system_info: Callable[..., Any]
+load_config: Callable[..., Any]
+retry_with_backoff: Callable[..., Any]
+setup_logging: Callable[..., Any]
+slugify: Callable[..., str]

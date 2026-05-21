@@ -15,7 +15,6 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable, Generator
-from contextlib import contextmanager
 
 
 def restore_terminal() -> None:
@@ -80,7 +79,7 @@ def install_signal_handlers(shutdown_fn: Callable[[], None]) -> None:
     # own SIGTSTP handler for forceful process-group kill.
 
 
-@contextmanager
+@contextlib.contextmanager
 def terminal_guard(shutdown_fn: Callable[[], None] | None = None) -> Generator[None, None, None]:
     """Install signal handlers and restore the terminal on exit.
 
