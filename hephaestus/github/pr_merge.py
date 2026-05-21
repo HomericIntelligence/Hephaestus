@@ -184,10 +184,11 @@ def handle_merge_result(result: Any, pr_number: int, base_branch: str) -> None:
         message = getattr(result, "message", None)
         sha = getattr(result, "sha", None)
     except AttributeError:
-        # Fallback for unexpected types
+        # Fallback for unexpected types. `sha` is intentionally not set here:
+        # it is only read in the `if merged:` branch below, and this path
+        # forces merged=False.
         merged = False
         message = str(result)
-        sha = None
 
     if merged:
         logger.info("  PR #%d merged into %s via rebase. sha=%s", pr_number, base_branch, sha)

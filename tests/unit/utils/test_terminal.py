@@ -64,7 +64,7 @@ class TestInstallSignalHandlers:
     def test_first_signal_calls_shutdown(self) -> None:
         """First signal calls the shutdown function."""
         shutdown = MagicMock()
-        terminal_module._shutdown_requested = False
+        terminal_module._shutdown_requested[0] = False
 
         install_signal_handlers(shutdown)
 
@@ -75,13 +75,13 @@ class TestInstallSignalHandlers:
 
         handler(signal_module.SIGINT, None)
         shutdown.assert_called_once()
-        assert terminal_module._shutdown_requested is True
+        assert terminal_module._shutdown_requested[0] is True
 
     def test_resets_shutdown_flag_on_install(self) -> None:
         """Re-installing handlers resets the shutdown flag."""
-        terminal_module._shutdown_requested = True
+        terminal_module._shutdown_requested[0] = True
         install_signal_handlers(MagicMock())
-        assert terminal_module._shutdown_requested is False
+        assert terminal_module._shutdown_requested[0] is False
 
 
 class TestTerminalGuard:

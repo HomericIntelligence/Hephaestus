@@ -43,8 +43,9 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        # Parse and validate version
-        _major, _minor, _patch = parse_version(args.version)
+        # Validate the version string — parse_version raises ValueError on a
+        # malformed version. The parsed tuple itself is not needed here.
+        parse_version(args.version)
 
         # Get repository root
         repo_root = get_repo_root()

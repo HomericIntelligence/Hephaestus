@@ -36,7 +36,10 @@ def restore_terminal() -> None:
 # stop() / terminal_guard().__exit__ never runs (e.g., daemon thread exit).
 atexit.register(restore_terminal)
 
-_shutdown_requested = False
+# Single-element list so the nested signal handler can mutate the flag
+# without a ``global`` rebind (a closure cannot rebind an outer name, but it
+# can mutate a shared container).
+_shutdown_requested: list[bool] = [False]
 
 
 def install_signal_handlers(shutdown_fn: Callable[[], None]) -> None:
@@ -54,17 +57,15 @@ def install_signal_handlers(shutdown_fn: Callable[[], None]) -> None:
                      signal handler (no locks, no I/O other than print).
 
     """
-    global _shutdown_requested
-    _shutdown_requested = False
+    _shutdown_requested[0] = False
 
     def _handler(signum: int, frame: object) -> None:
-        global _shutdown_requested
-        if _shutdown_requested:
+        if _shutdown_requested[0]:
             # Second signal — force exit immediately
             restore_terminal()
             sys.exit(128 + signum)
         else:
-            _shutdown_requested = True
+            _shutdown_requested[0] = True
             print(
                 f"\nReceived signal {signum}. Shutting down gracefully… "
                 "(press Ctrl+C again to force quit)",
