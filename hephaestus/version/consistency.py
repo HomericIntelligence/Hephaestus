@@ -2,10 +2,14 @@
 
 """Version consistency checks and atomic version bumping.
 
+The project uses hatch-vcs dynamic versioning: the **canonical version is
+derived from git tags**, not stored in any file. These checks therefore compare
+secondary version declarations against the git-derived canonical version.
+
 Provides three operations:
 
-1. ``check_version_consistency`` — compare pyproject.toml [project].version
-   with pixi.toml [workspace].version (if present) and fail if they differ.
+1. ``check_version_consistency`` — verify pixi.toml [workspace].version (if
+   present) matches the canonical git-tag version.
 
 2. ``check_package_version_consistency`` — broader multi-source scan: pixi.toml,
    ``__init__.py`` ``__version__``, and optional skill markdown files.
@@ -22,12 +26,18 @@ Usage:
 import argparse
 import importlib
 import re
+import subprocess
 import sys
 import types
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _dist_version
 from pathlib import Path
 
 from hephaestus.utils.helpers import get_repo_root
 from hephaestus.version.manager import VersionManager, parse_version
+
+# PyPI distribution name used for the importlib.metadata fallback.
+_DIST_NAME = "HomericIntelligence-Hephaestus"
 
 # tomllib ships with Python 3.11+; fall back to the tomli backport on 3.10.
 _tomllib: types.ModuleType | None = None
@@ -63,48 +73,77 @@ def _parse_version_tuple(version_str: str) -> tuple[int, ...]:
     return tuple(int(p) for p in version_str.split("."))
 
 
-def _get_pyproject_version(repo_root: Path) -> str:
-    """Read the version from ``pyproject.toml`` ``[project].version``.
+def _version_from_git_tag(repo_root: Path) -> str | None:
+    """Return the latest semver git tag (without a leading ``v``), or None.
+
+    This is the same authority hatch-vcs uses to compute the dynamic version.
 
     Args:
         repo_root: Repository root directory.
 
     Returns:
-        The version string, e.g. ``"0.5.0"``.
-
-    Raises:
-        SystemExit: With code 1 if the file is missing, malformed, or lacks the field.
+        A ``"X.Y.Z"`` string, or ``None`` if no matching tag exists or git is
+        unavailable.
 
     """
-    pyproject_path = repo_root / "pyproject.toml"
-    if not pyproject_path.is_file():
-        print(f"ERROR: pyproject.toml not found: {pyproject_path}", file=sys.stderr)
-        sys.exit(1)
-
-    if _tomllib is None:
-        print(
-            "ERROR: tomllib/tomli is required to parse TOML files. "
-            "Install tomli on Python 3.10: pip install tomli",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
     try:
-        with open(pyproject_path, "rb") as fh:
-            data = _tomllib.load(fh)
-    except Exception as exc:
-        print(f"ERROR: Could not parse {pyproject_path}: {exc}", file=sys.stderr)
-        sys.exit(1)
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    tag = result.stdout.strip().lstrip("v")
+    match = re.match(r"^\d+\.\d+\.\d+", tag)
+    return match.group(0) if match else None
 
-    version = data.get("project", {}).get("version")
-    if not version:
+
+def _version_from_metadata() -> str | None:
+    """Return the installed distribution's base version (no dev/local suffix), or None.
+
+    Returns:
+        A ``"X.Y.Z"`` string, or ``None`` if the package is not installed.
+
+    """
+    try:
+        raw = _dist_version(_DIST_NAME)
+    except PackageNotFoundError:
+        return None
+    match = re.match(r"^\d+\.\d+\.\d+", raw)
+    return match.group(0) if match else None
+
+
+def _get_canonical_version(repo_root: Path) -> str:
+    """Return the canonical project version.
+
+    Under hatch-vcs dynamic versioning the canonical version is derived from git
+    tags. This prefers the latest ``v*`` git tag and falls back to the installed
+    distribution metadata.
+
+    Args:
+        repo_root: Repository root directory.
+
+    Returns:
+        The canonical version string, e.g. ``"0.9.0"``.
+
+    Raises:
+        SystemExit: With code 1 if no canonical version can be determined.
+
+    """
+    version = _version_from_git_tag(repo_root) or _version_from_metadata()
+    if version is None:
         print(
-            f"ERROR: No [project].version found in {pyproject_path}",
+            "ERROR: could not determine the canonical version.\n"
+            "  This project uses hatch-vcs dynamic versioning; a vX.Y.Z git tag\n"
+            "  or an installed distribution is required.",
             file=sys.stderr,
         )
         sys.exit(1)
-
-    return str(version)
+    return version
 
 
 def _get_pixi_version(repo_root: Path) -> str | None:
@@ -198,11 +237,11 @@ def _find_aspirational_versions(
 
 
 def check_version_consistency(repo_root: Path, verbose: bool = False) -> int:
-    """Compare pyproject.toml and pixi.toml package versions.
+    """Verify pixi.toml's version (if any) matches the canonical git-tag version.
 
-    Passes if pixi.toml has no version field (expected state when pyproject.toml
-    is the single source of truth). Fails if both files declare a version and
-    they differ.
+    Passes if pixi.toml has no version field (expected state — the canonical
+    version comes from git tags via hatch-vcs). Fails if pixi.toml declares a
+    version that differs from the canonical version.
 
     Args:
         repo_root: Root directory of the repository.
@@ -212,32 +251,33 @@ def check_version_consistency(repo_root: Path, verbose: bool = False) -> int:
         0 if versions are consistent (or pixi.toml has no version), 1 otherwise.
 
     """
-    pyproject_version = _get_pyproject_version(repo_root)
+    canonical_version = _get_canonical_version(repo_root)
     pixi_version = _get_pixi_version(repo_root)
 
     if verbose:
-        print(f"pyproject.toml [project].version: {pyproject_version}")
+        print(f"Canonical version (git tag / metadata): {canonical_version}")
 
     if pixi_version is None:
         if verbose:
-            print("pixi.toml: no [workspace].version (pyproject.toml is single source)")
+            print("pixi.toml: no [workspace].version (canonical version is git-derived)")
         return 0
 
     if verbose:
-        print(f"pixi.toml [workspace].version:    {pixi_version}")
+        print(f"pixi.toml [workspace].version:          {pixi_version}")
 
-    if pyproject_version != pixi_version:
+    if canonical_version != pixi_version:
         print(
             "ERROR: version mismatch:\n"
-            f"  pyproject.toml: {pyproject_version}\n"
-            f"  pixi.toml:      {pixi_version}\n"
-            "pyproject.toml is the single source of truth — update pixi.toml to match.",
+            f"  canonical (git tag): {canonical_version}\n"
+            f"  pixi.toml:           {pixi_version}\n"
+            "The canonical version is derived from git tags — update or remove "
+            "the pixi.toml version.",
             file=sys.stderr,
         )
         return 1
 
     if verbose:
-        print(f"OK: version is consistent ({pyproject_version})")
+        print(f"OK: version is consistent ({canonical_version})")
     return 0
 
 
@@ -351,9 +391,9 @@ def check_package_version_consistency(
         0 if all checks pass, 1 if any fail.
 
     """
-    canonical = _get_pyproject_version(repo_root)
+    canonical = _get_canonical_version(repo_root)
     if verbose:
-        print(f"Canonical version (pyproject.toml): {canonical}")
+        print(f"Canonical version (git tag / metadata): {canonical}")
 
     all_errors: list[str] = []
     all_errors.extend(_check_pixi_version_errors(repo_root, canonical, verbose))
@@ -385,10 +425,14 @@ def bump_version(
 ) -> int:
     """Increment the project version by one semver step.
 
-    Reads the current version from ``pyproject.toml``, computes the new version
-    by incrementing ``part`` (major/minor/patch), and delegates all file writes
-    to :class:`~hephaestus.version.manager.VersionManager`.  After writing,
-    runs :func:`check_version_consistency` to validate the result.
+    Reads the current canonical version (latest git tag), computes the new
+    version by incrementing ``part`` (major/minor/patch), and delegates writes of
+    secondary files (``VERSION``, ``__init__.py``) to
+    :class:`~hephaestus.version.manager.VersionManager`.
+
+    Note: under hatch-vcs the authoritative version is set by creating a git tag
+    (``vX.Y.Z``). This helper computes and records the next version in secondary
+    files; the release is finalised by tagging — see ``docs/RELEASING.md``.
 
     Args:
         repo_root: Root directory of the repository.
@@ -400,7 +444,7 @@ def bump_version(
         0 on success, 1 on failure.
 
     """
-    current_str = _get_pyproject_version(repo_root)
+    current_str = _get_canonical_version(repo_root)
     try:
         current = parse_version(current_str)
     except ValueError as exc:
@@ -443,10 +487,10 @@ def bump_version(
 
     print(f"Version bumped: {current_str} -> {new_str}")
     print()
-    print("Next steps:")
-    print("  1. pixi install   # regenerates pixi.lock")
-    print("  2. git add pyproject.toml pixi.lock")
-    print(f'  3. git commit -m "chore(release): bump version to {new_str}"')
+    print("Next steps (hatch-vcs derives the published version from the git tag):")
+    print(f'  1. git tag -s v{new_str} -m "Release v{new_str}"')
+    print(f"  2. git push origin v{new_str}")
+    print("  See docs/RELEASING.md for the full release workflow.")
     return 0
 
 
