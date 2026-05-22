@@ -13,6 +13,8 @@ Usage:
 
 import json
 import os
+import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
@@ -89,12 +91,18 @@ def safe_write(
     content: str | bytes,
     backup: bool = True,
 ) -> None:
-    """Write content to file safely with optional backup.
+    """Write content to a file atomically, with an optional backup.
+
+    The content is first written to a temporary file in the same directory and
+    then moved into place with :func:`os.replace`, which is atomic on POSIX and
+    Windows. An interrupted write (process kill, OOM, disk-full) therefore never
+    leaves a partially written file at ``filepath`` — the target either still
+    holds its previous contents or does not exist.
 
     Args:
         filepath: Path to file
         content: Content to write
-        backup: Whether to create backup of existing file
+        backup: Whether to create a ``.bak`` copy of an existing file first
 
     Raises:
         OSError: If the file cannot be written
@@ -110,10 +118,27 @@ def safe_write(
             _logger.warning("Could not create backup: %s", e)
 
     ensure_directory(filepath.parent)
-    if isinstance(content, str):
-        filepath.write_text(content)
-    else:
-        filepath.write_bytes(content)
+
+    data = content.encode() if isinstance(content, str) else content
+
+    # Write to a temp file in the same directory so os.replace() stays on one
+    # filesystem (cross-device renames are not atomic and raise OSError).
+    fd, tmp_name = tempfile.mkstemp(
+        dir=filepath.parent,
+        prefix=f".{filepath.name}.",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, filepath)
+    except BaseException:
+        # On any failure, do not leave the temp file behind.
+        with suppress(OSError):
+            os.unlink(tmp_name)
+        raise
 
 
 def write_secure(
