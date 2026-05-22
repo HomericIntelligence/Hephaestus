@@ -132,7 +132,7 @@ Add to `pyproject.toml`:
 ```toml
 [project]
 dependencies = [
-    "homericintelligence-hephaestus>=0.6.0,<1",
+    "homericintelligence-hephaestus>=0.6.0,<2",
 ]
 ```
 
@@ -140,7 +140,7 @@ Or add a PyPI entry to `pixi.toml`:
 
 ```toml
 [pypi-dependencies]
-homericintelligence-hephaestus = ">=0.6.0,<1"
+homericintelligence-hephaestus = ">=0.6.0,<2"
 ```
 
 Then run `pixi install` to resolve the dependency.
