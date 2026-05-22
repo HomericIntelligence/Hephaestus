@@ -27,12 +27,12 @@ This project follows the [HomericIntelligence Code of Conduct](CODE_OF_CONDUCT.m
 
 ### Code Contributions
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Write/update tests
-5. Update documentation
-6. Submit a pull request
+1. Open (or pick up) a GitHub issue describing the change.
+2. Create a feature branch named `<issue-number>-description`.
+3. Make your changes.
+4. Write/update tests.
+5. Update documentation.
+6. Submit a pull request — see [Pull Request Process](#pull-request-process) below.
 
 ## Development Setup
 
@@ -79,35 +79,35 @@ pixi run test
 
 ## Version Management
 
-The project version is managed as follows:
+The project uses **hatch-vcs dynamic versioning** — the version is derived from
+git tags, not stored in a file:
 
-- **Single source of truth**: `pyproject.toml` under `[project].version`
-- **Secondary files**: `VERSION` and `hephaestus/__init__.py` (`__version__`) are kept in sync
-- **`pixi.toml` has no version field** — this is intentional. The `[workspace]` section in `pixi.toml`
-  is for environment metadata only; the package version comes from `pyproject.toml` via the editable install
+- **Single source of truth**: the latest `vX.Y.Z` git tag. `pyproject.toml` declares
+  `dynamic = ["version"]` with `[tool.hatch.version]` `source = "vcs"`; there is no
+  static `[project].version`.
+- **`pixi.toml` has no version field** — this is intentional. A pre-commit hook
+  (`check-version-single-source`) rejects a `version` field in either file.
 
-### Updating the version
+### Releasing a new version
 
-1. Update `version` in `pyproject.toml` under `[project]`
-2. Update secondary files using the version manager:
-
-   ```python
-   from hephaestus.version.manager import VersionManager
-   VersionManager().update("X.Y.Z")
-   ```
-
-   This updates `VERSION` and any `__init__.py` files that contain `__version__`.
-
-3. Do **not** add a `version` field to `pixi.toml` — a pre-commit hook (`check-version-single-source`)
-   will reject it
+You do not edit a version field. A release is cut by creating a signed git tag —
+see [`docs/RELEASING.md`](docs/RELEASING.md) for the full workflow. `hephaestus-bump-version`
+computes the next semver string and prints the `git tag` commands to run.
 
 ## Pull Request Process
 
-1. Ensure tests pass locally
-2. Squash commits into logical units
-3. Write a clear commit message
-4. Reference any related issues
-5. Request review from maintainers
+The `main` branch is protected. CI's `pr-policy` gate enforces three rules — a PR
+that violates any of them is blocked:
+
+1. **Sign every commit**: `git commit -S`. Verify with `git log --show-signature -1`.
+2. **Reference the issue**: the PR body must contain the literal line `Closes #<n>`
+   (capital `C`, no colon, on its own line). `Fixes`, `Resolves`, `closes`, and
+   `Closes:` are **not** accepted.
+3. **Enable auto-merge**: `gh pr merge --auto`.
+
+Also: ensure tests pass locally (`pixi run test`), keep commits to logical units with
+[conventional commit](https://www.conventionalcommits.org/) messages, and never bypass
+pre-commit hooks with `--no-verify`.
 
 ## Questions?
 

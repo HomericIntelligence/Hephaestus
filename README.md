@@ -318,11 +318,19 @@ hephaestus-check-complexity --help
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+The `main` branch is protected; all changes go through a pull request. CI enforces
+three rules — a PR that violates any of them is blocked:
+
+1. Create a feature branch named `<issue-number>-description`
+   (`git checkout -b 123-amazing-feature`).
+2. Commit your changes **signed** (`git commit -S -m "feat(scope): add amazing feature"`),
+   using [conventional commit](https://www.conventionalcommits.org/) messages.
+3. Push the branch (`git push -u origin 123-amazing-feature`).
+4. Open a pull request whose body contains the literal line `Closes #123`
+   (capital `C`, no colon, on its own line — `Fixes`/`Resolves` are **not** accepted).
+5. Enable auto-merge: `gh pr merge --auto`.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full process.
 
 ## Pixi Environments
 
