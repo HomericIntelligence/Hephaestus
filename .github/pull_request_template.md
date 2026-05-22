@@ -11,7 +11,8 @@
 
 ## Related Issues
 
-<!-- Link related issues using keywords: Closes #123, Fixes #456, Related to #789 -->
+<!-- CI requires the literal line `Closes #<n>` (capital C, no colon, on its own line).
+     `Fixes`, `Resolves`, `closes`, and `Closes:` are NOT accepted. -->
 
 Closes #
 
