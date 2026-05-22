@@ -48,7 +48,7 @@ SUBPACKAGE_SYMBOLS = [
     ("hephaestus.logging", ["setup_logging", "get_logger", "ContextLogger", "JsonFormatter"]),
     ("hephaestus.system", ["get_system_info", "format_system_info"]),
     ("hephaestus.datasets", ["DatasetDownloader"]),
-    ("hephaestus.github", ["detect_repo_from_remote", "local_branch_exists", "merge_prs"]),
+    ("hephaestus.github", ["detect_repo_from_remote", "local_branch_exists", "collect_stats"]),
     ("hephaestus.config", ["load_config", "get_setting", "get_config_value", "merge_configs"]),
     ("hephaestus.cli", ["Colors"]),
     ("hephaestus.utils", ["slugify", "retry_with_backoff", "flatten_dict", "get_repo_root"]),
