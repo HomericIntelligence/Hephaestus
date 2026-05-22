@@ -39,7 +39,9 @@ This project follows the [HomericIntelligence Code of Conduct](CODE_OF_CONDUCT.m
 1. Install Pixi: <https://pixi.sh/install/>
 2. Clone your fork
 3. Install dependencies: `pixi install`
-4. Activate development environment: `pixi shell -e dev`
+4. Install the package itself (editable) so `import hephaestus` works in the
+   environment: `pixi run dev-install`
+5. Activate development environment: `pixi shell -e dev`
 
 ## Code Style
 
