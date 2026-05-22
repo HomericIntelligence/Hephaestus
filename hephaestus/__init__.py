@@ -8,7 +8,9 @@ from importlib.metadata import version as _pkg_version
 from typing import Any
 
 try:
-    __version__ = _pkg_version("hephaestus")
+    # The PyPI distribution name is "HomericIntelligence-Hephaestus", which
+    # importlib.metadata does NOT normalize to the import name "hephaestus".
+    __version__ = _pkg_version("HomericIntelligence-Hephaestus")
 except PackageNotFoundError:
     __version__ = "unknown"
 

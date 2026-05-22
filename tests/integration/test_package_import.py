@@ -73,6 +73,26 @@ class TestTopLevelImports:
         assert hephaestus.__version__
         assert isinstance(hephaestus.__version__, str)
 
+    def test_version_resolves_against_installed_distribution(self):
+        """__version__ must resolve from distribution metadata, not fall back to 'unknown'.
+
+        Regression test for #433: importlib.metadata.version() must be called with the
+        PyPI distribution name ("HomericIntelligence-Hephaestus"), not the import name
+        ("hephaestus"), which it does not normalize to the same key.
+        """
+        from importlib.metadata import PackageNotFoundError
+        from importlib.metadata import version as pkg_version
+
+        import hephaestus
+
+        try:
+            expected = pkg_version("HomericIntelligence-Hephaestus")
+        except PackageNotFoundError:
+            pytest.skip("package not installed; metadata-based version unavailable")
+
+        assert hephaestus.__version__ == expected
+        assert hephaestus.__version__ != "unknown"
+
     @pytest.mark.parametrize("symbol", TOP_LEVEL_SYMBOLS)
     def test_top_level_symbol_importable(self, symbol):
         """Each symbol in __all__ must be accessible from the top-level package."""
