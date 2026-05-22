@@ -118,6 +118,19 @@ version-file = "hephaestus/_version.py"
 [tool.hatch.build.targets.wheel]
 packages = ["hephaestus"]
 
+[tool.hatch.build.targets.sdist]
+# Ship only the package source plus essential metadata. Without this,
+# hatchling includes the whole repo (CI workflows, .claude config, tests,
+# scripts) in the source distribution. only-include uses exact path
+# anchoring so nested README.md files (.github/, docs/, scripts/) and
+# .gitignore are not swept in.
+only-include = [
+    "hephaestus",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
