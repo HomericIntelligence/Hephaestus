@@ -6,6 +6,8 @@ ProjectHephaestus follows [Semantic Versioning](https://semver.org/).
 - **MINOR** version: new backwards-compatible functionality
 - **PATCH** version: backwards-compatible bug fixes
 
+Upgrading across a major version? See the [migration guide](docs/MIGRATION.md).
+
 ## Public API
 
 The following symbols are part of the stable public API and are covered by
