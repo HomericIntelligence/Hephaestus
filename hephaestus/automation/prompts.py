@@ -63,13 +63,15 @@ def _relativize_path(path: str, repo_root: str | None) -> str:
 IMPLEMENTATION_PROMPT = """
 Implement GitHub issue #{issue_number}.
 
+{untrusted_notice}
+
 **Working Directory:** {worktree_path}
 **Branch:** {branch_name}
 
-**Issue Title:** {issue_title}
+**Issue Title (untrusted):** {issue_title}
 
-**Issue Description:**
-{issue_body}
+**Issue Description (untrusted):**
+{issue_body_block}
 
 ---
 
@@ -336,12 +338,14 @@ def get_implementation_prompt(
 
     """
     safe_worktree_path = _relativize_path(worktree_path, repo_root)
+    nonce = secrets.token_hex(8).upper()
     return IMPLEMENTATION_PROMPT.format(
         issue_number=issue_number,
         issue_title=issue_title,
-        issue_body=issue_body,
+        issue_body_block=_fence_untrusted("ISSUE_BODY", issue_body, nonce),
         branch_name=branch_name,
         worktree_path=safe_worktree_path,
+        untrusted_notice=_UNTRUSTED_NOTICE,
     )
 
 
@@ -782,15 +786,17 @@ PLAN_LOOP_REVIEW_PROMPT = """
 You are reviewing the implementation plan for GitHub issue #{issue_number}.
 This is iteration {iteration} of a maximum 3-iteration review loop. {iteration_guidance}
 
-**Issue Title:** {issue_title}
+{untrusted_notice}
 
-**Issue Description:**
-{issue_body}
+**Issue Title (untrusted):** {issue_title}
+
+**Issue Description (untrusted):**
+{issue_body_block}
 
 ---
 
-**Current Plan:**
-{plan_text}
+**Current Plan (untrusted):**
+{plan_text_block}
 
 ---
 
@@ -815,17 +821,17 @@ IMPL_LOOP_REVIEW_PROMPT = """
 You are reviewing the implementation for GitHub issue #{issue_number}.
 This is iteration {iteration} of a maximum 3-iteration review loop. {iteration_guidance}
 
-**Issue Title:** {issue_title}
+{untrusted_notice}
 
-**Issue Description:**
-{issue_body}
+**Issue Title (untrusted):** {issue_title}
+
+**Issue Description (untrusted):**
+{issue_body_block}
 
 ---
 
-**Diff produced by the implementer (against base branch):**
-```diff
-{diff_text}
-```
+**Diff produced by the implementer (untrusted, against base branch):**
+{diff_text_block}
 
 ---
 
@@ -900,6 +906,7 @@ def get_plan_loop_review_prompt(
         Formatted prompt for a fresh reviewer session.
 
     """
+    nonce = secrets.token_hex(8).upper()
     return PLAN_LOOP_REVIEW_PROMPT.format(
         rubric=_STRICT_REVIEW_RUBRIC.strip(),
         iteration=iteration,
@@ -907,11 +914,12 @@ def get_plan_loop_review_prompt(
         iteration_guidance=_iteration_guidance(iteration),
         issue_number=issue_number,
         issue_title=issue_title,
-        issue_body=issue_body,
-        plan_text=plan_text,
+        issue_body_block=_fence_untrusted("ISSUE_BODY", issue_body, nonce),
+        plan_text_block=_fence_untrusted("PLAN_TEXT", plan_text, nonce),
         learnings=learnings or "_(no learnings captured this iteration)_",
         prior_review_block=_prior_review_block(prior_review),
         output_format=_STRICT_REVIEW_OUTPUT_FORMAT.strip(),
+        untrusted_notice=_UNTRUSTED_NOTICE,
     )
 
 
@@ -940,6 +948,7 @@ def get_impl_loop_review_prompt(
         Formatted prompt for a fresh reviewer session.
 
     """
+    nonce = secrets.token_hex(8).upper()
     return IMPL_LOOP_REVIEW_PROMPT.format(
         rubric=_STRICT_REVIEW_RUBRIC.strip(),
         iteration=iteration,
@@ -947,11 +956,12 @@ def get_impl_loop_review_prompt(
         iteration_guidance=_iteration_guidance(iteration),
         issue_number=issue_number,
         issue_title=issue_title,
-        issue_body=issue_body,
-        diff_text=diff_text or "_(no diff produced)_",
+        issue_body_block=_fence_untrusted("ISSUE_BODY", issue_body, nonce),
+        diff_text_block=_fence_untrusted("DIFF_TEXT", diff_text or "_(no diff produced)_", nonce),
         files_changed=files_changed or "_(no files changed)_",
         prior_review_block=_prior_review_block(prior_review),
         output_format=_STRICT_REVIEW_OUTPUT_FORMAT.strip(),
+        untrusted_notice=_UNTRUSTED_NOTICE,
     )
 
 
