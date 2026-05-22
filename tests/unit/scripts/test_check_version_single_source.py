@@ -1,4 +1,10 @@
-"""Tests for scripts/check_version_single_source.py."""
+"""Tests for scripts/check_version_single_source.py.
+
+This project uses hatch-vcs dynamic versioning. The checker validates that the
+version has exactly one authority (git tags via hatch-vcs): no static
+``[project].version``, ``version`` present in ``[project].dynamic``,
+``[tool.hatch.version].source == "vcs"``, and no pixi ``[workspace].version``.
+"""
 
 import sys
 from pathlib import Path
@@ -10,50 +16,90 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
 
 from check_version_single_source import (
     check_pixi_no_version,
-    check_pyproject_has_version,
+    check_pyproject_dynamic_version,
+)
+
+# A valid hatch-vcs pyproject.toml fragment (the real project's configuration).
+VALID_PYPROJECT = (
+    '[project]\nname = "mypkg"\ndynamic = ["version"]\n\n[tool.hatch.version]\nsource = "vcs"\n'
 )
 
 
-class TestCheckPyprojectHasVersion:
-    """Tests for check_pyproject_has_version()."""
+class TestCheckPyprojectDynamicVersion:
+    """Tests for check_pyproject_dynamic_version()."""
 
-    def test_returns_true_when_version_present(self, tmp_path: Path) -> None:
-        """Returns True when pyproject.toml has [project].version."""
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text('[project]\nname = "mypkg"\nversion = "1.2.3"\n')
-        assert check_pyproject_has_version(tmp_path) is True
+    def test_returns_true_for_valid_hatch_vcs_config(self, tmp_path: Path) -> None:
+        """Returns True when version is dynamic and hatch-vcs is the source."""
+        (tmp_path / "pyproject.toml").write_text(VALID_PYPROJECT)
+        assert check_pyproject_dynamic_version(tmp_path) is True
 
     def test_returns_false_when_pyproject_missing(self, tmp_path: Path) -> None:
         """Returns False when pyproject.toml does not exist."""
-        assert check_pyproject_has_version(tmp_path) is False
+        assert check_pyproject_dynamic_version(tmp_path) is False
 
-    def test_returns_false_when_no_version_in_project(self, tmp_path: Path) -> None:
-        """Returns False when [project] section has no version key."""
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text('[project]\nname = "mypkg"\ndescription = "no version"\n')
-        assert check_pyproject_has_version(tmp_path) is False
+    def test_returns_false_when_static_version_reintroduced(self, tmp_path: Path) -> None:
+        """Returns False when a static [project].version is present (regression for #435).
 
-    def test_returns_false_when_version_only_in_other_section(self, tmp_path: Path) -> None:
-        """Returns False when version exists only in a non-[project] section."""
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text('[tool.poetry]\nversion = "1.0.0"\n\n[project]\nname = "mypkg"\n')
-        assert check_pyproject_has_version(tmp_path) is False
+        The old regex-based checker would have matched an unrelated quoted string
+        and reported a false PASS; the rewritten checker must FAIL here.
+        """
+        (tmp_path / "pyproject.toml").write_text(
+            "[project]\n"
+            'name = "mypkg"\n'
+            'version = "1.2.3"\n'
+            'dynamic = ["version"]\n\n'
+            "[tool.hatch.version]\n"
+            'source = "vcs"\n'
+        )
+        assert check_pyproject_dynamic_version(tmp_path) is False
+
+    def test_returns_false_when_dynamic_missing_version(self, tmp_path: Path) -> None:
+        """Returns False when [project].dynamic does not contain 'version'."""
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "mypkg"\ndynamic = []\n\n[tool.hatch.version]\nsource = "vcs"\n'
+        )
+        assert check_pyproject_dynamic_version(tmp_path) is False
+
+    def test_returns_false_when_hatch_source_not_vcs(self, tmp_path: Path) -> None:
+        """Returns False when [tool.hatch.version].source is not 'vcs'."""
+        (tmp_path / "pyproject.toml").write_text(
+            "[project]\n"
+            'name = "mypkg"\n'
+            'dynamic = ["version"]\n\n'
+            "[tool.hatch.version]\n"
+            'path = "mypkg/__init__.py"\n'
+        )
+        assert check_pyproject_dynamic_version(tmp_path) is False
+
+    def test_does_not_match_entry_point_strings(self, tmp_path: Path) -> None:
+        """A [project.scripts] entry point must not be mistaken for a version.
+
+        Regression for #435: the old DOTALL regex captured
+        'pkg.module:main' from [project.scripts] as the version.
+        """
+        (tmp_path / "pyproject.toml").write_text(
+            "[project]\n"
+            'name = "mypkg"\n'
+            'dynamic = ["version"]\n\n'
+            "[project.scripts]\n"
+            'mypkg-cli = "mypkg.cli:main"\n\n'
+            "[tool.hatch.version]\n"
+            'source = "vcs"\n'
+        )
+        assert check_pyproject_dynamic_version(tmp_path) is True
 
     def test_prints_ok_on_success(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
-        """Prints OK message with version when found."""
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text('[project]\nversion = "2.0.0"\n')
-        check_pyproject_has_version(tmp_path)
-        captured = capsys.readouterr()
-        assert "2.0.0" in captured.out
+        """Prints OK message when configuration is valid."""
+        (tmp_path / "pyproject.toml").write_text(VALID_PYPROJECT)
+        check_pyproject_dynamic_version(tmp_path)
+        assert "OK" in capsys.readouterr().out
 
     def test_prints_error_on_missing_file(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
     ) -> None:
         """Prints ERROR message when pyproject.toml is missing."""
-        check_pyproject_has_version(tmp_path)
-        captured = capsys.readouterr()
-        assert "ERROR" in captured.out
+        check_pyproject_dynamic_version(tmp_path)
+        assert "ERROR" in capsys.readouterr().out
 
 
 class TestCheckPixiNoVersion:
@@ -97,30 +143,24 @@ class TestCheckPixiNoVersion:
         pixi = tmp_path / "pixi.toml"
         pixi.write_text('[workspace]\nversion = "0.1.0"\n')
         check_pixi_no_version(tmp_path)
-        captured = capsys.readouterr()
-        assert "ERROR" in captured.out
+        assert "ERROR" in capsys.readouterr().out
 
     def test_prints_ok_when_no_version(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         """Prints OK message when pixi.toml has no workspace version."""
         pixi = tmp_path / "pixi.toml"
         pixi.write_text('[workspace]\nname = "myproject"\n')
         check_pixi_no_version(tmp_path)
-        captured = capsys.readouterr()
-        assert "OK" in captured.out
+        assert "OK" in capsys.readouterr().out
 
 
 class TestMain:
     """Tests for main()."""
 
     def test_returns_0_when_all_ok(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Returns 0 when pyproject.toml has version and pixi.toml has none."""
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text('[project]\nversion = "1.0.0"\n')
-        pixi = tmp_path / "pixi.toml"
-        pixi.write_text('[workspace]\nname = "myproject"\n')
+        """Returns 0 for a valid hatch-vcs pyproject.toml and a versionless pixi.toml."""
+        (tmp_path / "pyproject.toml").write_text(VALID_PYPROJECT)
+        (tmp_path / "pixi.toml").write_text('[workspace]\nname = "myproject"\n')
 
-        monkeypatch.chdir(tmp_path)
-        # Patch get_repo_root in the module's namespace
         import check_version_single_source as mod
 
         monkeypatch.setattr(mod, "get_repo_root", lambda: tmp_path)
@@ -135,14 +175,30 @@ class TestMain:
         monkeypatch.setattr(mod, "get_repo_root", lambda: tmp_path)
         assert mod.main() == 1
 
+    def test_returns_1_when_static_version_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Returns 1 when a static [project].version is reintroduced."""
+        (tmp_path / "pyproject.toml").write_text(
+            "[project]\n"
+            'name = "mypkg"\n'
+            'version = "1.0.0"\n'
+            'dynamic = ["version"]\n\n'
+            "[tool.hatch.version]\n"
+            'source = "vcs"\n'
+        )
+
+        import check_version_single_source as mod
+
+        monkeypatch.setattr(mod, "get_repo_root", lambda: tmp_path)
+        assert mod.main() == 1
+
     def test_returns_1_when_pixi_has_version(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Returns 1 when pixi.toml [workspace] has a version field."""
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text('[project]\nversion = "1.0.0"\n')
-        pixi = tmp_path / "pixi.toml"
-        pixi.write_text('[workspace]\nversion = "1.0.0"\n')
+        (tmp_path / "pyproject.toml").write_text(VALID_PYPROJECT)
+        (tmp_path / "pixi.toml").write_text('[workspace]\nversion = "1.0.0"\n')
 
         import check_version_single_source as mod
 
@@ -153,10 +209,15 @@ class TestMain:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Returns 0 when pixi.toml does not exist (only pyproject.toml)."""
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text('[project]\nversion = "1.0.0"\n')
+        (tmp_path / "pyproject.toml").write_text(VALID_PYPROJECT)
 
         import check_version_single_source as mod
 
         monkeypatch.setattr(mod, "get_repo_root", lambda: tmp_path)
+        assert mod.main() == 0
+
+    def test_passes_against_real_repo_pyproject(self) -> None:
+        """The checker must PASS on the actual repository configuration."""
+        import check_version_single_source as mod
+
         assert mod.main() == 0
