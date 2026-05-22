@@ -3,13 +3,13 @@
 
 import pytest
 
+from hephaestus.markdown.utils import find_markdown_files
 from hephaestus.validation.markdown import (
     check_markdown_formatting,
     check_required_sections,
     count_markdown_issues,
     extract_markdown_links,
     extract_sections,
-    find_markdown_files,
     find_readmes,
     validate_all_links,
     validate_directory_exists,
