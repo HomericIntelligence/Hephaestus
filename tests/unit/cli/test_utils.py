@@ -201,3 +201,29 @@ class TestFormatOutput:
     def test_scalar_text(self) -> None:
         """Text format of a scalar returns its string representation."""
         assert format_output(42) == "42"
+
+
+class TestCliBarrelExports:
+    """Regression tests for #462: the cli package barrel exposes the framework."""
+
+    def test_framework_symbols_importable_from_cli_package(self) -> None:
+        """The CLI framework must be reachable via `from hephaestus.cli import ...`."""
+        from hephaestus.cli import (  # noqa: F401 - import is the assertion
+            COMMAND_REGISTRY,
+            Colors,
+            CommandRegistry,
+            add_logging_args,
+            confirm_action,
+            create_parser,
+            format_output,
+            format_table,
+            register_command,
+        )
+
+    def test_cli_all_lists_framework(self) -> None:
+        """hephaestus.cli.__all__ lists the framework symbols, not just Colors."""
+        import hephaestus.cli as cli
+
+        for symbol in ("create_parser", "COMMAND_REGISTRY", "format_table", "Colors"):
+            assert symbol in cli.__all__
+            assert hasattr(cli, symbol)

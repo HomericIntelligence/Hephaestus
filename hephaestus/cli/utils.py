@@ -18,9 +18,22 @@ from importlib.metadata import version as _pkg_version
 from typing import Any
 
 try:
-    __version__ = _pkg_version("hephaestus")
+    # The PyPI distribution name is "HomericIntelligence-Hephaestus", which
+    # importlib.metadata does NOT normalize to the import name "hephaestus".
+    __version__ = _pkg_version("HomericIntelligence-Hephaestus")
 except PackageNotFoundError:
     __version__ = "unknown"
+
+__all__ = [
+    "COMMAND_REGISTRY",
+    "CommandRegistry",
+    "add_logging_args",
+    "confirm_action",
+    "create_parser",
+    "format_output",
+    "format_table",
+    "register_command",
+]
 
 
 class CommandRegistry:
