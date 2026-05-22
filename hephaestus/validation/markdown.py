@@ -26,7 +26,29 @@ from hephaestus.markdown.utils import find_markdown_files
 
 logger = get_logger(__name__)
 
-__all__ = ["find_markdown_files"]
+# find_markdown_files is imported above for internal use (see validate_all_links);
+# it is intentionally NOT re-exported here — hephaestus.markdown is its single
+# canonical public home.
+__all__ = [
+    "ReadmeValidationResult",
+    "check_markdown_formatting",
+    "check_readmes_main",
+    "check_required_sections",
+    "count_markdown_issues",
+    "extract_markdown_links",
+    "extract_sections",
+    "find_readmes",
+    "main",
+    "print_link_summary",
+    "validate_all_links",
+    "validate_all_readmes",
+    "validate_directory_exists",
+    "validate_file_exists",
+    "validate_file_links",
+    "validate_internal_link",
+    "validate_readme",
+    "validate_relative_link",
+]
 
 
 def validate_file_exists(file_path: Path) -> bool:
