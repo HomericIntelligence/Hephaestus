@@ -146,7 +146,13 @@ def write_secure(
     content: str,
     permissions: int = 0o600,
 ) -> None:
-    """Write content to file with restrictive permissions.
+    """Write content to a file atomically and with restrictive permissions.
+
+    The content is written to a temporary file in the same directory —
+    ``chmod``-ed to ``permissions`` before any content is written so it is never
+    world-readable — then moved into place with :func:`os.replace`, which is
+    atomic on POSIX and Windows. An interrupted write therefore never leaves a
+    partial or wrongly-permissioned file at ``filepath``.
 
     Args:
         filepath: Path to file
@@ -159,11 +165,25 @@ def write_secure(
     """
     filepath = Path(filepath)
     filepath.parent.mkdir(parents=True, exist_ok=True)
-    # Open with target permissions atomically to eliminate the race window
-    # between create (umask-default perms) and chmod.
-    fd = os.open(str(filepath), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, permissions)
-    with os.fdopen(fd, "w") as fh:
-        fh.write(content)
+
+    # Create the temp file in the same directory so os.replace() stays on one
+    # filesystem, then restrict its permissions before writing any content.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=filepath.parent,
+        prefix=f".{filepath.name}.",
+        suffix=".tmp",
+    )
+    try:
+        os.chmod(tmp_name, permissions)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, filepath)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(tmp_name)
+        raise
 
 
 def _detect_format(filepath: Path, format_hint: str | None) -> str:

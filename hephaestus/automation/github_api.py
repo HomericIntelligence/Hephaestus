@@ -29,6 +29,7 @@ from hephaestus.github.rate_limit import (
     gh_rate_limit_reset_epoch,
     wait_until,
 )
+from hephaestus.io.utils import write_secure as io_write_secure
 
 from .claude_timeouts import gh_cli_timeout
 from .git_utils import get_repo_info, run
@@ -891,32 +892,18 @@ def fetch_issue_info(issue_number: int) -> IssueInfo:
 
 
 def write_secure(path: Path, content: str) -> None:
-    """Write content to file securely using atomic write.
+    """Write content to a file atomically with restrictive permissions.
+
+    Thin wrapper over the canonical :func:`hephaestus.io.utils.write_secure` so
+    automation state files share one atomic, ``0o600`` write implementation.
 
     Args:
         path: Destination file path
         content: Content to write
 
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Write to temp file first, then atomic rename
-    fd, temp_path = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    )
-
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-        os.replace(temp_path, path)
-        logger.debug("Wrote %s bytes to %s", len(content), path)
-    except Exception:
-        # Clean up temp file on error
-        with contextlib.suppress(OSError):
-            os.unlink(temp_path)
-        raise
+    io_write_secure(path, content)
+    logger.debug("Wrote %s bytes to %s", len(content), path)
 
 
 def gh_pr_review_post(

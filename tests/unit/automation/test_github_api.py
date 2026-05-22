@@ -897,6 +897,17 @@ class TestWriteSecure:
             # Restore permissions for cleanup
             test_file.parent.chmod(0o755)
 
+    def test_writes_with_restrictive_permissions(self, tmp_path: Any) -> None:
+        """github_api.write_secure delegates to io.write_secure → 0o600 perms.
+
+        Regression for #443: the automation copy of write_secure used to write
+        with default permissions; consolidating onto hephaestus.io.write_secure
+        means state files are owner-only.
+        """
+        test_file = tmp_path / "state.json"
+        write_secure(test_file, "{}")
+        assert oct(test_file.stat().st_mode & 0o777) == oct(0o600)
+
 
 class TestGhCallThrottle:
     """Tests for the per-thread `gh` call throttle inside _gh_call."""

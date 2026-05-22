@@ -197,6 +197,41 @@ class TestWriteSecure:
         write_secure(f, "new")
         assert f.read_text() == "new"
 
+    def test_write_is_atomic_on_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failure mid-write leaves the original file intact, never partial.
+
+        Regression for #443: write_secure must write via a temp file and atomic
+        rename so an interrupted write cannot corrupt the target.
+        """
+        f = tmp_path / "secret.txt"
+        f.write_text("original-secret")
+
+        def boom(*_args: object, **_kwargs: object) -> None:
+            raise OSError("simulated write failure")
+
+        monkeypatch.setattr(os, "replace", boom)
+        with pytest.raises(OSError, match="simulated write failure"):
+            write_secure(f, "new-secret-that-must-not-land")
+
+        assert f.read_text() == "original-secret"
+
+    def test_failed_write_leaves_no_temp_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed write cleans up its temporary file."""
+        f = tmp_path / "secret.txt"
+
+        def boom(*_args: object, **_kwargs: object) -> None:
+            raise OSError("simulated failure")
+
+        monkeypatch.setattr(os, "replace", boom)
+        with pytest.raises(OSError, match="simulated failure"):
+            write_secure(f, "data")
+
+        assert list(tmp_path.iterdir()) == []
+
 
 class TestDetectFormat:
     """Tests for _detect_format helper."""
