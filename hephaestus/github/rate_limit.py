@@ -21,7 +21,9 @@ import re
 import signal
 import subprocess
 import tempfile
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -400,25 +402,17 @@ def detect_claude_usage_cap(text: str) -> int | None:
     return parse_reset_epoch(time_str, tz)
 
 
-def wait_until(epoch: int) -> None:
-    """Block until the given epoch time, printing a countdown.
-
-    Handles ``SIGINT`` gracefully: the first interrupt prints a message
-    and raises :class:`KeyboardInterrupt`.
+def _countdown_loop(epoch: int, is_interrupted: Callable[[], bool]) -> None:
+    """Print a 1Hz countdown until ``epoch``, or until ``is_interrupted`` is true.
 
     Args:
         epoch: Target Unix timestamp to wait for.
+        is_interrupted: Callable returning True when the wait should abort.
 
     Raises:
-        KeyboardInterrupt: If the user presses Ctrl-C during the wait.
+        KeyboardInterrupt: If ``is_interrupted`` becomes true during the wait.
 
     """
-    interrupted = False
-
-    def handler(_sig: int, _frame: object) -> None:
-        nonlocal interrupted
-        interrupted = True
-
     # Defensive safety: if ``time.sleep`` returns instantly (e.g. because a
     # test has monkeypatched it), the print-driven countdown loop below
     # would otherwise busy-spin and OOM the process. Watch monotonic_ns
@@ -428,34 +422,64 @@ def wait_until(epoch: int) -> None:
     iterations = 0
     iteration_cap = 100_000  # ~27hrs at 1Hz; well above any real countdown
 
+    while True:
+        if is_interrupted():
+            print("\n[INFO] Wait interrupted by user")
+            raise KeyboardInterrupt
+        remaining = epoch - int(time.time())
+        if remaining <= 0:
+            print()
+            return
+        h, r = divmod(remaining, 3600)
+        m, s = divmod(r, 60)
+        print(
+            f"\r[INFO] Rate limit resets in {h:02d}:{m:02d}:{s:02d}",
+            end="",
+            flush=True,
+        )
+        time.sleep(1)
+        iterations += 1
+        if iterations >= iteration_cap:
+            # Either the system clock is broken or sleep is mocked;
+            # either way, stop spinning and let the caller proceed.
+            elapsed_s = (time.monotonic_ns() - start_mono) / 1e9
+            logger.warning("wait_until iteration cap reached after %.2fs; bailing out", elapsed_s)
+            print()
+            return
+
+
+def wait_until(epoch: int) -> None:
+    """Block until the given epoch time, printing a countdown.
+
+    On the main thread, ``SIGINT`` is handled gracefully: the first interrupt
+    prints a message and raises :class:`KeyboardInterrupt`. When called from a
+    worker thread, the custom handler is skipped — ``signal.signal`` may only be
+    called from the main thread — and Ctrl-C still propagates normally via the
+    interpreter's default handling on the main thread.
+
+    Args:
+        epoch: Target Unix timestamp to wait for.
+
+    Raises:
+        KeyboardInterrupt: If the user presses Ctrl-C during the wait
+            (main-thread invocations only).
+
+    """
+    if threading.current_thread() is not threading.main_thread():
+        # signal.signal() raises ValueError off the main thread. Run the
+        # countdown without a custom handler.
+        _countdown_loop(epoch, lambda: False)
+        return
+
+    interrupted = False
+
+    def handler(_sig: int, _frame: object) -> None:
+        nonlocal interrupted
+        interrupted = True
+
     old_handler = signal.signal(signal.SIGINT, handler)
     try:
-        while True:
-            if interrupted:
-                print("\n[INFO] Wait interrupted by user")
-                raise KeyboardInterrupt
-            remaining = epoch - int(time.time())
-            if remaining <= 0:
-                print()
-                return
-            h, r = divmod(remaining, 3600)
-            m, s = divmod(r, 60)
-            print(
-                f"\r[INFO] Rate limit resets in {h:02d}:{m:02d}:{s:02d}",
-                end="",
-                flush=True,
-            )
-            time.sleep(1)
-            iterations += 1
-            if iterations >= iteration_cap:
-                # Either the system clock is broken or sleep is mocked;
-                # either way, stop spinning and let the caller proceed.
-                elapsed_s = (time.monotonic_ns() - start_mono) / 1e9
-                logger.warning(
-                    "wait_until iteration cap reached after %.2fs; bailing out", elapsed_s
-                )
-                print()
-                return
+        _countdown_loop(epoch, lambda: interrupted)
     finally:
         signal.signal(signal.SIGINT, old_handler)
 

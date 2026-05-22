@@ -153,6 +153,29 @@ class TestWaitUntil:
         wait_until(target)
         assert mock_sleep.called
 
+    def test_runs_on_worker_thread_without_crashing(self) -> None:
+        """wait_until() must not raise when called off the main thread.
+
+        Regression for #441: signal.signal() raises ValueError on non-main
+        threads. wait_until() is reached from ThreadPoolExecutor workers during
+        parallel automation, so it must skip the SIGINT handler off-thread.
+        """
+        import threading
+
+        error: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                wait_until(0)  # past epoch — returns immediately
+            except BaseException as exc:  # capture for assertion in parent thread
+                error.append(exc)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert error == [], f"wait_until raised on worker thread: {error}"
+
 
 class TestDetectClaudeUsageLimit:
     """Tests for detect_claude_usage_limit."""
