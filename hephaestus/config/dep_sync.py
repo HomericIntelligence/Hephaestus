@@ -4,9 +4,10 @@ Provides two main operations:
 
 **Check** (``hephaestus-check-dep-sync``): Validates that every package pinned in
 ``requirements*.txt`` has a corresponding entry in ``pixi.toml`` and that the
-pinned version falls within the ``pixi.toml`` range constraint.  Also reports if
-``pyproject.toml`` still carries ``[project.dependencies]`` (which should be
-managed in ``pixi.toml`` instead).
+pinned version falls within the ``pixi.toml`` range constraint. For a library
+distributed via PyPI, ``[project.dependencies]`` and ``[project.optional-dependencies]``
+in ``pyproject.toml`` are the public install contract and are intentionally
+**not** flagged.
 
 **Sync** (``hephaestus-sync-requirements``): Re-generates ``requirements.txt`` and
 ``requirements-dev.txt`` from the pixi-resolved environment (``pixi list --json``),
@@ -213,30 +214,6 @@ def parse_requirements(path: Path) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def check_pyproject_no_deps(path: Path) -> list[str]:
-    """Return errors if ``pyproject.toml`` carries managed dependency sections.
-
-    Flags ``[project.dependencies]`` and ``[project.optional-dependencies]``
-    which should be managed in ``pixi.toml`` instead.
-
-    Args:
-        path: Path to ``pyproject.toml``.
-
-    Returns:
-        List of error strings.
-
-    """
-    errors: list[str] = []
-    if not path.exists():
-        return errors
-    text = path.read_text(encoding="utf-8")
-    if re.search(r"^\[project\.dependencies\]", text, re.MULTILINE):
-        errors.append("pyproject.toml contains [project.dependencies] — remove it")
-    if "[project.optional-dependencies]" in text:
-        errors.append("pyproject.toml contains [project.optional-dependencies] — remove it")
-    return errors
-
-
 def check_requirements_against_pixi(
     repo_root: Path,
     pixi_deps_lower: dict[str, str],
@@ -297,7 +274,6 @@ def check_dep_sync(repo_root: Path | None = None) -> list[str]:
     pixi_deps_lower = {k.lower(): v for k, v in pixi_deps.items()}
 
     errors.extend(check_requirements_against_pixi(repo_root, pixi_deps_lower))
-    errors.extend(check_pyproject_no_deps(repo_root / "pyproject.toml"))
     return errors
 
 
