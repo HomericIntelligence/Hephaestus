@@ -1,0 +1,67 @@
+ProjectHephaestus
+Copyright (c) 2024-2026, Micah Villmow
+
+This product is distributed under the BSD 3-Clause License (see LICENSE).
+
+This product bundles no third-party source code.
+
+================================================================================
+Third-party runtime dependencies
+================================================================================
+
+The following packages are installed as runtime dependencies when you install
+`HomericIntelligence-Hephaestus`. Their licenses are listed below; each is
+compatible with BSD 3-Clause distribution because they are imported, not
+modified or redistributed.
+
+  packaging     Apache-2.0 OR BSD-2-Clause
+  pyyaml        MIT
+  pydantic      MIT
+
+================================================================================
+Optional (extras) runtime dependencies
+================================================================================
+
+These packages are installed only when the corresponding extra is requested
+(e.g. `pip install HomericIntelligence-Hephaestus[github]`):
+
+  github extra
+    PyGithub    LGPL-3.0-only
+                LGPL-3.0 is compatible with BSD-3-Clause distribution when the
+                LGPL library is dynamically linked (as Python imports do). This
+                project does not modify PyGithub; consumers can replace it via
+                their own pip resolution.
+
+  nats extra
+    nats-py     Apache-2.0
+
+  toml extra
+    tomli       MIT (used only on Python < 3.11; stdlib tomllib on >= 3.11)
+
+  xml extra
+    defusedxml  PSF-2.0
+
+  schema extra
+    jsonschema  MIT
+
+================================================================================
+Build dependencies
+================================================================================
+
+Build-time only; not shipped in the wheel:
+
+  hatchling     MIT
+  hatch-vcs     MIT
+  editables     MIT
+
+================================================================================
+Development dependencies
+================================================================================
+
+The `pixi.toml` dev environment additionally pulls in tooling such as `ruff`,
+`mypy`, `pytest`, `bats-core`, `yamllint`, and `pre-commit`. These are NOT
+distributed as part of `HomericIntelligence-Hephaestus`; they are present only
+in the local development environment and have no bearing on the licenses of
+distributed artifacts. Some (e.g. `yamllint`, `bats-core`) are GPL-licensed,
+which is acceptable because they are external developer tools invoked at
+build/lint time, not linked into the published package.
