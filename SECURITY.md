@@ -2,13 +2,13 @@
 
 ## Supported Versions
 
-As of 2026-05-10. Python >= 3.10 required.
+As of 2026-05-24. Python >= 3.10 required.
 
-| Version | Supported            |
-|---------|----------------------|
-| 0.7.x   | ✅ Supported         |
-| 0.6.x   | ✅ Supported         |
-| < 0.6   | ❌ End of life       |
+| Version | Supported       |
+|---------|-----------------|
+| 1.x     | ✅ Supported    |
+| 0.9.x   | ✅ Supported    |
+| < 0.9   | ❌ End of life  |
 
 ## Reporting a Vulnerability
 
