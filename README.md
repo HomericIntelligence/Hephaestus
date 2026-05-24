@@ -380,4 +380,5 @@ pixi install
 
 ## License
 
-BSD 3-Clause License - see [LICENSE](LICENSE) file for details.
+BSD 3-Clause License — see [LICENSE](LICENSE) for the full text, and
+[NOTICE](NOTICE) for third-party dependency licenses and compatibility notes.
