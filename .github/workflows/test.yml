@@ -24,7 +24,7 @@ jobs:
         uses: prefix-dev/setup-pixi@1b2de7f3351f171c8b4dfeb558c639cb58ed4ec0  # v0.9.5
         with:
           pixi-version: v0.63.2
-          locked: false
+          locked: true
 
       - name: Cache pixi environments
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
