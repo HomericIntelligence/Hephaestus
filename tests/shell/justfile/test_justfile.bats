@@ -107,9 +107,13 @@ JUSTFILE="${REPO_ROOT}/justfile"
     while IFS= read -r task; do
         # 'audit' runs in a separate lint environment — skip for the default workflow.
         # 'mypy' pixi task is exposed as 'typecheck' in the justfile (UX alias).
+        # 'mypy-pkg' is the package-only backend of 'typecheck' (no user-facing alias).
+        # 'dev-install' is a one-time setup hook documented in CONTRIBUTING.md.
         case "$task" in
-            audit) continue ;;
-            mypy)  continue ;;
+            audit)        continue ;;
+            mypy)         continue ;;
+            mypy-pkg)     continue ;;
+            dev-install)  continue ;;
         esac
         if ! echo "$just_recipes" | grep -qx "$task"; then
             missing="${missing} ${task}"
