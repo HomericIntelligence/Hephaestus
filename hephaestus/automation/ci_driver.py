@@ -29,6 +29,7 @@ from hephaestus.agents.runtime import (
     session_agent_matches,
 )
 
+from ._review_utils import find_pr_for_issue
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
 from .claude_timeouts import ci_driver_claude_timeout
@@ -391,7 +392,10 @@ class CIDriver:
     def _find_pr_for_issue(self, issue_number: int) -> int | None:
         """Find the open PR for a single issue.
 
-        Tries branch-name lookup first, then body search.
+        Delegates to :func:`_review_utils.find_pr_for_issue` (two-strategy
+        branch-name + body search). Sharing the helper with
+        :class:`AddressReviewer` and :class:`PRReviewer` keeps strategy
+        evolution in one place.
 
         Args:
             issue_number: GitHub issue number.
@@ -400,65 +404,7 @@ class CIDriver:
             PR number if found, None otherwise.
 
         """
-        # Strategy 1: Look for branch named {issue}-auto-impl
-        branch_name = f"{issue_number}-auto-impl"
-        try:
-            result = _gh_call(
-                [
-                    "pr",
-                    "list",
-                    "--head",
-                    branch_name,
-                    "--state",
-                    "open",
-                    "--json",
-                    "number",
-                    "--limit",
-                    "1",
-                ],
-                check=False,
-            )
-            pr_data = json.loads(result.stdout or "[]")
-            if pr_data:
-                pr_number = pr_data[0]["number"]
-                logger.info("Found PR #%s for issue #%s via branch name", pr_number, issue_number)
-                return int(pr_number)
-        except Exception as e:
-            logger.debug("Branch-name lookup failed for issue #%s: %s", issue_number, e)
-
-        # Strategy 2: Search PR body for issue reference using the canonical
-        # "Closes #N" pattern so we don't accidentally match a PR that merely
-        # mentions the issue number in passing (e.g. "related to #123").
-        try:
-            result = _gh_call(
-                [
-                    "pr",
-                    "list",
-                    "--state",
-                    "open",
-                    "--search",
-                    f"Closes #{issue_number} in:body",
-                    "--json",
-                    "number,title",
-                    "--limit",
-                    "5",
-                ],
-                check=False,
-            )
-            pr_data = json.loads(result.stdout or "[]")
-            if pr_data:
-                pr_number = pr_data[0]["number"]
-                logger.info(
-                    "Found PR #%s for issue #%s via body search (title: %r)",
-                    pr_number,
-                    issue_number,
-                    pr_data[0].get("title", ""),
-                )
-                return int(pr_number)
-        except Exception as e:
-            logger.debug("Body search failed for issue #%s: %s", issue_number, e)
-
-        return None
+        return find_pr_for_issue(issue_number)
 
     def _get_pr_branch(self, pr_number: int) -> str:
         """Get the head branch name of a PR.

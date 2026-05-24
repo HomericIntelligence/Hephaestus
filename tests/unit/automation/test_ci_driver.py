@@ -656,8 +656,9 @@ class TestBodySearch:
 
     def test_body_search_uses_closes_pattern(self, driver: CIDriver) -> None:
         """The search string must use 'Closes #<N> in:body'."""
-        # Make the branch-name lookup return nothing so we fall through to body search
-        with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh:
+        # _find_pr_for_issue now delegates to _review_utils.find_pr_for_issue;
+        # patch _gh_call at its actual call site there.
+        with patch("hephaestus.automation._review_utils._gh_call") as mock_gh:
             mock_gh.return_value = MagicMock(stdout="[]")
             driver._find_pr_for_issue(42)
 

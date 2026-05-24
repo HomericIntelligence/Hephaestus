@@ -122,7 +122,9 @@ def find_pr_for_issue(
             except Exception as e:
                 logger.debug("Review state PR lookup failed for issue #%d: %s", issue_number, e)
 
-    # Strategy 3: PR-body text search
+    # Strategy 3: PR-body text search.
+    # Search for the canonical "Closes #N" link so we don't false-match a PR
+    # that merely mentions the issue number in passing ("related to #123").
     try:
         result = _gh_call(
             [
@@ -131,7 +133,7 @@ def find_pr_for_issue(
                 "--state",
                 "open",
                 "--search",
-                f"#{issue_number} in:body",
+                f"Closes #{issue_number} in:body",
                 "--json",
                 "number",
                 "--limit",
