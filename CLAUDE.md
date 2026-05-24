@@ -25,19 +25,26 @@ ProjectHephaestus is the shared utilities and tooling repository of the HomericI
 
 ```text
 ProjectHephaestus/
-├── hephaestus/                 # Python source code
-│   ├── utils/                  # General utility functions (slugify, retry, subprocess)
-│   ├── config/                 # Configuration management
-│   ├── logging/                # Logging utilities
-│   ├── io/                     # Input/output utilities
-│   ├── cli/                    # Command-line interface tools
-│   ├── system/                 # System information collection
-│   ├── github/                 # GitHub automation (PR merging)
-│   ├── datasets/               # Dataset downloading utilities
-│   ├── markdown/               # Markdown linting and link fixing
+├── hephaestus/                 # Python source code (19 subpackages)
+│   ├── agents/                 # Agent frontmatter + loader + runtime
+│   ├── automation/             # Issue planning / implementation / PR review pipeline
 │   ├── benchmarks/             # Benchmark comparison utilities
-│   ├── version/                # Version management
-│   └── validation/             # README and config validation
+│   ├── ci/                     # CI helpers (precommit, workflows, docker timing)
+│   ├── cli/                    # Command-line interface tools
+│   ├── config/                 # Configuration management
+│   ├── datasets/               # Dataset downloading utilities
+│   ├── discovery/              # Discovery of agents, skills, and code blocks
+│   ├── forensics/              # Coredump capture + gdb post-mortem runner
+│   ├── github/                 # GitHub automation (PR merging, fleet sync, tidy, stats)
+│   ├── io/                     # Input/output utilities
+│   ├── logging/                # Logging utilities
+│   ├── markdown/               # Markdown linting and link fixing
+│   ├── nats/                   # NATS JetStream subscriber (event-driven workflows)
+│   ├── resilience/             # Circuit breaker + retry + subprocess resilience
+│   ├── system/                 # System information collection
+│   ├── utils/                  # General utility functions (slugify, retry, subprocess)
+│   ├── validation/             # README, schema, and structural validation
+│   └── version/                # Version management
 ├── scripts/                    # Automation and maintenance scripts
 ├── tests/                      # Unit and integration tests
 │   ├── unit/                   # Unit tests (mirrors hephaestus/ structure)

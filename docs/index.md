@@ -8,18 +8,25 @@ ProjectHephaestus is the shared utilities and tooling library for the HomericInt
 
 ## Subpackages
 
-- **hephaestus.utils** — General utility functions (slugify, retry, subprocess helpers)
+- **hephaestus.agents** — Agent frontmatter, loader, runtime, stats
+- **hephaestus.automation** — Issue planning / implementation / PR review pipeline
+- **hephaestus.benchmarks** — Benchmark comparison and regression detection
+- **hephaestus.ci** — CI helpers (precommit, workflows, docker timing)
+- **hephaestus.cli** — CLI argument parsing and output formatting
 - **hephaestus.config** — Configuration loading and management (YAML, JSON, env vars)
+- **hephaestus.datasets** — Dataset downloading utilities
+- **hephaestus.discovery** — Discovery of agents, skills, and code blocks
+- **hephaestus.forensics** — Coredump capture and gdb post-mortem runner
+- **hephaestus.github** — GitHub automation (PR merging, fleet sync, tidy, stats, rate limit)
 - **hephaestus.io** — File I/O utilities (read, write, safe_write, load/save data)
 - **hephaestus.logging** — Enhanced logging (ContextLogger, setup_logging)
-- **hephaestus.cli** — CLI argument parsing and output formatting
+- **hephaestus.markdown** — Markdown linting, link fixing, anchor validation
+- **hephaestus.nats** — NATS JetStream subscriber for event-driven workflows
+- **hephaestus.resilience** — Circuit breaker + retry + subprocess resilience primitives
 - **hephaestus.system** — System information collection
-- **hephaestus.github** — GitHub automation (PR merging)
-- **hephaestus.datasets** — Dataset downloading utilities
-- **hephaestus.markdown** — Markdown linting and link fixing
-- **hephaestus.benchmarks** — Benchmark comparison and regression detection
-- **hephaestus.version** — Version management utilities
-- **hephaestus.validation** — README and config validation
+- **hephaestus.utils** — General utility functions (slugify, retry, subprocess helpers)
+- **hephaestus.validation** — README, schema, and structural validation
+- **hephaestus.version** — Version management (hatch-vcs + consistency checks)
 
 ## API Reference
 
