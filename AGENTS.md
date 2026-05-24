@@ -1,0 +1,91 @@
+# AGENTS.md
+
+This file is a single-page map of the AI-agent topology and conventions used by
+ProjectHephaestus and the wider HomericIntelligence ecosystem. For project-specific
+rules (commit policy, branch naming, version model) see [`CLAUDE.md`](CLAUDE.md);
+for the catalog of skills the agents invoke, see the [`skills/`](skills/) directory.
+
+## Agents the codebase orchestrates
+
+The `hephaestus.automation` subpackage drives a 6-phase issue/PR pipeline. Each phase
+runs an external coding agent — either **Claude Code** or **Codex** — chosen per
+invocation via the `--agent` CLI flag (see `hephaestus.agents.runtime.add_agent_argument`).
+
+| Phase | Module | Console script | Purpose |
+|-------|--------|----------------|---------|
+| Plan | `hephaestus.automation.planner` | `hephaestus-plan-issues` | Produce an implementation plan for an open issue |
+| Plan review | `hephaestus.automation.plan_reviewer` (within planner loop) | (internal) | Strict R0/R1/R2 review of the plan |
+| Implement | `hephaestus.automation.implementer` | `hephaestus-implement-issues` | Carry out the plan in an isolated git worktree |
+| Implementation review | `hephaestus.automation._review_utils` (within implementer loop) | (internal) | Strict review of the resulting diff |
+| PR review | `hephaestus.automation.pr_reviewer` | `hephaestus-review-prs` | Inline review of an open PR, policy-aware |
+| Address review | `hephaestus.automation.address_review` | (internal; spawned from PR-review verdicts) | Resolve outstanding inline-review threads |
+
+CI follow-up is handled by `hephaestus.automation.ci_driver` (`hephaestus-merge-prs` /
+internal worker), which polls CI checks and either fixes failing required checks via
+another agent invocation or enables auto-merge once green.
+
+A single one-off stage can be invoked manually via
+`hephaestus-agent-stage` (`hephaestus.automation.agent_stage`).
+
+## Agent runtime
+
+`hephaestus.agents.runtime` is the thin layer that abstracts over Claude Code and
+Codex. It provides:
+
+- `add_agent_argument(parser)` — adds a uniform `--agent` flag to any CLI.
+- `is_codex(agent_str)` — branches between the two providers.
+- `run_codex_text(...)`, `run_codex_session(...)`, `resume_codex_session(...)` —
+  invoke Codex.
+- Claude is invoked via `hephaestus.automation.claude_invoke.invoke_claude_with_session`.
+
+Per-agent timeouts are centralised in `hephaestus.automation.claude_timeouts`, all
+operator-tunable via `HEPH_*` environment variables.
+
+## Prompt safety
+
+`hephaestus.automation.prompts` builds every prompt the agents see. The module's
+contract — enforced by the test suite — is that **all untrusted GitHub content**
+(issue bodies, PR diffs, reviewer comments, plan text) is wrapped with
+`_fence_untrusted()` using random nonces and accompanied by `_UNTRUSTED_NOTICE`.
+This prevents a hostile issue body from forging a verdict line or injecting
+instructions that bypass the strict review loop. See the tests in
+`tests/unit/automation/test_prompts.py` for the regression coverage.
+
+## Human-in-the-loop checkpoints
+
+Several skills mandate human gates that the agents must wait on:
+
+- `skills/myrmidon-swarm/SKILL.md` — explicit Phase 1 "STOP HERE. Ask the user…"
+  before any swarm deploys.
+- `skills/skill-advisor/SKILL.md` — invoked at the start of any substantive task
+  with `allowed-tools: []`, so it can route but never act autonomously.
+- `skills/finish-branch/SKILL.md`, `skills/code-review/SKILL.md` — explicit confirm
+  steps before tagging, force-pushing, or merging.
+
+Every PR opened by the automation pipeline goes through GitHub's normal branch
+protection and the `pr-policy` required-check gate
+(see [`CLAUDE.md`](CLAUDE.md#pr-policy)) — a human still reviews and merges.
+
+## Skill catalog
+
+`skills/` contains 23 reusable skills the agents can invoke. See
+[`CLAUDE.md`](CLAUDE.md#skill-catalog) for the full table. Highlights:
+
+- **Workflow**: `skill-advisor`, `advise`, `brainstorm`, `test-driven-development`,
+  `systematic-debugging`, `verification`, `finish-branch`, `code-review`.
+- **Repo audits**: `repo-analyze` and its `-quick`, `-strict`, `-full`, and
+  `*-full` variants.
+- **Worktrees**: `git-worktrees`, `worktree-cleanup`, `tidy`.
+- **Orchestration**: `myrmidon-swarm` for hierarchical multi-agent fan-out.
+- **Knowledge capture**: `learn` (writes back to the Mnemosyne marketplace).
+
+## Configuration / boundaries
+
+- Hooks and per-skill `allowed-tools` are declared in each skill's frontmatter
+  (`skills/<name>/SKILL.md`) — these are the agent permission boundaries.
+- `.claude/settings.json` carries project-level plugin enablement.
+- `.claude-plugin/` ships the marketplace manifests (the project itself is a
+  Claude Code plugin); see also [`docs/plugin-installation.md`](docs/plugin-installation.md).
+- The deferred follow-ups for cross-agent abstraction (a formal `AgentProtocol`)
+  and for wiring `hephaestus.resilience` into the GitHub call path are tracked
+  in issues #468 and #469.
