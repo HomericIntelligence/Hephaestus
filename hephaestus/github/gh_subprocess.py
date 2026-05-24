@@ -64,7 +64,7 @@ def _gh_call(
                         wait_until(reset_epoch)
                     else:
                         wait_seconds = min(60 * (2**attempt), 300)
-                        logger.warning(f"Rate limited but no reset time, waiting {wait_seconds}s")
+                        logger.warning("Rate limited but no reset time, waiting %ss", wait_seconds)
                         time.sleep(wait_seconds)
                     continue
                 else:
@@ -80,14 +80,16 @@ def _gh_call(
                 r"invalid argument",
             ]
             if any(re.search(pattern, stderr, re.IGNORECASE) for pattern in non_transient_patterns):
-                logger.error(f"Non-transient error detected: {stderr[:200]}")
+                logger.error("Non-transient error detected: %s", stderr[:200])
                 raise
 
             if attempt == max_retries - 1:
                 raise
 
             wait_seconds = 2**attempt
-            logger.warning(f"gh call failed (attempt {attempt + 1}), retrying in {wait_seconds}s")
+            logger.warning(
+                "gh call failed (attempt %s), retrying in %ss", attempt + 1, wait_seconds
+            )
             time.sleep(wait_seconds)
 
     raise RuntimeError("gh call failed after all retries")
