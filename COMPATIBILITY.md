@@ -8,6 +8,48 @@ ProjectHephaestus follows [Semantic Versioning](https://semver.org/).
 
 Upgrading across a major version? See the [migration guide](docs/MIGRATION.md).
 
+## Stability Tiers
+
+ProjectHephaestus ships 19 subpackages with different maturity levels. Only the
+**stable** subpackages below are covered by the [deprecation policy](#deprecation-policy);
+**provisional** subpackages may change without notice, even across minor versions.
+
+### Stable
+
+The following subpackages are part of the stable public API surface. Public symbols
+(those listed in the module's `__all__` and in the per-package tables below) are
+covered by the deprecation policy.
+
+- `hephaestus` (top-level lazy re-exports)
+- `hephaestus.cli`
+- `hephaestus.config`
+- `hephaestus.io`
+- `hephaestus.logging`
+- `hephaestus.system`
+- `hephaestus.utils`
+- `hephaestus.version`
+
+### Provisional / internal
+
+The following subpackages contain useful code that is **not** covered by the
+stability guarantee — call them at your own risk and pin a specific version. They
+may change incompatibly in a minor release.
+
+| Subpackage | Why provisional |
+|------------|-----------------|
+| `hephaestus.agents` | Agent metadata schema still evolving |
+| `hephaestus.automation` | Actively-evolving 6-phase issue/PR pipeline; large refactor pending (#468) |
+| `hephaestus.benchmarks` | Comparison API is exploratory |
+| `hephaestus.ci` | CI helpers are project-specific glue, not a general API |
+| `hephaestus.datasets` | Downloader URLs and on-disk layout are not contracted |
+| `hephaestus.discovery` | Discovery rules for agents/skills still evolving |
+| `hephaestus.forensics` | Coredump/gdb helpers depend on host platform conventions |
+| `hephaestus.github` | Only `detect_repo_from_remote`/`local_branch_exists` and the `stats` / `rate_limit` helpers are intended as library API; the CLI `main()`s are not |
+| `hephaestus.markdown` | Linting/fixing rules track evolving markdown conventions |
+| `hephaestus.nats` | NATS subscriber surface is provisional pending real-world use |
+| `hephaestus.resilience` | Implemented but not yet wired into production paths (#469) |
+| `hephaestus.validation` | Validation rules track CI policy and evolve with it |
+
 ## Public API
 
 The following symbols are part of the stable public API and are covered by
@@ -35,6 +77,13 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 `get_repo_root`, `get_setting`, `human_readable_size`, `install_package`,
 `load_data`, `merge_configs`, `parse_reset_epoch`, `read_file`, `register_command`,
 `run_subprocess`, `safe_write`, `save_data`, `wait_until`, `write_file`, `write_secure`.
+
+**Deprecated lazy-loaded symbols** (covered by the deprecation policy until
+removal):
+
+- `retry_with_jitter` — superseded by `retry_with_backoff(jitter=True, max_delay=...)`.
+  Emits a `DeprecationWarning` when called. Scheduled for removal no earlier than
+  the next major version after 1.0.
 
 ### `hephaestus.logging`
 
