@@ -2,13 +2,25 @@
 
 """Tests for hephaestus.markdown.link_fixer module."""
 
+import sys
 from pathlib import Path
 
 import pytest
 
 from hephaestus.markdown.link_fixer import LinkFixer, LinkFixerOptions, check_links, main
 
+# The three "system path" tests use literal Unix absolute paths like
+# /home/user/repo/ to exercise the absolute-path-to-relative-path rewrite.
+# Those paths don't exist on macOS/Windows and the path separators differ,
+# so the tests are intrinsically Linux-only. The library itself is
+# cross-platform; only this test fixture is Linux-pinned.
+_linux_only = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="exercises absolute Unix path rewriting; library logic is cross-platform",
+)
 
+
+@_linux_only
 def test_fix_system_path_links():
     """Test fixing links with full system paths."""
     fixer = LinkFixer()
@@ -65,6 +77,7 @@ def test_fix_absolute_path_links():
     assert count == 0
 
 
+@_linux_only
 def test_link_fixer_integration(tmp_path):
     """Test full link fixer on a file."""
     # Create test file
@@ -87,6 +100,7 @@ def test_link_fixer_integration(tmp_path):
     assert "/home/user/repo/" not in content
 
 
+@_linux_only
 def test_link_fixer_dry_run(tmp_path):
     """Test that dry run doesn't modify files."""
     test_file = tmp_path / "test.md"

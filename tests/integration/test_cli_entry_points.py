@@ -21,6 +21,7 @@ from __future__ import annotations
 import importlib
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -55,6 +56,12 @@ class TestCLITargetImportable:
 
     @pytest.mark.parametrize("command,module_path,attr", ENTRY_POINTS, ids=ENTRY_POINT_IDS)
     def test_target_importable(self, command: str, module_path: str, attr: str) -> None:
+        # Several automation CLIs transitively import hephaestus.automation.curses_ui,
+        # which depends on the stdlib `curses` module. CPython does not ship curses on
+        # Windows, so these imports raise ModuleNotFoundError there. The CLIs are not
+        # intended for Windows operators; skip the parametrize entry on that platform.
+        if sys.platform == "win32" and "automation" in module_path:
+            pytest.skip("automation CLIs require curses (not bundled on Windows)")
         mod = importlib.import_module(module_path)
         assert hasattr(mod, attr), f"{module_path} has no '{attr}' attribute"
         assert callable(getattr(mod, attr)), f"{module_path}.{attr} is not callable"
