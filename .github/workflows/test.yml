@@ -85,7 +85,8 @@ jobs:
 
       - name: Check unit test structure
         if: matrix.test-type == 'unit'
-        run: python scripts/check_unit_test_structure.py
+        # Use the strict CLI (also flags loose test_*.py files at tests/unit/ root).
+        run: hephaestus-check-test-structure
 
       - name: Run integration tests
         if: matrix.test-type == 'integration'

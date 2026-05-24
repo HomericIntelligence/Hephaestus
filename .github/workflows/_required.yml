@@ -372,7 +372,8 @@ jobs:
         run: pytest tests/unit --override-ini="addopts=" -v --strict-markers --cov=hephaestus --cov-report=term-missing --cov-fail-under=80
 
       - name: Check unit test structure
-        run: python scripts/check_unit_test_structure.py
+        # Use the strict CLI (also flags loose test_*.py files at tests/unit/ root).
+        run: hephaestus-check-test-structure
 
   integration-tests:
     name: integration-tests
