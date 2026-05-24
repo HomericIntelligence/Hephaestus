@@ -5,7 +5,6 @@
     "url": "https://github.com/HomericIntelligence"
   },
   "description": "Shared tooling and commands for the HomericIntelligence agentic ecosystem",
-  "version": "3.0.0",
   "plugins": [
     {
       "name": "hephaestus",
