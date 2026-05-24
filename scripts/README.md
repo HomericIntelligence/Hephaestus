@@ -61,8 +61,6 @@ module — most users invoke the `hephaestus-*` console scripts instead.
 - **`compare_benchmarks.py`** — Compare benchmark results across runs.
 - **`demo_cli.py`** — Demo CLI functionality.
 - **`example_usage.py`** — Usage examples.
-- **`run_tests.py`** — Hand-rolled test runner kept as a fallback for
-  environments without pytest; prefer `pixi run test`.
 
 ## Usage
 
