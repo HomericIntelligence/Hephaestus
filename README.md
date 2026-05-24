@@ -21,18 +21,25 @@ ProjectHephaestus/
 ├── pyproject.toml     # Python package configuration
 ├── hephaestus/        # Main package
 │   ├── __init__.py
-│   ├── utils/         # General utility functions (slugify, retry, subprocess)
-│   ├── config/        # Configuration utilities (YAML, JSON, env vars)
-│   ├── io/            # I/O utilities (read, write, safe_write, load/save data)
-│   ├── cli/           # CLI helpers (argument parsing, output formatting)
-│   ├── logging/       # Logging utilities (ContextLogger, setup_logging)
-│   ├── system/        # System information collection
-│   ├── github/        # GitHub automation (PR merging)
-│   ├── datasets/      # Dataset downloading utilities
-│   ├── markdown/      # Markdown linting and link fixing
+│   ├── agents/        # Agent frontmatter + loader + runtime
+│   ├── automation/    # Issue planning / implementation / PR review pipeline
 │   ├── benchmarks/    # Benchmark comparison utilities
-│   ├── version/       # Version management
-│   └── validation/    # README and config validation
+│   ├── ci/            # CI helpers (precommit, workflows, docker timing)
+│   ├── cli/           # CLI helpers (argument parsing, output formatting)
+│   ├── config/        # Configuration utilities (YAML, JSON, env vars)
+│   ├── datasets/      # Dataset downloading utilities
+│   ├── discovery/     # Discovery of agents, skills, and code blocks
+│   ├── forensics/     # Coredump capture + gdb post-mortem runner
+│   ├── github/        # GitHub automation (PR merging, fleet sync, tidy, stats)
+│   ├── io/            # I/O utilities (read, write, safe_write, load/save data)
+│   ├── logging/       # Logging utilities (ContextLogger, setup_logging)
+│   ├── markdown/      # Markdown linting and link fixing
+│   ├── nats/          # NATS JetStream subscriber (event-driven workflows)
+│   ├── resilience/    # Circuit breaker + retry + subprocess resilience primitives
+│   ├── system/        # System information collection
+│   ├── utils/         # General utility functions (slugify, retry, subprocess)
+│   ├── validation/    # README, schema, and structural validation
+│   └── version/       # Version management (hatch-vcs + consistency checks)
 ├── tests/             # Unit tests
 ├── docs/              # Documentation
 ├── scripts/           # Utility scripts
