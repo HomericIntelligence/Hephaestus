@@ -102,7 +102,9 @@ repos:
       - id: check-unit-test-structure
         name: Check unit test structure
         description: Enforce tests/unit/ mirrors hephaestus/ and has no loose test files
-        entry: pixi run hephaestus-check-test-structure
+        # --environment default is explicit because the pre-commit CI job runs
+        # in the lint env; the hephaestus-* console scripts live in default.
+        entry: pixi run --environment default hephaestus-check-test-structure
         language: system
         pass_filenames: false
         files: ^(hephaestus|tests/unit)/
@@ -148,7 +150,9 @@ repos:
       - id: check-dep-sync
         name: Check dependency declarations are consistent
         description: Validate requirements*.txt entries against pixi.toml
-        entry: pixi run hephaestus-check-dep-sync
+        # --environment default is explicit because the pre-commit CI job runs
+        # in the lint env; the hephaestus-* console scripts live in default.
+        entry: pixi run --environment default hephaestus-check-dep-sync
         language: system
         pass_filenames: false
         files: ^(pyproject\.toml|pixi\.toml|pixi\.lock|requirements.*\.txt)$
