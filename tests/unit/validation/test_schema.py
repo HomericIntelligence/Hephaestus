@@ -165,3 +165,173 @@ class TestCheckFiles:
         """Empty files list returns 0."""
         exit_code, _error_count = check_files([], tmp_path, [])
         assert exit_code == 0
+
+
+class TestMain:
+    """Tests for hephaestus-validate-schemas CLI entry point (regression for #495)."""
+
+    def test_empty_files_returns_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No file arguments → no work → exit 0."""
+        from hephaestus.validation.schema import main
+
+        monkeypatch.setattr("sys.argv", ["hephaestus-validate-schemas"])
+        assert main() == 0
+
+    def test_missing_schema_map_returns_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Files passed without --schema-map exits 1 with a clear error."""
+        from hephaestus.validation.schema import main
+
+        f = tmp_path / "config.yaml"
+        f.write_text("name: ok\n")
+        monkeypatch.setattr("sys.argv", ["hephaestus-validate-schemas", str(f)])
+        assert main() == 1
+        assert "--schema-map is required" in capsys.readouterr().err
+
+    def test_missing_schema_map_file_returns_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """A --schema-map pointing at a missing file exits 1."""
+        from hephaestus.validation.schema import main
+
+        target = tmp_path / "config.yaml"
+        target.write_text("name: x\n")
+        missing_map = tmp_path / "does-not-exist.json"
+        monkeypatch.setattr(
+            "sys.argv",
+            ["hephaestus-validate-schemas", "--schema-map", str(missing_map), str(target)],
+        )
+        assert main() == 1
+        assert "Could not load schema map" in capsys.readouterr().err
+
+    def test_invalid_json_schema_map_returns_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """A malformed --schema-map JSON exits 1."""
+        from hephaestus.validation.schema import main
+
+        target = tmp_path / "config.yaml"
+        target.write_text("name: x\n")
+        bad_map = tmp_path / "bad.json"
+        bad_map.write_text("{not valid json")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["hephaestus-validate-schemas", "--schema-map", str(bad_map), str(target)],
+        )
+        assert main() == 1
+        assert "Could not load schema map" in capsys.readouterr().err
+
+    def test_valid_file_returns_zero(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A valid YAML file matching its schema exits 0."""
+        pytest.importorskip("jsonschema")
+        from hephaestus.validation.schema import main
+
+        schema = tmp_path / "schema.json"
+        schema.write_text(
+            json.dumps(
+                {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                }
+            )
+        )
+        target_dir = tmp_path / "config"
+        target_dir.mkdir()
+        target = target_dir / "ok.yaml"
+        target.write_text("name: alice\n")
+
+        schema_map = tmp_path / "map.json"
+        # The schema map JSON format is list[[pattern, schema_path]].
+        schema_map.write_text(json.dumps([[r"^config/.*\.yaml$", str(schema)]]))
+
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "hephaestus-validate-schemas",
+                "--schema-map",
+                str(schema_map),
+                "--repo-root",
+                str(tmp_path),
+                str(target),
+            ],
+        )
+        assert main() == 0
+
+    def test_violating_file_returns_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A file violating its schema exits 1."""
+        pytest.importorskip("jsonschema")
+        from hephaestus.validation.schema import main
+
+        schema = tmp_path / "schema.json"
+        schema.write_text(
+            json.dumps(
+                {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                }
+            )
+        )
+        target_dir = tmp_path / "config"
+        target_dir.mkdir()
+        target = target_dir / "bad.yaml"
+        target.write_text("notname: alice\n")  # missing required "name"
+
+        schema_map = tmp_path / "map.json"
+        schema_map.write_text(json.dumps([[r"^config/.*\.yaml$", str(schema)]]))
+
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "hephaestus-validate-schemas",
+                "--schema-map",
+                str(schema_map),
+                "--repo-root",
+                str(tmp_path),
+                str(target),
+            ],
+        )
+        assert main() == 1
+
+    def test_dry_run_returns_zero_even_on_violations(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--dry-run reports errors but returns 0."""
+        pytest.importorskip("jsonschema")
+        from hephaestus.validation.schema import main
+
+        schema = tmp_path / "schema.json"
+        schema.write_text(
+            json.dumps(
+                {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                }
+            )
+        )
+        target_dir = tmp_path / "config"
+        target_dir.mkdir()
+        target = target_dir / "bad.yaml"
+        target.write_text("notname: alice\n")
+
+        schema_map = tmp_path / "map.json"
+        schema_map.write_text(json.dumps([[r"^config/.*\.yaml$", str(schema)]]))
+
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "hephaestus-validate-schemas",
+                "--schema-map",
+                str(schema_map),
+                "--repo-root",
+                str(tmp_path),
+                "--dry-run",
+                str(target),
+            ],
+        )
+        assert main() == 0
