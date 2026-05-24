@@ -217,8 +217,6 @@ omit = [
     "hephaestus/automation/github_api.py",
     # pr_reviewer.py drives a full Claude session against a live PR; integration-only
     "hephaestus/automation/pr_reviewer.py",
-    "hephaestus/github/fleet_sync.py",
-    "hephaestus/github/tidy.py",
 ]
 
 [tool.coverage.report]
