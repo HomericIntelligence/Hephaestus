@@ -21,19 +21,19 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0
           fetch-tags: true
 
       - name: Install pixi
-        uses: prefix-dev/setup-pixi@v0.9.5
+        uses: prefix-dev/setup-pixi@1b2de7f3351f171c8b4dfeb558c639cb58ed4ec0  # v0.9.5
         with:
           pixi-version: v0.63.2
           locked: false
 
       - name: Cache pixi environments
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: |
             .pixi
@@ -50,19 +50,19 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0
           fetch-tags: true
 
       - name: Install pixi
-        uses: prefix-dev/setup-pixi@v0.9.5
+        uses: prefix-dev/setup-pixi@1b2de7f3351f171c8b4dfeb558c639cb58ed4ec0  # v0.9.5
         with:
           pixi-version: v0.63.2
           locked: false
 
       - name: Cache pixi environments
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: |
             .pixi
@@ -81,7 +81,7 @@ jobs:
     environment: pypi
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -105,13 +105,13 @@ jobs:
           git checkout "${TAG}"
 
       - name: Install pixi
-        uses: prefix-dev/setup-pixi@v0.9.5
+        uses: prefix-dev/setup-pixi@1b2de7f3351f171c8b4dfeb558c639cb58ed4ec0  # v0.9.5
         with:
           pixi-version: v0.63.2
           locked: false
 
       - name: Cache pixi environments
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: |
             .pixi
@@ -151,7 +151,7 @@ jobs:
           ls -1 dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
         with:
           verbose: true
 
@@ -176,7 +176,7 @@ jobs:
 
       - name: Create GitHub Release
         if: steps.existing.outputs.exists == 'false'
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           generate_release_notes: true
