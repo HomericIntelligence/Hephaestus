@@ -161,3 +161,63 @@ class TestPRInfo:
         )
         pr1.conflict_files.append("file.txt")
         assert pr2.conflict_files == [], "conflict_files must not be a shared mutable default"
+
+
+class TestGetResignEmail:
+    """Regression tests for #497: resign email is configurable, not hardcoded."""
+
+    def test_env_var_takes_precedence(self, monkeypatch) -> None:
+        """FLEET_GIT_EMAIL is used when set."""
+        from hephaestus.github.fleet_sync import get_resign_email
+
+        monkeypatch.setenv("FLEET_GIT_EMAIL", "alice@example.com")
+        assert get_resign_email() == "alice@example.com"
+
+    def test_empty_env_var_falls_through_to_git_config(self, monkeypatch) -> None:
+        """An empty FLEET_GIT_EMAIL falls back to git config."""
+        from hephaestus.github import fleet_sync
+
+        monkeypatch.setenv("FLEET_GIT_EMAIL", "")
+
+        # Stub subprocess.run so the test does not depend on the operator's
+        # actual git config.
+        class _Result:
+            def __init__(self) -> None:
+                self.returncode = 0
+                self.stdout = "bob@example.com\n"
+
+        # Target the attribute by dotted path so strict mypy (implicit_reexport=False)
+        # doesn't complain about fleet_sync not re-exporting `subprocess`.
+        monkeypatch.setattr(
+            "hephaestus.github.fleet_sync.subprocess.run",
+            lambda *a, **k: _Result(),
+        )
+        assert fleet_sync.get_resign_email() == "bob@example.com"
+
+    def test_no_config_raises_runtime_error(self, monkeypatch) -> None:
+        """When nothing is configured, fleet_sync fails loudly rather than guess."""
+        import pytest
+
+        from hephaestus.github import fleet_sync
+
+        monkeypatch.delenv("FLEET_GIT_EMAIL", raising=False)
+
+        class _EmptyResult:
+            returncode = 1
+            stdout = ""
+
+        monkeypatch.setattr(
+            "hephaestus.github.fleet_sync.subprocess.run",
+            lambda *a, **k: _EmptyResult(),
+        )
+        with pytest.raises(RuntimeError, match="no resign email configured"):
+            fleet_sync.get_resign_email()
+
+    def test_get_resign_exec_embeds_resolved_email(self, monkeypatch) -> None:
+        """get_resign_exec() inlines the resolved email into the git command."""
+        from hephaestus.github.fleet_sync import get_resign_exec
+
+        monkeypatch.setenv("FLEET_GIT_EMAIL", "carol@example.com")
+        cmd = get_resign_exec()
+        assert "user.email=carol@example.com" in cmd
+        assert "commit --amend --no-edit -S --reset-author" in cmd

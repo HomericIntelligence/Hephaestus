@@ -25,6 +25,7 @@ import argparse
 import contextlib
 import json
 import logging
+import os
 import subprocess
 import sys
 import tempfile
@@ -42,9 +43,47 @@ logger = get_logger(__name__)
 
 ORG = "HomericIntelligence"
 
-FLEET_NOREPLY = "4211002+mvillmow@users.noreply.github.com"
 
-RESIGN_EXEC = f"git -c user.email={FLEET_NOREPLY} commit --amend --no-edit -S --reset-author"
+def get_resign_email() -> str:
+    """Return the email address used to re-sign rebased commits.
+
+    Resolution order:
+
+    1. ``$FLEET_GIT_EMAIL`` if set and non-empty.
+    2. ``git config --global --get user.email``.
+    3. ``git config --get user.email`` (any scope).
+
+    Raises :class:`RuntimeError` if none is configured — fleet_sync must never
+    silently re-sign with a fallback identity that doesn't belong to the
+    operator.
+    """
+    env = os.environ.get("FLEET_GIT_EMAIL", "").strip()
+    if env:
+        return env
+    for args in (["--global"], []):
+        result = subprocess.run(
+            ["git", "config", *args, "--get", "user.email"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        email = result.stdout.strip()
+        if result.returncode == 0 and email:
+            return email
+    raise RuntimeError(
+        "fleet_sync: no resign email configured. Set FLEET_GIT_EMAIL=<address> "
+        "or `git config --global user.email <address>` before running."
+    )
+
+
+def get_resign_exec() -> str:
+    """Return the ``git commit --amend`` shell command used as ``rebase --exec``.
+
+    The email is resolved lazily so changes to ``$FLEET_GIT_EMAIL`` or git config
+    between calls take effect without restarting the process.
+    """
+    return f"git -c user.email={get_resign_email()} commit --amend --no-edit -S --reset-author"
+
 
 ALL_REPOS: list[str] = [
     "Odysseus",
@@ -257,7 +296,7 @@ def rebase_and_resign(pr: PRInfo, clone_dir: Path, dry_run: bool = False) -> boo
         _git(["fetch", "origin", base], cwd=work, dry_run=dry_run)
 
         result = _git(
-            ["rebase", f"origin/{base}", "--exec", RESIGN_EXEC],
+            ["rebase", f"origin/{base}", "--exec", get_resign_exec()],
             cwd=work,
             dry_run=dry_run,
             check=False,
@@ -377,6 +416,8 @@ def resolve_conflict_with_agent(
                 check=True,
             )
             commit_count = commit_count_result.stdout.strip()
+            resign_email = get_resign_email()
+            resign_exec = get_resign_exec()
 
             prompt = f"""You are resolving merge conflicts in a git rebase.
 
@@ -395,10 +436,10 @@ For each conflicted file:
 4. Stage the file: git add <file>
 
 After ALL conflicts are resolved:
-1. Continue the rebase: git -c user.email={FLEET_NOREPLY} rebase --continue
+1. Continue the rebase: git -c user.email={resign_email} rebase --continue
    (repeat if more conflicts appear)
 2. Re-sign all commits:
-   git rebase HEAD~{commit_count} --exec '{RESIGN_EXEC}'
+   git rebase HEAD~{commit_count} --exec '{resign_exec}'
 3. Push: git push --force-with-lease origin {branch}
 
 Rules:
