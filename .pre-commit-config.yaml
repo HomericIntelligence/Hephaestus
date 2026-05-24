@@ -141,6 +141,18 @@ repos:
         pass_filenames: false
         files: ^(pyproject\.toml|pixi\.toml)$
 
+  # Dependency-sync check: requirements*.txt entries must exist in pixi.toml
+  # and fall within the declared range. See hephaestus.config.dep_sync.
+  - repo: local
+    hooks:
+      - id: check-dep-sync
+        name: Check dependency declarations are consistent
+        description: Validate requirements*.txt entries against pixi.toml
+        entry: pixi run hephaestus-check-dep-sync
+        language: system
+        pass_filenames: false
+        files: ^(pyproject\.toml|pixi\.toml|pixi\.lock|requirements.*\.txt)$
+
   # Forbid silent-failure workarounds (|| true / continue-on-error: true).
   # See HomericIntelligence/Odysseus#280.
   - repo: local

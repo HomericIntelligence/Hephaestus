@@ -14,7 +14,6 @@ from hephaestus.config.dep_sync import (
     _parse_version,
     _version_satisfies,
     check_dep_sync,
-    check_pyproject_no_deps,
     check_requirements_against_pixi,
     check_requirements_up_to_date,
     generate_requirements_content,
@@ -228,32 +227,6 @@ class TestParseRequirements:
         req.write_text("")
         result = parse_requirements(req)
         assert result == {}
-
-
-class TestCheckPyprojectNoDeps:
-    """Tests for check_pyproject_no_deps()."""
-
-    def test_no_deps_returns_empty(self, tmp_path: Path) -> None:
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("[project]\nname = 'foo'\n")
-        errors = check_pyproject_no_deps(pyproject)
-        assert errors == []
-
-    def test_flags_project_dependencies(self, tmp_path: Path) -> None:
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("[project.dependencies]\nrequests = '>=2'\n")
-        errors = check_pyproject_no_deps(pyproject)
-        assert any("[project.dependencies]" in e for e in errors)
-
-    def test_flags_optional_dependencies(self, tmp_path: Path) -> None:
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("[project.optional-dependencies]\ndev = ['pytest']\n")
-        errors = check_pyproject_no_deps(pyproject)
-        assert any("[project.optional-dependencies]" in e for e in errors)
-
-    def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
-        errors = check_pyproject_no_deps(tmp_path / "nonexistent.toml")
-        assert errors == []
 
 
 class TestCheckRequirementsAgainstPixi:
