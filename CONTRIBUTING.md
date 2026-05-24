@@ -96,6 +96,23 @@ You do not edit a version field. A release is cut by creating a signed git tag �
 see [`docs/RELEASING.md`](docs/RELEASING.md) for the full workflow. `hephaestus-bump-version`
 computes the next semver string and prints the `git tag` commands to run.
 
+## Dependency Updates
+
+- **Dependabot** is configured for `pip` (pyproject.toml dev extras) and
+  `github-actions`. It opens PRs automatically for those.
+- **Conda dependencies in `pixi.toml`** (pydantic, pygithub, pygments, ruff, mypy,
+  bats-core, yamllint, etc.) are **not** covered by Dependabot — its pip ecosystem
+  cannot parse pixi.toml. These are updated manually:
+
+  ```bash
+  pixi update           # updates pixi.lock; commit alongside any range changes
+  ```
+
+  Run periodically as part of dependency-hygiene work. The proper long-term fix —
+  Renovate with native pixi support — is tracked in #484.
+- A pre-commit hook (`check-dep-sync`) verifies that any committed `requirements*.txt`
+  entries fall within the `pixi.toml` range; it does not initiate updates.
+
 ## Pull Request Process
 
 The `main` branch is protected. CI's `pr-policy` gate enforces three rules — a PR
