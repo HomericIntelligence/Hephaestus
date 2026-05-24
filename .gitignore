@@ -28,7 +28,11 @@ ENV/
 
 # IDE
 .idea/
-.vscode/
+.vscode/*
+# Track only the shared, project-wide VS Code config — personal files
+# (tasks.json, launch.json, etc.) stay ignored.
+!.vscode/extensions.json
+!.vscode/settings.json
 *.swp
 *.swo
 *.orig

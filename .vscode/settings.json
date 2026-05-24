@@ -1,0 +1,33 @@
+{
+  "// note": "Minimal VS Code config — relies on .editorconfig for formatting baselines.",
+
+  "python.defaultInterpreterPath": "${workspaceFolder}/.pixi/envs/default/bin/python",
+  "python.terminal.activateEnvironment": false,
+
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestArgs": [
+    "tests/unit",
+    "--no-cov"
+  ],
+
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports.ruff": "explicit"
+    }
+  },
+
+  "ruff.organizeImports": true,
+  "ruff.fixAll": false,
+
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.pixi": true,
+    "**/.ruff_cache": true,
+    "**/.mypy_cache": true,
+    "**/.pytest_cache": true,
+    "hephaestus/_version.py": true
+  }
+}
