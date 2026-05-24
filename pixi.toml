@@ -25,7 +25,14 @@ docs = "pdoc hephaestus --output-dir docs/api"
 # tree perpetually dirty. Keeping it out of the lock removes that churn. The
 # pixi-based CI jobs (ruff/mypy/yamllint) analyse source directly and do not
 # need the package installed. See issue #456; lockfile-v7 follow-up is #455.
-dev-install = "pip install -e . --no-build-isolation --no-deps"
+# `--no-deps` keeps pip from re-resolving runtime deps that pixi already
+# manages. We deliberately omit `--no-build-isolation`: pip's editable build
+# subprocess loads the backend from its own ephemeral env, and across
+# `pixi run` boundaries the parent pixi env's hatchling is not always visible
+# to that subprocess. Letting pip create an isolated build env (which fetches
+# hatchling/hatch-vcs/editables from PyPI) is slower on first run but works
+# reliably in both local and CI contexts.
+dev-install = "pip install -e . --no-deps"
 
 [dependencies]
 python = ">=3.10"
