@@ -101,8 +101,8 @@ repos:
     hooks:
       - id: check-unit-test-structure
         name: Check unit test structure
-        description: Enforce tests/unit/ mirrors hephaestus/ subpackage structure
-        entry: python3 scripts/check_unit_test_structure.py
+        description: Enforce tests/unit/ mirrors hephaestus/ and has no loose test files
+        entry: pixi run hephaestus-check-test-structure
         language: system
         pass_filenames: false
         files: ^(hephaestus|tests/unit)/
