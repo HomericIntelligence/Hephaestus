@@ -45,7 +45,25 @@ class TestNATSSubscriberThread:
         thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
         # stop() calls join() — should not raise even if never started
         thread._stop_event.set()
-        thread.stop()
+        # A thread that was never started counts as "joined cleanly" (True).
+        assert thread.stop() is True
+
+    def test_stop_returns_false_on_join_timeout(self) -> None:
+        """When a started thread refuses to exit within the timeout, stop() returns False.
+
+        Regression for #521: stop() previously returned None and silently
+        masked a wedged subscriber thread.
+        """
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        # Simulate a wedged thread: is_alive() returns True both before and
+        # after join(), and join() itself is a no-op so we don't need to
+        # actually start a real thread.
+        with (
+            patch.object(NATSSubscriberThread, "is_alive", return_value=True),
+            patch.object(NATSSubscriberThread, "join", return_value=None),
+        ):
+            result = thread.stop(timeout=0.01)
+        assert result is False
 
     def test_stop_event_is_threading_event(self) -> None:
         thread = NATSSubscriberThread(config=_config(), handler=MagicMock())

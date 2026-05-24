@@ -358,7 +358,7 @@ class NATSSubscriberThread(threading.Thread):
             self._set_state(SubscriberState.DISCONNECTED)
             await nc.drain()
 
-    def stop(self, timeout: float | None = None) -> None:
+    def stop(self, timeout: float | None = None) -> bool:
         """Signal the subscriber to stop and wait for the thread to finish.
 
         Args:
@@ -366,9 +366,22 @@ class NATSSubscriberThread(threading.Thread):
                 When ``None`` (the default), uses the ``join_timeout``
                 value supplied to the constructor (default 5.0 s).
 
+        Returns:
+            ``True`` if the thread joined cleanly within the timeout (or had
+            already finished); ``False`` if the join timed out and the thread
+            is still running. A ``False`` return also logs a warning so the
+            condition is visible in logs even when the caller ignores it.
+
         """
         effective_timeout = self._join_timeout if timeout is None else timeout
         self._set_state(SubscriberState.STOPPING)
         self._stop_event.set()
         if self.is_alive():
             self.join(timeout=effective_timeout)
+            if self.is_alive():
+                logger.warning(
+                    "NATS subscriber thread did not stop within %.1fs — still running",
+                    effective_timeout,
+                )
+                return False
+        return True
