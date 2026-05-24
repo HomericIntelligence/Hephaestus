@@ -49,9 +49,9 @@ format:
 format-check:
     pixi run ruff format --check {{ src_dirs }}
 
-# Run type checking
+# Run type checking on the package only (use `pixi run mypy` for everything)
 typecheck:
-    pixi run mypy {{ pkg_dir }}
+    pixi run mypy-pkg
 
 # Run all pre-commit hooks on all files
 precommit:
