@@ -44,6 +44,11 @@ jobs:
       - name: Run pre-commit
         run: |
           pixi install --environment lint
+          # Some hooks (check-dep-sync, check-unit-test-structure) invoke
+          # `pixi run hephaestus-*` which uses the default env. Install the
+          # default env and the package itself so those console scripts resolve.
+          pixi install --environment default
+          pixi run dev-install
           pixi run --environment lint pre-commit run --all-files --show-diff-on-failure
 
       - name: Upload pre-commit diff
