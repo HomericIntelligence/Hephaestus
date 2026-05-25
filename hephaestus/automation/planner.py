@@ -10,11 +10,19 @@ Provides:
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import logging
 import shutil
 import subprocess
+
+# fcntl is POSIX-only; CPython does not bundle it on Windows. Import lazily so
+# this module stays importable on Windows for tests that only need its
+# pure-Python helpers. The cross-process file locking that uses fcntl is only
+# reached on the live planner path.
+try:
+    import fcntl
+except ModuleNotFoundError:
+    fcntl = None  # type: ignore[assignment]
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -437,7 +445,11 @@ class Planner:
             lock_path.parent.mkdir(parents=True, exist_ok=True)
 
             with open(lock_path, "w") as lock_file:
-                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                # POSIX-only file locking; on Windows fcntl is None and we
+                # degrade gracefully by relying on the in-process thread lock
+                # acquired by the surrounding `with self._mnemosyne_lock:`.
+                if fcntl is not None:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX)
                 try:
                     # Re-check after acquiring file lock
                     if mnemosyne_root.exists():
@@ -476,7 +488,8 @@ class Planner:
                     return False
 
                 finally:
-                    fcntl.flock(lock_file, fcntl.LOCK_UN)
+                    if fcntl is not None:
+                        fcntl.flock(lock_file, fcntl.LOCK_UN)
 
     def _run_advise(self, issue_number: int, issue_title: str, issue_body: str) -> str:
         """Search team knowledge base for relevant prior learnings.
