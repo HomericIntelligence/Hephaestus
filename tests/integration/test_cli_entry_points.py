@@ -72,6 +72,12 @@ class TestCLIHelpFlag:
 
     @pytest.mark.parametrize("command,module_path,attr", ENTRY_POINTS, ids=ENTRY_POINT_IDS)
     def test_help_flag(self, command: str, module_path: str, attr: str) -> None:
+        # Automation CLIs transitively import POSIX-only stdlib modules
+        # (`curses` for the UI, `fcntl` for cross-process locking in planner).
+        # CPython on Windows ships neither; the CLIs aren't intended for
+        # Windows operators. Skip the help-flag check on that platform.
+        if sys.platform == "win32" and "automation" in module_path:
+            pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
         binary: str | None = shutil.which(command)
         if binary is None:
             pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
