@@ -1,6 +1,7 @@
 """Tests for the PlanReviewer automation."""
 
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -28,10 +29,44 @@ def reviewer(mock_options: PlanReviewerOptions) -> PlanReviewer:
 
 
 def _make_gh_result(payload: Any) -> MagicMock:
-    """Return a mock CompletedProcess with JSON stdout."""
+    """Return a mock CompletedProcess emulating the GraphQL response shape.
+
+    The legacy ``{"comments": [...]}`` payload (from ``gh issue view --comments``)
+    is automatically translated into the new GraphQL envelope
+    ``{"data": {"repository": {"issue": {"comments": {"nodes": [...]}}}}}``
+    with ``nodes`` in descending order (newest first) to match real GraphQL
+    output (see ``orderBy: {field: UPDATED_AT, direction: DESC}`` in
+    ``_fetch_issue_comments``). Production code reverses ``nodes`` back to
+    chronological order, so test inputs continue to be authored in
+    chronological order — the helper hides the reversal.
+
+    Tests that want to drive the raw GraphQL envelope can pass it directly
+    (any payload not matching ``{"comments": [...]}`` is forwarded as-is).
+    """
     mock = MagicMock()
-    mock.stdout = json.dumps(payload)
+    if isinstance(payload, dict) and set(payload.keys()) == {"comments"}:
+        nodes = list(reversed(payload["comments"]))
+        graphql_payload = {"data": {"repository": {"issue": {"comments": {"nodes": nodes}}}}}
+        mock.stdout = json.dumps(graphql_payload)
+    else:
+        mock.stdout = json.dumps(payload)
     return mock
+
+
+@pytest.fixture(autouse=True)
+def _patch_repo_helpers() -> Any:
+    """Stub repo discovery helpers used by the GraphQL fetch."""
+    with (
+        patch(
+            "hephaestus.automation.plan_reviewer.get_repo_root",
+            return_value=Path("/tmp/repo"),
+        ),
+        patch(
+            "hephaestus.automation.plan_reviewer.get_repo_slug",
+            return_value="owner/name",
+        ),
+    ):
+        yield
 
 
 class TestGetLatestPlan:
@@ -158,6 +193,100 @@ class TestLatestReviewIsFinal:
         """Gh failure → _fetch_issue_comments returns [], gate returns False."""
         with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
             mock_gh.side_effect = RuntimeError("gh failed")
+            assert reviewer._latest_review_is_final(123) is False
+
+    def test_false_when_approved_precedes_block_in_same_body(self, reviewer: PlanReviewer) -> None:
+        """Only the LAST verdict line counts — APPROVED then BLOCK → False.
+
+        Claude is allowed to discuss multiple verdict options in prose; the
+        prompt instructs readers to take only the LAST matching line.
+        Substring ``in`` would mis-fire True here.
+        """
+        comments = [
+            {"body": "## Implementation Plan\n\nDo stuff"},
+            {
+                "body": (
+                    "## 🔍 Plan Review\n\n"
+                    "Initial impression: looked sound.\n\n"
+                    "**Verdict: APPROVED**\n\n"
+                    "On reflection a fatal correctness bug surfaced.\n\n"
+                    "**Verdict: BLOCK**"
+                )
+            },
+        ]
+        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
+            mock_gh.return_value = _make_gh_result({"comments": comments})
+            assert reviewer._latest_review_is_final(123) is False
+
+    def test_true_when_block_precedes_approved_in_same_body(self, reviewer: PlanReviewer) -> None:
+        """BLOCK then APPROVED → True (last verdict line wins)."""
+        comments = [
+            {"body": "## Implementation Plan\n\nDo stuff"},
+            {
+                "body": (
+                    "## 🔍 Plan Review\n\n"
+                    "First-pass concern.\n\n"
+                    "**Verdict: BLOCK**\n\n"
+                    "After re-reading, concern was unfounded.\n\n"
+                    "**Verdict: APPROVED**"
+                )
+            },
+        ]
+        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
+            mock_gh.return_value = _make_gh_result({"comments": comments})
+            assert reviewer._latest_review_is_final(123) is True
+
+    def test_false_when_marker_is_quoted_in_discussion(self, reviewer: PlanReviewer) -> None:
+        """A quoted marker in prose must not fire the gate.
+
+        The substring check used to return True on inline mentions like
+        ``avoid using **Verdict: APPROVED** here`` — the regex requires the
+        marker to occupy an entire line.
+        """
+        comments = [
+            {"body": "## Implementation Plan\n\nDo stuff"},
+            {
+                "body": (
+                    "## 🔍 Plan Review\n\n"
+                    "Reviewer note: avoid using **Verdict: APPROVED** here "
+                    "because the plan still has gaps.\n\n"
+                    "**Verdict: REVISE**"
+                )
+            },
+        ]
+        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
+            mock_gh.return_value = _make_gh_result({"comments": comments})
+            assert reviewer._latest_review_is_final(123) is False
+
+    def test_handles_150_comments_without_truncating_latest(self, reviewer: PlanReviewer) -> None:
+        """Issues with >100 comments must still surface the latest review.
+
+        The previous ``gh issue view --comments`` call silently capped at
+        100 entries. The GraphQL ``last: 100`` query is bounded too, but
+        because it sorts ``UPDATED_AT DESC`` it always brings the newest
+        100 — which includes the actual most-recent plan-review comment
+        even when the issue has 150+ historical comments. See issue #553.
+        """
+        # Build 150 noise comments, then sandwich the real reviews so the
+        # latest review (REVISE) is well past index 100 in chronological
+        # order. After the helper reverses to DESC order to mimic GraphQL,
+        # the production code reverses back to chronological — the test
+        # still authors the list chronologically.
+        chronological: list[dict[str, Any]] = []
+        for i in range(120):
+            chronological.append({"body": f"Drive-by comment {i}"})
+        chronological.append({"body": "## 🔍 Plan Review\n\nOld pass.\n\n**Verdict: APPROVED**"})
+        for i in range(120, 145):
+            chronological.append({"body": f"Drive-by comment {i}"})
+        chronological.append({"body": "## 🔍 Plan Review\n\nNew concerns.\n\n**Verdict: REVISE**"})
+        # Total = 120 + 1 + 25 + 1 = 147; trim the OLDEST entries so the
+        # remaining 100 (newest) still include both reviews. Real GraphQL
+        # would do exactly this via ``last: 100`` + DESC ordering.
+        newest_100 = chronological[-100:]
+
+        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
+            mock_gh.return_value = _make_gh_result({"comments": newest_100})
+            # The latest review is REVISE → not final → re-run.
             assert reviewer._latest_review_is_final(123) is False
 
     def test_approved_marker_anywhere_in_latest_review_counts(self, reviewer: PlanReviewer) -> None:

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import subprocess
 import threading
 import time
@@ -39,6 +40,16 @@ logger = logging.getLogger(__name__)
 _PLAN_MARKERS = PLAN_COMMENT_MARKERS
 
 # Prefix used by this reviewer when posting review comments.
+#
+# IMPORTANT: byte-exact case-sensitive match assumption. Idempotency rests on
+# ``body.startswith(_REVIEW_PREFIX)``. Both sides come from the same writer
+# (this module) and GitHub stores comment bodies verbatim, so today this is
+# safe. If a future GitHub or tooling change ever normalizes the U+1F50D
+# magnifying-glass emoji to a different Unicode form (e.g. NFD vs NFC), or
+# alters spacing/case, ``startswith`` will silently miss and the reviewer
+# will post a duplicate review every loop. If that becomes a concern,
+# NFC-normalize both sides via ``unicodedata.normalize("NFC", ...)`` before
+# comparison. See issue #565.
 _REVIEW_PREFIX = "## 🔍 Plan Review"
 
 # Verdict marker emitted by Claude at the end of every plan review. See
@@ -52,6 +63,18 @@ _REVIEW_PREFIX = "## 🔍 Plan Review"
 # marker re-runs the reviewer so the plan can be re-evaluated after the
 # planner amends it.
 _FINAL_VERDICT_MARKER = "**Verdict: APPROVED**"
+
+# Regex that extracts every well-formed verdict line in a review body. We
+# parse with ``MULTILINE`` and take the LAST match, mirroring the
+# instruction Claude is given in :data:`prompts.PLAN_REVIEW_PROMPT` —
+# *"readers take only the LAST matching line in your response."* A substring
+# check is unsafe because the body may discuss earlier verdicts (e.g.
+# ``**Verdict: APPROVED**`` followed by ``**Verdict: BLOCK**``) or quote
+# the marker in prose; only the trailing line counts.
+_VERDICT_LINE_RE = re.compile(
+    r"^\*\*Verdict: (APPROVED|REVISE|BLOCK)\*\*\s*$",
+    re.MULTILINE,
+)
 
 # Fallback marker appended by _post_review when Claude's output omits the
 # verdict line entirely (defence-in-depth — keeps the short-circuit gate
@@ -80,6 +103,10 @@ class PlanReviewer:
         self.options = options
         self.status_tracker = StatusTracker(options.max_workers)
         self.lock = threading.Lock()
+        # Per-instance cache for ``_fetch_issue_comments`` (#A3-009, #560).
+        # Initialised here rather than lazily so mypy sees the type and the
+        # ThreadPoolExecutor invariant is unambiguous.
+        self._comments_cache: dict[int, list[dict[str, Any]]] = {}
 
     def run(self) -> dict[int, WorkerResult]:
         """Run the plan reviewer on all issues.
@@ -121,13 +148,15 @@ class PlanReviewer:
                         with self.lock:
                             results[issue_num] = result
                         if result.success:
-                            logger.info("Issue #%s: plan review completed", issue_num)
+                            logger.info("Issue %s: plan review completed", issue_ref(issue_num))
                         else:
                             logger.error(
-                                "Issue #%s: plan review failed: %s", issue_num, result.error
+                                "Issue %s: plan review failed: %s",
+                                issue_ref(issue_num),
+                                result.error,
                             )
                     except Exception as e:
-                        logger.error("Issue #%s raised exception: %s", issue_num, e)
+                        logger.error("Issue %s raised exception: %s", issue_ref(issue_num), e)
                         with self.lock:
                             results[issue_num] = WorkerResult(
                                 issue_number=issue_num,
@@ -170,15 +199,15 @@ class PlanReviewer:
             # out of re-review forever after the first interim verdict.)
             if self._latest_review_is_final(issue_number):
                 logger.info(
-                    "Issue #%s: latest plan review is APPROVED, skipping",
-                    issue_number,
+                    "Issue %s: latest plan review is APPROVED, skipping",
+                    issue_ref(issue_number),
                 )
                 return WorkerResult(issue_number=issue_number, success=True)
 
             # Skip if no plan exists
             plan_text = self._get_latest_plan(issue_number)
             if plan_text is None:
-                logger.info("Issue #%s: no plan comment found, skipping", issue_number)
+                logger.info("Issue %s: no plan comment found, skipping", issue_ref(issue_number))
                 return WorkerResult(issue_number=issue_number, success=True)
 
             # Fetch issue details for context
@@ -230,7 +259,7 @@ class PlanReviewer:
             return WorkerResult(issue_number=issue_number, success=True)
 
         except Exception as e:
-            logger.error("Issue #%s: unexpected error: %s", issue_number, e)
+            logger.error("Issue %s: unexpected error: %s", issue_ref(issue_number), e)
             return WorkerResult(
                 issue_number=issue_number,
                 success=False,
@@ -254,32 +283,69 @@ class PlanReviewer:
             List of comment dicts (may be empty on error).
 
         """
-        cache_attr = "_comments_cache"
-        if not hasattr(self, cache_attr):
-            object.__setattr__(self, cache_attr, {})
-        cache: dict[int, list[dict[str, Any]]] = getattr(self, cache_attr)
+        if issue_number in self._comments_cache:
+            return self._comments_cache[issue_number]
 
-        if issue_number in cache:
-            return cache[issue_number]
-
+        # Why GraphQL instead of ``gh issue view --comments``: the CLI's
+        # ``--comments`` JSON field paginates the underlying GraphQL query
+        # at a default cap (≤100 comments) and the CLI does NOT auto-paginate
+        # for ``--json`` output. On a long-running issue with >100 comments
+        # the older ``gh issue view`` call silently truncated the head of
+        # the list, so the "latest plan review" gate could see a stale
+        # APPROVED instead of the real most-recent REVISE/BLOCK. We now ask
+        # GraphQL directly for the *last 100* comments in descending update
+        # order — equivalent to "latest first" — and take the first matching
+        # ``## 🔍 Plan Review`` body in iteration order. Bounded to one API
+        # call. See issue #553. If an issue legitimately accumulates more
+        # than 100 plan-review comments in its history, a follow-up issue
+        # will be needed to add real pagination; in practice plans are
+        # revised a handful of times, not 100+.
+        repo = get_repo_slug(get_repo_root())
+        owner, name = repo.split("/", 1)
+        query = (
+            "query($owner:String!,$name:String!,$number:Int!){"
+            "  repository(owner:$owner,name:$name){"
+            "    issue(number:$number){"
+            "      comments(last: 100, orderBy: {field: UPDATED_AT, direction: DESC}){"
+            "        nodes{ body updatedAt }"
+            "      }"
+            "    }"
+            "  }"
+            "}"
+        )
         try:
             result = _gh_call(
                 [
-                    "issue",
-                    "view",
-                    str(issue_number),
-                    "--comments",
-                    "--json",
-                    "comments",
+                    "api",
+                    "graphql",
+                    "-f",
+                    f"query={query}",
+                    "-F",
+                    f"owner={owner}",
+                    "-F",
+                    f"name={name}",
+                    "-F",
+                    f"number={issue_number}",
                 ],
             )
             data = json.loads(result.stdout)
-            comments: list[dict[str, Any]] = data.get("comments", [])
+            nodes = (
+                data.get("data", {})
+                .get("repository", {})
+                .get("issue", {})
+                .get("comments", {})
+                .get("nodes", [])
+            )
+            # GraphQL returned newest-first (DESC by UPDATED_AT). Reverse to
+            # chronological order so downstream iteration semantics ("walk
+            # forward, last match wins") match the previous ``gh issue view``
+            # behaviour. Bounded to ≤100 entries by the page-size cap above.
+            comments: list[dict[str, Any]] = list(reversed(nodes))
         except Exception as e:
-            logger.warning("Failed to fetch comments for issue #%s: %s", issue_number, e)
+            logger.warning("Failed to fetch comments for issue %s: %s", issue_ref(issue_number), e)
             comments = []
 
-        cache[issue_number] = comments
+        self._comments_cache[issue_number] = comments
         return comments
 
     def _get_latest_plan(self, issue_number: int) -> str | None:
@@ -339,16 +405,24 @@ class PlanReviewer:
         if latest_review_body is None:
             return False
 
-        is_final = _FINAL_VERDICT_MARKER in latest_review_body
+        # Extract every well-formed verdict line (regex anchored to line
+        # boundaries). Per the prompt contract, ONLY the LAST matching
+        # verdict line counts — Claude may discuss multiple verdict options
+        # in prose before settling, so a substring ``in`` check is unsafe
+        # (it would fire True on ``**Verdict: APPROVED**`` followed by
+        # ``**Verdict: BLOCK**``, or on a quoted marker inside discussion).
+        # See issue #552.
+        matches = _VERDICT_LINE_RE.findall(latest_review_body)
+        is_final = bool(matches) and matches[-1] == "APPROVED"
         if is_final:
             logger.debug(
-                "Issue #%s: latest plan review is APPROVED (final)",
-                issue_number,
+                "Issue %s: latest plan review is APPROVED (final)",
+                issue_ref(issue_number),
             )
         else:
             logger.debug(
-                "Issue #%s: latest plan review is non-final (no APPROVED marker)",
-                issue_number,
+                "Issue %s: latest plan review is non-final (no APPROVED marker)",
+                issue_ref(issue_number),
             )
         return is_final
 
@@ -516,8 +590,8 @@ class PlanReviewer:
         """
         if "**Verdict:" not in review_text:
             logger.warning(
-                "Issue #%s: review body missing verdict line; appending fallback REVISE",
-                issue_number,
+                "Issue %s: review body missing verdict line; appending fallback REVISE",
+                issue_ref(issue_number),
             )
             review_text = f"{review_text.rstrip()}\n\n{_FALLBACK_VERDICT_LINE}\n"
         comment_body = f"{_REVIEW_PREFIX}\n\n{review_text}"
