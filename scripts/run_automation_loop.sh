@@ -352,6 +352,29 @@ process_repo() {
   # assignment whose RHS happens to be non-zero) must NOT silently abort
   # the function and cause phases 2-6 to be skipped.
   #
+  # Root cause of the original silent abort: bisected in #557.
+  # The triggering command was `git -C "$dir" fetch origin --quiet` (pre-fix
+  # scripts/run_automation_loop.sh:256, now line 376 with a `|| echo Warning…`
+  # guard added by Bundle C / PR #570). When `$dir` referenced a clone whose
+  # `origin` remote was absent or unreachable, git exited 128 ("'origin' does
+  # not appear to be a git repository"). Under `set -euo pipefail` this
+  # aborted process_repo before phase 2's banner could fire, matching the
+  # observed log signature: `Planning complete` (planner exited 0) immediately
+  # followed by `Warning: repo job pid=… exited non-zero (continuing)` and
+  # zero output for phases 2-6.
+  #
+  # Reproducer: tests/shell/scripts/test_run_automation_loop.bats includes
+  # the `phase 2-6 still run when phase 1 exits non-zero` regression test;
+  # the original bisect harness lived at build/bisect_repro.sh (not committed
+  # — see PR description in #557 closure).
+  #
+  # The broad `set +e` here is defense-in-depth — Bundle C tightened the
+  # specific offender (`git fetch`) but other unguarded infrastructure
+  # commands (e.g. a future `gh api ...` probe) could exhibit the same
+  # failure mode. Keeping `set +e` with explicit per-phase `rc=$?` capture
+  # is the POLA choice: future maintainers can add new phases without
+  # rediscovering the errexit landmine.
+  #
   # The `trap 'set -e' RETURN` below is defensive for hypothetical future
   # synchronous call sites. It is currently redundant given the always-
   # backgrounded invocation at the main loop (`process_repo "$repo" "$loop" &`,
