@@ -63,6 +63,7 @@ from .prompts import (
     get_impl_resume_feedback_prompt,
     get_implementation_prompt,
 )
+from .review_state import is_plan_review_approved
 from .session_naming import AGENT_IMPLEMENTER, current_trunk_githash
 from .status_tracker import StatusTracker
 from .worktree_manager import WorktreeManager
@@ -370,7 +371,17 @@ class IssueImplementer:
                         result = future.result()
                         results[issue_num] = result
 
-                        if result.success:
+                        if result.success and result.plan_review_not_approved:
+                            # Deferred: plan exists but latest review is not
+                            # APPROVED. Do NOT mark completed — dependents
+                            # must still wait, and the issue will be retried
+                            # on the next automation loop after re-review.
+                            # See #551.
+                            logger.info(
+                                "Issue #%s deferred: waiting for APPROVED plan-review",
+                                issue_num,
+                            )
+                        elif result.success:
                             self.resolver.mark_completed(issue_num)
                             logger.info("Issue #%s completed successfully", issue_num)
                         else:
@@ -589,6 +600,40 @@ class IssueImplementer:
                     state.phase = ImplementationPhase.PLANNING
                 self._save_state(state)
                 self._generate_plan(issue_number)
+
+            # Gate on APPROVED plan-review verdict (#551). The legacy
+            # ``_has_plan`` check above only verifies a plan comment EXISTS;
+            # it does not look at the plan-reviewer's verdict, so a BLOCK
+            # or REVISE plan (or a NOGO-exhausted plan that still starts
+            # with "# Implementation Plan", see planner.py:692-700) used to
+            # be implemented just like an APPROVED one. We now defer the
+            # issue when the latest plan-review is anything other than
+            # APPROVED, so the next loop's plan-review phase can re-evaluate
+            # after the planner amends.
+            self.status_tracker.update_slot(
+                slot_id, f"{issue_ref(issue_number)}: Checking plan-review verdict"
+            )
+            if not is_plan_review_approved(issue_number):
+                self._log(
+                    "info",
+                    f"Issue #{issue_number}: latest plan-review verdict is not "
+                    f"APPROVED — deferring implementation until next loop",
+                    thread_id,
+                )
+                with self.state_lock:
+                    state.phase = ImplementationPhase.WAITING_FOR_PLAN_REVIEW
+                self._save_state(state)
+                self.status_tracker.update_slot(
+                    slot_id,
+                    f"{issue_ref(issue_number)}: Waiting for APPROVED plan-review",
+                )
+                return WorkerResult(
+                    issue_number=issue_number,
+                    success=True,
+                    branch_name=branch_name,
+                    worktree_path=str(worktree_path),
+                    plan_review_not_approved=True,
+                )
 
             # Fetch issue info for context
             self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Fetching issue")
@@ -1675,14 +1720,18 @@ class IssueImplementer:
     def _print_summary(self, results: dict[int, WorkerResult]) -> None:
         """Print implementation summary."""
         total = len(results)
-        successful = sum(1 for r in results.values() if r.success)
-        failed = total - successful
+        deferred = sum(1 for r in results.values() if r.plan_review_not_approved)
+        successful = sum(
+            1 for r in results.values() if r.success and not r.plan_review_not_approved
+        )
+        failed = total - successful - deferred
 
         logger.info("=" * 60)
         logger.info("Implementation Summary")
         logger.info("=" * 60)
         logger.info("Total issues: %s", total)
         logger.info("Successful: %s", successful)
+        logger.info("Deferred (awaiting APPROVED plan-review): %s", deferred)
         logger.info("Failed: %s", failed)
 
         if successful > 0:

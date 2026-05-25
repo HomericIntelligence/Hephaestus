@@ -60,6 +60,7 @@ class ImplementationPhase(str, Enum):
     """Phase of issue implementation."""
 
     PLANNING = "planning"
+    WAITING_FOR_PLAN_REVIEW = "waiting_for_plan_review"
     IMPLEMENTING = "implementing"
     REVIEWING = "reviewing"  # 3x review loop between implement and test
     TESTING = "testing"
@@ -101,6 +102,11 @@ class WorkerResult(BaseModel):
     pr_number: int | None = None
     branch_name: str | None = None
     worktree_path: str | None = None
+    # Set True when the implementer skipped because the latest plan-review
+    # verdict is not APPROVED (REVISE / BLOCK / missing). The issue is not
+    # failed — it should be retried on the next automation loop after the
+    # planner amends and the reviewer re-evaluates. See #551.
+    plan_review_not_approved: bool = False
 
 
 class PlanResult(BaseModel):
