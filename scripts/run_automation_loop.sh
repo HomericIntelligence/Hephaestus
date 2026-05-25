@@ -6,8 +6,15 @@
 # in a loop N times for every repo.
 # drive-green only runs on the final loop. Up to PARALLEL_REPOS repos are processed concurrently.
 #
-# Issue discovery is delegated to each phase's Python entrypoint
-# (gh_list_open_issues), so issues opened mid-loop are picked up by later phases.
+# Issue discovery:
+#   - plan, implement: each phase's Python entrypoint auto-discovers via
+#     gh_list_open_issues(), so issues opened mid-loop by an earlier phase are
+#     picked up by these phases automatically.
+#   - review-plans, review-prs, address-review, drive-green: these entrypoints
+#     declare --issues as REQUIRED (no auto-discovery). The orchestrator
+#     discovers open issues once per repo per loop (`gh issue list`) and passes
+#     them via --issues. Repos with zero open issues skip these four phases
+#     cleanly with a "No open issues — skipping" log line.
 #
 # Usage:
 #   ./scripts/run_automation_loop.sh [options]
@@ -266,6 +273,25 @@ process_repo() {
     FOLLOW_UP_FLAG="--no-follow-up"
   fi
 
+  # Discover this repo's open issues once per loop iteration. Four of the six
+  # phases (plan_reviewer, pr_reviewer, address_review, ci_driver) declare
+  # --issues as REQUIRED in argparse and have no auto-discovery — invoking them
+  # without --issues fails with exit code 2, which the `|| echo Warning…`
+  # clauses below would silently swallow. We share the same list across all
+  # four phases so a single `gh` call covers them. The `plan` and `implement`
+  # phases intentionally do NOT consume this list — both auto-discover via
+  # gh_list_open_issues() inside their main(), which lets them pick up issues
+  # opened mid-loop by an earlier phase.
+  local OPEN_ISSUES=()
+  mapfile -t OPEN_ISSUES < <(
+    gh issue list --repo "$ORG/$repo" --state open --limit 200 \
+      --json number --jq '.[].number' 2>/dev/null
+  )
+  local ISSUE_ARGS=()
+  if [[ ${#OPEN_ISSUES[@]} -gt 0 ]]; then
+    ISSUE_ARGS=(--issues "${OPEN_ISSUES[@]}")
+  fi
+
   # --- Phase 1: Plan ---
   if phase_enabled plan; then
     echo "  [$repo] Planning issues..."
@@ -280,15 +306,20 @@ process_repo() {
 
   # --- Phase 2: Review Plans ---
   if phase_enabled review-plans; then
-    echo "  [$repo] Reviewing plans..."
-    (
-      cd "$dir"
-      "$PYTHON" "$SCRIPT_DIR/review_plans.py" \
-        --max-workers "$MAX_WORKERS" \
-        -v \
-        $DRY_RUN_FLAGS \
-        || echo "  [$repo] Warning: review-plans exited non-zero (loop $loop)"
-    )
+    if [[ ${#OPEN_ISSUES[@]} -eq 0 ]]; then
+      echo "  [$repo] No open issues — skipping review-plans"
+    else
+      echo "  [$repo] Reviewing plans..."
+      (
+        cd "$dir"
+        "$PYTHON" "$SCRIPT_DIR/review_plans.py" \
+          "${ISSUE_ARGS[@]}" \
+          --max-workers "$MAX_WORKERS" \
+          -v \
+          $DRY_RUN_FLAGS \
+          || echo "  [$repo] Warning: review-plans exited non-zero (loop $loop)"
+      )
+    fi
   fi
 
   # --- Phase 3: Implement ---
@@ -308,47 +339,62 @@ process_repo() {
 
   # --- Phase 4: Review PRs (inline comments) ---
   if phase_enabled review-prs; then
-    echo "  [$repo] Reviewing PRs..."
-    (
-      cd "$dir"
-      "$PYTHON" "$SCRIPT_DIR/review_issues.py" \
-        --max-workers "$MAX_WORKERS" \
-        --no-ui \
-        -v \
-        $DRY_RUN_FLAGS \
-        || echo "  [$repo] Warning: review-issues exited non-zero (loop $loop)"
-    )
+    if [[ ${#OPEN_ISSUES[@]} -eq 0 ]]; then
+      echo "  [$repo] No open issues — skipping review-prs"
+    else
+      echo "  [$repo] Reviewing PRs..."
+      (
+        cd "$dir"
+        "$PYTHON" "$SCRIPT_DIR/review_issues.py" \
+          "${ISSUE_ARGS[@]}" \
+          --max-workers "$MAX_WORKERS" \
+          --no-ui \
+          -v \
+          $DRY_RUN_FLAGS \
+          || echo "  [$repo] Warning: review-issues exited non-zero (loop $loop)"
+      )
+    fi
   fi
 
   # --- Phase 5: Address Review Comments ---
   if phase_enabled address-review; then
-    echo "  [$repo] Addressing review comments..."
-    (
-      cd "$dir"
-      "$PYTHON" "$SCRIPT_DIR/address_review.py" \
-        --max-workers "$MAX_WORKERS" \
-        --no-ui \
-        -v \
-        $DRY_RUN_FLAGS \
-        || echo "  [$repo] Warning: address-review exited non-zero (loop $loop)"
-    )
+    if [[ ${#OPEN_ISSUES[@]} -eq 0 ]]; then
+      echo "  [$repo] No open issues — skipping address-review"
+    else
+      echo "  [$repo] Addressing review comments..."
+      (
+        cd "$dir"
+        "$PYTHON" "$SCRIPT_DIR/address_review.py" \
+          "${ISSUE_ARGS[@]}" \
+          --max-workers "$MAX_WORKERS" \
+          --no-ui \
+          -v \
+          $DRY_RUN_FLAGS \
+          || echo "  [$repo] Warning: address-review exited non-zero (loop $loop)"
+      )
+    fi
   fi
 
   # --- Phase 6: Drive PRs to Green CI (final loop only) ---
   if phase_enabled drive-green && [[ "$loop" -eq "$LOOPS" ]]; then
-    echo "  [$repo] Driving PRs to green CI..."
-    (
-      cd "$dir"
-      # Defence-in-depth: ci_driver also checks these envs and refuses to run
-      # unless HEPH_LOOP_INDEX == HEPH_TOTAL_LOOPS or --force-run is given.
-      HEPH_LOOP_INDEX="$loop" HEPH_TOTAL_LOOPS="$LOOPS" \
-      "$PYTHON" "$SCRIPT_DIR/drive_prs_green.py" \
-        --max-workers "$MAX_WORKERS" \
-        --no-ui \
-        -v \
-        $DRY_RUN_FLAGS \
-        || echo "  [$repo] Warning: drive-prs-green exited non-zero (loop $loop)"
-    )
+    if [[ ${#OPEN_ISSUES[@]} -eq 0 ]]; then
+      echo "  [$repo] No open issues — skipping drive-green"
+    else
+      echo "  [$repo] Driving PRs to green CI..."
+      (
+        cd "$dir"
+        # Defence-in-depth: ci_driver also checks these envs and refuses to run
+        # unless HEPH_LOOP_INDEX == HEPH_TOTAL_LOOPS or --force-run is given.
+        HEPH_LOOP_INDEX="$loop" HEPH_TOTAL_LOOPS="$LOOPS" \
+        "$PYTHON" "$SCRIPT_DIR/drive_prs_green.py" \
+          "${ISSUE_ARGS[@]}" \
+          --max-workers "$MAX_WORKERS" \
+          --no-ui \
+          -v \
+          $DRY_RUN_FLAGS \
+          || echo "  [$repo] Warning: drive-prs-green exited non-zero (loop $loop)"
+      )
+    fi
   fi
 }
 
