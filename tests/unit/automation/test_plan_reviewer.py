@@ -209,20 +209,41 @@ class TestPostReviewVerdictFallback:
 
 
 class TestRunClaudeAnalysis:
-    """Tests for _run_claude_analysis method."""
+    """Tests for _run_claude_analysis method.
+
+    These tests patch ``invoke_claude_with_session`` at the
+    ``plan_reviewer`` module boundary — that is the actual call site at
+    ``plan_reviewer.py:400``. Patching ``subprocess.run`` would miss the
+    real code path because the production code calls a thin Claude-CLI
+    wrapper, not ``subprocess.run`` directly. The wrapper returns the
+    ``(stdout, session_uuid)`` tuple documented in
+    :func:`hephaestus.automation.claude_invoke.invoke_claude_with_session`.
+    """
 
     def test_returns_none_on_empty_output(self, reviewer: PlanReviewer) -> None:
         """_run_claude_analysis returns None when Claude returns empty output."""
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="   ", stderr="")
+        with patch("hephaestus.automation.plan_reviewer.invoke_claude_with_session") as mock_invoke:
+            mock_invoke.return_value = ("   ", "session-uuid")
             result = reviewer._run_claude_analysis(123, "Title", "Body", "Plan text")
 
         assert result is None
+        mock_invoke.assert_called_once()
 
     def test_returns_none_on_nonzero_exit(self, reviewer: PlanReviewer) -> None:
-        """_run_claude_analysis returns None when Claude exits non-zero."""
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error message")
+        """_run_claude_analysis returns None when Claude exits non-zero.
+
+        ``invoke_claude_with_session`` raises ``CalledProcessError`` on
+        non-zero exit — that is the real failure mode, not a
+        ``returncode=1`` ``CompletedProcess`` (the wrapper would have
+        already raised before returning).
+        """
+        import subprocess
+
+        exc = subprocess.CalledProcessError(
+            returncode=1, cmd=["claude"], output="", stderr="error message"
+        )
+        with patch("hephaestus.automation.plan_reviewer.invoke_claude_with_session") as mock_invoke:
+            mock_invoke.side_effect = exc
             result = reviewer._run_claude_analysis(123, "Title", "Body", "Plan text")
 
         assert result is None
@@ -230,21 +251,60 @@ class TestRunClaudeAnalysis:
     def test_returns_analysis_on_success(self, reviewer: PlanReviewer) -> None:
         """_run_claude_analysis returns review text on successful Claude call."""
         analysis_text = "This plan looks good. Here are some suggestions."
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout=analysis_text, stderr="")
+        with patch("hephaestus.automation.plan_reviewer.invoke_claude_with_session") as mock_invoke:
+            mock_invoke.return_value = (analysis_text, "session-uuid")
             result = reviewer._run_claude_analysis(123, "Title", "Body", "Plan text")
 
         assert result == analysis_text
+        # Sanity-check the wrapper was called with the expected kwargs.
+        kwargs = mock_invoke.call_args.kwargs
+        assert kwargs["issue"] == 123
+        assert kwargs["input_via_stdin"] is True
+        assert kwargs["allowed_tools"] == "Read,Glob,Grep"
 
     def test_returns_none_on_timeout(self, reviewer: PlanReviewer) -> None:
         """_run_claude_analysis returns None when Claude times out."""
         import subprocess
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.TimeoutExpired("claude", 300)
+        with patch("hephaestus.automation.plan_reviewer.invoke_claude_with_session") as mock_invoke:
+            mock_invoke.side_effect = subprocess.TimeoutExpired("claude", 300)
             result = reviewer._run_claude_analysis(123, "Title", "Body", "Plan text")
 
         assert result is None
+
+    def test_retries_on_rate_limit_with_quota_reset(self, reviewer: PlanReviewer) -> None:
+        """A 429 with a parseable reset epoch triggers wait_until + retry.
+
+        Production code (``plan_reviewer.py:418-433``) catches
+        ``CalledProcessError``, asks ``scan_quota_reset`` to extract an
+        epoch from stderr, and on a hit recurses with ``max_retries-1``
+        after ``wait_until(epoch)``. We patch ``wait_until`` so the test
+        does not sleep, then verify the wrapper is called twice — the
+        recursive retry path.
+        """
+        import subprocess
+
+        reset_epoch = 1_700_000_000
+        exc = subprocess.CalledProcessError(
+            returncode=1, cmd=["claude"], output="", stderr="rate limited"
+        )
+        analysis_text = "Retry succeeded — plan is fine."
+
+        with (
+            patch("hephaestus.automation.plan_reviewer.invoke_claude_with_session") as mock_invoke,
+            patch(
+                "hephaestus.automation.plan_reviewer.scan_quota_reset",
+                return_value=reset_epoch,
+            ) as mock_scan,
+            patch("hephaestus.automation.plan_reviewer.wait_until") as mock_wait,
+        ):
+            mock_invoke.side_effect = [exc, (analysis_text, "session-uuid")]
+            result = reviewer._run_claude_analysis(123, "Title", "Body", "Plan text")
+
+        assert result == analysis_text
+        assert mock_invoke.call_count == 2
+        mock_scan.assert_called_once_with("rate limited", "")
+        mock_wait.assert_called_once_with(reset_epoch)
 
 
 class TestReviewIssue:
