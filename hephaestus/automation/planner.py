@@ -138,30 +138,24 @@ class Planner:
     def _filter_issues(self) -> list[int]:
         """Filter issues based on options.
 
+        Only does the cheap, batched check here: skip closed issues using one
+        GraphQL call per 100 via :func:`prefetch_issue_states`. The
+        already-planned check happens per-issue inside :meth:`_plan_issue` so
+        it runs in parallel with the worker pool instead of blocking on N
+        sequential ``gh issue view --comments`` round-trips before any worker
+        starts (#548).
+
         Returns:
             List of issue numbers to plan
 
         """
-        issues_to_plan = []
-
         # Batch fetch issue states if we need to check for closed issues
         cached_states = {}
         if self.options.skip_closed:
             cached_states = prefetch_issue_states(self.options.issues)
 
+        issues_to_plan = []
         for issue_num in self.options.issues:
-            # Check if already planned (unless force)
-            if not self.options.force and self._has_existing_plan(issue_num):
-                logger.info("Issue #%s already has a plan, skipping", issue_num)
-                with self.lock:
-                    self.results[issue_num] = PlanResult(
-                        issue_number=issue_num,
-                        success=True,
-                        plan_already_exists=True,
-                    )
-                continue
-
-            # Check if closed (using cached states)
             if self.options.skip_closed:
                 state = cached_states.get(issue_num)
                 if state and state.value == "CLOSED":
@@ -231,6 +225,25 @@ class Planner:
             )
 
         try:
+            # Skip-if-already-planned moved here from _filter_issues (#548) so
+            # the check runs inside the thread pool (parallel, overlapped with
+            # actual planning work) instead of as a serial pre-pass that
+            # blocked all workers behind N ``gh issue view --comments`` calls.
+            if not self.options.force:
+                self.status_tracker.update_slot(
+                    slot_id, f"{issue_ref(issue_number)}: checking existing plan"
+                )
+                if self._has_existing_plan(issue_number):
+                    logger.info("Issue #%s already has a plan, skipping", issue_number)
+                    self.status_tracker.update_slot(
+                        slot_id, f"{issue_ref(issue_number)}: plan exists, skipped"
+                    )
+                    return PlanResult(
+                        issue_number=issue_number,
+                        success=True,
+                        plan_already_exists=True,
+                    )
+
             self.status_tracker.update_slot(slot_id, f"Planning {issue_ref(issue_number)}")
 
             if self.options.dry_run:
