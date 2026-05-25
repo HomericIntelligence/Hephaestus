@@ -352,3 +352,65 @@ class TestEMNISTDownloader:
     @patch.object(DatasetDownloader, "download_with_retry", return_value=False)
     def test_download_failure_all_mirrors(self, _mock, tmp_path: Path) -> None:
         assert EMNISTDownloader().download_emnist("balanced", str(tmp_path)) is False
+
+
+class TestSecurityHardening:
+    """Regression tests for #478: checksum verification + safe tar extraction."""
+
+    def test_dataset_md5_includes_known_files(self) -> None:
+        """The per-file MD5 map covers CIFAR + Fashion-MNIST downloads."""
+        from hephaestus.datasets.downloader import _DATASET_MD5
+
+        for name in (
+            "cifar-10-python.tar.gz",
+            "cifar-100-python.tar.gz",
+            "train-images-idx3-ubyte.gz",
+            "t10k-images-idx3-ubyte.gz",
+        ):
+            assert name in _DATASET_MD5
+
+    def test_verify_or_remove_passes_for_correct_md5(self, tmp_path: Path) -> None:
+        """A file matching the known MD5 verifies True and is kept."""
+        from hephaestus.datasets.downloader import _DATASET_MD5, _verify_or_remove
+
+        name = "cifar-10-python.tar.gz"
+        target = tmp_path / name
+        target.write_bytes(b"")  # MD5 of empty = d41d8cd98f00b204e9800998ecf8427e
+        # Patch the expected MD5 to the digest of the bytes we just wrote.
+        with patch.dict(_DATASET_MD5, {name: "d41d8cd98f00b204e9800998ecf8427e"}):
+            assert _verify_or_remove(target, name) is True
+        assert target.exists()
+
+    def test_verify_or_remove_removes_on_mismatch(self, tmp_path: Path) -> None:
+        """A file failing the MD5 check is verified False AND deleted."""
+        from hephaestus.datasets.downloader import _verify_or_remove
+
+        target = tmp_path / "cifar-10-python.tar.gz"
+        target.write_bytes(b"tampered content")
+        # The real MD5 in _DATASET_MD5 will not match — the helper must remove.
+        assert _verify_or_remove(target, "cifar-10-python.tar.gz") is False
+        assert not target.exists()
+
+    def test_verify_or_remove_unknown_filename_passes_with_warning(self, tmp_path: Path) -> None:
+        """A file with no recorded checksum is allowed through (logged)."""
+        from hephaestus.datasets.downloader import _verify_or_remove
+
+        target = tmp_path / "novel.bin"
+        target.write_bytes(b"x")
+        assert _verify_or_remove(target, "novel.bin") is True
+        assert target.exists()
+
+    def test_extractall_uses_data_filter(self) -> None:
+        """Both CIFAR extract sites pass filter='data' to extractall (CWE-22)."""
+        from hephaestus.datasets.downloader import __file__ as downloader_file
+
+        src = Path(downloader_file).read_text()
+        # Two extract sites, both with the filter.
+        assert src.count('tf.extractall(output_path, filter="data")') == 2
+        # No bare extractall(output_path) without filter.
+        assert "tf.extractall(output_path)\n" not in src
+
+    def test_fashion_mnist_url_is_https(self) -> None:
+        """Fashion-MNIST downloader uses HTTPS, not plain HTTP."""
+        d = FashionMNISTDownloader()
+        assert d.base_url.startswith("https://")

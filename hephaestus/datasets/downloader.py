@@ -25,7 +25,9 @@ Usage::
 
 from __future__ import annotations
 
+import contextlib
 import gzip
+import hashlib
 import pickle
 import struct
 import sys
@@ -39,6 +41,56 @@ from urllib.request import Request, urlopen
 from hephaestus.logging.utils import get_logger
 
 logger = get_logger(__name__)
+
+# Per-file MD5 checksums for integrity verification. Values are the
+# upstream-published MD5s used by torchvision; they detect MITM tampering and
+# CDN corruption. MD5 is fit-for-purpose here because the checksum comes from
+# a trusted source (the dataset distributor), not the network response.
+_DATASET_MD5: dict[str, str] = {
+    # CIFAR
+    "cifar-10-python.tar.gz": "c58f30108f718f92721af3b95e74349a",
+    "cifar-100-python.tar.gz": "eb9058c3a382ffc7106e4002c42a8d85",
+    # Fashion-MNIST
+    "train-images-idx3-ubyte.gz": "8d4fb7e6c68d591d4c3dfef9ec88bf0d",
+    "train-labels-idx1-ubyte.gz": "25c81989df183df01b3e8a0aad5dffbe",
+    "t10k-images-idx3-ubyte.gz": "bef4ecab320f06d8554ea6380940ec79",
+    "t10k-labels-idx1-ubyte.gz": "bb300cfdad3c16e7a12a480ee83cd310",
+}
+
+
+def _file_md5(path: Path) -> str:
+    """Return the hex MD5 digest of *path*'s contents."""
+    h = hashlib.md5(usedforsecurity=False)
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _verify_or_remove(path: Path, filename: str) -> bool:
+    """Verify *path* against the known MD5 for *filename*.
+
+    Returns True if the file matches the expected MD5 (or no checksum is known —
+    in which case the caller proceeds without verification, logged). Returns
+    False if the checksum is known and does not match; in that case the file is
+    removed so the next download attempt produces a fresh copy.
+    """
+    expected = _DATASET_MD5.get(filename)
+    if expected is None:
+        logger.warning("No checksum recorded for %s — skipping verification", filename)
+        return True
+    actual = _file_md5(path)
+    if actual == expected:
+        return True
+    logger.error(
+        "Checksum mismatch for %s: expected %s, got %s — discarding download",
+        filename,
+        expected,
+        actual,
+    )
+    with contextlib.suppress(OSError):
+        path.unlink()
+    return False
 
 
 class DatasetDownloader:
@@ -118,6 +170,9 @@ class DatasetDownloader:
                                 )
 
                 print()  # terminates the progress bar line
+                if not _verify_or_remove(output_path, filename):
+                    last_error = "checksum mismatch"
+                    continue
                 return True
 
             except HTTPError as e:
@@ -222,7 +277,7 @@ class FashionMNISTDownloader(DatasetDownloader):
 
     def __init__(self) -> None:
         """Initialize with the Fashion-MNIST dataset URL."""
-        super().__init__("http://fashion-mnist.s3-website.eu-central-1.amazonaws.com")
+        super().__init__("https://fashion-mnist.s3-website.eu-central-1.amazonaws.com")
         self.files = [
             ("train-images-idx3-ubyte.gz", "train_images.idx"),
             ("train-labels-idx1-ubyte.gz", "train_labels.idx"),
@@ -313,7 +368,9 @@ class CIFAR10Downloader(DatasetDownloader):
         batch_dir = output_path / "cifar-10-batches-py"
         try:
             with tarfile.open(tar_path) as tf:
-                tf.extractall(output_path)
+                # filter='data' (Python 3.12+) rejects members with absolute or
+                # ../-traversing paths, blocking the CWE-22 zip-slip class.
+                tf.extractall(output_path, filter="data")
         except (tarfile.TarError, OSError) as exc:
             logger.error("Failed to extract CIFAR-10 tarball: %s", exc)
             return False
@@ -434,7 +491,9 @@ class CIFAR100Downloader(DatasetDownloader):
         logger.info("Extracting CIFAR-100 tarball...")
         try:
             with tarfile.open(tar_path) as tf:
-                tf.extractall(output_path)
+                # filter='data' (Python 3.12+) rejects members with absolute or
+                # ../-traversing paths, blocking the CWE-22 zip-slip class.
+                tf.extractall(output_path, filter="data")
         except (tarfile.TarError, OSError) as exc:
             logger.error("Failed to extract CIFAR-100 tarball: %s", exc)
             return False
