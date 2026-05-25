@@ -4,11 +4,17 @@ Provides:
 - Thread-safe log buffer management
 - Real-time status display with curses
 - Per-thread log routing
+
+The :mod:`curses` stdlib module ships with CPython on POSIX but not on Windows
+(``_curses`` is unavailable there). To keep this module importable on Windows —
+so the pure-Python :class:`LogBuffer` / :class:`ThreadLogManager` classes that
+other automation modules depend on stay importable — ``curses`` is loaded under
+a try/except. Instantiating :class:`CursesUI` on a platform without curses
+raises :class:`RuntimeError` with a clear message.
 """
 
 import atexit
 import contextlib
-import curses
 import logging
 import threading
 import time
@@ -20,6 +26,11 @@ from hephaestus.utils.terminal import restore_terminal
 from .status_tracker import StatusTracker
 
 logger = logging.getLogger(__name__)
+
+try:
+    import curses
+except ModuleNotFoundError:  # Windows: stdlib `curses` is not bundled with CPython.
+    curses = None  # type: ignore[assignment]
 
 
 class LogBuffer:
@@ -122,7 +133,19 @@ class CursesUI:
             status_tracker: StatusTracker instance
             log_manager: ThreadLogManager instance
 
+        Raises:
+            RuntimeError: If the stdlib ``curses`` module is unavailable on this
+                platform (notably Windows). The pure-Python classes in this
+                module remain importable in that case; only ``CursesUI`` itself
+                is unusable.
+
         """
+        if curses is None:
+            raise RuntimeError(
+                "CursesUI requires the stdlib `curses` module, which is not "
+                "bundled with CPython on Windows. Run the automation pipeline "
+                "from a POSIX environment, or set --no-ui."
+            )
         self.status_tracker = status_tracker
         self.log_manager = log_manager
         self.stdscr: Any = None
