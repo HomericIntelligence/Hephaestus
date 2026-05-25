@@ -227,6 +227,7 @@ class TestPlanIssueNOGOExhausted:
     def test_nogo_exhausted_plan_result_success_false(self, planner: Planner) -> None:
         """All-NOGO loop must produce PlanResult(success=False) not PlanResult(success=True)."""
         with (
+            patch.object(planner, "_has_existing_plan", return_value=False),
             patch.object(
                 planner,
                 "_run_plan_review_loop",
@@ -243,6 +244,7 @@ class TestPlanIssueNOGOExhausted:
     def test_go_plan_result_success_true(self, planner: Planner) -> None:
         """A GO loop must still produce PlanResult(success=True)."""
         with (
+            patch.object(planner, "_has_existing_plan", return_value=False),
             patch.object(
                 planner,
                 "_run_plan_review_loop",
@@ -253,3 +255,97 @@ class TestPlanIssueNOGOExhausted:
             result = planner._plan_issue(123)
 
         assert result.success is True
+
+    def test_existing_plan_short_circuits_in_worker(self, planner: Planner) -> None:
+        """In-worker skip path (#548).
+
+        When a plan already exists, _plan_issue must return early with
+        plan_already_exists=True and NOT invoke the review loop or post a
+        plan. This is the parallel replacement for the old serial pre-pass
+        in _filter_issues.
+        """
+        with (
+            patch.object(planner, "_has_existing_plan", return_value=True),
+            patch.object(planner, "_run_plan_review_loop") as mock_loop,
+            patch.object(planner, "_post_plan") as mock_post,
+        ):
+            result = planner._plan_issue(123)
+
+        assert result.success is True
+        assert result.plan_already_exists is True
+        mock_loop.assert_not_called()
+        mock_post.assert_not_called()
+
+    def test_force_bypasses_existing_plan_check(self, planner: Planner) -> None:
+        """With force=True, the skip-check must be bypassed (#548).
+
+        _plan_issue must NOT call _has_existing_plan and must run the review
+        loop unconditionally. Keeps --force semantics intact after moving the
+        skip-check into the worker.
+        """
+        planner.options.force = True
+        with (
+            patch.object(planner, "_has_existing_plan") as mock_check,
+            patch.object(
+                planner,
+                "_run_plan_review_loop",
+                return_value=("plan", _go_review(), 1, True),
+            ) as mock_loop,
+            patch.object(planner, "_post_plan"),
+        ):
+            result = planner._plan_issue(123)
+
+        mock_check.assert_not_called()
+        mock_loop.assert_called_once()
+        assert result.success is True
+        assert result.plan_already_exists is False
+
+
+class TestFilterIssues:
+    """Regression guards for #548.
+
+    _filter_issues must NOT do per-issue plan lookups (those moved into the
+    worker). If these tests fail, the per-issue gh round-trip stall at phase
+    1 startup has been re-introduced.
+    """
+
+    def test_filter_does_not_call_has_existing_plan(self, planner: Planner) -> None:
+        """The serial _gh_call pre-pass is gone.
+
+        _filter_issues must not invoke _has_existing_plan, even once.
+        """
+        with (
+            patch.object(planner, "_has_existing_plan") as mock_check,
+            patch(
+                "hephaestus.automation.planner.prefetch_issue_states",
+                return_value={},
+            ),
+        ):
+            result = planner._filter_issues()
+
+        mock_check.assert_not_called()
+        assert result == [123]
+
+    def test_filter_still_skips_closed_issues(self, planner: Planner) -> None:
+        """Closed-issue filtering (cheap, batched GraphQL) stays in the pre-pass."""
+        from hephaestus.automation.models import IssueState
+
+        with patch(
+            "hephaestus.automation.planner.prefetch_issue_states",
+            return_value={123: IssueState.CLOSED},
+        ):
+            result = planner._filter_issues()
+
+        assert result == []
+
+    def test_filter_passes_open_issues_through(self, planner: Planner) -> None:
+        """Open issues survive the pre-pass and are returned for the worker pool."""
+        from hephaestus.automation.models import IssueState
+
+        with patch(
+            "hephaestus.automation.planner.prefetch_issue_states",
+            return_value={123: IssueState.OPEN},
+        ):
+            result = planner._filter_issues()
+
+        assert result == [123]
