@@ -51,11 +51,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # macOS and Windows are tracked separately in #539 — the test suite is
+        # mostly Linux-pinned (paths, file modes, curses, fcntl) and the
+        # cross-OS port is a multi-session effort, not blocking 1.0. The
+        # runtime fixes already in place (#533/#534/#536/#537/#538) stay.
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
         test-type: [unit, integration]
-    # `shell: bash` for every run step keeps the same script working on
-    # Windows runners (which would otherwise default to PowerShell).
+    # `shell: bash` is harmless on ubuntu and keeps the matrix re-expansion
+    # trivial once #539 is picked up.
     defaults:
       run:
         shell: bash
