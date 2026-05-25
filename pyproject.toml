@@ -29,6 +29,9 @@ dependencies = [
     "packaging>=21.0,<27",
     "pyyaml>=6.0,<7",
     "pydantic>=2.12.5,<3",
+    # IANA timezone data is bundled with Python on POSIX but not on Windows;
+    # rate_limit.py uses ZoneInfo which needs it on Windows.
+    "tzdata; platform_system == 'Windows'",
 ]
 
 [project.optional-dependencies]
