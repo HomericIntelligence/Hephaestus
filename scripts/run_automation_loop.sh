@@ -14,7 +14,13 @@
 #     declare --issues as REQUIRED (no auto-discovery). The orchestrator
 #     discovers open issues once per repo per loop (`gh issue list`) and passes
 #     them via --issues. Repos with zero open issues skip these four phases
-#     cleanly with a "No open issues — skipping" log line.
+#     cleanly with a log line of the form
+#     "  [$repo] phase N/6 NAME SKIP (no open issues)" emitted on stderr.
+#
+# Diagnostic stream routing:
+#   - stderr: every phase START / done / SKIP / Warning banner (operator
+#     diagnostics — grep `2>` redirect for the full phase lifecycle).
+#   - stdout: phase-binary output (Python tool stdout passes through).
 #
 # Usage:
 #   ./scripts/run_automation_loop.sh [options]
@@ -28,6 +34,18 @@
 #                             Valid: plan,review-plans,implement,review-prs,address-review,drive-green
 #                             Default: all six.
 #                             Normal gates still apply (drive-green only on final loop).
+#                             Safety checks warn (stderr) if dependencies are
+#                             skipped, e.g. `implement` without `review-plans`,
+#                             `address-review` without `review-prs`, or
+#                             `drive-green` without `implement`/`address-review`.
+#                             Use --allow-unsafe-phase-order to silence these.
+#   --allow-unsafe-phase-order
+#                             Suppress the dependency-ordering warnings emitted
+#                             when --phases skips a recommended predecessor
+#                             (e.g. running `plan,implement` without review).
+#                             Intended for operators deliberately running a
+#                             partial pipeline (e.g. bulk-creating plans first,
+#                             then implementing in a later invocation).
 #   --planner-model MODEL     Set HEPH_PLANNER_MODEL for child processes
 #   --reviewer-model MODEL    Set HEPH_REVIEWER_MODEL (covers plan-review and PR-review)
 #   --implementer-model MODEL Set HEPH_IMPLEMENTER_MODEL (covers implement, address-review,
@@ -104,6 +122,7 @@ ORG="HomericIntelligence"
 
 ALL_PHASES="plan,review-plans,implement,review-prs,address-review,drive-green"
 PHASES="$ALL_PHASES"
+ALLOW_UNSAFE_PHASE_ORDER=0
 
 PLANNER_MODEL=""
 REVIEWER_MODEL=""
@@ -120,6 +139,7 @@ while [[ $# -gt 0 ]]; do
     --max-workers)        MAX_WORKERS="$2"; shift 2 ;;
     --parallel-repos)     PARALLEL_REPOS="$2"; shift 2 ;;
     --phases)             PHASES="$2"; shift 2 ;;
+    --allow-unsafe-phase-order) ALLOW_UNSAFE_PHASE_ORDER=1; shift ;;
     --planner-model)      PLANNER_MODEL="$2"; shift 2 ;;
     --reviewer-model)     REVIEWER_MODEL="$2"; shift 2 ;;
     --implementer-model)  IMPLEMENTER_MODEL="$2"; shift 2 ;;
@@ -144,6 +164,40 @@ phase_enabled() {
 }
 
 # ---------------------------------------------------------------------------
+# Dependency-ordering validation for --phases.
+#
+# Phase typos are caught above. This block additionally warns when a phase is
+# enabled without a recommended predecessor — running `implement` without
+# `review-plans`, for example, means plans get implemented unreviewed
+# (potentially NOGO-exhausted). The warning goes to stderr so it interleaves
+# with the rest of the phase-lifecycle log. Operators who deliberately want
+# a partial pipeline (e.g. bulk-plan now, implement in a later invocation)
+# pass `--allow-unsafe-phase-order` to suppress these warnings.
+#
+# This is intentionally NOT a hard error: the orchestrator is a tool for
+# operators who know the pipeline, and forcing them to retype an opt-out for
+# every partial run would itself violate POLA. A loud stderr warning is the
+# right ergonomic balance.
+# ---------------------------------------------------------------------------
+phase_in_list() {
+  case ",${PHASES}," in
+    *",$1,"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+if [[ "$ALLOW_UNSAFE_PHASE_ORDER" -eq 0 ]]; then
+  if phase_in_list implement && ! phase_in_list review-plans; then
+    echo "WARNING: --phases includes 'implement' but not 'review-plans'; plans will be implemented without review (pass --allow-unsafe-phase-order to silence)" >&2
+  fi
+  if phase_in_list address-review && ! phase_in_list review-prs; then
+    echo "WARNING: --phases includes 'address-review' but not 'review-prs'; there will be no fresh review comments to address (pass --allow-unsafe-phase-order to silence)" >&2
+  fi
+  if phase_in_list drive-green && ! phase_in_list implement && ! phase_in_list address-review; then
+    echo "WARNING: --phases includes 'drive-green' but neither 'implement' nor 'address-review'; drive-green will run against PRs not touched this invocation (pass --allow-unsafe-phase-order to silence)" >&2
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Phase banner helpers.
 #
 # Every phase block in process_repo wraps its work in a phase_start/phase_done
@@ -152,8 +206,22 @@ phase_enabled() {
 # silent abort inside process_repo (e.g. set -e tripping on an unguarded
 # infrastructure command) will be obvious from a missing `done` line.
 #
+# Stream-routing contract (POLA): all phase-lifecycle diagnostics go to STDERR
+# so an operator running `script.sh 2>err.log >out.log` finds the full phase
+# lifecycle (START, done, SKIP, Warning) in `err.log`, leaving stdout for the
+# phase binaries' own output. The lone exception is `date +%s` inside
+# phase_start, which MUST stay on stdout because callers capture it via
+# `t0=$(phase_start …)`.
+#
 # phase_start prints the START banner to stderr and writes the epoch
 # timestamp to stdout, so callers do `t0=$(phase_start …)`.
+#
+# phase_done clamps elapsed-time arithmetic with a bash ternary
+# `$(( now >= t0 ? now - t0 : 0 ))` so an NTP step that moves the wall clock
+# backwards between phase_start and phase_done cannot produce a negative
+# `done in -Xs` reading. The ternary is a standard bash arithmetic-context
+# operator (man bash, ARITHMETIC EVALUATION): `cond ? a : b` evaluates `a`
+# when `cond` is non-zero, `b` otherwise.
 # ---------------------------------------------------------------------------
 phase_start() {
   local repo="$1" idx="$2" name="$3"
@@ -162,9 +230,10 @@ phase_start() {
 }
 phase_done() {
   local repo="$1" idx="$2" name="$3" t0="$4" status="${5:-0}"
-  local now
+  local now elapsed
   now=$(date +%s)
-  echo "  [$repo] phase $idx/6 $name done in $((now - t0))s (rc=$status)"
+  elapsed=$(( now >= t0 ? now - t0 : 0 ))
+  echo "  [$repo] phase $idx/6 $name done in ${elapsed}s (rc=$status)" >&2
 }
 
 # Forward model selections via env vars to all child processes.
@@ -281,13 +350,23 @@ process_repo() {
   # authoritative error handler. An unguarded infrastructure command
   # (`git fetch`, mapfile + process substitution under `set -m`, a `local`
   # assignment whose RHS happens to be non-zero) must NOT silently abort
-  # the function and cause phases 2-6 to be skipped. The RETURN trap
-  # restores errexit when the function returns so the outer orchestrator's
-  # `set -e` semantics are unaffected.
+  # the function and cause phases 2-6 to be skipped.
+  #
+  # The `trap 'set -e' RETURN` below is defensive for hypothetical future
+  # synchronous call sites. It is currently redundant given the always-
+  # backgrounded invocation at the main loop (`process_repo "$repo" "$loop" &`,
+  # ~line 506): the `&` forks a subshell, so any shell-option mutation here
+  # cannot propagate to the parent. Keeping the trap costs nothing and
+  # documents the intended contract should a future maintainer call
+  # process_repo synchronously.
   set +e
   trap 'set -e' RETURN
 
-  local rc t0
+  # any_failure tracks whether any phase returned non-zero. process_repo
+  # returns this value so the outer `wait` can detect hard crashes
+  # (SIGSEGV=139, OOM=137) that the per-phase Warning lines would otherwise
+  # bury inside the merged log stream.
+  local rc t0 any_failure=0
 
   echo ""
   echo "── $repo ──────────────────────────────────────────────────────"
@@ -295,10 +374,10 @@ process_repo() {
   # Rebase main before starting work
   echo "  [$repo] Rebasing main..."
   git -C "$dir" fetch origin --quiet \
-    || echo "  [$repo] Warning: git fetch failed (continuing with stale refs)"
+    || echo "  [$repo] Warning: git fetch failed (continuing with stale refs)" >&2
   git -C "$dir" rebase origin/main --quiet 2>/dev/null \
     || git -C "$dir" reset --hard origin/main --quiet 2>/dev/null \
-    || echo "  [$repo] Warning: could not rebase, continuing anyway"
+    || echo "  [$repo] Warning: could not rebase, continuing anyway" >&2
 
   # Capture the trunk SHA once per repo loop iteration. Every child phase
   # reads $HEPH_TRUNK_GITHASH to build deterministic Claude session IDs
@@ -344,16 +423,19 @@ process_repo() {
         "${DRY_RUN_FLAGS[@]}"
     )
     rc=$?
-    [[ $rc -ne 0 ]] && echo "  [$repo] Warning: plan-issues exited rc=$rc (loop $loop)"
+    if [[ $rc -ne 0 ]]; then
+      echo "  [$repo] Warning: plan-issues exited rc=$rc (loop $loop)" >&2
+      any_failure=1
+    fi
     phase_done "$repo" 1 plan "$t0" "$rc"
   else
-    echo "  [$repo] phase 1/6 plan SKIP (disabled by --phases)"
+    echo "  [$repo] phase 1/6 plan SKIP (disabled by --phases)" >&2
   fi
 
   # --- Phase 2: Review Plans ---
   if phase_enabled review-plans; then
     if [[ ${#OPEN_ISSUES[@]} -eq 0 ]]; then
-      echo "  [$repo] phase 2/6 review-plans SKIP (no open issues)"
+      echo "  [$repo] phase 2/6 review-plans SKIP (no open issues)" >&2
     else
       t0=$(phase_start "$repo" 2 review-plans)
       (
@@ -365,11 +447,14 @@ process_repo() {
           "${DRY_RUN_FLAGS[@]}"
       )
       rc=$?
-      [[ $rc -ne 0 ]] && echo "  [$repo] Warning: review-plans exited rc=$rc (loop $loop)"
+      if [[ $rc -ne 0 ]]; then
+        echo "  [$repo] Warning: review-plans exited rc=$rc (loop $loop)" >&2
+        any_failure=1
+      fi
       phase_done "$repo" 2 review-plans "$t0" "$rc"
     fi
   else
-    echo "  [$repo] phase 2/6 review-plans SKIP (disabled by --phases)"
+    echo "  [$repo] phase 2/6 review-plans SKIP (disabled by --phases)" >&2
   fi
 
   # --- Phase 3: Implement ---
@@ -385,16 +470,19 @@ process_repo() {
         "${DRY_RUN_FLAGS[@]}"
     )
     rc=$?
-    [[ $rc -ne 0 ]] && echo "  [$repo] Warning: implement-issues exited rc=$rc (loop $loop)"
+    if [[ $rc -ne 0 ]]; then
+      echo "  [$repo] Warning: implement-issues exited rc=$rc (loop $loop)" >&2
+      any_failure=1
+    fi
     phase_done "$repo" 3 implement "$t0" "$rc"
   else
-    echo "  [$repo] phase 3/6 implement SKIP (disabled by --phases)"
+    echo "  [$repo] phase 3/6 implement SKIP (disabled by --phases)" >&2
   fi
 
   # --- Phase 4: Review PRs (inline comments) ---
   if phase_enabled review-prs; then
     if [[ ${#OPEN_ISSUES[@]} -eq 0 ]]; then
-      echo "  [$repo] phase 4/6 review-prs SKIP (no open issues)"
+      echo "  [$repo] phase 4/6 review-prs SKIP (no open issues)" >&2
     else
       t0=$(phase_start "$repo" 4 review-prs)
       (
@@ -407,17 +495,20 @@ process_repo() {
           "${DRY_RUN_FLAGS[@]}"
       )
       rc=$?
-      [[ $rc -ne 0 ]] && echo "  [$repo] Warning: review-issues exited rc=$rc (loop $loop)"
+      if [[ $rc -ne 0 ]]; then
+        echo "  [$repo] Warning: review-issues exited rc=$rc (loop $loop)" >&2
+        any_failure=1
+      fi
       phase_done "$repo" 4 review-prs "$t0" "$rc"
     fi
   else
-    echo "  [$repo] phase 4/6 review-prs SKIP (disabled by --phases)"
+    echo "  [$repo] phase 4/6 review-prs SKIP (disabled by --phases)" >&2
   fi
 
   # --- Phase 5: Address Review Comments ---
   if phase_enabled address-review; then
     if [[ ${#OPEN_ISSUES[@]} -eq 0 ]]; then
-      echo "  [$repo] phase 5/6 address-review SKIP (no open issues)"
+      echo "  [$repo] phase 5/6 address-review SKIP (no open issues)" >&2
     else
       t0=$(phase_start "$repo" 5 address-review)
       (
@@ -430,20 +521,23 @@ process_repo() {
           "${DRY_RUN_FLAGS[@]}"
       )
       rc=$?
-      [[ $rc -ne 0 ]] && echo "  [$repo] Warning: address-review exited rc=$rc (loop $loop)"
+      if [[ $rc -ne 0 ]]; then
+        echo "  [$repo] Warning: address-review exited rc=$rc (loop $loop)" >&2
+        any_failure=1
+      fi
       phase_done "$repo" 5 address-review "$t0" "$rc"
     fi
   else
-    echo "  [$repo] phase 5/6 address-review SKIP (disabled by --phases)"
+    echo "  [$repo] phase 5/6 address-review SKIP (disabled by --phases)" >&2
   fi
 
   # --- Phase 6: Drive PRs to Green CI (final loop only) ---
   if ! phase_enabled drive-green; then
-    echo "  [$repo] phase 6/6 drive-green SKIP (disabled by --phases)"
+    echo "  [$repo] phase 6/6 drive-green SKIP (disabled by --phases)" >&2
   elif [[ "$loop" -ne "$LOOPS" ]]; then
-    echo "  [$repo] phase 6/6 drive-green SKIP (not final loop)"
+    echo "  [$repo] phase 6/6 drive-green SKIP (not final loop)" >&2
   elif [[ ${#OPEN_ISSUES[@]} -eq 0 ]]; then
-    echo "  [$repo] phase 6/6 drive-green SKIP (no open issues)"
+    echo "  [$repo] phase 6/6 drive-green SKIP (no open issues)" >&2
   else
     t0=$(phase_start "$repo" 6 drive-green)
     (
@@ -459,16 +553,19 @@ process_repo() {
         "${DRY_RUN_FLAGS[@]}"
     )
     rc=$?
-    [[ $rc -ne 0 ]] && echo "  [$repo] Warning: drive-prs-green exited rc=$rc (loop $loop)"
+    if [[ $rc -ne 0 ]]; then
+      echo "  [$repo] Warning: drive-prs-green exited rc=$rc (loop $loop)" >&2
+      any_failure=1
+    fi
     phase_done "$repo" 6 drive-green "$t0" "$rc"
   fi
 
-  # Always succeed: every phase has logged its own status via phase_done,
-  # so the outer `wait` should report success after a clean run. The
-  # previously-emitted `Warning: repo job pid=… exited non-zero` was
-  # cosmetic noise from set -e tripping on an unguarded infrastructure
-  # command — that path is now closed by the `set +e` above.
-  return 0
+  # Return non-zero if ANY phase tripped its rc!=0 branch above. The outer
+  # `wait` (main loop) then propagates this so CI / monitoring see a hard
+  # crash (SIGSEGV=139, OOM=137, plain Python exception=1). Per-phase
+  # Warning lines + phase_done banners are still the authoritative log;
+  # this return code is the at-a-glance health bit for the whole repo.
+  return $any_failure
 }
 
 # ---------------------------------------------------------------------------
@@ -486,11 +583,11 @@ for (( loop=1; loop<=LOOPS; loop++ )); do
     ACTIVE_PIDS+=($!)
 
     if [[ ${#ACTIVE_PIDS[@]} -ge "$PARALLEL_REPOS" ]]; then
-      # process_repo() always `return 0`; this branch should be unreachable
-      # on a clean run. If it fires, the cause is upstream of the per-phase
-      # error handlers (e.g. the subshell was killed by a signal) — point
-      # the operator at the phase banners that already document each
-      # phase's exit code.
+      # process_repo() returns 0 only when EVERY phase returned 0; non-zero
+      # means at least one phase failed (per-phase Warning + phase_done
+      # banners above pinpoint which one). A non-zero from `wait` here is
+      # the operator's at-a-glance signal that this repo's loop iteration
+      # was not fully clean — drill into the phase banners for details.
       if ! wait "${ACTIVE_PIDS[0]}"; then
         echo "  Note: wait() non-zero for pid=${ACTIVE_PIDS[0]} — check phase banners above" >&2
       fi
