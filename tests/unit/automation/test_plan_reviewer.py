@@ -84,39 +84,128 @@ class TestGetLatestPlan:
         assert result is None
 
 
-class TestHasExistingReview:
-    """Tests for _has_existing_review method."""
+class TestLatestReviewIsFinal:
+    """Tests for the FINAL/APPROVED short-circuit gate.
 
-    def test_has_existing_review_true(self, reviewer: PlanReviewer) -> None:
-        """_has_existing_review returns True when review comment exists."""
+    The reviewer skips an issue only when the LATEST plan-review comment
+    carries the `**Verdict: APPROVED**` marker. REVISE/BLOCK/no-marker
+    re-runs the reviewer so an amended plan gets a fresh evaluation.
+    """
+
+    def test_skip_when_latest_review_is_approved(self, reviewer: PlanReviewer) -> None:
+        """APPROVED in the latest plan-review comment → skip."""
         comments = [
-            {"body": "## 🔍 Plan Review\n\nSome review content"},
+            {"body": "## Implementation Plan\n\nDo stuff"},
+            {"body": "## 🔍 Plan Review\n\nLooks good.\n\n**Verdict: APPROVED**"},
         ]
         with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
             mock_gh.return_value = _make_gh_result({"comments": comments})
-            result = reviewer._has_existing_review(123)
+            assert reviewer._latest_review_is_final(123) is True
 
-        assert result is True
-
-    def test_has_existing_review_false_no_review(self, reviewer: PlanReviewer) -> None:
-        """_has_existing_review returns False when no review comment exists."""
+    def test_rerun_when_latest_review_revise(self, reviewer: PlanReviewer) -> None:
+        """REVISE in the latest plan-review comment → re-run (not final)."""
         comments = [
-            {"body": "## Implementation Plan\n\nSome plan"},
-            {"body": "Just a comment"},
+            {"body": "## Implementation Plan\n\nDo stuff"},
+            {"body": "## 🔍 Plan Review\n\nNeeds work.\n\n**Verdict: REVISE**"},
         ]
         with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
             mock_gh.return_value = _make_gh_result({"comments": comments})
-            result = reviewer._has_existing_review(123)
+            assert reviewer._latest_review_is_final(123) is False
 
-        assert result is False
+    def test_rerun_when_latest_review_block(self, reviewer: PlanReviewer) -> None:
+        """BLOCK in the latest plan-review comment → re-run (not final)."""
+        comments = [
+            {"body": "## Implementation Plan\n\nDo stuff"},
+            {"body": "## 🔍 Plan Review\n\nFundamental problem.\n\n**Verdict: BLOCK**"},
+        ]
+        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
+            mock_gh.return_value = _make_gh_result({"comments": comments})
+            assert reviewer._latest_review_is_final(123) is False
 
-    def test_has_existing_review_false_on_error(self, reviewer: PlanReviewer) -> None:
-        """_has_existing_review returns False when gh call fails."""
+    def test_rerun_when_older_approved_but_newer_revise(self, reviewer: PlanReviewer) -> None:
+        """An older APPROVED followed by a newer REVISE → re-run (latest wins)."""
+        comments = [
+            {"body": "## Implementation Plan\n\nFirst plan"},
+            {"body": "## 🔍 Plan Review\n\nOld pass.\n\n**Verdict: APPROVED**"},
+            {"body": "## Implementation Plan\n\nAmended plan"},
+            {"body": "## 🔍 Plan Review\n\nNew concerns.\n\n**Verdict: REVISE**"},
+        ]
+        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
+            mock_gh.return_value = _make_gh_result({"comments": comments})
+            assert reviewer._latest_review_is_final(123) is False
+
+    def test_rerun_when_review_lacks_verdict_marker(self, reviewer: PlanReviewer) -> None:
+        """A plan-review comment without any verdict marker → re-run."""
+        comments = [
+            {"body": "## Implementation Plan\n\nDo stuff"},
+            {"body": "## 🔍 Plan Review\n\nPre-marker convention review body."},
+        ]
+        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
+            mock_gh.return_value = _make_gh_result({"comments": comments})
+            assert reviewer._latest_review_is_final(123) is False
+
+    def test_rerun_when_no_review_comment_exists(self, reviewer: PlanReviewer) -> None:
+        """No plan-review comment at all → re-run (not final)."""
+        comments = [
+            {"body": "## Implementation Plan\n\nDo stuff"},
+            {"body": "Some unrelated drive-by comment"},
+        ]
+        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
+            mock_gh.return_value = _make_gh_result({"comments": comments})
+            assert reviewer._latest_review_is_final(123) is False
+
+    def test_false_on_gh_error(self, reviewer: PlanReviewer) -> None:
+        """Gh failure → _fetch_issue_comments returns [], gate returns False."""
         with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
             mock_gh.side_effect = RuntimeError("gh failed")
-            result = reviewer._has_existing_review(123)
+            assert reviewer._latest_review_is_final(123) is False
 
-        assert result is False
+    def test_approved_marker_anywhere_in_latest_review_counts(self, reviewer: PlanReviewer) -> None:
+        """The marker may appear anywhere in the review body.
+
+        Claude is free to put `**Verdict: APPROVED**` on the last line or
+        anywhere else — we don't require strict end-of-text positioning.
+        """
+        comments = [
+            {"body": "## Implementation Plan\n\nDo stuff"},
+            {
+                "body": (
+                    "## 🔍 Plan Review\n\n"
+                    "**Verdict: APPROVED**\n\n"
+                    "Long-form rationale follows below..."
+                )
+            },
+        ]
+        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
+            mock_gh.return_value = _make_gh_result({"comments": comments})
+            assert reviewer._latest_review_is_final(123) is True
+
+
+class TestPostReviewVerdictFallback:
+    """Tests for the defence-in-depth fallback verdict line in _post_review."""
+
+    def test_appends_fallback_when_verdict_missing(self, reviewer: PlanReviewer) -> None:
+        """If Claude output has no `**Verdict:`, _post_review appends REVISE."""
+        with patch("hephaestus.automation.plan_reviewer.gh_issue_comment") as mock_comment:
+            reviewer._post_review(123, "Just analysis prose, no verdict line.")
+
+        mock_comment.assert_called_once()
+        posted_body: str = mock_comment.call_args[0][1]
+        assert "**Verdict: REVISE**" in posted_body
+        assert posted_body.startswith("## 🔍 Plan Review")
+
+    def test_does_not_double_append_when_verdict_present(self, reviewer: PlanReviewer) -> None:
+        """If the review already has any **Verdict: line, no fallback is added."""
+        with patch("hephaestus.automation.plan_reviewer.gh_issue_comment") as mock_comment:
+            reviewer._post_review(
+                123,
+                "Some analysis.\n\n**Verdict: APPROVED**",
+            )
+
+        posted_body: str = mock_comment.call_args[0][1]
+        # exactly one Verdict line, not two
+        assert posted_body.count("**Verdict:") == 1
+        assert "**Verdict: APPROVED**" in posted_body
 
 
 class TestRunClaudeAnalysis:
@@ -164,7 +253,7 @@ class TestReviewIssue:
     def test_review_skipped_if_no_plan(self, reviewer: PlanReviewer) -> None:
         """When issue has no plan comment, _review_issue returns success with no post."""
         with (
-            patch.object(reviewer, "_has_existing_review", return_value=False),
+            patch.object(reviewer, "_latest_review_is_final", return_value=False),
             patch.object(reviewer, "_get_latest_plan", return_value=None),
             patch("hephaestus.automation.plan_reviewer.gh_issue_comment") as mock_comment,
         ):
@@ -173,10 +262,10 @@ class TestReviewIssue:
         assert result.success is True
         mock_comment.assert_not_called()
 
-    def test_review_skipped_if_already_reviewed(self, reviewer: PlanReviewer) -> None:
-        """When latest comment is a plan review, skip posting."""
+    def test_review_skipped_if_latest_review_is_final(self, reviewer: PlanReviewer) -> None:
+        """When the latest plan review is APPROVED, skip posting."""
         with (
-            patch.object(reviewer, "_has_existing_review", return_value=True),
+            patch.object(reviewer, "_latest_review_is_final", return_value=True),
             patch("hephaestus.automation.plan_reviewer.gh_issue_comment") as mock_comment,
         ):
             result = reviewer._review_issue(123, 0)
@@ -185,9 +274,9 @@ class TestReviewIssue:
         mock_comment.assert_not_called()
 
     def test_review_posted(self, reviewer: PlanReviewer) -> None:
-        """When plan exists and no review yet, posts review comment with correct prefix."""
+        """When plan exists and no APPROVED review yet, posts review with correct prefix."""
         with (
-            patch.object(reviewer, "_has_existing_review", return_value=False),
+            patch.object(reviewer, "_latest_review_is_final", return_value=False),
             patch.object(
                 reviewer, "_get_latest_plan", return_value="## Implementation Plan\n\nDo stuff"
             ),
@@ -195,7 +284,7 @@ class TestReviewIssue:
             patch.object(
                 reviewer,
                 "_run_claude_analysis",
-                return_value="Great plan! A few suggestions.",
+                return_value="Great plan! A few suggestions.\n\n**Verdict: APPROVED**",
             ),
             patch("hephaestus.automation.plan_reviewer.gh_issue_comment") as mock_comment,
         ):
@@ -214,7 +303,7 @@ class TestReviewIssue:
         reviewer = PlanReviewer(mock_options)
 
         with (
-            patch.object(reviewer, "_has_existing_review", return_value=False),
+            patch.object(reviewer, "_latest_review_is_final", return_value=False),
             patch.object(
                 reviewer, "_get_latest_plan", return_value="## Implementation Plan\n\nDo stuff"
             ),
@@ -222,7 +311,7 @@ class TestReviewIssue:
             patch.object(
                 reviewer,
                 "_run_claude_analysis",
-                return_value="Review text",
+                return_value="Review text\n\n**Verdict: REVISE**",
             ),
             patch("hephaestus.automation.plan_reviewer.gh_issue_comment") as mock_comment,
         ):
@@ -235,7 +324,7 @@ class TestReviewIssue:
     def test_returns_failure_when_claude_returns_none(self, reviewer: PlanReviewer) -> None:
         """Returns failed WorkerResult when Claude analysis returns None."""
         with (
-            patch.object(reviewer, "_has_existing_review", return_value=False),
+            patch.object(reviewer, "_latest_review_is_final", return_value=False),
             patch.object(
                 reviewer, "_get_latest_plan", return_value="## Implementation Plan\n\nDo stuff"
             ),
@@ -253,7 +342,7 @@ class TestFetchIssueCommentsCache:
     """Tests for the _fetch_issue_comments caching helper (#A3-009)."""
 
     def test_api_called_only_once_for_same_issue(self, reviewer: PlanReviewer) -> None:
-        """Calling both _has_existing_review and _get_latest_plan should hit the API once."""
+        """Calling _latest_review_is_final and _get_latest_plan should hit the API once."""
         comments = [
             {"body": "## Implementation Plan\n\nDo stuff"},
         ]
@@ -261,7 +350,7 @@ class TestFetchIssueCommentsCache:
             mock_gh.return_value = _make_gh_result({"comments": comments})
 
             # Call both methods that internally use _fetch_issue_comments
-            reviewer._has_existing_review(123)
+            reviewer._latest_review_is_final(123)
             reviewer._get_latest_plan(123)
 
         assert mock_gh.call_count == 1, "Expected single API call due to caching"

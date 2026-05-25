@@ -41,6 +41,24 @@ _PLAN_MARKERS = PLAN_COMMENT_MARKERS
 # Prefix used by this reviewer when posting review comments.
 _REVIEW_PREFIX = "## 🔍 Plan Review"
 
+# Verdict marker emitted by Claude at the end of every plan review. See
+# PLAN_REVIEW_PROMPT in prompts.py — Claude is instructed to end its
+# response with exactly one of:
+#   **Verdict: APPROVED**  — plan is sound and ready to implement
+#   **Verdict: REVISE**    — plan needs changes (re-review next loop)
+#   **Verdict: BLOCK**     — plan has a fundamental problem
+# We short-circuit the reviewer for an issue only when the LATEST plan
+# review carries APPROVED. Any other verdict (REVISE/BLOCK) or a missing
+# marker re-runs the reviewer so the plan can be re-evaluated after the
+# planner amends it.
+_FINAL_VERDICT_MARKER = "**Verdict: APPROVED**"
+
+# Fallback marker appended by _post_review when Claude's output omits the
+# verdict line entirely (defence-in-depth — keeps the short-circuit gate
+# parseable even if the model misformats). REVISE is the safe default
+# because it triggers re-review on the next loop.
+_FALLBACK_VERDICT_LINE = "**Verdict: REVISE**"
+
 
 class PlanReviewer:
     """Reviews implementation plans posted to GitHub issues by the planner.
@@ -144,9 +162,17 @@ class PlanReviewer:
 
             # --- Read-only checks (safe in dry-run) ---
 
-            # Skip if already reviewed
-            if self._has_existing_review(issue_number):
-                logger.info("Issue #%s: already has a plan review, skipping", issue_number)
+            # Skip only when the LATEST plan review carries the APPROVED
+            # verdict marker. A REVISE/BLOCK verdict, or any older convention
+            # without the marker, re-runs the reviewer so an amended plan
+            # gets a fresh evaluation. (Previously this short-circuited on
+            # any prior `## 🔍 Plan Review` comment, which locked an issue
+            # out of re-review forever after the first interim verdict.)
+            if self._latest_review_is_final(issue_number):
+                logger.info(
+                    "Issue #%s: latest plan review is APPROVED, skipping",
+                    issue_number,
+                )
                 return WorkerResult(issue_number=issue_number, success=True)
 
             # Skip if no plan exists
@@ -217,7 +243,7 @@ class PlanReviewer:
     def _fetch_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
         """Fetch all comments for an issue, caching the result per instance.
 
-        Both ``_has_existing_review`` and ``_get_latest_plan`` call this
+        Both ``_latest_review_is_final`` and ``_get_latest_plan`` call this
         helper so the ``gh issue view --comments`` API is hit only once per
         issue per worker invocation (#A3-009).
 
@@ -260,7 +286,7 @@ class PlanReviewer:
         """Return the body of the last comment that looks like a plan.
 
         Uses :meth:`_fetch_issue_comments` so the API call is shared with
-        :meth:`_has_existing_review`.
+        :meth:`_latest_review_is_final`.
 
         Args:
             issue_number: GitHub issue number.
@@ -280,8 +306,17 @@ class PlanReviewer:
 
         return None
 
-    def _has_existing_review(self, issue_number: int) -> bool:
-        """Check whether any comment is already a plan review.
+    def _latest_review_is_final(self, issue_number: int) -> bool:
+        """Return True iff the LATEST plan review on the issue is APPROVED.
+
+        The reviewer is idempotent only on the APPROVED verdict — see
+        :data:`_FINAL_VERDICT_MARKER` for context. Comments are scanned in
+        chronological order (the order GitHub returns them) and the last
+        matching ``## 🔍 Plan Review`` body wins. Returns False when:
+
+        - No plan review comment exists at all.
+        - The latest plan review's body does not contain the APPROVED marker
+          (e.g. REVISE, BLOCK, or any pre-marker convention).
 
         Uses :meth:`_fetch_issue_comments` so the API call is shared with
         :meth:`_get_latest_plan`.
@@ -290,18 +325,32 @@ class PlanReviewer:
             issue_number: GitHub issue number.
 
         Returns:
-            True if a review comment already exists.
+            True if the latest plan review carries the APPROVED marker.
 
         """
         comments = self._fetch_issue_comments(issue_number)
 
+        latest_review_body: str | None = None
         for comment in comments:
             body: str = comment.get("body", "")
             if body.startswith(_REVIEW_PREFIX):
-                logger.debug("Found existing review for issue #%s", issue_number)
-                return True
+                latest_review_body = body
 
-        return False
+        if latest_review_body is None:
+            return False
+
+        is_final = _FINAL_VERDICT_MARKER in latest_review_body
+        if is_final:
+            logger.debug(
+                "Issue #%s: latest plan review is APPROVED (final)",
+                issue_number,
+            )
+        else:
+            logger.debug(
+                "Issue #%s: latest plan review is non-final (no APPROVED marker)",
+                issue_number,
+            )
+        return is_final
 
     def _run_claude_analysis(
         self,
@@ -454,11 +503,23 @@ class PlanReviewer:
     def _post_review(self, issue_number: int, review_text: str) -> None:
         """Post the plan review as a comment on the issue.
 
+        Defence-in-depth: if Claude's output omits the verdict line entirely
+        (model misformat), append `_FALLBACK_VERDICT_LINE` (= REVISE) so the
+        next-loop short-circuit gate always has a parseable marker. REVISE is
+        the safe default — it re-runs the reviewer rather than silently
+        skipping a possibly-incomplete review.
+
         Args:
             issue_number: GitHub issue number.
             review_text: Review body text from Claude.
 
         """
+        if "**Verdict:" not in review_text:
+            logger.warning(
+                "Issue #%s: review body missing verdict line; appending fallback REVISE",
+                issue_number,
+            )
+            review_text = f"{review_text.rstrip()}\n\n{_FALLBACK_VERDICT_LINE}\n"
         comment_body = f"{_REVIEW_PREFIX}\n\n{review_text}"
         gh_issue_comment(issue_number, comment_body)
         logger.info("Posted plan review to issue #%s", issue_number)

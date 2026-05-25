@@ -143,15 +143,42 @@ phase_enabled() {
   esac
 }
 
+# ---------------------------------------------------------------------------
+# Phase banner helpers.
+#
+# Every phase block in process_repo wraps its work in a phase_start/phase_done
+# pair so the operator can see (a) which of the 6 phases actually ran for each
+# repo, (b) what exit code each phase returned, and (c) how long it took. A
+# silent abort inside process_repo (e.g. set -e tripping on an unguarded
+# infrastructure command) will be obvious from a missing `done` line.
+#
+# phase_start prints the START banner to stderr and writes the epoch
+# timestamp to stdout, so callers do `t0=$(phase_start …)`.
+# ---------------------------------------------------------------------------
+phase_start() {
+  local repo="$1" idx="$2" name="$3"
+  echo "  [$repo] phase $idx/6 $name START" >&2
+  date +%s
+}
+phase_done() {
+  local repo="$1" idx="$2" name="$3" t0="$4" status="${5:-0}"
+  local now
+  now=$(date +%s)
+  echo "  [$repo] phase $idx/6 $name done in $((now - t0))s (rc=$status)"
+}
+
 # Forward model selections via env vars to all child processes.
 # claude_models.py honours these and falls back to its own defaults if unset.
 [[ -n "$PLANNER_MODEL" ]]     && export HEPH_PLANNER_MODEL="$PLANNER_MODEL"
 [[ -n "$REVIEWER_MODEL" ]]    && export HEPH_REVIEWER_MODEL="$REVIEWER_MODEL"
 [[ -n "$IMPLEMENTER_MODEL" ]] && export HEPH_IMPLEMENTER_MODEL="$IMPLEMENTER_MODEL"
 
-DRY_RUN_FLAGS=""
+# Array form (rather than a string) so `"${DRY_RUN_FLAGS[@]}"` expands to
+# zero argv elements in the off case under `set -u`, matching the
+# `ISSUE_ARGS` pattern established in PR #543.
+DRY_RUN_FLAGS=()
 if [[ "$DRY_RUN" -eq 1 ]]; then
-  DRY_RUN_FLAGS="--dry-run"
+  DRY_RUN_FLAGS=(--dry-run)
 fi
 
 # ---------------------------------------------------------------------------
@@ -249,12 +276,26 @@ process_repo() {
   local loop="$2"
   local dir="$PROJECTS_DIR/$repo"
 
+  # Defang errexit for the function body. Each phase below captures `rc=$?`
+  # explicitly and logs a structured warning on non-zero — that is the
+  # authoritative error handler. An unguarded infrastructure command
+  # (`git fetch`, mapfile + process substitution under `set -m`, a `local`
+  # assignment whose RHS happens to be non-zero) must NOT silently abort
+  # the function and cause phases 2-6 to be skipped. The RETURN trap
+  # restores errexit when the function returns so the outer orchestrator's
+  # `set -e` semantics are unaffected.
+  set +e
+  trap 'set -e' RETURN
+
+  local rc t0
+
   echo ""
   echo "── $repo ──────────────────────────────────────────────────────"
 
   # Rebase main before starting work
   echo "  [$repo] Rebasing main..."
-  git -C "$dir" fetch origin --quiet
+  git -C "$dir" fetch origin --quiet \
+    || echo "  [$repo] Warning: git fetch failed (continuing with stale refs)"
   git -C "$dir" rebase origin/main --quiet 2>/dev/null \
     || git -C "$dir" reset --hard origin/main --quiet 2>/dev/null \
     || echo "  [$repo] Warning: could not rebase, continuing anyway"
@@ -267,10 +308,11 @@ process_repo() {
   export HEPH_TRUNK_GITHASH
   echo "  [$repo] trunk=$HEPH_TRUNK_GITHASH (loop $loop)"
 
-  # On loop 3+, suppress follow-up issue filing to avoid noise
-  local FOLLOW_UP_FLAG=""
+  # On loop 3+, suppress follow-up issue filing to avoid noise.
+  # Array form so `"${FOLLOW_UP_FLAG[@]}"` expands to zero elements when off.
+  local FOLLOW_UP_FLAG=()
   if [[ "$loop" -ge 3 ]]; then
-    FOLLOW_UP_FLAG="--no-follow-up"
+    FOLLOW_UP_FLAG=(--no-follow-up)
   fi
 
   # Discover this repo's open issues once per loop iteration. Four of the six
@@ -294,108 +336,139 @@ process_repo() {
 
   # --- Phase 1: Plan ---
   if phase_enabled plan; then
-    echo "  [$repo] Planning issues..."
+    t0=$(phase_start "$repo" 1 plan)
     (
-      cd "$dir"
+      cd "$dir" || exit 1
       "$PLAN_BIN" \
         -v \
-        $DRY_RUN_FLAGS \
-        || echo "  [$repo] Warning: plan-issues exited non-zero (loop $loop)"
+        "${DRY_RUN_FLAGS[@]}"
     )
+    rc=$?
+    [[ $rc -ne 0 ]] && echo "  [$repo] Warning: plan-issues exited rc=$rc (loop $loop)"
+    phase_done "$repo" 1 plan "$t0" "$rc"
+  else
+    echo "  [$repo] phase 1/6 plan SKIP (disabled by --phases)"
   fi
 
   # --- Phase 2: Review Plans ---
   if phase_enabled review-plans; then
     if [[ ${#OPEN_ISSUES[@]} -eq 0 ]]; then
-      echo "  [$repo] No open issues — skipping review-plans"
+      echo "  [$repo] phase 2/6 review-plans SKIP (no open issues)"
     else
-      echo "  [$repo] Reviewing plans..."
+      t0=$(phase_start "$repo" 2 review-plans)
       (
-        cd "$dir"
+        cd "$dir" || exit 1
         "$PYTHON" "$SCRIPT_DIR/review_plans.py" \
           "${ISSUE_ARGS[@]}" \
           --max-workers "$MAX_WORKERS" \
           -v \
-          $DRY_RUN_FLAGS \
-          || echo "  [$repo] Warning: review-plans exited non-zero (loop $loop)"
+          "${DRY_RUN_FLAGS[@]}"
       )
+      rc=$?
+      [[ $rc -ne 0 ]] && echo "  [$repo] Warning: review-plans exited rc=$rc (loop $loop)"
+      phase_done "$repo" 2 review-plans "$t0" "$rc"
     fi
+  else
+    echo "  [$repo] phase 2/6 review-plans SKIP (disabled by --phases)"
   fi
 
   # --- Phase 3: Implement ---
   if phase_enabled implement; then
-    echo "  [$repo] Implementing issues..."
+    t0=$(phase_start "$repo" 3 implement)
     (
-      cd "$dir"
+      cd "$dir" || exit 1
       "$IMPL_BIN" \
         --max-workers "$MAX_WORKERS" \
         --no-ui \
         -v \
-        $FOLLOW_UP_FLAG \
-        $DRY_RUN_FLAGS \
-        || echo "  [$repo] Warning: implement-issues exited non-zero (loop $loop)"
+        "${FOLLOW_UP_FLAG[@]}" \
+        "${DRY_RUN_FLAGS[@]}"
     )
+    rc=$?
+    [[ $rc -ne 0 ]] && echo "  [$repo] Warning: implement-issues exited rc=$rc (loop $loop)"
+    phase_done "$repo" 3 implement "$t0" "$rc"
+  else
+    echo "  [$repo] phase 3/6 implement SKIP (disabled by --phases)"
   fi
 
   # --- Phase 4: Review PRs (inline comments) ---
   if phase_enabled review-prs; then
     if [[ ${#OPEN_ISSUES[@]} -eq 0 ]]; then
-      echo "  [$repo] No open issues — skipping review-prs"
+      echo "  [$repo] phase 4/6 review-prs SKIP (no open issues)"
     else
-      echo "  [$repo] Reviewing PRs..."
+      t0=$(phase_start "$repo" 4 review-prs)
       (
-        cd "$dir"
+        cd "$dir" || exit 1
         "$PYTHON" "$SCRIPT_DIR/review_issues.py" \
           "${ISSUE_ARGS[@]}" \
           --max-workers "$MAX_WORKERS" \
           --no-ui \
           -v \
-          $DRY_RUN_FLAGS \
-          || echo "  [$repo] Warning: review-issues exited non-zero (loop $loop)"
+          "${DRY_RUN_FLAGS[@]}"
       )
+      rc=$?
+      [[ $rc -ne 0 ]] && echo "  [$repo] Warning: review-issues exited rc=$rc (loop $loop)"
+      phase_done "$repo" 4 review-prs "$t0" "$rc"
     fi
+  else
+    echo "  [$repo] phase 4/6 review-prs SKIP (disabled by --phases)"
   fi
 
   # --- Phase 5: Address Review Comments ---
   if phase_enabled address-review; then
     if [[ ${#OPEN_ISSUES[@]} -eq 0 ]]; then
-      echo "  [$repo] No open issues — skipping address-review"
+      echo "  [$repo] phase 5/6 address-review SKIP (no open issues)"
     else
-      echo "  [$repo] Addressing review comments..."
+      t0=$(phase_start "$repo" 5 address-review)
       (
-        cd "$dir"
+        cd "$dir" || exit 1
         "$PYTHON" "$SCRIPT_DIR/address_review.py" \
           "${ISSUE_ARGS[@]}" \
           --max-workers "$MAX_WORKERS" \
           --no-ui \
           -v \
-          $DRY_RUN_FLAGS \
-          || echo "  [$repo] Warning: address-review exited non-zero (loop $loop)"
+          "${DRY_RUN_FLAGS[@]}"
       )
+      rc=$?
+      [[ $rc -ne 0 ]] && echo "  [$repo] Warning: address-review exited rc=$rc (loop $loop)"
+      phase_done "$repo" 5 address-review "$t0" "$rc"
     fi
+  else
+    echo "  [$repo] phase 5/6 address-review SKIP (disabled by --phases)"
   fi
 
   # --- Phase 6: Drive PRs to Green CI (final loop only) ---
-  if phase_enabled drive-green && [[ "$loop" -eq "$LOOPS" ]]; then
-    if [[ ${#OPEN_ISSUES[@]} -eq 0 ]]; then
-      echo "  [$repo] No open issues — skipping drive-green"
-    else
-      echo "  [$repo] Driving PRs to green CI..."
-      (
-        cd "$dir"
-        # Defence-in-depth: ci_driver also checks these envs and refuses to run
-        # unless HEPH_LOOP_INDEX == HEPH_TOTAL_LOOPS or --force-run is given.
-        HEPH_LOOP_INDEX="$loop" HEPH_TOTAL_LOOPS="$LOOPS" \
-        "$PYTHON" "$SCRIPT_DIR/drive_prs_green.py" \
-          "${ISSUE_ARGS[@]}" \
-          --max-workers "$MAX_WORKERS" \
-          --no-ui \
-          -v \
-          $DRY_RUN_FLAGS \
-          || echo "  [$repo] Warning: drive-prs-green exited non-zero (loop $loop)"
-      )
-    fi
+  if ! phase_enabled drive-green; then
+    echo "  [$repo] phase 6/6 drive-green SKIP (disabled by --phases)"
+  elif [[ "$loop" -ne "$LOOPS" ]]; then
+    echo "  [$repo] phase 6/6 drive-green SKIP (not final loop)"
+  elif [[ ${#OPEN_ISSUES[@]} -eq 0 ]]; then
+    echo "  [$repo] phase 6/6 drive-green SKIP (no open issues)"
+  else
+    t0=$(phase_start "$repo" 6 drive-green)
+    (
+      cd "$dir" || exit 1
+      # Defence-in-depth: ci_driver also checks these envs and refuses to run
+      # unless HEPH_LOOP_INDEX == HEPH_TOTAL_LOOPS or --force-run is given.
+      HEPH_LOOP_INDEX="$loop" HEPH_TOTAL_LOOPS="$LOOPS" \
+      "$PYTHON" "$SCRIPT_DIR/drive_prs_green.py" \
+        "${ISSUE_ARGS[@]}" \
+        --max-workers "$MAX_WORKERS" \
+        --no-ui \
+        -v \
+        "${DRY_RUN_FLAGS[@]}"
+    )
+    rc=$?
+    [[ $rc -ne 0 ]] && echo "  [$repo] Warning: drive-prs-green exited rc=$rc (loop $loop)"
+    phase_done "$repo" 6 drive-green "$t0" "$rc"
   fi
+
+  # Always succeed: every phase has logged its own status via phase_done,
+  # so the outer `wait` should report success after a clean run. The
+  # previously-emitted `Warning: repo job pid=… exited non-zero` was
+  # cosmetic noise from set -e tripping on an unguarded infrastructure
+  # command — that path is now closed by the `set +e` above.
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -413,11 +486,13 @@ for (( loop=1; loop<=LOOPS; loop++ )); do
     ACTIVE_PIDS+=($!)
 
     if [[ ${#ACTIVE_PIDS[@]} -ge "$PARALLEL_REPOS" ]]; then
-      # A non-zero exit from process_repo just means one repo's phase warned;
-      # the per-phase blocks already logged the warning and the orchestrator
-      # continues with the remaining repos. Surface the exit code explicitly.
+      # process_repo() always `return 0`; this branch should be unreachable
+      # on a clean run. If it fires, the cause is upstream of the per-phase
+      # error handlers (e.g. the subshell was killed by a signal) — point
+      # the operator at the phase banners that already document each
+      # phase's exit code.
       if ! wait "${ACTIVE_PIDS[0]}"; then
-        echo "  Warning: repo job pid=${ACTIVE_PIDS[0]} exited non-zero (continuing)" >&2
+        echo "  Note: wait() non-zero for pid=${ACTIVE_PIDS[0]} — check phase banners above" >&2
       fi
       ACTIVE_PIDS=("${ACTIVE_PIDS[@]:1}")
     fi
@@ -426,7 +501,7 @@ for (( loop=1; loop<=LOOPS; loop++ )); do
   # Drain any remaining background jobs
   for pid in "${ACTIVE_PIDS[@]}"; do
     if ! wait "$pid"; then
-      echo "  Warning: repo job pid=$pid exited non-zero (continuing)" >&2
+      echo "  Note: wait() non-zero for pid=$pid — check phase banners above" >&2
     fi
   done
   ACTIVE_PIDS=()
