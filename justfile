@@ -19,6 +19,7 @@ default:
 # Install dependencies and set up pre-commit hooks (one-command bootstrap)
 bootstrap:
     pixi install
+    pixi run dev-install
     pixi run pre-commit install
 
 # Run all tests (unit + integration)
