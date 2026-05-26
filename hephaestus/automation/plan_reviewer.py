@@ -25,7 +25,7 @@ from hephaestus.github.rate_limit import wait_until
 from .claude_invoke import invoke_claude_with_session, scan_quota_reset
 from .claude_models import reviewer_model
 from .claude_timeouts import plan_reviewer_claude_timeout
-from .git_utils import get_repo_root, get_repo_slug, issue_ref
+from .git_utils import get_repo_info, get_repo_root, get_repo_slug, issue_ref
 from .github_api import _gh_call, gh_issue_comment, gh_issue_json
 from .models import PLAN_COMMENT_MARKERS, PlanReviewerOptions, WorkerResult
 from .prompts import get_plan_review_prompt
@@ -292,8 +292,11 @@ class PlanReviewer:
         # than 100 plan-review comments in its history, a follow-up issue
         # will be needed to add real pagination; in practice plans are
         # revised a handful of times, not 100+.
-        repo = get_repo_slug(get_repo_root())
-        owner, name = repo.split("/", 1)
+        # get_repo_slug returns only the short repo name (e.g. "AchaeanFleet");
+        # GraphQL needs the (owner, name) pair, which get_repo_info supplies.
+        # Earlier code tried `get_repo_slug(...).split("/", 1)` and crashed on
+        # every issue with "not enough values to unpack" (#574).
+        owner, name = get_repo_info(get_repo_root())
         query = (
             "query($owner:String!,$name:String!,$number:Int!){"
             "  repository(owner:$owner,name:$name){"
