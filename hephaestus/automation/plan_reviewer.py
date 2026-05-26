@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 import subprocess
 import threading
 import time
@@ -30,6 +29,12 @@ from .git_utils import get_repo_root, get_repo_slug, issue_ref
 from .github_api import _gh_call, gh_issue_comment, gh_issue_json
 from .models import PLAN_COMMENT_MARKERS, PlanReviewerOptions, WorkerResult
 from .prompts import get_plan_review_prompt
+from .review_state import (
+    PLAN_REVIEW_PREFIX as _REVIEW_PREFIX_SHARED,
+)
+from .review_state import (
+    is_plan_review_approved,
+)
 from .session_naming import AGENT_PLAN_REVIEWER, current_trunk_githash
 from .status_tracker import StatusTracker
 
@@ -50,7 +55,10 @@ _PLAN_MARKERS = PLAN_COMMENT_MARKERS
 # will post a duplicate review every loop. If that becomes a concern,
 # NFC-normalize both sides via ``unicodedata.normalize("NFC", ...)`` before
 # comparison. See issue #565.
-_REVIEW_PREFIX = "## 🔍 Plan Review"
+# Re-exported from review_state for back-compat. Both reviewer and
+# implementer now share one source of truth for the plan-review gate
+# (see :mod:`hephaestus.automation.review_state` and issue #551).
+_REVIEW_PREFIX = _REVIEW_PREFIX_SHARED
 
 # Verdict marker emitted by Claude at the end of every plan review. See
 # PLAN_REVIEW_PROMPT in prompts.py — Claude is instructed to end its
@@ -58,23 +66,7 @@ _REVIEW_PREFIX = "## 🔍 Plan Review"
 #   **Verdict: APPROVED**  — plan is sound and ready to implement
 #   **Verdict: REVISE**    — plan needs changes (re-review next loop)
 #   **Verdict: BLOCK**     — plan has a fundamental problem
-# We short-circuit the reviewer for an issue only when the LATEST plan
-# review carries APPROVED. Any other verdict (REVISE/BLOCK) or a missing
-# marker re-runs the reviewer so the plan can be re-evaluated after the
-# planner amends it.
 _FINAL_VERDICT_MARKER = "**Verdict: APPROVED**"
-
-# Regex that extracts every well-formed verdict line in a review body. We
-# parse with ``MULTILINE`` and take the LAST match, mirroring the
-# instruction Claude is given in :data:`prompts.PLAN_REVIEW_PROMPT` —
-# *"readers take only the LAST matching line in your response."* A substring
-# check is unsafe because the body may discuss earlier verdicts (e.g.
-# ``**Verdict: APPROVED**`` followed by ``**Verdict: BLOCK**``) or quote
-# the marker in prose; only the trailing line counts.
-_VERDICT_LINE_RE = re.compile(
-    r"^\*\*Verdict: (APPROVED|REVISE|BLOCK)\*\*\s*$",
-    re.MULTILINE,
-)
 
 # Fallback marker appended by _post_review when Claude's output omits the
 # verdict line entirely (defence-in-depth — keeps the short-circuit gate
@@ -375,17 +367,13 @@ class PlanReviewer:
     def _latest_review_is_final(self, issue_number: int) -> bool:
         """Return True iff the LATEST plan review on the issue is APPROVED.
 
-        The reviewer is idempotent only on the APPROVED verdict — see
-        :data:`_FINAL_VERDICT_MARKER` for context. Comments are scanned in
-        chronological order (the order GitHub returns them) and the last
-        matching ``## 🔍 Plan Review`` body wins. Returns False when:
-
-        - No plan review comment exists at all.
-        - The latest plan review's body does not contain the APPROVED marker
-          (e.g. REVISE, BLOCK, or any pre-marker convention).
-
-        Uses :meth:`_fetch_issue_comments` so the API call is shared with
-        :meth:`_get_latest_plan`.
+        Thin delegate over
+        :func:`hephaestus.automation.review_state.is_plan_review_approved`,
+        which is the single source of truth for this gate (also called by
+        the implementer — see #551). The comments fetched by
+        :meth:`_fetch_issue_comments` are forwarded so the API call is
+        shared with :meth:`_get_latest_plan` and the per-instance cache is
+        respected.
 
         Args:
             issue_number: GitHub issue number.
@@ -395,36 +383,7 @@ class PlanReviewer:
 
         """
         comments = self._fetch_issue_comments(issue_number)
-
-        latest_review_body: str | None = None
-        for comment in comments:
-            body: str = comment.get("body", "")
-            if body.startswith(_REVIEW_PREFIX):
-                latest_review_body = body
-
-        if latest_review_body is None:
-            return False
-
-        # Extract every well-formed verdict line (regex anchored to line
-        # boundaries). Per the prompt contract, ONLY the LAST matching
-        # verdict line counts — Claude may discuss multiple verdict options
-        # in prose before settling, so a substring ``in`` check is unsafe
-        # (it would fire True on ``**Verdict: APPROVED**`` followed by
-        # ``**Verdict: BLOCK**``, or on a quoted marker inside discussion).
-        # See issue #552.
-        matches = _VERDICT_LINE_RE.findall(latest_review_body)
-        is_final = bool(matches) and matches[-1] == "APPROVED"
-        if is_final:
-            logger.debug(
-                "Issue %s: latest plan review is APPROVED (final)",
-                issue_ref(issue_number),
-            )
-        else:
-            logger.debug(
-                "Issue %s: latest plan review is non-final (no APPROVED marker)",
-                issue_ref(issue_number),
-            )
-        return is_final
+        return is_plan_review_approved(issue_number, comments=comments)
 
     def _run_claude_analysis(
         self,
