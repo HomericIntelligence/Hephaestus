@@ -216,3 +216,30 @@ class TestUntrustedFencing:
         assert self._fence_present(out, "ISSUE_BODY")
         assert self._fence_present(out, "DIFF_TEXT")
         assert prompts._UNTRUSTED_NOTICE in out
+
+
+class TestSharedRubricConstants:
+    """Tests for the shared strict-grading and seven-principles rubric blocks.
+
+    These constants (added for issue #577) are the single source of truth
+    consumed by the per-stage strict-simplify review prompts implemented in
+    sub-issues #578-#581.
+    """
+
+    def test_seven_principles_block_has_all_seven(self) -> None:
+        """All seven CLAUDE.md principles must appear as named graded dimensions."""
+        block = prompts._SEVEN_PRINCIPLES_DIMENSIONS
+        for marker in (
+            "P1 — KISS",
+            "P2 — YAGNI",
+            "P3 — TDD",
+            "P4 — DRY",
+            "P5 — SOLID",
+            "P6 — Modularity",
+            "P7 — POLA",
+        ):
+            assert marker in block, f"missing principle marker: {marker!r}"
+
+    def test_anti_inflation_rules_have_default_is_f(self) -> None:
+        """The anti-inflation block must restate the DEFAULT IS F rule."""
+        assert "DEFAULT IS F" in prompts._STRICT_GRADING_AND_ANTI_INFLATION
