@@ -55,7 +55,12 @@ def _make_gh_result(payload: Any) -> MagicMock:
 
 @pytest.fixture(autouse=True)
 def _patch_repo_helpers() -> Any:
-    """Stub repo discovery helpers used by the GraphQL fetch."""
+    """Stub repo discovery helpers used by the GraphQL fetch.
+
+    ``_fetch_issue_comments`` calls ``get_repo_info`` for the GraphQL query
+    (#574). ``get_repo_slug`` is still patched for any code path that asks
+    for the short slug (logger prefixes, etc.).
+    """
     with (
         patch(
             "hephaestus.automation.plan_reviewer.get_repo_root",
@@ -63,7 +68,11 @@ def _patch_repo_helpers() -> Any:
         ),
         patch(
             "hephaestus.automation.plan_reviewer.get_repo_slug",
-            return_value="owner/name",
+            return_value="name",
+        ),
+        patch(
+            "hephaestus.automation.plan_reviewer.get_repo_info",
+            return_value=("owner", "name"),
         ),
     ):
         yield
@@ -573,3 +582,33 @@ class TestFetchIssueCommentsCache:
             result = reviewer._fetch_issue_comments(999)
 
         assert result == []
+
+    def test_uses_owner_repo_tuple_from_get_repo_info(self, reviewer: PlanReviewer) -> None:
+        """Regression test for #574 — derive owner+name from get_repo_info.
+
+        ``_fetch_issue_comments`` must obtain ``owner`` and ``name`` from
+        ``get_repo_info`` (which returns a tuple) rather than calling
+        ``get_repo_slug(...).split('/', 1)`` (which crashes with "not enough
+        values to unpack" because the slug is just the repo name with no
+        owner prefix).
+
+        We assert the GraphQL call receives the owner and name as SEPARATE
+        ``-F`` flags, derived from ``get_repo_info``'s tuple, not from a
+        string-split of the slug.
+        """
+        reviewer._comments_cache.clear()
+        with (
+            patch(
+                "hephaestus.automation.plan_reviewer.get_repo_info",
+                return_value=("HomericIntelligence", "ProjectMnemosyne"),
+            ) as mock_info,
+            patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh,
+        ):
+            mock_gh.return_value = _make_gh_result({"comments": []})
+            reviewer._fetch_issue_comments(1928)
+
+        mock_info.assert_called_once()
+        gh_args = mock_gh.call_args[0][0]
+        joined = " ".join(gh_args)
+        assert "owner=HomericIntelligence" in joined
+        assert "name=ProjectMnemosyne" in joined

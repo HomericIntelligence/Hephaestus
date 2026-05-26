@@ -386,3 +386,86 @@ class TestPlanReviewVerdictGate:
 
         assert result.plan_review_not_approved is True
         assert ImplementationPhase.WAITING_FOR_PLAN_REVIEW in captured_phases
+
+
+# ---------------------------------------------------------------------------
+# #574 — run() must short-circuit cleanly when there are no issues and no epic
+# ---------------------------------------------------------------------------
+
+
+class TestRunWithNothingToImplement:
+    """#574 regression: implementer must short-circuit on empty input.
+
+    When the CLI's auto-discovery returns zero open issues AND no epic is
+    specified, ``IssueImplementer.run()`` must NOT fall through to
+    ``load_epic(0)`` (which would retry-storm against ``gh issue view 0``).
+    Mirrors the planner's ``if not issues_to_plan: warn; return {}`` pattern.
+    """
+
+    def test_run_with_no_issues_and_no_epic_short_circuits(self, tmp_path: Path) -> None:
+        """No issues and epic=0 → run() returns {} after a warning, never calls load_epic."""
+        options = ImplementerOptions(
+            issues=[],
+            epic_number=0,
+            dry_run=False,
+            enable_learn=False,
+            enable_follow_up=False,
+            enable_ui=False,
+            health_check=False,
+        )
+        with patch("hephaestus.automation.implementer.get_repo_root", return_value=tmp_path):
+            impl = IssueImplementer(options)
+
+        with patch.object(impl.resolver, "load_epic") as mock_load_epic:
+            result = impl.run()
+
+        assert result == {}
+        mock_load_epic.assert_not_called()
+
+    def test_run_with_issues_still_proceeds(self, tmp_path: Path) -> None:
+        """Sanity check: the short-circuit must NOT fire when issues are present."""
+        options = ImplementerOptions(
+            issues=[42],
+            epic_number=0,
+            dry_run=True,
+            enable_learn=False,
+            enable_follow_up=False,
+            enable_ui=False,
+            health_check=False,
+            analyze_only=True,
+        )
+        with patch("hephaestus.automation.implementer.get_repo_root", return_value=tmp_path):
+            impl = IssueImplementer(options)
+
+        with (
+            patch.object(impl, "_load_issues") as mock_load_issues,
+            patch.object(impl.resolver, "detect_cycles"),
+            patch.object(impl, "_analyze_dependencies", return_value={}),
+        ):
+            impl.run()
+
+        mock_load_issues.assert_called_once_with([42])
+
+    def test_run_with_epic_but_no_issues_still_proceeds(self, tmp_path: Path) -> None:
+        """Sanity check: the short-circuit must NOT fire when an epic is given."""
+        options = ImplementerOptions(
+            issues=[],
+            epic_number=123,
+            dry_run=True,
+            enable_learn=False,
+            enable_follow_up=False,
+            enable_ui=False,
+            health_check=False,
+            analyze_only=True,
+        )
+        with patch("hephaestus.automation.implementer.get_repo_root", return_value=tmp_path):
+            impl = IssueImplementer(options)
+
+        with (
+            patch.object(impl.resolver, "load_epic") as mock_load_epic,
+            patch.object(impl.resolver, "detect_cycles"),
+            patch.object(impl, "_analyze_dependencies", return_value={}),
+        ):
+            impl.run()
+
+        mock_load_epic.assert_called_once_with(123)
