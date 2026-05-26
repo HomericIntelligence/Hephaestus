@@ -417,3 +417,64 @@ class TestPlanLoopStrictRubric:
         """Site 3 (#580) reuses _FULL_SWEEP_SUFFIX — guard against accidental rename."""
         assert hasattr(prompts, "_FULL_SWEEP_SUFFIX")
         assert self._FULL_SWEEP_MARKER in prompts._FULL_SWEEP_SUFFIX
+
+
+class TestImplLoopStrictRubric:
+    """Tests for the impl-loop strict rubric and final-iteration full sweep.
+
+    Verifies issue #580: ``IMPL_LOOP_REVIEW_PROMPT`` uses the new
+    ``_IMPL_LOOP_STRICT_RUBRIC`` and conditionally appends the shared
+    ``_FULL_SWEEP_SUFFIX`` only on iteration==2.
+    """
+
+    _FULL_SWEEP_MARKER = "Final-iteration Full-Sweep"
+    _SEVEN_PRINCIPLE_MARKERS = (
+        "P1 — KISS",
+        "P2 — YAGNI",
+        "P3 — TDD",
+        "P4 — DRY",
+        "P5 — SOLID",
+        "P6 — Modularity",
+        "P7 — POLA",
+    )
+
+    @staticmethod
+    def _build(iteration: int) -> str:
+        return prompts.get_impl_loop_review_prompt(
+            issue_number=580,
+            issue_title="t",
+            issue_body="body",
+            diff_text="diff",
+            files_changed="hephaestus/foo.py",
+            iteration=iteration,
+            prior_review=None,
+        )
+
+    def test_impl_loop_prompt_iteration_0_omits_full_sweep(self) -> None:
+        """Iteration 0 must NOT include the final-iteration full-sweep suffix."""
+        out = self._build(0)
+        assert self._FULL_SWEEP_MARKER not in out
+
+    def test_impl_loop_prompt_iteration_2_includes_full_sweep(self) -> None:
+        """Iteration 2 MUST include the final-iteration full-sweep suffix."""
+        out = self._build(2)
+        assert self._FULL_SWEEP_MARKER in out
+
+    def test_impl_loop_prompt_all_iterations_contain_seven_principles(self) -> None:
+        """Every iteration's prompt embeds all seven principle markers."""
+        for iteration in (0, 1, 2):
+            out = self._build(iteration)
+            for marker in self._SEVEN_PRINCIPLE_MARKERS:
+                assert marker in out, f"iteration {iteration} missing principle marker {marker!r}"
+
+    def test_impl_loop_prompt_has_tdd_emphasis(self) -> None:
+        """The P3/TDD section must explicitly require tests proportional to the diff."""
+        out = self._build(0)
+        assert "tests proportional to the production code" in out
+
+    def test_impl_loop_prompt_preserves_verdict_format(self) -> None:
+        """The trailing Grade/Verdict output format must remain intact (parser contract)."""
+        for iteration in (0, 1, 2):
+            out = self._build(iteration)
+            assert "Grade: <A|B|C|D|F>" in out
+            assert "Verdict: <GO|NOGO>" in out

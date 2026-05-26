@@ -994,6 +994,61 @@ plan steps is NOT a fix — flag it as unresolved and downgrade accordingly.
 
 
 # ---------------------------------------------------------------------------
+# Per-stage strict rubric: IMPL-LOOP REVIEW (implementer's iterative R0/R1/R2)
+#
+# Composes the shared strict-grading + anti-inflation rules with impl-stage
+# dimensions (graded on the diff, not the plan) and the seven software-
+# engineering principles. Wired into IMPL_LOOP_REVIEW_PROMPT so the loop
+# reviewer judges the implementer's diff against a strict, stage-tailored
+# rubric instead of the legacy generic one.
+# ---------------------------------------------------------------------------
+
+_IMPL_LOOP_STRICT_RUBRIC = (
+    _STRICT_GRADING_AND_ANTI_INFLATION
+    + """
+**Stage-specific dimensions for impl-loop review:**
+
+1. Diff fidelity to plan — every hunk in the diff maps to a step the plan
+   named. Flag work that drifts from the plan (renamed targets, new
+   abstractions, "while I was there" cleanups) without an explicit
+   justification. Plan said X, diff did Y is a finding even if Y looks
+   reasonable in isolation.
+2. Code correctness — file paths, function names, class names, and imports
+   referenced by the diff all resolve. Symbols introduced by the diff are
+   spelled consistently between definition and call site. Flag dangling
+   imports, typos in identifiers, and references to files/functions that
+   the diff did not actually create.
+3. Test coverage of the diff (P3/TDD has particular bite here) — the diff
+   MUST include tests proportional to the production code. Net-new public
+   functions need unit tests covering happy path AND at least one error
+   path; bugfixes need a regression test that fails without the fix. A
+   diff that adds production code with no corresponding test changes is a
+   MAJOR finding by default.
+4. No regression of unrelated tests — the diff does not delete, weaken,
+   `xfail`, `skip`, or `monkeypatch`-around existing tests to make the
+   build green. Flag any test deletion or assertion-loosening that the
+   issue did not explicitly request.
+5. Safety — no destructive operations slipped in (no `rm -rf`, no
+   schema/data migrations without rollback notes, no unscoped `sudo`,
+   no committed secrets or tokens, no `--no-verify` / `|| true`
+   silencers). Flag credentials in env-var defaults, hard-coded
+   API keys, or signing-key material.
+6. Diff scope — every hunk maps to a stated requirement in the issue
+   (YAGNI applied at the diff level). Flag opportunistic refactors,
+   formatting churn in untouched files, dependency bumps that weren't
+   asked for, or new config knobs without a current consumer.
+
+**On R1+ (re-review iterations)**: verify previous-iteration's findings
+were actually addressed in THIS diff, not just acknowledged in commit
+messages or comments. A diff that adds a "TODO: fix this" without
+changing the offending code is NOT a fix — flag it as unresolved and
+downgrade accordingly.
+"""
+    + _SEVEN_PRINCIPLES_DIMENSIONS
+)
+
+
+# ---------------------------------------------------------------------------
 # Per-stage strict rubric: PR REVIEW
 #
 # Composite rubric injected into PR_REVIEW_ANALYSIS_PROMPT (site 4 / #581).
@@ -1143,6 +1198,7 @@ Review the diff against the issue requirements and the rubric. Cite specific
 file:line locations when justifying findings. Watch for: missing tests,
 incomplete error handling, unaddressed acceptance criteria, scope creep,
 and risky changes that the issue did not request.
+{full_sweep_suffix}
 
 {output_format}
 """
@@ -1250,8 +1306,9 @@ def get_impl_loop_review_prompt(
 
     """
     nonce = secrets.token_hex(8).upper()
+    full_sweep_suffix = _FULL_SWEEP_SUFFIX.strip() if iteration == 2 else ""
     return IMPL_LOOP_REVIEW_PROMPT.format(
-        rubric=_STRICT_REVIEW_RUBRIC.strip(),
+        rubric=_IMPL_LOOP_STRICT_RUBRIC.strip(),
         iteration=iteration,
         iteration_label=_iteration_label(iteration),
         iteration_guidance=_iteration_guidance(iteration),
@@ -1261,6 +1318,7 @@ def get_impl_loop_review_prompt(
         diff_text_block=_fence_untrusted("DIFF_TEXT", diff_text or "_(no diff produced)_", nonce),
         files_changed=files_changed or "_(no files changed)_",
         prior_review_block=_prior_review_block(prior_review),
+        full_sweep_suffix=full_sweep_suffix,
         output_format=_STRICT_REVIEW_OUTPUT_FORMAT.strip(),
         untrusted_notice=_UNTRUSTED_NOTICE,
     )
