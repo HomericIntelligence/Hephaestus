@@ -74,6 +74,72 @@ class TestPRReviewAnalysisPrompt:
         assert "auto_merge_enabled=true" in on
         assert "auto_merge_enabled=false" in off
 
+    def test_pr_review_prompt_contains_strict_rubric(self) -> None:
+        """Prompt must embed the strict rubric.
+
+        Verifies the strict-grading scale, PR-specific dimensions, and the
+        seven software-engineering principles (P1–P7) are all present.
+        """
+        out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
+        # Strict-grading / anti-inflation markers.
+        assert "DEFAULT IS F" in out
+        assert "ANTI-INFLATION RULES" in out
+        # PR-specific stage dimensions.
+        assert "D1 — Policy compliance" in out
+        assert "D2 — Diff review of CHANGED lines only" in out
+        assert "D3 — Inline-comment quality" in out
+        assert "D4 — CI failure analysis" in out
+        # Seven principles markers.
+        for marker in (
+            "P1 — KISS",
+            "P2 — YAGNI",
+            "P3 — TDD",
+            "P4 — DRY",
+            "P5 — SOLID",
+            "P6 — Modularity",
+            "P7 — POLA",
+        ):
+            assert marker in out, f"missing seven-principle marker: {marker}"
+
+    def test_pr_review_prompt_preserves_json_block(self) -> None:
+        """The trailing JSON fenced block must remain byte-exact.
+
+        `pr_reviewer.py:_parse_json_block` extracts the LAST fenced JSON
+        block — any change to the schema or fence ordering breaks parsing.
+        """
+        out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
+        # The schema example must appear verbatim.
+        assert (
+            '{"comments": [{"path": "...", "line": 1, "side": "RIGHT", "body": "..."}], '
+            '"summary": "..."}'
+        ) in out
+        # The LGTM example must appear verbatim.
+        assert '{"comments": [], "summary": "LGTM"}' in out
+        # The last fenced code block in the prompt must be the JSON block — the
+        # parser takes the LAST one. Verify the closing ``` after the JSON
+        # block is the final fence in the prompt.
+        last_fence_close = out.rfind("```")
+        assert last_fence_close != -1
+        # The fence immediately preceding the final close must open a ```json
+        # block (no other fenced block may follow it).
+        preceding_open = out.rfind("```", 0, last_fence_close)
+        assert preceding_open != -1
+        assert out[preceding_open : preceding_open + 7] == "```json"
+
+    def test_pr_review_prompt_preserves_policy_gates(self) -> None:
+        """All three policy gates must still appear in the prompt.
+
+        Closes #N, auto-merge, and signed commits remain alongside the new
+        rubric — the rubric references them as the highest-priority BLOCK
+        gate.
+        """
+        out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
+        assert "Closes #N" in out
+        assert "auto-merge" in out.lower()
+        assert "Signed commits" in out or "signed commits" in out.lower()
+        # The mandatory policy-checks header must remain.
+        assert "Policy checks (MANDATORY" in out
+
     def test_passes_commit_signing_state(self) -> None:
         out = prompts.get_pr_review_analysis_prompt(
             pr_number=1,

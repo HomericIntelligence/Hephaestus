@@ -508,6 +508,10 @@ Analyze PR #{pr_number} linked to issue #{issue_number}.
 
 ---
 
+{strict_rubric}
+
+---
+
 **Policy checks (MANDATORY — run these BEFORE any code-quality review):**
 
 This repository enforces three non-negotiable PR properties. If ANY check fails,
@@ -694,6 +698,7 @@ def get_pr_review_analysis_prompt(
         auto_merge_state_block=_fence_untrusted("AUTO_MERGE_STATE", auto_merge_state, nonce),
         commits_signing_block=_fence_untrusted("COMMITS_SIGNING_STATE", signing_state_json, nonce),
         untrusted_notice=_UNTRUSTED_NOTICE,
+        strict_rubric=_PR_STRICT_RUBRIC.strip(),
     )
 
 
@@ -794,6 +799,40 @@ critique → Verdict: NOGO. When in doubt, NOGO.
 # compatibility while sub-issues #578-#581 migrate each review site over to
 # stage-tailored rubrics that compose these blocks.
 # ---------------------------------------------------------------------------
+
+_PR_STRICT_RUBRIC_DIMENSIONS = """
+**PR-review-specific graded dimensions (each starts at F; promote only on
+concrete evidence from the artifacts above):**
+
+D1 — Policy compliance (HIGHEST PRIORITY / BLOCK gate).
+    The three mandatory gates below (Closes #N / auto-merge / signed
+    commits) are graded as a single dimension. ANY violation forces an
+    overall BLOCK verdict, regardless of every other dimension's grade.
+    Policy compliance is NEVER weighed against code quality — it is a
+    hard precondition.
+
+D2 — Diff review of CHANGED lines only.
+    Restrict findings to lines actually modified in the PR diff above.
+    Do NOT comment on pre-existing code outside the diff hunks, even if
+    it has issues — that is scope-bleed and a finding against the
+    reviewer, not the PR. If a changed line depends on unchanged code,
+    cite the changed line and reference (not critique) the dependency.
+
+D3 — Inline-comment quality.
+    Every inline comment MUST be actionable and specific. Reject filler
+    like "consider …", "you might want to …", "maybe …", or vague
+    style nags. Each comment must name the concrete defect, the
+    expected behavior, and (where non-obvious) a suggested fix or
+    citation. Comments that fail this bar must be omitted, not
+    softened.
+
+D4 — CI failure analysis (only when CI Status block is non-empty).
+    When the CI Status block reports failures, the review MUST identify
+    the failing job(s), quote the relevant error signal, and tie each
+    failure to a diff hunk (or note "unrelated to diff" with evidence).
+    Silently ignoring red CI is a major finding against the review.
+"""
+
 
 _STRICT_GRADING_AND_ANTI_INFLATION = """
 GRADING (every dimension starts at F; A must be EARNED with concrete evidence):
@@ -910,6 +949,25 @@ Stage-specific dimensions for plan review:
   the plan without re-deriving it? Flag plans that defer key decisions
   to the implementer.
 """
+    + _SEVEN_PRINCIPLES_DIMENSIONS
+)
+
+
+# ---------------------------------------------------------------------------
+# Per-stage strict rubric: PR REVIEW
+#
+# Composite rubric injected into PR_REVIEW_ANALYSIS_PROMPT (site 4 / #581).
+# Order: strict grading scale → PR-specific dimensions (D1 policy is the
+# BLOCK gate) → seven software-engineering principles. The existing
+# policy-checks block in PR_REVIEW_ANALYSIS_PROMPT remains the
+# authoritative description of the three gates referenced by D1, and the
+# trailing JSON output format remains byte-exact for `_parse_json_block`.
+# ---------------------------------------------------------------------------
+_PR_STRICT_RUBRIC = (
+    _STRICT_GRADING_AND_ANTI_INFLATION
+    + "\n"
+    + _PR_STRICT_RUBRIC_DIMENSIONS
+    + "\n"
     + _SEVEN_PRINCIPLES_DIMENSIONS
 )
 
