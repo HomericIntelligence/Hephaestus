@@ -351,3 +351,69 @@ class TestPlanReviewStrictRubric:
         assert "Requirements alignment" in out
         assert "Plan completeness" in out
         assert "Stage handoff" in out
+
+
+class TestPlanLoopStrictRubric:
+    """Tests for the plan-loop strict rubric and final-iteration full sweep.
+
+    Verifies issue #579: ``PLAN_LOOP_REVIEW_PROMPT`` uses the new
+    ``_PLAN_LOOP_STRICT_RUBRIC`` and conditionally appends
+    ``_FULL_SWEEP_SUFFIX`` only on iteration==2.
+    """
+
+    _FULL_SWEEP_MARKER = "Final-iteration Full-Sweep"
+    _SEVEN_PRINCIPLE_MARKERS = (
+        "P1 — KISS",
+        "P2 — YAGNI",
+        "P3 — TDD",
+        "P4 — DRY",
+        "P5 — SOLID",
+        "P6 — Modularity",
+        "P7 — POLA",
+    )
+
+    @staticmethod
+    def _build(iteration: int) -> str:
+        return prompts.get_plan_loop_review_prompt(
+            issue_number=579,
+            issue_title="t",
+            issue_body="body",
+            plan_text="plan",
+            learnings="",
+            iteration=iteration,
+            prior_review=None,
+        )
+
+    def test_plan_loop_prompt_iteration_0_omits_full_sweep(self) -> None:
+        """Iteration 0 must NOT include the final-iteration full-sweep suffix."""
+        out = self._build(0)
+        assert self._FULL_SWEEP_MARKER not in out
+
+    def test_plan_loop_prompt_iteration_2_includes_full_sweep(self) -> None:
+        """Iteration 2 MUST include the final-iteration full-sweep suffix."""
+        out = self._build(2)
+        assert self._FULL_SWEEP_MARKER in out
+
+    def test_plan_loop_prompt_all_iterations_contain_seven_principles(self) -> None:
+        """Every iteration's prompt embeds all seven principle markers."""
+        for iteration in (0, 1, 2):
+            out = self._build(iteration)
+            for marker in self._SEVEN_PRINCIPLE_MARKERS:
+                assert marker in out, f"iteration {iteration} missing principle marker {marker!r}"
+
+    def test_plan_loop_prompt_iteration_1_includes_address_prior_findings(self) -> None:
+        """R1 prompt must direct the reviewer to verify previous-iteration findings."""
+        out = self._build(1)
+        assert "verify previous-iteration's findings" in out
+
+    def test_plan_loop_prompt_preserves_verdict_format(self) -> None:
+        """The trailing Grade/Verdict output format must remain intact (parser contract)."""
+        for iteration in (0, 1, 2):
+            out = self._build(iteration)
+            assert "Grade: <A|B|C|D|F>" in out
+            assert "Verdict: <GO|NOGO>" in out
+
+    def test_full_sweep_suffix_constant_exposes_module_level_name(self) -> None:
+        """Site 3 (#580) reuses _FULL_SWEEP_SUFFIX — guard against accidental rename."""
+        assert hasattr(prompts, "_FULL_SWEEP_SUFFIX")
+        assert self._FULL_SWEEP_MARKER in prompts._FULL_SWEEP_SUFFIX
