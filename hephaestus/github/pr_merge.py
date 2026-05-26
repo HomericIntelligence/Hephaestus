@@ -196,7 +196,7 @@ def handle_merge_result(result: Any, pr_number: int, base_branch: str) -> None:
         logger.error("  Failed to merge PR #%d. API message: %s", pr_number, message)
 
 
-def main() -> None:  # noqa: C901
+def main() -> int:  # noqa: C901
     """Serve as the main entry point for PR merge automation."""
     parser = argparse.ArgumentParser(
         description="Merge open PRs with successful CI/CD into main (rebase via PR API)"
@@ -223,7 +223,7 @@ def main() -> None:  # noqa: C901
         logger.error(
             "Please set GITHUB_TOKEN environment variable with a token that has 'repo' scope."
         )
-        sys.exit(1)
+        return 1
 
     # Detect or use provided repo name
     repo_name = args.repo or detect_repo_from_remote()
@@ -232,7 +232,7 @@ def main() -> None:  # noqa: C901
             "Could not detect repository name. Please provide --repo OWNER/REPO or "
             "ensure you're in a git repository with a GitHub remote."
         )
-        sys.exit(1)
+        return 1
 
     logger.info("Working with repository: %s", repo_name)
 
@@ -244,7 +244,7 @@ def main() -> None:  # noqa: C901
             "PyGithub not installed. Install with: pip install PyGithub\n"
             "Or install hephaestus with github extras: pip install hephaestus[github]"
         )
-        sys.exit(1)
+        return 1
 
     # Connect to GitHub
     gh = Github(token)
@@ -252,7 +252,7 @@ def main() -> None:  # noqa: C901
         repo = gh.get_repo(repo_name)
     except Exception as e:  # broad catch intentional: PyGithub raises many exception subtypes
         logger.error("Error accessing repo %s: %s", repo_name, e)
-        sys.exit(1)
+        return 1
 
     # Update local main
     logger.info("Updating local 'main'...")
@@ -303,7 +303,8 @@ def main() -> None:  # noqa: C901
             logger.warning("  CI/CD checks not successful for PR #%d. Skipping merge.", pr.number)
 
     logger.info("\nDone processing all open PRs.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
