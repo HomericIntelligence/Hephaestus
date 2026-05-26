@@ -33,9 +33,6 @@ from .review_state import (
     PLAN_REVIEW_PREFIX as _REVIEW_PREFIX_SHARED,
 )
 from .review_state import (
-    VERDICT_LINE_RE as _VERDICT_LINE_RE_SHARED,
-)
-from .review_state import (
     is_plan_review_approved,
 )
 from .session_naming import AGENT_PLAN_REVIEWER, current_trunk_githash
@@ -70,12 +67,6 @@ _REVIEW_PREFIX = _REVIEW_PREFIX_SHARED
 #   **Verdict: REVISE**    — plan needs changes (re-review next loop)
 #   **Verdict: BLOCK**     — plan has a fundamental problem
 _FINAL_VERDICT_MARKER = "**Verdict: APPROVED**"
-
-# Back-compat alias for the verdict-line regex. Production code now
-# delegates to ``review_state.is_plan_review_approved`` (#551) rather
-# than scanning bodies inline; the alias remains so existing tests that
-# patch this symbol keep working.
-_VERDICT_LINE_RE = _VERDICT_LINE_RE_SHARED
 
 # Fallback marker appended by _post_review when Claude's output omits the
 # verdict line entirely (defence-in-depth — keeps the short-circuit gate
