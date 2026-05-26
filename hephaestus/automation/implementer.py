@@ -155,7 +155,7 @@ class IssueImplementer:
         ui_msg = f"{prefix}: {msg}" if prefix else msg
         self.log_manager.log(tid, ui_msg)
 
-    def run(self) -> dict[int, WorkerResult]:
+    def run(self) -> dict[int, WorkerResult]:  # noqa: C901  # one-extra-branch for #574 early-exit; orchestration body is intentionally linear
         """Run the implementer.
 
         Returns:
@@ -165,6 +165,19 @@ class IssueImplementer:
         # Health check mode
         if self.options.health_check:
             return self._health_check()
+
+        # Short-circuit when there's nothing to implement. The CLI's auto-
+        # discovery branch (implementer.main → gh_list_open_issues) sets
+        # ``args.issues = []`` for repos with zero open issues, then defaults
+        # ``epic_number=0``. Without this guard we fall through to
+        # ``load_epic(0)`` and pay 5 retries × exponential backoff against
+        # ``gh issue view 0`` before crashing — wasting ~12s per empty repo
+        # and dominating wall-clock for the parallel-repos loop. Mirrors
+        # ``planner.py:107-108`` which warns and returns ``{}`` on the same
+        # condition. See #574.
+        if not self.options.issues and not self.options.epic_number:
+            logger.warning("No issues to implement (repo has no open issues / nothing discovered)")
+            return {}
 
         # Load issues or epic and resolve dependencies
         if self.options.issues:
