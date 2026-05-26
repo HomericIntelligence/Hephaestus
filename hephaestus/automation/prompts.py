@@ -915,7 +915,7 @@ inverts the existing convention.").
 
 
 # ---------------------------------------------------------------------------
-# Per-stage strict rubric: PLAN REVIEW
+# Per-stage strict rubric: PLAN REVIEW (standalone Phase-2 reviewer)
 #
 # Composes the shared strict-grading + anti-inflation rules with plan-stage
 # dimensions and the seven software-engineering principles. Injected into
@@ -954,6 +954,46 @@ Stage-specific dimensions for plan review:
 
 
 # ---------------------------------------------------------------------------
+# Per-stage strict rubric: PLAN-LOOP REVIEW (planner's iterative R0/R1/R2)
+#
+# Same dimensional shape as _PLAN_STRICT_RUBRIC plus the R1+ "addressed-
+# not-just-acknowledged" guard. Wired into PLAN_LOOP_REVIEW_PROMPT.
+# ---------------------------------------------------------------------------
+
+_PLAN_LOOP_STRICT_RUBRIC = (
+    _STRICT_GRADING_AND_ANTI_INFLATION
+    + """
+**Stage-specific dimensions for plan-loop review:**
+
+1. Requirements alignment — every acceptance criterion in the issue is named
+   and addressed by a concrete plan step. Flag silently dropped criteria,
+   reinterpretations that narrow scope, or steps that target unrelated work.
+2. Plan completeness — the plan covers design, implementation, tests, and
+   verification. Flag missing test strategy, missing rollback considerations,
+   or hand-waving over hard parts ("then we wire it up").
+3. Concreteness — steps name specific files, functions, classes, and
+   interfaces by path. Flag vague verbs ("refactor X", "improve Y") with no
+   concrete target.
+4. Risk surface — destructive operations, schema changes, irreversible
+   migrations, and security-sensitive areas are explicitly called out with
+   mitigations. Flag risk items the plan ignores or treats as routine.
+5. Verification plan — every acceptance criterion has a concrete check
+   (command, test name, manual step) the reviewer can run. Flag "we will
+   add tests" without naming them.
+6. Stage handoff — the plan produces artifacts the implementer can act on
+   without re-deriving design decisions. Flag plans that leave key choices
+   ("decide framework X later") to the implementer.
+
+**On R1+ (re-review iterations)**: verify previous-iteration's findings were
+actually addressed in the new artifact, not just acknowledged or commented
+on. A plan that adds a "we will address this" sentence without changing the
+plan steps is NOT a fix — flag it as unresolved and downgrade accordingly.
+"""
+    + _SEVEN_PRINCIPLES_DIMENSIONS
+)
+
+
+# ---------------------------------------------------------------------------
 # Per-stage strict rubric: PR REVIEW
 #
 # Composite rubric injected into PR_REVIEW_ANALYSIS_PROMPT (site 4 / #581).
@@ -970,6 +1010,70 @@ _PR_STRICT_RUBRIC = (
     + "\n"
     + _SEVEN_PRINCIPLES_DIMENSIONS
 )
+
+
+# ---------------------------------------------------------------------------
+# Final-iteration full-sweep suffix (appended on R2 by both PLAN_LOOP and
+# IMPL_LOOP review prompts). Adds cross-cutting checks above and beyond
+# the per-stage rubric — security review, dependency-graph impact, doc
+# drift. Issue-scoped, not repo-scoped. Site 3 (#580) reuses this constant.
+# ---------------------------------------------------------------------------
+_FULL_SWEEP_SUFFIX = """
+## Final-iteration Full-Sweep (R2 only)
+
+This is the FINAL review iteration. In addition to the per-dimension rubric
+above, perform the following cross-cutting sweeps. Keep each sweep scoped to
+THIS issue's plan — do NOT broaden into a repo-wide audit. Flag findings
+inside the existing Grade/Verdict; do NOT emit a separate verdict line.
+
+### S1 — Cross-cutting security review of this plan
+
+Read every plan step that touches:
+- external input (HTTP, CLI args, env vars, file uploads, message payloads),
+- subprocess invocation or shell commands,
+- credentials, tokens, signing keys, or secret material,
+- unsafe deserialization (binary-object loaders, YAML.load, JSON with custom
+  decoders),
+- file-system writes outside the build/ directory,
+- network egress to new endpoints.
+
+For each such step, verify the plan names a concrete mitigation
+(parameterized commands, allow-listed inputs, secret-via-env, schema
+validation, path-traversal guard, TLS verification). Missing mitigation on a
+security-relevant step is a MAJOR finding. Vague mitigation ("we will
+validate inputs") without naming the validator is a MAJOR finding.
+
+### S2 — Dependency-graph impact analysis
+
+Identify every shared module the plan modifies (anything under
+`hephaestus/` consumed by ≥2 callers, plus any public API exported from a
+package `__init__.py`). For each:
+- Does the plan acknowledge downstream callers?
+- Does the plan preserve the existing call signature or schedule a
+  coordinated update?
+- Does the plan add a new shared utility without checking whether an
+  existing one already covers the case (DRY)?
+
+A shared-module change with no caller-coordination note is a MAJOR finding.
+A shared-module change that breaks an existing signature without a
+deprecation path is CRITICAL.
+
+### S3 — Documentation-drift check
+
+For every new concept the plan introduces — new module, new public
+function, new CLI flag, new config knob, new env var, new file layout —
+verify the plan also names a documentation update (README, docstring,
+docs/ markdown, or skill). A new public surface with no doc update is a
+MAJOR finding. A new config knob with no doc update is a MAJOR finding.
+A purely-internal refactor that touches no public surface needs no doc
+update — do not flag.
+
+### Sweep output
+
+After completing S1/S2/S3 above, fold any new findings into the existing
+per-dimension scoring. The Grade and Verdict lines remain the SINGLE
+output verdict — do not emit duplicate verdicts for the sweep.
+"""
 
 
 PLAN_LOOP_REVIEW_PROMPT = """
@@ -1002,6 +1106,7 @@ This is iteration {iteration} of a maximum 3-iteration review loop. {iteration_g
 Review the plan above against the issue requirements and the rubric. Cite
 specific paragraphs of the plan or sections of the issue when justifying
 findings. After your analysis, output your verdict.
+{full_sweep_suffix}
 
 {output_format}
 """
@@ -1101,8 +1206,9 @@ def get_plan_loop_review_prompt(
 
     """
     nonce = secrets.token_hex(8).upper()
+    full_sweep_suffix = _FULL_SWEEP_SUFFIX.strip() if iteration == 2 else ""
     return PLAN_LOOP_REVIEW_PROMPT.format(
-        rubric=_STRICT_REVIEW_RUBRIC.strip(),
+        rubric=_PLAN_LOOP_STRICT_RUBRIC.strip(),
         iteration=iteration,
         iteration_label=_iteration_label(iteration),
         iteration_guidance=_iteration_guidance(iteration),
@@ -1112,6 +1218,7 @@ def get_plan_loop_review_prompt(
         plan_text_block=_fence_untrusted("PLAN_TEXT", plan_text, nonce),
         learnings=learnings or "_(no learnings captured this iteration)_",
         prior_review_block=_prior_review_block(prior_review),
+        full_sweep_suffix=full_sweep_suffix,
         output_format=_STRICT_REVIEW_OUTPUT_FORMAT.strip(),
         untrusted_notice=_UNTRUSTED_NOTICE,
     )
