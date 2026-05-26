@@ -300,36 +300,39 @@ class TestMain:
 
     @patch("hephaestus.github.pr_merge.run_git_cmd")
     @patch("hephaestus.github.pr_merge.detect_repo_from_remote")
-    def test_exits_1_when_no_token(self, mock_detect, mock_git) -> None:
-        """main() exits 1 when GITHUB_TOKEN is not set."""
+    def test_returns_1_when_no_token(self, mock_detect, mock_git) -> None:
+        """main() returns 1 when GITHUB_TOKEN is not set."""
         with patch.dict("os.environ", {}, clear=True):
             with patch("os.getenv", return_value=None):
                 with patch("sys.argv", ["prog"]):
-                    with pytest.raises(SystemExit) as exc_info:
-                        from hephaestus.github.pr_merge import main
+                    from hephaestus.github.pr_merge import main
 
-                        main()
-        assert exc_info.value.code == 1
+                    assert main() == 1
 
     @patch("hephaestus.github.pr_merge.run_git_cmd")
-    def test_exits_1_when_no_repo_detected(self, mock_git) -> None:
-        """main() exits 1 when repo can't be detected."""
+    def test_returns_1_when_no_repo_detected(self, mock_git) -> None:
+        """main() returns 1 when repo can't be detected."""
         with patch("os.getenv", return_value="fake-token"):
             with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value=None):
                 with patch("sys.argv", ["prog"]):
-                    with pytest.raises(SystemExit) as exc_info:
-                        from hephaestus.github.pr_merge import main
+                    from hephaestus.github.pr_merge import main
 
-                        main()
-        assert exc_info.value.code == 1
+                    assert main() == 1
 
     @pytest.mark.skipif(
         not importlib.util.find_spec("github"),
         reason="PyGithub not installed — cannot mock its absence when it is genuinely absent",
     )
     @patch("hephaestus.github.pr_merge.run_git_cmd")
-    def test_exits_1_when_pygithub_not_installed(self, mock_git) -> None:
-        """main() exits 1 when PyGithub is not importable."""
+    def test_returns_1_when_pygithub_not_installed(self, mock_git) -> None:
+        """main() returns 1 when PyGithub is not importable."""
+        # A blanket builtins.__import__ patch also fires for argparse's
+        # transitive `import locale`, so main() may not reach the github import
+        # at all. Accept either outcome (return 1 from the clean path, or
+        # ImportError propagating from incidental machinery) — both signal that
+        # PyGithub's absence is fatal, which is what we are asserting.
+        from hephaestus.github.pr_merge import main
+
         with patch("os.getenv", return_value="fake-token"):
             with patch(
                 "hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"
@@ -338,14 +341,15 @@ class TestMain:
                     "builtins.__import__", side_effect=ImportError("No module named 'github'")
                 ):
                     with patch("sys.argv", ["prog"]):
-                        with pytest.raises((SystemExit, ImportError)):
-                            from hephaestus.github.pr_merge import main
-
-                            main()
+                        try:
+                            result = main()
+                        except ImportError:
+                            return  # acceptable failure mode
+                        assert result == 1
 
     @patch("hephaestus.github.pr_merge.run_git_cmd")
-    def test_exits_1_when_repo_access_fails(self, mock_git) -> None:
-        """main() exits 1 when GitHub repo access raises."""
+    def test_returns_1_when_repo_access_fails(self, mock_git) -> None:
+        """main() returns 1 when GitHub repo access raises."""
         mock_gh = MagicMock()
         mock_gh.get_repo.side_effect = Exception("Not found")
         mock_github_module = MagicMock()
@@ -357,11 +361,9 @@ class TestMain:
             ):
                 with patch.dict(sys.modules, {"github": mock_github_module}):
                     with patch("sys.argv", ["prog"]):
-                        with pytest.raises(SystemExit) as exc_info:
-                            from hephaestus.github.pr_merge import main
+                        from hephaestus.github.pr_merge import main
 
-                            main()
-        assert exc_info.value.code == 1
+                        assert main() == 1
 
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
