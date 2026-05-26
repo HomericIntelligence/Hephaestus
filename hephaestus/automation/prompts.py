@@ -450,6 +450,10 @@ _UNTRUSTED_NOTICE = (
 PLAN_REVIEW_PROMPT = """
 Review the implementation plan for GitHub issue #{issue_number}.
 
+{strict_rubric}
+
+---
+
 {untrusted_notice}
 
 **Issue Title (untrusted):** {issue_title}
@@ -639,6 +643,7 @@ def get_plan_review_prompt(
         issue_body_block=_fence_untrusted("ISSUE_BODY", issue_body, nonce),
         plan_text_block=_fence_untrusted("PLAN_TEXT", plan_text, nonce),
         untrusted_notice=_UNTRUSTED_NOTICE,
+        strict_rubric=_PLAN_STRICT_RUBRIC.strip(),
     )
 
 
@@ -868,6 +873,45 @@ offending principle by name (e.g. "Verdict: NOGO — P2/YAGNI: diff adds
 a config flag with no current consumer; P7/POLA: new flag's default
 inverts the existing convention.").
 """
+
+
+# ---------------------------------------------------------------------------
+# Per-stage strict rubric: PLAN REVIEW
+#
+# Composes the shared strict-grading + anti-inflation rules with plan-stage
+# dimensions and the seven software-engineering principles. Injected into
+# PLAN_REVIEW_PROMPT so the standalone plan reviewer grades plans against
+# the same strict rubric the loop reviewer uses.
+# ---------------------------------------------------------------------------
+
+_PLAN_STRICT_RUBRIC = (
+    _STRICT_GRADING_AND_ANTI_INFLATION
+    + """
+Stage-specific dimensions for plan review:
+
+- Requirements alignment: does the plan map every acceptance criterion in
+  the issue to a concrete step? Flag any criterion left unaddressed or
+  vaguely waved at.
+- Plan completeness: are setup, implementation, test, and rollback steps
+  all named? Flag missing test plan, missing verification, or implicit
+  "and then it works" gaps.
+- Concreteness (file paths exist): does the plan name real files,
+  functions, and module paths that exist (or will be created with stated
+  paths)? Flag hand-wavy "update the relevant module" wording.
+- Risk surface: does the plan avoid destructive operations, irreversible
+  decisions, and changes outside the issue's stated scope? Flag any
+  step that mutates shared state, deletes data, or touches unrelated
+  subsystems without justification.
+- Verification plan: are the verification steps concrete enough for the
+  implementer to copy-paste-run? Flag plans that say "run the tests"
+  without naming which tests or "check that it works" without a check.
+- Stage handoff: does the implementer receive everything they need
+  (file paths, function signatures, test names, commands) to execute
+  the plan without re-deriving it? Flag plans that defer key decisions
+  to the implementer.
+"""
+    + _SEVEN_PRINCIPLES_DIMENSIONS
+)
 
 
 PLAN_LOOP_REVIEW_PROMPT = """

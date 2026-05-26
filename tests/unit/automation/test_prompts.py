@@ -243,3 +243,45 @@ class TestSharedRubricConstants:
     def test_anti_inflation_rules_have_default_is_f(self) -> None:
         """The anti-inflation block must restate the DEFAULT IS F rule."""
         assert "DEFAULT IS F" in prompts._STRICT_GRADING_AND_ANTI_INFLATION
+
+
+class TestPlanReviewStrictRubric:
+    """Tests for the strict rubric injected into PLAN_REVIEW_PROMPT (#578)."""
+
+    def _render(self) -> str:
+        return prompts.get_plan_review_prompt(
+            issue_number=123,
+            issue_title="title",
+            issue_body="body",
+            plan_text="plan text",
+        )
+
+    def test_plan_review_prompt_contains_strict_rubric(self) -> None:
+        """All seven principle markers must appear in the rendered prompt."""
+        out = self._render()
+        for marker in (
+            "P1 — KISS",
+            "P2 — YAGNI",
+            "P3 — TDD",
+            "P4 — DRY",
+            "P5 — SOLID",
+            "P6 — Modularity",
+            "P7 — POLA",
+        ):
+            assert marker in out, f"missing principle marker: {marker!r}"
+        # The shared anti-inflation block must also be embedded.
+        assert "DEFAULT IS F" in out
+
+    def test_plan_review_prompt_preserves_verdict_format(self) -> None:
+        """The trailing **Verdict: ...** lines the regex parser depends on."""
+        out = self._render()
+        assert "**Verdict: APPROVED**" in out
+        assert "**Verdict: REVISE**" in out
+        assert "**Verdict: BLOCK**" in out
+
+    def test_plan_review_prompt_contains_stage_dimensions(self) -> None:
+        """The plan-specific stage dimensions must be enumerated in the prompt."""
+        out = self._render()
+        assert "Requirements alignment" in out
+        assert "Plan completeness" in out
+        assert "Stage handoff" in out
