@@ -778,6 +778,98 @@ critique → Verdict: NOGO. When in doubt, NOGO.
 """
 
 
+# ---------------------------------------------------------------------------
+# Shared rubric building blocks consumed by the per-stage strict-simplify
+# review prompts. These constants are the single source of truth for the
+# grading scale, anti-inflation rules, and the seven graded software-
+# engineering principles from CLAUDE.md `## Key Development Principles`.
+#
+# They are intentionally additive: the existing `_STRICT_REVIEW_RUBRIC` and
+# `_STRICT_REVIEW_OUTPUT_FORMAT` constants above are preserved for backward
+# compatibility while sub-issues #578-#581 migrate each review site over to
+# stage-tailored rubrics that compose these blocks.
+# ---------------------------------------------------------------------------
+
+_STRICT_GRADING_AND_ANTI_INFLATION = """
+GRADING (every dimension starts at F; A must be EARNED with concrete evidence):
+- A  (93-100%) Exemplary. ZERO critical/major findings; ≤2 minor. RARE.
+- B  (80-89%)  Solid. ZERO critical findings, ≤1 major.
+- C  (70-79%)  Mediocre. Multiple gaps that should be prioritized.
+- D  (60-69%)  Poor. Fundamental practices missing or broken.
+- F  (<60%)    Failing / misaligned / dangerous.
+
+ANTI-INFLATION RULES (MANDATORY):
+- DEFAULT IS F. Find concrete evidence to justify ANY upgrade.
+- "It looks done" is NOT sufficient.
+- Do NOT give credit for plans, TODOs, or follow-up issues — grade what THIS
+  artifact delivers right now.
+- Do NOT round up. 74% is C, not C+ or B-.
+- If you catch yourself wanting to give B+ or higher, re-examine whether you
+  verified EVERY dimension or skimmed.
+"""
+
+
+_SEVEN_PRINCIPLES_DIMENSIONS = """
+**Software-engineering principles (graded — each can DROP a verdict, not just keep it):**
+
+P1 — KISS — Keep It Simple Stupid.
+    Is this the simplest solution that meets the requirement? Flag any
+    abstraction layer, generic interface, configuration knob, or
+    indirection without a current concrete consumer. Robust ≠ defensive
+    cruft. A robust simple solution beats a defensive complex one.
+
+P2 — YAGNI — You Ain't Gonna Need It.
+    Every diff hunk / planned-change must map to a stated requirement
+    in THIS issue. Flag scope creep, opportunistic refactors mixed in,
+    or "while we're here" additions. Features built for hypothetical
+    future requirements are findings.
+
+P3 — TDD — Test Driven Development.
+    Do tests drive the implementation? Look for test-first evidence:
+    tests that define behavior contracts, high coverage of edge cases,
+    and tests that landed alongside (not after) the code. For plan
+    reviews: does the plan name the tests that will define each
+    acceptance criterion? For impl reviews: does the diff include tests
+    proportional to the production code?
+
+P4 — DRY — Don't Repeat Yourself.
+    If two near-identical code/text blocks exist, prefer extracting a
+    helper — UNLESS the extraction would itself add complexity. Flag
+    BOTH "left duplicated where it should be DRYed" AND "DRYed
+    prematurely into an over-general helper". Cite specific
+    duplications with file:line.
+
+P5 — SOLID — five sub-principles, grade each that applies:
+    - SRP (Single Responsibility): each module/class/function has ONE
+      reason to change.
+    - OCP (Open-Closed): open for extension, closed for modification.
+    - LSP (Liskov Substitution): subtypes substitutable for base types.
+    - ISP (Interface Segregation): no client forced to depend on
+      methods it doesn't use.
+    - DIP (Dependency Inversion): high-level depends on abstractions,
+      not concretions.
+    Flag the specific sub-principle violated; vague "SOLID violation"
+    is insufficient.
+
+P6 — Modularity — develop independent modules through well-defined
+    interfaces. Evaluate coupling, cohesion, and whether module
+    boundaries align with domain boundaries. Flag implicit coupling
+    (shared globals, unexported state, hidden initialization order).
+
+P7 — POLA — Principle Of Least Astonishment.
+    Create intuitive and predictable interfaces. Flag surprising
+    defaults, inconsistent naming, non-obvious side effects, silent
+    failures, or behavior that contradicts the docstring/name.
+
+**Verdict floor (mandatory):** if ANY of P1–P7 reveals a critical or
+major finding, the verdict CANNOT be GO/APPROVED even if every other
+dimension scores A. Reviewer must explicitly downgrade and cite the
+offending principle by name (e.g. "Verdict: NOGO — P2/YAGNI: diff adds
+a config flag with no current consumer; P7/POLA: new flag's default
+inverts the existing convention.").
+"""
+
+
 PLAN_LOOP_REVIEW_PROMPT = """
 {rubric}
 
