@@ -11,6 +11,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.constants import DEFAULT_EXCLUDE_DIRS
 from hephaestus.logging.utils import get_logger
 from hephaestus.markdown.utils import find_markdown_files
@@ -475,6 +476,7 @@ def main() -> None:
         action="store_true",
         help="Show what would be fixed without making changes",
     )
+    add_json_arg(parser)
 
     args = parser.parse_args()
 
@@ -483,12 +485,21 @@ def main() -> None:
     fixer = MarkdownFixer(options)
     files_modified, total_fixes = fixer.process_path(args.path)
 
-    print("\nSummary:")
-    print(f"  Files modified: {files_modified}")
-    print(f"  Total fixes: {total_fixes}")
+    if args.json:
+        emit_json_status(
+            0,
+            message="dry run complete" if args.dry_run else "fix complete",
+            files_modified=files_modified,
+            total_fixes=total_fixes,
+            dry_run=args.dry_run,
+        )
+    else:
+        print("\nSummary:")
+        print(f"  Files modified: {files_modified}")
+        print(f"  Total fixes: {total_fixes}")
 
-    if args.dry_run:
-        print("\n[DRY RUN] No files were actually modified")
+        if args.dry_run:
+            print("\n[DRY RUN] No files were actually modified")
 
     sys.exit(0)
 

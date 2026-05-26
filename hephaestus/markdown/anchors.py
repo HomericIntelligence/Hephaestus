@@ -22,6 +22,8 @@ import re
 import sys
 from pathlib import Path
 
+from hephaestus.cli.utils import add_json_arg, format_output
+
 
 def heading_to_anchor(heading: str) -> str:
     """Convert markdown heading text to a GitHub-style anchor slug.
@@ -233,11 +235,31 @@ def main() -> int:
         action="store_true",
         help="Print success message when no errors are found",
     )
+    add_json_arg(parser)
 
     args = parser.parse_args()
 
     repo_root: Path | None = args.repo_root
     source_files: list[Path] | None = args.sources if args.sources else None
+
+    if args.json:
+        # JSON branch: emit structured payload instead of human-readable text.
+        if source_files is None:
+            rr = repo_root
+            if rr is None:
+                from hephaestus.utils.helpers import get_repo_root
+
+                rr = get_repo_root()
+            source_files = _collect_markdown_files(rr)
+        errors = validate_anchors(source_files, args.target)
+        payload = {
+            "target": str(args.target),
+            "valid": not errors,
+            "error_count": len(errors),
+            "errors": errors,
+        }
+        print(format_output(payload, "json"))
+        return 0 if not errors else 1
 
     return check_anchors(
         target_file=args.target,

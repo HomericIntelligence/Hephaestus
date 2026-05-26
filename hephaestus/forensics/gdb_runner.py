@@ -40,6 +40,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from hephaestus.cli.utils import add_json_arg, emit_json_status
+
 #: gdb batch script template. Uses Python event hooks rather than a plain
 #: gdb-script ``if`` because ``handle SIG* stop`` + a ``hook-stop`` block
 #: fires on *every* stop event (including normal exit, where
@@ -248,6 +250,7 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs=argparse.REMAINDER,
         help="arguments passed to the command verbatim",
     )
+    add_json_arg(parser)
     return parser
 
 
@@ -270,14 +273,20 @@ def main(argv: list[str] | None = None) -> int:
 
     # Escape hatch: RUN_UNDER_GDB=0 bypasses gdb for local dev.
     if os.environ.get("RUN_UNDER_GDB") == "0":
-        return subprocess.run([args.command, *args.command_args], check=False).returncode
+        rc = subprocess.run([args.command, *args.command_args], check=False).returncode
+        if args.json:
+            emit_json_status(rc, message="ran command directly (RUN_UNDER_GDB=0)")
+        return rc
 
-    return run_under_gdb(
+    rc = run_under_gdb(
         core_dir=args.core_dir,
         command=args.command,
         command_args=args.command_args,
         gdb_cmd_prefix=os.environ.get("GDB_CMD_PREFIX"),
     )
+    if args.json:
+        emit_json_status(rc, message="ran command under gdb")
+    return rc
 
 
 if __name__ == "__main__":

@@ -38,6 +38,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.logging.utils import get_logger
 
 logger = get_logger(__name__)
@@ -607,6 +608,7 @@ def main() -> None:
         choices=sorted(EMNIST_SPLITS),
         help="EMNIST split (only used when dataset=emnist, default: balanced)",
     )
+    add_json_arg(parser)
 
     args = parser.parse_args()
     success = True
@@ -630,7 +632,14 @@ def main() -> None:
         elif name == "emnist":
             success &= EMNISTDownloader().download_emnist(args.split, out)
 
-    sys.exit(0 if success else 1)
+    exit_code = 0 if success else 1
+    if args.json:
+        emit_json_status(
+            exit_code,
+            message="datasets downloaded" if success else "one or more datasets failed",
+            datasets=datasets_to_run,
+        )
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

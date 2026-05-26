@@ -49,6 +49,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from hephaestus.cli.utils import add_json_arg, emit_json_status
+
 #: Default candidate output directories, tried in order. The first that
 #: already exists wins; if none exist, the last is created. A CI job
 #: typically overrides this to point at its workspace.
@@ -188,6 +190,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="global (host-namespace) PID (%%P) — captured, unused in the filename",
     )
+    add_json_arg(parser)
     return parser
 
 
@@ -218,12 +221,15 @@ def main(argv: list[str] | None = None) -> int:
     # ELF. When invoked manually on a terminal with no piped input, reading
     # stdin would hang forever — refuse early.
     if sys.stdin.isatty():
-        print(
-            "hephaestus-coredump-handler: stdin is a TTY — refusing to run "
-            "(would block). This is a kernel core_pattern handler; test it with "
-            "`printf 'fake' | hephaestus-coredump-handler <pid> <exe> <time> <sig>`.",
-            file=sys.stderr,
-        )
+        if args.json:
+            emit_json_status(1, message="stdin is a TTY — refusing to run")
+        else:
+            print(
+                "hephaestus-coredump-handler: stdin is a TTY — refusing to run "
+                "(would block). This is a kernel core_pattern handler; test it with "
+                "`printf 'fake' | hephaestus-coredump-handler <pid> <exe> <time> <sig>`.",
+                file=sys.stderr,
+            )
         return 1
 
     # --target-dir wins over the env var, which wins over the built-in default.
@@ -237,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
     max_bytes = int(max_bytes_env) if max_bytes_env else DEFAULT_MAX_BYTES
 
     target_dir = resolve_target_dir(candidates)
-    write_core(
+    out_path = write_core(
         sys.stdin.buffer,
         pid=args.pid,
         exe=args.exe,
@@ -246,6 +252,8 @@ def main(argv: list[str] | None = None) -> int:
         target_dir=target_dir,
         max_bytes=max_bytes,
     )
+    if args.json:
+        emit_json_status(0, message="core written", path=str(out_path))
     return 0
 
 
