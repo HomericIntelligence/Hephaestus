@@ -158,8 +158,8 @@ class TestIsPlanReviewApprovedWithFetch:
                 return_value="/tmp/repo",
             ),
             patch(
-                "hephaestus.automation.review_state.get_repo_slug",
-                return_value="owner/name",
+                "hephaestus.automation.review_state.get_repo_info",
+                return_value=("owner", "name"),
             ),
         ):
             yield
@@ -184,3 +184,33 @@ class TestIsPlanReviewApprovedWithFetch:
             side_effect=RuntimeError("network down"),
         ):
             assert is_plan_review_approved(123) is False
+
+    def test_uses_owner_repo_tuple_from_get_repo_info(self) -> None:
+        """Regression test for #588 — derive owner+name from get_repo_info.
+
+        ``_fetch_issue_comments_graphql`` must obtain ``owner`` and ``name``
+        from ``get_repo_info`` (which returns a tuple) rather than calling
+        ``get_repo_slug(...).split('/', 1)`` (which crashes with "not enough
+        values to unpack" because the slug is just the repo name with no
+        owner prefix). This mirrors the fix in PR #575 for the same bug
+        pattern in ``plan_reviewer.py``; #588 caught the missed copy here.
+        """
+        mock_result = MagicMock()
+        mock_result.stdout = _graphql_payload([])
+        with (
+            patch(
+                "hephaestus.automation.review_state.get_repo_info",
+                return_value=("HomericIntelligence", "ProjectMnemosyne"),
+            ) as mock_info,
+            patch(
+                "hephaestus.automation.review_state._gh_call",
+                return_value=mock_result,
+            ) as mock_gh,
+        ):
+            is_plan_review_approved(1928)
+
+        mock_info.assert_called_once()
+        gh_args = mock_gh.call_args[0][0]
+        joined = " ".join(gh_args)
+        assert "owner=HomericIntelligence" in joined
+        assert "name=ProjectMnemosyne" in joined

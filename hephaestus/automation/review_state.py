@@ -24,7 +24,7 @@ import logging
 import re
 from typing import Any
 
-from .git_utils import get_repo_root, get_repo_slug, issue_ref
+from .git_utils import get_repo_info, get_repo_root, issue_ref
 from .github_api import _gh_call
 
 logger = logging.getLogger(__name__)
@@ -84,8 +84,11 @@ def _fetch_issue_comments_graphql(issue_number: int) -> list[dict[str, Any]]:
         Returns an empty list on any failure.
 
     """
-    repo = get_repo_slug(get_repo_root())
-    owner, name = repo.split("/", 1)
+    # get_repo_slug returns only the short repo name (e.g. "ProjectMnemosyne");
+    # GraphQL needs the (owner, name) pair, which get_repo_info supplies.
+    # PR #575 fixed this in plan_reviewer.py but missed the identical bug here,
+    # crashing every implementer-side APPROVED-gate check (#588).
+    owner, name = get_repo_info(get_repo_root())
     query = (
         "query($owner:String!,$name:String!,$number:Int!){"
         "  repository(owner:$owner,name:$name){"
