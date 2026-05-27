@@ -888,7 +888,7 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
             for fut, repo in futures.items():
                 try:
                     result = fut.result()
-                except BaseException as exc:
+                except Exception as exc:
                     LOG.error("[%s] future raised: %s", repo, exc)
                     result = RepoResult(
                         repo=repo,
