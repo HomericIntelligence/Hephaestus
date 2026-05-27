@@ -52,9 +52,7 @@ def test_main_returns_1_on_any_failure(monkeypatch) -> None:
 
 def test_main_returns_130_on_keyboard_interrupt(monkeypatch) -> None:
     """A KeyboardInterrupt during run() is caught and returns 130."""
-    monkeypatch.setattr(
-        "sys.argv", ["address_review", "--issues", "1", "--no-ui", "--dry-run"]
-    )
+    monkeypatch.setattr("sys.argv", ["address_review", "--issues", "1", "--no-ui", "--dry-run"])
     boom = MagicMock(side_effect=KeyboardInterrupt())
     with (
         patch.object(address_review.AddressReviewer, "__init__", return_value=None),
