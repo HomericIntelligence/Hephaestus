@@ -50,6 +50,7 @@ from .follow_up import parse_follow_up_items, run_follow_up_issues
 from .git_utils import get_repo_root, get_repo_slug, issue_ref, pr_ref, run
 from .github_api import fetch_issue_info, gh_list_open_issues
 from .implementer_state import ImplementationStateManager
+from .implementer_summary import ImplementationSummaryPrinter
 from .learn import learn_needs_rerun, run_learn
 from .models import (
     ImplementationPhase,
@@ -1733,46 +1734,7 @@ class IssueImplementer:
 
     def _print_summary(self, results: dict[int, WorkerResult]) -> None:
         """Print implementation summary."""
-        total = len(results)
-        deferred = sum(1 for r in results.values() if r.plan_review_not_approved)
-        successful = sum(
-            1 for r in results.values() if r.success and not r.plan_review_not_approved
-        )
-        failed = total - successful - deferred
-
-        logger.info("=" * 60)
-        logger.info("Implementation Summary")
-        logger.info("=" * 60)
-        logger.info("Total issues: %s", total)
-        logger.info("Successful: %s", successful)
-        logger.info("Deferred (awaiting APPROVED plan-review): %s", deferred)
-        logger.info("Failed: %s", failed)
-
-        if successful > 0:
-            logger.info("\nSuccessful PRs:")
-            for issue_num, result in results.items():
-                if result.success and result.pr_number:
-                    logger.info("  #%s: PR #%s", issue_num, result.pr_number)
-
-        if failed > 0:
-            logger.info("\nFailed issues:")
-            for issue_num, result in results.items():
-                if not result.success:
-                    logger.info("  #%s: %s", issue_num, result.error)
-
-        preserved = self.worktree_manager.preserved
-        if preserved:
-            issue_nums = [n for n, _ in preserved]
-            script = sys.argv[0]
-            issues_arg = " ".join(str(n) for n in issue_nums)
-            logger.info("\nPreserved worktrees (contain uncommitted changes):")
-            for issue_num, path in preserved:
-                logger.info("  #%s: %s", issue_num, path)
-            logger.info("\nRerun these issues after inspecting/cleaning the worktrees:")
-            logger.info("  %s --issues %s --resume", script, issues_arg)
-            logger.info("To discard them instead:")
-            for _, path in preserved:
-                logger.info("  git worktree remove --force %s", path)
+        ImplementationSummaryPrinter(self.worktree_manager).print(results)
 
 
 def _setup_logging(verbose: bool = False, log_dir: Path | None = None) -> None:
