@@ -23,6 +23,7 @@ from hephaestus.agents.runtime import (
     add_agent_argument,
     is_codex,
 )
+from hephaestus.cli.utils import add_json_arg, emit_json_status
 
 # NOTE: Several symbols below are re-imported here purely so existing tests
 # can keep patching them at the ``hephaestus.automation.implementer.X`` path
@@ -785,6 +786,7 @@ Examples:
         action="store_true",
         help="Enable verbose logging",
     )
+    add_json_arg(parser)
 
     args = parser.parse_args()
 
@@ -829,7 +831,7 @@ def main() -> int:
         dry_run=args.dry_run,
         enable_learn=not args.no_learn,
         enable_follow_up=not args.no_follow_up,
-        enable_ui=not args.no_ui,
+        enable_ui=not args.no_ui and not args.json,
     )
 
     if args.health_check:
@@ -850,12 +852,18 @@ def main() -> int:
                 failed = [num for num, result in results.items() if not result.success]
                 if failed:
                     log.error("Failed to implement %s issue(s): %s", len(failed), failed)
+                    if args.json:
+                        emit_json_status(1, issues=args.issues or [], failed=failed)
                     return 1
 
             log.info("Complete")
+            if args.json:
+                emit_json_status(0, issues=args.issues or [], epic=args.epic or 0)
             return 0
         except KeyboardInterrupt:
             log.warning("Interrupted by user")
+            if args.json:
+                emit_json_status(130, message="interrupted")
             return 130
 
 

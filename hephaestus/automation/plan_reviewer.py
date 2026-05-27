@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_text
+from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.github.rate_limit import wait_until
 
 from .claude_invoke import invoke_claude_with_session, scan_quota_reset
@@ -662,6 +663,7 @@ Examples:
         action="store_true",
         help="Enable verbose logging",
     )
+    add_json_arg(parser)
 
     return parser.parse_args()
 
@@ -690,7 +692,7 @@ def main() -> int:
             agent=args.agent,
             max_workers=args.max_workers,
             dry_run=args.dry_run,
-            enable_ui=not args.no_ui,
+            enable_ui=not args.no_ui and not args.json,
             verbose=args.verbose,
         )
 
@@ -700,13 +702,19 @@ def main() -> int:
         failed = [num for num, result in results.items() if not result.success]
         if failed:
             log.error("Failed to review %s plan(s) for issue(s): %s", len(failed), failed)
+            if args.json:
+                emit_json_status(1, issues=args.issues, failed=failed)
             return 1
 
         log.info("Plan review complete")
+        if args.json:
+            emit_json_status(0, issues=args.issues, failed=[])
         return 0
 
     except KeyboardInterrupt:
         log.warning("Interrupted by user")
+        if args.json:
+            emit_json_status(130, message="interrupted")
         return 130
 
 

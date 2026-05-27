@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_text
+from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.github.pr_merge import detect_repo_from_remote
 from hephaestus.logging.utils import get_logger
 
@@ -413,6 +414,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     add_agent_argument(parser)
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
+    add_json_arg(parser)
     return parser
 
 
@@ -468,7 +470,7 @@ def _print_summary(results: dict[str, str]) -> int:
     return 0 if not failed else 1
 
 
-def main() -> int:
+def main() -> int:  # noqa: C901
     """Entry point for hephaestus-tidy."""
     args = _build_arg_parser().parse_args()
 
@@ -480,6 +482,8 @@ def main() -> int:
 
     env = _validate_environment()
     if env is None:
+        if args.json:
+            emit_json_status(1, message="environment validation failed")
         return 1
     repo_slug, _, repo_path = env
     trunk = _detect_default_branch(args.trunk)
@@ -498,6 +502,8 @@ def main() -> int:
 
     if not problem_branches:
         logger.info("\nAll branches rebased cleanly — no swarm needed.")
+        if args.json:
+            emit_json_status(0, problem_branches=0)
         return 0
 
     logger.info(
@@ -510,6 +516,8 @@ def main() -> int:
         logger.info("--no-swarm: skipping Myrmidon dispatch. Fix manually:")
         for b in problem_branches:
             logger.info("  git rebase origin/%s  (on branch %s)", trunk, b)
+        if args.json:
+            emit_json_status(1, problem_branches=problem_branches, swarm="skipped")
         return 1
 
     logger.info(
@@ -521,6 +529,8 @@ def main() -> int:
     if args.dry_run:
         for b in problem_branches:
             logger.info("[dry-run] Would spawn Sonnet agent for branch: %s", b)
+        if args.json:
+            emit_json_status(0, dry_run=True, problem_branches=problem_branches)
         return 0
 
     results = asyncio.run(
@@ -535,7 +545,10 @@ def main() -> int:
         )
     )
 
-    return _print_summary(results)
+    exit_code = _print_summary(results)
+    if args.json:
+        emit_json_status(exit_code, results=results)
+    return exit_code
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ from hephaestus.agents.runtime import (
     run_codex_session,
     session_agent_matches,
 )
+from hephaestus.cli.utils import add_json_arg, emit_json_status
 
 from ._review_utils import (
     build_review_parser,
@@ -895,6 +896,7 @@ Examples:
         issues_help="Issue numbers whose linked PRs should have review threads addressed",
         dry_run_help=("Show what would be done without actually resolving threads or pushing code"),
     )
+    add_json_arg(parser)
     return parser.parse_args()
 
 
@@ -918,7 +920,7 @@ def main() -> int:
         agent=args.agent,
         max_workers=args.max_workers,
         dry_run=args.dry_run,
-        enable_ui=not args.no_ui,
+        enable_ui=not args.no_ui and not args.json,
         verbose=args.verbose,
     )
 
@@ -930,12 +932,18 @@ def main() -> int:
             failed = [num for num, result in results.items() if not result.success]
             if failed:
                 log.error("Failed to address review for %s issue(s): %s", len(failed), failed)
+                if args.json:
+                    emit_json_status(1, issues=args.issues, failed=failed)
                 return 1
 
             log.info("Address review complete")
+            if args.json:
+                emit_json_status(0, issues=args.issues, failed=[])
             return 0
         except KeyboardInterrupt:
             log.warning("Interrupted by user")
+            if args.json:
+                emit_json_status(130, message="interrupted")
             return 130
 
 

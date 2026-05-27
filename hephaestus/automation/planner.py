@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument
+from hephaestus.cli.utils import add_json_arg, emit_json_status
 
 from .claude_models import advise_model
 from .git_utils import get_repo_root, issue_ref
@@ -628,6 +629,7 @@ Examples:
         action="store_true",
         help="Enable verbose logging",
     )
+    add_json_arg(parser)
 
     return parser.parse_args()
 
@@ -657,6 +659,8 @@ def main() -> int:
                 "(reset at epoch %s). Skipping cleanly.",
                 e.reset_epoch,
             )
+            if args.json:
+                emit_json_status(0, message="rate-limited; skipped", reset_epoch=e.reset_epoch)
             return 0
         log.info("No --issues given; discovered %s open issues: %s", len(discovered), discovered)
         args.issues = discovered
@@ -686,12 +690,18 @@ def main() -> int:
         failed = [num for num, result in results.items() if not result.success]
         if failed:
             log.error("Failed to plan %s issue(s): %s", len(failed), failed)
+            if args.json:
+                emit_json_status(1, issues=args.issues, failed=failed)
             return 1
 
         log.info("Planning complete")
+        if args.json:
+            emit_json_status(0, issues=args.issues, failed=[])
         return 0
     except KeyboardInterrupt:
         logging.getLogger(__name__).warning("Interrupted by user")
+        if args.json:
+            emit_json_status(130, message="interrupted")
         return 130
 
 

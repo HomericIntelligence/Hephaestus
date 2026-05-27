@@ -17,6 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from hephaestus.cli.utils import add_json_arg, format_output
 from hephaestus.utils.helpers import get_repo_root
 
 
@@ -147,9 +148,22 @@ def main() -> int:
         action="store_true",
         help="Enable verbose output",
     )
+    add_json_arg(parser)
     args = parser.parse_args()
 
     repo_root = args.repo_root or get_repo_root()
+
+    if args.json:
+        violations = run_ruff_complexity_check(args.path, args.threshold, repo_root)
+        report = {
+            "path": args.path,
+            "threshold": args.threshold,
+            "violations": violations,
+            "passed": not violations,
+        }
+        print(format_output(report, "json"))
+        return 0 if not violations else 1
+
     success = check_max_complexity(
         path=args.path,
         threshold=args.threshold,

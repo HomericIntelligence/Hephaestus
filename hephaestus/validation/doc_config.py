@@ -30,6 +30,8 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+from hephaestus.cli.utils import add_json_arg, format_output
+
 _tomllib = None
 for _mod_name in ("tomllib", "tomli"):
     try:
@@ -465,6 +467,7 @@ def main() -> int:
         action="store_true",
         help="Skip the live pytest --collect-only test count check",
     )
+    add_json_arg(parser)
 
     args = parser.parse_args()
 
@@ -474,6 +477,27 @@ def main() -> int:
         from hephaestus.utils.helpers import get_repo_root
 
         repo_root = get_repo_root()
+
+    if args.json:
+        expected_threshold = load_coverage_threshold(repo_root)
+        all_errors: list[str] = []
+        all_errors.extend(check_claude_md_threshold(repo_root, expected_threshold))
+        cov_path = extract_cov_path(repo_root)
+        all_errors.extend(check_readme_cov_path(repo_root, cov_path))
+        all_errors.extend(check_addopts_cov_fail_under(repo_root, expected_threshold))
+        if not args.skip_test_count:
+            actual_count = collect_actual_test_count(repo_root)
+            if actual_count is not None:
+                all_errors.extend(check_readme_test_count(repo_root, actual_count))
+        exit_code = 0 if not all_errors else 1
+        report = {
+            "expected_threshold": expected_threshold,
+            "errors": all_errors,
+            "exit_code": exit_code,
+            "passed": not all_errors,
+        }
+        print(format_output(report, "json"))
+        return exit_code
 
     return check_doc_config_consistency(
         repo_root=repo_root,

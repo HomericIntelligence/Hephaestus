@@ -33,6 +33,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _dist_version
 from pathlib import Path
 
+from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
 from hephaestus.utils.helpers import get_repo_root
 from hephaestus.version.manager import VersionManager, parse_version
 
@@ -522,8 +523,20 @@ def check_version_consistency_main() -> int:
         action="store_true",
         help="Print parsed versions even when they match",
     )
+    add_json_arg(parser)
     args = parser.parse_args()
     root = args.repo_root or get_repo_root()
+    if args.json:
+        canonical = _version_from_git_tag(root) or _version_from_metadata()
+        pixi_version = _get_pixi_version(root)
+        consistent = pixi_version is None or pixi_version == canonical
+        payload = {
+            "canonical_version": canonical,
+            "pixi_version": pixi_version,
+            "consistent": consistent,
+        }
+        print(format_output(payload, "json"))
+        return 0 if consistent else 1
     return check_version_consistency(root, verbose=args.verbose)
 
 
@@ -564,11 +577,29 @@ def check_package_versions_main() -> int:
         action="store_true",
         help="Print passing check names and canonical version",
     )
+    add_json_arg(parser)
     args = parser.parse_args()
     root = args.repo_root or get_repo_root()
     init_path: Path | None = args.package_init
     if init_path is not None and not init_path.is_absolute():
         init_path = root / init_path
+    if args.json:
+        canonical = _get_canonical_version(root)
+        errors: list[str] = []
+        errors.extend(_check_pixi_version_errors(root, canonical, verbose=False))
+        errors.extend(_check_init_version_errors(init_path, canonical, verbose=False))
+        if args.scan_skills:
+            errors.extend(
+                _check_skill_version_errors(root, _parse_version_tuple(canonical), verbose=False)
+            )
+        payload = {
+            "canonical_version": canonical,
+            "ok": not errors,
+            "error_count": len(errors),
+            "errors": errors,
+        }
+        print(format_output(payload, "json"))
+        return 0 if not errors else 1
     return check_package_version_consistency(
         root,
         package_init=init_path,
@@ -610,6 +641,16 @@ def bump_version_main() -> int:
         action="store_true",
         help="Print additional details",
     )
+    add_json_arg(parser)
     args = parser.parse_args()
     root = args.repo_root or get_repo_root()
+    if args.json:
+        exit_code = bump_version(root, part=args.part, dry_run=args.dry_run, verbose=False)
+        emit_json_status(
+            exit_code,
+            message=("dry run complete" if args.dry_run else "version bumped"),
+            part=args.part,
+            dry_run=args.dry_run,
+        )
+        return exit_code
     return bump_version(root, part=args.part, dry_run=args.dry_run, verbose=args.verbose)

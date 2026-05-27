@@ -221,3 +221,76 @@ class TestGetResignEmail:
         cmd = get_resign_exec()
         assert "user.email=carol@example.com" in cmd
         assert "commit --amend --no-edit -S --reset-author" in cmd
+
+
+class TestMain:
+    """Smoke tests for hephaestus.github.fleet_sync.main()."""
+
+    def test_main_success_json(self, monkeypatch, capsys) -> None:
+        """main() with --json emits ok envelope when no failures occur."""
+        import json
+
+        from hephaestus.github import fleet_sync
+
+        def fake_process(repo, args, clone_dir):
+            return {
+                "merged": 1,
+                "rebased": 0,
+                "conflict_resolved": 0,
+                "skipped": 0,
+                "failed": 0,
+            }
+
+        monkeypatch.setattr(fleet_sync, "process_repo", fake_process)
+        monkeypatch.setattr("sys.argv", ["fleet-sync", "--repos", "owner/a", "--json", "--dry-run"])
+        assert fleet_sync.main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "ok"
+        assert payload["repos"] == 1
+        assert payload["totals"]["merged"] == 1
+
+    def test_main_failure_json(self, monkeypatch, capsys) -> None:
+        """main() with failures returns 1 and JSON envelope shows error."""
+        import json
+
+        from hephaestus.github import fleet_sync
+
+        def fake_process(repo, args, clone_dir):
+            return {
+                "merged": 0,
+                "rebased": 0,
+                "conflict_resolved": 0,
+                "skipped": 0,
+                "failed": 1,
+            }
+
+        monkeypatch.setattr(fleet_sync, "process_repo", fake_process)
+        monkeypatch.setattr("sys.argv", ["fleet-sync", "--repos", "owner/a", "--json", "--dry-run"])
+        assert fleet_sync.main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert payload["totals"]["failed"] == 1
+
+    def test_main_success_text(self, monkeypatch) -> None:
+        """main() without --json still runs through every repo."""
+        from hephaestus.github import fleet_sync
+
+        calls = []
+
+        def fake_process(repo, args, clone_dir):
+            calls.append(repo)
+            return {
+                "merged": 0,
+                "rebased": 0,
+                "conflict_resolved": 0,
+                "skipped": 0,
+                "failed": 0,
+            }
+
+        monkeypatch.setattr(fleet_sync, "process_repo", fake_process)
+        monkeypatch.setattr(
+            "sys.argv",
+            ["fleet-sync", "--repos", "owner/a", "owner/b", "--dry-run"],
+        )
+        assert fleet_sync.main() == 0
+        assert calls == ["owner/a", "owner/b"]

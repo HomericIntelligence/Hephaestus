@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
+from hephaestus.cli.utils import add_json_arg, emit_json_status
+
 LOG = logging.getLogger(__name__)
 
 # Canonical phase ordering. Index 0 = phase 1 (plan), index 5 = phase 6
@@ -224,6 +226,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     p.add_argument("-v", "--verbose", action="store_true", help="Enable DEBUG logging")
+    add_json_arg(p)
     return p.parse_args(argv)
 
 
@@ -980,7 +983,7 @@ def _resolve_org_and_repos(
     return (detected_org, [detected_repo], None)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # noqa: C901
     """Console-script entry point. Returns the process exit code."""
     args = _parse_args(argv)
     _setup_logging(args.verbose)
@@ -993,6 +996,8 @@ def main(argv: list[str] | None = None) -> int:
     org, repos, err = _resolve_org_and_repos(args)
     if err:
         LOG.error("%s", err)
+        if args.json:
+            emit_json_status(1, message=err)
         return 1
 
     cfg = LoopConfig(
@@ -1022,6 +1027,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if not repos:
         LOG.error("Repo list is empty; nothing to do.")
+        if args.json:
+            emit_json_status(1, message="empty repo list")
         return 1
 
     if not cfg.dry_run:
@@ -1050,8 +1057,24 @@ def main(argv: list[str] | None = None) -> int:
     failures = [r for r in results if r.any_failure]
     if failures:
         LOG.warning("%d/%d repo-loop results had failures", len(failures), len(results))
+        if args.json:
+            emit_json_status(
+                1,
+                repos=repos,
+                loops_run=cfg.loops,
+                failed_repos=[r.repo for r in failures],
+            )
         return 1
-    return 130 if _shutdown_requested() else 0
+
+    exit_code = 130 if _shutdown_requested() else 0
+    if args.json:
+        emit_json_status(
+            exit_code,
+            repos=repos,
+            loops_run=cfg.loops,
+            failed_repos=[],
+        )
+    return exit_code
 
 
 if __name__ == "__main__":

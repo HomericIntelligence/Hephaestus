@@ -13,6 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from hephaestus.cli.utils import add_json_arg, format_output
 from hephaestus.utils.helpers import run_subprocess
 
 
@@ -287,14 +288,16 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Collect system information")
-    parser.add_argument("--json", action="store_true", help="Output in JSON format")
     parser.add_argument("--no-tools", action="store_true", help="Skip tool version checks")
+    add_json_arg(parser)
 
     args = parser.parse_args()
 
     info = get_system_info(include_tools=not args.no_tools)
-    format_type = "json" if args.json else "text"
-    print(format_system_info(info, format_type))
+    if args.json:
+        print(format_output(info, "json"))
+    else:
+        print(format_system_info(info, "text"))
 
 
 if __name__ == "__main__":

@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from hephaestus.cli.utils import add_json_arg, format_output
+
 try:
     import yaml as _yaml
 except ModuleNotFoundError:
@@ -223,6 +225,38 @@ def check_agent_file(
 # ---------------------------------------------------------------------------
 
 
+def _emit_validate_agents_json(
+    agents_dir: Path,
+    md_files: list[Path],
+) -> int:
+    """JSON branch of :func:`validate_agents_main`. Returns exit code."""
+    results: list[dict[str, Any]] = []
+    invalid_count = 0
+    for file_path in md_files:
+        is_valid, errors = check_agent_file(file_path)
+        results.append(
+            {
+                "file": file_path.name,
+                "valid": is_valid,
+                "errors": errors,
+            }
+        )
+        if not is_valid:
+            invalid_count += 1
+
+    total = len(md_files)
+    payload = {
+        "ok": invalid_count == 0,
+        "agents_dir": str(agents_dir),
+        "total": total,
+        "valid": total - invalid_count,
+        "invalid": invalid_count,
+        "results": results,
+    }
+    print(format_output(payload, "json"))
+    return 0 if invalid_count == 0 else 1
+
+
 def validate_agents_main(argv: list[str] | None = None) -> int:
     """CLI entry point: validate agent frontmatter files in a directory.
 
@@ -248,6 +282,7 @@ def validate_agents_main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Treat warnings as errors",
     )
+    add_json_arg(parser)
     args = parser.parse_args(argv)
 
     if args.agents_dir is not None:
@@ -258,13 +293,35 @@ def validate_agents_main(argv: list[str] | None = None) -> int:
         agents_dir = get_repo_root() / ".claude" / "agents"
 
     if not agents_dir.is_dir():
+        if args.json:
+            payload = {
+                "ok": False,
+                "agents_dir": str(agents_dir),
+                "error": "agents directory not found",
+            }
+            print(format_output(payload, "json"))
+            return 1
         print(f"ERROR: agents directory not found: {agents_dir}", file=sys.stderr)
         return 1
 
     md_files = sorted(agents_dir.glob("*.md"))
     if not md_files:
+        if args.json:
+            payload = {
+                "ok": False,
+                "agents_dir": str(agents_dir),
+                "error": "no agent files found",
+                "total": 0,
+                "invalid": 0,
+                "results": [],
+            }
+            print(format_output(payload, "json"))
+            return 1
         print(f"No agent files found in {agents_dir}", file=sys.stderr)
         return 1
+
+    if args.json:
+        return _emit_validate_agents_json(agents_dir, md_files)
 
     invalid_count = 0
     for file_path in md_files:

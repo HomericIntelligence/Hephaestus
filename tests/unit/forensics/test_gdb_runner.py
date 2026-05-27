@@ -130,3 +130,37 @@ class TestMain:
         monkeypatch.setenv("RUN_UNDER_GDB", "0")
         rc = main(["/tmp/unused-core-dir", "sh", "-c", "exit 3"])
         assert rc == 3
+
+    def test_run_under_gdb_0_json_envelope(self, monkeypatch, capsys) -> None:
+        """RUN_UNDER_GDB=0 with --json emits a status envelope."""
+        import json
+
+        monkeypatch.setenv("RUN_UNDER_GDB", "0")
+        rc = main(["--json", "/tmp/unused-core-dir", "sh", "-c", "exit 0"])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "ok"
+        assert "directly" in payload["message"]
+
+    def test_gdb_branch_json_envelope(self, monkeypatch, capsys, tmp_path: Path) -> None:
+        """The gdb-wrapped branch emits a JSON envelope when --json is set."""
+        import json
+
+        from hephaestus.forensics import gdb_runner
+
+        monkeypatch.delenv("RUN_UNDER_GDB", raising=False)
+        monkeypatch.setattr(gdb_runner, "run_under_gdb", lambda **kw: 0)
+        rc = main(["--json", str(tmp_path), "sh"])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "ok"
+        assert "gdb" in payload["message"]
+
+    def test_gdb_branch_no_json(self, monkeypatch, tmp_path: Path) -> None:
+        """The gdb-wrapped branch returns the inferior's exit code without --json."""
+        from hephaestus.forensics import gdb_runner
+
+        monkeypatch.delenv("RUN_UNDER_GDB", raising=False)
+        monkeypatch.setattr(gdb_runner, "run_under_gdb", lambda **kw: 42)
+        rc = main([str(tmp_path), "sh"])
+        assert rc == 42

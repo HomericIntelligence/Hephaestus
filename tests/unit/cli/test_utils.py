@@ -9,9 +9,11 @@ import pytest
 
 from hephaestus.cli.utils import (
     CommandRegistry,
+    add_json_arg,
     add_logging_args,
     confirm_action,
     create_parser,
+    emit_json_status,
     format_output,
     format_table,
 )
@@ -227,3 +229,53 @@ class TestCliBarrelExports:
         for symbol in ("create_parser", "COMMAND_REGISTRY", "format_table", "Colors"):
             assert symbol in cli.__all__
             assert hasattr(cli, symbol)
+
+
+class TestAddJsonArg:
+    """Tests for add_json_arg."""
+
+    def test_adds_json_flag(self) -> None:
+        """add_json_arg() registers --json as a bool flag."""
+        parser = argparse.ArgumentParser()
+        add_json_arg(parser)
+        args = parser.parse_args([])
+        assert args.json is False
+        args = parser.parse_args(["--json"])
+        assert args.json is True
+
+    def test_help_text_mentions_machine_readable(self) -> None:
+        """Help string explains the flag's purpose."""
+        parser = argparse.ArgumentParser()
+        add_json_arg(parser)
+        help_text = parser.format_help()
+        assert "--json" in help_text
+        assert "JSON" in help_text
+
+
+class TestEmitJsonStatus:
+    """Tests for emit_json_status."""
+
+    def test_ok_status_on_zero_exit(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """exit_code=0 emits status='ok'."""
+        emit_json_status(0)
+        out = json.loads(capsys.readouterr().out)
+        assert out == {"status": "ok", "exit_code": 0}
+
+    def test_error_status_on_nonzero_exit(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """exit_code != 0 emits status='error'."""
+        emit_json_status(2)
+        out = json.loads(capsys.readouterr().out)
+        assert out == {"status": "error", "exit_code": 2}
+
+    def test_message_included(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """An optional message is added to the envelope."""
+        emit_json_status(1, message="thing broke")
+        out = json.loads(capsys.readouterr().out)
+        assert out["message"] == "thing broke"
+
+    def test_extra_fields_merged(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Extra kwargs land as top-level keys."""
+        emit_json_status(0, files_checked=5, warnings=0)
+        out = json.loads(capsys.readouterr().out)
+        assert out["files_checked"] == 5
+        assert out["warnings"] == 0

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from hephaestus.cli.utils import add_json_arg, format_output
 from hephaestus.logging.utils import get_logger
 from hephaestus.markdown.utils import find_markdown_files
 
@@ -474,12 +475,7 @@ def check_readmes_main() -> int:
         action="store_true",
         help="Print each README path as it is checked",
     )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        dest="json_output",
-        help="Output results as JSON",
-    )
+    add_json_arg(parser)
 
     args = parser.parse_args()
     directory = args.directory or Path.cwd()
@@ -493,10 +489,13 @@ def check_readmes_main() -> int:
     results = validate_all_readmes(directory, required_sections)
 
     if not results:
-        print(f"No README.md files found in {directory}")
+        if args.json:
+            print(format_output({"directory": str(directory), "results": []}, "json"))
+        else:
+            print(f"No README.md files found in {directory}")
         return 0
 
-    if args.json_output:
+    if args.json:
         output = [
             {
                 "file": str(r.file),
@@ -708,6 +707,7 @@ def main() -> int:
         action="store_true",
         help="Print verbose output",
     )
+    add_json_arg(parser)
 
     args = parser.parse_args()
     repo_root = args.repo_root or get_repo_root()
@@ -718,7 +718,11 @@ def main() -> int:
         return 1
 
     results = validate_all_links(directory, repo_root, verbose=args.verbose)
-    print_link_summary(results)
+
+    if args.json:
+        print(format_output(results, "json"))
+    else:
+        print_link_summary(results)
 
     return 0 if not results["failed"] else 1
 

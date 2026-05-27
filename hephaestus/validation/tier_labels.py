@@ -36,6 +36,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from hephaestus.cli.utils import add_json_arg
 from hephaestus.utils.helpers import get_repo_root
 
 # ---------------------------------------------------------------------------
@@ -361,12 +362,7 @@ def main() -> int:
         action="store_true",
         help="Print details for each mismatch found.",
     )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        dest="json_output",
-        help="Output results as JSON.",
-    )
+    add_json_arg(parser)
 
     args = parser.parse_args()
 
@@ -389,7 +385,7 @@ def main() -> int:
         print(f"ERROR: I/O error during scan: {exc}", file=sys.stderr)
         return 2
 
-    if args.json_output:
+    if args.json:
         print(format_json(findings))
     elif args.verbose or findings:
         print(format_report(findings), end="")

@@ -203,3 +203,101 @@ class TestMain:
             ],
         )
         assert main() == 0
+
+    def test_json_missing_coverage_file(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """--json emits an error envelope when the coverage file is missing."""
+        import json
+
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "check-coverage",
+                "--path",
+                "pkg/",
+                "--coverage-file",
+                str(tmp_path / "missing.xml"),
+                "--json",
+            ],
+        )
+        assert main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert "not found" in payload["message"]
+
+    def test_json_passing(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """--json emits a structured payload when coverage passes."""
+        import json
+
+        pytest.importorskip("defusedxml")
+        coverage_xml = tmp_path / "coverage.xml"
+        coverage_xml.write_text(
+            '<?xml version="1.0" ?>\n<coverage version="7.4" line-rate="0.95"></coverage>\n'
+        )
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "check-coverage",
+                "--threshold",
+                "80",
+                "--path",
+                "pkg/",
+                "--coverage-file",
+                str(coverage_xml),
+                "--json",
+            ],
+        )
+        assert main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["passed"] is True
+        assert payload["threshold"] == 80
+        assert payload["coverage"] >= 80
+
+    def test_json_failing(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """--json returns 1 and reports failure when below threshold."""
+        import json
+
+        pytest.importorskip("defusedxml")
+        coverage_xml = tmp_path / "coverage.xml"
+        coverage_xml.write_text(
+            '<?xml version="1.0" ?>\n<coverage version="7.4" line-rate="0.50"></coverage>\n'
+        )
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "check-coverage",
+                "--threshold",
+                "80",
+                "--path",
+                "pkg/",
+                "--coverage-file",
+                str(coverage_xml),
+                "--json",
+            ],
+        )
+        assert main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["passed"] is False
+
+    def test_json_unparseable_coverage(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """--json returns 0 with passed=True when coverage is unparseable."""
+        import json
+
+        coverage_xml = tmp_path / "coverage.xml"
+        coverage_xml.write_text("not xml at all")
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "check-coverage",
+                "--threshold",
+                "80",
+                "--path",
+                "pkg/",
+                "--coverage-file",
+                str(coverage_xml),
+                "--json",
+            ],
+        )
+        assert main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["passed"] is True
+        assert payload["coverage"] is None

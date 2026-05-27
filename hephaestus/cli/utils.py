@@ -27,9 +27,11 @@ except PackageNotFoundError:
 __all__ = [
     "COMMAND_REGISTRY",
     "CommandRegistry",
+    "add_json_arg",
     "add_logging_args",
     "confirm_action",
     "create_parser",
+    "emit_json_status",
     "format_output",
     "format_table",
     "register_command",
@@ -112,6 +114,46 @@ def add_logging_args(parser: argparse.ArgumentParser) -> None:
         "-q", "--quiet", action="store_true", help="Suppress informational messages"
     )
     logging_group.add_argument("--log-file", help="Log to file instead of stdout")
+
+
+def add_json_arg(parser: argparse.ArgumentParser) -> None:
+    """Add the standard ``--json`` flag to a CLI parser.
+
+    Every ``hephaestus-*`` console script accepts ``--json`` so output is
+    machine-readable for pipelines. Data-returning CLIs emit their structured
+    payload via ``format_output(data, "json")``; status-only CLIs should call
+    ``emit_json_status()`` to print a minimal ``{"status": ..., "exit_code": ...}``
+    envelope on exit.
+    """
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON output instead of human-readable text",
+    )
+
+
+def emit_json_status(exit_code: int, message: str | None = None, **extra: Any) -> None:
+    """Print a minimal JSON status envelope to stdout.
+
+    Use this in CLIs whose output is just status (e.g. fix/format/install).
+    Data-returning CLIs should instead call ``format_output(data, "json")``.
+
+    Args:
+        exit_code: The CLI's exit code (0 = ok, non-zero = error).
+        message: Optional human-readable summary.
+        **extra: Additional fields to merge into the envelope.
+
+    """
+    import json
+
+    envelope: dict[str, Any] = {
+        "status": "ok" if exit_code == 0 else "error",
+        "exit_code": exit_code,
+    }
+    if message is not None:
+        envelope["message"] = message
+    envelope.update(extra)
+    print(json.dumps(envelope))
 
 
 def confirm_action(

@@ -19,6 +19,8 @@ import sys
 from datetime import datetime
 from typing import Any
 
+from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
+
 # ---------------------------------------------------------------------------
 # Data helpers
 # ---------------------------------------------------------------------------
@@ -310,30 +312,48 @@ def main() -> int:
     parser.add_argument("end_date", help="End date (YYYY-MM-DD)")
     parser.add_argument("--author", help="Filter by author username")
     parser.add_argument("--repo", help="Repository (owner/repo), defaults to current repo")
+    add_json_arg(parser)
 
     args = parser.parse_args()
 
     if not validate_date(args.start_date):
-        print(f"Error: Invalid start date format: {args.start_date}", file=sys.stderr)
-        print("Expected format: YYYY-MM-DD", file=sys.stderr)
+        if args.json:
+            emit_json_status(1, message=f"Invalid start date format: {args.start_date}")
+        else:
+            print(f"Error: Invalid start date format: {args.start_date}", file=sys.stderr)
+            print("Expected format: YYYY-MM-DD", file=sys.stderr)
         return 1
 
     if not validate_date(args.end_date):
-        print(f"Error: Invalid end date format: {args.end_date}", file=sys.stderr)
-        print("Expected format: YYYY-MM-DD", file=sys.stderr)
+        if args.json:
+            emit_json_status(1, message=f"Invalid end date format: {args.end_date}")
+        else:
+            print(f"Error: Invalid end date format: {args.end_date}", file=sys.stderr)
+            print("Expected format: YYYY-MM-DD", file=sys.stderr)
         return 1
 
     repo = args.repo if args.repo else get_current_repo()
 
-    print(f"Repository: {repo}")
-    print(f"Date range: {args.start_date} to {args.end_date}")
-    if args.author:
-        print(f"Author: {args.author}")
-    print()
-    print("Fetching statistics...")
+    if not args.json:
+        print(f"Repository: {repo}")
+        print(f"Date range: {args.start_date} to {args.end_date}")
+        if args.author:
+            print(f"Author: {args.author}")
+        print()
+        print("Fetching statistics...")
 
     stats = collect_stats(args.start_date, args.end_date, args.author, repo)
-    print(format_stats_table(stats))
+    if args.json:
+        payload = {
+            "repo": repo,
+            "start_date": args.start_date,
+            "end_date": args.end_date,
+            "author": args.author,
+            "stats": stats,
+        }
+        print(format_output(payload, "json"))
+    else:
+        print(format_stats_table(stats))
     return 0
 
 

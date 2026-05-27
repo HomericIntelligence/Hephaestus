@@ -152,3 +152,115 @@ def test_dispatch_swarm_runs_codex_agents_in_threads(
     assert result == {"feature/a": "fixed"}
     assert calls
     assert calls[0][0] is tidy_module._run_codex_rebase_agent
+
+
+class TestMain:
+    """Smoke tests for hephaestus.github.tidy.main() covering --json branches."""
+
+    def test_env_validation_failure_json(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """When env validation fails, --json emits an error envelope."""
+        import json
+
+        monkeypatch.setattr(tidy_module, "_validate_environment", lambda: None)
+        monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--json"])
+        assert tidy_module.main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert "environment" in payload["message"]
+
+    def test_no_problem_branches_json(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """Clean tidy run with --json emits ok envelope."""
+        import json
+
+        monkeypatch.setattr(
+            tidy_module, "_validate_environment", lambda: ("owner/repo", "", tmp_path)
+        )
+        monkeypatch.setattr(tidy_module, "_detect_default_branch", lambda _x: "main")
+        monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry: (0, ""))
+        monkeypatch.setattr(tidy_module, "parse_problem_branches", lambda _o: [])
+        monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--json"])
+        assert tidy_module.main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "ok"
+        assert payload["problem_branches"] == 0
+
+    def test_no_swarm_with_problems_json(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """--no-swarm with problem branches emits error envelope and exits 1."""
+        import json
+
+        monkeypatch.setattr(
+            tidy_module, "_validate_environment", lambda: ("owner/repo", "", tmp_path)
+        )
+        monkeypatch.setattr(tidy_module, "_detect_default_branch", lambda _x: "main")
+        monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry: (0, ""))
+        monkeypatch.setattr(tidy_module, "parse_problem_branches", lambda _o: ["feature/a"])
+        monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--json", "--no-swarm"])
+        assert tidy_module.main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert payload["swarm"] == "skipped"
+
+    def test_dry_run_with_problems_json(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """--dry-run with problem branches emits ok envelope."""
+        import json
+
+        monkeypatch.setattr(
+            tidy_module, "_validate_environment", lambda: ("owner/repo", "", tmp_path)
+        )
+        monkeypatch.setattr(tidy_module, "_detect_default_branch", lambda _x: "main")
+        monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry: (0, ""))
+        monkeypatch.setattr(tidy_module, "parse_problem_branches", lambda _o: ["feature/a"])
+        monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--json", "--dry-run"])
+        assert tidy_module.main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "ok"
+        assert payload["dry_run"] is True
+
+    def test_full_dispatch_json(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """End-to-end with swarm dispatch (mocked) emits results envelope."""
+        import json
+
+        monkeypatch.setattr(
+            tidy_module, "_validate_environment", lambda: ("owner/repo", "", tmp_path)
+        )
+        monkeypatch.setattr(tidy_module, "_detect_default_branch", lambda _x: "main")
+        monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry: (0, ""))
+        monkeypatch.setattr(tidy_module, "parse_problem_branches", lambda _o: ["feature/a"])
+
+        async def fake_dispatch(*args, **kwargs):
+            return {"feature/a": "rebased"}
+
+        monkeypatch.setattr(tidy_module, "_dispatch_swarm", fake_dispatch)
+        monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--json"])
+        assert tidy_module.main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "ok"
+        assert payload["results"] == {"feature/a": "rebased"}
+
+    def test_env_validation_failure_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without --json, env-validation failure still exits 1."""
+        monkeypatch.setattr(tidy_module, "_validate_environment", lambda: None)
+        monkeypatch.setattr("sys.argv", ["hephaestus-tidy"])
+        assert tidy_module.main() == 1

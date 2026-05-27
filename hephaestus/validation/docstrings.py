@@ -20,6 +20,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from hephaestus.cli.utils import add_json_arg
 from hephaestus.utils.helpers import get_repo_root
 
 _CONTINUATION_STARTERS = frozenset(
@@ -302,12 +303,7 @@ def main() -> int:
         action="store_true",
         help="Print detailed output",
     )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        dest="json_output",
-        help="Output results as JSON",
-    )
+    add_json_arg(parser)
 
     args = parser.parse_args()
     repo_root = args.repo_root or get_repo_root()
@@ -315,7 +311,7 @@ def main() -> int:
 
     findings = scan_directory(directory, repo_root)
 
-    if args.json_output:
+    if args.json:
         print(format_json(findings))
     else:
         print(format_report(findings))

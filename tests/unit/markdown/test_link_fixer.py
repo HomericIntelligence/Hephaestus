@@ -201,3 +201,75 @@ class TestMain:
         )
         result = main()
         assert result == 0  # fix mode always exits 0
+
+    def test_check_clean_json(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import json
+
+        (tmp_path / "clean.md").write_text("No bad links here.\n")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["hephaestus-check-links", "--check", "--json", str(tmp_path)],
+        )
+        assert main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "ok"
+        assert payload["message"] == "no invalid links found"
+
+    def test_check_bad_links_json(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import json
+
+        (tmp_path / "bad.md").write_text("See [link](/absolute/path.md)\n")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["hephaestus-check-links", "--check", "--json", str(tmp_path)],
+        )
+        assert main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert "invalid link" in payload["message"]
+        assert "absolute_path_issues" in payload
+
+    def test_fix_mode_json(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import json
+
+        f = tmp_path / "f.md"
+        f.write_text("See [link](/absolute/path.md)\n")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["hephaestus-check-links", "--json", str(tmp_path)],
+        )
+        assert main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "ok"
+        assert payload["message"] == "link fix complete"
+        assert "files_modified" in payload
+
+    def test_check_clean_verbose_text(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Verbose text mode prints the no-invalid-links sentinel."""
+        (tmp_path / "clean.md").write_text("No bad links here.\n")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["hephaestus-check-links", "--check", "--verbose", str(tmp_path)],
+        )
+        assert main() == 0
+        assert "No invalid" in capsys.readouterr().out

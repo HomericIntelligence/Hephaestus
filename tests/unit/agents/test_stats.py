@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import sys
 from pathlib import Path
+
+import pytest
 
 from hephaestus.agents.loader import AgentInfo
 from hephaestus.agents.stats import (
@@ -11,6 +15,7 @@ from hephaestus.agents.stats import (
     collect_agent_stats,
     format_stats_json,
     format_stats_text,
+    main,
 )
 
 _VALID_FM = (
@@ -237,3 +242,101 @@ class TestFormatStatsJson:
         result = format_stats_json(stats)
         parsed = json.loads(result)
         assert "test-agent" in parsed["agents_without_level"]
+
+
+def _write_valid_agent(dirpath: Path, name: str = "agent-a") -> Path:
+    """Write a minimal valid agent markdown file."""
+    content = (
+        f"---\nname: {name}\ndescription: A test agent\n"
+        "tools: Read,Write\nmodel: sonnet\nlevel: 2\n---\n# Body\n"
+    )
+    path = dirpath / f"{name}.md"
+    path.write_text(content)
+    return path
+
+
+class TestMain:
+    """Smoke tests for the stats CLI main()."""
+
+    def test_main_text_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        _write_valid_agent(agents_dir, "a1")
+        monkeypatch.setattr(sys, "argv", ["stats", "--agents-dir", str(agents_dir)])
+        assert main() == 0
+        assert "Agent System Statistics Report" in capsys.readouterr().out
+
+    def test_main_json_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        _write_valid_agent(agents_dir, "a1")
+        monkeypatch.setattr(sys, "argv", ["stats", "--agents-dir", str(agents_dir), "--json"])
+        assert main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert "total_agents" in payload
+        assert payload["total_agents"] == 1
+
+    def test_main_format_json_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        _write_valid_agent(agents_dir, "a1")
+        monkeypatch.setattr(
+            sys, "argv", ["stats", "--agents-dir", str(agents_dir), "--format", "json"]
+        )
+        assert main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert "total_agents" in payload
+
+    def test_main_output_to_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        _write_valid_agent(agents_dir, "a1")
+        out_file = tmp_path / "out.txt"
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["stats", "--agents-dir", str(agents_dir), "--output", str(out_file)],
+        )
+        assert main() == 0
+        assert out_file.exists()
+        assert "Agent System Statistics Report" in out_file.read_text()
+
+    def test_main_dir_not_found(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        missing = tmp_path / "nope"
+        monkeypatch.setattr(sys, "argv", ["stats", "--agents-dir", str(missing)])
+        assert main() == 1
+        assert "agents directory not found" in capsys.readouterr().err
+
+    def test_main_no_agents_found(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.setattr(sys, "argv", ["stats", "--agents-dir", str(empty)])
+        # No .md files → load_all_agents returns [], main returns 1
+        assert main() == 1
+
+    def test_main_default_agents_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Cover the get_repo_root() default branch."""
+        from hephaestus.utils import helpers
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        _write_valid_agent(agents_dir, "a1")
+        # Make get_repo_root return tmp_path so the default <root>/.claude/agents resolves
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "agents").symlink_to(agents_dir, target_is_directory=True)
+        monkeypatch.setattr(helpers, "get_repo_root", lambda: tmp_path)
+        monkeypatch.setattr(sys, "argv", ["stats"])
+        assert main() == 0

@@ -24,6 +24,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from hephaestus.cli.utils import add_json_arg, emit_json_status
+
 # mypy flags that consume the next argument as their value.
 _FLAGS_WITH_VALUE: frozenset[str] = frozenset(
     {
@@ -132,15 +134,21 @@ def main() -> int:
         usage="%(prog)s [mypy-flags...] file1.py file2.py ...",
         add_help=True,
     )
-    # We parse just --help / -h normally; all remaining args are passed through.
+    add_json_arg(parser)
+    # We parse just --help / -h / --json normally; all remaining args are passed through.
     parser.parse_known_args(sys.argv[1:])
 
     raw_args = sys.argv[1:]
-    # Strip --help handled above so it doesn't end up as a file path.
-    raw_args = [a for a in raw_args if a not in ("-h", "--help")]
+    json_mode = "--json" in raw_args
+    # Strip --help / --json handled above so they don't end up as a file path or
+    # get forwarded to mypy (which does not accept --json).
+    raw_args = [a for a in raw_args if a not in ("-h", "--help", "--json")]
 
     flags, files = split_flags_and_files(raw_args)
-    return run_mypy_per_file(files, flags=flags)
+    exit_code = run_mypy_per_file(files, flags=flags)
+    if json_mode:
+        emit_json_status(exit_code, files_checked=len(files))
+    return exit_code
 
 
 if __name__ == "__main__":

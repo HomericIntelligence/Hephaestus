@@ -198,3 +198,27 @@ class TestMain:
         py_file.write_text("x = 1\n")
         monkeypatch.setattr("sys.argv", ["check-type-aliases", "--verbose", str(tmp_path)])
         assert main() == 0
+
+    def test_clean_json(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """--json emits a passing report for clean code."""
+        import json
+
+        py_file = tmp_path / "clean.py"
+        py_file.write_text("x = 1\n")
+        monkeypatch.setattr("sys.argv", ["check-type-aliases", "--json", str(tmp_path)])
+        assert main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["passed"] is True
+        assert payload["violation_count"] == 0
+
+    def test_violations_json(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """--json emits a failing report listing violations."""
+        import json
+
+        py_file = tmp_path / "bad.py"
+        py_file.write_text("Result = DomainResult\n")
+        monkeypatch.setattr("sys.argv", ["check-type-aliases", "--json", str(tmp_path)])
+        assert main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["passed"] is False
+        assert payload["violation_count"] >= 1

@@ -596,3 +596,82 @@ class TestMain:
                         from hephaestus.github.pr_merge import main
 
                         main()
+
+
+class TestMainJson:
+    """Smoke tests covering --json branches of pr_merge.main()."""
+
+    def test_no_token_json(self, capsys) -> None:
+        import json
+
+        from hephaestus.github.pr_merge import main
+
+        with patch("os.getenv", return_value=None):
+            with patch("sys.argv", ["prog", "--json"]):
+                assert main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert payload["exit_code"] == 1
+
+    @patch("hephaestus.github.pr_merge.run_git_cmd")
+    def test_no_repo_json(self, _mock_git, capsys) -> None:
+        import json
+
+        from hephaestus.github.pr_merge import main
+
+        with patch("os.getenv", return_value="fake-token"):
+            with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value=None):
+                with patch("sys.argv", ["prog", "--json"]):
+                    assert main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+
+    @patch("hephaestus.github.pr_merge.try_push_head_branch")
+    @patch("hephaestus.github.pr_merge.run_git_cmd")
+    def test_success_json(self, _mock_git, _mock_push, capsys) -> None:
+        """Full happy-path with no PRs returns 0 and emits ok envelope."""
+        import json
+
+        mock_repo = MagicMock()
+        mock_repo.get_pulls.return_value = []
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        mock_github_module = MagicMock()
+        mock_github_module.Github.return_value = mock_gh
+
+        with patch("os.getenv", return_value="fake-token"):
+            with patch(
+                "hephaestus.github.pr_merge.detect_repo_from_remote",
+                return_value="owner/repo",
+            ):
+                with patch.dict(sys.modules, {"github": mock_github_module}):
+                    with patch("sys.argv", ["prog", "--json"]):
+                        from hephaestus.github.pr_merge import main
+
+                        assert main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "ok"
+        assert payload["exit_code"] == 0
+
+    @patch("hephaestus.github.pr_merge.run_git_cmd")
+    def test_repo_access_failure_json(self, _mock_git, capsys) -> None:
+        """When gh.get_repo raises, --json emits an error envelope."""
+        import json
+
+        mock_gh = MagicMock()
+        mock_gh.get_repo.side_effect = RuntimeError("403")
+        mock_github_module = MagicMock()
+        mock_github_module.Github.return_value = mock_gh
+
+        with patch("os.getenv", return_value="fake-token"):
+            with patch(
+                "hephaestus.github.pr_merge.detect_repo_from_remote",
+                return_value="owner/repo",
+            ):
+                with patch.dict(sys.modules, {"github": mock_github_module}):
+                    with patch("sys.argv", ["prog", "--json"]):
+                        from hephaestus.github.pr_merge import main
+
+                        assert main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"

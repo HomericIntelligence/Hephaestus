@@ -612,3 +612,118 @@ class TestFetchIssueCommentsCache:
         joined = " ".join(gh_args)
         assert "owner=HomericIntelligence" in joined
         assert "name=ProjectMnemosyne" in joined
+
+
+class TestMain:
+    """Smoke tests for plan_reviewer.main()."""
+
+    def test_success_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """main() returns 0 when every issue is reviewed successfully."""
+        from hephaestus.automation import plan_reviewer
+        from hephaestus.automation.models import WorkerResult
+
+        monkeypatch.setattr(
+            "sys.argv", ["plan-reviewer", "--issues", "1", "2", "--no-ui", "--dry-run"]
+        )
+
+        def fake_run(self: object) -> dict[int, WorkerResult]:
+            return {
+                1: WorkerResult(issue_number=1, success=True),
+                2: WorkerResult(issue_number=2, success=True),
+            }
+
+        monkeypatch.setattr(plan_reviewer.PlanReviewer, "run", fake_run)
+        assert plan_reviewer.main() == 0
+
+    def test_success_json(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """main() with --json emits ok envelope on success."""
+        import json as _json
+
+        from hephaestus.automation import plan_reviewer
+        from hephaestus.automation.models import WorkerResult
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["plan-reviewer", "--issues", "1", "--no-ui", "--dry-run", "--json"],
+        )
+
+        def fake_run(self: object) -> dict[int, WorkerResult]:
+            return {1: WorkerResult(issue_number=1, success=True)}
+
+        monkeypatch.setattr(plan_reviewer.PlanReviewer, "run", fake_run)
+        assert plan_reviewer.main() == 0
+        payload = _json.loads(capsys.readouterr().out)
+        assert payload["status"] == "ok"
+        assert payload["issues"] == [1]
+        assert payload["failed"] == []
+
+    def test_failure_json(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """main() with --json emits error envelope when any review fails."""
+        import json as _json
+
+        from hephaestus.automation import plan_reviewer
+        from hephaestus.automation.models import WorkerResult
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["plan-reviewer", "--issues", "1", "2", "--no-ui", "--dry-run", "--json"],
+        )
+
+        def fake_run(self: object) -> dict[int, WorkerResult]:
+            return {
+                1: WorkerResult(issue_number=1, success=True),
+                2: WorkerResult(issue_number=2, success=False, error="boom"),
+            }
+
+        monkeypatch.setattr(plan_reviewer.PlanReviewer, "run", fake_run)
+        assert plan_reviewer.main() == 1
+        payload = _json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert payload["failed"] == [2]
+
+    def test_keyboard_interrupt_json(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """KeyboardInterrupt with --json emits a 130 envelope."""
+        import json as _json
+
+        from hephaestus.automation import plan_reviewer
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["plan-reviewer", "--issues", "1", "--no-ui", "--dry-run", "--json"],
+        )
+
+        def fake_run(self: object) -> None:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(plan_reviewer.PlanReviewer, "run", fake_run)
+        assert plan_reviewer.main() == 130
+        payload = _json.loads(capsys.readouterr().out)
+        assert payload["exit_code"] == 130
+        assert payload["message"] == "interrupted"
+
+    def test_dedupes_issue_numbers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Duplicate --issues values are de-duplicated before review runs."""
+        from hephaestus.automation import plan_reviewer
+        from hephaestus.automation.models import WorkerResult
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["plan-reviewer", "--issues", "5", "5", "5", "--no-ui", "--dry-run"],
+        )
+
+        seen_issues: list[list[int]] = []
+
+        def fake_run(self: object) -> dict[int, WorkerResult]:
+            # self.options is set during PlanReviewer.__init__
+            seen_issues.append(list(self.options.issues))  # type: ignore[attr-defined]
+            return {5: WorkerResult(issue_number=5, success=True)}
+
+        monkeypatch.setattr(plan_reviewer.PlanReviewer, "run", fake_run)
+        assert plan_reviewer.main() == 0
+        assert seen_issues == [[5]]

@@ -20,6 +20,8 @@ from typing import Any
 
 import yaml
 
+from hephaestus.cli.utils import add_json_arg, emit_json_status
+
 SchemaMapping = list[tuple[re.Pattern[str], Path]]
 
 
@@ -207,10 +209,13 @@ def main() -> int:
         action="store_true",
         help="Print errors but exit 0",
     )
+    add_json_arg(parser)
 
     args = parser.parse_args()
 
     if not args.files:
+        if args.json:
+            emit_json_status(0, message="no files to validate", error_count=0)
         return 0
 
     from hephaestus.utils.helpers import get_repo_root as _get_repo_root
@@ -218,22 +223,35 @@ def main() -> int:
     repo_root = args.repo_root or _get_repo_root()
 
     if args.schema_map is None:
-        print(
-            "ERROR: --schema-map is required. Provide a JSON file mapping "
-            "file patterns to schema paths.",
-            file=sys.stderr,
-        )
+        if args.json:
+            emit_json_status(1, message="--schema-map is required")
+        else:
+            print(
+                "ERROR: --schema-map is required. Provide a JSON file mapping "
+                "file patterns to schema paths.",
+                file=sys.stderr,
+            )
         return 1
 
     try:
         schema_map = load_schema_map(args.schema_map)
     except (FileNotFoundError, json.JSONDecodeError) as exc:
-        print(f"ERROR: Could not load schema map: {exc}", file=sys.stderr)
+        if args.json:
+            emit_json_status(1, message=f"Could not load schema map: {exc}")
+        else:
+            print(f"ERROR: Could not load schema map: {exc}", file=sys.stderr)
         return 1
 
-    exit_code, _ = check_files(
+    exit_code, error_count = check_files(
         args.files, repo_root, schema_map, verbose=args.verbose, dry_run=args.dry_run
     )
+    if args.json:
+        emit_json_status(
+            exit_code,
+            error_count=error_count,
+            files_checked=len(args.files),
+            dry_run=args.dry_run,
+        )
     return exit_code
 
 

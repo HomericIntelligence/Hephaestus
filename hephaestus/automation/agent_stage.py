@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from hephaestus.agents.runtime import add_agent_argument, run_claude_text, run_codex_session
+from hephaestus.cli.utils import add_json_arg, emit_json_status
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the agent command before running",
     )
+    add_json_arg(parser)
     return parser
 
 
@@ -153,7 +155,11 @@ def run_agent(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """Run the agent stage command-line interface."""
-    return run_agent(build_parser().parse_args(argv))
+    args = build_parser().parse_args(argv)
+    exit_code = run_agent(args)
+    if args.json:
+        emit_json_status(exit_code, stage=args.stage, agent=args.agent)
+    return exit_code
 
 
 if __name__ == "__main__":

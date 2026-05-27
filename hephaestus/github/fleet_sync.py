@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_text
+from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.github.rate_limit import detect_rate_limit, wait_until
 from hephaestus.logging.utils import get_logger
 
@@ -570,6 +571,7 @@ def main() -> int:
     )
     add_agent_argument(parser)
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
+    add_json_arg(parser)
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -605,7 +607,10 @@ def main() -> int:
     logger.info("  Skipped:           %d", totals["skipped"])
     logger.info("  Failed:            %d", totals["failed"])
 
-    return 0 if totals["failed"] == 0 else 1
+    exit_code = 0 if totals["failed"] == 0 else 1
+    if args.json:
+        emit_json_status(exit_code, None, repos=len(repos), totals=totals)
+    return exit_code
 
 
 if __name__ == "__main__":

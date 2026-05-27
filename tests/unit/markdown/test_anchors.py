@@ -253,3 +253,85 @@ class TestMain:
             ],
         )
         assert main() == 1
+
+    def test_json_valid(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import json
+
+        target = tmp_path / "install.md"
+        target.write_text("# Setup\n")
+        source = tmp_path / "README.md"
+        source.write_text("[link](install.md#setup)")
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "hephaestus-validate-anchors",
+                "--target",
+                str(target),
+                "--json",
+                str(source),
+            ],
+        )
+        assert main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["valid"] is True
+        assert payload["error_count"] == 0
+
+    def test_json_invalid(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import json
+
+        target = tmp_path / "install.md"
+        target.write_text("# Setup\n")
+        source = tmp_path / "README.md"
+        source.write_text("[link](install.md#missing)")
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "hephaestus-validate-anchors",
+                "--target",
+                str(target),
+                "--json",
+                str(source),
+            ],
+        )
+        assert main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["valid"] is False
+        assert payload["error_count"] >= 1
+
+    def test_json_auto_collect_with_repo_root(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """When no sources are passed, _collect_markdown_files is called."""
+        import json
+
+        target = tmp_path / "install.md"
+        target.write_text("# Setup\n")
+        source = tmp_path / "README.md"
+        source.write_text("[link](install.md#setup)")
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "hephaestus-validate-anchors",
+                "--target",
+                str(target),
+                "--repo-root",
+                str(tmp_path),
+                "--json",
+            ],
+        )
+        assert main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["valid"] is True

@@ -27,6 +27,8 @@ import sys
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
+
 try:
     import yaml as _yaml
 except ModuleNotFoundError:
@@ -311,6 +313,7 @@ def check_workflow_inventory_main() -> int:
         default=None,
         help="Repository root (default: auto-detect via git)",
     )
+    add_json_arg(parser)
     args = parser.parse_args()
 
     if args.repo_root is not None:
@@ -321,6 +324,16 @@ def check_workflow_inventory_main() -> int:
         repo_root = get_repo_root()
 
     undocumented, missing_files = check_inventory(repo_root)
+
+    if args.json:
+        in_sync = not undocumented and not missing_files
+        payload = {
+            "in_sync": in_sync,
+            "undocumented": list(undocumented),
+            "missing_files": list(missing_files),
+        }
+        print(format_output(payload, "json"))
+        return 0 if in_sync else 1
 
     if not undocumented and not missing_files:
         print("OK: workflow inventory is in sync.")
@@ -363,6 +376,7 @@ def validate_workflow_checkout_main() -> int:
         nargs="*",
         help="Workflow files or directories (default: .github/workflows/)",
     )
+    add_json_arg(parser)
     args = parser.parse_args()
 
     target_paths: list[str] = args.paths
@@ -375,12 +389,29 @@ def validate_workflow_checkout_main() -> int:
     workflow_files = collect_workflow_files(target_paths)
 
     if not workflow_files:
+        if args.json:
+            emit_json_status(0, message="no workflow files found", files_checked=0)
+            return 0
         print("No workflow files found to validate.")
         return 0
 
     all_violations: list[Violation] = []
     for wf_file in workflow_files:
         all_violations.extend(validate_workflow(wf_file))
+
+    if args.json:
+        exit_code = 0 if not all_violations else 1
+        emit_json_status(
+            exit_code,
+            message=(
+                "all workflows pass checkout-first invariant"
+                if not all_violations
+                else f"found {len(all_violations)} violation(s)"
+            ),
+            files_checked=len(workflow_files),
+            violation_count=len(all_violations),
+        )
+        return exit_code
 
     if all_violations:
         for v in all_violations:

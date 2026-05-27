@@ -18,8 +18,9 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
 from hephaestus.utils.helpers import get_repo_root
 
 HIGH_THRESHOLD: float = 7.0
@@ -156,25 +157,22 @@ def main() -> int:
 
     """
     parser = _build_parser()
+    add_json_arg(parser)
     args = parser.parse_args()
 
     ignore_ids = load_ignore_list(args.ignore_file)
-    if ignore_ids:
+    if ignore_ids and not args.json:
         print(f"pip-audit: ignoring {len(ignore_ids)} advisory ID(s)")
 
-    raw = sys.stdin.read()
-    json_start = raw.find("{")
-    if json_start == -1:
-        print("pip-audit: no vulnerabilities found", file=sys.stderr)
-        return 0
-
-    try:
-        data = json.loads(raw[json_start:])
-    except json.JSONDecodeError as exc:
-        print(f"filter_audit: failed to parse pip-audit JSON: {exc}", file=sys.stderr)
-        return 1
+    parsed = _parse_audit_input(sys.stdin.read(), args.json)
+    if isinstance(parsed, int):
+        return parsed
+    data = parsed
 
     blocking, suppressed = filter_audit_results(data, ignore_ids)
+
+    if args.json:
+        return _emit_audit_json(blocking, suppressed)
 
     if suppressed:
         print("pip-audit: suppressed vulnerabilities (LOW/MEDIUM/UNKNOWN — not blocking CI):")
@@ -190,6 +188,46 @@ def main() -> int:
     if not suppressed:
         print("pip-audit: no vulnerabilities found")
     return 0
+
+
+def _parse_audit_input(raw: str, json_mode: bool) -> dict[str, Any] | int:
+    """Parse pip-audit stdin payload.
+
+    Returns the parsed dict, or an integer exit code if the input was empty
+    or failed to parse.
+    """
+    json_start = raw.find("{")
+    if json_start == -1:
+        if json_mode:
+            emit_json_status(0, message="no vulnerabilities found")
+        else:
+            print("pip-audit: no vulnerabilities found", file=sys.stderr)
+        return 0
+
+    try:
+        return cast(dict[str, Any], json.loads(raw[json_start:]))
+    except json.JSONDecodeError as exc:
+        if json_mode:
+            emit_json_status(1, message=f"failed to parse pip-audit JSON: {exc}")
+        else:
+            print(f"filter_audit: failed to parse pip-audit JSON: {exc}", file=sys.stderr)
+        return 1
+
+
+def _emit_audit_json(blocking: list[AuditEntry], suppressed: list[AuditEntry]) -> int:
+    """Emit the audit findings as a JSON report and return the exit code."""
+    report = {
+        "blocking": [
+            {"package": n, "version": v, "id": vid, "severity": lbl} for n, v, vid, lbl in blocking
+        ],
+        "suppressed": [
+            {"package": n, "version": v, "id": vid, "severity": lbl}
+            for n, v, vid, lbl in suppressed
+        ],
+        "exit_code": 1 if blocking else 0,
+    }
+    print(format_output(report, "json"))
+    return 1 if blocking else 0
 
 
 def _build_parser() -> argparse.ArgumentParser:

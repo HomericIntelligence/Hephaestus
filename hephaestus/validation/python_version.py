@@ -19,6 +19,7 @@ import re
 import sys
 from pathlib import Path
 
+from hephaestus.cli.utils import add_json_arg, format_output
 from hephaestus.utils.helpers import get_repo_root
 
 tomllib = None
@@ -231,13 +232,27 @@ def main() -> int:
         action="store_true",
         help="Print parsed versions even when consistent",
     )
+    add_json_arg(parser)
 
     args = parser.parse_args()
     repo_root = args.repo_root or get_repo_root()
 
     consistent, versions = check_python_version_consistency(
-        repo_root, check_dockerfile=args.check_dockerfile, verbose=args.verbose
+        repo_root,
+        check_dockerfile=args.check_dockerfile,
+        verbose=args.verbose and not args.json,
     )
+
+    if args.json:
+        report = {
+            "consistent": consistent,
+            "versions": versions,
+            "passed": consistent or not versions,
+        }
+        print(format_output(report, "json"))
+        if not versions:
+            return 0
+        return 0 if consistent else 1
 
     if not versions:
         print("WARNING: No Python version specs found in pyproject.toml")

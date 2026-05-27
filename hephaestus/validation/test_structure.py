@@ -21,6 +21,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.utils.helpers import get_repo_root
 
 ALLOWED_ROOT_FILES: frozenset[str] = frozenset({"__init__.py", "conftest.py"})
@@ -209,12 +210,16 @@ def main() -> int:
         action="store_true",
         help="Print detailed output",
     )
+    add_json_arg(parser)
 
     args = parser.parse_args()
     repo_root = args.repo_root or get_repo_root()
 
     passed = check_test_structure(repo_root, src_package=args.src_package, verbose=args.verbose)
-    return 0 if passed else 1
+    exit_code = 0 if passed else 1
+    if args.json:
+        emit_json_status(exit_code, passed=passed)
+    return exit_code
 
 
 if __name__ == "__main__":

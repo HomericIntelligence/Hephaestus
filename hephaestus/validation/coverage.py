@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
 from hephaestus.utils.helpers import get_repo_root
 
 logger = logging.getLogger(__name__)
@@ -211,6 +212,7 @@ def main() -> int:
         action="store_true",
         help="Enable verbose output",
     )
+    add_json_arg(parser)
 
     args = parser.parse_args()
 
@@ -221,7 +223,7 @@ def main() -> int:
     else:
         threshold = get_module_threshold(args.path, config)
 
-    if args.verbose:
+    if args.verbose and not args.json:
         # User-facing CLI verbose output — intentionally written to stdout.
         print("Checking coverage with settings:")
         print(f"  Threshold: {threshold}%")
@@ -229,6 +231,9 @@ def main() -> int:
         print(f"  Coverage file: {args.coverage_file}")
 
     if not args.coverage_file.exists():
+        if args.json:
+            emit_json_status(1, message=f"Coverage file not found: {args.coverage_file}")
+            return 1
         # User-facing actionable guidance — intentionally written to stderr so
         # the message appears even when stdout is redirected to a file.
         print(f"\nWARNING: Coverage file not found: {args.coverage_file}", file=sys.stderr)
@@ -237,6 +242,28 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+
+    if args.json:
+        coverage_value = parse_coverage_report(args.coverage_file)
+        if coverage_value is None:
+            report: dict[str, Any] = {
+                "path": args.path,
+                "threshold": threshold,
+                "coverage": None,
+                "passed": True,
+                "message": "Coverage data not available; check skipped",
+            }
+            print(format_output(report, "json"))
+            return 0
+        passed = coverage_value >= threshold
+        report = {
+            "path": args.path,
+            "threshold": threshold,
+            "coverage": coverage_value,
+            "passed": passed,
+        }
+        print(format_output(report, "json"))
+        return 0 if passed else 1
 
     success = check_coverage(threshold, args.path, args.coverage_file)
     return 0 if success else 1

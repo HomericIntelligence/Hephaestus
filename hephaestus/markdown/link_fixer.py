@@ -22,6 +22,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.constants import DEFAULT_EXCLUDE_DIRS
 from hephaestus.logging.utils import get_logger
 from hephaestus.markdown.utils import find_markdown_files
@@ -249,6 +250,7 @@ def main() -> int:
         action="store_true",
         help="Print per-file details",
     )
+    add_json_arg(parser)
 
     args = parser.parse_args()
 
@@ -256,13 +258,24 @@ def main() -> int:
         files_with_issues, system_issues, abs_issues = check_links(args.path, verbose=args.verbose)
         total = system_issues + abs_issues
         if total > 0:
-            print(
-                f"Found {files_with_issues} file(s) with {total} invalid link(s) "
-                f"({system_issues} system-path, {abs_issues} absolute-path).",
-                file=sys.stderr,
-            )
+            if args.json:
+                emit_json_status(
+                    1,
+                    message=f"{total} invalid link(s) found",
+                    files_with_issues=files_with_issues,
+                    system_path_issues=system_issues,
+                    absolute_path_issues=abs_issues,
+                )
+            else:
+                print(
+                    f"Found {files_with_issues} file(s) with {total} invalid link(s) "
+                    f"({system_issues} system-path, {abs_issues} absolute-path).",
+                    file=sys.stderr,
+                )
             return 1
-        if args.verbose:
+        if args.json:
+            emit_json_status(0, message="no invalid links found")
+        elif args.verbose:
             print("No invalid absolute-path links found.")
         return 0
 
@@ -271,7 +284,17 @@ def main() -> int:
     fixer = LinkFixer(options)
     files_modified, system_fixes, abs_fixes = fixer.process_path(args.path)
     total = system_fixes + abs_fixes
-    print(f"\nSummary: {files_modified} file(s) modified, {total} link(s) fixed.")
+    if args.json:
+        emit_json_status(
+            0,
+            message="link fix complete",
+            files_modified=files_modified,
+            links_fixed=total,
+            system_path_fixes=system_fixes,
+            absolute_path_fixes=abs_fixes,
+        )
+    else:
+        print(f"\nSummary: {files_modified} file(s) modified, {total} link(s) fixed.")
     return 0
 
 

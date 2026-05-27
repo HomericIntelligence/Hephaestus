@@ -38,6 +38,8 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
+from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
+
 # Header written at the top of every auto-generated requirements file.
 _GENERATED_HEADER = """\
 # AUTO-GENERATED from pixi.toml — do not edit manually.
@@ -458,9 +460,20 @@ def check_dep_sync_main() -> int:
         default=None,
         help="Repository root (default: auto-detect via git)",
     )
+    add_json_arg(parser)
     args = parser.parse_args()
 
     errors = check_dep_sync(args.repo_root)
+
+    if args.json:
+        payload = {
+            "ok": not errors,
+            "error_count": len(errors),
+            "errors": errors,
+        }
+        print(format_output(payload, "json"))
+        return 0 if not errors else 1
+
     if errors:
         print("Dependency sync check FAILED:", file=sys.stderr)
         for err in errors:
@@ -511,6 +524,7 @@ def sync_requirements_main() -> int:
         metavar="PKG",
         help="Dev-only packages for requirements-dev.txt",
     )
+    add_json_arg(parser)
 
     args = parser.parse_args()
 
@@ -530,6 +544,18 @@ def sync_requirements_main() -> int:
             core_packages=args.core,
             dev_packages=args.dev,
         )
+        exit_code = 0 if ok else 1
+        if args.json:
+            emit_json_status(
+                exit_code,
+                message=(
+                    "requirements files are up-to-date"
+                    if ok
+                    else "requirements files are out of date"
+                ),
+                mode="check",
+            )
+            return exit_code
         if ok:
             print("OK: requirements files are up-to-date")
             return 0
@@ -541,6 +567,8 @@ def sync_requirements_main() -> int:
         core_packages=args.core,
         dev_packages=args.dev,
     )
+    if args.json:
+        emit_json_status(0, message="requirements files synchronised", mode="sync")
     return 0
 
 

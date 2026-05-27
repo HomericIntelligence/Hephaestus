@@ -29,6 +29,8 @@ import re
 import sys
 from pathlib import Path
 
+from hephaestus.cli.utils import add_json_arg, format_output
+
 # Scripts that are imported by other scripts (not invoked directly) — always active.
 _ALWAYS_ACTIVE: frozenset[str] = frozenset(
     {
@@ -282,6 +284,7 @@ def main() -> int:
         default=None,
         help="Exclude scripts whose name contains PATTERN (e.g. 'test_')",
     )
+    add_json_arg(parser)
 
     args = parser.parse_args()
 
@@ -291,6 +294,19 @@ def main() -> int:
         from hephaestus.utils.helpers import get_repo_root
 
         repo_root = get_repo_root()
+
+    if args.json:
+        stale = find_stale_scripts(repo_root, exclude_pattern=args.exclude)
+        exit_code = 1 if (stale and args.strict) else 0
+        report = {
+            "stale_scripts": stale,
+            "stale_count": len(stale),
+            "strict": args.strict,
+            "exit_code": exit_code,
+            "passed": not stale,
+        }
+        print(format_output(report, "json"))
+        return exit_code
 
     return check_stale_scripts(
         repo_root=repo_root,

@@ -27,6 +27,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
+
 # ---------------------------------------------------------------------------
 # TOML loading (tomllib on 3.11+, tomli on 3.10, manual fallback)
 # ---------------------------------------------------------------------------
@@ -416,14 +418,28 @@ def bench_precommit_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--threshold", type=int, default=120, help="Warning threshold in seconds (default: 120)."
     )
+    add_json_arg(parser)
 
     args = parser.parse_args(argv)
+
+    over_threshold = check_threshold(args.elapsed, args.threshold)
+
+    if args.json:
+        payload = {
+            "elapsed_seconds": args.elapsed,
+            "files": args.files,
+            "status": args.status,
+            "threshold_seconds": args.threshold,
+            "over_threshold": over_threshold,
+        }
+        print(format_output(payload, "json"))
+        return 0
 
     table = format_summary_table(args.elapsed, args.files, args.status)
     print(table)
     write_step_summary(table)
 
-    if check_threshold(args.elapsed, args.threshold):
+    if over_threshold:
         emit_warning(
             f"Pre-commit hooks took {args.elapsed}s, "
             f"which exceeds the {args.threshold}s threshold. "
@@ -455,6 +471,7 @@ def check_precommit_versions_main(argv: list[str] | None = None) -> int:
         default=None,
         help="Path to pixi.toml (default: repo root)",
     )
+    add_json_arg(parser)
     args = parser.parse_args(argv)
 
     try:
@@ -463,8 +480,24 @@ def check_precommit_versions_main(argv: list[str] | None = None) -> int:
             pixi_path=args.pixi,
         )
     except FileNotFoundError as exc:
+        if args.json:
+            emit_json_status(1, message=str(exc))
+            return 1
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+
+    if args.json:
+        exit_code = 0 if not issues else 1
+        emit_json_status(
+            exit_code,
+            message=(
+                "all pre-commit hook versions are consistent with pixi.toml"
+                if not issues
+                else "pre-commit version drift detected"
+            ),
+            issue_count=len(issues),
+        )
+        return exit_code
 
     if issues:
         print("Pre-commit version drift detected:")

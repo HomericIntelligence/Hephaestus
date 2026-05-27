@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
 
 from hephaestus.agents.frontmatter import (
     check_agent_file,
@@ -10,6 +13,7 @@ from hephaestus.agents.frontmatter import (
     extract_frontmatter_parsed,
     extract_frontmatter_raw,
     extract_frontmatter_with_lines,
+    validate_agents_main,
     validate_frontmatter,
 )
 
@@ -151,3 +155,84 @@ class TestCheckAgentFile:
         is_valid, errors = check_agent_file(f)
         assert is_valid is False
         assert errors
+
+
+class TestValidateAgentsMain:
+    """Smoke tests for the validate_agents_main() CLI."""
+
+    def test_text_success(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "a.md").write_text(_VALID_FM)
+        rc = validate_agents_main(["--agents-dir", str(agents_dir)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "OK" in out
+        assert "1/1 agents valid" in out
+
+    def test_text_invalid_agent(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "bad.md").write_text(_NO_FM)
+        rc = validate_agents_main(["--agents-dir", str(agents_dir)])
+        assert rc == 1
+        assert "FAIL" in capsys.readouterr().out
+
+    def test_json_success(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "a.md").write_text(_VALID_FM)
+        rc = validate_agents_main(["--agents-dir", str(agents_dir), "--json"])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["total"] == 1
+        assert payload["invalid"] == 0
+
+    def test_json_invalid_agent(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "bad.md").write_text(_NO_FM)
+        rc = validate_agents_main(["--agents-dir", str(agents_dir), "--json"])
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is False
+        assert payload["invalid"] == 1
+
+    def test_json_dir_not_found(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        missing = tmp_path / "nope"
+        rc = validate_agents_main(["--agents-dir", str(missing), "--json"])
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is False
+        assert "not found" in payload["error"]
+
+    def test_text_dir_not_found(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = validate_agents_main(["--agents-dir", str(tmp_path / "nope")])
+        assert rc == 1
+        assert "not found" in capsys.readouterr().err
+
+    def test_json_no_files(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        rc = validate_agents_main(["--agents-dir", str(empty), "--json"])
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is False
+        assert "no agent files" in payload["error"]
+
+    def test_text_no_files(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        rc = validate_agents_main(["--agents-dir", str(empty)])
+        assert rc == 1
+        assert "No agent files" in capsys.readouterr().err
+
+    def test_default_agents_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from hephaestus.utils import helpers
+
+        agents_dir = tmp_path / ".claude" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "a.md").write_text(_VALID_FM)
+        monkeypatch.setattr(helpers, "get_repo_root", lambda: tmp_path)
+        assert validate_agents_main([]) == 0

@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from hephaestus.cli.utils import add_json_arg
 from hephaestus.utils.helpers import get_repo_root
 
 # ---------------------------------------------------------------------------
@@ -344,12 +345,6 @@ def main() -> int:
         help="Repository root (default: auto-detect)",
     )
     parser.add_argument(
-        "--json",
-        action="store_true",
-        dest="json_output",
-        help="Output results as JSON",
-    )
-    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -362,6 +357,7 @@ def main() -> int:
         default=None,
         help="Additional path prefix to exclude (may be repeated)",
     )
+    add_json_arg(parser)
 
     args = parser.parse_args()
     repo_root: Path = args.repo_root or get_repo_root()
@@ -373,7 +369,7 @@ def main() -> int:
 
     findings = scan_repository(scan_root, excluded_prefixes=excluded)
 
-    if args.json_output:
+    if args.json:
         print(format_json_report(findings))
     else:
         print(format_text_report(findings, verbose=args.verbose))

@@ -414,3 +414,72 @@ class TestSecurityHardening:
         """Fashion-MNIST downloader uses HTTPS, not plain HTTP."""
         d = FashionMNISTDownloader()
         assert d.base_url.startswith("https://")
+
+
+class TestMainJsonAndAll:
+    """Additional smoke tests for main() covering --json + 'all' dataset branches."""
+
+    def test_main_mnist_success_json(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import json
+
+        from hephaestus.datasets import downloader
+
+        monkeypatch.setattr("sys.argv", ["dl", "mnist", "--json"])
+        with patch.object(downloader.MNISTDownloader, "download_mnist", return_value=True):
+            with pytest.raises(SystemExit) as exc:
+                downloader.main()
+        assert exc.value.code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "ok"
+        assert payload["datasets"] == ["mnist"]
+
+    def test_main_failure_json(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import json
+
+        from hephaestus.datasets import downloader
+
+        monkeypatch.setattr("sys.argv", ["dl", "cifar10", "--json"])
+        with patch.object(downloader.CIFAR10Downloader, "download_cifar10", return_value=False):
+            with pytest.raises(SystemExit) as exc:
+                downloader.main()
+        assert exc.value.code == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert "failed" in payload["message"]
+
+    def test_main_all_invokes_each_downloader(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from hephaestus.datasets import downloader
+
+        monkeypatch.setattr("sys.argv", ["dl", "all"])
+        with (
+            patch.object(downloader.MNISTDownloader, "download_mnist", return_value=True) as m1,
+            patch.object(
+                downloader.FashionMNISTDownloader, "download_fashion_mnist", return_value=True
+            ) as m2,
+            patch.object(downloader.CIFAR10Downloader, "download_cifar10", return_value=True) as m3,
+            patch.object(
+                downloader.CIFAR100Downloader, "download_cifar100", return_value=True
+            ) as m4,
+            patch.object(downloader.EMNISTDownloader, "download_emnist", return_value=True) as m5,
+        ):
+            with pytest.raises(SystemExit) as exc:
+                downloader.main()
+        assert exc.value.code == 0
+        for m in (m1, m2, m3, m4, m5):
+            m.assert_called_once()
+
+    def test_main_emnist_with_split(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from hephaestus.datasets import downloader
+
+        monkeypatch.setattr("sys.argv", ["dl", "emnist", "--split", "digits"])
+        with patch.object(
+            downloader.EMNISTDownloader, "download_emnist", return_value=True
+        ) as mock_dl:
+            with pytest.raises(SystemExit) as exc:
+                downloader.main()
+        assert exc.value.code == 0
+        assert mock_dl.call_args.args[0] == "digits"

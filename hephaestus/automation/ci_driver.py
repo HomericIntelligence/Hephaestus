@@ -28,6 +28,7 @@ from hephaestus.agents.runtime import (
     run_codex_session,
     session_agent_matches,
 )
+from hephaestus.cli.utils import add_json_arg, emit_json_status
 
 from ._review_utils import find_pr_for_issue
 from .claude_invoke import invoke_claude_with_session
@@ -877,6 +878,7 @@ Examples:
             "automation loop). Setting HEPH_CI_DRIVER_FORCE=1 has the same effect."
         ),
     )
+    add_json_arg(parser)
 
     return parser.parse_args()
 
@@ -931,6 +933,8 @@ def main() -> int:
             "HEPH_CI_DRIVER_FORCE=1) to override.",
             reason,
         )
+        if args.json:
+            emit_json_status(2, message=f"gate refused: {reason}")
         return 2
     log.debug("ci_driver gate passed: %s", reason)
 
@@ -942,7 +946,7 @@ def main() -> int:
             agent=args.agent,
             max_workers=args.max_workers,
             dry_run=args.dry_run,
-            enable_ui=not args.no_ui,
+            enable_ui=not args.no_ui and not args.json,
             verbose=args.verbose,
         )
 
@@ -952,13 +956,19 @@ def main() -> int:
         failed = [num for num, result in results.items() if not result.success]
         if failed:
             log.error("CI drive failed for %s issue(s): %s", len(failed), failed)
+            if args.json:
+                emit_json_status(1, issues=args.issues, failed=failed)
             return 1
 
         log.info("CI driver complete")
+        if args.json:
+            emit_json_status(0, issues=args.issues, failed=[])
         return 0
 
     except KeyboardInterrupt:
         log.warning("Interrupted by user")
+        if args.json:
+            emit_json_status(130, message="interrupted")
         return 130
 
 

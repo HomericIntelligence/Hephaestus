@@ -24,6 +24,7 @@ import subprocess
 import sys
 from typing import Any
 
+from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.logging.utils import get_logger
 from hephaestus.utils.helpers import run_subprocess
 
@@ -215,6 +216,7 @@ def main() -> int:  # noqa: C901
         "--repo",
         help="Repository in format OWNER/REPO (auto-detected if not provided)",
     )
+    add_json_arg(parser)
     args = parser.parse_args()
 
     # Get GitHub token
@@ -223,6 +225,8 @@ def main() -> int:  # noqa: C901
         logger.error(
             "Please set GITHUB_TOKEN environment variable with a token that has 'repo' scope."
         )
+        if args.json:
+            emit_json_status(1)
         return 1
 
     # Detect or use provided repo name
@@ -232,6 +236,8 @@ def main() -> int:  # noqa: C901
             "Could not detect repository name. Please provide --repo OWNER/REPO or "
             "ensure you're in a git repository with a GitHub remote."
         )
+        if args.json:
+            emit_json_status(1)
         return 1
 
     logger.info("Working with repository: %s", repo_name)
@@ -244,6 +250,8 @@ def main() -> int:  # noqa: C901
             "PyGithub not installed. Install with: pip install PyGithub\n"
             "Or install hephaestus with github extras: pip install hephaestus[github]"
         )
+        if args.json:
+            emit_json_status(1)
         return 1
 
     # Connect to GitHub
@@ -252,6 +260,8 @@ def main() -> int:  # noqa: C901
         repo = gh.get_repo(repo_name)
     except Exception as e:  # broad catch intentional: PyGithub raises many exception subtypes
         logger.error("Error accessing repo %s: %s", repo_name, e)
+        if args.json:
+            emit_json_status(1)
         return 1
 
     # Update local main
@@ -303,6 +313,8 @@ def main() -> int:  # noqa: C901
             logger.warning("  CI/CD checks not successful for PR #%d. Skipping merge.", pr.number)
 
     logger.info("\nDone processing all open PRs.")
+    if args.json:
+        emit_json_status(0)
     return 0
 
 

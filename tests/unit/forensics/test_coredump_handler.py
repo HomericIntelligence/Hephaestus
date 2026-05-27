@@ -168,3 +168,54 @@ class TestMainTargetDir:
 
         monkeypatch.setattr("sys.stdin", _TtyStdin())
         assert main(["1", "p", "0", "6"]) == 1
+
+    def test_tty_stdin_json_envelope(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A TTY stdin with --json emits an error envelope."""
+        import json
+
+        class _TtyStdin:
+            buffer = io.BytesIO(b"")
+
+            def isatty(self) -> bool:
+                return True
+
+        monkeypatch.setattr("sys.stdin", _TtyStdin())
+        assert main(["--json", "1", "p", "0", "6"]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert "TTY" in payload["message"]
+
+    def test_success_json_envelope(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Successful write emits an ok envelope with the core file path."""
+        import json
+
+        cores = tmp_path / "cores"
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b"ELFXX"))
+        rc = main(["--json", "--target-dir", str(cores), "7", "proc", "100", "11"])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "ok"
+        assert payload["message"] == "core written"
+        assert payload["path"].endswith("core.7.proc.100.sig11")
+
+    def test_max_bytes_env_var_respected_via_main(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """COREDUMP_MAX_BYTES is parsed by main()."""
+        cores = tmp_path / "cores"
+        monkeypatch.setenv("COREDUMP_MAX_BYTES", "3")
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b"ABCDEFG"))
+        rc = main(["--target-dir", str(cores), "1", "p", "0", "6"])
+        assert rc == 0
+        # Cap of 3 bytes should clip output to 3 bytes.
+        written = (cores / "core.1.p.0.sig6").read_bytes()
+        assert len(written) == 3

@@ -216,3 +216,88 @@ class TestMain:
         with patch("hephaestus.github.stats.collect_stats", return_value=mock_stats):
             result = main()
         assert result == 0
+
+    def test_invalid_start_date_json(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import json
+
+        from hephaestus.github.stats import main
+
+        monkeypatch.setattr("sys.argv", ["hephaestus-github-stats", "bad", "2026-01-31", "--json"])
+        assert main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert "start date" in payload["message"]
+
+    def test_invalid_end_date_json(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import json
+
+        from hephaestus.github.stats import main
+
+        monkeypatch.setattr("sys.argv", ["hephaestus-github-stats", "2026-01-01", "bad", "--json"])
+        assert main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert "end date" in payload["message"]
+
+    def test_valid_dates_json(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import json
+
+        from hephaestus.github.stats import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "hephaestus-github-stats",
+                "2026-01-01",
+                "2026-01-31",
+                "--repo",
+                "owner/repo",
+                "--json",
+            ],
+        )
+        mock_stats = {
+            "issues": {"total": 1, "open": 0, "closed": 1},
+            "prs": {"total": 1, "merged": 1, "open": 0, "closed": 0},
+            "commits": {"total": 5},
+        }
+        with patch("hephaestus.github.stats.collect_stats", return_value=mock_stats):
+            assert main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["repo"] == "owner/repo"
+        assert payload["stats"]["commits"]["total"] == 5
+
+    def test_default_repo_via_get_current_repo(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """When --repo not given, get_current_repo() is invoked."""
+        import json
+
+        from hephaestus.github.stats import main
+
+        monkeypatch.setattr(
+            "sys.argv",
+            ["hephaestus-github-stats", "2026-01-01", "2026-01-31", "--json"],
+        )
+        with (
+            patch(
+                "hephaestus.github.stats.get_current_repo", return_value="owner/auto"
+            ) as mock_repo,
+            patch(
+                "hephaestus.github.stats.collect_stats",
+                return_value={
+                    "issues": {"total": 0, "open": 0, "closed": 0},
+                    "prs": {"total": 0, "merged": 0, "open": 0, "closed": 0},
+                    "commits": {"total": 0},
+                },
+            ),
+        ):
+            assert main() == 0
+        mock_repo.assert_called_once()
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["repo"] == "owner/auto"

@@ -21,6 +21,8 @@ import re
 import sys
 from pathlib import Path
 
+from hephaestus.cli.utils import add_json_arg, format_output
+
 
 def is_shadowing_pattern(alias: str, target: str) -> bool:
     """Check if alias name shadows the target name.
@@ -177,13 +179,26 @@ def main() -> int:
         action="store_true",
         help="Print verbose output",
     )
+    add_json_arg(parser)
 
     args = parser.parse_args()
 
-    if args.verbose:
+    if args.verbose and not args.json:
         print(f"Checking {len(args.paths)} path(s) for type alias shadowing...")
 
     exit_code, errors = check_files(args.paths)
+
+    if args.json:
+        report = {
+            "paths": [str(p) for p in args.paths],
+            "violations": errors,
+            "violation_count": len(errors),
+            "exit_code": exit_code,
+            "passed": exit_code == 0,
+        }
+        print(format_output(report, "json"))
+        return exit_code
+
     if errors:
         print("\n".join(errors), file=sys.stderr)
         print(f"\nFound {len(errors)} type alias shadowing violation(s)", file=sys.stderr)

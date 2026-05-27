@@ -93,6 +93,41 @@ class TestCLIHelpFlag:
         assert "usage" in combined, f"{command} --help did not print usage information"
 
 
+class TestCLIJsonFlag:
+    """Every console script must accept ``--json`` for machine-readable output."""
+
+    @pytest.mark.parametrize("command,module_path,attr", ENTRY_POINTS, ids=ENTRY_POINT_IDS)
+    def test_json_flag_documented_in_help(self, command: str, module_path: str, attr: str) -> None:
+        """``<cmd> --help`` must mention ``--json`` so it is discoverable.
+
+        We do not invoke ``<cmd> --json`` directly because most CLIs need
+        additional args (file paths, repo names, gh auth, etc.) and would
+        legitimately fail to produce useful output. Verifying that the flag
+        appears in ``--help`` text proves the parser registered it without
+        having to execute the CLI's main logic.
+        """
+        if sys.platform == "win32" and "automation" in module_path:
+            pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
+        binary: str | None = shutil.which(command)
+        if binary is None:
+            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
+        assert binary is not None
+
+        result = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, (
+            f"{command} --help exited {result.returncode}\n"
+            f"stdout: {result.stdout[:500]}\n"
+            f"stderr: {result.stderr[:500]}"
+        )
+        combined = result.stdout + result.stderr
+        assert "--json" in combined, (
+            f"{command} does not advertise --json in its --help output.\n"
+            "Every hephaestus-* console script must call "
+            "`hephaestus.cli.utils.add_json_arg(parser)`.\n"
+            f"--help output (first 800 chars):\n{combined[:800]}"
+        )
+
+
 class TestCLIEntryPointDiscovery:
     """Sanity-check the discovery itself."""
 

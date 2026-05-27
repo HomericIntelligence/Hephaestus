@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.loader import AgentInfo, load_all_agents
+from hephaestus.cli.utils import add_json_arg, format_output
 
 # ---------------------------------------------------------------------------
 # Stats computation
@@ -226,6 +227,7 @@ def main() -> int:
         default=None,
         help="Write output to file instead of stdout",
     )
+    add_json_arg(parser)
 
     args = parser.parse_args()
 
@@ -247,7 +249,18 @@ def main() -> int:
 
     stats = collect_agent_stats(agents)
 
-    output = format_stats_json(stats) if args.format == "json" else format_stats_text(stats)
+    if args.json or args.format == "json":
+        # Emit JSON via shared helper for consistent structure across CLIs.
+        serialisable: dict[str, Any] = {
+            "total_agents": stats["total_agents"],
+            "by_level": {str(k): v for k, v in stats["by_level"].items()},
+            "tool_frequency": dict(stats["tool_frequency"]),
+            "skill_frequency": dict(stats["skill_frequency"]),
+            "agents_without_level": stats["agents_without_level"],
+        }
+        output = format_output(serialisable, "json")
+    else:
+        output = format_stats_text(stats)
 
     if args.output:
         args.output.write_text(output, encoding="utf-8")
