@@ -26,34 +26,44 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import (
-    add_agent_argument,
     is_codex,
     resume_codex_session,
     run_codex_session,
     session_agent_matches,
 )
 
-from ._review_utils import find_pr_for_issue
+from ._review_utils import (
+    build_review_parser,
+    find_pr_for_issue,
+    instance_log,
+    setup_review_logging,
+)
+from ._reviewer_base import BaseReviewer
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
 from .claude_timeouts import address_review_claude_timeout
-from .curses_ui import CursesUI, ThreadLogManager
-from .git_utils import get_repo_root, get_repo_slug, issue_ref, pr_ref, run
+from .curses_ui import CursesUI, ThreadLogManager  # noqa: F401  (ThreadLogManager re-exported)
+from .git_utils import (  # noqa: F401  (get_repo_root re-exported)
+    get_repo_root,
+    get_repo_slug,
+    issue_ref,
+    pr_ref,
+    run,
+)
 from .github_api import (
     gh_pr_list_unresolved_threads,
     gh_pr_resolve_thread,
-    write_secure,
 )
 from .models import AddressReviewOptions, ReviewPhase, ReviewState, WorkerResult
 from .prompts import get_address_review_prompt
 from .session_naming import AGENT_IMPLEMENTER, current_trunk_githash
-from .status_tracker import StatusTracker
-from .worktree_manager import WorktreeManager
+from .status_tracker import StatusTracker  # noqa: F401 — re-exported for test patching
+from .worktree_manager import WorktreeManager  # noqa: F401 — re-exported for test patching
 
 logger = logging.getLogger(__name__)
 
 
-class AddressReviewer:
+class AddressReviewer(BaseReviewer):
     """Addresses unresolved PR review threads using Claude Code.
 
     Features:
@@ -62,7 +72,12 @@ class AddressReviewer:
     - Selective thread resolution (only resolves threads Claude explicitly fixed)
     - State persistence for observability
     - Real-time curses UI for status monitoring
+
+    Inherits shared scaffolding (``__init__``, ``_log``, ``_fail``,
+    ``_save_state``) from :class:`BaseReviewer`.
     """
+
+    options: AddressReviewOptions
 
     def __init__(self, options: AddressReviewOptions) -> None:
         """Initialize address reviewer.
@@ -71,34 +86,15 @@ class AddressReviewer:
             options: Reviewer configuration options
 
         """
-        self.options = options
-        self.repo_root = get_repo_root()
-        self.state_dir = self.repo_root / "build" / ".issue_implementer"
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-
-        self.worktree_manager = WorktreeManager()
-        self.status_tracker = StatusTracker(options.max_workers)
-        self.log_manager = ThreadLogManager()
-
-        self.states: dict[int, ReviewState] = {}
-        self.state_lock = threading.Lock()
-
-        self.ui: CursesUI | None = None
+        super().__init__(options)
 
     def _log(self, level: str, msg: str, thread_id: int | None = None) -> None:
         """Log to both standard logger and UI thread buffer.
 
-        Args:
-            level: Log level ("error", "warning", or "info")
-            msg: Message to log
-            thread_id: Thread ID (defaults to current thread)
-
+        Overrides :meth:`BaseReviewer._log` so the stdlib log record
+        attributes to this module rather than ``_reviewer_base``.
         """
-        getattr(logger, level)(msg)
-        tid = thread_id or threading.get_ident()
-        prefix = {"error": "ERROR", "warning": "WARN", "info": ""}.get(level, "")
-        ui_msg = f"{prefix}: {msg}" if prefix else msg
-        self.log_manager.log(tid, ui_msg)
+        instance_log(self.log_manager, level, msg, thread_id, caller_logger=logger)
 
     def run(self) -> dict[int, WorkerResult]:
         """Run the address review workflow.
@@ -485,6 +481,9 @@ class AddressReviewer:
     def _load_review_state(self, issue_number: int) -> ReviewState | None:
         """Load review state from disk.
 
+        Thin wrapper around :meth:`BaseReviewer._load_review_state_from_disk`
+        kept for backward compatibility with internal callers and tests.
+
         Args:
             issue_number: GitHub issue number
 
@@ -492,25 +491,19 @@ class AddressReviewer:
             ReviewState if state file exists and is valid, None otherwise
 
         """
-        state_file = self.state_dir / f"review-{issue_number}.json"
-        if not state_file.exists():
-            return None
-        try:
-            data = json.loads(state_file.read_text())
-            return ReviewState.model_validate(data)
-        except Exception as e:
-            logger.warning("Could not load review state for #%s: %s", issue_number, e)
-            return None
+        return self._load_review_state_from_disk(issue_number)
 
     def _save_review_state(self, state: ReviewState) -> None:
         """Save review state to disk.
+
+        Thin wrapper around :meth:`BaseReviewer._save_state` kept for
+        backward compatibility with internal callers.
 
         Args:
             state: ReviewState to persist
 
         """
-        state_file = self.state_dir / f"review-{state.issue_number}.json"
-        write_secure(state_file, state.model_dump_json(indent=2))
+        self._save_state(state)
 
     def _get_or_create_worktree(
         self,
@@ -856,34 +849,6 @@ class AddressReviewer:
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Failed to push branch {branch_name}: {e}") from e
 
-    def _fail(
-        self,
-        issue_number: int,
-        error_msg: str,
-        slot_id: int,
-    ) -> WorkerResult:
-        """Record a failure, update state and tracker, and return a failed WorkerResult.
-
-        Args:
-            issue_number: GitHub issue number
-            error_msg: Human-readable error description
-            slot_id: Worker slot ID for status updates
-
-        Returns:
-            WorkerResult with success=False
-
-        """
-        self.status_tracker.update_slot(
-            slot_id, f"{issue_ref(issue_number)}: FAILED - {error_msg[:50]}"
-        )
-        err_state = self.states.get(issue_number)
-        if err_state:
-            with self.state_lock:
-                err_state.phase = ReviewPhase.FAILED
-                err_state.error = error_msg
-            self._save_review_state(err_state)
-        return WorkerResult(issue_number=issue_number, success=False, error=error_msg)
-
     def _print_summary(self, results: dict[int, WorkerResult]) -> None:
         """Print address review summary.
 
@@ -909,29 +874,13 @@ class AddressReviewer:
                     logger.info("  #%s: %s", issue_num, result.error)
 
 
-def _setup_logging(verbose: bool = False) -> None:
-    """Configure logging for the CLI.
-
-    Args:
-        verbose: Enable verbose (DEBUG) logging
-
-    """
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-
 def _parse_args() -> argparse.Namespace:
     """Parse command line arguments for the address review CLI."""
-    parser = argparse.ArgumentParser(
+    parser = build_review_parser(
         description=(
             "Find PRs with unresolved review threads and use Claude Code to fix the code, "
             "then resolve only the threads Claude explicitly addresses."
         ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Address review threads for specific issues
@@ -943,41 +892,9 @@ Examples:
   # Use more parallel workers
   %(prog)s --issues 595 596 597 --max-workers 5
         """,
+        issues_help="Issue numbers whose linked PRs should have review threads addressed",
+        dry_run_help=("Show what would be done without actually resolving threads or pushing code"),
     )
-
-    parser.add_argument(
-        "--issues",
-        type=int,
-        nargs="+",
-        required=True,
-        help="Issue numbers whose linked PRs should have review threads addressed",
-    )
-    add_agent_argument(parser)
-    parser.add_argument(
-        "--max-workers",
-        type=int,
-        default=3,
-        choices=range(1, 33),
-        metavar="N",
-        help="Maximum number of parallel workers, 1-32 (default: 3)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be done without actually resolving threads or pushing code",
-    )
-    parser.add_argument(
-        "--no-ui",
-        action="store_true",
-        help="Disable curses UI (use plain logging instead)",
-    )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
-    )
-
     return parser.parse_args()
 
 
@@ -989,7 +906,7 @@ def main() -> int:
 
     """
     args = _parse_args()
-    _setup_logging(args.verbose)
+    setup_review_logging(args.verbose)
 
     log = logging.getLogger(__name__)
     log.info("Starting address review for issues: %s", args.issues)

@@ -24,20 +24,27 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_text
+from hephaestus.agents.runtime import is_codex, run_codex_text
 
-from ._review_utils import find_pr_for_issue, parse_json_block
+from ._review_utils import (
+    build_review_parser,
+    find_pr_for_issue,
+    instance_log,
+    parse_json_block,
+    setup_review_logging,
+)
+from ._reviewer_base import BaseReviewer
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import reviewer_model
 from .claude_timeouts import pr_reviewer_claude_timeout
-from .curses_ui import CursesUI, ThreadLogManager
+from .curses_ui import CursesUI, ThreadLogManager  # noqa: F401  (ThreadLogManager re-exported)
 from .git_utils import get_repo_info, get_repo_root, get_repo_slug, issue_ref, pr_ref
-from .github_api import _gh_call, fetch_issue_info, gh_pr_review_post, write_secure
+from .github_api import _gh_call, fetch_issue_info, gh_pr_review_post
 from .models import ReviewerOptions, ReviewPhase, ReviewState, WorkerResult
 from .prompts import get_pr_review_analysis_prompt
 from .session_naming import AGENT_PR_REVIEWER, current_trunk_githash
-from .status_tracker import StatusTracker
-from .worktree_manager import WorktreeManager
+from .status_tracker import StatusTracker  # noqa: F401 — re-exported for test patching
+from .worktree_manager import WorktreeManager  # noqa: F401 — re-exported for test patching
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +138,7 @@ def _parse_json_block(text: str) -> dict[str, Any]:
     return parse_json_block(text)
 
 
-class PRReviewer:
+class PRReviewer(BaseReviewer):
     """Posts inline review comments on open PRs linked to specified issues.
 
     Features:
@@ -141,7 +148,12 @@ class PRReviewer:
     - Real-time curses UI for status monitoring
 
     This class does NOT commit, push, or fix code.
+
+    Inherits shared scaffolding (``__init__``, ``_log``, ``_fail``,
+    ``_save_state``) from :class:`BaseReviewer`.
     """
+
+    options: ReviewerOptions
 
     def __init__(self, options: ReviewerOptions):
         """Initialize PR reviewer.
@@ -150,34 +162,15 @@ class PRReviewer:
             options: Reviewer configuration options
 
         """
-        self.options = options
-        self.repo_root = get_repo_root()
-        self.state_dir = self.repo_root / "build" / ".issue_implementer"
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-
-        self.worktree_manager = WorktreeManager()
-        self.status_tracker = StatusTracker(options.max_workers)
-        self.log_manager = ThreadLogManager()
-
-        self.states: dict[int, ReviewState] = {}
-        self.state_lock = threading.Lock()
-
-        self.ui: CursesUI | None = None
+        super().__init__(options)
 
     def _log(self, level: str, msg: str, thread_id: int | None = None) -> None:
         """Log to both standard logger and UI thread buffer.
 
-        Args:
-            level: Log level ("error", "warning", or "info")
-            msg: Message to log
-            thread_id: Thread ID (defaults to current thread)
-
+        Overrides :meth:`BaseReviewer._log` so the stdlib log record
+        attributes to this module rather than ``_reviewer_base``.
         """
-        getattr(logger, level)(msg)
-        tid = thread_id or threading.get_ident()
-        prefix = {"error": "ERROR", "warning": "WARN", "info": ""}.get(level, "")
-        ui_msg = f"{prefix}: {msg}" if prefix else msg
-        self.log_manager.log(tid, ui_msg)
+        instance_log(self.log_manager, level, msg, thread_id, caller_logger=logger)
 
     def run(self) -> dict[int, WorkerResult]:
         """Run the PR reviewer.
@@ -486,16 +479,6 @@ class PRReviewer:
             with contextlib.suppress(Exception):
                 prompt_file.unlink()
 
-    def _save_state(self, state: ReviewState) -> None:
-        """Save review state to disk.
-
-        Args:
-            state: ReviewState to persist
-
-        """
-        state_file = self.state_dir / f"review-{state.issue_number}.json"
-        write_secure(state_file, state.model_dump_json(indent=2))
-
     def _get_or_create_state(self, issue_number: int, pr_number: int) -> ReviewState:
         """Get or create review state for an issue.
 
@@ -517,62 +500,20 @@ class PRReviewer:
         """
         with self.state_lock:
             if issue_number not in self.states:
-                # Try to load from disk before creating a fresh state
-                state_file = self.state_dir / f"review-{issue_number}.json"
-                if state_file.exists():
-                    try:
-                        self.states[issue_number] = ReviewState.model_validate_json(
-                            state_file.read_text()
-                        )
-                        logger.debug(
-                            "Loaded review state for issue #%d from disk (phase=%s)",
-                            issue_number,
-                            self.states[issue_number].phase,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "Malformed review state file for issue #%d (%s); starting fresh",
-                            issue_number,
-                            exc,
-                        )
-                        self.states[issue_number] = ReviewState(
-                            issue_number=issue_number,
-                            pr_number=pr_number,
-                        )
+                loaded = self._load_review_state_from_disk(issue_number)
+                if loaded is not None:
+                    self.states[issue_number] = loaded
+                    logger.debug(
+                        "Loaded review state for issue #%d from disk (phase=%s)",
+                        issue_number,
+                        loaded.phase,
+                    )
                 else:
                     self.states[issue_number] = ReviewState(
                         issue_number=issue_number,
                         pr_number=pr_number,
                     )
             return self.states[issue_number]
-
-    def _fail_review(
-        self,
-        issue_number: int,
-        error_msg: str,
-        slot_id: int,
-    ) -> WorkerResult:
-        """Record a review failure, update state and tracker, and return a failed WorkerResult.
-
-        Args:
-            issue_number: GitHub issue number
-            error_msg: Human-readable error description
-            slot_id: Worker slot ID for status updates
-
-        Returns:
-            WorkerResult with success=False
-
-        """
-        self.status_tracker.update_slot(
-            slot_id, f"{issue_ref(issue_number)}: FAILED - {error_msg[:50]}"
-        )
-        err_state = self.states.get(issue_number)
-        if err_state:
-            with self.state_lock:
-                err_state.phase = ReviewPhase.FAILED
-                err_state.error = error_msg
-            self._save_state(err_state)
-        return WorkerResult(issue_number=issue_number, success=False, error=error_msg)
 
     def _review_pr(self, issue_number: int, pr_number: int) -> WorkerResult:
         """Analyze and post inline review comments for a single PR.
@@ -708,22 +649,22 @@ class PRReviewer:
         except subprocess.TimeoutExpired as e:
             error_msg = f"Timeout: {' '.join(str(c) for c in e.cmd[:3])} exceeded {e.timeout}s"
             self._log("error", error_msg, thread_id)
-            return self._fail_review(issue_number, error_msg, slot_id)
+            return self._fail(issue_number, error_msg, slot_id)
 
         except subprocess.CalledProcessError as e:
             error_msg = (
                 f"Command failed (exit {e.returncode}): {' '.join(str(c) for c in e.cmd[:3])}"
             )
             self._log("error", error_msg, thread_id)
-            return self._fail_review(issue_number, error_msg, slot_id)
+            return self._fail(issue_number, error_msg, slot_id)
 
         except RuntimeError as e:
             self._log("error", f"Runtime error: {e}", thread_id)
-            return self._fail_review(issue_number, str(e)[:80], slot_id)
+            return self._fail(issue_number, str(e)[:80], slot_id)
 
         except Exception as e:
             self._log("error", f"Unexpected {type(e).__name__}: {e}", thread_id)
-            return self._fail_review(issue_number, str(e)[:80], slot_id)
+            return self._fail(issue_number, str(e)[:80], slot_id)
 
         finally:
             time.sleep(1)
@@ -801,29 +742,13 @@ class PRReviewer:
                     logger.info("  #%s: %s", issue_num, result.error)
 
 
-def _setup_logging(verbose: bool = False) -> None:
-    """Configure logging for the CLI.
-
-    Args:
-        verbose: Enable verbose (DEBUG) logging
-
-    """
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-
 def _parse_args() -> argparse.Namespace:
     """Parse command line arguments for the reviewer CLI."""
-    parser = argparse.ArgumentParser(
+    parser = build_review_parser(
         description=(
             "Analyze open PRs linked to GitHub issues using Claude Code "
             "and post inline review comments (read-only — does not fix code)"
         ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Review PRs for specific issues
@@ -835,41 +760,9 @@ Examples:
   # Review with more workers
   %(prog)s --issues 595 596 --max-workers 5
         """,
+        issues_help="Issue numbers whose linked PRs should be reviewed",
+        dry_run_help="Show what would be done without actually posting any review comments",
     )
-
-    parser.add_argument(
-        "--issues",
-        type=int,
-        nargs="+",
-        required=True,
-        help="Issue numbers whose linked PRs should be reviewed",
-    )
-    add_agent_argument(parser)
-    parser.add_argument(
-        "--max-workers",
-        type=int,
-        default=3,
-        choices=range(1, 33),
-        metavar="N",
-        help="Maximum number of parallel workers, 1-32 (default: 3)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be done without actually posting any review comments",
-    )
-    parser.add_argument(
-        "--no-ui",
-        action="store_true",
-        help="Disable curses UI (use plain logging instead)",
-    )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
-    )
-
     return parser.parse_args()
 
 
@@ -881,7 +774,7 @@ def main() -> int:
 
     """
     args = _parse_args()
-    _setup_logging(args.verbose)
+    setup_review_logging(args.verbose)
 
     log = logging.getLogger(__name__)
     log.info("Starting PR review for issues: %s", args.issues)
