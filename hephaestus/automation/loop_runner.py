@@ -1,0 +1,1058 @@
+"""Multi-repo, multi-phase automation loop driver.
+
+Replaces ``scripts/run_automation_loop.sh``. Iterates over all
+non-archived HomericIntelligence repos, running the 6-phase pipeline
+(plan → review-plans → implement → review-prs → address-review →
+drive-green) ``--loops`` times per repo.
+
+The key correctness invariant — and the reason this replaces the bash
+version — is that each phase is a plain ``subprocess.run`` call inside a
+Python ``for`` loop. Phase N failing returns a ``PhaseResult(rc=N)`` and
+control unconditionally proceeds to phase N+1. No shell-option landmine
+(``set -e`` / ``set -m`` / subshell exec-optimization) can silently skip
+the rest of the pipeline.
+
+CLI is flag-compatible with the previous bash script so operator muscle
+memory and any pinned callers keep working.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import logging
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import traceback
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field
+from pathlib import Path
+from urllib.parse import urlparse
+
+LOG = logging.getLogger(__name__)
+
+# Canonical phase ordering. Index 0 = phase 1 (plan), index 5 = phase 6
+# (drive-green). Matches the bash version's --phases flag exactly.
+ALL_PHASES: tuple[str, ...] = (
+    "plan",
+    "review-plans",
+    "implement",
+    "review-prs",
+    "address-review",
+    "drive-green",
+)
+
+DEFAULT_PROJECTS_DIR = Path.home() / "Projects"
+
+# Sentinel for ``--org`` invoked with no argument (auto-detect from cwd).
+# Module-level identity guarantees ``args.org is _ORG_AUTODETECT`` is the
+# unambiguous test for "user passed --org but gave no value".
+_ORG_AUTODETECT = object()
+
+
+def _parse_repo_list(value: str) -> list[str]:
+    """Split a comma-separated repo list, stripping whitespace and empties.
+
+    Example: ``"foo, bar,baz"`` → ``["foo", "bar", "baz"]``. Empty input
+    returns an empty list, which the caller treats as "user didn't pass
+    --repos".
+    """
+    return [s.strip() for s in value.split(",") if s.strip()]
+
+
+# Phases 2/4/5/6 declare --issues as required in their argparse. Phases 1
+# and 3 auto-discover. This set drives the "skip when no open issues"
+# branch in process_repo.
+PHASES_REQUIRING_ISSUES: frozenset[str] = frozenset(
+    {"review-plans", "review-prs", "address-review", "drive-green"}
+)
+
+# Sentinel for cooperative shutdown on SIGINT/SIGTERM. Worker threads
+# check this between phases so an in-flight subprocess can still finish
+# but the next phase is skipped.
+_SHUTDOWN_REQUESTED = False
+
+
+def _shutdown_requested() -> bool:
+    return _SHUTDOWN_REQUESTED
+
+
+def _request_shutdown(signum: int, _frame: object) -> None:
+    global _SHUTDOWN_REQUESTED
+    _SHUTDOWN_REQUESTED = True
+    LOG.warning("Signal %s received — requesting cooperative shutdown", signum)
+
+
+@dataclass
+class PhaseResult:
+    """Outcome of a single phase invocation for a single repo+loop."""
+
+    name: str
+    rc: int = 0
+    elapsed_s: float = 0.0
+    skipped: bool = False
+    skip_reason: str | None = None
+    # If subprocess.run itself raised (OSError, TimeoutExpired, …), the
+    # exception text lands here. The phase is treated as rc=1.
+    error: str | None = None
+
+    @property
+    def failed(self) -> bool:
+        """True when the phase ran and returned a non-zero exit code."""
+        return not self.skipped and self.rc != 0
+
+
+@dataclass
+class RepoResult:
+    """Per-repo, per-loop outcome — collection of phase results."""
+
+    repo: str
+    loop_idx: int
+    phases: list[PhaseResult] = field(default_factory=list)
+    # Populated when the WORKER itself crashed (not a phase failure).
+    runner_error: str | None = None
+
+    @property
+    def any_failure(self) -> bool:
+        """True when any phase failed or the worker itself crashed."""
+        return self.runner_error is not None or any(p.failed for p in self.phases)
+
+
+@dataclass
+class LoopConfig:
+    """Top-level CLI-derived configuration."""
+
+    loops: int = 5
+    max_workers: int = 3
+    parallel_repos: int = 1
+    phases: tuple[str, ...] = ALL_PHASES
+    dry_run: bool = False
+    allow_unsafe_phase_order: bool = False
+    planner_model: str = ""
+    reviewer_model: str = ""
+    implementer_model: str = ""
+    # Org is resolved at runtime from --org / --repos / cwd detection; no
+    # hardcoded fallback. Always set by main() before ``run_loop``.
+    org: str = ""
+    projects_dir: Path = DEFAULT_PROJECTS_DIR
+    # Per-phase timeout in seconds. ``None`` disables (the planner /
+    # implementer naturally bound themselves via their own batch caps).
+    phase_timeout_s: float | None = None
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog="hephaestus-automation-loop",
+        description="Run the 6-phase automation pipeline across HomericIntelligence repos.",
+    )
+    p.add_argument("--dry-run", action="store_true", help="Pass --dry-run to every phase")
+    p.add_argument("--loops", type=int, default=5, help="Number of loop iterations (default: 5)")
+    p.add_argument(
+        "--max-workers",
+        type=int,
+        default=3,
+        help="Parallel workers per repo per phase (default: 3). Passed to each phase binary.",
+    )
+    p.add_argument(
+        "--parallel-repos",
+        type=int,
+        default=1,
+        help="Repos processed in parallel per loop iteration (default: 1)",
+    )
+    p.add_argument(
+        "--phases",
+        default=",".join(ALL_PHASES),
+        help=f"Comma-separated subset of phases to run. Valid: {','.join(ALL_PHASES)}",
+    )
+    p.add_argument(
+        "--allow-unsafe-phase-order",
+        action="store_true",
+        help="Silence dependency-ordering warnings when --phases skips a recommended predecessor",
+    )
+    p.add_argument("--planner-model", default="", help="HEPH_PLANNER_MODEL for child processes")
+    p.add_argument(
+        "--reviewer-model",
+        default="",
+        help="HEPH_REVIEWER_MODEL for child processes (plan-review + PR-review)",
+    )
+    p.add_argument(
+        "--implementer-model",
+        default="",
+        help="HEPH_IMPLEMENTER_MODEL for child processes (implement, address-review, ci-driver)",
+    )
+    p.add_argument(
+        "--org",
+        nargs="?",
+        const=_ORG_AUTODETECT,
+        default=None,
+        help=(
+            "Enumerate non-fork, non-archived repos in a GitHub org. "
+            "Pass `--org NAME` for a specific org, or `--org` alone to auto-detect "
+            "the org from the current repo's git remote. "
+            "Default (no flag): run only for the current repo."
+        ),
+    )
+    p.add_argument(
+        "--projects-dir",
+        type=Path,
+        default=DEFAULT_PROJECTS_DIR,
+        help=f"Local directory containing repo clones (default: {DEFAULT_PROJECTS_DIR})",
+    )
+    p.add_argument(
+        "--phase-timeout",
+        type=float,
+        default=None,
+        help="Per-phase timeout in seconds (default: no timeout)",
+    )
+    p.add_argument(
+        "--repos",
+        type=_parse_repo_list,
+        default=None,
+        help=(
+            "Comma-separated repo list (e.g. `--repos foo,bar`). Overrides org "
+            "enumeration. Space-separated input is NOT accepted."
+        ),
+    )
+    p.add_argument("-v", "--verbose", action="store_true", help="Enable DEBUG logging")
+    return p.parse_args(argv)
+
+
+def _validate_phases(phases_csv: str) -> tuple[str, ...]:
+    selected = tuple(p.strip() for p in phases_csv.split(",") if p.strip())
+    invalid = [p for p in selected if p not in ALL_PHASES]
+    if invalid:
+        raise SystemExit(f"Unknown phase(s): {invalid}. Valid: {','.join(ALL_PHASES)}")
+    return selected
+
+
+def _phase_order_warnings(cfg: LoopConfig) -> list[str]:
+    """Replicate the bash script's dependency-ordering safety warnings."""
+    warnings: list[str] = []
+    selected = set(cfg.phases)
+    if "implement" in selected and "review-plans" not in selected:
+        warnings.append(
+            "--phases includes 'implement' but not 'review-plans'; "
+            "plans will be implemented without review"
+        )
+    if "address-review" in selected and "review-prs" not in selected:
+        warnings.append(
+            "--phases includes 'address-review' but not 'review-prs'; "
+            "there will be no fresh review comments to address"
+        )
+    if (
+        "drive-green" in selected
+        and "implement" not in selected
+        and "address-review" not in selected
+    ):
+        warnings.append(
+            "--phases includes 'drive-green' but neither 'implement' nor "
+            "'address-review'; drive-green will run against PRs not touched this invocation"
+        )
+    return warnings
+
+
+# ---------------------------------------------------------------------------
+# Repo discovery
+# ---------------------------------------------------------------------------
+
+
+def _detect_cwd_repo() -> tuple[str | None, str | None]:
+    """Return ``(org, repo_name)`` for the current working directory.
+
+    Returns ``(None, None)`` when cwd is not inside a git repo or has no
+    parseable github.com origin remote. ``org`` is parsed from
+    ``git remote get-url origin``; ``repo_name`` is the basename of
+    ``git rev-parse --show-toplevel``.
+    """
+    try:
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        ).stdout.strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        return (None, None)
+    repo: str | None = Path(top).name or None
+
+    org: str | None = None
+    try:
+        url = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        ).stdout.strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        url = ""
+
+    host = ""
+    path = ""
+    parsed = urlparse(url)
+    if parsed.scheme:
+        host = (parsed.hostname or "").rstrip(".").lower()
+        path = parsed.path.lstrip("/")
+    elif "@" in url and ":" in url:
+        # SCP-like git remote, e.g. git@github.com:org/repo.git
+        after_at = url.split("@", 1)[1]
+        host_part, path_part = after_at.split(":", 1)
+        host = host_part.rstrip(".").lower()
+        path = path_part.lstrip("/")
+
+    if host == "github.com":
+        parts = path.split("/", 1)
+        if len(parts) == 2:
+            org = parts[0] or None
+
+    return (org, repo)
+
+
+def _gh_list_repos(org: str) -> list[str]:
+    """Return non-archived, non-fork, non-Odysseus repos for ``org``."""
+    out = subprocess.run(
+        [
+            "gh",
+            "repo",
+            "list",
+            org,
+            "--no-archived",
+            "--json",
+            "name,isArchived,isFork",
+            "--limit",
+            "200",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if out.returncode != 0:
+        raise SystemExit(f"gh repo list {org} failed (rc={out.returncode}): {out.stderr.strip()}")
+    try:
+        entries = json.loads(out.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"gh repo list returned invalid JSON: {exc}") from exc
+    return [
+        e["name"]
+        for e in entries
+        if not e.get("isArchived", False)
+        and not e.get("isFork", False)
+        and e.get("name") != "Odysseus"
+    ]
+
+
+def _gh_issue_numbers_for(org: str, repo: str, filter_flag: str) -> set[int]:
+    """Return open-issue numbers in ``org/repo`` matching one ``gh issue list`` filter.
+
+    ``filter_flag`` is one of ``"--author"`` / ``"--assignee"``; the value is
+    always ``@me`` (current authenticated gh user). Returns an empty set on
+    any failure (rate limit, auth error, etc.) so callers can fall back
+    safely.
+    """
+    out = subprocess.run(
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            f"{org}/{repo}",
+            "--state",
+            "open",
+            filter_flag,
+            "@me",
+            "--limit",
+            "200",
+            "--json",
+            "number",
+            "--jq",
+            ".[].number",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if out.returncode != 0:
+        return set()
+    return {int(x) for x in out.stdout.split() if x.strip().isdigit()}
+
+
+def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
+    """Return open issue numbers in ``org/repo`` authored by OR assigned to ``@me``.
+
+    GitHub treats ``--author`` and ``--assignee`` as AND, so we issue two
+    queries and union the results to get OR semantics. Sorted ascending
+    so the implementer phase processes oldest-first.
+    """
+    union = _gh_issue_numbers_for(org, repo, "--author") | _gh_issue_numbers_for(
+        org, repo, "--assignee"
+    )
+    return sorted(union)
+
+
+def _count_open_issues(org: str, repo: str) -> int:
+    """Return count of ``@me``-authored OR ``@me``-assigned open issues."""
+    return len(_list_open_issue_numbers(org, repo))
+
+
+def _sort_repos_by_open_count(org: str, repos: list[str]) -> list[str]:
+    """Order repos ascending by open-issue count (smallest backlog first)."""
+    counted: list[tuple[int, int, str]] = []
+    for idx, repo in enumerate(repos):
+        counted.append((_count_open_issues(org, repo), idx, repo))
+    counted.sort()
+    return [name for _, _, name in counted]
+
+
+def _resolve_repo_dir(projects_dir: Path, repo: str) -> Path:
+    return projects_dir / repo
+
+
+def _ensure_clone(org: str, repo: str, dest: Path) -> None:
+    """Clone the repo into ``dest`` if not already present."""
+    if (dest / ".git").exists():
+        return
+    LOG.info("Cloning %s/%s -> %s", org, repo, dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    rc = subprocess.run(
+        ["gh", "repo", "clone", f"{org}/{repo}", str(dest)],
+        check=False,
+    ).returncode
+    if rc != 0:
+        raise RuntimeError(f"gh repo clone {org}/{repo} failed (rc={rc})")
+
+
+def _clone_missing_repos(org: str, repos: list[str], projects_dir: Path) -> None:
+    """Sequentially clone any repos not already present.
+
+    Done upfront — before any worker thread starts — so two threads with
+    ``--parallel-repos > 1`` can never race on a missing clone. Matches
+    the bash version's pre-loop clone pass at
+    scripts/run_automation_loop.sh:326-336.
+    """
+    LOG.info("Cloning missing repos ...")
+    for repo in repos:
+        dest = projects_dir / repo
+        if (dest / ".git").exists():
+            LOG.debug("[%s] already cloned at %s", repo, dest)
+            continue
+        try:
+            _ensure_clone(org, repo, dest)
+        except Exception as exc:
+            LOG.error("[%s] clone failed: %s — repo will be marked failed", repo, exc)
+
+
+def _rebase_main(repo: str, repo_dir: Path) -> str:
+    """Fetch + rebase main; return short trunk SHA (or 'unknown')."""
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "fetch", "origin", "--quiet"],
+        check=False,
+    )
+    rb = subprocess.run(
+        ["git", "-C", str(repo_dir), "rebase", "origin/main", "--quiet"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if rb.returncode != 0:
+        # Mid-rebase state; fall back to a hard reset so the loop can continue.
+        # This mirrors the bash script's exact behavior.
+        LOG.warning("[%s] rebase failed, hard-resetting to origin/main", repo)
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "rebase", "--abort"],
+            capture_output=True,
+            check=False,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "reset", "--hard", "origin/main", "--quiet"],
+            capture_output=True,
+            check=False,
+        )
+    sha = subprocess.run(
+        ["git", "-C", str(repo_dir), "rev-parse", "--short=7", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return sha.stdout.strip() or "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Phase execution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_phase_bin(phase: str) -> tuple[str, list[str]] | None:
+    """Return ``(executable, leading_args)`` for ``phase``.
+
+    Returns ``None`` if the phase's binary cannot be found on PATH. The
+    caller treats that as a phase-skip rather than a runner crash so a
+    misconfigured pixi env produces a useful per-phase error rather than
+    a tear-down.
+    """
+    script_dir = Path(__file__).resolve().parents[2] / "scripts"
+    if phase == "plan":
+        bin_path = shutil.which("hephaestus-plan-issues")
+        return (bin_path, []) if bin_path else None
+    if phase == "implement":
+        bin_path = shutil.which("hephaestus-implement-issues")
+        return (bin_path, []) if bin_path else None
+    if phase == "review-plans":
+        py = sys.executable
+        return (py, [str(script_dir / "review_plans.py")])
+    if phase == "review-prs":
+        py = sys.executable
+        return (py, [str(script_dir / "review_issues.py")])
+    if phase == "address-review":
+        py = sys.executable
+        return (py, [str(script_dir / "address_review.py")])
+    if phase == "drive-green":
+        py = sys.executable
+        return (py, [str(script_dir / "drive_prs_green.py")])
+    return None
+
+
+# Per-phase argv flag matrix. Mirrors the bash script's per-phase blocks
+# at scripts/run_automation_loop.sh:444-576. Encoded as a table so each
+# phase's flags are obvious at a glance and impossible to duplicate.
+#
+# - "max_workers": pass `--max-workers N`
+# - "no_ui":       pass `--no-ui`
+# - "issues":      pass `--issues N N N` when open_issues is non-empty
+#                  (skip when no open issues — that case is already gated
+#                  in process_repo via the "no open issues" SKIP branch)
+# - "follow_up_loop_threshold": if non-None, pass `--no-follow-up` when
+#                  loop_idx >= threshold (bash equivalent: FOLLOW_UP_FLAG
+#                  set on loop ≥ 3, scripts/run_automation_loop.sh:415-418)
+_PHASE_FLAGS: dict[str, dict[str, object]] = {
+    "plan": {"max_workers": False, "no_ui": False, "issues": False},
+    "review-plans": {"max_workers": True, "no_ui": False, "issues": True},
+    "implement": {
+        "max_workers": True,
+        "no_ui": True,
+        "issues": False,
+        "follow_up_loop_threshold": 3,
+    },
+    "review-prs": {"max_workers": True, "no_ui": True, "issues": True},
+    "address-review": {"max_workers": True, "no_ui": True, "issues": True},
+    "drive-green": {"max_workers": True, "no_ui": True, "issues": True},
+}
+
+
+def _build_phase_argv(
+    phase: str,
+    cfg: LoopConfig,
+    open_issues: list[int],
+    loop_idx: int = 1,
+) -> list[str] | None:
+    """Construct the full argv for ``phase``; ``None`` when binary unresolved."""
+    resolved = _resolve_phase_bin(phase)
+    if resolved is None:
+        return None
+    executable, leading = resolved
+    argv: list[str] = [executable, *leading]
+
+    flags = _PHASE_FLAGS[phase]
+
+    # All phases support -v / --dry-run uniformly.
+    argv.append("-v")
+    if cfg.dry_run:
+        argv.append("--dry-run")
+
+    if flags["issues"] and open_issues:
+        argv.append("--issues")
+        argv.extend(str(n) for n in open_issues)
+
+    if flags["max_workers"]:
+        argv.extend(["--max-workers", str(cfg.max_workers)])
+
+    if flags["no_ui"]:
+        argv.append("--no-ui")
+
+    threshold = flags.get("follow_up_loop_threshold")
+    if isinstance(threshold, int) and loop_idx >= threshold:
+        argv.append("--no-follow-up")
+
+    return argv
+
+
+def _phase_env(
+    cfg: LoopConfig,
+    loop_idx: int,
+    trunk_sha: str,
+    phase: str,
+) -> dict[str, str]:
+    """Build the environment dict for a phase subprocess.
+
+    ``HEPH_LOOP_INDEX`` / ``HEPH_TOTAL_LOOPS`` are scoped to the
+    ``drive-green`` phase only — matching the bash script which set these
+    inline solely for the drive-green subshell (scripts/run_automation_loop.sh:570).
+    The ci_driver.py defense-in-depth check uses these to refuse to run
+    outside the final loop; injecting them into other phases' envs is
+    benign but a behavioral divergence from the bash version.
+    """
+    env = os.environ.copy()
+    if cfg.planner_model:
+        env["HEPH_PLANNER_MODEL"] = cfg.planner_model
+    if cfg.reviewer_model:
+        env["HEPH_REVIEWER_MODEL"] = cfg.reviewer_model
+    if cfg.implementer_model:
+        env["HEPH_IMPLEMENTER_MODEL"] = cfg.implementer_model
+    env["HEPH_TRUNK_GITHASH"] = trunk_sha
+    if phase == "drive-green":
+        env["HEPH_LOOP_INDEX"] = str(loop_idx)
+        env["HEPH_TOTAL_LOOPS"] = str(cfg.loops)
+    return env
+
+
+def run_phase(
+    repo: str,
+    repo_dir: Path,
+    phase: str,
+    cfg: LoopConfig,
+    loop_idx: int,
+    open_issues: list[int],
+    trunk_sha: str,
+) -> PhaseResult:
+    """Run one phase as a subprocess. Never raises — always returns a result.
+
+    Exit codes, timeouts, and OS errors are normalized into ``PhaseResult``
+    so the caller can unconditionally proceed to the next phase.
+    """
+    t0 = time.monotonic()
+    argv = _build_phase_argv(phase, cfg, open_issues, loop_idx=loop_idx)
+    if argv is None:
+        return PhaseResult(
+            name=phase,
+            rc=127,
+            skipped=False,
+            error=f"could not resolve binary for phase {phase!r}",
+            elapsed_s=time.monotonic() - t0,
+        )
+
+    LOG.info("[%s] phase %s START", repo, phase)
+    env = _phase_env(cfg, loop_idx, trunk_sha, phase)
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd=str(repo_dir),
+            env=env,
+            timeout=cfg.phase_timeout_s,
+            check=False,
+        )
+        rc = completed.returncode
+    except subprocess.TimeoutExpired as exc:
+        LOG.error("[%s] phase %s TIMEOUT after %.0fs", repo, phase, exc.timeout or 0.0)
+        return PhaseResult(
+            name=phase,
+            rc=124,
+            elapsed_s=time.monotonic() - t0,
+            error=f"timeout after {exc.timeout}s",
+        )
+    except OSError as exc:
+        LOG.error("[%s] phase %s OSError: %s", repo, phase, exc)
+        return PhaseResult(
+            name=phase,
+            rc=126,
+            elapsed_s=time.monotonic() - t0,
+            error=f"OSError: {exc}",
+        )
+    elapsed = time.monotonic() - t0
+    LOG.info("[%s] phase %s done in %.1fs (rc=%d)", repo, phase, elapsed, rc)
+    return PhaseResult(name=phase, rc=rc, elapsed_s=elapsed)
+
+
+# ---------------------------------------------------------------------------
+# Per-repo orchestration
+# ---------------------------------------------------------------------------
+
+
+def process_repo(
+    repo: str,
+    loop_idx: int,
+    cfg: LoopConfig,
+) -> RepoResult:
+    """Run the 6-phase pipeline for one repo. Never raises.
+
+    Any exception inside the function (filesystem error, gh API explosion,
+    unexpected programming bug) is caught and stashed in
+    ``RepoResult.runner_error`` so the outer loop never sees a thread
+    crash. Per-phase failures live in ``RepoResult.phases``.
+    """
+    result = RepoResult(repo=repo, loop_idx=loop_idx)
+    try:
+        return _process_repo_inner(repo, loop_idx, cfg, result)
+    except Exception as exc:
+        tb = traceback.format_exc()
+        result.runner_error = f"{type(exc).__name__}: {exc}\n{tb}"
+        LOG.error("[%s] runner crashed: %s", repo, exc)
+        return result
+
+
+def _process_repo_inner(
+    repo: str,
+    loop_idx: int,
+    cfg: LoopConfig,
+    result: RepoResult,
+) -> RepoResult:
+    # Clones are done in an upfront sequential pass in main() — see
+    # _clone_missing_repos. process_repo runs concurrently across repos
+    # (--parallel-repos > 1), so doing the clone here would race two
+    # workers on the same gh-clone call when both target the same missing
+    # repo. Bash equivalent: scripts/run_automation_loop.sh:326-336.
+    repo_dir = _resolve_repo_dir(cfg.projects_dir, repo)
+    if not (repo_dir / ".git").exists():
+        result.runner_error = f"repo {repo} not cloned at {repo_dir}"
+        return result
+
+    LOG.info("── %s (loop %d) ──", repo, loop_idx)
+    trunk_sha = _rebase_main(repo, repo_dir)
+    LOG.info("[%s] trunk=%s", repo, trunk_sha)
+
+    # Open-issue discovery happens once per repo per loop. Phases 2/4/5/6
+    # need this list; the others auto-discover internally.
+    open_issues = _list_open_issue_numbers(cfg.org, repo)
+
+    for phase in ALL_PHASES:
+        if _shutdown_requested():
+            LOG.warning("[%s] phase %s SKIP (shutdown requested)", repo, phase)
+            result.phases.append(
+                PhaseResult(name=phase, skipped=True, skip_reason="shutdown requested")
+            )
+            continue
+
+        if phase not in cfg.phases:
+            LOG.info("[%s] phase %s SKIP (disabled by --phases)", repo, phase)
+            result.phases.append(
+                PhaseResult(name=phase, skipped=True, skip_reason="disabled by --phases")
+            )
+            continue
+
+        # drive-green only runs on the final loop. Mirrors bash behavior.
+        if phase == "drive-green" and loop_idx != cfg.loops:
+            LOG.info("[%s] phase %s SKIP (not final loop)", repo, phase)
+            result.phases.append(
+                PhaseResult(name=phase, skipped=True, skip_reason="not final loop")
+            )
+            continue
+
+        if phase in PHASES_REQUIRING_ISSUES and not open_issues:
+            LOG.info("[%s] phase %s SKIP (no open issues)", repo, phase)
+            result.phases.append(
+                PhaseResult(name=phase, skipped=True, skip_reason="no open issues")
+            )
+            continue
+
+        phase_result = run_phase(
+            repo=repo,
+            repo_dir=repo_dir,
+            phase=phase,
+            cfg=cfg,
+            loop_idx=loop_idx,
+            open_issues=open_issues,
+            trunk_sha=trunk_sha,
+        )
+        result.phases.append(phase_result)
+        if phase_result.failed:
+            LOG.warning(
+                "[%s] phase %s FAILED rc=%d — continuing to next phase",
+                repo,
+                phase,
+                phase_result.rc,
+            )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Outer loop
+# ---------------------------------------------------------------------------
+
+
+def _preflight_token_scopes(org: str, probe_repo: str) -> None:
+    """Mirror the bash script's gh-token preflight."""
+    out = subprocess.run(
+        [
+            "gh",
+            "api",
+            "-H",
+            "Accept: application/vnd.github+json",
+            f"/repos/{org}/{probe_repo}",
+            "--jq",
+            ".permissions",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if out.returncode != 0:
+        raise SystemExit(
+            f"ERROR: `gh` cannot read {org}/{probe_repo} with the current token.\n"
+            f"  {out.stderr.strip()}\n"
+            "  Required scopes: repo (classic) OR "
+            "Issues+PRs+Contents Read & Write (fine-grained).\n"
+            "  Check with: gh auth status"
+        )
+    if out.stdout.strip() in {"null", "{}"}:
+        LOG.warning(
+            "Token permissions on %s/%s are empty; PR/issue writes will fail.",
+            org,
+            probe_repo,
+        )
+
+
+def _rate_limit_remaining() -> tuple[int, int] | None:
+    """Return ``(remaining, reset_epoch)`` for the GraphQL budget, or None."""
+    out = subprocess.run(
+        ["gh", "api", "rate_limit"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if out.returncode != 0:
+        return None
+    try:
+        data = json.loads(out.stdout)
+        gql = data["resources"]["graphql"]
+        return int(gql["remaining"]), int(gql["reset"])
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        return None
+
+
+def _maybe_sleep_for_rate_budget(loop_idx: int, total_loops: int) -> None:
+    """Sleep until the upstream reset when GraphQL budget would be exhausted."""
+    if os.environ.get("HEPHAESTUS_RATE_GUARD", "1") == "0":
+        return
+    if loop_idx >= total_loops:
+        return
+    threshold = int(os.environ.get("HEPHAESTUS_RATE_GUARD_THRESHOLD", "200"))
+    rl = _rate_limit_remaining()
+    if rl is None:
+        return
+    remaining, reset_epoch = rl
+    if remaining >= threshold:
+        return
+    wait_s = max(0, reset_epoch - int(time.time()) + 5)
+    if wait_s <= 0:
+        return
+    LOG.info(
+        "Rate budget low (%d/%d GraphQL remaining); sleeping %ds until reset",
+        remaining,
+        threshold,
+        wait_s,
+    )
+    # Cooperatively cancellable sleep so SIGINT during the wait still works.
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        if _shutdown_requested():
+            LOG.warning("Rate-budget sleep cancelled by shutdown request")
+            return
+        time.sleep(min(1.0, deadline - time.monotonic()))
+
+
+def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
+    """Drive ``cfg.loops`` iterations across ``repos``. Returns flat result list.
+
+    Any single thread raising is contained — ``process_repo`` already
+    swallows all exceptions, and ``Future.exception()`` is the second-line
+    safety net for the rare case where the work submission itself dies.
+    """
+    all_results: list[RepoResult] = []
+
+    for loop_idx in range(1, cfg.loops + 1):
+        if _shutdown_requested():
+            LOG.warning("Shutdown requested before loop %d — stopping", loop_idx)
+            break
+
+        LOG.info("━" * 60)
+        LOG.info("▶ LOOP %d / %d", loop_idx, cfg.loops)
+        LOG.info("━" * 60)
+
+        with ThreadPoolExecutor(
+            max_workers=max(1, cfg.parallel_repos),
+            thread_name_prefix="repo-",
+        ) as pool:
+            futures: dict[Future[RepoResult], str] = {
+                pool.submit(process_repo, repo, loop_idx, cfg): repo for repo in repos
+            }
+            for fut, repo in futures.items():
+                try:
+                    result = fut.result()
+                except Exception as exc:
+                    LOG.error("[%s] future raised: %s", repo, exc)
+                    result = RepoResult(
+                        repo=repo,
+                        loop_idx=loop_idx,
+                        runner_error=f"future raised: {type(exc).__name__}: {exc}",
+                    )
+                all_results.append(result)
+                if result.any_failure:
+                    LOG.warning(
+                        "[%s] loop %d had failures (see phase rcs above)",
+                        repo,
+                        loop_idx,
+                    )
+
+        LOG.info("Loop %d complete.", loop_idx)
+        _maybe_sleep_for_rate_budget(loop_idx, cfg.loops)
+
+    LOG.info("✓ All %d loop(s) complete across %d repo(s).", cfg.loops, len(repos))
+    return all_results
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def _setup_logging(verbose: bool) -> None:
+    from hephaestus.logging import setup_logging
+
+    setup_logging(level=logging.DEBUG if verbose else logging.INFO)
+
+
+def _resolve_org_and_repos(
+    args: argparse.Namespace,
+) -> tuple[str, list[str], str | None]:
+    """Resolve ``(org, repos, error_message)`` from CLI args + cwd detection.
+
+    Precedence:
+      1. ``--repos`` given → use it; org from cwd (preferred) or ``--org NAME``.
+      2. ``--org NAME`` (explicit) → enumerate non-fork repos in NAME.
+      3. ``--org`` (no arg) → detect org from cwd; enumerate non-fork repos.
+      4. (no flags) → use only the cwd repo + its org.
+
+    Returns ``("", [], "<reason>")`` on error so ``main()`` can log and exit.
+    """
+    # Branch 1: explicit --repos
+    if args.repos:
+        detected_org, _ = _detect_cwd_repo()
+        explicit_org = args.org if isinstance(args.org, str) else None
+        org = detected_org or explicit_org
+        if not org:
+            return (
+                "",
+                [],
+                "--repos requires being run inside a github.com repo or passing --org NAME.",
+            )
+        return (org, list(args.repos), None)
+
+    # Branches 2 + 3: --org variants
+    if args.org is not None:
+        if args.org is _ORG_AUTODETECT:
+            detected_org, _ = _detect_cwd_repo()
+            if not detected_org:
+                return (
+                    "",
+                    [],
+                    "--org with no argument requires being run inside a github.com repo.",
+                )
+            org = detected_org
+        else:
+            org = args.org
+        LOG.info("Discovering repos in %s ...", org)
+        candidates = _gh_list_repos(org)
+        if not candidates:
+            return (org, [], "No repos returned from gh repo list — possible rate limit.")
+        LOG.info("Sorting %d repos by open-issue count ...", len(candidates))
+        return (org, _sort_repos_by_open_count(org, candidates), None)
+
+    # Branch 4: no flags — default to cwd repo
+    detected_org, detected_repo = _detect_cwd_repo()
+    if not (detected_org and detected_repo):
+        return (
+            "",
+            [],
+            "No repo specified and cwd is not a github.com repo. "
+            "Pass --repos foo,bar or --org [NAME].",
+        )
+    LOG.info("Defaulting to current repo: %s/%s", detected_org, detected_repo)
+    return (detected_org, [detected_repo], None)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Console-script entry point. Returns the process exit code."""
+    args = _parse_args(argv)
+    _setup_logging(args.verbose)
+
+    phases = _validate_phases(args.phases)
+
+    # Resolve org + repos using a 4-branch precedence ladder. Org is
+    # always set explicitly here — there is no silent fallback to a
+    # hardcoded default.
+    org, repos, err = _resolve_org_and_repos(args)
+    if err:
+        LOG.error("%s", err)
+        return 1
+
+    cfg = LoopConfig(
+        loops=args.loops,
+        max_workers=args.max_workers,
+        parallel_repos=args.parallel_repos,
+        phases=phases,
+        dry_run=args.dry_run,
+        allow_unsafe_phase_order=args.allow_unsafe_phase_order,
+        planner_model=args.planner_model,
+        reviewer_model=args.reviewer_model,
+        implementer_model=args.implementer_model,
+        org=org,
+        projects_dir=args.projects_dir,
+        phase_timeout_s=args.phase_timeout,
+    )
+
+    if not cfg.allow_unsafe_phase_order:
+        for w in _phase_order_warnings(cfg):
+            LOG.warning("%s (pass --allow-unsafe-phase-order to silence)", w)
+
+    signal.signal(signal.SIGINT, _request_shutdown)
+    signal.signal(signal.SIGTERM, _request_shutdown)
+    # SIGHUP missing on Windows; not the target platform but be tolerant.
+    with contextlib.suppress(AttributeError, ValueError):
+        signal.signal(signal.SIGHUP, _request_shutdown)
+
+    if not repos:
+        LOG.error("Repo list is empty; nothing to do.")
+        return 1
+
+    if not cfg.dry_run:
+        _preflight_token_scopes(cfg.org, repos[0])
+
+    _clone_missing_repos(cfg.org, repos, cfg.projects_dir)
+
+    LOG.info("Repos to process: %s", " ".join(repos))
+    LOG.info(
+        "Loops: %d | Max workers: %d | Parallel repos: %d | Dry run: %s",
+        cfg.loops,
+        cfg.max_workers,
+        cfg.parallel_repos,
+        cfg.dry_run,
+    )
+    LOG.info("Phases: %s", ",".join(cfg.phases))
+    LOG.info(
+        "Models: planner=%s reviewer=%s implementer=%s",
+        cfg.planner_model or "<default>",
+        cfg.reviewer_model or "<default>",
+        cfg.implementer_model or "<default>",
+    )
+
+    results = run_loop(cfg, repos)
+
+    failures = [r for r in results if r.any_failure]
+    if failures:
+        LOG.warning("%d/%d repo-loop results had failures", len(failures), len(results))
+        return 1
+    return 130 if _shutdown_requested() else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

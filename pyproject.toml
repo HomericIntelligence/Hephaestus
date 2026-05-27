@@ -65,6 +65,7 @@ all = [
 ]
 
 [project.scripts]
+hephaestus-automation-loop = "hephaestus.automation.loop_runner:main"
 hephaestus-plan-issues = "hephaestus.automation.planner:main"
 hephaestus-implement-issues = "hephaestus.automation.implementer:main"
 hephaestus-review-prs = "hephaestus.automation.pr_reviewer:main"
