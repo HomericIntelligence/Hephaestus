@@ -692,7 +692,7 @@ def process_repo(
     result = RepoResult(repo=repo, loop_idx=loop_idx)
     try:
         return _process_repo_inner(repo, loop_idx, cfg, result)
-    except BaseException as exc:
+    except Exception as exc:
         tb = traceback.format_exc()
         result.runner_error = f"{type(exc).__name__}: {exc}\n{tb}"
         LOG.error("[%s] runner crashed: %s", repo, exc)
