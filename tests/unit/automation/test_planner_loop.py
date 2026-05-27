@@ -44,7 +44,7 @@ class TestRunPlanReviewLoop:
         """A GO on R0 must skip iterations 1 and 2."""
         with (
             patch(
-                "hephaestus.automation.planner.gh_issue_json",
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
                 return_value={"title": "T", "body": "B"},
             ),
             patch.object(planner, "_generate_plan", return_value="plan v0") as mock_plan,
@@ -64,7 +64,7 @@ class TestRunPlanReviewLoop:
         """When every review says NOGO, the loop runs exactly 3 iterations."""
         with (
             patch(
-                "hephaestus.automation.planner.gh_issue_json",
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
                 return_value={"title": "T", "body": "B"},
             ),
             patch.object(
@@ -91,7 +91,7 @@ class TestRunPlanReviewLoop:
     def test_terminates_on_go_at_iter1(self, planner: Planner) -> None:
         with (
             patch(
-                "hephaestus.automation.planner.gh_issue_json",
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
                 return_value={"title": "T", "body": "B"},
             ),
             patch.object(
@@ -117,7 +117,7 @@ class TestRunPlanReviewLoop:
         review_iter0 = _nogo_review("D")
         with (
             patch(
-                "hephaestus.automation.planner.gh_issue_json",
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
                 return_value={"title": "T", "body": "B"},
             ),
             patch.object(
@@ -317,7 +317,7 @@ class TestFilterIssues:
         with (
             patch.object(planner, "_has_existing_plan") as mock_check,
             patch(
-                "hephaestus.automation.planner.prefetch_issue_states",
+                "hephaestus.automation.planner_state.prefetch_issue_states",
                 return_value={},
             ),
         ):
@@ -331,7 +331,7 @@ class TestFilterIssues:
         from hephaestus.automation.models import IssueState
 
         with patch(
-            "hephaestus.automation.planner.prefetch_issue_states",
+            "hephaestus.automation.planner_state.prefetch_issue_states",
             return_value={123: IssueState.CLOSED},
         ):
             result = planner._filter_issues()
@@ -343,7 +343,7 @@ class TestFilterIssues:
         from hephaestus.automation.models import IssueState
 
         with patch(
-            "hephaestus.automation.planner.prefetch_issue_states",
+            "hephaestus.automation.planner_state.prefetch_issue_states",
             return_value={123: IssueState.OPEN},
         ):
             result = planner._filter_issues()

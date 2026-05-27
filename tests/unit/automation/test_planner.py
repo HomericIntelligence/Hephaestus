@@ -53,10 +53,10 @@ class TestCallClaude:
 
         stack = ExitStack()
         stack.enter_context(
-            patch("hephaestus.automation.planner.get_repo_root", return_value=Path("/repo"))
+            patch("hephaestus.automation.planner_claude.get_repo_root", return_value=Path("/repo"))
         )
         stack.enter_context(
-            patch("hephaestus.automation.planner.get_repo_slug", return_value="TestRepo")
+            patch("hephaestus.automation.planner_claude.get_repo_slug", return_value="TestRepo")
         )
         return stack
 
@@ -136,7 +136,7 @@ class TestCallClaude:
         with (
             self._patch_repo(),
             patch("hephaestus.automation.claude_invoke.subprocess.run") as mock_run,
-            patch("hephaestus.automation.planner.scan_quota_reset") as mock_scan,
+            patch("hephaestus.automation.planner_claude.scan_quota_reset") as mock_scan,
         ):
             mock_run.side_effect = [
                 subprocess.CalledProcessError(1, "claude", stderr="rate limit exceeded"),
@@ -163,7 +163,7 @@ class TestCallClaude:
         with (
             self._patch_repo(),
             patch("hephaestus.automation.claude_invoke.subprocess.run") as mock_run,
-            patch("hephaestus.automation.planner.wait_until") as mock_wait,
+            patch("hephaestus.automation.planner_claude.wait_until") as mock_wait,
         ):
             mock_run.side_effect = [
                 subprocess.CalledProcessError(1, "claude", output=usage_json, stderr=""),
@@ -336,7 +336,7 @@ class TestGeneratePlan:
     def test_plan_with_advise_findings(self, planner: Any) -> None:
         """Test plan generation with advise findings injected."""
         with (
-            patch("hephaestus.automation.planner.gh_issue_json") as mock_gh,
+            patch("hephaestus.automation.planner_review_loop.gh_issue_json") as mock_gh,
             patch.object(
                 planner,
                 "_run_advise",
@@ -363,7 +363,7 @@ class TestGeneratePlan:
         planner = Planner(mock_options)
 
         with (
-            patch("hephaestus.automation.planner.gh_issue_json") as mock_gh,
+            patch("hephaestus.automation.planner_review_loop.gh_issue_json") as mock_gh,
             patch.object(planner, "_run_advise") as mock_advise,
             patch.object(planner, "_call_claude", return_value="# Implementation Plan\nStep 1"),
         ):

@@ -105,7 +105,12 @@ def test_planner_module_uses_its_expected_agents() -> None:
     AGENT_PLAN_REVIEWER — in-process plan-review call (separate from the
                           standalone plan_reviewer.py phase module)
     """
-    src = (AUTOMATION_DIR / "planner.py").read_text()
+    # The planner package was split (#598): the strict review loop lives in
+    # planner_review_loop.py. Scan both source files for AGENT_* wiring so the
+    # invariant survives the split.
+    src = (AUTOMATION_DIR / "planner.py").read_text() + (
+        AUTOMATION_DIR / "planner_review_loop.py"
+    ).read_text()
     found = set(re.findall(r"\bagent\s*=\s*(AGENT_[A-Z_]+)\b", src))
     expected = {
         "AGENT_PLANNER",
@@ -113,4 +118,4 @@ def test_planner_module_uses_its_expected_agents() -> None:
         "AGENT_LEARNINGS",
         "AGENT_PLAN_REVIEWER",
     }
-    assert found == expected, f"planner.py agent wiring drifted: found={found}, expected={expected}"
+    assert found == expected, f"planner agent wiring drifted: found={found}, expected={expected}"
