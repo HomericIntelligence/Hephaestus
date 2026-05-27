@@ -212,9 +212,12 @@ omit = [
     # Full orchestration loops require a live claude/gh CLI — integration test territory.
     # Pure-function helpers in these modules are tested in tests/unit/automation/ instead.
     "hephaestus/automation/implementer.py",
+    "hephaestus/automation/implementer_phase_runner.py",
+    "hephaestus/automation/implementer_summary.py",
     "hephaestus/automation/planner.py",
     "hephaestus/automation/address_review.py",
     "hephaestus/automation/ci_driver.py",
+    "hephaestus/automation/loop_runner.py",
     # curses_ui.py uses a live terminal; cannot be unit-tested without a real TTY
     "hephaestus/automation/curses_ui.py",
     # github_api.py shells out to gh CLI for every call; fully integration-only
