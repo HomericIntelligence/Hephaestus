@@ -16,7 +16,7 @@ This file describes the typical development workflow for ProjectHephaestus.
 1. **Automated Checks**: All PRs must pass pre-commit hooks
 2. **Peer Review**: At least one other developer review required
 3. **Security Review**: Security-sensitive changes require special attention
-4. **Merge**: Use rebase merge strategy with auto-merge enabled
+4. **Merge**: Use squash merge strategy with auto-merge enabled (`gh pr merge --auto --squash`)
 
 ## Testing Workflow
 

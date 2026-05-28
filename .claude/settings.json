@@ -2,5 +2,24 @@
   "enabledPlugins": {
     "hephaestus@ProjectHephaestus": true,
     "safety-net@cc-marketplace": true
+  },
+  "permissions": {
+    "deny": [
+      "Bash(rm -rf /*)",
+      "Bash(rm -rf ~)",
+      "Bash(rm -rf $HOME*)",
+      "Bash(sudo:*)",
+      "Bash(curl * | sh)",
+      "Bash(curl * | bash)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git reset --hard origin/main)",
+      "Bash(git push * --no-verify*)",
+      "Bash(git commit * --no-verify*)",
+      "Bash(gh pr merge * --admin*)",
+      "Write(~/.ssh/**)",
+      "Write(~/.aws/**)",
+      "Write(~/.gnupg/**)"
+    ]
   }
 }
