@@ -215,6 +215,50 @@ class TestPrefetchIssueStates:
 
         assert states == {}
 
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info")
+    def test_int_validation_in_graphql_query(self, mock_repo_info: Any, mock_gh_call: Any) -> None:
+        """Test that issue numbers are cast to int in GraphQL query to prevent injection."""
+        mock_repo_info.return_value = ("owner", "repo")
+
+        mock_result = Mock()
+        mock_result.stdout = json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "issue0": {"number": 123, "state": "OPEN"},
+                    }
+                }
+            }
+        )
+        mock_gh_call.return_value = mock_result
+
+        # Call with issue numbers
+        states = prefetch_issue_states([123])
+
+        # Verify the GraphQL query was called with int-casted numbers
+        mock_gh_call.assert_called()
+        call_args = mock_gh_call.call_args
+        # The query should contain the int-casted number
+        query_arg = call_args[0][0]
+        assert any("issue(number: 123)" in arg for arg in query_arg)
+
+        assert states[123] == IssueState.OPEN
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info")
+    def test_non_numeric_issue_number_raises_error(
+        self, mock_repo_info: Any, mock_gh_call: Any
+    ) -> None:
+        """Test that non-numeric issue numbers raise ValueError during int() casting."""
+        mock_repo_info.return_value = ("owner", "repo")
+
+        # Try to pass a non-numeric string (type-hint violation)
+        # This should raise a ValueError when int() is called on it
+        with pytest.raises(ValueError):
+            # Using "abc" as string will fail the int() cast
+            prefetch_issue_states(["abc"])  # type: ignore
+
 
 class TestGhCall:
     """Tests for _gh_call function."""
