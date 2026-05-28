@@ -526,6 +526,154 @@ def gh_issue_comment(issue_number: int, body: str) -> None:
         raise RuntimeError(f"Failed to post comment to issue #{issue_number}: {e}") from e
 
 
+def _fetch_issue_comment_ids(issue_number: int) -> list[dict[str, Any]]:
+    """Return up to 100 most-recent issue comments as ``{databaseId, body}`` dicts.
+
+    Unlike :func:`_fetch_issue_comments_graphql` in ``review_state`` (which
+    fetches ``body``/``url`` for verdict parsing), this also requests
+    ``databaseId`` — the integer id required by the REST update/delete
+    endpoints (``/repos/{o}/{r}/issues/comments/{id}``). Newest-first from
+    GraphQL is reversed to chronological order so "last match wins" matches
+    the rest of the pipeline.
+
+    Returns an empty list on any failure (callers then fall back to create).
+    """
+    owner, name = get_repo_info()
+    query = (
+        "query($owner:String!,$name:String!,$number:Int!){"
+        "  repository(owner:$owner,name:$name){"
+        "    issue(number:$number){"
+        "      comments(last: 100, orderBy: {field: UPDATED_AT, direction: DESC}){"
+        "        nodes{ databaseId body }"
+        "      }"
+        "    }"
+        "  }"
+        "}"
+    )
+    try:
+        result = _gh_call(
+            [
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"name={name}",
+                "-F",
+                f"number={issue_number}",
+            ],
+        )
+        data = json.loads(result.stdout)
+        nodes = (
+            data.get("data", {})
+            .get("repository", {})
+            .get("issue", {})
+            .get("comments", {})
+            .get("nodes", [])
+        )
+        return list(reversed(nodes))
+    except Exception as exc:
+        logger.warning("Failed to fetch comment ids for issue #%s: %s", issue_number, exc)
+        return []
+
+
+def gh_issue_delete_comment(comment_id: int) -> None:
+    """Delete a single issue comment by its REST database id.
+
+    Args:
+        comment_id: The integer ``databaseId`` of the issue comment.
+
+    Raises:
+        RuntimeError: If the delete call fails.
+
+    """
+    owner, name = get_repo_info()
+    try:
+        _gh_call(
+            [
+                "api",
+                "--method",
+                "DELETE",
+                f"/repos/{owner}/{name}/issues/comments/{comment_id}",
+            ],
+        )
+        logger.info("Deleted issue comment %s", comment_id)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Failed to delete issue comment {comment_id}: {e}") from e
+
+
+def gh_issue_upsert_comment(issue_number: int, marker_prefix: str, body: str) -> int | None:
+    """Create-or-update the single issue comment whose body starts with ``marker_prefix``.
+
+    Enforces the "one comment per role" invariant: the pipeline must keep at
+    most one PLAN comment (``# Implementation Plan``) and one REVIEW comment
+    (``## 🔍 Plan Review``) per issue, updated in place rather than appended.
+
+    Behaviour:
+    - Find every existing comment whose body ``startswith(marker_prefix)``.
+    - If none: create a new comment.
+    - If one or more: PATCH the newest matching comment with ``body`` and
+      DELETE the older duplicates (one-time convergence for issues that
+      already accumulated multiple plan/review comments).
+
+    Args:
+        issue_number: GitHub issue number.
+        marker_prefix: The role marker the comment body must start with.
+        body: The full new comment body (should itself start with the marker).
+
+    Returns:
+        The ``databaseId`` of the upserted comment, or ``None`` if a fresh
+        comment was created via ``gh issue comment`` (whose id we do not parse).
+
+    Raises:
+        RuntimeError: If a create/update/delete call fails.
+
+    """
+    comments = _fetch_issue_comment_ids(issue_number)
+    matching = [
+        c
+        for c in comments
+        if str(c.get("body", "")).startswith(marker_prefix) and c.get("databaseId") is not None
+    ]
+
+    if not matching:
+        # No existing comment with this marker — create a fresh one.
+        gh_issue_comment(issue_number, body)
+        return None
+
+    # Newest matching comment wins (list is chronological → last element).
+    target = matching[-1]
+    target_id = int(target["databaseId"])
+    owner, name = get_repo_info()
+
+    # Delete older duplicates so only one comment with this marker remains.
+    for dup in matching[:-1]:
+        dup_id = dup.get("databaseId")
+        if dup_id is not None:
+            gh_issue_delete_comment(int(dup_id))
+
+    try:
+        with _body_file(body) as path:
+            _gh_call(
+                [
+                    "api",
+                    "--method",
+                    "PATCH",
+                    f"/repos/{owner}/{name}/issues/comments/{target_id}",
+                    "-F",
+                    f"body=@{path}",
+                ],
+            )
+        logger.info("Updated issue comment %s (marker %r)", target_id, marker_prefix)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"Failed to update issue comment {target_id} on #{issue_number}: {e}"
+        ) from e
+    return target_id
+
+
 def _parse_issue_number(output: str) -> int:
     """Extract issue number from gh issue create output (URL or bare number)."""
     match = re.search(r"/issues/(\d+)", output)

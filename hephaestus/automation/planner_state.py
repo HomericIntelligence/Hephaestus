@@ -21,13 +21,33 @@ from typing import TYPE_CHECKING, Any
 
 from .git_utils import issue_ref
 from .github_api import _gh_call, prefetch_issue_states
-from .models import PLAN_COMMENT_MARKERS
-from .review_state import fetch_all_issue_comments_graphql
+from .models import PLAN_COMMENT_MARKER, PLAN_COMMENT_MARKERS
+from .review_state import PLAN_REVIEW_PREFIX, fetch_all_issue_comments_graphql
 
 if TYPE_CHECKING:
     from .models import PlannerOptions
 
 logger = logging.getLogger(__name__)
+
+
+def _comments_contain_plan(comments: list[dict[str, Any]]) -> bool:
+    """Return True if any comment is a plan comment (not a review).
+
+    Matches plan markers only at the START of a comment body, never as a free
+    substring: a ``## 🔍 Plan Review`` comment quotes the plan (so it contains
+    plan headings as substrings) and must NOT count as "has a plan" — that
+    substring confusion caused the reviewer to review its own prior review
+    (#455/#468/#484). Mirrors ``plan_reviewer._get_latest_plan``.
+    """
+    for comment in comments:
+        stripped = comment.get("body", "").lstrip()
+        if stripped.startswith(PLAN_REVIEW_PREFIX):
+            continue
+        if stripped.startswith(PLAN_COMMENT_MARKER) or any(
+            stripped.startswith(marker) for marker in PLAN_COMMENT_MARKERS
+        ):
+            return True
+    return False
 
 
 class PlannerStateManager:
@@ -144,11 +164,9 @@ class PlannerStateManager:
         # Fast path: use cached comments when available (#616).
         cached = self.get_cached_comments(issue_number)
         if cached is not None:
-            for comment in cached:
-                body = comment.get("body", "")
-                if any(marker in body for marker in PLAN_COMMENT_MARKERS):
-                    logger.debug("Found existing plan for %s (cached)", issue_ref(issue_number))
-                    return True
+            if _comments_contain_plan(cached):
+                logger.debug("Found existing plan for %s (cached)", issue_ref(issue_number))
+                return True
             return False
 
         # Slow path: individual fetch (pre-#616 behaviour, kept as fallback).
@@ -167,11 +185,9 @@ class PlannerStateManager:
             data = json.loads(result.stdout)
             comments = data.get("comments", [])
 
-            for comment in comments:
-                body = comment.get("body", "")
-                if any(marker in body for marker in PLAN_COMMENT_MARKERS):
-                    logger.debug("Found existing plan for %s", issue_ref(issue_number))
-                    return True
+            if _comments_contain_plan(comments):
+                logger.debug("Found existing plan for %s", issue_ref(issue_number))
+                return True
 
             return False
 

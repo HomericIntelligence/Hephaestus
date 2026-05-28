@@ -14,10 +14,19 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-# Markers that identify a plan comment posted by the planner. Used by both
-# the planner (to skip already-posted plans) and plan_reviewer (to locate
-# the plan to review). Single source of truth — adding a new heading style
-# only requires one edit.
+# The canonical heading the planner WRITES at the top of the single plan
+# comment. The pipeline upserts exactly one comment starting with this marker
+# (see github_api.gh_issue_upsert_comment). This is the only marker used to
+# *locate the plan to review*.
+PLAN_COMMENT_MARKER: str = "# Implementation Plan"
+
+# Broader set of headings that may identify a *legacy* plan comment authored
+# before the single-comment model. Used ONLY for backward-compatible detection
+# of "does this issue already have a plan?" — NOT for selecting the plan body
+# to feed the reviewer. Critically this set must never be used as a substring
+# match against arbitrary comment bodies: a "## 🔍 Plan Review" comment legitimately
+# contains "## Objective"/"## Plan" when it quotes the plan, and matching those
+# caused the reviewer to review its own prior review (issues #455/#468/#484).
 PLAN_COMMENT_MARKERS: tuple[str, ...] = (
     "# Implementation Plan",
     "## Implementation Plan",

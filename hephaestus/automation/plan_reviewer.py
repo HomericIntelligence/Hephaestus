@@ -28,7 +28,7 @@ from .claude_models import reviewer_model
 from .claude_timeouts import plan_reviewer_claude_timeout
 from .git_utils import get_repo_info, get_repo_root, get_repo_slug, issue_ref
 from .github_api import _gh_call, gh_issue_comment, gh_issue_json
-from .models import PLAN_COMMENT_MARKERS, PlanReviewerOptions, WorkerResult
+from .models import PLAN_COMMENT_MARKER, PLAN_COMMENT_MARKERS, PlanReviewerOptions, WorkerResult
 from .prompts import get_plan_review_prompt
 from .review_state import (
     PLAN_REVIEW_PREFIX as _REVIEW_PREFIX_SHARED,
@@ -346,10 +346,18 @@ class PlanReviewer:
         return comments
 
     def _get_latest_plan(self, issue_number: int) -> str | None:
-        """Return the body of the last comment that looks like a plan.
+        """Return the body of the last comment that is the PLAN.
 
         Uses :meth:`_fetch_issue_comments` so the API call is shared with
         :meth:`_latest_review_is_final`.
+
+        Selection rules (fixes the self-review bug of #455/#468/#484):
+        - A plan comment must *start with* a plan heading, not merely contain
+          one. A ``## 🔍 Plan Review`` body that quotes the plan contains
+          ``## Objective``/``## Plan`` as substrings — matching those caused
+          the reviewer to pick its own prior review as "the plan".
+        - Review comments (``body.startswith(_REVIEW_PREFIX)``) are excluded
+          outright, belt-and-suspenders.
 
         Args:
             issue_number: GitHub issue number.
@@ -360,10 +368,17 @@ class PlanReviewer:
         """
         comments = self._fetch_issue_comments(issue_number)
 
-        # Walk in reverse to find the *last* plan comment
+        # Walk in reverse to find the *last* genuine plan comment.
         for comment in reversed(comments):
             body: str = comment.get("body", "")
-            if any(marker in body for marker in _PLAN_MARKERS):
+            stripped = body.lstrip()
+            if stripped.startswith(_REVIEW_PREFIX):
+                continue  # never treat a review comment as the plan
+            # Canonical marker first; fall back to legacy markers but ONLY at
+            # the start of the body (anchored), never as a free substring.
+            if stripped.startswith(PLAN_COMMENT_MARKER) or any(
+                stripped.startswith(marker) for marker in _PLAN_MARKERS
+            ):
                 logger.debug("Found plan comment for issue #%s", issue_number)
                 return body
 
