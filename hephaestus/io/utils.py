@@ -262,7 +262,7 @@ def load_data(
         import pickle
 
         with open(filepath, "rb") as f:
-            return pickle.load(f)
+            return pickle.load(f)  # nosec B301 - caller explicitly opted in via allow_unsafe_deserialization=True; default False raises ValueError before this line
 
     raise ValueError(f"Unsupported format: '{fmt}'")
 

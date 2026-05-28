@@ -244,3 +244,10 @@ exclude_lines = [
 
 [tool.bandit]
 exclude_dirs = ["tests", "build", ".pixi"]
+# The pixi `sast` task passes `-l medium` (report MEDIUM+ severity only).
+# LOW findings (B404 import-subprocess, B603 subprocess-list, B607 partial-path,
+# B403 import-pickle, B101 assert, B311 random, B112 try-except-continue) are
+# noise for an automation codebase that legitimately calls system tools (git, gh,
+# claude) via subprocess with fixed literal argument lists and non-cryptographic
+# random for retry jitter.  Genuine injection risk (shell=True) is HIGH severity
+# and is unaffected by this threshold.
