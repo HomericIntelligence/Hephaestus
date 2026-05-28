@@ -16,7 +16,7 @@ on the worker-pool driver. No behavior change.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 from .claude_invoke import parse_review_verdict
 from .claude_models import learn_model, planner_model, reviewer_model
@@ -26,32 +26,101 @@ from .github_api import gh_issue_json
 from .prompts import get_plan_loop_review_prompt, get_plan_prompt
 from .session_naming import AGENT_LEARNINGS, AGENT_PLAN_REVIEWER, AGENT_PLANNER
 
-if TYPE_CHECKING:
-    from .planner import Planner
-
 logger = logging.getLogger(__name__)
 
 MAX_REVIEW_ITERATIONS = 3
 
 
+class PlannerHost(Protocol):
+    """Minimal Planner surface the review loop depends on.
+
+    Declares only the methods and attributes PlanReviewLoop calls, allowing
+    the loop to depend on this interface rather than the concrete Planner's
+    full private surface (Dependency Inversion Principle). Implements
+    structural substitutability — any object with these members satisfies
+    the protocol.
+
+    Method names retain their underscore prefix because they are the existing
+    call surface. This is deliberate: the test seam (e.g.,
+    ``patch.object(planner, "_generate_plan", ...)``) targets these private
+    names, and renaming them is out of scope. The docstring here makes the
+    contract explicit and documented.
+    """
+
+    options: Any
+    status_tracker: Any
+
+    def _run_advise(self, issue_number: int, issue_title: str, issue_body: str) -> str:
+        """Search team knowledge base for relevant prior learnings."""
+        pass
+
+    def _generate_plan(
+        self,
+        issue_number: int,
+        max_retries: int = 3,
+        *,
+        prior_review: str | None = None,
+        cached_advise: str | None = None,
+        cached_issue_data: dict[str, Any] | None = None,
+    ) -> str:
+        """Generate implementation plan using Claude Code."""
+        pass
+
+    def _capture_planner_learnings(self, issue_number: int, plan: str) -> str:
+        """Capture learnings from the generated plan."""
+        pass
+
+    def _run_plan_review(
+        self,
+        *,
+        issue_number: int,
+        issue_title: str,
+        issue_body: str,
+        plan_text: str,
+        learnings: str,
+        iteration: int,
+        prior_review: str | None,
+    ) -> str:
+        """Run a reviewer pass on the current plan."""
+        pass
+
+    def _call_claude(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        agent: str,
+        issue_number: int | str,
+        max_retries: int = 3,
+        timeout: int = 300,
+        extra_args: list[str] | None = None,
+    ) -> str:
+        """Call Claude with the given prompt."""
+        pass
+
+
 class PlanReviewLoop:
     """Bounded plan→learn→review iteration loop.
 
-    Holds a back-reference to the owning :class:`Planner` and intentionally
-    routes per-issue work back through ``planner._generate_plan`` /
+    Holds a back-reference to a :class:`PlannerHost` and intentionally routes
+    per-issue work back through ``planner._generate_plan`` /
     ``planner._capture_planner_learnings`` / ``planner._run_plan_review``
     rather than calling :class:`PlannerClaudeRunner` directly. The indirection
     preserves the existing ``patch.object(planner, "_generate_plan", ...)``
-    test seam: a patched method on the Planner instance still intercepts the
+    test seam: a patched method on the host instance still intercepts the
     loop's inner calls.
+
+    Depends on the minimal :class:`PlannerHost` protocol rather than the
+    concrete Planner class, making the loop substitutable for testing and
+    allowing implementation flexibility.
     """
 
-    def __init__(self, planner: Planner) -> None:
-        """Bind the loop to its owning planner.
+    def __init__(self, planner: PlannerHost) -> None:
+        """Bind the loop to its owning planner host.
 
         Args:
-            planner: The :class:`Planner` instance whose options,
-                status tracker, and Claude helpers this loop reuses.
+            planner: A :class:`PlannerHost` instance (typically a Planner)
+                whose options, status tracker, and Claude helpers this loop reuses.
 
         """
         self.planner = planner
