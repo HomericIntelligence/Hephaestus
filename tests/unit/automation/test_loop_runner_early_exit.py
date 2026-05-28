@@ -1,14 +1,18 @@
-"""Tests for loop_runner early-exit mechanism (issue #613)."""
+"""Tests for loop_runner early-exit mechanism (issues #613 / #614)."""
 
 import os
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
+from hephaestus.automation import loop_runner
 from hephaestus.automation.loop_runner import (
+    LoopConfig,
     PhaseResult,
     RepoResult,
     _make_work_report_path,
     _read_work_report,
+    run_loop,
 )
 
 
@@ -298,42 +302,169 @@ class TestRunPhaseWorkReport:
         pass
 
 
+def _zero_work_result(repo: str, loop_idx: int) -> RepoResult:
+    """Return a RepoResult where all convergence phases report 0 work."""
+    rr = RepoResult(repo=repo, loop_idx=loop_idx)
+    rr.phases.append(PhaseResult(name="plan", rc=0, work_units=0))
+    rr.phases.append(PhaseResult(name="review-plans", rc=0, work_units=0))
+    return rr
+
+
+def _work_result(repo: str, loop_idx: int, work_units: int = 3) -> RepoResult:
+    """Return a RepoResult where plan produced work."""
+    rr = RepoResult(repo=repo, loop_idx=loop_idx)
+    rr.phases.append(PhaseResult(name="plan", rc=0, work_units=work_units))
+    rr.phases.append(PhaseResult(name="review-plans", rc=0, work_units=0))
+    return rr
+
+
+def _failed_result(repo: str, loop_idx: int) -> RepoResult:
+    """Return a RepoResult with a phase failure and zero work units."""
+    rr = RepoResult(repo=repo, loop_idx=loop_idx)
+    rr.phases.append(PhaseResult(name="plan", rc=1, work_units=0))
+    rr.phases.append(PhaseResult(name="review-plans", rc=0, work_units=0))
+    return rr
+
+
+def _unknown_work_result(repo: str, loop_idx: int) -> RepoResult:
+    """Return a RepoResult where work_units is None (un-instrumented phase)."""
+    rr = RepoResult(repo=repo, loop_idx=loop_idx)
+    rr.phases.append(PhaseResult(name="plan", rc=0, work_units=None))
+    return rr
+
+
 class TestRunLoopEarlyExit:
-    """Tests for early-exit logic in run_loop."""
+    """Tests for early-exit logic in run_loop (#614)."""
 
-    def test_early_exit_fires_zero_work(self) -> None:
-        """When a loop produces 0 work across all repos, loop breaks."""
-        # Mock process_repo to return RepoResult with work_units=0 for all phases.
-        # Assert run_loop exits after loop 1 (not loop 5).
-        # Deferred to implementation phase.
-        pass
+    def test_early_exit_fires_on_zero_work_pass(self, tmp_path: Path) -> None:
+        """When a full pass across all repos produces 0 new plans and 0 reviews, break early.
 
-    def test_no_early_exit_when_work_done(self) -> None:
-        """When a loop produces work, loop continues."""
-        # Mock process_repo to return RepoResult with work_units>0.
-        # Assert run_loop runs all configured loops.
-        # Deferred to implementation phase.
-        pass
+        A 5-loop config should stop after loop 1 when no repo reports any work.
+        """
+        projects = tmp_path
+        (projects / "r1" / ".git").mkdir(parents=True)
+        cfg = LoopConfig(loops=5, projects_dir=projects)
 
-    def test_no_early_exit_on_failure(self) -> None:
-        """Failure suppresses early-exit even if work_units=0."""
-        # Mock process_repo to return RepoResult with any_failure=True and work_units=0.
-        # Assert run_loop does NOT break early.
-        # Deferred to implementation phase.
-        pass
+        call_count = 0
 
-    def test_early_exit_not_final_loop(self) -> None:
-        """Early-exit only checks when loop_idx < cfg.loops."""
-        # Mock final loop iteration; assert no break is attempted.
-        # Deferred to implementation phase.
-        pass
+        def fake_process(repo: str, loop_idx: int, cfg: LoopConfig) -> RepoResult:
+            nonlocal call_count
+            call_count += 1
+            return _zero_work_result(repo, loop_idx)
 
-    def test_unknown_work_never_converges(self) -> None:
-        """When work_units=None (unknown), loop continues (conservative)."""
-        # Mock process_repo to return RepoResult with work_units=None.
-        # Assert run_loop runs all configured loops.
-        # Deferred to implementation phase.
-        pass
+        with patch.object(loop_runner, "process_repo", side_effect=fake_process):
+            results = run_loop(cfg, repos=["r1"])
+
+        # Only loop 1 should have run — early-exit fires immediately.
+        assert max(r.loop_idx for r in results) == 1
+        assert call_count == 1
+
+    def test_loops_caps_when_work_continues_every_loop(self, tmp_path: Path) -> None:
+        """--loops is still respected as an upper bound when work is produced each loop.
+
+        With loops=3 and work every iteration, exactly 3 loops must complete.
+        """
+        projects = tmp_path
+        (projects / "r1" / ".git").mkdir(parents=True)
+        cfg = LoopConfig(loops=3, projects_dir=projects)
+
+        def fake_process(repo: str, loop_idx: int, cfg: LoopConfig) -> RepoResult:
+            return _work_result(repo, loop_idx)
+
+        with patch.object(loop_runner, "process_repo", side_effect=fake_process):
+            results = run_loop(cfg, repos=["r1"])
+
+        assert max(r.loop_idx for r in results) == 3
+        assert len(results) == 3
+
+    def test_no_early_exit_when_failure_present(self, tmp_path: Path) -> None:
+        """A failure suppresses early-exit even when work_units=0.
+
+        The loop must not break early if any repo reported a phase failure,
+        because failures may resolve in the next iteration.
+        """
+        projects = tmp_path
+        (projects / "r1" / ".git").mkdir(parents=True)
+        cfg = LoopConfig(loops=3, projects_dir=projects)
+
+        call_count = 0
+
+        def fake_process(repo: str, loop_idx: int, cfg: LoopConfig) -> RepoResult:
+            nonlocal call_count
+            call_count += 1
+            return _failed_result(repo, loop_idx)
+
+        with patch.object(loop_runner, "process_repo", side_effect=fake_process):
+            results = run_loop(cfg, repos=["r1"])
+
+        # All 3 loops must run — failure blocks early-exit.
+        assert max(r.loop_idx for r in results) == 3
+        assert call_count == 3
+
+    def test_early_exit_skipped_on_final_loop(self, tmp_path: Path) -> None:
+        """Early-exit is not evaluated on the final loop (loop_idx == cfg.loops).
+
+        When loops=1 the early-exit condition cannot fire because the check
+        requires loop_idx < cfg.loops.
+        """
+        projects = tmp_path
+        (projects / "r1" / ".git").mkdir(parents=True)
+        cfg = LoopConfig(loops=1, projects_dir=projects)
+
+        def fake_process(repo: str, loop_idx: int, cfg: LoopConfig) -> RepoResult:
+            return _zero_work_result(repo, loop_idx)
+
+        with patch.object(loop_runner, "process_repo", side_effect=fake_process):
+            results = run_loop(cfg, repos=["r1"])
+
+        # Exactly one result — the single configured loop ran to completion.
+        assert len(results) == 1
+        assert results[0].loop_idx == 1
+
+    def test_unknown_work_units_prevents_early_exit(self, tmp_path: Path) -> None:
+        """When work_units=None (un-instrumented phase), loop never early-exits.
+
+        Conservative behaviour: treat unknown as produced work so the loop
+        keeps running up to cfg.loops.
+        """
+        projects = tmp_path
+        (projects / "r1" / ".git").mkdir(parents=True)
+        cfg = LoopConfig(loops=3, projects_dir=projects)
+
+        def fake_process(repo: str, loop_idx: int, cfg: LoopConfig) -> RepoResult:
+            return _unknown_work_result(repo, loop_idx)
+
+        with patch.object(loop_runner, "process_repo", side_effect=fake_process):
+            results = run_loop(cfg, repos=["r1"])
+
+        # All 3 loops run because unknown phases are treated as productive.
+        assert max(r.loop_idx for r in results) == 3
+
+    def test_early_exit_multi_repo_requires_all_zero(self, tmp_path: Path) -> None:
+        """Early-exit only fires when EVERY repo in the pass reports zero work.
+
+        If even one repo produces work the loop must continue.
+        """
+        projects = tmp_path
+        for repo in ("r1", "r2"):
+            (projects / repo / ".git").mkdir(parents=True)
+        cfg = LoopConfig(loops=5, projects_dir=projects)
+
+        call_counts: dict[str, int] = {"r1": 0, "r2": 0}
+
+        def fake_process(repo: str, loop_idx: int, cfg: LoopConfig) -> RepoResult:
+            call_counts[repo] += 1
+            if repo == "r1":
+                # r1 always produces work
+                return _work_result(repo, loop_idx)
+            # r2 produces no work
+            return _zero_work_result(repo, loop_idx)
+
+        with patch.object(loop_runner, "process_repo", side_effect=fake_process):
+            results = run_loop(cfg, repos=["r1", "r2"])
+
+        # All 5 loops should run because r1 is always productive.
+        assert max(r.loop_idx for r in results) == 5
 
 
 class TestMainLoopsRunReporting:

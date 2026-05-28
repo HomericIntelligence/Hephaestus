@@ -1038,17 +1038,23 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
         LOG.info("%s", _summarize_loop(loop_results, loop_idx, elapsed_s))
         LOG.info("Loop %d complete.", loop_idx)
 
-        # Check for early exit: if this loop produced no work and had no
-        # failures, break (--loops is an upper bound). (#613)
-        loop_results = [r for r in all_results if r.loop_idx == loop_idx]
+        # Early-exit: when the full pass across ALL repos produced zero
+        # convergence-relevant work (0 new plans + 0 non-skipped reviews)
+        # and no failures, the pipeline has converged — continue loops would
+        # only re-spin non-converging issues. --loops remains an upper bound.
+        # (#614)
         if (
             loop_idx < cfg.loops
             and not any(r.any_failure for r in loop_results)
             and not any(r.produced_work for r in loop_results)
         ):
             LOG.info(
-                "Early exit: full loop produced 0 new plans and 0 reviews after loop %d",
+                "Early exit after loop %d/%d: full pass produced 0 new plans"
+                " and 0 non-skipped reviews across all %d repo(s)."
+                " Remaining loops skipped — use --loops to override upper bound.",
                 loop_idx,
+                cfg.loops,
+                len(repos),
             )
             break
 
