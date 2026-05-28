@@ -4,17 +4,6 @@
 
 repos:
 
-  # Security checks
-  - repo: local
-    hooks:
-      - id: check-shell-injection
-        name: Check for shell=True (Security)
-        description: Prevent command injection vulnerabilities via shell=True
-        entry: 'shell=True'
-        language: pygrep
-        files: \.py$
-        types: [python]
-
   # Python formatting and linting
   - repo: local
     hooks:
@@ -73,6 +62,18 @@ repos:
         language: system
         pass_filenames: false
         stages: [manual]
+
+  # Security: SAST (Static Application Security Testing)
+  - repo: local
+    hooks:
+      - id: bandit
+        name: Bandit (SAST)
+        description: AST-based Python security scanner (subprocess/shell injection)
+        entry: pixi run --environment lint sast
+        language: system
+        files: ^(hephaestus|scripts)/.*\.py$
+        types: [python]
+        pass_filenames: false
 
   # Lock file freshness
   - repo: local
