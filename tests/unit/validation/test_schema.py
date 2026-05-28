@@ -81,6 +81,23 @@ class TestResolveSchema:
         result = resolve_schema(other_file, tmp_path, schema_map)
         assert result is None
 
+    def test_relative_to_fallback_when_not_relative(self) -> None:
+        """File path outside repo_root uses fallback string conversion."""
+        # When a file is not relative to repo_root, resolve_schema falls back
+        # to using the path string as-is. This tests the ValueError catch at line 66-67.
+        from pathlib import Path
+
+        # Create two unrelated temp directories so relative_to fails
+        file_path = Path("/some/absolute/config/test.yaml")
+        repo_root = Path("/different/root")
+        # Pattern requires the full absolute path to match
+        schema_map = [(re.compile(r".*/config/.*\.yaml$"), Path("schema.json"))]
+
+        # The relative_to will raise ValueError, so it falls back to string conversion
+        # The pattern will match the fallback full path, and return repo_root / schema_rel
+        result = resolve_schema(file_path, repo_root, schema_map)
+        assert result == Path("/different/root/schema.json")
+
 
 class TestValidateFile:
     """Tests for validate_file()."""
@@ -137,6 +154,26 @@ class TestCheckFiles:
         assert exit_code == 0
         assert error_count == 0
 
+    def test_valid_files_verbose_prints_pass(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Verbose flag prints PASS: for valid files."""
+        pytest.importorskip("jsonschema")
+        schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+        schema_file = tmp_path / "schema.json"
+        schema_file.write_text(json.dumps(schema))
+
+        yaml_file = tmp_path / "config" / "test.yaml"
+        yaml_file.parent.mkdir()
+        yaml_file.write_text("name: hello\n")
+
+        schema_map = [(re.compile(r"^config/.*\.yaml$"), schema_file)]
+        exit_code, error_count = check_files([yaml_file], tmp_path, schema_map, verbose=True)
+        assert exit_code == 0
+        assert error_count == 0
+        captured = capsys.readouterr()
+        assert "PASS:" in captured.out
+
     def test_dry_run_returns_zero(self, tmp_path: Path) -> None:
         """Dry run returns 0 even with errors."""
         pytest.importorskip("jsonschema")
@@ -152,6 +189,41 @@ class TestCheckFiles:
         exit_code, error_count = check_files([yaml_file], tmp_path, schema_map, dry_run=True)
         assert exit_code == 0
         assert error_count >= 1
+
+    def test_schema_load_oserror(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+        """OSError when loading schema file is caught and counted."""
+        pytest.importorskip("jsonschema")
+        yaml_file = tmp_path / "config" / "test.yaml"
+        yaml_file.parent.mkdir()
+        yaml_file.write_text("name: hello\n")
+
+        # Create a schema file path that will raise OSError when read
+        schema_file = tmp_path / "nonexistent_schema.json"
+        schema_map = [(re.compile(r"^config/.*\.yaml$"), schema_file)]
+        exit_code, error_count = check_files([yaml_file], tmp_path, schema_map)
+        assert exit_code == 1
+        assert error_count >= 1
+        captured = capsys.readouterr()
+        assert "Could not load schema" in captured.err
+
+    def test_schema_load_json_decode_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        """JSONDecodeError when loading schema file is caught and counted."""
+        pytest.importorskip("jsonschema")
+        yaml_file = tmp_path / "config" / "test.yaml"
+        yaml_file.parent.mkdir()
+        yaml_file.write_text("name: hello\n")
+
+        # Create a schema file with invalid JSON
+        schema_file = tmp_path / "bad_schema.json"
+        schema_file.write_text("{invalid json")
+        schema_map = [(re.compile(r"^config/.*\.yaml$"), schema_file)]
+        exit_code, error_count = check_files([yaml_file], tmp_path, schema_map)
+        assert exit_code == 1
+        assert error_count >= 1
+        captured = capsys.readouterr()
+        assert "Could not load schema" in captured.err
 
     def test_no_matching_schema_warns(self, tmp_path: Path) -> None:
         """File with no matching schema is warned, not failed."""
@@ -335,3 +407,154 @@ class TestMain:
             ],
         )
         assert main() == 0
+
+    def test_json_flag_no_files(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """--json flag with no files emits JSON status."""
+        from hephaestus.validation.schema import main
+
+        monkeypatch.setattr("sys.argv", ["hephaestus-validate-schemas", "--json"])
+        assert main() == 0
+        captured = capsys.readouterr()
+        # Verify JSON output contains expected fields
+        output = json.loads(captured.out)
+        assert output["exit_code"] == 0
+        assert "message" in output or "error_count" in output
+
+    def test_json_flag_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """--json flag on success emits JSON with correct fields."""
+        pytest.importorskip("jsonschema")
+        from hephaestus.validation.schema import main
+
+        schema = tmp_path / "schema.json"
+        schema.write_text(
+            json.dumps(
+                {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                }
+            )
+        )
+        target_dir = tmp_path / "config"
+        target_dir.mkdir()
+        target = target_dir / "ok.yaml"
+        target.write_text("name: alice\n")
+
+        schema_map = tmp_path / "map.json"
+        schema_map.write_text(json.dumps([[r"^config/.*\.yaml$", str(schema)]]))
+
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "hephaestus-validate-schemas",
+                "--schema-map",
+                str(schema_map),
+                "--repo-root",
+                str(tmp_path),
+                "--json",
+                str(target),
+            ],
+        )
+        assert main() == 0
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert output["exit_code"] == 0
+        assert output["error_count"] == 0
+        assert output["files_checked"] == 1
+
+    def test_verbose_pass_output(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """--verbose flag prints PASS lines for valid files."""
+        pytest.importorskip("jsonschema")
+        from hephaestus.validation.schema import main
+
+        schema = tmp_path / "schema.json"
+        schema.write_text(
+            json.dumps(
+                {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                }
+            )
+        )
+        target_dir = tmp_path / "config"
+        target_dir.mkdir()
+        target = target_dir / "ok.yaml"
+        target.write_text("name: alice\n")
+
+        schema_map = tmp_path / "map.json"
+        schema_map.write_text(json.dumps([[r"^config/.*\.yaml$", str(schema)]]))
+
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "hephaestus-validate-schemas",
+                "--schema-map",
+                str(schema_map),
+                "--repo-root",
+                str(tmp_path),
+                "--verbose",
+                str(target),
+            ],
+        )
+        assert main() == 0
+        captured = capsys.readouterr()
+        assert "PASS:" in captured.out
+
+    def test_resolve_schema_fallback_for_unresolvable_path(self, tmp_path: Path) -> None:
+        """resolve_schema handles ValueError from relative_to gracefully."""
+        from hephaestus.validation.schema import resolve_schema
+
+        # Create a schema file
+        schema_file = tmp_path / "schema.json"
+        schema_file.write_text("{}")
+
+        # Use absolute path outside repo_root to trigger ValueError
+        file_path = Path("/absolute/unrelated/path.yaml")
+        # Pattern that matches the absolute path string
+        schema_map = [(re.compile(r".*unrelated.*"), schema_file)]
+
+        result = resolve_schema(file_path, tmp_path, schema_map)
+        # Should match via the fallback str(file_path) and return the schema
+        assert result == schema_file
+
+    def test_check_files_schema_load_oserror(self, tmp_path: Path) -> None:
+        """check_files handles OSError when reading schema file."""
+        pytest.importorskip("jsonschema")
+        from hephaestus.validation.schema import check_files
+
+        target_dir = tmp_path / "config"
+        target_dir.mkdir()
+        target = target_dir / "file.yaml"
+        target.write_text("name: alice\n")
+
+        schema_map = [(re.compile(r"config/.*\.yaml$"), Path("nonexistent.json"))]
+
+        exit_code, error_count = check_files([target], tmp_path, schema_map)
+        assert exit_code == 1
+        assert error_count == 1
+
+    def test_check_files_schema_load_json_decode_error(self, tmp_path: Path) -> None:
+        """check_files handles JSONDecodeError when parsing schema file."""
+        pytest.importorskip("jsonschema")
+        from hephaestus.validation.schema import check_files
+
+        target_dir = tmp_path / "config"
+        target_dir.mkdir()
+        target = target_dir / "file.yaml"
+        target.write_text("name: alice\n")
+
+        schema_file = tmp_path / "bad_schema.json"
+        schema_file.write_text("{invalid json")
+
+        schema_map = [(re.compile(r"config/.*\.yaml$"), schema_file)]
+
+        exit_code, error_count = check_files([target], tmp_path, schema_map)
+        assert exit_code == 1
+        assert error_count == 1

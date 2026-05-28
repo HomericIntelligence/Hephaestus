@@ -355,14 +355,17 @@ jobs:
             pip-${{ runner.os }}-3.12-
 
       - name: Install package
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,schema]"
 
       - name: Run unit tests
-        run: pytest tests/unit --override-ini="addopts=" -v --strict-markers --cov=hephaestus --cov-report=term-missing --cov-fail-under=80
+        run: pytest tests/unit --override-ini="addopts=" -v --strict-markers --cov=hephaestus --cov-report=term-missing --cov-report=xml --cov-fail-under=80
 
       - name: Check unit test structure
         # Use the strict CLI (also flags loose test_*.py files at tests/unit/ root).
         run: hephaestus-check-test-structure
+
+      - name: Check per-module coverage floors
+        run: pip install -e ".[xml]" && hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml
 
   integration-tests:
     name: integration-tests

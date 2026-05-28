@@ -136,6 +136,59 @@ def parse_coverage_report(coverage_file: Path) -> float | None:
         return None
 
 
+def parse_module_coverage(coverage_file: Path) -> dict[str, tuple[float, float]]:
+    """Parse per-module coverage from Cobertura XML report.
+
+    Extracts line-rate and branch-rate for each <class> element
+    (representing a module/file).
+
+    Args:
+        coverage_file: Path to ``coverage.xml`` file.
+
+    Returns:
+        Dictionary mapping filename to (line_rate, branch_rate) tuple, both
+        as percentages (0-100).
+
+    Raises:
+        FileNotFoundError: If coverage file does not exist.
+        RuntimeError: If defusedxml is not available or parsing fails.
+
+    """
+    if not coverage_file.exists():
+        raise FileNotFoundError(f"Coverage file not found: {coverage_file}")
+
+    try:
+        import defusedxml.ElementTree as ElementTree
+    except ImportError as err:
+        raise RuntimeError(
+            "defusedxml not installed. "
+            "Install with: pip install HomericIntelligence-Hephaestus[xml]"
+        ) from err
+
+    try:
+        tree = ElementTree.parse(str(coverage_file))
+        root = tree.getroot()
+    except Exception as e:
+        raise RuntimeError(f"Error parsing coverage file: {e}") from e
+
+    modules: dict[str, tuple[float, float]] = {}
+    for class_elem in root.findall(".//class"):
+        filename = class_elem.get("filename")
+        if filename is None:
+            continue
+        line_rate_str = class_elem.get("line-rate")
+        branch_rate_str = class_elem.get("branch-rate")
+        try:
+            line_rate = float(line_rate_str or "0") * 100.0 if line_rate_str else 0.0
+            branch_rate = float(branch_rate_str or "0") * 100.0 if branch_rate_str else 0.0
+            modules[filename] = (line_rate, branch_rate)
+        except (ValueError, TypeError) as e:
+            logger.warning("Could not parse rates for %s: %s", filename, e)
+            continue
+
+    return modules
+
+
 def check_coverage(threshold: float, path: str, coverage_file: Path) -> bool:
     """Check if coverage meets threshold.
 
@@ -170,6 +223,94 @@ def check_coverage(threshold: float, path: str, coverage_file: Path) -> bool:
     gap = threshold - coverage
     print(f"  FAILED - Coverage is {gap:.2f}% below threshold")
     return False
+
+
+def _check_module_floors(
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    modules_config: dict[str, Any],
+) -> int:
+    """Check per-module coverage floors from the parsed config.
+
+    Args:
+        args: Parsed CLI arguments (coverage_file, json, verbose).
+        config: Full coverage configuration dictionary.
+        modules_config: The ``[coverage.modules]`` sub-dict.
+
+    Returns:
+        0 if all configured modules meet their floor, 1 otherwise.
+
+    """
+    try:
+        module_coverage = parse_module_coverage(args.coverage_file)
+    except (FileNotFoundError, RuntimeError) as e:
+        if args.json:
+            emit_json_status(1, message=f"Could not parse module coverage: {e}")
+        else:
+            print(f"\nERROR: Could not parse module coverage: {e}", file=sys.stderr)
+        return 1
+
+    all_modules_pass = True
+    for module_path in modules_config:
+        module_threshold = get_module_threshold(module_path, config)
+        if module_path not in module_coverage:
+            # Module is configured but not found in the coverage report — fail loudly
+            if not args.json:
+                print(
+                    f"\nERROR: Module {module_path} expected in coverage report but not found",
+                    file=sys.stderr,
+                )
+            all_modules_pass = False
+            continue
+
+        line_rate, branch_rate = module_coverage[module_path]
+        # Use branch rate for comparison if available, otherwise line rate
+        coverage_metric = branch_rate if branch_rate > 0 else line_rate
+        if coverage_metric < module_threshold:
+            if not args.json:
+                print(
+                    f"\nModule {module_path}: {coverage_metric:.2f}% "
+                    f"(below threshold of {module_threshold:.2f}%)",
+                    file=sys.stderr,
+                )
+            all_modules_pass = False
+        elif not args.json and args.verbose:
+            print(f"  {module_path}: {coverage_metric:.2f}% ✓")
+
+    return 0 if all_modules_pass else 1
+
+
+def _emit_json_report(args: argparse.Namespace, threshold: float) -> int:
+    """Emit a JSON coverage report and return an exit code.
+
+    Args:
+        args: Parsed CLI arguments (coverage_file, path).
+        threshold: Effective coverage threshold to test against.
+
+    Returns:
+        0 if coverage passes (or data unavailable), 1 if below threshold.
+
+    """
+    coverage_value = parse_coverage_report(args.coverage_file)
+    if coverage_value is None:
+        report: dict[str, Any] = {
+            "path": args.path,
+            "threshold": threshold,
+            "coverage": None,
+            "passed": True,
+            "message": "Coverage data not available; check skipped",
+        }
+        print(format_output(report, "json"))
+        return 0
+    passed = coverage_value >= threshold
+    report = {
+        "path": args.path,
+        "threshold": threshold,
+        "coverage": coverage_value,
+        "passed": passed,
+    }
+    print(format_output(report, "json"))
+    return 0 if passed else 1
 
 
 def main() -> int:
@@ -243,27 +384,15 @@ def main() -> int:
         )
         return 1
 
+    # Check per-module floors if configured
+    modules_config = config.get("coverage", {}).get("modules", {})
+    if modules_config:
+        rc = _check_module_floors(args, config, modules_config)
+        if rc != 0:
+            return rc
+
     if args.json:
-        coverage_value = parse_coverage_report(args.coverage_file)
-        if coverage_value is None:
-            report: dict[str, Any] = {
-                "path": args.path,
-                "threshold": threshold,
-                "coverage": None,
-                "passed": True,
-                "message": "Coverage data not available; check skipped",
-            }
-            print(format_output(report, "json"))
-            return 0
-        passed = coverage_value >= threshold
-        report = {
-            "path": args.path,
-            "threshold": threshold,
-            "coverage": coverage_value,
-            "passed": passed,
-        }
-        print(format_output(report, "json"))
-        return 0 if passed else 1
+        return _emit_json_report(args, threshold)
 
     success = check_coverage(threshold, args.path, args.coverage_file)
     return 0 if success else 1
