@@ -408,9 +408,22 @@ pre-commit run --all-files
 
 ## Version Management
 
-- **`pyproject.toml`** is the single source of truth for the project version (`[project].version`)
-- **`pixi.toml`** intentionally has no version field — do not add one
-- Use `hephaestus.version.manager.VersionManager` to update secondary files (`VERSION`, `__init__.py`)
-- The `check-version-single-source` pre-commit hook enforces single-source versioning
+This project uses **hatch-vcs dynamic versioning** — the package version is derived
+from git tags, not stored in any file.
+
+- **Single source of truth**: the latest `vX.Y.Z` git tag. `pyproject.toml` declares
+  `dynamic = ["version"]` with `[tool.hatch.version]` `source = "vcs"`; there is **no**
+  static `[project].version` field.
+- **`hephaestus/_version.py`** is generated at build time by the hatch-vcs build hook
+  (`[tool.hatch.build.hooks.vcs]`, `version-file = "hephaestus/_version.py"`) and is not
+  committed. At runtime, `hephaestus/__init__.py` reads `__version__` from installed
+  package metadata via `importlib.metadata`.
+- **`pixi.toml`** intentionally has no version field — do not add one.
+- The `check-version-single-source` pre-commit hook enforces this invariant: it fails if
+  a static `[project].version` is reintroduced, if `dynamic = ["version"]` or
+  `[tool.hatch.version]` `source = "vcs"` is missing, or if `pixi.toml [workspace]` gains
+  a `version` field.
+- To cut a release you do **not** edit any version field — a signed `vX.Y.Z` git tag drives
+  it. See `docs/RELEASING.md` and `CONTRIBUTING.md` for the workflow.
 
 Make sure all temporary files are in the build/ directory
