@@ -5,9 +5,15 @@ ensuring the published install contract does not permit API-incompatible
 versions that are never tested.
 """
 
+import sys
 from pathlib import Path
 
 import pytest
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 
 def _floor(spec: str) -> str:
@@ -48,8 +54,6 @@ class TestDependencyFloorConsistency:
         and 2.x are API-incompatible, they must match to ensure the published
         install contract aligns with the tested (dev) environment.
         """
-        import tomllib
-
         # Load pyproject.toml
         pyproject_path = repo_root / "pyproject.toml"
         assert pyproject_path.exists(), f"pyproject.toml not found at {pyproject_path}"
@@ -111,8 +115,6 @@ class TestDependencyFloorConsistency:
         PyGithub 1.x and 2.x are API-incompatible. The floor must be at least 2.x
         to ensure the code is tested against the versions it can use.
         """
-        import tomllib
-
         pyproject_path = repo_root / "pyproject.toml"
         with open(pyproject_path, "rb") as f:
             pyproject = tomllib.load(f)
