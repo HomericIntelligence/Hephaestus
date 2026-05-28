@@ -17,6 +17,13 @@ from hephaestus.logging.utils import get_logger
 
 logger = get_logger(__name__)
 
+# Subprocess timeouts for different operation types.
+# METADATA_TIMEOUT: local, non-network queries (git status, git config, pixi list)
+# NETWORK_TIMEOUT: operations touching the network (gh calls, git clone/fetch/push)
+# Both support env-var overrides for CI tuning.
+METADATA_TIMEOUT: int = int(os.environ.get("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", "10"))
+NETWORK_TIMEOUT: int = int(os.environ.get("HEPHAESTUS_SUBPROCESS_NETWORK_TIMEOUT", "120"))
+
 
 def slugify(text: str) -> str:
     """Convert text to a URL-friendly slug.

@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Tests for the shared constants module."""
 
+import importlib
 import logging
+import os
 
 import pytest
 
 from hephaestus.constants import DEFAULT_EXCLUDE_DIRS, LOG_FORMAT
+from hephaestus.utils import helpers
 
 
 class TestDefaultExcludeDirs:
@@ -78,3 +81,55 @@ class TestLogFormat:
         assert "%(name)s" in LOG_FORMAT
         assert "%(levelname)s" in LOG_FORMAT
         assert "%(message)s" in LOG_FORMAT
+
+
+class TestSubprocessTimeouts:
+    """Tests for subprocess timeout constants."""
+
+    def test_metadata_timeout_exists(self) -> None:
+        """METADATA_TIMEOUT constant is defined."""
+        assert hasattr(helpers, "METADATA_TIMEOUT")
+        assert isinstance(helpers.METADATA_TIMEOUT, int)
+        assert helpers.METADATA_TIMEOUT > 0
+
+    def test_network_timeout_exists(self) -> None:
+        """NETWORK_TIMEOUT constant is defined."""
+        assert hasattr(helpers, "NETWORK_TIMEOUT")
+        assert isinstance(helpers.NETWORK_TIMEOUT, int)
+        assert helpers.NETWORK_TIMEOUT > 0
+
+    def test_network_timeout_longer_than_metadata(self) -> None:
+        """NETWORK_TIMEOUT should be longer than METADATA_TIMEOUT."""
+        assert helpers.NETWORK_TIMEOUT >= helpers.METADATA_TIMEOUT
+
+    def test_default_metadata_timeout_is_10(self) -> None:
+        """Default METADATA_TIMEOUT is 10 seconds."""
+        if "HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT" not in os.environ:
+            assert helpers.METADATA_TIMEOUT == 10
+
+    def test_default_network_timeout_is_120(self) -> None:
+        """Default NETWORK_TIMEOUT is 120 seconds."""
+        if "HEPHAESTUS_SUBPROCESS_NETWORK_TIMEOUT" not in os.environ:
+            assert helpers.NETWORK_TIMEOUT == 120
+
+    def test_metadata_timeout_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """METADATA_TIMEOUT respects HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT env var."""
+        monkeypatch.setenv("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", "5")
+        # Reimport to pick up the new env var
+        importlib.reload(helpers)
+        try:
+            assert helpers.METADATA_TIMEOUT == 5
+        finally:
+            # Restore original values
+            importlib.reload(helpers)
+
+    def test_network_timeout_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """NETWORK_TIMEOUT respects HEPHAESTUS_SUBPROCESS_NETWORK_TIMEOUT env var."""
+        monkeypatch.setenv("HEPHAESTUS_SUBPROCESS_NETWORK_TIMEOUT", "300")
+        # Reimport to pick up the new env var
+        importlib.reload(helpers)
+        try:
+            assert helpers.NETWORK_TIMEOUT == 300
+        finally:
+            # Restore original values
+            importlib.reload(helpers)

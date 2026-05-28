@@ -39,6 +39,7 @@ from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_te
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.github.rate_limit import detect_rate_limit, wait_until
 from hephaestus.logging.utils import get_logger
+from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
 logger = get_logger(__name__)
 
@@ -62,15 +63,19 @@ def get_resign_email() -> str:
     if env:
         return env
     for args in (["--global"], []):
-        result = subprocess.run(
-            ["git", "config", *args, "--get", "user.email"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        email = result.stdout.strip()
-        if result.returncode == 0 and email:
-            return email
+        try:
+            result = subprocess.run(
+                ["git", "config", *args, "--get", "user.email"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=METADATA_TIMEOUT,
+            )
+            email = result.stdout.strip()
+            if result.returncode == 0 and email:
+                return email
+        except subprocess.TimeoutExpired:
+            continue
     raise RuntimeError(
         "fleet_sync: no resign email configured. Set FLEET_GIT_EMAIL=<address> "
         "or `git config --global user.email <address>` before running."
@@ -154,7 +159,7 @@ def _gh(
                 check=check,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=NETWORK_TIMEOUT,
             )
         except subprocess.CalledProcessError as e:
             epoch = detect_rate_limit(e.stderr or "")
@@ -174,7 +179,10 @@ def _git(
     dry_run: bool = False,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a git command in a working directory."""
+    """Run a git command in a working directory.
+
+    Uses NETWORK_TIMEOUT for operations involving network I/O (clone, fetch, push).
+    """
     if dry_run:
         logger.info("[dry-run] git %s (in %s)", " ".join(args), cwd)
         return subprocess.CompletedProcess(["git", *args], 0, stdout="", stderr="")
@@ -184,6 +192,7 @@ def _git(
         capture_output=True,
         text=True,
         check=check,
+        timeout=NETWORK_TIMEOUT,
     )
 
 
@@ -312,7 +321,7 @@ def rebase_and_resign(pr: PRInfo, clone_dir: Path, dry_run: bool = False) -> boo
         logger.info("  ✓ Rebased and re-signed PR #%d", pr.number)
         return True
 
-    except subprocess.CalledProcessError as e:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         logger.error("  Rebase/push failed for PR #%d: %s", pr.number, e.stderr or str(e))
         return False
 
@@ -382,6 +391,7 @@ def resolve_conflict_with_agent(
             capture_output=True,
             text=True,
             check=False,
+            timeout=NETWORK_TIMEOUT,
         )
 
         # Identify conflicted files
@@ -391,6 +401,7 @@ def resolve_conflict_with_agent(
             capture_output=True,
             text=True,
             check=True,
+            timeout=METADATA_TIMEOUT,
         )
         conflict_files = [f.strip() for f in status_result.stdout.splitlines() if f.strip()]
 
@@ -415,6 +426,7 @@ def resolve_conflict_with_agent(
                 capture_output=True,
                 text=True,
                 check=True,
+                timeout=METADATA_TIMEOUT,
             )
             commit_count = commit_count_result.stdout.strip()
             resign_email = get_resign_email()
@@ -464,6 +476,7 @@ Rules:
             capture_output=True,
             text=True,
             check=False,
+            timeout=NETWORK_TIMEOUT,
         )
         if branch in verify.stdout:
             logger.info("  ✓ Conflict resolved and pushed for PR #%d", pr.number)

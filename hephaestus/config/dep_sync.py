@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
+from hephaestus.utils.helpers import METADATA_TIMEOUT
 
 # Header written at the top of every auto-generated requirements file.
 _GENERATED_HEADER = """\
@@ -294,11 +295,19 @@ def get_pixi_packages() -> dict[str, str]:
         SystemExit: With code 1 if ``pixi list`` fails.
 
     """
-    result = subprocess.run(
-        ["pixi", "list", "--json"],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["pixi", "list", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=METADATA_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            "ERROR: pixi list --json timed out",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if result.returncode != 0:
         print(
             f"ERROR: pixi list --json failed: {result.stderr}",

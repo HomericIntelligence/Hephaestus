@@ -1,12 +1,20 @@
-"""Unit tests for hephaestus.github.tidy — focusing on parse_problem_branches."""
+"""Unit tests for hephaestus.github.tidy — focusing on parse_problem_branches and timeouts."""
 
 import asyncio
 import importlib
+import subprocess
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hephaestus.github.tidy import parse_problem_branches
+from hephaestus.github.tidy import (
+    _detect_default_branch,
+    _in_git_repo,
+    _repo_root,
+    _working_tree_clean,
+    parse_problem_branches,
+)
 
 tidy_module = importlib.import_module("hephaestus.github.tidy")
 
@@ -264,3 +272,69 @@ class TestMain:
         monkeypatch.setattr(tidy_module, "_validate_environment", lambda: None)
         monkeypatch.setattr("sys.argv", ["hephaestus-tidy"])
         assert tidy_module.main() == 1
+
+
+class TestTimeoutHandling:
+    """Tests for subprocess timeout handling in tidy helpers."""
+
+    def test_detect_default_branch_with_timeout(self) -> None:
+        """_detect_default_branch falls back to 'main' on timeout."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired(["gh"], 120)
+            result = _detect_default_branch(None)
+            assert result == "main"
+
+    def test_detect_default_branch_calls_with_network_timeout(self) -> None:
+        """_detect_default_branch uses NETWORK_TIMEOUT."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="main\n")
+            _detect_default_branch(None)
+            # Verify the call included timeout
+            assert mock_run.called
+            call_kwargs = mock_run.call_args[1]
+            assert "timeout" in call_kwargs
+            assert call_kwargs["timeout"] == tidy_module.NETWORK_TIMEOUT
+
+    def test_working_tree_clean_with_timeout(self) -> None:
+        """_working_tree_clean propagates TimeoutExpired."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired(["git"], 10)
+            with pytest.raises(subprocess.TimeoutExpired):
+                _working_tree_clean()
+
+    def test_working_tree_clean_uses_metadata_timeout(self) -> None:
+        """_working_tree_clean uses METADATA_TIMEOUT."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="")
+            _working_tree_clean()
+            assert mock_run.called
+            call_kwargs = mock_run.call_args[1]
+            assert "timeout" in call_kwargs
+            assert call_kwargs["timeout"] == tidy_module.METADATA_TIMEOUT
+
+    def test_in_git_repo_with_timeout(self) -> None:
+        """_in_git_repo propagates TimeoutExpired."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired(["git"], 10)
+            with pytest.raises(subprocess.TimeoutExpired):
+                _in_git_repo()
+
+    def test_in_git_repo_uses_metadata_timeout(self) -> None:
+        """_in_git_repo uses METADATA_TIMEOUT."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            _in_git_repo()
+            assert mock_run.called
+            call_kwargs = mock_run.call_args[1]
+            assert "timeout" in call_kwargs
+            assert call_kwargs["timeout"] == tidy_module.METADATA_TIMEOUT
+
+    def test_repo_root_uses_metadata_timeout(self) -> None:
+        """_repo_root uses METADATA_TIMEOUT."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="/path/to/repo\n")
+            _repo_root()
+            assert mock_run.called
+            call_kwargs = mock_run.call_args[1]
+            assert "timeout" in call_kwargs
+            assert call_kwargs["timeout"] == tidy_module.METADATA_TIMEOUT
