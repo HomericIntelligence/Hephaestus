@@ -222,6 +222,34 @@ class ImplementationPhaseRunner:
                     worktree_path=None,
                 )
 
+            # Skip implementation entirely when an open PR already exists for
+            # this issue. Re-running the agent would clobber in-flight work;
+            # the open PR is handled by the later review-prs / address-review /
+            # drive-green phases. Checked BEFORE create_worktree() so the skip
+            # path costs nothing. Looked up via _impl_module so tests can patch
+            # ``hephaestus.automation.implementer.find_pr_for_issue``.
+            self.status_tracker.update_slot(
+                slot_id, f"{issue_ref(issue_number)}: Checking for existing PR"
+            )
+            existing_pr = self._impl_module.find_pr_for_issue(issue_number)
+            if existing_pr is not None:
+                impl._log(
+                    "info",
+                    f"Issue #{issue_number}: open PR {pr_ref(existing_pr)} already exists — "
+                    f"skipping implementation (handled by later phases)",
+                    thread_id,
+                )
+                with self.state_lock:
+                    state.phase = ImplementationPhase.CREATING_PR
+                impl._save_state(state)
+                return WorkerResult(
+                    issue_number=issue_number,
+                    success=True,
+                    pr_number=existing_pr,
+                    branch_name=branch_name,
+                    already_has_pr=True,
+                )
+
             # Create worktree (only in non-dry-run mode)
             self.status_tracker.update_slot(
                 slot_id, f"{issue_ref(issue_number)}: Creating worktree"

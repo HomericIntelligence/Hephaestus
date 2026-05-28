@@ -34,6 +34,7 @@ from hephaestus.cli.utils import add_json_arg, emit_json_status
 from . import (  # noqa: F401  # re-export for test-patch compatibility
     review_state,
 )
+from ._review_utils import find_pr_for_issue  # noqa: F401
 from .claude_invoke import invoke_claude_with_session  # noqa: F401
 from .curses_ui import CursesUI, ThreadLogManager
 from .dependency_resolver import CyclicDependencyError, DependencyResolver
