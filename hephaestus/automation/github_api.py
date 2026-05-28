@@ -1294,9 +1294,7 @@ def gh_pr_checks(
     result = _gh_call(["pr", "checks", str(pr_number), "--json", "name,state,bucket,workflow"])
     raw: list[dict[str, Any]] = json.loads(result.stdout)
 
-    checks: list[dict[str, Any]] = [
-        _map_pr_check(item) for item in raw
-    ]
+    checks: list[dict[str, Any]] = [_map_pr_check(item) for item in raw]
 
     logger.debug("Fetched %s CI check(s) for PR #%s", len(checks), pr_number)
     return checks
