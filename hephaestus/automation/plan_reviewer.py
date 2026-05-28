@@ -38,6 +38,7 @@ from .review_state import (
 )
 from .session_naming import AGENT_PLAN_REVIEWER, current_trunk_githash
 from .status_tracker import StatusTracker
+from .work_report import write_work_report
 
 logger = logging.getLogger(__name__)
 
@@ -195,13 +196,13 @@ class PlanReviewer:
                     "Issue %s: latest plan review is APPROVED, skipping",
                     issue_ref(issue_number),
                 )
-                return WorkerResult(issue_number=issue_number, success=True)
+                return WorkerResult(issue_number=issue_number, success=True, already_reviewed=True)
 
             # Skip if no plan exists
             plan_text = self._get_latest_plan(issue_number)
             if plan_text is None:
                 logger.info("Issue %s: no plan comment found, skipping", issue_ref(issue_number))
-                return WorkerResult(issue_number=issue_number, success=True)
+                return WorkerResult(issue_number=issue_number, success=True, already_reviewed=True)
 
             # Fetch issue details for context
             self.status_tracker.update_slot(
@@ -698,6 +699,10 @@ def main() -> int:
 
         reviewer = PlanReviewer(options)
         results = reviewer.run()
+
+        # Compute work units for loop convergence (#613): non-skipped reviews
+        work_units = sum(1 for r in results.values() if r.success and not r.already_reviewed)
+        write_work_report(work_units)
 
         failed = [num for num, result in results.items() if not result.success]
         if failed:
