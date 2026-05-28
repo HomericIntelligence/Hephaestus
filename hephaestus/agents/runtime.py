@@ -74,6 +74,12 @@ def run_claude_text(
 
     env = os.environ.copy()
     env["CLAUDECODE"] = ""
+    # Propagate correlation ID to subprocess if set (for gh tracing).
+    from hephaestus.logging.utils import get_current_correlation_id
+
+    cid = get_current_correlation_id()
+    if cid:
+        env["GH_TRACE_ID"] = cid
     return subprocess.run(
         cmd,
         input=prompt,

@@ -151,6 +151,12 @@ def invoke_claude_with_session(  # noqa: C901  # state machine: argv assembly + 
         # CLAUDECODE is set by an outer Claude Code process to refuse nested
         # invocations; clear it so the automation subprocess can launch.
         env["CLAUDECODE"] = ""
+        # Propagate correlation ID to subprocess if set (for gh tracing).
+        from hephaestus.logging.utils import get_current_correlation_id
+
+        cid = get_current_correlation_id()
+        if cid:
+            env["GH_TRACE_ID"] = cid
         cmd = _build(create)
         logger.debug(
             "claude invoke: agent=%s issue=%s sid=%s mode=%s",
