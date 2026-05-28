@@ -79,12 +79,14 @@ class TestCompatibilityDocReferences:
         """
         from pathlib import Path
 
-        repo_root = Path(__file__).resolve().parents[2]
+        # Test file lives at tests/unit/utils/test_deprecation_warnings.py;
+        # parents[0] is tests/unit/utils, [1] tests/unit, [2] tests, [3] repo root.
+        repo_root = Path(__file__).resolve().parents[3]
         compat = (repo_root / "COMPATIBILITY.md").read_text(encoding="utf-8")
         if "retry_with_jitter" not in compat:
             pytest.fail(
                 "COMPATIBILITY.md no longer mentions `retry_with_jitter`, but "
-                "`tests/unit/test_deprecation_warnings.py` still asserts the "
-                "deprecation. Drop the corresponding tests when removing a "
-                "documented deprecation."
+                "`tests/unit/utils/test_deprecation_warnings.py` still asserts "
+                "the deprecation. Drop the corresponding tests when removing "
+                "a documented deprecation."
             )
