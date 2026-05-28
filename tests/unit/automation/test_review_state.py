@@ -15,11 +15,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation.review_state import (
+    MAX_UNPARSEABLE_VERDICT_PASSES,
     PLAN_REVIEW_PREFIX,
     VERDICT_APPROVED,
     VERDICT_BLOCK,
     VERDICT_REVISE,
     _extract_verdict_context,
+    count_unparseable_verdict_passes,
+    exceeds_unparseable_verdict_cap,
+    fetch_all_issue_comments_graphql,
     is_plan_review_approved,
     latest_verdict,
 )
@@ -207,7 +211,7 @@ class TestIsPlanReviewApprovedWithComments:
         assert "<no url>" in log_text
 
     def test_enriched_logging_missing_verdict(self, caplog: Any) -> None:
-        """Not-APPROVED logs should show verdict context even for <missing> verdicts."""
+        """Malformed-verdict logs at WARNING with first line of comment + URL."""
         import logging
 
         caplog.set_level(logging.DEBUG)
@@ -217,7 +221,8 @@ class TestIsPlanReviewApprovedWithComments:
         ]
         is_plan_review_approved(123, comments=comments)
         log_text = caplog.text
-        assert "<missing>" in log_text
+        # #615: malformed verdict now emits WARNING-level log with first line + URL
+        assert "VERDICT_LINE_RE did not match" in log_text
         assert "https://github.com/o/r/issues/123#comment-2" in log_text
 
 
@@ -300,3 +305,169 @@ class TestIsPlanReviewApprovedWithFetch:
         joined = " ".join(gh_args)
         assert "owner=HomericIntelligence" in joined
         assert "name=ProjectMnemosyne" in joined
+
+
+# ---------------------------------------------------------------------------
+# count_unparseable_verdict_passes / exceeds_unparseable_verdict_cap (#615)
+# ---------------------------------------------------------------------------
+
+
+class TestUnparseableVerdictCap:
+    """Bounded-retry helpers introduced by #615."""
+
+    def test_zero_when_all_verdicts_parseable(self) -> None:
+        comments = [
+            _plan_comment(),
+            _review_comment(VERDICT_APPROVED),
+        ]
+        assert count_unparseable_verdict_passes(comments) == 0
+
+    def test_counts_malformed_review_comments(self) -> None:
+        # Two plan-review comments with no parseable verdict + one with REVISE.
+        comments = [
+            _plan_comment(),
+            _review_comment(None),  # malformed pass 1
+            _review_comment(None),  # malformed pass 2
+            _review_comment(VERDICT_REVISE),  # well-formed — should NOT be counted
+        ]
+        assert count_unparseable_verdict_passes(comments) == 2
+
+    def test_only_counts_plan_review_comments(self) -> None:
+        # Non-plan-review comments (no PLAN_REVIEW_PREFIX) should not be counted.
+        other = {"body": "Some other comment with no verdict"}
+        comments = [other, _plan_comment(), other]
+        assert count_unparseable_verdict_passes(comments) == 0
+
+    def test_empty_comments_returns_zero(self) -> None:
+        assert count_unparseable_verdict_passes([]) == 0
+
+    def test_exceeds_cap_false_when_below_threshold(self) -> None:
+        comments = [
+            _plan_comment(),
+            _review_comment(None),  # 1 malformed pass
+        ]
+        assert exceeds_unparseable_verdict_cap(comments) is False
+
+    def test_exceeds_cap_true_when_at_threshold(self) -> None:
+        comments = [_plan_comment()] + [_review_comment(None)] * MAX_UNPARSEABLE_VERDICT_PASSES
+        assert exceeds_unparseable_verdict_cap(comments) is True
+
+    def test_exceeds_cap_false_when_parseable_verdict_resets(self) -> None:
+        # Even 2 malformed + 1 parseable: cap not exceeded (count stops at 2).
+        comments = [
+            _plan_comment(),
+            _review_comment(None),
+            _review_comment(None),
+            _review_comment(VERDICT_REVISE),
+        ]
+        assert exceeds_unparseable_verdict_cap(comments) is False
+
+    def test_custom_cap_respected(self) -> None:
+        comments = [_plan_comment(), _review_comment(None)]
+        assert exceeds_unparseable_verdict_cap(comments, cap=1) is True
+        assert exceeds_unparseable_verdict_cap(comments, cap=2) is False
+
+    def test_malformed_verdict_logs_at_warning_level(self, caplog: Any) -> None:
+        """#615: missing verdict should produce a WARNING with first line + URL."""
+        import logging
+
+        caplog.set_level(logging.WARNING)
+        comments = [
+            _plan_comment(),
+            _review_comment(None, url="https://github.com/o/r/issues/615#comment-99"),
+        ]
+        is_plan_review_approved(615, comments=comments)
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warning_records, "Expected at least one WARNING log for malformed verdict"
+        combined = " ".join(r.getMessage() for r in warning_records)
+        assert "VERDICT_LINE_RE did not match" in combined
+        assert "https://github.com/o/r/issues/615#comment-99" in combined
+
+
+# ---------------------------------------------------------------------------
+# fetch_all_issue_comments_graphql (#616)
+# ---------------------------------------------------------------------------
+
+
+def _batch_graphql_payload(issues: dict[int, list[str]]) -> str:
+    """Build a GraphQL batch response for alias-indexed issues.
+
+    ``issues`` maps issue_number -> list of comment bodies (chronological).
+    The aliasing uses the position in ``sorted(issues.keys())`` so tests can
+    be deterministic.
+    """
+    repo: dict[str, Any] = {}
+    for idx, (num, bodies) in enumerate(sorted(issues.items())):
+        # GraphQL returns newest-first; production code reverses to chrono.
+        nodes = [
+            {"body": b, "updatedAt": "2025-01-01T00:00:00Z", "url": f"https://gh/{num}/{i}"}
+            for i, b in enumerate(reversed(bodies))
+        ]
+        repo[f"issue{idx}"] = {"comments": {"nodes": nodes}}
+    return json.dumps({"data": {"repository": repo}})
+
+
+class TestFetchAllIssueCommentsGraphql:
+    """Batch comment fetch for plan-detection + review-gate (#616)."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_repo(self) -> Any:
+        with (
+            patch(
+                "hephaestus.automation.review_state.get_repo_root",
+                return_value="/tmp/repo",
+            ),
+            patch(
+                "hephaestus.automation.review_state.get_repo_info",
+                return_value=("owner", "repo"),
+            ),
+        ):
+            yield
+
+    def test_returns_empty_dict_for_empty_input(self) -> None:
+        assert fetch_all_issue_comments_graphql([]) == {}
+
+    def test_single_issue_comments_in_chrono_order(self) -> None:
+        bodies = ["first comment", "second comment"]
+        payload = _batch_graphql_payload({101: bodies})
+        mock_result = MagicMock()
+        mock_result.stdout = payload
+        with patch("hephaestus.automation.review_state._gh_call", return_value=mock_result):
+            result = fetch_all_issue_comments_graphql([101])
+        assert 101 in result
+        assert [c["body"] for c in result[101]] == bodies
+
+    def test_multiple_issues_returned_correctly(self) -> None:
+        payload = _batch_graphql_payload(
+            {
+                201: ["plan A"],
+                202: ["plan B", "review B"],
+            }
+        )
+        mock_result = MagicMock()
+        mock_result.stdout = payload
+        with patch("hephaestus.automation.review_state._gh_call", return_value=mock_result):
+            result = fetch_all_issue_comments_graphql([201, 202])
+        assert len(result[201]) == 1
+        assert result[201][0]["body"] == "plan A"
+        assert len(result[202]) == 2
+        assert result[202][0]["body"] == "plan B"
+        assert result[202][1]["body"] == "review B"
+
+    def test_makes_single_gh_call(self) -> None:
+        payload = _batch_graphql_payload({301: [], 302: []})
+        mock_result = MagicMock()
+        mock_result.stdout = payload
+        with patch(
+            "hephaestus.automation.review_state._gh_call", return_value=mock_result
+        ) as mock_gh:
+            fetch_all_issue_comments_graphql([301, 302])
+        mock_gh.assert_called_once()
+
+    def test_returns_empty_lists_on_gh_failure(self) -> None:
+        with patch(
+            "hephaestus.automation.review_state._gh_call",
+            side_effect=RuntimeError("network error"),
+        ):
+            result = fetch_all_issue_comments_graphql([401, 402])
+        assert result == {401: [], 402: []}
