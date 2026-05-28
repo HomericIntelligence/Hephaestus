@@ -54,11 +54,17 @@ class CircuitBreaker:
     Tracks failures and opens the circuit when a threshold is exceeded,
     preventing further calls until a recovery timeout has elapsed.
 
+    The HALF_OPEN state admits a limited number of concurrent in-flight calls
+    to test recovery. The `half_open_max_calls` parameter controls this concurrency
+    limit: each admitted call increments an in-flight counter, and each completed
+    call (success or failure) decrements it, allowing the next call to proceed.
+
     Args:
         name: Identifier for this circuit breaker instance
         failure_threshold: Number of consecutive failures before opening
         recovery_timeout: Seconds to wait before transitioning to half-open
-        half_open_max_calls: Max calls allowed in half-open state
+        half_open_max_calls: Maximum number of calls admitted concurrently in-flight
+            while HALF_OPEN; each call releases its slot on completion (success or failure)
         success_threshold: Consecutive successes in HALF_OPEN required to close
 
     Example:
@@ -81,7 +87,8 @@ class CircuitBreaker:
             name: Identifier for this circuit breaker instance
             failure_threshold: Consecutive failures before opening
             recovery_timeout: Seconds before transitioning to half-open
-            half_open_max_calls: Max calls allowed in half-open state
+            half_open_max_calls: Maximum number of calls admitted concurrently
+                in-flight while HALF_OPEN; each call releases its slot on completion
             success_threshold: Consecutive successes in HALF_OPEN to close
 
         """
@@ -158,13 +165,13 @@ class CircuitBreaker:
         return result
 
     def _record_success(self) -> None:
-        """Record a successful call."""
+        """Record a successful call (releases this call's half-open slot)."""
         with self._lock:
             if self._state == CircuitBreakerState.HALF_OPEN:
+                if self._half_open_calls > 0:
+                    self._half_open_calls -= 1
                 self._half_open_successes += 1
                 if self._half_open_successes < self.success_threshold:
-                    # Allow the next probe through by resetting the call counter
-                    self._half_open_calls = 0
                     return
                 logger.info(
                     "Circuit breaker '%s' closing after %d successful half-open call(s)",
@@ -177,12 +184,14 @@ class CircuitBreaker:
             self._half_open_successes = 0
 
     def _record_failure(self) -> None:
-        """Record a failed call."""
+        """Record a failed call (releases this call's half-open slot)."""
         with self._lock:
             self._failure_count += 1
             self._last_failure_time = time.monotonic()
 
             if self._state == CircuitBreakerState.HALF_OPEN:
+                if self._half_open_calls > 0:
+                    self._half_open_calls -= 1
                 self._state = CircuitBreakerState.OPEN
                 logger.warning(
                     "Circuit breaker '%s' re-opened after half-open failure",
@@ -225,7 +234,8 @@ def get_circuit_breaker(
         name: Unique identifier for the circuit breaker
         failure_threshold: Failures before opening (only used on creation)
         recovery_timeout: Recovery timeout in seconds (only used on creation)
-        half_open_max_calls: Max half-open calls (only used on creation)
+        half_open_max_calls: Maximum concurrent in-flight calls in HALF_OPEN state
+            (only used on creation)
         success_threshold: Successes in HALF_OPEN to close (only used on creation)
 
     Returns:
