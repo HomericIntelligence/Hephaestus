@@ -42,6 +42,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pixi-
 
+      - name: Editable install (scripts/ smoke tests spawn subprocesses that import hephaestus)
+        run: pixi run dev-install
+
       - name: Run tests
         run: pixi run pytest tests/unit
 
