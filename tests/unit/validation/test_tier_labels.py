@@ -397,7 +397,7 @@ class TestFormatReport:
     def test_findings_included_in_report(self) -> None:
         """Non-empty findings produce a report with mismatch details."""
         finding = TierLabelFinding(
-            file="docs/README.md",
+            file="docs/sample.md",
             line=5,
             tier="T3",
             found_name="Tooling",
@@ -437,7 +437,7 @@ class TestFormatJson:
     def test_findings_serialised_correctly(self) -> None:
         """Finding fields appear in the JSON output."""
         finding = TierLabelFinding(
-            file="docs/README.md",
+            file="docs/sample.md",
             line=10,
             tier="T4",
             found_name="Delegation",
@@ -447,7 +447,7 @@ class TestFormatJson:
         result = json.loads(format_json([finding]))
         assert len(result) == 1
         obj = result[0]
-        assert obj["file"] == "docs/README.md"
+        assert obj["file"] == "docs/sample.md"
         assert obj["line"] == 10
         assert obj["tier"] == "T4"
         assert obj["found_name"] == "Delegation"

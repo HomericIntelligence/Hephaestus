@@ -56,7 +56,7 @@ def test_fix_absolute_path_links():
     assert count == 1
 
     # Test from subdirectory (depth 1)
-    file_path = Path("docs/README.md")
+    file_path = Path("docs/index.md")
     content = "See [agents](/agents/index.md)"
     fixed, count = fixer.fix_absolute_path_links(content, file_path)
     assert fixed == "See [agents](../agents/index.md)"
