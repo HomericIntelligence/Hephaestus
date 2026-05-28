@@ -19,6 +19,7 @@ from hephaestus.automation.github_api import (
     gh_issue_json,
     gh_list_labels,
     gh_list_open_issues,
+    gh_pr_checks,
     gh_pr_create,
     is_issue_closed,
     parse_issue_dependencies,
@@ -1301,3 +1302,87 @@ class TestGhCallRateLimitFromStdout:
         )
         with pytest.raises(GitHubRateLimitError):
             _gh_call(["issue", "list"], max_retries=2)
+
+
+# Valid field set for `gh pr checks --json`, captured from the gh CLI schema.
+# Any field the code requests MUST be a subset of this, or gh rejects the whole
+# call with "Unknown JSON field" (the bug behind issue #654).
+_GH_PR_CHECKS_VALID_FIELDS = {
+    "bucket",
+    "completedAt",
+    "description",
+    "event",
+    "link",
+    "name",
+    "startedAt",
+    "state",
+    "workflow",
+}
+
+
+class TestGhPrChecks:
+    """Tests for gh_pr_checks: schema validity and bucket->contract mapping."""
+
+    def test_dry_run_returns_empty(self) -> None:
+        assert gh_pr_checks(123, dry_run=True) == []
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_requested_json_fields_are_valid_schema(self, mock_gh_call: Any) -> None:
+        """The --json field list must be a subset of gh's real schema."""
+        mock_result = Mock()
+        mock_result.stdout = "[]"
+        mock_gh_call.return_value = mock_result
+
+        gh_pr_checks(123)
+
+        args = mock_gh_call.call_args.args[0]
+        json_idx = args.index("--json")
+        requested = set(args[json_idx + 1].split(","))
+        invalid = requested - _GH_PR_CHECKS_VALID_FIELDS
+        assert not invalid, f"gh pr checks requested invalid --json field(s): {invalid}"
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_maps_bucket_to_status_and_conclusion(self, mock_gh_call: Any) -> None:
+        """state/bucket from gh map onto the status/conclusion contract."""
+        mock_result = Mock()
+        mock_result.stdout = json.dumps(
+            [
+                {"name": "pass-check", "state": "SUCCESS", "bucket": "pass", "workflow": ""},
+                {"name": "fail-check", "state": "FAILURE", "bucket": "fail", "workflow": "CI"},
+                {"name": "skip-check", "state": "SKIPPED", "bucket": "skipping", "workflow": ""},
+                {"name": "pend-check", "state": "PENDING", "bucket": "pending", "workflow": ""},
+                {"name": "cancel-check", "state": "CANCELLED", "bucket": "cancel", "workflow": ""},
+            ]
+        )
+        mock_gh_call.return_value = mock_result
+
+        checks = gh_pr_checks(456)
+        by_name = {c["name"]: c for c in checks}
+
+        assert by_name["pass-check"]["status"] == "completed"
+        assert by_name["pass-check"]["conclusion"] == "success"
+        assert by_name["fail-check"]["status"] == "completed"
+        assert by_name["fail-check"]["conclusion"] == "failure"
+        assert by_name["skip-check"]["status"] == "completed"
+        assert by_name["skip-check"]["conclusion"] == "skipped"
+        assert by_name["cancel-check"]["status"] == "completed"
+        assert by_name["cancel-check"]["conclusion"] == "failure"
+        # Pending checks are not yet concluded.
+        assert by_name["pend-check"]["status"] == "in_progress"
+        assert by_name["pend-check"]["conclusion"] is None
+        # Every check exposes the contract keys consumed by ci_driver.
+        for c in checks:
+            assert set(c) == {"name", "status", "conclusion", "required"}
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_unknown_bucket_treated_as_pending(self, mock_gh_call: Any) -> None:
+        """An unrecognised bucket degrades to in_progress, never a false 'completed'."""
+        mock_result = Mock()
+        mock_result.stdout = json.dumps(
+            [{"name": "weird", "state": "QUEUED", "bucket": "something-new", "workflow": ""}]
+        )
+        mock_gh_call.return_value = mock_result
+
+        (check,) = gh_pr_checks(789)
+        assert check["status"] == "in_progress"
+        assert check["conclusion"] is None

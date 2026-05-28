@@ -199,6 +199,7 @@ _NON_TRANSIENT_PATTERNS = [
         r"(?:^|\s)400(?:\s|$)|bad request",
         r"(?:^|\s)401(?:\s|$)|unauthorized",
         r"invalid argument",
+        r"unknown json field",
     )
 ]
 _NON_TRANSIENT_PATTERNS.append(_TOKEN_SCOPE_PATTERN)
@@ -1241,6 +1242,30 @@ mutation ResolveThread($threadId: ID!) {
     logger.info("Resolved review thread %r", thread_id)
 
 
+# ``gh pr checks --json`` rollup buckets → (status, conclusion) in the contract that
+# ci_driver.py consumes. A terminal bucket (anything but "pending") means the check has
+# concluded; the bucket also tells us pass/fail/skip.
+_PR_CHECK_BUCKET_MAP: dict[str, tuple[str, str | None]] = {
+    "pass": ("completed", "success"),
+    "fail": ("completed", "failure"),
+    "cancel": ("completed", "failure"),
+    "skipping": ("completed", "skipped"),
+    "pending": ("in_progress", None),
+}
+
+
+def _map_pr_check(item: dict[str, Any]) -> dict[str, Any]:
+    """Map one raw ``gh pr checks --json`` entry onto the status/conclusion contract."""
+    bucket = str(item.get("bucket", "")).lower()
+    status, conclusion = _PR_CHECK_BUCKET_MAP.get(bucket, ("in_progress", None))
+    return {
+        "name": item.get("name", ""),
+        "status": status,
+        "conclusion": conclusion,
+        "required": False,
+    }
+
+
 def gh_pr_checks(
     pr_number: int,
     dry_run: bool = False,
@@ -1253,27 +1278,23 @@ def gh_pr_checks(
 
     Returns:
         List of check dicts with keys: name (str), status (str), conclusion (str | None),
-        required (bool)
+        required (bool).
+
+        ``gh pr checks --json`` does not expose ``status``/``conclusion``/``required`` — it
+        exposes ``state`` (e.g. ``SUCCESS``/``FAILURE``/``PENDING``) and ``bucket``
+        (``pass``/``fail``/``pending``/``skipping``/``cancel``). Those are mapped here onto the
+        ``status``/``conclusion`` keys this module's consumers expect. ``required`` is not in the
+        schema, so it defaults to ``False`` (callers treat "no required checks" as "all required").
 
     """
     if dry_run:
         logger.info("[dry_run] Would fetch CI checks for PR #%s", pr_number)
         return []
 
-    result = _gh_call(
-        ["pr", "checks", str(pr_number), "--json", "name,status,conclusion,workflow,required"]
-    )
+    result = _gh_call(["pr", "checks", str(pr_number), "--json", "name,state,bucket,workflow"])
     raw: list[dict[str, Any]] = json.loads(result.stdout)
 
-    checks: list[dict[str, Any]] = [
-        {
-            "name": item.get("name", ""),
-            "status": item.get("status", ""),
-            "conclusion": item.get("conclusion") or None,
-            "required": bool(item.get("required", False)),
-        }
-        for item in raw
-    ]
+    checks: list[dict[str, Any]] = [_map_pr_check(item) for item in raw]
 
     logger.debug("Fetched %s CI check(s) for PR #%s", len(checks), pr_number)
     return checks

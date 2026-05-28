@@ -344,13 +344,12 @@ class PRReviewer(BaseReviewer):
         # Fetch CI check status (best-effort).
         try:
             result = _gh_call(
-                ["pr", "checks", str(pr_number), "--json", "name,state,conclusion"],
+                ["pr", "checks", str(pr_number), "--json", "name,state,bucket"],
                 check=False,
             )
             checks = json.loads(result.stdout or "[]")
             status_lines = [
-                f"{c.get('name', '?')}: {c.get('conclusion') or c.get('state', '?')}"
-                for c in checks
+                f"{c.get('name', '?')}: {c.get('bucket') or c.get('state', '?')}" for c in checks
             ]
             context["ci_status"] = "\n".join(status_lines)
         except Exception as exc:
