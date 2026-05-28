@@ -46,7 +46,7 @@ dev = [
     "tomli>=2.0,<3;python_version<'3.11'",
 ]
 github = [
-    "PyGithub>=1.55,<3",
+    "PyGithub>=2.9.1,<3",
 ]
 toml = [
     "tomli>=2.0,<3;python_version<'3.11'",

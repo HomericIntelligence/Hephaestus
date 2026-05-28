@@ -6,6 +6,14 @@ updates:
       interval: "weekly"
     labels:
       - "dependencies"
+    # Dependabot auto-appends a colon after a prefix ending in ) → "chore(deps): ...".
+    # https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      python-dependencies:
+        patterns:
+          - "*"
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -14,3 +22,9 @@ updates:
     labels:
       - "dependencies"
       - "ci/cd"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
