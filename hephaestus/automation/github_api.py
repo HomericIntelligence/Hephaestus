@@ -787,7 +787,7 @@ def _fetch_batch_states(batch: list[int], owner: str, repo: str) -> dict[int, Is
 
     """
     fragments = [
-        f"issue{idx}: issue(number: {num}) {{ number state }}" for idx, num in enumerate(batch)
+        f"issue{idx}: issue(number: {int(num)}) {{ number state }}" for idx, num in enumerate(batch)
     ]
     query = f"""
         query {{
