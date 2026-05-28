@@ -5,7 +5,8 @@ import secrets
 from ._shared import _UNTRUSTED_NOTICE, _fence_untrusted
 
 ADDRESS_REVIEW_PROMPT = """
-Address the review threads for PR #{pr_number} (issue #{issue_number}).
+You are the COORDINATOR for addressing the review threads on PR #{pr_number}
+(issue #{issue_number}).
 
 **Working Directory:** {worktree_path}
 
@@ -22,27 +23,58 @@ The block above is a JSON array where each element has:
 
 ---
 
-**Your task:**
-For each thread, read the file at `path` in the working directory and apply the necessary
-code fix. After fixing all addressable threads:
+**Your task (coordinator):**
 
-1. Run tests: `pixi run python -m pytest tests/ -v`
-2. Run pre-commit: `pre-commit run --all-files`
-3. Fix any issues found
-4. Commit all changes (do NOT push)
+1. Parse the review-threads JSON above and **group the threads by `path`** (one group
+   per distinct file). Threads with a null/empty `path` (PR-level / general comments)
+   form one extra group keyed as `__general__`.
+
+2. For EACH file group, dispatch ONE sub-agent using the Task tool
+   (`subagent_type: "general-purpose"`). Dispatch all groups, one sub-agent per file.
+   Each sub-agent OWNS exactly one file and must not touch any other file — this
+   prevents two agents editing the same file and causing merge/commit contention.
+
+   Give each sub-agent a self-contained prompt that instructs it to:
+   a. FIRST run the team-knowledge skill to pull prior learnings relevant to this fix:
+      `Skill(skill: "hephaestus:advise", args: "<short description of the review feedback>")`.
+      Use whatever it surfaces to inform the fix; do not skip this step.
+   b. Read the owned file at `path` in the working directory `{worktree_path}` and apply
+      the code fix for ALL of that file's review threads (you will pass it the thread
+      bodies + line numbers + thread_ids for its file only).
+   c. Report back, for each `thread_id` it handled, a one-line reply describing the fix —
+      or, if a thread is not addressable in code, say so and leave it out of the fixed set.
+
+   **Each sub-agent prompt MUST include these guardrails (critical):**
+   - "Do NOT background your work, do NOT exit early, and do NOT defer. Complete the fix
+     synchronously and return only when the file is fully edited."
+   - "You own ONLY the file `<path>`. Do not read-modify any other file. Do not commit,
+     push, or run git — the coordinator handles that."
+   - "Return your result as a compact list mapping each thread_id to a one-line reply."
+
+3. After ALL sub-agents have returned, you (the coordinator) integrate their results and
+   run the gates from the working directory:
+   - Run tests: `pixi run python -m pytest tests/ -v`
+   - Run pre-commit: `pre-commit run --all-files`
+   - Fix any issues found (you may edit files directly at this stage).
+   - Commit all changes (do NOT push).
+
+4. Trust but verify: only mark a thread `addressed` if the owning sub-agent actually
+   edited the file for it. If a sub-agent claimed a fix but the file is unchanged for that
+   thread, drop it from `addressed`.
 
 **Output format:**
-Write your fix notes in prose. At the very end of your response, emit a single fenced JSON block:
+Write your coordination notes in prose. At the very end of your response, emit a single
+fenced JSON block:
 
 ```json
 {{"addressed": ["<thread_id>", ...], "replies": {{"<thread_id>": "one-line reply"}}}}
 ```
 
-Rules for the JSON block:
-- `addressed`: array of thread_id strings for threads you actually fixed in code
+Rules for the JSON block (UNCHANGED — the pipeline parses exactly this):
+- `addressed`: array of thread_id strings for threads actually fixed in code
   (any thread_id not in the unresolved-set we presented is dropped silently)
-- `replies`: mapping of thread_id to a one-line reply describing what you changed
-- Only include threads you genuinely fixed. Leave unaddressable threads out of `addressed`.
+- `replies`: mapping of thread_id to a one-line reply describing what changed
+- Only include threads genuinely fixed. Leave unaddressable threads out of `addressed`.
 - Emit only one JSON block, at the very end of your response (the parser takes the LAST one).
 """
 
