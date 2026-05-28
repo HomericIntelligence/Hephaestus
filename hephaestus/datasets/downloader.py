@@ -401,6 +401,17 @@ class CIFAR10Downloader(DatasetDownloader):
         train_images: list[Any] = []
         train_labels: list[Any] = []
 
+        # NOTE: pickle.load on untrusted input is dangerous. CIFAR-10 batch files
+        # are trusted here because the downloader fetched them from a canonical
+        # torchvision mirror, then verified the bundle's MD5 against the
+        # upstream-published checksum (see _MD5_CHECKSUMS dict and the
+        # checksum-verification step above). batch_dir lives under the
+        # project's write-restricted state directory, so a local attacker
+        # would need to defeat both the URL pinning and the MD5 check to
+        # inject a malicious pickle here. This is the project's only
+        # intentional bypass of the safe-pickle policy documented in
+        # io/utils.py::load_data (allow_unsafe_deserialization=False default)
+        # and SECURITY.md; do NOT generalize this pattern.
         for i in range(1, 6):
             batch_path = batch_dir / f"data_batch_{i}"
             try:

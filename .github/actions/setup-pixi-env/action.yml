@@ -1,0 +1,61 @@
+# Composite action: install pixi + cache its environments.
+#
+# Extracted from the 4 duplicate "Install pixi" / "Cache pixi environments"
+# blocks that previously lived inline in `.github/workflows/_required.yml`.
+# The two dimensions of variation between callers — which pixi environment
+# to materialize, and which cache key prefix to use — are exposed as
+# inputs.
+#
+# Why a composite action and not a reusable workflow?
+# - We need to share STEPS, not jobs. A reusable workflow can only be called
+#   via `uses:` at the job level, which forces every caller into a separate
+#   job + adds an extra runner spin-up. A composite action runs inline in
+#   the caller's existing job, preserving the merge-gate's matrix.
+# - The action lives under `.github/actions/` (the GitHub convention for
+#   project-local composite actions), and is invoked via
+#   `uses: ./.github/actions/setup-pixi-env` with the same relative path
+#   from every caller.
+#
+# Audit reference: closes S6 minor finding from #596 — "extract pixi-setup
+# composite action from _required.yml".
+
+name: Setup pixi env
+description: Install pixi + cache its environments. Wraps prefix-dev/setup-pixi + actions/cache.
+
+inputs:
+  environments:
+    description: >-
+      Which pixi environments to materialize on install. Pass "lint" to
+      mount only the lint env (for ruff/mypy/yamllint jobs), or leave
+      empty to install the default env (for unit-tests / shell-tests
+      / build / etc.).
+    required: false
+    default: ""
+  cache-key-prefix:
+    description: >-
+      Prefix for the cache key. Use "pixi-lint" when only the lint env is
+      installed (smaller cache, lint jobs share it). Use "pixi-shell" or
+      similar when the default env is installed (larger cache, test jobs
+      share it). The full key is composed as
+      <prefix>-<runner.os>-<hashFiles(pixi.lock)>.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install pixi
+      uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11  # v0.9.6
+      with:
+        pixi-version: v0.63.2
+        environments: ${{ inputs.environments }}
+        locked: true
+
+    - name: Cache pixi environments
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+      with:
+        path: |
+          .pixi
+          ~/.cache/rattler/cache
+        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ hashFiles('pixi.lock') }}
+        restore-keys: |
+          ${{ inputs.cache-key-prefix }}-${{ runner.os }}-
