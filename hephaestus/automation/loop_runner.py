@@ -151,6 +151,44 @@ class RepoResult:
         return any(p.produced_work for p in self.phases if p.name in _CONVERGENCE_PHASES)
 
 
+def _summarize_loop(loop_results: list[RepoResult], loop_idx: int, elapsed_s: float) -> str:
+    """Generate a one-line summary of loop execution for logs.
+
+    Counts: planned (non-skipped plan phases), reviewed (review-plans +
+    review-prs non-skipped), skipped (all skipped phases).
+
+    Args:
+        loop_results: Results from all repos in this loop iteration.
+        loop_idx: Loop iteration number (1-indexed).
+        elapsed_s: Wall-clock seconds elapsed for the loop.
+
+    Returns:
+        A summary string like "loop 1: planned=5 reviewed=3 skipped=2 elapsed=45s".
+
+    """
+    total_planned = 0
+    total_reviewed = 0
+    total_skipped = 0
+
+    for result in loop_results:
+        for phase in result.phases:
+            if phase.skipped:
+                total_skipped += 1
+            else:
+                # Count non-skipped plan phase
+                if phase.name == "plan":
+                    total_planned += 1
+                # Count non-skipped review phases
+                elif phase.name in ("review-plans", "review-prs"):
+                    total_reviewed += 1
+
+    elapsed = f"{elapsed_s:.0f}s"
+    return (
+        f"loop {loop_idx}: planned={total_planned} reviewed={total_reviewed} "
+        f"skipped={total_skipped} elapsed={elapsed}"
+    )
+
+
 @dataclass
 class LoopConfig:
     """Top-level CLI-derived configuration."""
@@ -967,6 +1005,9 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
         LOG.info("▶ LOOP %d / %d", loop_idx, cfg.loops)
         LOG.info("━" * 60)
 
+        loop_t0 = time.monotonic()
+        loop_results: list[RepoResult] = []
+
         with ThreadPoolExecutor(
             max_workers=max(1, cfg.parallel_repos),
             thread_name_prefix="repo-",
@@ -984,6 +1025,7 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
                         loop_idx=loop_idx,
                         runner_error=f"future raised: {type(exc).__name__}: {exc}",
                     )
+                loop_results.append(result)
                 all_results.append(result)
                 if result.any_failure:
                     LOG.warning(
@@ -992,6 +1034,8 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
                         loop_idx,
                     )
 
+        elapsed_s = time.monotonic() - loop_t0
+        LOG.info("%s", _summarize_loop(loop_results, loop_idx, elapsed_s))
         LOG.info("Loop %d complete.", loop_idx)
 
         # Check for early exit: if this loop produced no work and had no

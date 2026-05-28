@@ -19,6 +19,7 @@ from hephaestus.automation.review_state import (
     VERDICT_APPROVED,
     VERDICT_BLOCK,
     VERDICT_REVISE,
+    _extract_verdict_context,
     is_plan_review_approved,
     latest_verdict,
 )
@@ -72,16 +73,61 @@ class TestLatestVerdict:
 
 
 # ---------------------------------------------------------------------------
+# _extract_verdict_context
+# ---------------------------------------------------------------------------
+
+
+class TestExtractVerdictContext:
+    """Context extraction for not-APPROVED logs."""
+
+    def test_extracts_verdict_line_when_present(self) -> None:
+        body = f"{PLAN_REVIEW_PREFIX}\n\nReview text.\n\n**Verdict: REVISE**\n"
+        context = _extract_verdict_context(body)
+        assert "Verdict: REVISE" in context
+
+    def test_returns_first_non_prefix_line_when_no_verdict(self) -> None:
+        body = f"{PLAN_REVIEW_PREFIX}\n\nThis is the main content.\nMore details.\n"
+        context = _extract_verdict_context(body)
+        assert context == "This is the main content."
+
+    def test_prefers_verdict_line_over_first_content_line(self) -> None:
+        body = (
+            f"{PLAN_REVIEW_PREFIX}\n\nFirst line of content.\nMore details.\n**Verdict: BLOCK**\n"
+        )
+        context = _extract_verdict_context(body)
+        assert "Verdict: BLOCK" in context
+
+    def test_returns_empty_string_when_body_is_empty(self) -> None:
+        body = ""
+        context = _extract_verdict_context(body)
+        assert context == ""
+
+    def test_returns_empty_string_when_only_prefix_lines(self) -> None:
+        body = f"{PLAN_REVIEW_PREFIX}\n{PLAN_REVIEW_PREFIX}\n"
+        context = _extract_verdict_context(body)
+        assert context == ""
+
+    def test_truncates_to_verdict_log_preview_chars(self) -> None:
+        long_line = "x" * 500
+        body = f"{PLAN_REVIEW_PREFIX}\n\n{long_line}\n"
+        context = _extract_verdict_context(body)
+        assert len(context) <= 200
+
+
+# ---------------------------------------------------------------------------
 # is_plan_review_approved (with pre-supplied comments)
 # ---------------------------------------------------------------------------
 
 
-def _review_comment(verdict: str | None) -> dict[str, Any]:
+def _review_comment(verdict: str | None, url: str | None = None) -> dict[str, Any]:
     if verdict is None:
         body = f"{PLAN_REVIEW_PREFIX}\n\nMalformed review with no verdict line.\n"
     else:
         body = f"{PLAN_REVIEW_PREFIX}\n\nBody.\n\n**Verdict: {verdict}**\n"
-    return {"body": body}
+    comment = {"body": body}
+    if url is not None:
+        comment["url"] = url
+    return comment
 
 
 def _plan_comment() -> dict[str, Any]:
@@ -133,6 +179,46 @@ class TestIsPlanReviewApprovedWithComments:
         # Review comment exists with the right prefix but no verdict line.
         comments = [_plan_comment(), _review_comment(None)]
         assert is_plan_review_approved(123, comments=comments) is False
+
+    def test_enriched_logging_includes_verdict_context_and_url(self, caplog: Any) -> None:
+        """Not-APPROVED logs should include verdict context and URL."""
+        import logging
+
+        caplog.set_level(logging.DEBUG)
+        comments = [
+            _plan_comment(),
+            _review_comment(VERDICT_BLOCK, url="https://github.com/o/r/issues/123#comment-1"),
+        ]
+        is_plan_review_approved(123, comments=comments)
+        # Logs should include verdict context and URL when not-APPROVED
+        log_text = caplog.text
+        assert "BLOCK" in log_text
+        assert "https://github.com/o/r/issues/123#comment-1" in log_text
+
+    def test_enriched_logging_fallback_no_url(self, caplog: Any) -> None:
+        """Not-APPROVED logs should show <no url> when URL is missing."""
+        import logging
+
+        caplog.set_level(logging.DEBUG)
+        comments = [_plan_comment(), _review_comment(VERDICT_REVISE)]
+        is_plan_review_approved(123, comments=comments)
+        log_text = caplog.text
+        assert "REVISE" in log_text
+        assert "<no url>" in log_text
+
+    def test_enriched_logging_missing_verdict(self, caplog: Any) -> None:
+        """Not-APPROVED logs should show verdict context even for <missing> verdicts."""
+        import logging
+
+        caplog.set_level(logging.DEBUG)
+        comments = [
+            _plan_comment(),
+            _review_comment(None, url="https://github.com/o/r/issues/123#comment-2"),
+        ]
+        is_plan_review_approved(123, comments=comments)
+        log_text = caplog.text
+        assert "<missing>" in log_text
+        assert "https://github.com/o/r/issues/123#comment-2" in log_text
 
 
 # ---------------------------------------------------------------------------

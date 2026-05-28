@@ -71,6 +71,9 @@ def get_repo_root(path: Path | None = None) -> Path:
     return _get_repo_root(path)
 
 
+_repo_info_cache: dict[Path | None, tuple[str, str]] = {}
+
+
 def get_repo_info(repo_root: Path | None = None) -> tuple[str, str]:
     """Get repository owner and name from git remote.
 
@@ -86,6 +89,11 @@ def get_repo_info(repo_root: Path | None = None) -> tuple[str, str]:
     """
     if repo_root is None:
         repo_root = get_repo_root()
+
+    key = repo_root.resolve() if repo_root is not None else None
+    cached = _repo_info_cache.get(key)
+    if cached is not None:
+        return cached
 
     try:
         result = run(
@@ -111,6 +119,7 @@ def get_repo_info(repo_root: Path | None = None) -> tuple[str, str]:
             raise RuntimeError(f"Unable to parse git remote URL: {remote_url}")
 
         logger.debug("Detected repo: %s/%s", owner, repo)
+        _repo_info_cache[key] = (owner, repo)
         return owner, repo
 
     except subprocess.CalledProcessError as e:
@@ -149,6 +158,12 @@ def get_repo_slug(repo_root: Path | None = None) -> str:
         repo = "repo"
     _repo_slug_cache[key] = repo
     return repo
+
+
+def clear_repo_caches() -> None:
+    """Clear both repo info and slug caches. For test isolation and long-lived processes."""
+    _repo_info_cache.clear()
+    _repo_slug_cache.clear()
 
 
 def issue_ref(issue_number: int | str) -> str:
