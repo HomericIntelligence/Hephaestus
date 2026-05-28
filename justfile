@@ -83,3 +83,7 @@ install-check:
 # Install missing HomericIntelligence ecosystem dependencies
 install ROLE="all":
     bash scripts/shell/install.sh --install --role {{ ROLE }}
+
+# Remove dev-run log files (run*.log are gitignored clutter)
+clean:
+    rm -f run*.log

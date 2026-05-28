@@ -1,8 +1,5 @@
 # Contributing to ProjectHephaestus
 
-> **See also:** [`docs/contributing.md`](docs/contributing.md) for a concise summary of
-> development principles (KISS, YAGNI, DRY, SOLID, Modularity) used in this project.
-
 Thank you for considering contributing to ProjectHephaestus! We welcome contributions from the community.
 
 ## Code of Conduct
@@ -100,16 +97,15 @@ computes the next semver string and prints the `git tag` commands to run.
 
 - **Dependabot** is configured for `pip` (pyproject.toml dev extras) and
   `github-actions`. It opens PRs automatically for those.
-- **Conda dependencies in `pixi.toml`** (pydantic, pygithub, pygments, ruff, mypy,
-  bats-core, yamllint, etc.) are **not** covered by Dependabot — its pip ecosystem
-  cannot parse pixi.toml. These are updated manually:
+- **Renovate** (`renovate.json`) is configured with the `:pixi` preset and watches
+  conda-forge / pixi dependencies in `pixi.toml` — the package ecosystem Dependabot
+  cannot parse. Renovate opens grouped PRs on a weekly cadence, matching Dependabot's
+  schedule. To manually refresh the lock file outside of that cycle:
 
   ```bash
   pixi update           # updates pixi.lock; commit alongside any range changes
   ```
 
-  Run periodically as part of dependency-hygiene work. The proper long-term fix —
-  Renovate with native pixi support — is tracked in #484.
 - A pre-commit hook (`check-dep-sync`) verifies that any committed `requirements*.txt`
   entries fall within the `pixi.toml` range; it does not initiate updates.
 
