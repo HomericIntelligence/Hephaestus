@@ -388,7 +388,7 @@ class TestPlanReviewLoopProtocolSubstitutability:
             "hephaestus.automation.planner_review_loop.gh_issue_json",
             return_value={"title": "Test", "body": "Description"},
         ):
-            plan, review, iterations, verdict_is_go = loop.run(123, slot_id=0)
+            plan, _review, iterations, verdict_is_go = loop.run(123, slot_id=0)
 
         # Verify the loop called the host's methods
         assert fake_host._generate_plan.called

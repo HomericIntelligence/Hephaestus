@@ -52,7 +52,7 @@ class PlannerHost(Protocol):
 
     def _run_advise(self, issue_number: int, issue_title: str, issue_body: str) -> str:
         """Search team knowledge base for relevant prior learnings."""
-        ...
+        pass
 
     def _generate_plan(
         self,
@@ -64,11 +64,11 @@ class PlannerHost(Protocol):
         cached_issue_data: dict[str, Any] | None = None,
     ) -> str:
         """Generate implementation plan using Claude Code."""
-        ...
+        pass
 
     def _capture_planner_learnings(self, issue_number: int, plan: str) -> str:
         """Capture learnings from the generated plan."""
-        ...
+        pass
 
     def _run_plan_review(
         self,
@@ -82,7 +82,7 @@ class PlannerHost(Protocol):
         prior_review: str | None,
     ) -> str:
         """Run a reviewer pass on the current plan."""
-        ...
+        pass
 
     def _call_claude(
         self,
@@ -96,7 +96,7 @@ class PlannerHost(Protocol):
         extra_args: list[str] | None = None,
     ) -> str:
         """Call Claude with the given prompt."""
-        ...
+        pass
 
 
 class PlanReviewLoop:
