@@ -271,7 +271,7 @@ gh issue comment <number> --body "Completed implementation of new logging utilit
 1. The PR body MUST contain the literal line `Closes #<issue-number>` (capital
    `C`, no colon, on its own line). `Fixes`, `Resolves`, `closes`, and
    `Closes:` are NOT accepted.
-2. Auto-merge MUST be enabled (`gh pr merge --auto --rebase`).
+2. Auto-merge MUST be enabled (`gh pr merge --auto --squash`) (squash-only; rebase is disabled).
 3. Every commit MUST be cryptographically signed (`git commit -S`).
 
 CI blocks PRs that fail any of these checks. No exceptions, including
@@ -294,8 +294,8 @@ gh pr create \
   --title "[Type] Brief description" \
   --body "$(printf 'Summary of change.\n\nCloses #<issue-number>\n')"
 
-# 5. Enable auto-merge (mandatory)
-gh pr merge --auto --rebase
+# 5. Enable auto-merge (mandatory; squash-only — rebase is disabled)
+gh pr merge --auto --squash
 ```
 
 ### Commit Message Format
