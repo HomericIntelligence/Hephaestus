@@ -589,7 +589,7 @@ class EMNISTDownloader(DatasetDownloader):
         return True
 
 
-def main() -> None:
+def main() -> int:
     """Serve as the main entry point for dataset downloading."""
     import argparse
 
@@ -650,8 +650,8 @@ def main() -> None:
             message="datasets downloaded" if success else "one or more datasets failed",
             datasets=datasets_to_run,
         )
-    sys.exit(exit_code)
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

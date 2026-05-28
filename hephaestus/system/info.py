@@ -283,7 +283,7 @@ def format_system_info(info: dict[str, Any], format_type: str = "text") -> str:
     return "\n".join(output)
 
 
-def main() -> None:
+def main() -> int:
     """Collect and display system information."""
     import argparse
 
@@ -299,6 +299,8 @@ def main() -> None:
     else:
         print(format_system_info(info, "text"))
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
