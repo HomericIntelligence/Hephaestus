@@ -14,7 +14,6 @@ from hephaestus.utils.helpers import (
     get_repo_root,
     human_readable_size,
     install_package,
-    logger,
     run_subprocess,
     slugify,
 )
@@ -179,7 +178,7 @@ class TestRunSubprocess:
 
     def test_log_on_error_false_suppresses_error_log(self):
         """When log_on_error=False, failure does not call logger.error."""
-        with patch.object(logger, "error") as mock_error:
+        with patch("hephaestus.utils.helpers.logger.error") as mock_error:
             with pytest.raises(subprocess.CalledProcessError):
                 run_subprocess(["false"], log_on_error=False)
 
@@ -187,7 +186,7 @@ class TestRunSubprocess:
 
     def test_log_on_error_true_emits_error_log(self):
         """When log_on_error=True (default), failure calls logger.error."""
-        with patch.object(logger, "error") as mock_error:
+        with patch("hephaestus.utils.helpers.logger.error") as mock_error:
             with pytest.raises(subprocess.CalledProcessError):
                 run_subprocess(["false"], log_on_error=True)
 
@@ -201,7 +200,7 @@ class TestRunSubprocess:
         """
         long_arg = "x" * 10_000
 
-        with patch.object(logger, "error") as mock_error:
+        with patch("hephaestus.utils.helpers.logger.error") as mock_error:
             with pytest.raises(subprocess.CalledProcessError):
                 run_subprocess(["false", long_arg])
 
@@ -370,7 +369,7 @@ class TestRunSubprocessTimeoutLogging:
         exc = subprocess.TimeoutExpired(cmd=["sleep", "99"], timeout=1)
         with (
             patch("subprocess.run", side_effect=exc),
-            patch.object(logger, "error") as mock_error,
+            patch("hephaestus.utils.helpers.logger.error") as mock_error,
         ):
             with pytest.raises(subprocess.TimeoutExpired):
                 run_subprocess(["sleep", "99"], timeout=1)

@@ -40,6 +40,7 @@ class MarkdownFixer:
         """
         self.options = options or FixerOptions()
         self.exclude_patterns = self.options.exclude_patterns or DEFAULT_EXCLUDE_DIRS
+        self.had_error: bool = False  # Sticky per-instance; consumed by main() for exit code
 
     def fix_file(self, file_path: Path) -> tuple[bool, int]:
         """Fix markdown linting errors in a file.
@@ -55,6 +56,7 @@ class MarkdownFixer:
             content = file_path.read_text(encoding="utf-8")
         except OSError as e:
             logger.error("Error reading %s: %s", file_path, e)
+            self.had_error = True
             return False, 0
 
         original_content = content
@@ -94,6 +96,7 @@ class MarkdownFixer:
                 return True, fixes
             except OSError as e:
                 logger.error("Error writing %s: %s", file_path, e)
+                self.had_error = True
                 return False, 0
 
         if self.options.verbose:
@@ -431,6 +434,7 @@ class MarkdownFixer:
         """
         if not path.exists():
             logger.error("Error: %s does not exist", path)
+            self.had_error = True
             return 0, 0
 
         files_to_fix = []
@@ -461,7 +465,7 @@ class MarkdownFixer:
         return files_modified, total_fixes
 
 
-def main() -> None:
+def main() -> int:
     """Serve as the main entry point for the markdown fixer."""
     parser = argparse.ArgumentParser(
         description="Fix common markdown linting errors automatically",
@@ -485,10 +489,18 @@ def main() -> None:
     fixer = MarkdownFixer(options)
     files_modified, total_fixes = fixer.process_path(args.path)
 
+    exit_code = 1 if fixer.had_error else 0
+
     if args.json:
+        if fixer.had_error:
+            message = "completed with errors"
+        elif args.dry_run:
+            message = "dry run complete"
+        else:
+            message = "fix complete"
         emit_json_status(
-            0,
-            message="dry run complete" if args.dry_run else "fix complete",
+            exit_code,
+            message=message,
             files_modified=files_modified,
             total_fixes=total_fixes,
             dry_run=args.dry_run,
@@ -501,8 +513,8 @@ def main() -> None:
         if args.dry_run:
             print("\n[DRY RUN] No files were actually modified")
 
-    sys.exit(0)
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

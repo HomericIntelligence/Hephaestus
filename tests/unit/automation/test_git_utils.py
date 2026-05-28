@@ -1,6 +1,7 @@
 """Tests for git utility functions."""
 
 import subprocess
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
@@ -8,6 +9,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from hephaestus.automation.git_utils import (
+    clear_repo_caches,
     get_current_branch,
     get_repo_info,
     get_repo_root,
@@ -15,6 +17,14 @@ from hephaestus.automation.git_utils import (
     run,
     safe_git_fetch,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_caches() -> Generator[None, None, None]:
+    """Clear repo caches before each test to avoid cross-test interference."""
+    clear_repo_caches()
+    yield
+    clear_repo_caches()
 
 
 class TestRun:
@@ -109,6 +119,51 @@ class TestGetRepoInfo:
 
         with pytest.raises(RuntimeError, match="Unable to parse git remote URL"):
             get_repo_info()
+
+    @patch("hephaestus.automation.git_utils.run")
+    @patch("hephaestus.automation.git_utils.get_repo_root")
+    def test_result_caching_prevents_repeated_run_calls(
+        self, mock_get_root: Any, mock_run: Any
+    ) -> None:
+        """Test that repeated get_repo_info calls use cached result."""
+        repo_root = Path("/home/user/repo")
+        mock_get_root.return_value = repo_root
+        mock_result = Mock()
+        mock_result.stdout = "git@github.com:owner/repo.git\n"
+        mock_run.return_value = mock_result
+
+        # First call should invoke run() and cache the result
+        owner1, repo1 = get_repo_info(repo_root)
+        assert owner1 == "owner"
+        assert repo1 == "repo"
+        assert mock_run.call_count == 1
+
+        # Second call with same repo_root should return cached result without calling run()
+        owner2, repo2 = get_repo_info(repo_root)
+        assert owner2 == "owner"
+        assert repo2 == "repo"
+        assert mock_run.call_count == 1  # Should not increase
+
+    @patch("hephaestus.automation.git_utils.run")
+    @patch("hephaestus.automation.git_utils.get_repo_root")
+    def test_clear_repo_caches_forces_re_detection(self, mock_get_root: Any, mock_run: Any) -> None:
+        """Test that clear_repo_caches forces re-detection on next call."""
+        repo_root = Path("/home/user/repo")
+        mock_get_root.return_value = repo_root
+        mock_result = Mock()
+        mock_result.stdout = "git@github.com:owner/repo.git\n"
+        mock_run.return_value = mock_result
+
+        # First call caches the result
+        get_repo_info(repo_root)
+        assert mock_run.call_count == 1
+
+        # Clear caches
+        clear_repo_caches()
+
+        # Next call should invoke run() again
+        get_repo_info(repo_root)
+        assert mock_run.call_count == 2
 
 
 class TestGetCurrentBranch:

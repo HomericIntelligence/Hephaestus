@@ -349,3 +349,51 @@ class TestFilterIssues:
             result = planner._filter_issues()
 
         assert result == [123]
+
+
+class TestPlanReviewLoopProtocolSubstitutability:
+    """Verify PlanReviewLoop depends on PlannerHost protocol, not concrete Planner.
+
+    This ensures the loop is genuinely substitutable — it can be instantiated
+    with any object that implements the PlannerHost protocol, not just a
+    Planner instance.
+    """
+
+    def test_loop_runs_with_protocol_host(self) -> None:
+        """PlanReviewLoop must work with a minimal fake host (not a real Planner).
+
+        This is the core proof that the Protocol injection works: the loop
+        doesn't depend on the concrete Planner class, only the interface.
+        """
+        from unittest.mock import MagicMock
+
+        from hephaestus.automation.planner_review_loop import PlanReviewLoop
+
+        # Create a minimal fake host that satisfies PlannerHost protocol
+        fake_host = MagicMock()
+        fake_host.options = MagicMock()
+        fake_host.options.enable_advise = False
+        fake_host.status_tracker = MagicMock()
+        fake_host._run_advise = MagicMock(return_value="advise")
+        fake_host._generate_plan = MagicMock(return_value="plan")
+        fake_host._capture_planner_learnings = MagicMock(return_value="learnings")
+        fake_host._run_plan_review = MagicMock(return_value=_go_review())
+        fake_host._call_claude = MagicMock(return_value="result")
+
+        # Instantiate PlanReviewLoop with the fake host (not a Planner)
+        loop = PlanReviewLoop(fake_host)
+
+        # Verify the loop can run without error
+        with patch(
+            "hephaestus.automation.planner_review_loop.gh_issue_json",
+            return_value={"title": "Test", "body": "Description"},
+        ):
+            plan, _review, iterations, verdict_is_go = loop.run(123, slot_id=0)
+
+        # Verify the loop called the host's methods
+        assert fake_host._generate_plan.called
+        assert fake_host._capture_planner_learnings.called
+        assert fake_host._run_plan_review.called
+        assert plan == "plan"
+        assert iterations == 1
+        assert verdict_is_go is True

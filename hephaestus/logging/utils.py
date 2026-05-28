@@ -12,11 +12,14 @@ Usage:
     logger.info("This is an info message")
 """
 
+import contextvars
 import logging
 import os
 import sys
 import threading
 import uuid
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +32,11 @@ _handler_setup_lock = threading.Lock()
 # Honour HEPHAESTUS_LOG_FORMAT=json so logging format can be configured at
 # deployment time without code changes (12-factor pattern).
 _ENV_JSON_FORMAT: bool = os.environ.get("HEPHAESTUS_LOG_FORMAT", "").lower() == "json"
+
+# Context variable for correlation ID propagation to subprocesses (thread- and async-safe)
+_correlation_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "correlation_id", default=None
+)
 
 
 class ContextLogger(logging.LoggerAdapter):  # type: ignore[type-arg]
@@ -76,6 +84,62 @@ class ContextLogger(logging.LoggerAdapter):  # type: ignore[type-arg]
         """
         cid = correlation_id if correlation_id is not None else str(uuid.uuid4())
         return self.bind(correlation_id=cid)
+
+
+def set_correlation_id(correlation_id: str) -> contextvars.Token[str | None]:
+    """Set the ambient correlation ID for subprocess propagation.
+
+    Thread- and async-safe via contextvars. Intended for callers who manage
+    their own cleanup via _correlation_id_var.reset(token). Most callers
+    should use the correlation_id_scope() context manager instead.
+
+    Args:
+        correlation_id: Correlation ID string to set.
+
+    Returns:
+        A Token that can be used to restore the previous value.
+
+    """
+    return _correlation_id_var.set(correlation_id)
+
+
+def get_current_correlation_id() -> str | None:
+    """Get the current ambient correlation ID, if set.
+
+    Thread- and async-safe via contextvars. Returns None if no correlation
+    ID is currently bound.
+
+    Returns:
+        The current correlation ID string, or None.
+
+    """
+    return _correlation_id_var.get()
+
+
+@contextmanager
+def correlation_id_scope(correlation_id: str) -> Generator[None, None, None]:
+    """Context manager to set an ambient correlation ID for subprocess propagation.
+
+    The correlation ID is set on entry and restored on exit (thread- and
+    async-safe via contextvars). This is the primary API for subprocess
+    correlation ID propagation.
+
+    Args:
+        correlation_id: Correlation ID string to set for the scope.
+
+    Yields:
+        None.
+
+    Example:
+        with correlation_id_scope("request-abc-123"):
+            _gh_call(["issue", "create"])  # gh process sees GH_TRACE_ID=request-abc-123
+
+    """
+    token = set_correlation_id(correlation_id)
+    try:
+        yield
+    finally:
+        _correlation_id_var.reset(token)
 
 
 def get_logger(

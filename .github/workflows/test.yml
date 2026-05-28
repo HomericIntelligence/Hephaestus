@@ -81,7 +81,7 @@ jobs:
             pip-${{ runner.os }}-${{ matrix.python-version }}-
 
       - name: Install package
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,schema]"
 
       - name: Run unit tests
         if: matrix.test-type == 'unit'
@@ -91,6 +91,10 @@ jobs:
         if: matrix.test-type == 'unit'
         # Use the strict CLI (also flags loose test_*.py files at tests/unit/ root).
         run: hephaestus-check-test-structure
+
+      - name: Check per-module coverage floors
+        if: matrix.test-type == 'unit'
+        run: pip install -e ".[xml]" && hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml
 
       - name: Run integration tests
         if: matrix.test-type == 'integration'

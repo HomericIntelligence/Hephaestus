@@ -87,7 +87,7 @@ bandit = ">=1.9.4,<2"
 # transitive dependency of pygithub (we never import it directly), so there is no
 # version bump or code change that resolves it. Ignored as unfixable + disputed.
 pip-audit = "pip-audit --ignore-vuln CVE-2026-3219 --ignore-vuln CVE-2026-6357 --ignore-vuln CVE-2026-44431 --ignore-vuln CVE-2026-44432 --ignore-vuln PYSEC-2025-183"
-sast = "bandit -c pyproject.toml -r hephaestus scripts"
+sast = "bandit -c pyproject.toml -r hephaestus scripts --severity-level medium"
 
 [environments]
 default = { features = ["dev"], solve-group = "default" }

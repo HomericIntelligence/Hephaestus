@@ -50,6 +50,9 @@ VERDICT_APPROVED = "APPROVED"
 VERDICT_REVISE = "REVISE"
 VERDICT_BLOCK = "BLOCK"
 
+# Maximum length for verdict context preview in logs (e.g., first verdict line or content).
+_VERDICT_LOG_PREVIEW_CHARS = 200
+
 
 def latest_verdict(review_body: str) -> str | None:
     """Return the LAST well-formed verdict token in ``review_body``.
@@ -66,6 +69,39 @@ def latest_verdict(review_body: str) -> str | None:
     """
     matches = VERDICT_LINE_RE.findall(review_body)
     return matches[-1] if matches else None
+
+
+def _extract_verdict_context(review_body: str) -> str:
+    """Extract a human-readable context line from a review body.
+
+    Returns the last line containing 'Verdict:' if present, else the first
+    non-empty line that doesn't start with PLAN_REVIEW_PREFIX. Truncated to
+    _VERDICT_LOG_PREVIEW_CHARS for logging. Useful for diagnosing missing or
+    unexpected verdicts by showing actual content rather than just the token.
+
+    Args:
+        review_body: Full text of a plan-review comment.
+
+    Returns:
+        A preview string (may be empty if body is empty or all-prefix).
+
+    """
+    lines = review_body.split("\n")
+
+    # Look for a line containing "Verdict:" (any case variation)
+    for line in reversed(lines):
+        if "Verdict:" in line:
+            preview = line.strip()
+            if preview:
+                return preview[:_VERDICT_LOG_PREVIEW_CHARS]
+
+    # Fall back to first non-prefix content line
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith(PLAN_REVIEW_PREFIX):
+            return stripped[:_VERDICT_LOG_PREVIEW_CHARS]
+
+    return ""
 
 
 def _fetch_issue_comments_graphql(issue_number: int) -> list[dict[str, Any]]:
@@ -94,7 +130,7 @@ def _fetch_issue_comments_graphql(issue_number: int) -> list[dict[str, Any]]:
         "  repository(owner:$owner,name:$name){"
         "    issue(number:$number){"
         "      comments(last: 100, orderBy: {field: UPDATED_AT, direction: DESC}){"
-        "        nodes{ body updatedAt }"
+        "        nodes{ body updatedAt url }"
         "      }"
         "    }"
         "  }"
@@ -165,10 +201,12 @@ def is_plan_review_approved(
         comments = _fetch_issue_comments_graphql(issue_number)
 
     latest_review_body: str | None = None
+    latest_review_url: str | None = None
     for comment in comments:
         body: str = comment.get("body", "")
         if body.startswith(PLAN_REVIEW_PREFIX):
             latest_review_body = body
+            latest_review_url = comment.get("url")
 
     if latest_review_body is None:
         logger.debug(
@@ -185,9 +223,13 @@ def is_plan_review_approved(
             issue_ref(issue_number),
         )
     else:
+        context = _extract_verdict_context(latest_review_body)
+        url_part = f" {latest_review_url}" if latest_review_url else " <no url>"
         logger.debug(
-            "Issue %s: latest plan review verdict is %s (not APPROVED)",
+            "Issue %s: latest plan review verdict is %s (not APPROVED) | %s%s",
             issue_ref(issue_number),
             verdict or "<missing>",
+            context,
+            url_part,
         )
     return is_approved

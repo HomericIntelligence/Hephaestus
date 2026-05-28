@@ -17,6 +17,13 @@ from hephaestus.logging.utils import get_logger
 
 logger = get_logger(__name__)
 
+# Subprocess timeouts for different operation types.
+# METADATA_TIMEOUT: local, non-network queries (git status, git config, pixi list)
+# NETWORK_TIMEOUT: operations touching the network (gh calls, git clone/fetch/push)
+# Both support env-var overrides for CI tuning.
+METADATA_TIMEOUT: int = int(os.environ.get("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", "10"))
+NETWORK_TIMEOUT: int = int(os.environ.get("HEPHAESTUS_SUBPROCESS_NETWORK_TIMEOUT", "120"))
+
 
 def slugify(text: str) -> str:
     """Convert text to a URL-friendly slug.
@@ -139,6 +146,7 @@ def run_subprocess(
     check: bool = True,
     dry_run: bool = False,
     log_on_error: bool = True,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run subprocess command with proper error handling.
 
@@ -150,6 +158,8 @@ def run_subprocess(
         dry_run: If True, log the command but do not execute it
         log_on_error: If False, suppress ERROR logging when the command fails.
             Use when failure is expected and already handled by the caller.
+        env: Optional environment dict to pass to subprocess.run().
+            If provided, replaces the current process environment.
 
     Returns:
         Completed process object
@@ -161,6 +171,16 @@ def run_subprocess(
     if dry_run:
         logger.info("[DRY-RUN] $ %s", " ".join(cmd))
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    # Inject correlation ID into subprocess environment if set.
+    # Function-local import to keep module import graph clean.
+    effective_env = env.copy() if env is not None else os.environ.copy()
+    from hephaestus.logging.utils import get_current_correlation_id
+
+    cid = get_current_correlation_id()
+    if cid:
+        effective_env["GH_TRACE_ID"] = cid
+
     try:
         result = subprocess.run(
             cmd,
@@ -170,6 +190,7 @@ def run_subprocess(
             text=True,
             check=check,
             timeout=timeout,
+            env=effective_env,
         )
         return result
     except subprocess.TimeoutExpired:

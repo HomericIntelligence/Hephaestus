@@ -27,6 +27,7 @@ from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_te
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.github.pr_merge import detect_repo_from_remote
 from hephaestus.logging.utils import get_logger
+from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
 logger = get_logger(__name__)
 
@@ -62,45 +63,63 @@ def _detect_default_branch(override: str | None) -> str:
             capture_output=True,
             text=True,
             check=True,
+            timeout=NETWORK_TIMEOUT,
         )
         branch = result.stdout.strip()
         if branch:
             return branch
-    except subprocess.CalledProcessError as e:
-        logger.warning("Could not detect default branch via gh: %s", e.stderr.strip())
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        logger.warning("Could not detect default branch via gh: %s", getattr(e, "stderr", str(e)))
     return "main"
 
 
 def _working_tree_clean() -> bool:
     """Return True if the git working tree has no uncommitted changes."""
-    result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return result.returncode == 0 and result.stdout.strip() == ""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=METADATA_TIMEOUT,
+        )
+        return result.returncode == 0 and result.stdout.strip() == ""
+    except subprocess.TimeoutExpired as e:
+        logger.error("git status timed out: %s", e)
+        raise
 
 
 def _in_git_repo() -> bool:
     """Return True if cwd is inside a git repository."""
-    return (
-        subprocess.run(
-            ["git", "rev-parse", "--git-dir"],
-            capture_output=True,
-            check=False,
-        ).returncode
-        == 0
-    )
+    try:
+        return (
+            subprocess.run(
+                ["git", "rev-parse", "--git-dir"],
+                capture_output=True,
+                check=False,
+                timeout=METADATA_TIMEOUT,
+            ).returncode
+            == 0
+        )
+    except subprocess.TimeoutExpired as e:
+        logger.error("git rev-parse --git-dir timed out: %s", e)
+        raise
 
 
 def _repo_root() -> Path:
-    """Return the root directory of the current git repository."""
+    """Return the root directory of the current git repository.
+
+    Note: TimeoutExpired propagates to the sole caller (_validate_environment),
+    which invokes this bare without a try/except. This is consistent with the
+    CalledProcessError path: both failures propagate as unhandled exceptions to
+    the CLI entrypoint.
+    """
     result = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
         capture_output=True,
         text=True,
         check=True,
+        timeout=METADATA_TIMEOUT,
     )
     return Path(result.stdout.strip())
 

@@ -478,3 +478,62 @@ class TestImplLoopStrictRubric:
             out = self._build(iteration)
             assert "Grade: <A|B|C|D|F>" in out
             assert "Verdict: <GO|NOGO>" in out
+
+
+class TestAddressReviewPrompt:
+    """The address-review prompt is a coordinator that fans out per-file sub-agents."""
+
+    def _build(self) -> str:
+        return prompts.get_address_review_prompt(
+            pr_number=42,
+            issue_number=7,
+            worktree_path="/tmp/wt",
+            threads_json='[{"thread_id": "T1", "path": "a.py", "line": 1, "body": "fix"}]',
+        )
+
+    def test_substitutes_args(self) -> None:
+        out = self._build()
+        assert "42" in out
+        assert "7" in out
+        assert "/tmp/wt" in out
+
+    def test_instructs_per_file_subagent_fanout(self) -> None:
+        out = self._build()
+        # Coordinator groups by file and dispatches one sub-agent per file via Task.
+        assert "group the threads by `path`" in out or "group the threads by `path`" in out.lower()
+        assert "Task tool" in out
+        assert "ONE sub-agent" in out
+
+    def test_instructs_advise_skill(self) -> None:
+        """Each sub-agent must consult /hephaestus:advise before fixing."""
+        out = self._build()
+        assert "hephaestus:advise" in out
+
+    def test_has_no_early_exit_and_file_ownership_guardrails(self) -> None:
+        out = self._build()
+        assert "do NOT exit early" in out
+        assert "Do NOT background" in out
+        # File ownership: a sub-agent owns exactly one file.
+        assert "OWNS exactly one file" in out
+
+    def test_preserves_json_block_contract(self) -> None:
+        """The final JSON-block contract the pipeline parses must be intact."""
+        out = self._build()
+        assert '"addressed"' in out
+        assert '"replies"' in out
+
+    def test_threads_json_is_fenced_untrusted(self) -> None:
+        """Reviewer bodies stay fenced as untrusted input."""
+        out = self._build()
+        assert "BEGIN_" in out and "THREADS_JSON" in out
+        assert "UNTRUSTED" in out
+
+    def test_renders_with_brace_containing_body(self) -> None:
+        """A reviewer comment containing curly braces must not break .format()."""
+        out = prompts.get_address_review_prompt(
+            pr_number=1,
+            issue_number=1,
+            worktree_path="/tmp/wt",
+            threads_json='[{"thread_id": "T1", "path": "a.py", "line": 1, "body": "use {x: 1}"}]',
+        )
+        assert "use {x: 1}" in out

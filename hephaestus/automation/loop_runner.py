@@ -102,11 +102,32 @@ class PhaseResult:
     # If subprocess.run itself raised (OSError, TimeoutExpired, …), the
     # exception text lands here. The phase is treated as rc=1.
     error: str | None = None
+    # Work units produced by this phase (e.g., issues planned or reviewed).
+    # None means unknown (phase did not report). Used for loop convergence (#613).
+    work_units: int | None = None
 
     @property
     def failed(self) -> bool:
         """True when the phase ran and returned a non-zero exit code."""
         return not self.skipped and self.rc != 0
+
+    @property
+    def produced_work(self) -> bool:
+        """Whether this phase did convergence-relevant work.
+
+        Unknown (un-instrumented) phases return True conservatively so the
+        loop never early-exits on a phase it can't measure.
+        """
+        if self.skipped:
+            return False
+        if self.work_units is None:
+            return True
+        return self.work_units > 0
+
+
+# Phases that count toward loop convergence. Future phases opting into
+# convergence must be added here AND must call write_work_report.
+_CONVERGENCE_PHASES: frozenset[str] = frozenset({"plan", "review-plans"})
 
 
 @dataclass
@@ -123,6 +144,49 @@ class RepoResult:
     def any_failure(self) -> bool:
         """True when any phase failed or the worker itself crashed."""
         return self.runner_error is not None or any(p.failed for p in self.phases)
+
+    @property
+    def produced_work(self) -> bool:
+        """Whether any convergence-relevant phase produced work."""
+        return any(p.produced_work for p in self.phases if p.name in _CONVERGENCE_PHASES)
+
+
+def _summarize_loop(loop_results: list[RepoResult], loop_idx: int, elapsed_s: float) -> str:
+    """Generate a one-line summary of loop execution for logs.
+
+    Counts: planned (non-skipped plan phases), reviewed (review-plans +
+    review-prs non-skipped), skipped (all skipped phases).
+
+    Args:
+        loop_results: Results from all repos in this loop iteration.
+        loop_idx: Loop iteration number (1-indexed).
+        elapsed_s: Wall-clock seconds elapsed for the loop.
+
+    Returns:
+        A summary string like "loop 1: planned=5 reviewed=3 skipped=2 elapsed=45s".
+
+    """
+    total_planned = 0
+    total_reviewed = 0
+    total_skipped = 0
+
+    for result in loop_results:
+        for phase in result.phases:
+            if phase.skipped:
+                total_skipped += 1
+            else:
+                # Count non-skipped plan phase
+                if phase.name == "plan":
+                    total_planned += 1
+                # Count non-skipped review phases
+                elif phase.name in ("review-plans", "review-prs"):
+                    total_reviewed += 1
+
+    elapsed = f"{elapsed_s:.0f}s"
+    return (
+        f"loop {loop_idx}: planned={total_planned} reviewed={total_reviewed} "
+        f"skipped={total_skipped} elapsed={elapsed}"
+    )
 
 
 @dataclass
@@ -145,6 +209,49 @@ class LoopConfig:
     # Per-phase timeout in seconds. ``None`` disables (the planner /
     # implementer naturally bound themselves via their own batch caps).
     phase_timeout_s: float | None = None
+
+
+# ---------------------------------------------------------------------------
+# Work report helpers (#613)
+# ---------------------------------------------------------------------------
+
+
+def _make_work_report_path(build_dir: str) -> str:
+    """Create a temp work report file path under build/.
+
+    Args:
+        build_dir: Path to the build directory.
+
+    Returns:
+        Path to a new temp file for work reporting.
+
+    """
+    import tempfile
+
+    build_path = Path(build_dir)
+    build_path.mkdir(parents=True, exist_ok=True)
+    fd, path = tempfile.mkstemp(prefix="work_report_", dir=str(build_path))
+    os.close(fd)
+    return path
+
+
+def _read_work_report(path: str) -> int | None:
+    """Read and parse work-unit count from a work report file.
+
+    Args:
+        path: Path to the work report file.
+
+    Returns:
+        The work-unit count, or None if the file is missing, empty, or malformed.
+
+    """
+    try:
+        content = Path(path).read_text(encoding="utf-8").strip()
+        if not content:
+            return None
+        return int(content)
+    except (OSError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -645,6 +752,12 @@ def run_phase(
 
     LOG.info("[%s] phase %s START", repo, phase)
     env = _phase_env(cfg, loop_idx, trunk_sha, phase)
+
+    # Create work report file path and inject into env (#613)
+    build_dir = cfg.projects_dir.parent / "build"
+    work_report_path = _make_work_report_path(str(build_dir))
+    env["HEPH_WORK_REPORT"] = work_report_path
+
     try:
         completed = subprocess.run(
             argv,
@@ -670,9 +783,18 @@ def run_phase(
             elapsed_s=time.monotonic() - t0,
             error=f"OSError: {exc}",
         )
+    finally:
+        # Read work report and clean up
+        work_units = None
+        try:
+            work_units = _read_work_report(work_report_path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(work_report_path)
+
     elapsed = time.monotonic() - t0
     LOG.info("[%s] phase %s done in %.1fs (rc=%d)", repo, phase, elapsed, rc)
-    return PhaseResult(name=phase, rc=rc, elapsed_s=elapsed)
+    return PhaseResult(name=phase, rc=rc, elapsed_s=elapsed, work_units=work_units)
 
 
 # ---------------------------------------------------------------------------
@@ -866,6 +988,8 @@ def _maybe_sleep_for_rate_budget(loop_idx: int, total_loops: int) -> None:
 def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
     """Drive ``cfg.loops`` iterations across ``repos``. Returns flat result list.
 
+    Early-exits when a full loop produces no convergence-relevant work (#613).
+
     Any single thread raising is contained — ``process_repo`` already
     swallows all exceptions, and ``Future.exception()`` is the second-line
     safety net for the rare case where the work submission itself dies.
@@ -880,6 +1004,9 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
         LOG.info("━" * 60)
         LOG.info("▶ LOOP %d / %d", loop_idx, cfg.loops)
         LOG.info("━" * 60)
+
+        loop_t0 = time.monotonic()
+        loop_results: list[RepoResult] = []
 
         with ThreadPoolExecutor(
             max_workers=max(1, cfg.parallel_repos),
@@ -898,6 +1025,7 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
                         loop_idx=loop_idx,
                         runner_error=f"future raised: {type(exc).__name__}: {exc}",
                     )
+                loop_results.append(result)
                 all_results.append(result)
                 if result.any_failure:
                     LOG.warning(
@@ -906,10 +1034,34 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
                         loop_idx,
                     )
 
+        elapsed_s = time.monotonic() - loop_t0
+        LOG.info("%s", _summarize_loop(loop_results, loop_idx, elapsed_s))
         LOG.info("Loop %d complete.", loop_idx)
+
+        # Check for early exit: if this loop produced no work and had no
+        # failures, break (--loops is an upper bound). (#613)
+        loop_results = [r for r in all_results if r.loop_idx == loop_idx]
+        if (
+            loop_idx < cfg.loops
+            and not any(r.any_failure for r in loop_results)
+            and not any(r.produced_work for r in loop_results)
+        ):
+            LOG.info(
+                "Early exit: full loop produced 0 new plans and 0 reviews after loop %d",
+                loop_idx,
+            )
+            break
+
         _maybe_sleep_for_rate_budget(loop_idx, cfg.loops)
 
-    LOG.info("✓ All %d loop(s) complete across %d repo(s).", cfg.loops, len(repos))
+    # Report actual loops run (may be less than cfg.loops due to early exit)
+    actual_loops = max((r.loop_idx for r in all_results), default=0)
+    LOG.info(
+        "✓ Completed %d of %d loop(s) across %d repo(s).",
+        actual_loops,
+        cfg.loops,
+        len(repos),
+    )
     return all_results
 
 
@@ -1054,6 +1206,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
 
     results = run_loop(cfg, repos)
 
+    # Compute actual loops run (may be less than cfg.loops due to early exit)
+    loops_run = max((r.loop_idx for r in results), default=0)
+
     failures = [r for r in results if r.any_failure]
     if failures:
         LOG.warning("%d/%d repo-loop results had failures", len(failures), len(results))
@@ -1061,7 +1216,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
             emit_json_status(
                 1,
                 repos=repos,
-                loops_run=cfg.loops,
+                loops_run=loops_run,
                 failed_repos=[r.repo for r in failures],
             )
         return 1
@@ -1071,7 +1226,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         emit_json_status(
             exit_code,
             repos=repos,
-            loops_run=cfg.loops,
+            loops_run=loops_run,
             failed_repos=[],
         )
     return exit_code

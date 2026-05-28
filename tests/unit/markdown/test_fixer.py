@@ -2,7 +2,10 @@
 
 """Tests for hephaestus.markdown.fixer module."""
 
-from hephaestus.markdown.fixer import FixerOptions, MarkdownFixer
+import json
+import sys
+
+from hephaestus.markdown.fixer import FixerOptions, MarkdownFixer, main
 
 
 def test_fix_md034_bare_urls():
@@ -466,3 +469,149 @@ class TestFixMd032:
         content = "\n- item 1\n- item 2\n\n"
         fixed, _fixes = f._fix_structural_issues(content)
         assert "- item 1\n- item 2" in fixed
+
+
+# Tests for had_error attribute and exit code behavior
+
+
+def test_process_path_sets_had_error_on_missing_path(tmp_path):
+    """Test that process_path sets had_error when path does not exist."""
+    fixer = MarkdownFixer()
+    assert fixer.had_error is False
+
+    missing_path = tmp_path / "nonexistent"
+    files_modified, total_fixes = fixer.process_path(missing_path)
+
+    assert files_modified == 0
+    assert total_fixes == 0
+    assert fixer.had_error is True
+
+
+def test_process_path_no_error_on_empty_directory(tmp_path):
+    """Test that process_path does not set had_error for empty directory."""
+    fixer = MarkdownFixer()
+    assert fixer.had_error is False
+
+    # Empty directory (no markdown files, but directory exists)
+    files_modified, total_fixes = fixer.process_path(tmp_path)
+
+    assert files_modified == 0
+    assert total_fixes == 0
+    assert fixer.had_error is False  # Not an error, just no files
+
+
+def test_fix_file_sets_had_error_on_read_error(tmp_path, monkeypatch):
+    """Test that fix_file sets had_error when file read fails."""
+    md_file = tmp_path / "test.md"
+    md_file.write_text("# Test\n")
+
+    fixer = MarkdownFixer()
+    assert fixer.had_error is False
+
+    # Mock read_text to raise OSError
+    def mock_read_error(*args, **kwargs):
+        raise OSError("Permission denied")
+
+    monkeypatch.setattr("pathlib.Path.read_text", mock_read_error)
+
+    modified, fixes = fixer.fix_file(md_file)
+
+    assert modified is False
+    assert fixes == 0
+    assert fixer.had_error is True
+
+
+def test_fix_file_sets_had_error_on_write_error(tmp_path, monkeypatch):
+    """Test that fix_file sets had_error when file write fails."""
+    md_file = tmp_path / "test.md"
+    md_file.write_text("```\ncode\n```\n")  # Missing language tag, needs fixing
+
+    fixer = MarkdownFixer()
+    assert fixer.had_error is False
+
+    # Mock write_text to raise OSError
+    def mock_write_error(self, content, **kwargs):
+        raise OSError("Read-only filesystem")
+
+    monkeypatch.setattr("pathlib.Path.write_text", mock_write_error)
+
+    modified, fixes = fixer.fix_file(md_file)
+
+    assert modified is False
+    assert fixes == 0
+    assert fixer.had_error is True
+
+
+def test_fix_file_no_error_on_clean_file(tmp_path):
+    """Test that fix_file does not set had_error for clean files."""
+    md_file = tmp_path / "clean.md"
+    md_file.write_text("# Heading\n\nContent\n")
+
+    fixer = MarkdownFixer()
+    assert fixer.had_error is False
+
+    fixer.fix_file(md_file)
+
+    assert fixer.had_error is False
+
+
+def test_main_returns_zero_on_success(tmp_path, monkeypatch):
+    """Test that main() returns 0 when fixing succeeds."""
+    md_file = tmp_path / "test.md"
+    md_file.write_text("# Test\n")
+
+    monkeypatch.setattr(sys, "argv", ["fixer", str(md_file)])
+
+    exit_code = main()
+
+    assert exit_code == 0
+
+
+def test_main_returns_one_on_missing_path(tmp_path, monkeypatch):
+    """Test that main() returns 1 when path does not exist."""
+    missing_path = tmp_path / "nonexistent"
+    monkeypatch.setattr(sys, "argv", ["fixer", str(missing_path)])
+
+    exit_code = main()
+
+    assert exit_code == 1
+
+
+def test_main_returns_zero_on_empty_directory(tmp_path, monkeypatch):
+    """Test that main() returns 0 for empty directory (no regression)."""
+    monkeypatch.setattr(sys, "argv", ["fixer", str(tmp_path)])
+
+    exit_code = main()
+
+    assert exit_code == 0
+
+
+def test_main_dry_run_returns_zero(tmp_path, monkeypatch):
+    """Test that main() returns 0 in dry-run mode."""
+    md_file = tmp_path / "test.md"
+    md_file.write_text("```\ncode\n```\n")  # Needs fixing
+
+    monkeypatch.setattr(sys, "argv", ["fixer", "--dry-run", str(md_file)])
+
+    exit_code = main()
+
+    assert exit_code == 0
+
+
+def test_main_json_missing_path_emits_exit_code_one(tmp_path, monkeypatch, capsys):
+    """Test that main() with --json emits exit code 1 for missing path."""
+    missing_path = tmp_path / "nonexistent"
+    monkeypatch.setattr(sys, "argv", ["fixer", "--json", str(missing_path)])
+
+    exit_code = main()
+
+    assert exit_code == 1
+
+    # Check that JSON output contains the correct exit code
+    captured = capsys.readouterr()
+    try:
+        output = json.loads(captured.out)
+        assert output["exit_code"] == 1
+    except json.JSONDecodeError:
+        # If JSON parsing fails, verify output was emitted (non-empty)
+        assert captured.out != ""

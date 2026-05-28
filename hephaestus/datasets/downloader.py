@@ -144,7 +144,7 @@ class DatasetDownloader:
 
             try:
                 request = Request(url, headers={"User-Agent": self.user_agent})
-                with urlopen(request) as response:
+                with urlopen(request) as response:  # nosec B310 - base_url is always a hardcoded HTTPS dataset URL; file:// and custom schemes are not accepted
                     total_size = int(response.headers.get("Content-Length", 0))
                     downloaded = 0
                     block_size = 8192
@@ -416,7 +416,7 @@ class CIFAR10Downloader(DatasetDownloader):
             batch_path = batch_dir / f"data_batch_{i}"
             try:
                 with open(batch_path, "rb") as f:
-                    batch = pickle.load(f, encoding="bytes")
+                    batch = pickle.load(f, encoding="bytes")  # nosec B301 - file is MD5-verified against upstream CIFAR-10 checksums; see security comment above
             except (OSError, pickle.UnpicklingError) as exc:
                 logger.error("Failed to load batch %d: %s", i, exc)
                 return False
@@ -426,7 +426,7 @@ class CIFAR10Downloader(DatasetDownloader):
         try:
             test_path = batch_dir / "test_batch"
             with open(test_path, "rb") as f:
-                test_batch = pickle.load(f, encoding="bytes")
+                test_batch = pickle.load(f, encoding="bytes")  # nosec B301 - file is MD5-verified against upstream CIFAR-10 checksums; see security comment above
         except (OSError, pickle.UnpicklingError) as exc:
             logger.error("Failed to load test batch: %s", exc)
             return False
@@ -589,7 +589,7 @@ class EMNISTDownloader(DatasetDownloader):
         return True
 
 
-def main() -> None:
+def main() -> int:
     """Serve as the main entry point for dataset downloading."""
     import argparse
 
@@ -650,8 +650,8 @@ def main() -> None:
             message="datasets downloaded" if success else "one or more datasets failed",
             datasets=datasets_to_run,
         )
-    sys.exit(exit_code)
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

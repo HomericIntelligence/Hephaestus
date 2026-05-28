@@ -54,7 +54,7 @@ from hephaestus.cli.utils import add_json_arg, emit_json_status
 #: Default candidate output directories, tried in order. The first that
 #: already exists wins; if none exist, the last is created. A CI job
 #: typically overrides this to point at its workspace.
-DEFAULT_TARGET_DIRS: tuple[str, ...] = ("/tmp/crash-bundle/cores",)
+DEFAULT_TARGET_DIRS: tuple[str, ...] = ("/tmp/crash-bundle/cores",)  # nosec B108 - intentional default for CI environments; callers may override via --target-dir
 
 #: Default cap on the core size written to disk (4 GiB). Prevents a runaway
 #: process from filling the host disk.

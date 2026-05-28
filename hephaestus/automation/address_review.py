@@ -652,7 +652,10 @@ class AddressReviewer(BaseReviewer):
                 timeout=address_review_claude_timeout(),
                 output_format="json",
                 permission_mode="dontAsk",
-                allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
+                # Task: the session acts as a coordinator that dispatches one
+                # sub-agent per file of review threads. Skill: each sub-agent
+                # runs /hephaestus:advise before fixing. See prompts/address_review.py.
+                allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
                 input_via_stdin=True,
             )
             log_file.write_text(stdout or "")

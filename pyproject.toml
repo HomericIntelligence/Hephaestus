@@ -46,7 +46,7 @@ dev = [
     "tomli>=2.0,<3;python_version<'3.11'",
 ]
 github = [
-    "PyGithub>=1.55,<3",
+    "PyGithub>=2.9.1,<3",
 ]
 toml = [
     "tomli>=2.0,<3;python_version<'3.11'",
@@ -211,6 +211,9 @@ omit = [
     "*/__init__.py",
     # Full orchestration loops require a live claude/gh CLI — integration test territory.
     # Pure-function helpers in these modules are tested in tests/unit/automation/ instead.
+    # The allowlist of these 10 modules is frozen in tests/unit/validation/test_omit_allowlist.py
+    # to prevent silent growth of the omit list, and their importability is guarded by
+    # tests/integration/test_orchestration_smoke.py.
     "hephaestus/automation/implementer.py",
     "hephaestus/automation/implementer_phase_runner.py",
     "hephaestus/automation/implementer_summary.py",
@@ -244,3 +247,10 @@ exclude_lines = [
 
 [tool.bandit]
 exclude_dirs = ["tests", "build", ".pixi"]
+# The pixi `sast` task passes `-l medium` (report MEDIUM+ severity only).
+# LOW findings (B404 import-subprocess, B603 subprocess-list, B607 partial-path,
+# B403 import-pickle, B101 assert, B311 random, B112 try-except-continue) are
+# noise for an automation codebase that legitimately calls system tools (git, gh,
+# claude) via subprocess with fixed literal argument lists and non-cryptographic
+# random for retry jitter.  Genuine injection risk (shell=True) is HIGH severity
+# and is unaffected by this threshold.

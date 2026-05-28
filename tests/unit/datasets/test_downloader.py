@@ -232,11 +232,10 @@ class TestMain:
         mock_cls.return_value = mock_instance
 
         with patch("sys.argv", ["prog", "mnist", str(tmp_path)]):
-            with pytest.raises(SystemExit) as exc_info:
-                from hephaestus.datasets.downloader import main
+            from hephaestus.datasets.downloader import main
 
-                main()
-        assert exc_info.value.code == 0
+            exit_code = main()
+        assert exit_code == 0
 
     @patch("hephaestus.datasets.downloader.MNISTDownloader")
     def test_main_mnist_failure(self, mock_cls, tmp_path: Path) -> None:
@@ -246,11 +245,10 @@ class TestMain:
         mock_cls.return_value = mock_instance
 
         with patch("sys.argv", ["prog", "mnist"]):
-            with pytest.raises(SystemExit) as exc_info:
-                from hephaestus.datasets.downloader import main
+            from hephaestus.datasets.downloader import main
 
-                main()
-        assert exc_info.value.code == 1
+            exit_code = main()
+        assert exit_code == 1
 
     @patch("hephaestus.datasets.downloader.MNISTDownloader")
     def test_main_mnist_default_output_dir(self, mock_cls) -> None:
@@ -260,11 +258,11 @@ class TestMain:
         mock_cls.return_value = mock_instance
 
         with patch("sys.argv", ["prog", "mnist"]):
-            with pytest.raises(SystemExit):
-                from hephaestus.datasets.downloader import main
+            from hephaestus.datasets.downloader import main
 
-                main()
+            exit_code = main()
 
+        assert exit_code == 0
         mock_instance.download_mnist.assert_called_once_with("datasets/mnist")
 
 
@@ -428,9 +426,8 @@ class TestMainJsonAndAll:
 
         monkeypatch.setattr("sys.argv", ["dl", "mnist", "--json"])
         with patch.object(downloader.MNISTDownloader, "download_mnist", return_value=True):
-            with pytest.raises(SystemExit) as exc:
-                downloader.main()
-        assert exc.value.code == 0
+            exit_code = downloader.main()
+        assert exit_code == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "ok"
         assert payload["datasets"] == ["mnist"]
@@ -444,9 +441,8 @@ class TestMainJsonAndAll:
 
         monkeypatch.setattr("sys.argv", ["dl", "cifar10", "--json"])
         with patch.object(downloader.CIFAR10Downloader, "download_cifar10", return_value=False):
-            with pytest.raises(SystemExit) as exc:
-                downloader.main()
-        assert exc.value.code == 1
+            exit_code = downloader.main()
+        assert exit_code == 1
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "error"
         assert "failed" in payload["message"]
@@ -466,9 +462,8 @@ class TestMainJsonAndAll:
             ) as m4,
             patch.object(downloader.EMNISTDownloader, "download_emnist", return_value=True) as m5,
         ):
-            with pytest.raises(SystemExit) as exc:
-                downloader.main()
-        assert exc.value.code == 0
+            exit_code = downloader.main()
+        assert exit_code == 0
         for m in (m1, m2, m3, m4, m5):
             m.assert_called_once()
 
@@ -479,7 +474,6 @@ class TestMainJsonAndAll:
         with patch.object(
             downloader.EMNISTDownloader, "download_emnist", return_value=True
         ) as mock_dl:
-            with pytest.raises(SystemExit) as exc:
-                downloader.main()
-        assert exc.value.code == 0
+            exit_code = downloader.main()
+        assert exit_code == 0
         assert mock_dl.call_args.args[0] == "digits"

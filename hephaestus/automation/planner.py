@@ -46,6 +46,7 @@ from .prompts import (
 )
 from .session_naming import AGENT_ADVISE
 from .status_tracker import StatusTracker
+from .work_report import write_work_report
 
 __all__ = ["MAX_REVIEW_ITERATIONS", "Planner", "main"]
 
@@ -686,6 +687,12 @@ def main() -> int:
 
         planner = Planner(options)
         results = planner.run()
+
+        # Compute work units for loop convergence (#613): new plans
+        successful = sum(1 for r in results.values() if r.success)
+        already_planned = sum(1 for r in results.values() if r.plan_already_exists)
+        work_units = max(0, successful - already_planned)
+        write_work_report(work_units)
 
         failed = [num for num, result in results.items() if not result.success]
         if failed:

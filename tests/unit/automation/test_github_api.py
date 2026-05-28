@@ -27,6 +27,13 @@ from hephaestus.automation.github_api import (
     write_secure,
 )
 from hephaestus.automation.models import IssueState
+from hephaestus.resilience.circuit_breaker import reset_all_circuit_breakers
+
+
+@pytest.fixture(autouse=True)
+def _reset_circuit_breakers() -> None:
+    """Reset all circuit breakers before each test to prevent cross-test contamination."""
+    reset_all_circuit_breakers()
 
 
 class TestGhIssueJson:
@@ -432,28 +439,27 @@ class TestGhCall:
 
         assert mock_run.call_count == 1
 
-    @patch("hephaestus.automation.github_api.resilient_call")
-    def test_resilient_call_invoked_with_correct_parameters(self, mock_resilient: Any) -> None:
-        """Test that _gh_call invokes resilient_call with correct parameters.
+    @patch("hephaestus.automation.github_api._gh_call_impl")
+    def test_circuit_breaker_wraps_gh_call_impl(self, mock_impl: Any) -> None:
+        """Test that _gh_call routes through the circuit breaker to _gh_call_impl.
 
-        Verifies that the circuit breaker name, max_retries, and other
-        parameters are passed correctly to resilient_call.
+        Verifies that the circuit breaker calls _gh_call_impl with the
+        correct arguments forwarded from _gh_call.
         """
+        _github_api_module._GH_BREAKER.reset()
         mock_result = Mock(spec=subprocess.CompletedProcess)
         mock_result.stdout = "success"
-        mock_resilient.return_value = mock_result
+        mock_impl.return_value = mock_result
 
         result = _gh_call(["issue", "view", "123"], max_retries=6)
 
         assert result.stdout == "success"
-        # resilient_call should be called on outer loop
-        assert mock_resilient.call_count == 1
-        # Check that circuit_breaker_name was passed
-        call_kwargs = mock_resilient.call_args[1]
-        assert "circuit_breaker_name" in call_kwargs
-        assert call_kwargs["circuit_breaker_name"] == "gh_cli"
-        assert call_kwargs["max_retries"] == 2  # inner retries
-        assert call_kwargs["initial_delay"] == 2.0
+        # _gh_call_impl should be called once via the circuit breaker
+        assert mock_impl.call_count == 1
+        # Check that args and kwargs are forwarded correctly
+        call_args, call_kwargs = mock_impl.call_args
+        assert call_args[0] == ["issue", "view", "123"]
+        assert call_kwargs["max_retries"] == 6
 
     @patch("hephaestus.automation.github_api.run")
     def test_non_transient_errors_not_retried_by_resilient_call(self, mock_run: Any) -> None:

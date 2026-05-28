@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -17,6 +18,7 @@ from hephaestus.config.dep_sync import (
     check_requirements_against_pixi,
     check_requirements_up_to_date,
     generate_requirements_content,
+    get_pixi_packages,
     parse_pixi_toml,
     parse_requirements,
     sync_requirements,
@@ -542,3 +544,30 @@ class TestParsePixiTomlFeatureEnvs:
         (tmp_path / "requirements-dev.txt").write_text("pytest==9.0.3\n")
         errors = check_dep_sync(tmp_path)
         assert errors == []
+
+
+class TestTimeoutHandling:
+    """Tests for subprocess timeout handling in dep_sync."""
+
+    def test_get_pixi_packages_with_timeout(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """get_pixi_packages exits with code 1 on timeout."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired(["pixi"], 10)
+            with pytest.raises(SystemExit) as exc_info:
+                get_pixi_packages()
+            assert exc_info.value.code == 1
+            captured = capsys.readouterr()
+            assert "timed out" in captured.err
+
+    def test_get_pixi_packages_uses_metadata_timeout(self) -> None:
+        """get_pixi_packages uses METADATA_TIMEOUT."""
+        from hephaestus.utils.helpers import METADATA_TIMEOUT
+
+        pixi_out = '[{"name": "pkg", "version": "1.0"}]'
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=pixi_out)
+            get_pixi_packages()
+            assert mock_run.called
+            call_kwargs = mock_run.call_args[1]
+            assert "timeout" in call_kwargs
+            assert call_kwargs["timeout"] == METADATA_TIMEOUT

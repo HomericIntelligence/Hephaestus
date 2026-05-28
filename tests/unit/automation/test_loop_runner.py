@@ -22,6 +22,7 @@ from hephaestus.automation.loop_runner import (
     PhaseResult,
     RepoResult,
     _phase_order_warnings,
+    _summarize_loop,
     _validate_phases,
     process_repo,
     run_loop,
@@ -716,3 +717,82 @@ def test_detect_cwd_repo_returns_none_when_not_git() -> None:
     ):
         org, repo = loop_runner._detect_cwd_repo()
     assert (org, repo) == (None, None)
+
+
+# ---------------------------------------------------------------------------
+# _summarize_loop
+# ---------------------------------------------------------------------------
+
+
+class TestSummarizeLoop:
+    """Tests for loop summary generation."""
+
+    def test_empty_loop_results(self) -> None:
+        """Empty loop (no repos) produces zero counts."""
+        summary = _summarize_loop([], 1, 10.5)
+        assert summary == "loop 1: planned=0 reviewed=0 skipped=0 elapsed=10s"
+
+    def test_all_skipped_phases(self) -> None:
+        """All skipped phases counted in skipped column."""
+        repo_result = RepoResult(repo="TestRepo", loop_idx=1)
+        repo_result.phases = [
+            PhaseResult("plan", skipped=True, skip_reason="no issues"),
+            PhaseResult("review-plans", skipped=True, skip_reason="no issues"),
+        ]
+        summary = _summarize_loop([repo_result], 2, 5.0)
+        assert "planned=0" in summary
+        assert "reviewed=0" in summary
+        assert "skipped=2" in summary
+        assert "loop 2" in summary
+
+    def test_counts_plan_phase(self) -> None:
+        """Non-skipped plan phase counted in planned."""
+        repo_result = RepoResult(repo="TestRepo", loop_idx=1)
+        repo_result.phases = [PhaseResult("plan", rc=0)]
+        summary = _summarize_loop([repo_result], 1, 3.0)
+        assert "planned=1" in summary
+
+    def test_counts_review_phases(self) -> None:
+        """Non-skipped review-plans and review-prs counted in reviewed."""
+        repo_result = RepoResult(repo="TestRepo", loop_idx=1)
+        repo_result.phases = [
+            PhaseResult("review-plans", rc=0),
+            PhaseResult("review-prs", rc=0),
+        ]
+        summary = _summarize_loop([repo_result], 1, 3.0)
+        assert "reviewed=2" in summary
+
+    def test_mixed_phases(self) -> None:
+        """Mix of skipped, planned, and reviewed phases."""
+        repo_result = RepoResult(repo="TestRepo", loop_idx=1)
+        repo_result.phases = [
+            PhaseResult("plan", rc=0),
+            PhaseResult("review-plans", rc=0),
+            PhaseResult("implement", skipped=True, skip_reason="no issues"),
+            PhaseResult("review-prs", rc=1),  # failed but still counted as reviewed
+        ]
+        summary = _summarize_loop([repo_result], 3, 7.5)
+        assert "loop 3" in summary
+        assert "planned=1" in summary
+        assert "reviewed=2" in summary
+        assert "skipped=1" in summary
+
+    def test_elapsed_formatting(self) -> None:
+        """Elapsed time formatted with no decimal places."""
+        repo_result = RepoResult(repo="TestRepo", loop_idx=1)
+        summary = _summarize_loop([repo_result], 1, 45.6)
+        assert "elapsed=46s" in summary
+
+    def test_multiple_repos_aggregated(self) -> None:
+        """Results from multiple repos aggregated together."""
+        repo1 = RepoResult(repo="Repo1", loop_idx=1)
+        repo1.phases = [PhaseResult("plan", rc=0)]
+        repo2 = RepoResult(repo="Repo2", loop_idx=1)
+        repo2.phases = [
+            PhaseResult("plan", skipped=True, skip_reason="no issues"),
+            PhaseResult("review-plans", rc=0),
+        ]
+        summary = _summarize_loop([repo1, repo2], 1, 10.0)
+        assert "planned=1" in summary
+        assert "reviewed=1" in summary
+        assert "skipped=1" in summary

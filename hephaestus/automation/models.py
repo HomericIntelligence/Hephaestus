@@ -107,6 +107,10 @@ class WorkerResult(BaseModel):
     # failed — it should be retried on the next automation loop after the
     # planner amends and the reviewer re-evaluates. See #551.
     plan_review_not_approved: bool = False
+    # Set True when the reviewer short-circuited (plan already APPROVED, or no
+    # plan comment yet); the issue was not reviewed this pass and does not
+    # count as work for loop convergence (#613).
+    already_reviewed: bool = False
 
 
 class PlanResult(BaseModel):

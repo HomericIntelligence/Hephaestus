@@ -1,8 +1,17 @@
-"""Unit tests for hephaestus.github.fleet_sync — pure logic functions."""
+"""Unit tests for hephaestus.github.fleet_sync — pure logic functions and timeouts."""
 
 from __future__ import annotations
 
-from hephaestus.github.fleet_sync import PRInfo, PRStatus, _ci_state
+import importlib
+import subprocess
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from hephaestus.github.fleet_sync import PRInfo, PRStatus, _ci_state, get_resign_email
+
+fleet_sync_module = importlib.import_module("hephaestus.github.fleet_sync")
 
 
 class TestCiState:
@@ -294,3 +303,60 @@ class TestMain:
         )
         assert fleet_sync.main() == 0
         assert calls == ["owner/a", "owner/b"]
+
+
+class TestTimeoutHandling:
+    """Tests for subprocess timeout handling in fleet_sync."""
+
+    def test_get_resign_email_with_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """get_resign_email handles TimeoutExpired by trying next config source."""
+        monkeypatch.delenv("FLEET_GIT_EMAIL", raising=False)
+
+        call_count = [0]
+
+        def failing_run(*args, **kwargs):
+            call_count[0] += 1
+            # First call times out, second returns a result
+            if call_count[0] == 1:
+                raise subprocess.TimeoutExpired(["git"], 10)
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "alice@example.com\n"
+            return result
+
+        monkeypatch.setattr("hephaestus.github.fleet_sync.subprocess.run", failing_run)
+        # Should get email from second attempt (after timeout)
+        assert get_resign_email() == "alice@example.com"
+
+    def test_get_resign_email_uses_metadata_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """get_resign_email uses METADATA_TIMEOUT."""
+        monkeypatch.delenv("FLEET_GIT_EMAIL", raising=False)
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="test@example.com\n")
+            get_resign_email()
+            assert mock_run.called
+            call_kwargs = mock_run.call_args[1]
+            assert "timeout" in call_kwargs
+            assert call_kwargs["timeout"] == fleet_sync_module.METADATA_TIMEOUT
+
+    def test_gh_uses_network_timeout(self) -> None:
+        """_gh function uses NETWORK_TIMEOUT."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="[]")
+            fleet_sync_module._gh(["pr", "list"], repo="TestRepo")
+            assert mock_run.called
+            call_kwargs = mock_run.call_args[1]
+            assert "timeout" in call_kwargs
+            assert call_kwargs["timeout"] == fleet_sync_module.NETWORK_TIMEOUT
+
+    def test_git_uses_network_timeout(self) -> None:
+        """_git function uses NETWORK_TIMEOUT."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="")
+            work_dir = Path("/tmp/test")
+            fleet_sync_module._git(["clone", "url", "."], cwd=work_dir)
+            assert mock_run.called
+            call_kwargs = mock_run.call_args[1]
+            assert "timeout" in call_kwargs
+            assert call_kwargs["timeout"] == fleet_sync_module.NETWORK_TIMEOUT
