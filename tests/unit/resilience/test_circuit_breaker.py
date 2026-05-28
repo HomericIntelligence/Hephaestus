@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -444,3 +445,148 @@ def test_parametrized_thresholds_full_cycle(
         cb.call(lambda: "ok")
 
     assert cb.state == CircuitBreakerState.CLOSED
+
+
+class TestCircuitBreakerHalfOpenConcurrency:
+    """Tests for half-open admission under concurrent access."""
+
+    def test_half_open_inflight_never_exceeds_max(self) -> None:
+        """Peak concurrent in-flight calls never exceed half_open_max_calls.
+
+        With success_threshold > 1, verifies that _half_open_calls is decremented
+        on call completion, preventing re-admission while earlier probes are
+        executing outside the lock.
+
+        Uses a threading.Barrier to guarantee concurrent execution and
+        deterministic peak measurement, eliminating timing dependencies.
+        """
+        half_open_max_calls = 2
+        success_threshold = 10
+        num_probe_threads = 8
+
+        cb = CircuitBreaker(
+            "concurrency_test",
+            failure_threshold=1,
+            recovery_timeout=0.1,
+            half_open_max_calls=half_open_max_calls,
+            success_threshold=success_threshold,
+        )
+
+        # Open the circuit
+        with pytest.raises(RuntimeError):
+            cb.call(MagicMock(side_effect=RuntimeError("fail")))
+
+        assert cb.state == CircuitBreakerState.OPEN
+
+        # Wait for recovery
+        time.sleep(0.15)
+        assert cb.state == CircuitBreakerState.HALF_OPEN
+
+        # Track concurrent in-flight calls
+        current_inflight = 0
+        peak_inflight = 0
+        inflight_lock = threading.Lock()
+        probe_barrier = threading.Barrier(half_open_max_calls, timeout=2.0)
+
+        def probe_func() -> str:
+            """Probe that tracks in-flight concurrency and blocks at barrier."""
+            nonlocal current_inflight, peak_inflight
+            with inflight_lock:
+                current_inflight += 1
+                peak_inflight = max(peak_inflight, current_inflight)
+            with contextlib.suppress(threading.BrokenBarrierError):
+                probe_barrier.wait()
+            with inflight_lock:
+                current_inflight -= 1
+            return "ok"
+
+        # Spawn threads; some will be admitted (up to half_open_max_calls),
+        # others will get CircuitBreakerOpenError
+        threads = []
+        for _ in range(num_probe_threads):
+
+            def attempt() -> None:
+                with contextlib.suppress(CircuitBreakerOpenError):
+                    cb.call(probe_func)
+
+            t = threading.Thread(target=attempt)
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        # Peak concurrent calls should never exceed half_open_max_calls,
+        # even though success_threshold > 1 and _half_open_calls was being reset
+        assert peak_inflight <= half_open_max_calls, (
+            f"Peak concurrent calls ({peak_inflight}) "
+            f"exceeded half_open_max_calls ({half_open_max_calls})"
+        )
+
+    def test_half_open_slot_released_on_success(self) -> None:
+        """In-flight slot is released on successful call, allowing reuse within half-open phase."""
+        half_open_max_calls = 1
+        success_threshold = 3
+
+        cb = CircuitBreaker(
+            "slot_reuse_test",
+            failure_threshold=1,
+            recovery_timeout=0.1,
+            half_open_max_calls=half_open_max_calls,
+            success_threshold=success_threshold,
+        )
+
+        # Open the circuit
+        with pytest.raises(RuntimeError):
+            cb.call(MagicMock(side_effect=RuntimeError("fail")))
+
+        # Wait for recovery
+        time.sleep(0.15)
+        assert cb.state == CircuitBreakerState.HALF_OPEN
+
+        # First probe succeeds
+        cb.call(lambda: "ok")
+        assert cb.state == CircuitBreakerState.HALF_OPEN
+        assert cb._half_open_calls == 0  # Slot released
+        assert cb._half_open_successes == 1
+
+        # Second probe reuses the same slot
+        cb.call(lambda: "ok")
+        assert cb.state == CircuitBreakerState.HALF_OPEN
+        assert cb._half_open_calls == 0  # Slot released again
+        assert cb._half_open_successes == 2
+
+        # Third probe closes the circuit
+        cb.call(lambda: "ok")
+        assert cb.state == CircuitBreakerState.CLOSED
+        # After transition to CLOSED, counters are reset
+        assert cb._half_open_calls == 0
+
+    def test_half_open_slot_released_on_failure(self) -> None:
+        """In-flight slot is released on failed call in half-open state."""
+        half_open_max_calls = 2
+        success_threshold = 2
+
+        cb = CircuitBreaker(
+            "slot_failure_test",
+            failure_threshold=1,
+            recovery_timeout=0.1,
+            half_open_max_calls=half_open_max_calls,
+            success_threshold=success_threshold,
+        )
+
+        # Open the circuit
+        with pytest.raises(RuntimeError):
+            cb.call(MagicMock(side_effect=RuntimeError("fail")))
+
+        # Wait for recovery
+        time.sleep(0.15)
+        assert cb.state == CircuitBreakerState.HALF_OPEN
+
+        # One probe fails
+        with pytest.raises(RuntimeError):
+            cb.call(MagicMock(side_effect=RuntimeError("probe fails")))
+
+        # Should be back to OPEN, slot released
+        assert cb.state == CircuitBreakerState.OPEN
+        assert cb._half_open_calls == 0
