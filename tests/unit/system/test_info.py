@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Tests for system information utilities."""
 
+import sys
+
 from hephaestus.system.info import (
     extract_version_word,
     format_system_info,
@@ -10,6 +12,7 @@ from hephaestus.system.info import (
     get_os_info,
     get_python_info,
     get_system_info,
+    main,
     run_command,
 )
 
@@ -164,9 +167,6 @@ class TestFormatSystemInfo:
 
 def test_main_returns_zero(monkeypatch):
     """Test that main() returns 0 on success."""
-    import sys
-    from hephaestus.system.info import main
-
     monkeypatch.setattr(sys, "argv", ["info"])
 
     exit_code = main()
@@ -176,9 +176,6 @@ def test_main_returns_zero(monkeypatch):
 
 def test_main_json_returns_zero(monkeypatch):
     """Test that main() returns 0 with --json flag."""
-    import sys
-    from hephaestus.system.info import main
-
     monkeypatch.setattr(sys, "argv", ["info", "--json"])
 
     exit_code = main()

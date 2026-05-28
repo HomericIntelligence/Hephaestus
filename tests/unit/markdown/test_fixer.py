@@ -2,7 +2,10 @@
 
 """Tests for hephaestus.markdown.fixer module."""
 
-from hephaestus.markdown.fixer import FixerOptions, MarkdownFixer
+import json
+import sys
+
+from hephaestus.markdown.fixer import FixerOptions, MarkdownFixer, main
 
 
 def test_fix_md034_bare_urls():
@@ -547,16 +550,13 @@ def test_fix_file_no_error_on_clean_file(tmp_path):
     fixer = MarkdownFixer()
     assert fixer.had_error is False
 
-    modified, fixes = fixer.fix_file(md_file)
+    fixer.fix_file(md_file)
 
     assert fixer.had_error is False
 
 
 def test_main_returns_zero_on_success(tmp_path, monkeypatch):
     """Test that main() returns 0 when fixing succeeds."""
-    import sys
-    from hephaestus.markdown.fixer import main
-
     md_file = tmp_path / "test.md"
     md_file.write_text("# Test\n")
 
@@ -569,9 +569,6 @@ def test_main_returns_zero_on_success(tmp_path, monkeypatch):
 
 def test_main_returns_one_on_missing_path(tmp_path, monkeypatch):
     """Test that main() returns 1 when path does not exist."""
-    import sys
-    from hephaestus.markdown.fixer import main
-
     missing_path = tmp_path / "nonexistent"
     monkeypatch.setattr(sys, "argv", ["fixer", str(missing_path)])
 
@@ -582,9 +579,6 @@ def test_main_returns_one_on_missing_path(tmp_path, monkeypatch):
 
 def test_main_returns_zero_on_empty_directory(tmp_path, monkeypatch):
     """Test that main() returns 0 for empty directory (no regression)."""
-    import sys
-    from hephaestus.markdown.fixer import main
-
     monkeypatch.setattr(sys, "argv", ["fixer", str(tmp_path)])
 
     exit_code = main()
@@ -594,9 +588,6 @@ def test_main_returns_zero_on_empty_directory(tmp_path, monkeypatch):
 
 def test_main_dry_run_returns_zero(tmp_path, monkeypatch):
     """Test that main() returns 0 in dry-run mode."""
-    import sys
-    from hephaestus.markdown.fixer import main
-
     md_file = tmp_path / "test.md"
     md_file.write_text("```\ncode\n```\n")  # Needs fixing
 
@@ -609,10 +600,6 @@ def test_main_dry_run_returns_zero(tmp_path, monkeypatch):
 
 def test_main_json_missing_path_emits_exit_code_one(tmp_path, monkeypatch, capsys):
     """Test that main() with --json emits exit code 1 for missing path."""
-    import sys
-    import json
-    from hephaestus.markdown.fixer import main
-
     missing_path = tmp_path / "nonexistent"
     monkeypatch.setattr(sys, "argv", ["fixer", "--json", str(missing_path)])
 
@@ -626,5 +613,5 @@ def test_main_json_missing_path_emits_exit_code_one(tmp_path, monkeypatch, capsy
         output = json.loads(captured.out)
         assert output["exit_code"] == 1
     except json.JSONDecodeError:
-        # If JSON parsing fails, at least confirm the exit code
-        assert exit_code == 1
+        # If JSON parsing fails, verify output was emitted (non-empty)
+        assert captured.out != ""
