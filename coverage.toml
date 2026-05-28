@@ -1,0 +1,7 @@
+[coverage]
+# Aggregate coverage threshold
+minimum = 80
+
+# Per-module coverage floors
+[coverage.modules]
+"validation/schema.py" = { minimum = 80 }

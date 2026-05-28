@@ -13,6 +13,14 @@ from hephaestus.validation.coverage import (
 )
 
 
+@pytest.fixture
+def empty_config(tmp_path: Path) -> Path:
+    """Create a minimal coverage config without per-module floors."""
+    config_file = tmp_path / "coverage.toml"
+    config_file.write_text("[coverage]\nminimum = 80\n")
+    return config_file
+
+
 class TestLoadCoverageConfig:
     """Tests for load_coverage_config()."""
 
@@ -161,7 +169,7 @@ class TestMain:
         )
         assert main() == 1
 
-    def test_with_threshold_flag(self, tmp_path: Path, monkeypatch) -> None:
+    def test_with_threshold_flag(self, tmp_path: Path, monkeypatch, empty_config: Path) -> None:
         """Explicit threshold flag works."""
         pytest.importorskip("defusedxml")
         coverage_xml = tmp_path / "coverage.xml"
@@ -178,11 +186,13 @@ class TestMain:
                 "pkg/",
                 "--coverage-file",
                 str(coverage_xml),
+                "--config",
+                str(empty_config),
             ],
         )
         assert main() == 0
 
-    def test_verbose_flag(self, tmp_path: Path, monkeypatch) -> None:
+    def test_verbose_flag(self, tmp_path: Path, monkeypatch, empty_config: Path) -> None:
         """Verbose flag works."""
         pytest.importorskip("defusedxml")
         coverage_xml = tmp_path / "coverage.xml"
@@ -200,6 +210,8 @@ class TestMain:
                 "--coverage-file",
                 str(coverage_xml),
                 "--verbose",
+                "--config",
+                str(empty_config),
             ],
         )
         assert main() == 0
@@ -224,7 +236,7 @@ class TestMain:
         assert payload["status"] == "error"
         assert "not found" in payload["message"]
 
-    def test_json_passing(self, tmp_path: Path, monkeypatch, capsys) -> None:
+    def test_json_passing(self, tmp_path: Path, monkeypatch, capsys, empty_config: Path) -> None:
         """--json emits a structured payload when coverage passes."""
         import json
 
@@ -244,6 +256,8 @@ class TestMain:
                 "--coverage-file",
                 str(coverage_xml),
                 "--json",
+                "--config",
+                str(empty_config),
             ],
         )
         assert main() == 0
@@ -252,7 +266,7 @@ class TestMain:
         assert payload["threshold"] == 80
         assert payload["coverage"] >= 80
 
-    def test_json_failing(self, tmp_path: Path, monkeypatch, capsys) -> None:
+    def test_json_failing(self, tmp_path: Path, monkeypatch, capsys, empty_config: Path) -> None:
         """--json returns 1 and reports failure when below threshold."""
         import json
 
@@ -272,13 +286,17 @@ class TestMain:
                 "--coverage-file",
                 str(coverage_xml),
                 "--json",
+                "--config",
+                str(empty_config),
             ],
         )
         assert main() == 1
         payload = json.loads(capsys.readouterr().out)
         assert payload["passed"] is False
 
-    def test_json_unparseable_coverage(self, tmp_path: Path, monkeypatch, capsys) -> None:
+    def test_json_unparseable_coverage(
+        self, tmp_path: Path, monkeypatch, capsys, empty_config: Path
+    ) -> None:
         """--json returns 0 with passed=True when coverage is unparseable."""
         import json
 
@@ -295,6 +313,8 @@ class TestMain:
                 "--coverage-file",
                 str(coverage_xml),
                 "--json",
+                "--config",
+                str(empty_config),
             ],
         )
         assert main() == 0
