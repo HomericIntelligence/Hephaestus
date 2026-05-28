@@ -139,7 +139,7 @@ Add to `pyproject.toml`:
 ```toml
 [project]
 dependencies = [
-    "homericintelligence-hephaestus>=0.6.0,<2",
+    "homericintelligence-hephaestus>=1.0,<2",
 ]
 ```
 
@@ -147,7 +147,7 @@ Or add a PyPI entry to `pixi.toml`:
 
 ```toml
 [pypi-dependencies]
-homericintelligence-hephaestus = ">=0.6.0,<2"
+homericintelligence-hephaestus = ">=1.0,<2"
 ```
 
 Then run `pixi install` to resolve the dependency.
@@ -206,7 +206,7 @@ config = merge_with_env({}, convert_bools=True)
 <!-- CLI table generated from pyproject.toml [project.scripts]. Keep in sync via
      `python3 scripts/check_cli_table_sync.py` (also enforced in pre-commit). -->
 
-41 console scripts are installed when you install the package.  Run any command
+42 console scripts are installed when you install the package.  Run any command
 with `--help` to see full usage.
 
 ### Automation
