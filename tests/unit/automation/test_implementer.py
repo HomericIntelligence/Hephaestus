@@ -270,6 +270,11 @@ class TestPlanReviewVerdictGate:
             patch.object(impl.worktree_manager, "create_worktree", return_value=worktree_path),
             patch.object(impl, "_has_plan", return_value=True),
             patch.object(impl, "_save_state"),
+            # The existing-PR skip guard runs before this gate; no PR by default.
+            patch(
+                "hephaestus.automation.implementer.find_pr_for_issue",
+                return_value=None,
+            ),
             patch(
                 "hephaestus.automation.implementer.is_plan_review_approved",
                 return_value=gate_return,
@@ -346,6 +351,10 @@ class TestPlanReviewVerdictGate:
             patch.object(impl, "_generate_plan") as gen_plan,
             patch.object(impl, "_save_state"),
             patch(
+                "hephaestus.automation.implementer.find_pr_for_issue",
+                return_value=None,
+            ),
+            patch(
                 "hephaestus.automation.implementer.is_plan_review_approved",
                 return_value=False,
             ),
@@ -378,6 +387,10 @@ class TestPlanReviewVerdictGate:
             patch.object(impl, "_has_plan", return_value=True),
             patch.object(impl, "_save_state", side_effect=_record_save),
             patch(
+                "hephaestus.automation.implementer.find_pr_for_issue",
+                return_value=None,
+            ),
+            patch(
                 "hephaestus.automation.implementer.is_plan_review_approved",
                 return_value=False,
             ),
@@ -386,6 +399,88 @@ class TestPlanReviewVerdictGate:
 
         assert result.plan_review_not_approved is True
         assert ImplementationPhase.WAITING_FOR_PLAN_REVIEW in captured_phases
+
+
+# ---------------------------------------------------------------------------
+# Skip implementation when an open PR already exists for the issue
+# ---------------------------------------------------------------------------
+
+
+class TestExistingPrSkipsImplementation:
+    """``_implement_issue`` must short-circuit when an open PR already exists.
+
+    The guard runs BEFORE worktree creation and the plan-review gate, so a
+    re-run of the loop never re-implements (and never clobbers) an issue that
+    already has an in-flight PR. The open PR is handled by the later
+    review-prs / address-review / drive-green phases.
+    """
+
+    @pytest.fixture
+    def impl(self, tmp_path: Path) -> IssueImplementer:
+        options = ImplementerOptions(
+            issues=[1],
+            dry_run=False,
+            enable_learn=False,
+            enable_follow_up=False,
+            enable_ui=False,
+        )
+        with patch("hephaestus.automation.implementer.get_repo_root", return_value=tmp_path):
+            return IssueImplementer(options)
+
+    def test_existing_pr_skips_before_worktree_and_agent(
+        self, impl: IssueImplementer, tmp_path: Path
+    ) -> None:
+        with (
+            patch(
+                "hephaestus.automation.implementer.find_pr_for_issue",
+                return_value=777,
+            ),
+            patch.object(impl.worktree_manager, "create_worktree") as create_wt,
+            patch.object(impl, "_save_state"),
+            patch.object(impl, "_has_plan") as has_plan,
+            patch.object(impl, "_run_claude_code") as run_agent,
+        ):
+            result = impl._implement_issue(1)
+
+        assert result.success is True
+        assert result.already_has_pr is True
+        assert result.pr_number == 777
+        # No worktree, no plan check, no agent session on the skip path.
+        create_wt.assert_not_called()
+        has_plan.assert_not_called()
+        run_agent.assert_not_called()
+
+    def test_no_existing_pr_proceeds(self, impl: IssueImplementer, tmp_path: Path) -> None:
+        """When no PR exists, the guard is transparent and work proceeds."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir(exist_ok=True)
+
+        with (
+            patch(
+                "hephaestus.automation.implementer.find_pr_for_issue",
+                return_value=None,
+            ),
+            patch.object(impl.worktree_manager, "create_worktree", return_value=worktree_path),
+            patch.object(impl, "_has_plan", return_value=True),
+            patch.object(impl, "_save_state"),
+            patch(
+                "hephaestus.automation.implementer.is_plan_review_approved",
+                return_value=True,
+            ),
+            patch.object(impl, "_run_claude_code", return_value="sess-1"),
+            patch.object(impl, "_run_impl_review_loop", return_value=(1, "GO", "A")),
+            patch.object(impl, "_finalize_pr", return_value=999),
+            patch.object(impl, "_run_post_pr_followup"),
+            patch(
+                "hephaestus.automation.implementer.fetch_issue_info",
+                return_value=MagicMock(title="t", body="b"),
+            ),
+        ):
+            result = impl._implement_issue(1)
+
+        assert result.success is True
+        assert result.already_has_pr is False
+        assert result.pr_number == 999
 
 
 # ---------------------------------------------------------------------------

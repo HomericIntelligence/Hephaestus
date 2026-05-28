@@ -107,6 +107,11 @@ class WorkerResult(BaseModel):
     # failed — it should be retried on the next automation loop after the
     # planner amends and the reviewer re-evaluates. See #551.
     plan_review_not_approved: bool = False
+    # Set True when the implementer skipped because an open PR already exists
+    # for this issue. Re-implementing would clobber in-flight work; the open
+    # PR is handled by the later review-prs / address-review / drive-green
+    # phases. Not a failure.
+    already_has_pr: bool = False
     # Set True when the reviewer short-circuited (plan already APPROVED, or no
     # plan comment yet); the issue was not reviewed this pass and does not
     # count as work for loop convergence (#613).
