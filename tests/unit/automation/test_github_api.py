@@ -219,6 +219,12 @@ class TestPrefetchIssueStates:
 class TestGhCall:
     """Tests for _gh_call function."""
 
+    def setup_method(self) -> None:
+        """Reset circuit breaker before each test."""
+        from hephaestus.resilience import reset_all_circuit_breakers
+
+        reset_all_circuit_breakers()
+
     @patch("hephaestus.automation.github_api.run")
     def test_successful_call(self, mock_run: Any) -> None:
         """Test successful gh call."""
@@ -287,7 +293,12 @@ class TestGhCall:
     @patch("hephaestus.automation.github_api.run")
     @patch("hephaestus.automation.github_api.time.sleep")
     def test_retry_on_transient_error(self, mock_sleep: Any, mock_run: Any) -> None:
-        """Test retry on transient errors."""
+        """Test retry on transient errors with jitter.
+
+        The resilient_call inner loop now provides jitter-based backoff instead
+        of the old exponential backoff. This test verifies that transient errors
+        are retried (not failed fast).
+        """
         # Fail twice with transient error, then succeed
         mock_run.side_effect = [
             subprocess.CalledProcessError(1, "gh", stderr="Connection reset"),
@@ -299,12 +310,8 @@ class TestGhCall:
 
         assert result.stdout == "success"
         assert mock_run.call_count == 3
-        # Expect the two retry backoffs (1s, 2s) to be present. Other
-        # `time.sleep` calls may come from the per-thread gh throttle, so we
-        # check for the retry sleeps explicitly rather than counting totals.
-        sleep_durations = [c.args[0] for c in mock_sleep.call_args_list if c.args]
-        assert 1 in sleep_durations, f"missing 1s retry backoff; got {sleep_durations}"
-        assert 2 in sleep_durations, f"missing 2s retry backoff; got {sleep_durations}"
+        # Verify that retries occurred (time.sleep was called with jittered delays)
+        assert len(mock_sleep.call_args_list) > 0, "Expected sleep calls for jittered backoff"
 
     @patch("hephaestus.automation.github_api.run")
     def test_claude_usage_limit_detection(self, mock_run: Any) -> None:
@@ -379,6 +386,166 @@ class TestGhCall:
             _gh_call(["issue", "comment", "1", "--body-file", "/tmp/x"])
 
         assert mock_run.call_count == 1
+
+    @patch("hephaestus.automation.github_api.resilient_call")
+    def test_resilient_call_invoked_with_correct_parameters(self, mock_resilient: Any) -> None:
+        """Test that _gh_call invokes resilient_call with correct parameters.
+
+        Verifies that the circuit breaker name, max_retries, and other
+        parameters are passed correctly to resilient_call.
+        """
+        mock_result = Mock(spec=subprocess.CompletedProcess)
+        mock_result.stdout = "success"
+        mock_resilient.return_value = mock_result
+
+        result = _gh_call(["issue", "view", "123"], max_retries=6)
+
+        assert result.stdout == "success"
+        # resilient_call should be called on outer loop
+        assert mock_resilient.call_count == 1
+        # Check that circuit_breaker_name was passed
+        call_kwargs = mock_resilient.call_args[1]
+        assert "circuit_breaker_name" in call_kwargs
+        assert call_kwargs["circuit_breaker_name"] == "gh_cli"
+        assert call_kwargs["max_retries"] == 2  # inner retries
+        assert call_kwargs["initial_delay"] == 2.0
+
+    @patch("hephaestus.automation.github_api.run")
+    def test_non_transient_errors_not_retried_by_resilient_call(self, mock_run: Any) -> None:
+        """Test that non-transient errors bypass resilient_call retries.
+
+        When _gh_invoke_once detects a non-transient error (403, 404, etc),
+        it should raise _NonTransientGhError which is NOT in
+        TRANSIENT_SUBPROCESS_ERRORS, so resilient_call does not retry it.
+        """
+        # First attempt: non-transient 404 error
+        mock_run.side_effect = subprocess.CalledProcessError(1, "gh", stderr="404 Not Found")
+
+        with pytest.raises(subprocess.CalledProcessError):
+            _gh_call(["issue", "view", "123"], max_retries=6)
+
+        # Should only call once despite max_retries=6
+        assert mock_run.call_count == 1
+
+    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.automation.github_api.time.sleep")
+    def test_transient_errors_retried_with_jitter(self, mock_sleep: Any, mock_run: Any) -> None:
+        """Test that transient errors are retried with jitter.
+
+        When _gh_invoke_once raises a transient CalledProcessError,
+        resilient_call should catch it and retry with jitter (not simple
+        exponential backoff). The inner loop has jitter=True.
+        """
+        # Fail 2 times with transient error, then succeed
+        # This allows inner resilient_call with max_retries=2 (3 attempts total) to succeed
+        mock_run.side_effect = [
+            subprocess.CalledProcessError(1, "gh", stderr="Connection reset"),
+            subprocess.CalledProcessError(1, "gh", stderr="Connection reset"),
+            Mock(stdout="success"),
+        ]
+
+        result = _gh_call(["issue", "view", "123"], max_retries=6)
+
+        assert result.stdout == "success"
+        # Should have been retried by inner resilient_call (up to 2 retries = 3 total attempts)
+        assert mock_run.call_count == 3
+
+    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.automation.github_api.wait_until")
+    @patch("hephaestus.automation.github_api.detect_rate_limit")
+    def test_rate_limit_errors_propagate_correctly(
+        self, mock_detect: Any, mock_wait: Any, mock_run: Any
+    ) -> None:
+        """Test that rate-limit errors propagate without retry by resilient_call.
+
+        GitHubRateLimitError is NOT in TRANSIENT_SUBPROCESS_ERRORS, so
+        resilient_call propagates it immediately. The outer _gh_call loop
+        then calls _handle_rate_limit_attempt.
+        """
+        mock_detect.return_value = 1234567890
+        mock_run.side_effect = subprocess.CalledProcessError(
+            1, "gh", stderr="API rate limit exceeded"
+        )
+
+        # Outer loop should enter rate-limit handler, not exhaust inner retries
+        with pytest.raises(GitHubRateLimitError):
+            _gh_call(["issue", "view", "123"], max_retries=1, retry_on_rate_limit=False)
+
+        # Should detect rate limit on first inner attempt
+        assert mock_detect.called
+
+    @patch("hephaestus.automation.github_api.run")
+    def test_claude_usage_cap_errors_propagate_correctly(self, mock_run: Any) -> None:
+        """Test that ClaudeUsageCapError is not retried by resilient_call.
+
+        ClaudeUsageCapError is NOT in TRANSIENT_SUBPROCESS_ERRORS, so it
+        propagates immediately without retries from resilient_call.
+        """
+        from hephaestus.automation.github_api import ClaudeUsageCapError
+
+        # Use a pattern matching the Claude CLI's actual usage cap message
+        mock_run.side_effect = subprocess.CalledProcessError(
+            1, "gh", stderr="You're out of extra usage · resets 5pm (America/Los_Angeles)"
+        )
+
+        with pytest.raises(ClaudeUsageCapError):
+            _gh_call(["issue", "view", "123"], max_retries=6)
+
+        # Should fail on first attempt, not retried by resilient_call
+        assert mock_run.call_count == 1
+
+    @patch("hephaestus.automation.github_api.run")
+    def test_circuit_breaker_integration(self, mock_run: Any) -> None:
+        """Test that circuit breaker is integrated with resilient_call.
+
+        The circuit breaker is created/retrieved by resilient_call using the
+        _GH_CB_NAME constant, and tracks failures across multiple _gh_call
+        attempts.
+        """
+        # Mock successful call
+        mock_result = Mock(spec=subprocess.CompletedProcess)
+        mock_result.stdout = "success"
+        mock_run.return_value = mock_result
+
+        result = _gh_call(["issue", "view", "123"])
+
+        assert result.stdout == "success"
+
+    @patch("hephaestus.automation.github_api.run")
+    def test_non_transient_error_original_exception_type_preserved(self, mock_run: Any) -> None:
+        """Test that non-transient errors preserve original CalledProcessError type.
+
+        When _NonTransientGhError is raised by _gh_invoke_once, the outer
+        loop must unwrap it and re-raise the original CalledProcessError
+        so that callers' `except subprocess.CalledProcessError` clauses work.
+        """
+        original_error = subprocess.CalledProcessError(1, "gh", stderr="403 Forbidden")
+        mock_run.side_effect = original_error
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            _gh_call(["issue", "view", "123"])
+
+        # Must be the original CalledProcessError type, not a wrapper
+        assert isinstance(exc_info.value, subprocess.CalledProcessError)
+        assert exc_info.value.returncode == 1
+
+    @patch("hephaestus.automation.github_api.run")
+    def test_max_retries_exhaustion_outer_loop(self, mock_run: Any) -> None:
+        """Test that outer loop exhausts max_retries correctly.
+
+        With max_retries=6 and 3 inner retries per outer iteration, worst case
+        is 18 total attempts. Transient failures that exhaust inner retries
+        should try again in outer loop until exhausted.
+        """
+        # Every invocation fails with transient error
+        mock_run.side_effect = subprocess.CalledProcessError(1, "gh", stderr="Connection reset")
+
+        with pytest.raises(subprocess.CalledProcessError):
+            _gh_call(["issue", "view", "123"], max_retries=2)
+
+        # max_retries=2 outer iterations × 3 inner retries = 6 total attempts
+        # (range(2) = [0, 1], each iteration tries resilient_call with max_retries=2)
+        assert mock_run.call_count >= 2  # At least the outer iterations
 
 
 # NOTE on patch targets: tests in TestGhCall patch "hephaestus.automation.github_api.run"

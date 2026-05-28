@@ -30,6 +30,7 @@ from hephaestus.github.rate_limit import (
     wait_until,
 )
 from hephaestus.io.utils import write_secure as io_write_secure
+from hephaestus.resilience import resilient_call
 
 from .claude_timeouts import gh_cli_timeout
 from .git_utils import get_repo_info, run
@@ -112,6 +113,18 @@ class ClaudeUsageCapError(RuntimeError):
         """
         super().__init__(message)
         self.reset_epoch: int | None = reset_epoch
+
+
+class _NonTransientGhError(Exception):
+    """Wraps a CalledProcessError that must NOT be retried by resilient_call.
+
+    Carries the original CalledProcessError as ``__cause__`` so the outer
+    _gh_call layer can re-raise the original error and preserve subprocess
+    semantics for callers that ``except subprocess.CalledProcessError``.
+    """
+
+
+_GH_CB_NAME = "gh_cli"
 
 
 def gh_list_labels(refresh: bool = False) -> set[str]:
@@ -266,19 +279,79 @@ def _log_token_scope_remediation(args: list[str], stderr: str) -> None:
     )
 
 
+def _gh_invoke_once(
+    args: list[str],
+    *,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Single gh invocation with error classification.
+
+    Pre-classifies errors before returning to resilient_call so that
+    non-transient failures are wrapped in _NonTransientGhError (which is
+    not in TRANSIENT_SUBPROCESS_ERRORS) and bypass the retry loop.
+
+    Args:
+        args: Arguments to pass to gh
+        check: Whether to raise on non-zero exit
+
+    Returns:
+        CompletedProcess instance
+
+    Raises:
+        subprocess.CalledProcessError: transient failures (retried by resilient_call)
+        _NonTransientGhError: non-transient failures (NOT retried)
+        GitHubRateLimitError: rate-limit hit (NOT retried by resilient_call)
+        ClaudeUsageCapError: Claude usage cap (NOT retried)
+
+    """
+    gh_global_throttle_acquire()
+    _gh_throttle_wait()
+    try:
+        return run(
+            ["gh", *args],
+            check=check,
+            capture_output=True,
+            timeout=gh_cli_timeout(),
+        )
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr if e.stderr else ""
+
+        _raise_if_claude_usage(stderr, e)
+
+        reset_epoch = _extract_reset_epoch(e)
+        if reset_epoch is not None:
+            raise GitHubRateLimitError(
+                f"GitHub API rate limit reached. Reset at epoch {reset_epoch}",
+                reset_epoch=reset_epoch,
+            ) from e
+
+        if _is_non_transient_error(stderr):
+            if _is_token_scope_error(stderr):
+                _log_token_scope_remediation(args, stderr)
+            logger.error("Non-transient error detected: %s", stderr[:200])
+            raise _NonTransientGhError(str(e)) from e
+
+        raise
+
+
 def _gh_call(
     args: list[str],
     check: bool = True,
     retry_on_rate_limit: bool = True,
     max_retries: int = 6,
 ) -> subprocess.CompletedProcess[str]:
-    """Call gh CLI with rate limit handling.
+    """Call gh CLI with rate limit handling and resilient retries.
+
+    Combines resilient_call (for transient retries with jitter and circuit breaker)
+    with an outer loop for rate-limit waits. Non-transient errors are caught by
+    _gh_invoke_once and wrapped in _NonTransientGhError so resilient_call does
+    not retry them.
 
     Args:
         args: Arguments to pass to gh
         check: Whether to raise on non-zero exit
         retry_on_rate_limit: Whether to retry on rate limit
-        max_retries: Maximum retry attempts
+        max_retries: Maximum outer retry attempts
 
     Returns:
         CompletedProcess instance
@@ -286,52 +359,27 @@ def _gh_call(
     Raises:
         subprocess.CalledProcessError: If command fails and check=True
         ClaudeUsageCapError: If a Claude per-period usage cap is detected.
+        GitHubRateLimitError: If rate limit is hit and not retried.
         RuntimeError: For other non-transient or exhausted-retry failures.
 
     """
     for attempt in range(max_retries):
         try:
-            gh_global_throttle_acquire()
-            _gh_throttle_wait()
-            result = run(
-                ["gh", *args],
-                check=check,
-                capture_output=True,
-                timeout=gh_cli_timeout(),
+            return cast(
+                subprocess.CompletedProcess[str],
+                resilient_call(
+                    _gh_invoke_once,
+                    args,
+                    circuit_breaker_name=_GH_CB_NAME,
+                    max_retries=2,
+                    initial_delay=2.0,
+                    max_delay=30.0,
+                    check=check,
+                ),
             )
-            return result
-        except subprocess.CalledProcessError as e:
-            stderr = e.stderr if e.stderr else ""
-            _raise_if_claude_usage(stderr, e)
-
-            reset_epoch = _extract_reset_epoch(e)
-            if reset_epoch is not None:
-                _handle_rate_limit_attempt(
-                    reset_epoch=reset_epoch,
-                    attempt=attempt,
-                    max_retries=max_retries,
-                    retry_on_rate_limit=retry_on_rate_limit,
-                    cause=e,
-                )
-                continue
-
-            if _is_non_transient_error(stderr):
-                logger.error("Non-transient error detected: %s", stderr[:200])
-                if _is_token_scope_error(stderr):
-                    _log_token_scope_remediation(args, stderr)
-                raise
-
-            if attempt == max_retries - 1:
-                raise
-
-            wait_seconds = 2**attempt
-            logger.warning(
-                "gh call failed (attempt %s), retrying in %ss", attempt + 1, wait_seconds
-            )
-            time.sleep(wait_seconds)
+        except _NonTransientGhError as e:
+            raise cast(subprocess.CalledProcessError, e.__cause__) from None
         except GitHubRateLimitError as e:
-            # Raised from inside _check_graphql_errors when the JSON payload
-            # carries a RATE_LIMITED entry (HTTP 200, gh exits 0).
             _handle_rate_limit_attempt(
                 reset_epoch=e.reset_epoch,
                 attempt=attempt,
@@ -341,7 +389,6 @@ def _gh_call(
             )
             continue
 
-    # Should not reach here, but satisfy type checker
     raise RuntimeError("gh call failed after all retries")
 
 
