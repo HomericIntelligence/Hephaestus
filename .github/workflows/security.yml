@@ -57,3 +57,45 @@ jobs:
               echo "Vulnerabilities detected — see job logs for details."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  sast:
+    name: Static Application Security Testing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install pixi
+        uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11  # v0.9.6
+        with:
+          pixi-version: v0.63.2
+          environments: lint
+          locked: true
+
+      - name: Cache pixi environments
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: |
+            .pixi
+            ~/.cache/rattler/cache
+          key: pixi-lint-${{ runner.os }}-${{ hashFiles('pixi.lock') }}
+
+      - name: Run bandit (SAST)
+        id: bandit
+        run: pixi run --environment lint sast
+
+      - name: Post bandit summary
+        if: always()
+        env:
+          BANDIT_OUTCOME: ${{ steps.bandit.outcome }}
+        run: |
+          {
+            echo "## Bandit Static Application Security Testing"
+            echo ""
+            if [ "$BANDIT_OUTCOME" = "success" ]; then
+              echo "No security issues found."
+            else
+              echo "Security issues detected — see job logs for details."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
