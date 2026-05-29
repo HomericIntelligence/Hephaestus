@@ -158,7 +158,7 @@ jobs:
         if: steps.detect.outputs.skip == 'false'
         uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11  # v0.9.6
         with:
-          pixi-version: v0.67.2
+          pixi-version: v0.69.0
           cache: true
       - name: pixi install (locked)
         if: steps.detect.outputs.skip == 'false'

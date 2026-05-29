@@ -3,6 +3,7 @@ name = "project-hephaestus"
 description = "Shared utilities and tooling for the HomericIntelligence ecosystem"
 channels = ["conda-forge"]
 platforms = ["linux-64"] # Do not re-enable, "win-64", "osx-64", "osx-arm64"]
+requires-pixi = ">=0.69.0"
 
 [tasks]
 test = "pytest"
