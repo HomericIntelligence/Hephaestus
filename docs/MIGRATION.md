@@ -1,17 +1,27 @@
 # Migration Guide
 
-## 0.x → 1.0
+> **Status (as of 2026-05-28):** The latest released version is **0.9.2** (tag-driven
+> via hatch-vcs). **1.0 has not been released yet** — the section below is the
+> *forthcoming* 1.0 migration guidance, published ahead of the cut so consumers can
+> prepare. There are currently **no breaking changes between 0.9.x releases**: upgrading
+> within the 0.9.x line requires no code changes for code that uses only the documented
+> public API in [`COMPATIBILITY.md`](../COMPATIBILITY.md). The `Development Status ::
+> 5 - Production/Stable` classifier in `pyproject.toml` reflects the maturity of the
+> stable public API surface, not a 1.0 tag; the package remains tag-driven and is
+> currently on the 0.9.x series.
+
+## 0.x → 1.0 (forthcoming — not yet released)
 
 ### Summary
 
-**Version 1.0 introduces no breaking changes to the documented public API.**
+**Version 1.0 will introduce no breaking changes to the documented public API.**
 
-The 1.0 release does not change the public API — it *commits* to it. Every symbol
+The 1.0 release will not change the public API — it will *commit* to it. Every symbol
 listed in [`COMPATIBILITY.md`](../COMPATIBILITY.md) keeps the same name, signature,
 and behavior it had in the 0.x series. Code that uses only the documented public API
-needs **no changes** to move from a recent 0.x release to 1.0.
+will need **no changes** to move from a recent 0.x release to 1.0.
 
-What 1.0 means for consumers:
+What 1.0 will mean for consumers:
 
 - The public API surface in `COMPATIBILITY.md` is now covered by the
   [Semantic Versioning](https://semver.org/) guarantees and the deprecation policy —

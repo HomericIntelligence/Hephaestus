@@ -11,7 +11,7 @@ Continuous Integration pipeline that runs on every push and pull request to `mai
 **Matrix:**
 
 - OS: `ubuntu-latest`
-- Python: `3.12`
+- Python: `3.10` / `3.11` / `3.12` / `3.13`
 - Test types: `unit`, `integration`
 
 **Jobs:**
@@ -23,7 +23,7 @@ Continuous Integration pipeline that runs on every push and pull request to `mai
 **Status Badge:**
 
 ```markdown
-![Test](https://github.com/mvillmow/ProjectHephaestus/actions/workflows/test.yml/badge.svg)
+![Test](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/test.yml/badge.svg)
 ```
 
 ### Pre-commit Workflow (`workflows/pre-commit.yml`)
@@ -37,6 +37,23 @@ Scheduled and on-demand pip-audit scan for dependency vulnerabilities.
 ### Release Workflow (`workflows/release.yml`)
 
 Builds and publishes the package to PyPI on version tag push (`v*`).
+
+### Required Checks Workflow (`workflows/_required.yml`)
+
+The consolidated required-status-check gate that runs on every pull request to
+`main` (and on push to `main`). It aggregates lint, markdownlint, `pixi-check`,
+shellcheck, the `pr-policy` gate (enforces `Closes #N`, auto-merge enabled, and
+signed commits), unit/integration/shell tests, wheel build, security scans
+(pip-audit, Gitleaks, bandit), workflow-schema validation, and version-sync. It
+also re-runs on `auto_merge_enabled` / `auto_merge_disabled` events so the
+`pr-policy` auto-merge check converges without timing races.
+
+### Auto-Tag Workflow (`workflows/auto-tag.yml`)
+
+Manually dispatched (`workflow_dispatch`) release-tagging helper. Computes the
+next `vX.Y.Z` tag by bumping the requested component (`patch` / `minor` /
+`major`) from the highest existing tag, then pushes it — which in turn triggers
+`release.yml`.
 
 ## Maintenance
 

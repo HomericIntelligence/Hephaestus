@@ -2,6 +2,13 @@
 
 ProjectHephaestus ships as a Claude Code plugin in addition to a Python package. Installing the plugin gives any repository in your ecosystem access to the `hephaestus` skill set.
 
+> **Note on versions:** The plugin version (currently `3.0.0`, declared in
+> `.claude-plugin/`) and the Python package version (currently `0.9.2`, tag-driven via
+> hatch-vcs) are **separate artifacts** with independent version numbers — they are not
+> coupled and will not match. See
+> [`COMPATIBILITY.md`](../COMPATIBILITY.md#versioning-python-package-vs-claude-code-plugin)
+> for details.
+
 ## What the Plugin Provides
 
 | Skill | Invocation | Description |

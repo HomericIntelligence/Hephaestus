@@ -8,6 +8,28 @@ ProjectHephaestus follows [Semantic Versioning](https://semver.org/).
 
 Upgrading across a major version? See the [migration guide](docs/MIGRATION.md).
 
+## Supported Python Versions
+
+ProjectHephaestus supports **Python 3.10+** (`requires-python = ">=3.10"` in
+`pyproject.toml`). CI exercises the package on 3.10, 3.11, 3.12, and 3.13. Dropping
+support for a Python minor version is treated as a backwards-incompatible change and
+follows the deprecation policy below.
+
+## Versioning: Python Package vs Claude Code Plugin
+
+ProjectHephaestus ships **two independently versioned artifacts**:
+
+- **The Python package** (`homericintelligence-hephaestus`) — version is **tag-driven**
+  via hatch-vcs (derived from the latest `vX.Y.Z` git tag; currently `0.9.2`). This is
+  the version the Semantic Versioning guarantees in this document apply to.
+- **The Claude Code plugin** (`hephaestus`, declared in `.claude-plugin/`) — carries its
+  own `version` field (currently `3.0.0`) that tracks the skill/command surface, not the
+  Python API.
+
+These two version numbers are **not** coupled and will not match. The plugin version
+says nothing about the Python package version and vice versa. See
+[`docs/plugin-installation.md`](docs/plugin-installation.md) for plugin installation.
+
 ## Stability Tiers
 
 ProjectHephaestus ships 19 subpackages with different maturity levels. Only the
@@ -38,7 +60,7 @@ may change incompatibly in a minor release.
 | Subpackage | Why provisional |
 |------------|-----------------|
 | `hephaestus.agents` | Agent metadata schema still evolving |
-| `hephaestus.automation` | Actively-evolving 6-phase issue/PR pipeline; large refactor pending (#468) |
+| `hephaestus.automation` | Actively-evolving 3-stage issue/PR pipeline (collapsed from the prior 6-phase design in #677/#679); internals still evolving |
 | `hephaestus.benchmarks` | Comparison API is exploratory |
 | `hephaestus.ci` | CI helpers are project-specific glue, not a general API |
 | `hephaestus.datasets` | Downloader URLs and on-disk layout are not contracted |

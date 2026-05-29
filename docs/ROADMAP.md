@@ -6,9 +6,9 @@ ProjectHephaestus is the foundational utilities and tooling repository of the Ho
 
 ## Current Focus (Q2 2026)
 
-The project is currently focused on addressing findings from the strict 2026-04-28 repository audit (Epic #310). This ongoing work spans:
+The strict 2026-04-28 repository audit (Epic #310) is now **closed**. The active work is remediating findings from the follow-up strict 2026-05-28 audit, tracked as individual `audit-finding` issues. This ongoing work spans:
 
-1. **Strict Audit Remediation** — Addressing 29 major, minor, and nitpick findings across 15 audit dimensions. Focus areas include improving automation module test coverage, fixing f-string logging anti-patterns, and hardening the 6-phase review-PR pipeline.
+1. **Audit Remediation** — Addressing the open `audit-finding` issues across the 15 audit dimensions. Focus areas include documentation currency, automation module test coverage, fixing f-string logging anti-patterns, and continued hardening of the 3-stage review-PR pipeline (collapsed from the prior 6-phase design in #677/#679).
 
 2. **Automation Package Stabilization** — Refactoring and hardening the automation modules (PR review, CI driver, issue implementation) to improve single responsibility, observability, and idempotency. This includes fixing critical bugs in the CI state machine and worktree management.
 
@@ -44,7 +44,7 @@ Conservative, directional items:
 
 ProjectHephaestus uses an Epic-and-children issue pattern for project planning. Major initiatives are tracked as Epic issues (labeled `epic`), with breakdown into concrete child issues tagged by audit section and severity.
 
-**Exemplar:** Epic #310 (Strict audit 2026-04-28) contains 29 child issues spanning all 15 audit dimensions, with clear scoping and evidence-based requirements.
+**Exemplar:** Epic #310 (Strict audit 2026-04-28, now closed) contained 29 child issues spanning all 15 audit dimensions, with clear scoping and evidence-based requirements.
 
 We also capture session learnings in ProjectMnemosyne via the `/learn` skill, preserving team knowledge about patterns, anti-patterns, and decisions across the ecosystem.
 
@@ -52,4 +52,4 @@ We also capture session learnings in ProjectMnemosyne via the `/learn` skill, pr
 
 This roadmap is reviewed and updated at the end of each release cycle (typically monthly). As new Epics are created or project priorities shift, the roadmap is refreshed to reflect current focus areas. To propose changes, open an issue and reference this document.
 
-Last updated: 2026-05-09
+Last updated: 2026-05-28

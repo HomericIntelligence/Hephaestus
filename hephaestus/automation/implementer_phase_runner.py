@@ -1,4 +1,4 @@
-"""Per-issue 6-phase pipeline runner for :class:`IssueImplementer`.
+"""Per-issue 3-stage pipeline runner for :class:`IssueImplementer`.
 
 Extracted from :mod:`hephaestus.automation.implementer` as part of the #597
 decomposition. The runner owns the body of ``_implement_issue`` and all of

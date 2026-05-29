@@ -36,8 +36,15 @@ jobs:
           # Find the highest existing vX.Y.Z tag and increment the requested component
           LATEST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
           if [ -z "${LATEST_TAG}" ]; then
-            # No tags yet — start at v0.7.0 base
-            LATEST="0.7.0"
+            # No vX.Y.Z tags found. This repo is tag-driven and already has a
+            # published history (13+ tags as of v0.9.2), so an empty result here
+            # means the tags were not fetched (missing fetch-depth/fetch-tags) or
+            # a fresh repo with no release line — NOT a request to seed a version.
+            # Fail loudly rather than silently inventing a stale base tag, which
+            # would push a wrong release tag and trigger release.yml.
+            echo "::error::No vX.Y.Z tags found. Refusing to seed a version automatically." >&2
+            echo "::error::Ensure tags are fetched (fetch-depth: 0, fetch-tags: true) or create the initial tag manually." >&2
+            exit 1
           else
             LATEST="${LATEST_TAG#v}"
           fi
