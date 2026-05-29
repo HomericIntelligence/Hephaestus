@@ -7,6 +7,8 @@ common edge-case inputs (e.g. content containing curly braces).
 
 from __future__ import annotations
 
+import re
+
 from hephaestus.automation import prompts
 
 
@@ -189,6 +191,36 @@ class TestPlanPrompt:
         assert "PRIOR REVIEW" in out
         # It must say it produces the single Implementation Plan comment.
         assert "# Implementation Plan" in out
+
+    def test_includes_xml_tagged_section_skeleton(self) -> None:
+        """The prompt teaches placement via XML-tagged section slots (#693 R0=F fix).
+
+        The tags are a teaching device only — the planner still OUTPUTS markdown
+        ``## Section`` headings — so the prompt must show the slot tags AND state
+        they are illustrative, not the output format.
+        """
+        out = prompts.get_plan_prompt(99)
+        for tag in ("<objective>", "<approach>", "<files_to_modify>", "<verification>"):
+            assert tag in out, f"expected teaching tag {tag} in the plan prompt"
+        assert "markdown" in out.lower()
+
+    def test_includes_two_good_and_one_bad_example(self) -> None:
+        """Two GOOD worked examples + one BAD (meta-narrative) example.
+
+        #693 R0/R1 were NOGO'd for being a meta-description rather than the
+        plan; the BAD example makes that anti-pattern explicit.
+        """
+        out = prompts.get_plan_prompt(99)
+        lower = out.lower()
+        assert lower.count("good example") >= 2, "expected at least two GOOD examples"
+        assert "bad example" in lower, "expected a labelled BAD example"
+        assert "meta" in lower or "changelog" in lower
+
+    def test_good_examples_show_concrete_path_and_verification(self) -> None:
+        """The worked examples model the concreteness the reviewer demands."""
+        out = prompts.get_plan_prompt(99)
+        assert re.search(r"\.py:\d+", out), "expected a file:line reference in the examples"
+        assert "pixi run pytest" in out
 
 
 class TestPlanReviewContextAndVerdict:
