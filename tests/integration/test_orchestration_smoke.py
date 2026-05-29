@@ -1,13 +1,14 @@
 """Smoke tests for omitted orchestration modules — integration backstop.
 
-These tests validate that the 10 automation modules omitted from coverage
+These tests validate that the 11 automation modules omitted from coverage
 (per pyproject.toml[tool.coverage.run].omit) remain importable and their
 console entry points work correctly.
 
 Module enumeration and entry-point discovery verified at plan time:
-- All 10 modules are importable (guards against import regressions)
+- All 11 modules are importable (guards against import regressions)
 - 4 modules have console scripts: implementer, planner, loop_runner, pr_reviewer
-- 2 modules are script-less but have main(): address_review, ci_driver
+- 3 modules are script-less but have main(): address_review, ci_driver,
+    implementer_cli (its main() backs the implementer console script via re-export)
 - 4 modules lack main() entirely: implementer_phase_runner, implementer_summary,
     curses_ui, github_api
 """
@@ -16,9 +17,10 @@ import subprocess
 
 import pytest
 
-# All 10 omitted orchestration modules
+# All 11 omitted orchestration modules
 OMITTED_MODULES = [
     "hephaestus.automation.implementer",
+    "hephaestus.automation.implementer_cli",
     "hephaestus.automation.implementer_phase_runner",
     "hephaestus.automation.implementer_summary",
     "hephaestus.automation.planner",
@@ -38,10 +40,14 @@ CONSOLE_SCRIPTS = [
     ("hephaestus-review-prs", "hephaestus.automation.pr_reviewer"),
 ]
 
-# Modules with main() but no console script
+# Modules with main() but no console script of their own.
+# implementer_cli.main() is exposed as the ``hephaestus-implement-issues`` script
+# via re-export from ``hephaestus.automation.implementer`` — it has no separate
+# entry point, so it is verified here for callability rather than via --help.
 MAIN_ONLY_MODULES = [
     "hephaestus.automation.address_review",
     "hephaestus.automation.ci_driver",
+    "hephaestus.automation.implementer_cli",
 ]
 
 
