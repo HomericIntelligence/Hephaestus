@@ -50,25 +50,17 @@ def test_validate_phases_rejects_typo() -> None:
         _validate_phases("plan,implmnt")
 
 
-def test_phase_order_warnings_implement_without_review_plans() -> None:
-    """Phase order warnings implement without review plans."""
-    cfg = LoopConfig(phases=("implement",))
-    warnings = _phase_order_warnings(cfg)
-    assert any("implement" in w and "review-plans" in w for w in warnings)
-
-
-def test_phase_order_warnings_address_review_without_review_prs() -> None:
-    """Phase order warnings address review without review prs."""
-    cfg = LoopConfig(phases=("address-review",))
-    warnings = _phase_order_warnings(cfg)
-    assert any("address-review" in w and "review-prs" in w for w in warnings)
-
-
-def test_phase_order_warnings_drive_green_without_implement() -> None:
-    """Phase order warnings drive green without implement."""
+def test_phase_order_warnings_drive_green_without_implement_warns() -> None:
+    """drive-green selected without implement triggers the cross-stage warning."""
     cfg = LoopConfig(phases=("drive-green",))
     warnings = _phase_order_warnings(cfg)
-    assert any("drive-green" in w for w in warnings)
+    assert any("drive-green" in w and "implement" in w for w in warnings)
+
+
+def test_phase_order_warnings_drive_green_with_implement_silent() -> None:
+    """drive-green selected alongside implement produces no warning."""
+    cfg = LoopConfig(phases=("implement", "drive-green"))
+    assert _phase_order_warnings(cfg) == []
 
 
 def test_phase_order_warnings_silent_on_full_pipeline() -> None:
@@ -297,9 +289,11 @@ def test_process_repo_skips_issue_phases_when_no_issues(
     ):
         result = process_repo("r", loop_idx=1, cfg=cfg)
     by_name = {p.name: p for p in result.phases}
-    for name in ("review-plans", "review-prs", "address-review", "drive-green"):
-        assert by_name[name].skipped
-        assert by_name[name].skip_reason == "no open issues"
+    # Only drive-green requires open issues (PHASES_REQUIRING_ISSUES). With
+    # loops=1 it also runs on the final loop, so the skip reason here is the
+    # "no open issues" gate rather than "not final loop".
+    assert by_name["drive-green"].skipped
+    assert by_name["drive-green"].skip_reason == "no open issues"
     # plan and implement auto-discover, so they still run
     assert not by_name["plan"].skipped
     assert not by_name["implement"].skipped
@@ -383,11 +377,11 @@ def test_build_phase_argv_plan_omits_issues() -> None:
     assert "--issues" not in argv
 
 
-def test_build_phase_argv_review_plans_includes_issues() -> None:
-    """Build phase argv review plans includes issues."""
+def test_build_phase_argv_drive_green_includes_issues() -> None:
+    """drive-green forwards the open-issue list via --issues (the only phase that does)."""
     cfg = LoopConfig()
     with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/py", ["script.py"])):
-        argv = loop_runner._build_phase_argv("review-plans", cfg, open_issues=[7, 8])
+        argv = loop_runner._build_phase_argv("drive-green", cfg, open_issues=[7, 8])
     assert argv is not None
     assert "--issues" in argv
     assert "7" in argv and "8" in argv
@@ -410,11 +404,11 @@ def test_build_phase_argv_implement_has_single_max_workers() -> None:
     assert argv.count("--max-workers") == 1
 
 
-def test_build_phase_argv_review_plans_omits_no_ui() -> None:
-    """Regression: review-plans does NOT receive --no-ui (bash never passed it)."""
+def test_build_phase_argv_plan_omits_no_ui() -> None:
+    """Regression: plan does NOT receive --no-ui (per _PHASE_FLAGS)."""
     cfg = LoopConfig()
-    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/py", ["s.py"])):
-        argv = loop_runner._build_phase_argv("review-plans", cfg, open_issues=[1])
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/plan", [])):
+        argv = loop_runner._build_phase_argv("plan", cfg, open_issues=[1])
     assert argv is not None
     assert "--no-ui" not in argv
 
@@ -450,7 +444,7 @@ def test_build_phase_argv_plan_omits_max_workers() -> None:
 def test_phase_env_loop_index_only_for_drive_green() -> None:
     """Regression: HEPH_LOOP_INDEX/HEPH_TOTAL_LOOPS scoped to drive-green only."""
     cfg = LoopConfig(loops=5)
-    for phase in ("plan", "review-plans", "implement", "review-prs", "address-review"):
+    for phase in ("plan", "implement"):
         env = loop_runner._phase_env(cfg, loop_idx=3, trunk_sha="abc", phase=phase)
         assert "HEPH_LOOP_INDEX" not in env, f"phase {phase} leaked HEPH_LOOP_INDEX"
         assert "HEPH_TOTAL_LOOPS" not in env, f"phase {phase} leaked HEPH_TOTAL_LOOPS"
@@ -730,18 +724,18 @@ class TestSummarizeLoop:
     def test_empty_loop_results(self) -> None:
         """Empty loop (no repos) produces zero counts."""
         summary = _summarize_loop([], 1, 10.5)
-        assert summary == "loop 1: planned=0 reviewed=0 skipped=0 elapsed=10s"
+        assert summary == "loop 1: planned=0 implemented=0 skipped=0 elapsed=10s"
 
     def test_all_skipped_phases(self) -> None:
         """All skipped phases counted in skipped column."""
         repo_result = RepoResult(repo="TestRepo", loop_idx=1)
         repo_result.phases = [
             PhaseResult("plan", skipped=True, skip_reason="no issues"),
-            PhaseResult("review-plans", skipped=True, skip_reason="no issues"),
+            PhaseResult("implement", skipped=True, skip_reason="no issues"),
         ]
         summary = _summarize_loop([repo_result], 2, 5.0)
         assert "planned=0" in summary
-        assert "reviewed=0" in summary
+        assert "implemented=0" in summary
         assert "skipped=2" in summary
         assert "loop 2" in summary
 
@@ -752,29 +746,27 @@ class TestSummarizeLoop:
         summary = _summarize_loop([repo_result], 1, 3.0)
         assert "planned=1" in summary
 
-    def test_counts_review_phases(self) -> None:
-        """Non-skipped review-plans and review-prs counted in reviewed."""
+    def test_counts_implement_phases(self) -> None:
+        """Non-skipped implement phases counted in implemented."""
         repo_result = RepoResult(repo="TestRepo", loop_idx=1)
         repo_result.phases = [
-            PhaseResult("review-plans", rc=0),
-            PhaseResult("review-prs", rc=0),
+            PhaseResult("implement", rc=0),
         ]
         summary = _summarize_loop([repo_result], 1, 3.0)
-        assert "reviewed=2" in summary
+        assert "implemented=1" in summary
 
     def test_mixed_phases(self) -> None:
-        """Mix of skipped, planned, and reviewed phases."""
+        """Mix of skipped, planned, and implemented phases."""
         repo_result = RepoResult(repo="TestRepo", loop_idx=1)
         repo_result.phases = [
             PhaseResult("plan", rc=0),
-            PhaseResult("review-plans", rc=0),
-            PhaseResult("implement", skipped=True, skip_reason="no issues"),
-            PhaseResult("review-prs", rc=1),  # failed but still counted as reviewed
+            PhaseResult("implement", rc=1),  # failed but still counted as implemented
+            PhaseResult("drive-green", skipped=True, skip_reason="no issues"),
         ]
         summary = _summarize_loop([repo_result], 3, 7.5)
         assert "loop 3" in summary
         assert "planned=1" in summary
-        assert "reviewed=2" in summary
+        assert "implemented=1" in summary
         assert "skipped=1" in summary
 
     def test_elapsed_formatting(self) -> None:
@@ -790,9 +782,9 @@ class TestSummarizeLoop:
         repo2 = RepoResult(repo="Repo2", loop_idx=1)
         repo2.phases = [
             PhaseResult("plan", skipped=True, skip_reason="no issues"),
-            PhaseResult("review-plans", rc=0),
+            PhaseResult("implement", rc=0),
         ]
         summary = _summarize_loop([repo1, repo2], 1, 10.0)
         assert "planned=1" in summary
-        assert "reviewed=1" in summary
+        assert "implemented=1" in summary
         assert "skipped=1" in summary

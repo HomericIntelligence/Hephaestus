@@ -36,15 +36,16 @@ without needing the console script on `$PATH`.
 Each of these is a tiny wrapper around the matching `hephaestus.automation.*`
 module — most users invoke the `hephaestus-*` console scripts instead.
 
-- **`plan_issues.py`** → `hephaestus-plan-issues` (bulk issue planning).
+- **`plan_issues.py`** → `hephaestus-plan-issues` (bulk issue planning;
+  the planner owns its plan-review loop internally).
 - **`implement_issues.py`** → `hephaestus-implement-issues` (bulk issue
-  implementation in parallel worktrees).
-- **`review_issues.py`** → read-only issue review.
-- **`review_plans.py`** → plan-phase review.
-- **`address_review.py`** → resolve PR review threads.
+  implementation in parallel worktrees; absorbs PR-review +
+  thread-addressing in-loop).
 - **`drive_prs_green.py`** → drive open PRs to green CI.
-- **`run_automation_loop.sh`** — Glue script that drives the full 6-phase
-  pipeline (plan → review → implement → review → PR → follow-up).
+- **`run_automation_loop.sh`** — Legacy bash glue script, superseded by the
+  `hephaestus-automation-loop` console script
+  (`hephaestus.automation.loop_runner`). Drives the 3-stage pipeline
+  (plan → implement → drive-green).
 
 ### GitHub
 

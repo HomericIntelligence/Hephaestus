@@ -230,8 +230,8 @@ class ImplementationPhaseRunner:
 
             # Skip implementation entirely when an open PR already exists for
             # this issue. Re-running the agent would clobber in-flight work;
-            # the open PR is handled by the later review-prs / address-review /
-            # drive-green phases. Checked BEFORE create_worktree() so the skip
+            # an open PR from a prior loop is carried to green by the later
+            # drive-green stage. Checked BEFORE create_worktree() so the skip
             # path costs nothing. Looked up via _impl_module so tests can patch
             # ``hephaestus.automation.implementer.find_pr_for_issue``.
             self.status_tracker.update_slot(

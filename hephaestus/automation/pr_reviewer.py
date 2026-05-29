@@ -7,7 +7,10 @@ Provides:
 - State persistence and UI monitoring
 
 This module does NOT commit, push, or fix code. Fixing is handled by
-address_review.py in a separate phase.
+address_review.py, which the implementer runs as an in-loop step of the
+implement stage (it is no longer a separate pipeline phase). This module is
+also exposed as the standalone ``hephaestus-review-prs`` console script for
+manual, out-of-band PR review.
 """
 
 from __future__ import annotations

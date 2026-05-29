@@ -7,22 +7,25 @@ for the catalog of skills the agents invoke, see the [`skills/`](skills/) direct
 
 ## Agents the codebase orchestrates
 
-The `hephaestus.automation` subpackage drives a 6-phase issue/PR pipeline. Each phase
-runs an external coding agent — either **Claude Code** or **Codex** — chosen per
-invocation via the `--agent` CLI flag (see `hephaestus.agents.runtime.add_agent_argument`).
+The `hephaestus.automation` subpackage drives a 3-stage issue/PR pipeline
+(plan → implement → drive-green). Each stage runs an external coding agent —
+either **Claude Code** or **Codex** — chosen per invocation via the `--agent`
+CLI flag (see `hephaestus.agents.runtime.add_agent_argument`). Plan review and
+PR-review/address-review are no longer standalone stages: the planner owns its
+review loop and the implementer absorbs PR-review + thread-addressing in-loop.
 
-| Phase | Module | Console script | Purpose |
+| Stage | Module | Console script | Purpose |
 |-------|--------|----------------|---------|
 | Plan | `hephaestus.automation.planner` | `hephaestus-plan-issues` | Produce an implementation plan for an open issue |
-| Plan review | `hephaestus.automation.plan_reviewer` (within planner loop) | (internal) | Strict R0/R1/R2 review of the plan |
+| ↳ plan review (in-loop) | `hephaestus.automation.plan_reviewer` (within planner loop) | (internal) | Strict R0/R1/R2 review of the plan |
 | Implement | `hephaestus.automation.implementer` | `hephaestus-implement-issues` | Carry out the plan in an isolated git worktree |
-| Implementation review | `hephaestus.automation._review_utils` (within implementer loop) | (internal) | Strict review of the resulting diff |
-| PR review | `hephaestus.automation.pr_reviewer` | `hephaestus-review-prs` | Inline review of an open PR, policy-aware |
-| Address review | `hephaestus.automation.address_review` | (internal; spawned from PR-review verdicts) | Resolve outstanding inline-review threads |
+| ↳ implementation review (in-loop) | `hephaestus.automation._review_utils` (within implementer loop) | (internal) | Strict review of the resulting diff |
+| ↳ PR review (in-loop) | `hephaestus.automation.pr_reviewer` (within implementer loop) | (internal) | Inline review of the open PR, policy-aware |
+| ↳ address review (in-loop) | `hephaestus.automation.address_review` (within implementer loop) | (internal) | Resolve outstanding inline-review threads |
+| Drive green | `hephaestus.automation.ci_driver` | `hephaestus-merge-prs` | Poll CI, fix failing required checks, enable auto-merge once green |
 
-CI follow-up is handled by `hephaestus.automation.ci_driver` (`hephaestus-merge-prs` /
-internal worker), which polls CI checks and either fixes failing required checks via
-another agent invocation or enables auto-merge once green.
+`hephaestus.automation.pr_reviewer` is also exposed as the standalone
+`hephaestus-review-prs` console script for manual, out-of-band PR review.
 
 A single one-off stage can be invoked manually via
 `hephaestus-agent-stage` (`hephaestus.automation.agent_stage`).

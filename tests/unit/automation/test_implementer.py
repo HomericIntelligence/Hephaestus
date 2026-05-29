@@ -411,8 +411,8 @@ class TestExistingPrSkipsImplementation:
 
     The guard runs BEFORE worktree creation and the plan-review gate, so a
     re-run of the loop never re-implements (and never clobbers) an issue that
-    already has an in-flight PR. The open PR is handled by the later
-    review-prs / address-review / drive-green phases.
+    already has an in-flight PR. The open PR is handled by the implementer's
+    in-loop PR-review + address-review steps and the later drive-green stage.
     """
 
     @pytest.fixture

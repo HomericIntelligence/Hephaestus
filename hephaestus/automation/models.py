@@ -103,8 +103,8 @@ class WorkerResult(BaseModel):
     plan_review_not_approved: bool = False
     # Set True when the implementer skipped because an open PR already exists
     # for this issue. Re-implementing would clobber in-flight work; the open
-    # PR is handled by the later review-prs / address-review / drive-green
-    # phases. Not a failure.
+    # PR is handled by the implementer's in-loop PR-review + address-review
+    # steps and the later drive-green stage. Not a failure.
     already_has_pr: bool = False
     # Set True when the reviewer short-circuited (plan already APPROVED, or no
     # plan comment yet); the issue was not reviewed this pass and does not
