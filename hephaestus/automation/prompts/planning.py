@@ -43,38 +43,83 @@ gets posted and reviewed, so returning anything other than the full plan
 after a NOGO, output the FULL revised plan again — not a diff or a description
 of your edits.
 
-**Your plan should include:**
-1. **Objective** - Brief description of what needs to be done
-2. **Approach** - High-level strategy and key decisions
-3. **Files to Create** - New files needed with descriptions
-4. **Files to Modify** - Existing files to change with specific changes
-5. **Implementation Order** - Numbered sequence of steps
-6. **Verification** - How to test and verify the implementation
-7. **Skills Used** - List skills invoked during planning AND any team
-   knowledge base skills referenced in the Prior Learnings section above
-8. **Changes from review** - ONLY when a prior `## 🔍 Plan Review` is present
-   in your context above (i.e. you are revising the plan). Add a
-   `## Changes from review` section that enumerates each change you made and
-   names the specific review finding it addresses (e.g.
-   "- Added regression test `tests/...::test_x` — addresses review finding on
-   missing error-path coverage"). When there is NO prior review (this is the
-   first plan), OMIT this section entirely or write `_N/A — initial plan_`.
+**Required structure (what goes where):**
+The XML tags below ILLUSTRATE which content belongs in each section — they are
+NOT the output format. Your actual output is **markdown**: emit each section as
+a `## <Section Name>` heading with the described content filled in. Every
+section must contain concrete, reviewable detail (real file paths, line numbers
+where known, actual code/commands) — not a description of what the section
+would contain.
+
+<objective>One short paragraph: what changes and why, grounded in the issue.</objective>
+<approach>The strategy and the key decisions, each with the evidence behind it
+(a grep you ran, an existing pattern you are following). State decisions, not
+options.</approach>
+<files_to_create>Each new file with its path and what it contains. Write
+"_None._" when none.</files_to_create>
+<files_to_modify>Each existing file as `path/to/file.py`, the exact change,
+and a fenced code snippet of the new/changed code. Cite `file.py:line` when
+you know the line.</files_to_modify>
+<implementation_order>A numbered sequence of concrete steps.</implementation_order>
+<verification>One runnable command per acceptance criterion in the issue, each
+labelled with the criterion it proves. Use the repo's real runner
+(e.g. `pixi run pytest <path>`).</verification>
+<skills_used>Skills you invoked during planning AND any team knowledge-base
+skills from the Prior Learnings section above.</skills_used>
+<changes_from_review>ONLY when a prior `## 🔍 Plan Review` is in your context
+(you are revising). Enumerate each change and name the specific review finding
+it addresses. On the FIRST plan, omit this section or write
+`_N/A — initial plan_`.</changes_from_review>
+
+---
+
+**GOOD example 1** (concrete file:line + fenced change + per-criterion check):
+
+## Files to Modify
+### `hephaestus/io/utils.py`
+Replace the bare `open()` at `hephaestus/io/utils.py:142` with an atomic write:
+```python
+with _body_file(body) as tmp:
+    os.replace(tmp, target)
+```
+## Verification
+```bash
+pixi run pytest tests/unit/io/test_utils.py -k atomic   # acceptance criterion 1: no partial writes
+```
+
+**GOOD example 2** (decision stated with evidence, not options):
+
+## Approach
+Inject only the repo root into `PYTHONPATH`, not the full `pythonpath` list.
+Grepped `scripts/*.py`: 12 import `hephaestus`, zero do `from scripts import …`
+(`grep -rlE "from scripts|import scripts" scripts/*.py` → no matches), so the
+repo root alone resolves every import.
+
+**BAD example** (this is what gets a NOGO — DO NOT do this):
+
+## Objective
+I've written the full plan and updated the issue comment with all 8 sections.
+See the comment above for the complete plan and verification steps.
+
+> Why it fails: this is a **meta-narrative / changelog** about the plan, not the
+> plan itself. The reviewer only sees the text you output — pointing at "the
+> comment above" or summarizing what you did leaves the artifact empty and is
+> NOGO'd every time (this caused the #693 R0/R1 NOGO-exhaustion). Put the actual
+> plan content in every section.
 
 **Guidelines:**
-- Be specific about file paths and function names
-- Reference existing patterns in hephaestus/ to follow
-- Include test file creation in the plan
-- Consider dependencies and integration points
-- Keep the plan focused on the issue requirements
-- In the Skills Used section, include both skills you invoked directly
-  and any team knowledge base skills provided in the Prior Learnings
-- Document which skills you used during planning so implementers know what context was gathered
+- Be specific about file paths and function names; prefer `file.py:line`.
+- Reference existing patterns in hephaestus/ to follow.
+- Include test file creation in the plan.
+- Consider dependencies and integration points.
+- Keep the plan focused on the issue requirements.
 - When re-planning, make the `## Changes from review` section concrete: every
   prior review finding must map to either a change you made or an explicit
   note on why it does not apply — do NOT merely acknowledge findings.
 
 **Format:**
-Use markdown with clear sections and bullet points.
+Output markdown only. Start with the `# Implementation Plan` heading, then the
+`## <Section>` headings above, each filled with concrete content.
 """
 
 
