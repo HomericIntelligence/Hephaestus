@@ -244,6 +244,13 @@ jobs:
     #   2. Auto-merge is enabled on the PR.
     #   3. Every commit on the PR has a verified signature.
     # Push events are skipped because there is no PR to inspect.
+    #
+    # `needs: lint` defers this gate until lint passes. Besides matching how
+    # every other downstream job here is gated, it removes a race: pr-policy is
+    # a ~3s check that, run on PR-open, used to evaluate the auto-merge check
+    # (#2) before `gh pr merge --auto` had registered, reporting a spurious
+    # failure. Waiting on lint gives auto-merge time to land before #2 reads it.
+    needs: lint
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
