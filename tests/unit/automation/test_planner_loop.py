@@ -390,6 +390,74 @@ class TestLoopUpsertsPlanAndReview:
         assert verdict_is_go is True
 
 
+class TestPlanBodyContentGuard:
+    """Stage 2 (#695): a changelog-shaped 'plan' must not be posted as a plan.
+
+    Root cause of the #693 NOGO-exhaustion: the planner agent returned a
+    meta-narrative/changelog instead of a plan body, which the loop then
+    upserted verbatim and handed to the reviewer — who (correctly) NOGO'd a
+    plan that contained no implementation content. The guard flags any plan
+    body that lacks every expected section header with a visible operator
+    warning, rather than silently posting the changelog as the plan.
+    """
+
+    def _plan_calls(self, mock_upsert: Any) -> list[Any]:
+        return [c for c in mock_upsert.call_args_list if c.args[1] == PLAN_COMMENT_MARKER]
+
+    def test_changelog_shaped_plan_gets_content_warning(
+        self, planner: Planner, _patch_loop_upsert: Any
+    ) -> None:
+        """A 'plan' that is pure narrative (no section headers) is flagged, not posted clean."""
+        changelog = (
+            "Fixed and verified. The R1 reviewer was correct in substance: my prior "
+            "`gh api PATCH` had accidentally overwritten the issue comment with only the "
+            "chat-summary changelog, so the full plan was absent. The comment now contains "
+            "the complete plan."
+        )
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
+                return_value={"title": "T", "body": "B"},
+            ),
+            patch.object(planner, "_generate_plan", return_value=changelog),
+            patch.object(planner, "_capture_planner_learnings", return_value=""),
+            patch.object(planner, "_run_plan_review", return_value=_nogo_review()),
+        ):
+            planner._run_plan_review_loop(123, slot_id=0)
+
+        plan_calls = self._plan_calls(_patch_loop_upsert)
+        assert plan_calls, "expected a PLAN upsert"
+        body = plan_calls[0].args[2]
+        # Still carries the marker (so the upsert keys correctly)...
+        assert body.startswith(PLAN_COMMENT_MARKER)
+        # ...but a visible warning marks it as not-a-real-plan so neither the
+        # reviewer nor an operator mistakes the changelog for a plan.
+        assert "PLAN-CONTENT-MISSING" in body
+
+    def test_terse_but_valid_plan_passes_through_without_warning(
+        self, planner: Planner, _patch_loop_upsert: Any
+    ) -> None:
+        """A short plan that DOES contain a recognised section header is not flagged."""
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
+                return_value={"title": "T", "body": "B"},
+            ),
+            patch.object(
+                planner,
+                "_generate_plan",
+                return_value="## Objective\nFix X.\n\n## Verification\nRun the suite.",
+            ),
+            patch.object(planner, "_capture_planner_learnings", return_value=""),
+            patch.object(planner, "_run_plan_review", return_value=_go_review()),
+        ):
+            planner._run_plan_review_loop(123, slot_id=0)
+
+        body = self._plan_calls(_patch_loop_upsert)[0].args[2]
+        assert "PLAN-CONTENT-MISSING" not in body
+        assert "## Objective" in body
+
+
 class TestCapturePlannerLearnings:
     """Learnings capture must fail safely (return '') without raising."""
 

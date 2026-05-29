@@ -31,8 +31,17 @@ Create an implementation plan for GitHub issue #{issue_number}.
   when present). When a prior review is present you are RE-PLANNING to
   address it, not starting fresh.
 
-You produce/refresh exactly ONE `# Implementation Plan` comment on the issue
-(it is upserted in place — do not write a second plan comment).
+**Output contract — read carefully:**
+Your FINAL message must BE the complete plan, as markdown, starting with the
+`# Implementation Plan` heading and containing every section below in full.
+The pipeline posts your output to the issue for you — you MUST NOT run `gh`,
+`gh api`, `git`, or any command that creates, edits, or PATCHes an issue
+comment yourself. Do NOT post a status note, changelog, or "I updated the
+comment" summary as your output: whatever you return IS the plan body that
+gets posted and reviewed, so returning anything other than the full plan
+(e.g. a meta-narrative about what you did) will fail review. When re-planning
+after a NOGO, output the FULL revised plan again — not a diff or a description
+of your edits.
 
 **Your plan should include:**
 1. **Objective** - Brief description of what needs to be done

@@ -32,6 +32,47 @@ logger = logging.getLogger(__name__)
 
 MAX_REVIEW_ITERATIONS = 3
 
+# Section headers a genuine plan is expected to contain at least one of. A body
+# that contains NONE of these is a meta-narrative / changelog, not a plan — the
+# planner agent occasionally returns such text (#693/#695 NOGO-exhaustion: the
+# agent posted a "I fixed the comment" changelog instead of the plan, which the
+# reviewer then correctly NOGO'd). We detect that shape and post a visible
+# warning rather than letting a contentless body masquerade as the plan.
+_PLAN_SECTION_HEADERS = (
+    "objective",
+    "approach",
+    "files to create",
+    "files to modify",
+    "implementation order",
+    "implementation steps",
+    "verification",
+    "skills used",
+    "changes from review",
+)
+
+# Visible marker prepended (after the plan marker) when the body has no plan
+# sections. Operators and the reviewer can grep for it; it is intentionally
+# loud and machine-greppable.
+_PLAN_CONTENT_MISSING_BANNER = (
+    "> [!CAUTION]\n"
+    "> **PLAN-CONTENT-MISSING** — The planner returned text containing no "
+    "recognised plan sections (it looks like a changelog or status note, not a "
+    "plan). This is posted verbatim for diagnosis but **must not be implemented**; "
+    "the planner should re-plan with a full plan body (Objective, Approach, Files "
+    "to Modify, Verification, etc.).\n\n"
+)
+
+
+def _plan_body_has_sections(body: str) -> bool:
+    """Return True if ``body`` contains at least one recognised plan section header.
+
+    Case-insensitive substring match on the known section names. A plan as
+    terse as a single ``## Objective`` section passes; a pure narrative or
+    changelog with none of the headers does not.
+    """
+    haystack = body.lower()
+    return any(header in haystack for header in _PLAN_SECTION_HEADERS)
+
 
 class PlannerHost(Protocol):
     """Minimal Planner surface the review loop depends on.
@@ -286,6 +327,22 @@ class PlanReviewLoop:
             if plan.lstrip().startswith(PLAN_COMMENT_MARKER)
             else f"{PLAN_COMMENT_MARKER}\n\n{plan}"
         )
+        # Guard (#695): if the model returned a contentless narrative/changelog
+        # with no recognised plan sections, prepend a visible warning so the
+        # reviewer and operators do not mistake it for a plan. We still post it
+        # (for diagnosis) rather than dropping it silently.
+        if not _plan_body_has_sections(body):
+            logger.warning(
+                "%s: planner output contains no recognised plan sections "
+                "(possible changelog/meta-narrative); flagging with a "
+                "PLAN-CONTENT-MISSING banner",
+                issue_ref(issue_number),
+            )
+            # ``body`` is already marker-prefixed (normalised just above); insert
+            # the banner immediately after the marker line without duplicating
+            # the marker.
+            after_marker = body[len(PLAN_COMMENT_MARKER) :].lstrip("\n")
+            body = f"{PLAN_COMMENT_MARKER}\n\n{_PLAN_CONTENT_MISSING_BANNER}{after_marker}"
         if re_planned and "\n## Changes from review" not in f"\n{body}":
             body = (
                 f"{body.rstrip()}\n\n## Changes from review\n\n"
