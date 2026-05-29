@@ -23,7 +23,6 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-import importlib
 import re
 import subprocess
 import sys
@@ -31,15 +30,10 @@ from pathlib import Path
 from typing import Any, cast
 
 from hephaestus.cli.utils import add_json_arg, format_output
+from hephaestus.io.toml import import_tomllib
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
-_tomllib = None
-for _mod_name in ("tomllib", "tomli"):
-    try:
-        _tomllib = importlib.import_module(_mod_name)
-        break
-    except ModuleNotFoundError:
-        continue
+_tomllib = import_tomllib()
 
 
 def _load_pyproject(repo_root: Path) -> dict[str, Any]:
