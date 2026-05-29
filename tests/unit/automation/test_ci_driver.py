@@ -39,12 +39,19 @@ def _make_check(
 
 @pytest.fixture
 def mock_options() -> CIDriverOptions:
-    """Create CIDriverOptions with minimal parallelism and no UI."""
+    """Create CIDriverOptions with minimal parallelism and no UI.
+
+    ``enable_advise=False`` by default: the advise-first step (#30) would
+    otherwise spawn a real ``claude``/``gh`` subprocess in the CI-fix path on
+    hosts where ``claude`` is on PATH. Tests that specifically exercise advise
+    flip it back on and patch ``_run_advise``.
+    """
     return CIDriverOptions(
         issues=[123],
         max_workers=1,
         dry_run=False,
         enable_ui=False,
+        enable_advise=False,
         max_fix_iterations=1,
     )
 
@@ -326,6 +333,48 @@ class TestRequiredVsNonRequired:
 
         mock_fix.assert_not_called()
         assert result.success is True
+
+
+# ---------------------------------------------------------------------------
+# advise-first (#30) — runs once before the fix loop, gated by enable_advise
+# ---------------------------------------------------------------------------
+
+
+class TestCiDriverAdvise:
+    """Stage 3 advise-first wiring in _attempt_ci_fixes."""
+
+    def test_advise_runs_before_fix_loop_when_enabled(self, driver: CIDriver) -> None:
+        """enable_advise=True → _run_advise is called and its findings reach the fix session."""
+        driver.options.enable_advise = True
+        with (
+            patch.object(driver, "_get_failing_ci_logs", return_value="error log"),
+            patch.object(driver, "_load_impl_session_id", return_value=None),
+            patch.object(driver, "_get_worktree_path", return_value=Path("/tmp/wt")),
+            patch.object(
+                driver, "_run_advise", return_value="## Findings\n- mind X"
+            ) as mock_advise,
+            patch.object(driver, "_run_ci_fix_session", return_value=True) as mock_fix,
+        ):
+            driver._attempt_ci_fixes(123, 456, 0)
+
+        mock_advise.assert_called_once_with(123)
+        # Findings are forwarded as the 6th positional arg to the fix session.
+        assert mock_fix.call_args.args[5] == "## Findings\n- mind X"
+
+    def test_advise_skipped_when_disabled(self, driver: CIDriver) -> None:
+        """enable_advise=False → _run_advise is never called and findings are empty."""
+        driver.options.enable_advise = False
+        with (
+            patch.object(driver, "_get_failing_ci_logs", return_value="error log"),
+            patch.object(driver, "_load_impl_session_id", return_value=None),
+            patch.object(driver, "_get_worktree_path", return_value=Path("/tmp/wt")),
+            patch.object(driver, "_run_advise") as mock_advise,
+            patch.object(driver, "_run_ci_fix_session", return_value=True) as mock_fix,
+        ):
+            driver._attempt_ci_fixes(123, 456, 0)
+
+        mock_advise.assert_not_called()
+        assert mock_fix.call_args.args[5] == ""
 
 
 # ---------------------------------------------------------------------------
