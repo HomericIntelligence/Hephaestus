@@ -26,7 +26,7 @@ from typing import Any
 
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.logging.utils import get_logger
-from hephaestus.utils.helpers import run_subprocess
+from hephaestus.utils.helpers import METADATA_TIMEOUT, run_subprocess
 
 logger = get_logger(__name__)
 
@@ -142,10 +142,12 @@ def local_branch_exists(branch_name: str) -> bool:
     """
     try:
         out = subprocess.check_output(
-            ["git", "branch", "--list", branch_name], stderr=subprocess.DEVNULL
+            ["git", "branch", "--list", branch_name],
+            stderr=subprocess.DEVNULL,
+            timeout=METADATA_TIMEOUT,
         )
         return bool(out.strip())
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
 
 

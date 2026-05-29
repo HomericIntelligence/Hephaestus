@@ -16,19 +16,28 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation import loop_runner
+from hephaestus.automation.claude_timeouts import gh_cli_timeout
 from hephaestus.automation.loop_runner import (
     ALL_PHASES,
     LoopConfig,
     PhaseResult,
     RepoResult,
+    _default_phase_timeout_s,
+    _ensure_clone,
+    _gh_issue_numbers_for,
     _phase_order_warnings,
+    _preflight_token_scopes,
+    _rate_limit_remaining,
+    _rebase_main,
     _resolve_phase_bin,
     _summarize_loop,
     _validate_phases,
+    main,
     process_repo,
     run_loop,
     run_phase,
 )
+from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
 # ---------------------------------------------------------------------------
 # Phase topology — the 6→3 stage collapse (#455/#468/#484)
@@ -830,3 +839,223 @@ class TestSummarizeLoop:
         assert "planned=1" in summary
         assert "implemented=1" in summary
         assert "skipped=1" in summary
+
+
+# ---------------------------------------------------------------------------
+# Subprocess timeout discipline (#684)
+# ---------------------------------------------------------------------------
+
+
+def _completed(returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess[str]:
+    """Build a CompletedProcess stand-in for mocked subprocess.run calls."""
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
+
+
+class TestSubprocessTimeouts:
+    """Every unbounded gh/git call in the loop must now pass ``timeout=``."""
+
+    def test_gh_list_repos_passes_timeout(self) -> None:
+        """``gh repo list`` is a network op bounded by gh_cli_timeout()."""
+        with patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run:
+            mock_run.return_value = _completed(stdout="[]")
+            loop_runner._gh_list_repos("MyOrg")
+        assert mock_run.call_args.kwargs["timeout"] == gh_cli_timeout()
+
+    def test_gh_issue_numbers_passes_timeout(self) -> None:
+        """``gh issue list`` is bounded by gh_cli_timeout()."""
+        with patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run:
+            mock_run.return_value = _completed(stdout="1\n2\n")
+            _gh_issue_numbers_for("Org", "Repo", "--author")
+        assert mock_run.call_args.kwargs["timeout"] == gh_cli_timeout()
+
+    def test_preflight_token_scopes_passes_timeout(self) -> None:
+        """The token preflight ``gh api`` call is bounded by gh_cli_timeout()."""
+        with patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run:
+            mock_run.return_value = _completed(stdout='{"push": true}')
+            _preflight_token_scopes("Org", "Repo")
+        assert mock_run.call_args.kwargs["timeout"] == gh_cli_timeout()
+
+    def test_rate_limit_remaining_passes_timeout(self) -> None:
+        """``gh api rate_limit`` is bounded by gh_cli_timeout()."""
+        payload = '{"resources":{"graphql":{"remaining":5000,"reset":0}}}'
+        with patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run:
+            mock_run.return_value = _completed(stdout=payload)
+            _rate_limit_remaining()
+        assert mock_run.call_args.kwargs["timeout"] == gh_cli_timeout()
+
+    def test_rebase_main_git_ops_pass_metadata_timeout(self, tmp_path: Path) -> None:
+        """The local git ops in _rebase_main carry METADATA_TIMEOUT."""
+        with (
+            patch("hephaestus.automation.loop_runner.resilient_call") as mock_resilient,
+            patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run,
+        ):
+            mock_resilient.return_value = _completed()
+            mock_run.return_value = _completed(stdout="abc1234")
+            _rebase_main("Repo", tmp_path)
+        # Every direct subprocess.run (rebase / rev-parse) is bounded.
+        assert mock_run.call_count >= 2
+        for call in mock_run.call_args_list:
+            assert call.kwargs["timeout"] == METADATA_TIMEOUT
+
+    def test_gh_list_repos_timeout_raises_systemexit(self) -> None:
+        """A timed-out ``gh repo list`` surfaces as a clean SystemExit."""
+        with patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=120)
+            with pytest.raises(SystemExit, match="timed out"):
+                loop_runner._gh_list_repos("MyOrg")
+
+    def test_gh_issue_numbers_timeout_returns_empty_set(self) -> None:
+        """A timed-out issue query degrades to an empty set, not a crash."""
+        with patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=120)
+            assert _gh_issue_numbers_for("Org", "Repo", "--author") == set()
+
+
+class TestResilientCallAdoption:
+    """The hang-prone clone/fetch calls route through resilient_call (#684)."""
+
+    def test_ensure_clone_uses_resilient_call_with_network_timeout(self, tmp_path: Path) -> None:
+        """``_ensure_clone`` delegates the clone to resilient_call."""
+        dest = tmp_path / "Repo"
+        with patch("hephaestus.automation.loop_runner.resilient_call") as mock_resilient:
+            mock_resilient.return_value = _completed(returncode=0)
+            _ensure_clone("Org", "Repo", dest)
+        assert mock_resilient.call_count == 1
+        # The wrapped callable is subprocess.run; the clone is NETWORK_TIMEOUT-bounded.
+        assert mock_resilient.call_args.args[0] is subprocess.run
+        assert mock_resilient.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
+        assert mock_resilient.call_args.kwargs["circuit_breaker_name"] == "gh-repo-clone"
+
+    def test_rebase_main_fetch_uses_resilient_call(self, tmp_path: Path) -> None:
+        """``_rebase_main`` routes the network fetch through resilient_call."""
+        with (
+            patch("hephaestus.automation.loop_runner.resilient_call") as mock_resilient,
+            patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run,
+        ):
+            mock_resilient.return_value = _completed()
+            mock_run.return_value = _completed(stdout="abc1234")
+            _rebase_main("Repo", tmp_path)
+        assert mock_resilient.call_count == 1
+        # The wrapped callable is the module's subprocess.run (here the patched mock).
+        assert mock_resilient.call_args.args[0] is mock_run
+        assert mock_resilient.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
+        assert mock_resilient.call_args.kwargs["circuit_breaker_name"] == "git-fetch"
+
+    def test_resilient_call_terminates_hung_clone(self, tmp_path: Path) -> None:
+        """A subprocess that never returns is killed: TimeoutExpired propagates.
+
+        ``resilient_call`` does not retry intentional timeouts (it is not in the
+        transient set), so the TimeoutExpired surfaces and ``_ensure_clone``
+        converts the failed clone into a RuntimeError rather than hanging.
+        """
+        dest = tmp_path / "Repo"
+
+        def _hang(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+            raise subprocess.TimeoutExpired(cmd="gh repo clone", timeout=120)
+
+        with patch("hephaestus.automation.loop_runner.subprocess.run", side_effect=_hang):
+            with pytest.raises(subprocess.TimeoutExpired):
+                _ensure_clone("Org", "Repo", dest)
+
+    def test_rebase_main_fetch_timeout_is_non_fatal(self, tmp_path: Path) -> None:
+        """A timed-out fetch is logged and the rebase proceeds against stale main."""
+
+        def _hang(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+            raise subprocess.TimeoutExpired(cmd="git fetch", timeout=120)
+
+        with (
+            patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run,
+            patch(
+                "hephaestus.automation.loop_runner.resilient_call",
+                side_effect=_hang,
+            ),
+        ):
+            mock_run.return_value = _completed(stdout="def5678")
+            sha = _rebase_main("Repo", tmp_path)
+        assert sha == "def5678"
+
+
+class TestDefaultPhaseTimeout:
+    """run_phase must apply a default timeout when --phase-timeout is absent (#684)."""
+
+    def test_default_phase_timeout_is_non_none(self) -> None:
+        """A fresh LoopConfig has a positive default phase timeout."""
+        cfg = LoopConfig()
+        assert cfg.phase_timeout_s is not None
+        assert cfg.phase_timeout_s == _default_phase_timeout_s()
+        assert cfg.phase_timeout_s > 0
+
+    def test_run_phase_passes_default_timeout_to_subprocess(self, fake_repo_dir: Path) -> None:
+        """When no override is given, run_phase forwards the default timeout."""
+        cfg = LoopConfig()
+        completed = MagicMock(returncode=0)
+        with (
+            patch.object(loop_runner, "_resolve_phase_bin", return_value=("/bin/true", [])),
+            patch("subprocess.run", return_value=completed) as run_mock,
+        ):
+            run_phase(
+                repo="r",
+                repo_dir=fake_repo_dir,
+                phase="plan",
+                cfg=cfg,
+                loop_idx=1,
+                open_issues=[],
+                trunk_sha="abc1234",
+            )
+        assert run_mock.call_args.kwargs["timeout"] == _default_phase_timeout_s()
+
+    def test_default_phase_timeout_reads_env_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``HEPH_PHASE_TIMEOUT`` overrides the built-in default."""
+        monkeypatch.setenv("HEPH_PHASE_TIMEOUT", "42")
+        assert _default_phase_timeout_s() == 42.0
+
+    def test_default_phase_timeout_ignores_malformed_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-numeric override falls back to the default instead of crashing."""
+        monkeypatch.setenv("HEPH_PHASE_TIMEOUT", "not-a-number")
+        assert _default_phase_timeout_s() == 3600.0
+
+    def test_main_applies_default_phase_timeout_when_flag_absent(self) -> None:
+        """``main`` builds a LoopConfig with the default timeout when --phase-timeout is omitted."""
+        captured: dict[str, LoopConfig] = {}
+
+        def _capture(cfg: LoopConfig, _repos: list[str]) -> list[RepoResult]:
+            captured["cfg"] = cfg
+            return []
+
+        with (
+            patch.object(
+                loop_runner,
+                "_resolve_org_and_repos",
+                return_value=("Org", ["Repo"], None),
+            ),
+            patch.object(loop_runner, "_preflight_token_scopes"),
+            patch.object(loop_runner, "_clone_missing_repos"),
+            patch.object(loop_runner, "run_loop", side_effect=_capture),
+        ):
+            main(["--repos", "Repo", "--dry-run", "--loops", "1"])
+        assert captured["cfg"].phase_timeout_s == _default_phase_timeout_s()
+
+    def test_main_disables_phase_timeout_when_zero(self) -> None:
+        """``--phase-timeout 0`` explicitly disables the bound (None)."""
+        captured: dict[str, LoopConfig] = {}
+
+        def _capture(cfg: LoopConfig, _repos: list[str]) -> list[RepoResult]:
+            captured["cfg"] = cfg
+            return []
+
+        with (
+            patch.object(
+                loop_runner,
+                "_resolve_org_and_repos",
+                return_value=("Org", ["Repo"], None),
+            ),
+            patch.object(loop_runner, "_preflight_token_scopes"),
+            patch.object(loop_runner, "_clone_missing_repos"),
+            patch.object(loop_runner, "run_loop", side_effect=_capture),
+        ):
+            main(["--repos", "Repo", "--phase-timeout", "0", "--loops", "1"])
+        assert captured["cfg"].phase_timeout_s is None

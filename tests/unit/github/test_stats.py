@@ -10,10 +10,12 @@ from hephaestus.github.stats import (
     collect_stats,
     format_stats_table,
     get_commits_stats,
+    get_current_repo,
     get_issues_stats,
     get_prs_stats,
     validate_date,
 )
+from hephaestus.utils.helpers import METADATA_TIMEOUT
 
 
 class TestValidateDate:
@@ -301,3 +303,42 @@ class TestMain:
         mock_repo.assert_called_once()
         payload = json.loads(capsys.readouterr().out)
         assert payload["repo"] == "owner/auto"
+
+
+class TestStatsSubprocessTimeouts:
+    """Every gh metadata read in stats.py must pass ``timeout=`` (#684)."""
+
+    @staticmethod
+    def _ok(stdout: str = "0\n") -> MagicMock:
+        m = MagicMock()
+        m.returncode = 0
+        m.stdout = stdout
+        return m
+
+    def test_get_current_repo_passes_timeout(self) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = self._ok("owner/repo")
+            get_current_repo()
+        assert mock_run.call_args.kwargs["timeout"] == METADATA_TIMEOUT
+
+    def test_get_issues_stats_all_calls_pass_timeout(self) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [self._ok("10\n"), self._ok("3\n")]
+            get_issues_stats("2026-01-01", "2026-01-31", None, "owner/repo")
+        assert mock_run.call_count == 2
+        for call in mock_run.call_args_list:
+            assert call.kwargs["timeout"] == METADATA_TIMEOUT
+
+    def test_get_prs_stats_all_calls_pass_timeout(self) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [self._ok("8\n"), self._ok("5\n"), self._ok("1\n")]
+            get_prs_stats("2026-01-01", "2026-01-31", None, "owner/repo")
+        assert mock_run.call_count == 3
+        for call in mock_run.call_args_list:
+            assert call.kwargs["timeout"] == METADATA_TIMEOUT
+
+    def test_get_commits_stats_passes_timeout(self) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = self._ok("4\n")
+            get_commits_stats("2026-01-01", "2026-01-31", None, "owner/repo")
+        assert mock_run.call_args.kwargs["timeout"] == METADATA_TIMEOUT

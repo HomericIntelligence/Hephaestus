@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.utils.helpers import NETWORK_TIMEOUT
 from hephaestus.validation.doc_config import (
     check_addopts_cov_fail_under,
     check_claude_md_threshold,
@@ -224,6 +227,21 @@ class TestCollectActualTestCount:
         # No tests/ directory — subprocess will likely return nothing parseable
         result = collect_actual_test_count(tmp_path)
         assert result is None or isinstance(result, int)
+
+    def test_pytest_collection_passes_timeout(self, tmp_path: Path) -> None:
+        """The pytest --collect-only subprocess is bounded (#684)."""
+        with patch("hephaestus.validation.doc_config.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="5 tests collected\n", stderr="")
+            collect_actual_test_count(tmp_path)
+        assert mock_run.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
+
+    def test_returns_none_on_timeout(self, tmp_path: Path) -> None:
+        """A hung pytest collection degrades to None instead of hanging (#684)."""
+        with patch(
+            "hephaestus.validation.doc_config.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="pytest", timeout=120),
+        ):
+            assert collect_actual_test_count(tmp_path) is None
 
 
 class TestCheckDocConfigConsistency:

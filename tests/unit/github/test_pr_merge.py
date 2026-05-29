@@ -17,6 +17,7 @@ from hephaestus.github.pr_merge import (
     run_git_cmd,
     try_push_head_branch,
 )
+from hephaestus.utils.helpers import METADATA_TIMEOUT
 
 
 class TestDetectRepoFromRemote:
@@ -235,6 +236,19 @@ class TestLocalBranchExists:
     def test_returns_false_on_subprocess_error(self, mock_check) -> None:
         """Returns False when subprocess raises CalledProcessError."""
         mock_check.side_effect = subprocess.CalledProcessError(1, "git")
+        assert local_branch_exists("branch") is False
+
+    @patch("hephaestus.github.pr_merge.subprocess.check_output")
+    def test_passes_timeout(self, mock_check) -> None:
+        """The git branch lookup is bounded by METADATA_TIMEOUT (#684)."""
+        mock_check.return_value = b"  my-feature\n"
+        local_branch_exists("my-feature")
+        assert mock_check.call_args.kwargs["timeout"] == METADATA_TIMEOUT
+
+    @patch("hephaestus.github.pr_merge.subprocess.check_output")
+    def test_returns_false_on_timeout(self, mock_check) -> None:
+        """A hung ``git branch --list`` degrades to False instead of hanging (#684)."""
+        mock_check.side_effect = subprocess.TimeoutExpired(cmd="git", timeout=10)
         assert local_branch_exists("branch") is False
 
 

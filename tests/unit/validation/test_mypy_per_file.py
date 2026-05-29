@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.utils.helpers import NETWORK_TIMEOUT
 from hephaestus.validation.mypy_per_file import (
     check_mypy_per_file,
     main,
@@ -119,6 +121,26 @@ class TestRunMypyPerFile:
             run_mypy_per_file(files, flags=["--ignore-missing-imports"])
 
         assert call_count == 3
+
+    def test_passes_timeout_per_invocation(self, tmp_path: Path) -> None:
+        """Each per-file mypy run is bounded by NETWORK_TIMEOUT (#684)."""
+        files = [str(tmp_path / "f.py")]
+        Path(files[0]).write_text("x = 1\n")
+        with patch("hephaestus.validation.mypy_per_file.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            run_mypy_per_file(files, flags=[])
+        assert mock_run.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
+
+    def test_timeout_yields_nonzero_rc(self, tmp_path: Path) -> None:
+        """A hung mypy run is treated as a failure (rc 124), not a crash (#684)."""
+        files = [str(tmp_path / "f.py")]
+        Path(files[0]).write_text("x = 1\n")
+        with patch(
+            "hephaestus.validation.mypy_per_file.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="mypy", timeout=120),
+        ):
+            rc = run_mypy_per_file(files, flags=[])
+        assert rc == 124
 
 
 class TestCheckMypyPerFile:

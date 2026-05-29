@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Any
 
 from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
+from hephaestus.utils.helpers import METADATA_TIMEOUT
 
 # ---------------------------------------------------------------------------
 # Data helpers
@@ -57,6 +58,7 @@ def get_current_repo() -> str:
         ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
         capture_output=True,
         text=True,
+        timeout=METADATA_TIMEOUT,
     )
     if result.returncode != 0:
         print(f"Error: Failed to get repo name: {result.stderr}", file=sys.stderr)
@@ -93,6 +95,7 @@ def get_issues_stats(
         ["gh", "api", "search/issues", "-f", f"q={base_query}", "--jq", ".total_count"],
         capture_output=True,
         text=True,
+        timeout=METADATA_TIMEOUT,
     )
     if result.returncode != 0:
         return {"total": 0, "open": 0, "closed": 0}
@@ -111,6 +114,7 @@ def get_issues_stats(
         ],
         capture_output=True,
         text=True,
+        timeout=METADATA_TIMEOUT,
     )
     open_count = int(result_open.stdout.strip()) if result_open.returncode == 0 else 0
 
@@ -139,6 +143,7 @@ def get_prs_stats(start_date: str, end_date: str, author: str | None, repo: str)
         ["gh", "api", "search/issues", "-f", f"q={base_query}", "--jq", ".total_count"],
         capture_output=True,
         text=True,
+        timeout=METADATA_TIMEOUT,
     )
     if result.returncode != 0:
         return {"total": 0, "merged": 0, "open": 0, "closed": 0}
@@ -157,6 +162,7 @@ def get_prs_stats(start_date: str, end_date: str, author: str | None, repo: str)
         ],
         capture_output=True,
         text=True,
+        timeout=METADATA_TIMEOUT,
     )
     merged = int(result_merged.stdout.strip()) if result_merged.returncode == 0 else 0
 
@@ -172,6 +178,7 @@ def get_prs_stats(start_date: str, end_date: str, author: str | None, repo: str)
         ],
         capture_output=True,
         text=True,
+        timeout=METADATA_TIMEOUT,
     )
     open_count = int(result_open.stdout.strip()) if result_open.returncode == 0 else 0
 
@@ -215,7 +222,7 @@ def get_commits_stats(
     if author:
         params += ["-f", f"author={author}"]
 
-    result = subprocess.run(params, capture_output=True, text=True)
+    result = subprocess.run(params, capture_output=True, text=True, timeout=METADATA_TIMEOUT)
     if result.returncode != 0:
         return {"total": 0}
 

@@ -36,9 +36,37 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
+from hephaestus.automation.claude_timeouts import gh_cli_timeout
 from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.resilience.subprocess_resilience import resilient_call
+from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
 LOG = logging.getLogger(__name__)
+
+
+def _default_phase_timeout_s() -> float:
+    """Return the default per-phase timeout in seconds.
+
+    A phase that shells out to ``claude`` can stall indefinitely on a network
+    hang; a non-``None`` default ensures the worker thread is always bounded
+    even when the operator does not pass ``--phase-timeout``. Overridable via
+    ``HEPH_PHASE_TIMEOUT`` (seconds). Mirrors the graceful-fallback contract of
+    :mod:`hephaestus.automation.claude_timeouts`: a malformed env value logs a
+    warning and falls back to the default rather than crashing at startup.
+
+    The 3600s (1h) default comfortably exceeds the longest in-phase Claude
+    timeout (the implementer's 1800s) so a healthy phase never trips it.
+    """
+    default = 3600
+    raw = os.environ.get("HEPH_PHASE_TIMEOUT")
+    if raw is None:
+        return float(default)
+    try:
+        return float(raw)
+    except ValueError:
+        LOG.warning("Ignoring non-numeric HEPH_PHASE_TIMEOUT=%r — using default %ds", raw, default)
+        return float(default)
+
 
 # Canonical phase ordering. The pipeline collapsed from 6 phases to 3
 # session-stable stages (#455/#468/#484): the former standalone review-plans,
@@ -207,9 +235,11 @@ class LoopConfig:
     # hardcoded fallback. Always set by main() before ``run_loop``.
     org: str = ""
     projects_dir: Path = DEFAULT_PROJECTS_DIR
-    # Per-phase timeout in seconds. ``None`` disables (the planner /
-    # implementer naturally bound themselves via their own batch caps).
-    phase_timeout_s: float | None = None
+    # Per-phase timeout in seconds. Defaults to an env-overridable bound
+    # (``HEPH_PHASE_TIMEOUT``) so a stalled subprocess can never hang a worker
+    # thread indefinitely (#684). Passing ``--phase-timeout`` overrides it;
+    # ``None`` explicitly disables the bound.
+    phase_timeout_s: float | None = field(default_factory=_default_phase_timeout_s)
 
 
 # ---------------------------------------------------------------------------
@@ -321,8 +351,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--phase-timeout",
         type=float,
-        default=None,
-        help="Per-phase timeout in seconds (default: no timeout)",
+        default=_default_phase_timeout_s(),
+        help=(
+            "Per-phase timeout in seconds (default: HEPH_PHASE_TIMEOUT or "
+            f"{int(_default_phase_timeout_s())}s). Pass 0 or a negative value to disable."
+        ),
     )
     p.add_argument(
         "--repos",
@@ -425,22 +458,26 @@ def _detect_cwd_repo() -> tuple[str | None, str | None]:
 
 def _gh_list_repos(org: str) -> list[str]:
     """Return non-archived, non-fork, non-Odysseus repos for ``org``."""
-    out = subprocess.run(
-        [
-            "gh",
-            "repo",
-            "list",
-            org,
-            "--no-archived",
-            "--json",
-            "name,isArchived,isFork",
-            "--limit",
-            "200",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        out = subprocess.run(
+            [
+                "gh",
+                "repo",
+                "list",
+                org,
+                "--no-archived",
+                "--json",
+                "name,isArchived,isFork",
+                "--limit",
+                "200",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=gh_cli_timeout(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit(f"gh repo list {org} timed out after {exc.timeout}s") from exc
     if out.returncode != 0:
         raise SystemExit(f"gh repo list {org} failed (rc={out.returncode}): {out.stderr.strip()}")
     try:
@@ -464,28 +501,32 @@ def _gh_issue_numbers_for(org: str, repo: str, filter_flag: str) -> set[int]:
     any failure (rate limit, auth error, etc.) so callers can fall back
     safely.
     """
-    out = subprocess.run(
-        [
-            "gh",
-            "issue",
-            "list",
-            "--repo",
-            f"{org}/{repo}",
-            "--state",
-            "open",
-            filter_flag,
-            "@me",
-            "--limit",
-            "200",
-            "--json",
-            "number",
-            "--jq",
-            ".[].number",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        out = subprocess.run(
+            [
+                "gh",
+                "issue",
+                "list",
+                "--repo",
+                f"{org}/{repo}",
+                "--state",
+                "open",
+                filter_flag,
+                "@me",
+                "--limit",
+                "200",
+                "--json",
+                "number",
+                "--jq",
+                ".[].number",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=gh_cli_timeout(),
+        )
+    except subprocess.TimeoutExpired:
+        return set()
     if out.returncode != 0:
         return set()
     return {int(x) for x in out.stdout.split() if x.strip().isdigit()}
@@ -528,10 +569,16 @@ def _ensure_clone(org: str, repo: str, dest: Path) -> None:
         return
     LOG.info("Cloning %s/%s -> %s", org, repo, dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    rc = subprocess.run(
+    # Route the clone through resilient_call: a network blip retries with
+    # backoff, while a true hang is bounded by NETWORK_TIMEOUT (#684).
+    completed = resilient_call(
+        subprocess.run,
         ["gh", "repo", "clone", f"{org}/{repo}", str(dest)],
         check=False,
-    ).returncode
+        timeout=NETWORK_TIMEOUT,
+        circuit_breaker_name="gh-repo-clone",
+    )
+    rc = completed.returncode  # type: ignore[attr-defined]
     if rc != 0:
         raise RuntimeError(f"gh repo clone {org}/{repo} failed (rc={rc})")
 
@@ -558,15 +605,26 @@ def _clone_missing_repos(org: str, repos: list[str], projects_dir: Path) -> None
 
 def _rebase_main(repo: str, repo_dir: Path) -> str:
     """Fetch + rebase main; return short trunk SHA (or 'unknown')."""
-    subprocess.run(
-        ["git", "-C", str(repo_dir), "fetch", "origin", "--quiet"],
-        check=False,
-    )
+    # The fetch touches the network, so route it through resilient_call:
+    # transient failures retry with backoff and a genuine stall is capped by
+    # NETWORK_TIMEOUT (#684). A timeout after retries is non-fatal here — the
+    # subsequent rebase against a stale origin/main is still safe.
+    try:
+        resilient_call(
+            subprocess.run,
+            ["git", "-C", str(repo_dir), "fetch", "origin", "--quiet"],
+            check=False,
+            timeout=NETWORK_TIMEOUT,
+            circuit_breaker_name="git-fetch",
+        )
+    except subprocess.TimeoutExpired:
+        LOG.warning("[%s] git fetch timed out; rebasing against stale origin/main", repo)
     rb = subprocess.run(
         ["git", "-C", str(repo_dir), "rebase", "origin/main", "--quiet"],
         capture_output=True,
         text=True,
         check=False,
+        timeout=METADATA_TIMEOUT,
     )
     if rb.returncode != 0:
         # Mid-rebase state; fall back to a hard reset so the loop can continue.
@@ -576,17 +634,20 @@ def _rebase_main(repo: str, repo_dir: Path) -> str:
             ["git", "-C", str(repo_dir), "rebase", "--abort"],
             capture_output=True,
             check=False,
+            timeout=METADATA_TIMEOUT,
         )
         subprocess.run(
             ["git", "-C", str(repo_dir), "reset", "--hard", "origin/main", "--quiet"],
             capture_output=True,
             check=False,
+            timeout=METADATA_TIMEOUT,
         )
     sha = subprocess.run(
         ["git", "-C", str(repo_dir), "rev-parse", "--short=7", "HEAD"],
         capture_output=True,
         text=True,
         check=False,
+        timeout=METADATA_TIMEOUT,
     )
     return sha.stdout.strip() or "unknown"
 
@@ -888,20 +949,26 @@ def _process_repo_inner(
 
 def _preflight_token_scopes(org: str, probe_repo: str) -> None:
     """Mirror the bash script's gh-token preflight."""
-    out = subprocess.run(
-        [
-            "gh",
-            "api",
-            "-H",
-            "Accept: application/vnd.github+json",
-            f"/repos/{org}/{probe_repo}",
-            "--jq",
-            ".permissions",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        out = subprocess.run(
+            [
+                "gh",
+                "api",
+                "-H",
+                "Accept: application/vnd.github+json",
+                f"/repos/{org}/{probe_repo}",
+                "--jq",
+                ".permissions",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=gh_cli_timeout(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit(
+            f"ERROR: `gh` token preflight for {org}/{probe_repo} timed out after {exc.timeout}s."
+        ) from exc
     if out.returncode != 0:
         raise SystemExit(
             f"ERROR: `gh` cannot read {org}/{probe_repo} with the current token.\n"
@@ -920,12 +987,16 @@ def _preflight_token_scopes(org: str, probe_repo: str) -> None:
 
 def _rate_limit_remaining() -> tuple[int, int] | None:
     """Return ``(remaining, reset_epoch)`` for the GraphQL budget, or None."""
-    out = subprocess.run(
-        ["gh", "api", "rate_limit"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        out = subprocess.run(
+            ["gh", "api", "rate_limit"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=gh_cli_timeout(),
+        )
+    except subprocess.TimeoutExpired:
+        return None
     if out.returncode != 0:
         return None
     try:
@@ -1152,7 +1223,11 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         implementer_model=args.implementer_model,
         org=org,
         projects_dir=args.projects_dir,
-        phase_timeout_s=args.phase_timeout,
+        # A non-positive --phase-timeout explicitly disables the bound; any
+        # positive value (including the env-overridable default) applies it.
+        phase_timeout_s=(
+            args.phase_timeout if args.phase_timeout and args.phase_timeout > 0 else None
+        ),
     )
 
     if not cfg.allow_unsafe_phase_order:

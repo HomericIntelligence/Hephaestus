@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 
 from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
 # mypy flags that consume the next argument as their value.
 _FLAGS_WITH_VALUE: frozenset[str] = frozenset(
@@ -95,9 +96,19 @@ def run_mypy_per_file(
     overall_rc = 0
     for filepath in files:
         cmd = [executable, "-m", "mypy", *extra_flags, filepath]
-        result = subprocess.run(cmd, capture_output=False)
-        if result.returncode != 0:
-            overall_rc = result.returncode
+        try:
+            result = subprocess.run(cmd, capture_output=False, timeout=NETWORK_TIMEOUT)
+            rc = result.returncode
+        except subprocess.TimeoutExpired as exc:
+            # A hung mypy run must not stall the whole check; treat it as a
+            # failure for this file so the aggregate rc is non-zero (#684).
+            print(
+                f"mypy-each-file: {filepath} timed out after {exc.timeout}s",
+                file=sys.stderr,
+            )
+            rc = 124
+        if rc != 0:
+            overall_rc = rc
 
     return overall_rc
 

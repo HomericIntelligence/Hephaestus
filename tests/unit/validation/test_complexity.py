@@ -1,7 +1,9 @@
 """Tests for hephaestus.validation.complexity."""
 
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
+from hephaestus.utils.helpers import NETWORK_TIMEOUT
 from hephaestus.validation.complexity import (
     check_max_complexity,
     main,
@@ -107,3 +109,14 @@ class TestMain:
             ],
         )
         assert main() == 1
+
+
+class TestComplexitySubprocessTimeout:
+    """``run_ruff_complexity_check`` must bound the external ruff call (#684)."""
+
+    def test_ruff_invocation_passes_timeout(self, tmp_path: Path) -> None:
+        """The ruff subprocess is bounded so a hung tool cannot stall the check."""
+        with patch("hephaestus.validation.complexity.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="", returncode=0)
+            run_ruff_complexity_check("hephaestus/", 10, tmp_path)
+        assert mock_run.call_args.kwargs["timeout"] == NETWORK_TIMEOUT

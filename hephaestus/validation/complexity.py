@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 from hephaestus.cli.utils import add_json_arg, format_output
-from hephaestus.utils.helpers import get_repo_root
+from hephaestus.utils.helpers import NETWORK_TIMEOUT, get_repo_root
 
 
 def run_ruff_complexity_check(
@@ -52,6 +52,7 @@ def run_ruff_complexity_check(
         capture_output=True,
         text=True,
         cwd=repo_root,
+        timeout=NETWORK_TIMEOUT,
     )
 
     if not result.stdout.strip():

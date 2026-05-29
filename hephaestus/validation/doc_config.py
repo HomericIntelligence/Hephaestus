@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from hephaestus.cli.utils import add_json_arg, format_output
+from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
 _tomllib = None
 for _mod_name in ("tomllib", "tomli"):
@@ -260,8 +261,9 @@ def collect_actual_test_count(repo_root: Path) -> int | None:
             cwd=repo_root,
             capture_output=True,
             text=True,
+            timeout=NETWORK_TIMEOUT,
         )
-    except (FileNotFoundError, OSError):
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return None
 
     output = result.stdout + result.stderr
