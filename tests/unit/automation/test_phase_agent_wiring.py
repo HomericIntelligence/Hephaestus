@@ -1,13 +1,20 @@
 """Regression guard: each phase module passes the correct AGENT_* constant.
 
-The phase modules split into two categories:
+The phase modules split into three categories:
 
-- **Self-agent phases** (`plan_reviewer`, `pr_reviewer`, `implementer`,
-  `ci_driver`) own their own session identity — each passes its dedicated
-  ``AGENT_*`` constant to ``invoke_claude_with_session`` so its session UUID
-  is distinct from every other phase's. ``ci_driver`` owns Session 3
-  (``AGENT_CI_DRIVER``): drive-green polls CI, runs its own fix sessions, and
-  captures its own learnings on a transcript independent of the implementer.
+- **Self-agent phases** (`implementer`, `ci_driver`) own one long-lived
+  session identity — each passes its dedicated ``AGENT_*`` constant to
+  ``invoke_claude_with_session`` so its session UUID is distinct from every
+  other phase's AND stable across the stage (resumed, not recreated).
+  ``ci_driver`` owns Session 3 (``AGENT_CI_DRIVER``): drive-green polls CI,
+  runs its own fix sessions, and captures its own learnings on a transcript
+  independent of the implementer.
+- **Per-iteration reviewer phases** (`plan_reviewer`, `pr_reviewer`) must run
+  as a *fresh* session every review-loop iteration so the reviewer never
+  inherits its own prior verdict (the #455/#468/#484 self-review bug). They
+  derive their per-iteration agent token via
+  ``reviewer_agent(AGENT_*_REVIEWER, iteration)`` rather than a static
+  ``agent=AGENT_*_REVIEWER`` kwarg, so the guard asserts that wiring instead.
 - **Continuation phases** (`address_review`) deliberately resume the
   implementer's session. Address-review applies code fixes to satisfy PR
   review feedback, continuing the same line of work the implementer started,
@@ -43,12 +50,28 @@ AUTOMATION_DIR = Path(automation_pkg.__file__).parent
 # the implementer module's namespace (``_impl_mod.AGENT_IMPLEMENTER``)
 # so test patches at ``implementer.AGENT_IMPLEMENTER`` still take effect.
 SELF_AGENT_PHASES: list[tuple[str, str, tuple[str, ...]]] = [
-    ("plan_reviewer.py", "AGENT_PLAN_REVIEWER", ()),
-    ("pr_reviewer.py", "AGENT_PR_REVIEWER", ()),
     ("implementer.py", "AGENT_IMPLEMENTER", ("implementer_phase_runner.py",)),
     # ci_driver owns Session 3 (AGENT_CI_DRIVER): its fix sessions and its
     # post-green learnings run on a transcript independent of the implementer.
     ("ci_driver.py", "AGENT_CI_DRIVER", ()),
+]
+
+
+# Per-iteration reviewer phases: a fresh session every review-loop iteration.
+#
+# Each entry is ``(module_file, base_agent_constant, in_loop_caller_files)``.
+# The reviewer derives its per-iteration token via
+# ``reviewer_agent(base, iteration)`` so successive iterations land on distinct
+# session UUIDs and the reviewer never reviews its own prior verdict.
+#
+# The wrapping call site differs by reviewer: the plan reviewer's lives in the
+# planner's in-loop driver (``planner_review_loop.py``), while the PR reviewer
+# carries its own in-loop callable (``review_pr_inline``) inside
+# ``pr_reviewer.py``. We scan the module together with its in-loop caller so the
+# guard holds regardless of which file owns the wrapper.
+PER_ITERATION_REVIEWER_PHASES: list[tuple[str, str, tuple[str, ...]]] = [
+    ("plan_reviewer.py", "AGENT_PLAN_REVIEWER", ("planner_review_loop.py",)),
+    ("pr_reviewer.py", "AGENT_PR_REVIEWER", ()),
 ]
 
 
@@ -178,4 +201,53 @@ def test_planner_module_uses_its_expected_agents() -> None:
     # AGENT_LEARNINGS must no longer be wired into any planner call.
     assert "AGENT_LEARNINGS" not in found, (
         "learnings capture must resume AGENT_PLANNER, not open an AGENT_LEARNINGS session"
+    )
+
+
+@pytest.mark.parametrize("module_file, base_agent, in_loop_callers", PER_ITERATION_REVIEWER_PHASES)
+def test_per_iteration_reviewer_uses_reviewer_agent_wrapper(
+    module_file: str, base_agent: str, in_loop_callers: tuple[str, ...]
+) -> None:
+    """Each reviewer derives a FRESH session per iteration via reviewer_agent().
+
+    A per-iteration reviewer must NOT pin a single session across the review
+    loop — that is precisely the self-review bug (#455/#468/#484). Somewhere in
+    its call path (the reviewer module itself or its in-loop caller) the token
+    ``reviewer_agent(base, iteration)`` must be produced and forwarded into the
+    Claude session call. We scan module + in-loop callers together because the
+    wrapper lives in the planner loop for the plan reviewer but inside the
+    module for the PR reviewer.
+    """
+    src = _read_phase_sources(module_file, in_loop_callers)
+    assert re.search(r"from\s+\.session_naming\s+import\s+[^\n]*\breviewer_agent\b", src), (
+        f"{module_file} (and callers {in_loop_callers}) must import reviewer_agent "
+        f"from .session_naming"
+    )
+    assert re.search(rf"\b{base_agent}\b", src), (
+        f"{module_file} (and callers {in_loop_callers}) must reference {base_agent}"
+    )
+    assert re.search(rf"\breviewer_agent\(\s*{base_agent}\s*,", src), (
+        f"{module_file} (and callers {in_loop_callers}) must derive the per-iteration "
+        f"session via reviewer_agent({base_agent}, iteration) so each review round "
+        f"is a fresh session"
+    )
+
+
+@pytest.mark.parametrize("module_file, base_agent, in_loop_callers", PER_ITERATION_REVIEWER_PHASES)
+def test_per_iteration_reviewer_does_not_pin_foreign_agent(
+    module_file: str, base_agent: str, in_loop_callers: tuple[str, ...]
+) -> None:
+    """A reviewer module must not pin any non-reviewer AGENT_* via a bare agent=.
+
+    Scoped to the reviewer module itself (NOT its callers — the planner loop
+    legitimately uses AGENT_PLANNER/AGENT_ADVISE). The only bare
+    ``agent=AGENT_*`` constant the reviewer module may pin is its own base
+    (e.g. the standalone CLI default); it must never resume a foreign session
+    such as ``AGENT_IMPLEMENTER``.
+    """
+    src = (AUTOMATION_DIR / module_file).read_text()
+    found = set(re.findall(r"\bagent\s*=\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?(AGENT_[A-Z_]+)\b", src))
+    assert found <= {base_agent}, (
+        f"{module_file} pins unexpected AGENT_* constants via agent=: "
+        f"{found - {base_agent}}; a reviewer module may only pin its own base {base_agent}"
     )
