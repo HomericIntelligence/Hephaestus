@@ -1,5 +1,28 @@
 name: Test
 
+# Cross-Python compatibility matrix.
+#
+# The authoritative required gate is `.github/workflows/_required.yml`: it runs
+# lint (ruff/yamllint/mypy), the canonical unit-tests + integration-tests jobs
+# (Python 3.12, with --cov-fail-under=80 + per-module coverage floors), the
+# build smoke test, and the security/schema/pr-policy gates.
+#
+# To fix the DRY violation (and ~2x runner cost) flagged in #687, this workflow
+# no longer re-runs the `lint` job (ruff check/format + mypy) — that lives in
+# `_required.yml` and is the required check. What remains here is ONLY the
+# multi-interpreter test matrix that `_required.yml` does NOT cover: it proves
+# the library imports and its tests pass on every supported Python (3.10–3.13).
+#
+# Coverage gating, the coverage upload, and the build smoke test were also
+# dropped here — `_required.yml` already gates all three on 3.12. Do NOT re-add
+# a lint job, coverage gating, or a build step to this file.
+#
+# NOTE: the full classifier set (3.10/3.11/3.12/3.13) is intentionally kept in
+# the matrix below. `scripts/check_python_version_consistency.py` (and its
+# pre-commit hook) require this workflow's python-version matrix to cover every
+# `Programming Language :: Python :: 3.x` classifier in pyproject.toml. Adding a
+# new supported Python means adding it here AND to the classifiers.
+
 on:
   pull_request:
   push:
@@ -13,38 +36,6 @@ permissions:
   contents: read
 
 jobs:
-  lint:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-
-      - name: Install pixi
-        uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11  # v0.9.6
-        with:
-          pixi-version: v0.69.0
-          locked: true
-
-      - name: Cache pixi environments
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
-        with:
-          path: |
-            .pixi
-            ~/.cache/rattler/cache
-          key: pixi-${{ runner.os }}-${{ hashFiles('pixi.lock') }}
-          restore-keys: |
-            pixi-${{ runner.os }}-
-
-      - name: Lint check
-        run: pixi run ruff check hephaestus scripts tests
-
-      - name: Format check
-        run: pixi run ruff format --check hephaestus scripts tests
-
-      - name: Type check
-        run: pixi run mypy
-
   test:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -85,35 +76,14 @@ jobs:
 
       - name: Run unit tests
         if: matrix.test-type == 'unit'
-        run: pytest tests/unit --override-ini="addopts=" -v --strict-markers --cov=hephaestus --cov-report=term-missing --cov-report=xml --cov-fail-under=80
+        run: pytest tests/unit --override-ini="addopts=" -v --strict-markers
 
       - name: Check unit test structure
         if: matrix.test-type == 'unit'
         # Use the strict CLI (also flags loose test_*.py files at tests/unit/ root).
         run: hephaestus-check-test-structure
 
-      - name: Check per-module coverage floors
-        if: matrix.test-type == 'unit'
-        run: pip install -e ".[xml]" && hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml
-
       - name: Run integration tests
         if: matrix.test-type == 'integration'
         run: |
           pytest tests/integration --override-ini="addopts=" -v --strict-markers
-
-      - name: Build wheel smoke test
-        if: matrix.test-type == 'integration'
-        run: |
-          python -m build
-          pip install dist/homericintelligence_hephaestus-*.whl --force-reinstall
-          python -c "import hephaestus; print('Package version:', hephaestus.__version__)"
-          python -c "from hephaestus import slugify, retry_with_backoff, setup_logging; print('OK')"
-
-      - name: Upload coverage
-        if: matrix.test-type == 'unit' && matrix.python-version == '3.12'
-        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354  # v6
-        with:
-          files: ./coverage.xml
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
-          flags: unit

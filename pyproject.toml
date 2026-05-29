@@ -7,7 +7,7 @@ name = "HomericIntelligence-Hephaestus"
 dynamic = ["version"]
 description = "Shared utilities and tooling for the HomericIntelligence ecosystem"
 readme = "README.md"
-license = {text = "BSD 3-Clause"}
+license = "BSD-3-Clause"
 requires-python = ">=3.10"
 authors = [
     { name = "Micah Villmow <research@villmow.us>" },

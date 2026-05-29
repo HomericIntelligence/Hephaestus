@@ -53,7 +53,10 @@ pytest-cov = ">=7.0.0,<8"
 types-pyyaml = ">=6.0.12,<7"
 ruff = ">=0.1.0,<1"
 mypy = ">=1.8.0,<2"
-yamllint = ">=1.35.0,<2"
+# yamllint floor tracks the .pre-commit-config.yaml mirror rev (v1.38.0) so the
+# local hook and the pixi-driven CI `lint` job resolve the same major/minor.
+# See the single-source-of-truth note at the top of .pre-commit-config.yaml.
+yamllint = ">=1.38.0,<2"
 just = ">=1.25.0,<2"
 bats-core = ">=1.11.0,<2"
 
@@ -68,7 +71,9 @@ pytest-watch = ">=4.2,<5"
 [feature.lint.dependencies]
 ruff = ">=0.1.0,<1"
 mypy = ">=1.8.0,<2"
-yamllint = ">=1.35.0,<2"
+# Keep this yamllint floor in lockstep with [feature.dev] above and the
+# .pre-commit-config.yaml yamllint mirror rev (v1.38.0).
+yamllint = ">=1.38.0,<2"
 pre-commit = ">=3.0,<5"
 types-pyyaml = ">=6.0.12,<7"
 
@@ -77,16 +82,30 @@ pip-audit = ">=2.7,<3"
 bandit = ">=1.9.4,<2"
 
 [feature.lint.tasks]
-# CVE-2026-3219: pip vendored library issue, no fix available we can pin
-# CVE-2026-6357: pip 26.0.1 → 26.1 fix; pip is bundled by the runner Python
-# and our deps don't pin it, so ignore until the runner ships a newer pip.
-# CVE-2026-44431 / CVE-2026-44432: urllib3 2.6.3 → 2.7.0 fix; 2.7.0 is not yet
-# packaged on conda-forge, so we can't bump until upstream publishes it.
+# pip-audit suppression ledger. Each --ignore-vuln below MUST carry a reason +
+# a re-review trigger so a suppression is never silently permanent. Re-review
+# the whole list every dependency bump (or quarterly, whichever comes first).
+#
+# CVE-2026-3219 (pip): unfixable — the flaw is in a library pip vendors and there
+#   is no released pip we can pin that drops the vulnerable copy. pip is bundled
+#   by the runner's Python; we never declare it as a dependency.
+#   Re-review: drop when a fixed pip ships and the runner Python carries it.
+# CVE-2026-6357 (pip): not-yet-packaged — fixed in pip 26.1 (we run 26.0.1), but
+#   pip is supplied by the runner Python and our deps don't pin it, so we cannot
+#   force the bump ourselves.
+#   Re-review: drop when the runner Python ships pip >= 26.1.
+# CVE-2026-44431 (urllib3): not-yet-packaged — fixed in urllib3 2.7.0; that
+#   release is not on conda-forge yet, so the locked env cannot reach it.
+#   Re-review: drop when conda-forge publishes urllib3 >= 2.7.0.
+# CVE-2026-44432 (urllib3): not-yet-packaged — same urllib3 2.6.3 → 2.7.0 fix and
+#   same conda-forge availability gap as CVE-2026-44431; tracked together.
+#   Re-review: drop alongside CVE-2026-44431 when urllib3 >= 2.7.0 lands.
 # PYSEC-2025-183 (CVE-2025-45768): affects every pyjwt release (0.1.1-2.12.1) with
-# no fixed version, and is disputed by the pyjwt maintainers — it concerns the key
-# length chosen by the calling application, not a library defect. pyjwt is only a
-# transitive dependency of pygithub (we never import it directly), so there is no
-# version bump or code change that resolves it. Ignored as unfixable + disputed.
+#   no fixed version, and is disputed by the pyjwt maintainers — it concerns the key
+#   length chosen by the calling application, not a library defect. pyjwt is only a
+#   transitive dependency of pygithub (we never import it directly), so there is no
+#   version bump or code change that resolves it. Ignored as unfixable + disputed.
+#   Re-review: drop if pyjwt publishes a fixed release or pygithub drops the dep.
 pip-audit = "pip-audit --ignore-vuln CVE-2026-3219 --ignore-vuln CVE-2026-6357 --ignore-vuln CVE-2026-44431 --ignore-vuln CVE-2026-44432 --ignore-vuln PYSEC-2025-183"
 sast = "bandit -c pyproject.toml -r hephaestus scripts --severity-level medium"
 

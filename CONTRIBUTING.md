@@ -35,10 +35,15 @@ This project follows the [HomericIntelligence Code of Conduct](CODE_OF_CONDUCT.m
 
 1. Install Pixi: <https://pixi.sh/install/>
 2. Clone your fork
-3. Install dependencies: `pixi install`
-4. Install the package itself (editable) so `import hephaestus` works in the
-   environment: `pixi run dev-install`
-5. Activate development environment: `pixi shell -e dev`
+3. Bootstrap the project (installs deps, the editable package, and pre-commit
+   hooks in one step): `just bootstrap`
+
+   `just bootstrap` wraps `pixi install`, `pixi run dev-install`, and
+   `pixi run pre-commit install`. If you do not have [`just`](https://just.systems/)
+   installed, run those three commands manually instead.
+4. Activate development environment: `pixi shell -e dev`
+5. Before pushing, run the fast quality gate: `just check`
+   (lint + format-check + typecheck). Run `just --list` to see every recipe.
 
 ## Code Style
 
@@ -95,12 +100,15 @@ computes the next semver string and prints the `git tag` commands to run.
 
 ## Dependency Updates
 
-- **Dependabot** is configured for `pip` (pyproject.toml dev extras) and
-  `github-actions`. It opens PRs automatically for those.
+- **Dependabot** is configured for `pip` (pyproject.toml dev extras) and is the
+  **sole** manager of `github-actions`. It opens PRs automatically for those.
 - **Renovate** (`renovate.json`) is configured with the `:pixi` preset and watches
-  conda-forge / pixi dependencies in `pixi.toml` — the package ecosystem Dependabot
-  cannot parse. Renovate opens grouped PRs on a weekly cadence, matching Dependabot's
-  schedule. To manually refresh the lock file outside of that cycle:
+  **only** conda-forge / pixi dependencies in `pixi.toml` — the package ecosystem
+  Dependabot cannot parse. Renovate's GitHub Actions manager is explicitly disabled
+  (`"github-actions": { "enabled": false }`) so the two tools never double-manage
+  actions and emit duplicate PRs. Renovate opens grouped PRs on a weekly cadence,
+  matching Dependabot's schedule. To manually refresh the lock file outside of that
+  cycle:
 
   ```bash
   pixi update           # updates pixi.lock; commit alongside any range changes
@@ -123,6 +131,31 @@ that violates any of them is blocked:
 Also: ensure tests pass locally (`pixi run test`), keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages, and never bypass
 pre-commit hooks with `--no-verify`.
+
+## Developer Certificate of Origin (DCO)
+
+By contributing, you certify the [Developer Certificate of Origin 1.1](https://developercertificate.org/):
+you have the right to submit the work under this project's open-source license and you agree it may be
+distributed under those terms. You record that legal grant by adding a `Signed-off-by` trailer to **every**
+commit:
+
+```bash
+git commit -s -S -m "type(scope): description"
+```
+
+This is **distinct** from the cryptographic signature requirement above, and both are required:
+
+- **`-s` (`Signed-off-by:` trailer)** — the *DCO*. A legal attestation that you have the right to
+  contribute the change and license it inbound to the project. It proves *provenance of the grant*.
+- **`-S` (GPG/SSH signature)** — *cryptographic authorship/integrity*. It proves *who* authored the
+  commit and that its contents were not tampered with. The `pr-policy` CI gate enforces `-S`.
+
+You can set them together so you never forget:
+
+```bash
+git config commit.gpgsign true   # always -S
+# add the sign-off per commit with -s (or via a prepare-commit-msg hook)
+```
 
 ## Questions?
 

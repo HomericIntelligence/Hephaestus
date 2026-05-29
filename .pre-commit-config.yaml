@@ -1,6 +1,20 @@
 # Pre-commit hooks for ProjectHephaestus
 # Install: pixi run pre-commit install
 # Run manually: pixi run pre-commit run --all-files
+#
+# Linter version pinning — single source of truth:
+#   pixi.toml [feature.lint] is authoritative for tool versions used in CI
+#   (ruff, mypy, yamllint run via `pixi run --environment lint ...` in
+#   .github/workflows/_required.yml). The mirror `rev:`s below pin the SAME
+#   tools for the local pre-commit run, so they MUST stay within the pixi
+#   range to keep local == CI. When bumping a tool, change pixi.toml first,
+#   then update the matching `rev:` here:
+#     - yamllint  (adrienverge/yamllint rev)        ⇄ pixi yamllint
+#     - shellcheck (shellcheck-py rev)              ⇄ CI installs via apt; keep
+#                                                      this rev current with it
+#     - markdownlint-cli2 (DavidAnson rev)          ⇄ CI markdownlint-cli2-action
+#     - pre-commit-hooks (pre-commit/pre-commit-hooks rev) ⇄ meta hooks, no pixi pkg
+#   `hephaestus-check-precommit-versions` flags drift for the pixi-backed tools.
 
 repos:
 

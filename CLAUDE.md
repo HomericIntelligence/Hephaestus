@@ -222,6 +222,15 @@ If you are a myrmidon-swarm subagent with a specific task prompt, skip this and 
 | `repo-analyze` | Comprehensive 15-dimension repository audit |
 | `repo-analyze-quick` | Quick repository health check |
 | `repo-analyze-strict` | Ruthlessly thorough repository audit |
+| `repo-analyze-full` | Full-coverage audit — one swarm agent per section, no sampling cap |
+| `repo-analyze-quick-full` | Quick health check with full file coverage |
+| `repo-analyze-strict-full` | Strict audit with full file coverage (swarm per section) |
+| `review-pr-strict` | Ruthlessly thorough PR-alignment audit with full coverage |
+| `worktree-cleanup` | Audit + prune git worktrees (never deletes branches) |
+| `tidy` | Rebase all local branches with swarm conflict resolution |
+| `create-reusable-utilities` | Port/generalize utility scripts for cross-project reuse |
+| `github-actions-python-cicd` | Set up a Python GitHub Actions CI/CD pipeline |
+| `python-repo-modernization` | Bring a Python repo to production-grade quality |
 
 ### Agent Skills vs Sub-Agents Decision Tree
 
@@ -231,9 +240,9 @@ Is the task well-defined with predictable steps?
 │   ├─ Is it a new feature? → brainstorm → test-driven-development
 │   ├─ Is it a bug? → systematic-debugging → test-driven-development
 │   ├─ Is it ready to ship? → verification → finish-branch
-│   ├─ Is it a GitHub operation? → Use gh-* skills
-│   ├─ Is it a CI/CD task? → Use ci-* skills
-│   └─ Is it documentation work? → Use doc-* skills
+│   ├─ Is it a CI/CD pipeline setup? → github-actions-python-cicd
+│   ├─ Is it a repo audit? → repo-analyze (or its quick/strict/full variants)
+│   └─ Is it a PR review? → code-review (or review-pr-strict for alignment audits)
 │
 └─ NO → Use a Sub-Agent
     ├─ Does it require exploration/discovery? → Use sub-agent
