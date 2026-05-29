@@ -16,6 +16,7 @@ from pathlib import Path
 
 from hephaestus.logging.utils import get_logger
 from hephaestus.utils.helpers import get_repo_root
+from hephaestus.version.parsing import parse_version_tuple
 
 logger = get_logger(__name__)
 
@@ -46,10 +47,9 @@ def parse_version(version: str) -> tuple[int, int, int]:
             f"Invalid version format: {version}. Expected format: MAJOR.MINOR.PATCH (e.g., 0.1.0)"
         )
 
-    major = int(match.group(1))
-    minor = int(match.group(2))
-    patch = int(match.group(3))
-
+    # The regex guarantees exactly three all-digit groups; delegate the numeric
+    # conversion to the shared core, then narrow to the fixed 3-tuple contract.
+    major, minor, patch = parse_version_tuple(version, on_non_numeric="raise")
     return (major, minor, patch)
 
 

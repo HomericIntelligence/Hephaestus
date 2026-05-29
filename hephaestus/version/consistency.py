@@ -24,30 +24,24 @@ Usage:
 """
 
 import argparse
-import importlib
 import re
 import subprocess
 import sys
-import types
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _dist_version
 from pathlib import Path
 
 from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
+from hephaestus.io.toml import import_tomllib
 from hephaestus.utils.helpers import get_repo_root
 from hephaestus.version.manager import VersionManager, parse_version
+from hephaestus.version.parsing import parse_version_tuple
 
 # PyPI distribution name used for the importlib.metadata fallback.
 _DIST_NAME = "HomericIntelligence-Hephaestus"
 
 # tomllib ships with Python 3.11+; fall back to the tomli backport on 3.10.
-_tomllib: types.ModuleType | None = None
-for _mod_name in ("tomllib", "tomli"):
-    try:
-        _tomllib = importlib.import_module(_mod_name)
-        break
-    except ImportError:
-        continue
+_tomllib = import_tomllib()
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -64,6 +58,9 @@ _INLINE_CODE_RE = re.compile(r"``[^`]+``|`[^`]+`")
 def _parse_version_tuple(version_str: str) -> tuple[int, ...]:
     """Parse ``"X.Y.Z"`` into a comparable tuple of ints.
 
+    Splits on ``.`` and requires every segment to be an integer; raises on any
+    non-numeric segment. Inputs here are always pre-validated ``X.Y.Z`` strings.
+
     Args:
         version_str: A semver string like ``"1.2.3"``.
 
@@ -71,7 +68,7 @@ def _parse_version_tuple(version_str: str) -> tuple[int, ...]:
         A tuple such as ``(1, 2, 3)``.
 
     """
-    return tuple(int(p) for p in version_str.split("."))
+    return parse_version_tuple(version_str, on_non_numeric="raise")
 
 
 def _version_from_git_tag(repo_root: Path) -> str | None:
