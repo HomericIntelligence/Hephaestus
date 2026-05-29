@@ -16,7 +16,9 @@ from hephaestus.automation.github_api import (
     gh_create_label,
     gh_issue_comment,
     gh_issue_create,
+    gh_issue_delete_comment,
     gh_issue_json,
+    gh_issue_upsert_comment,
     gh_list_labels,
     gh_list_open_issues,
     gh_pr_checks,
@@ -1386,3 +1388,67 @@ class TestGhPrChecks:
         (check,) = gh_pr_checks(789)
         assert check["status"] == "in_progress"
         assert check["conclusion"] is None
+
+
+class TestUpsertAndDeleteComment:
+    """Idempotent plan/review comment lifecycle (one comment per role)."""
+
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("o", "r"))
+    @patch("hephaestus.automation.github_api._fetch_issue_comment_ids", return_value=[])
+    @patch("hephaestus.automation.github_api.gh_issue_comment")
+    def test_upsert_creates_when_absent(
+        self, mock_create: Any, _mock_fetch: Any, _mock_repo: Any
+    ) -> None:
+        rv = gh_issue_upsert_comment(5, "# Implementation Plan", "# Implementation Plan\nbody")
+        mock_create.assert_called_once_with(5, "# Implementation Plan\nbody")
+        assert rv is None  # fresh create: id not parsed
+
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("o", "r"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.gh_issue_comment")
+    def test_upsert_patches_existing(
+        self, mock_create: Any, mock_gh_call: Any, _mock_repo: Any
+    ) -> None:
+        with patch(
+            "hephaestus.automation.github_api._fetch_issue_comment_ids",
+            return_value=[{"databaseId": 99, "body": "# Implementation Plan\nold"}],
+        ):
+            rv = gh_issue_upsert_comment(5, "# Implementation Plan", "# Implementation Plan\nnew")
+        # No fresh comment created; a PATCH call was issued for id 99.
+        mock_create.assert_not_called()
+        assert rv == 99
+        patched = any(
+            "PATCH" in str(c) and "issues/comments/99" in str(c)
+            for c in mock_gh_call.call_args_list
+        )
+        assert patched, mock_gh_call.call_args_list
+
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("o", "r"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.gh_issue_comment")
+    def test_upsert_deletes_older_duplicates(
+        self, _mock_create: Any, mock_gh_call: Any, _mock_repo: Any
+    ) -> None:
+        # Three legacy plan comments → newest (id 3) patched, 1 and 2 deleted.
+        with patch(
+            "hephaestus.automation.github_api._fetch_issue_comment_ids",
+            return_value=[
+                {"databaseId": 1, "body": "# Implementation Plan\na"},
+                {"databaseId": 2, "body": "# Implementation Plan\nb"},
+                {"databaseId": 3, "body": "# Implementation Plan\nc"},
+            ],
+        ):
+            rv = gh_issue_upsert_comment(5, "# Implementation Plan", "# Implementation Plan\nnew")
+        assert rv == 3
+        calls = [str(c) for c in mock_gh_call.call_args_list]
+        assert any("DELETE" in c and "comments/1" in c for c in calls), calls
+        assert any("DELETE" in c and "comments/2" in c for c in calls), calls
+        assert any("PATCH" in c and "comments/3" in c for c in calls), calls
+
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("o", "r"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_delete_comment_calls_rest_delete(self, mock_gh_call: Any, _mock_repo: Any) -> None:
+        gh_issue_delete_comment(42)
+        (args,) = mock_gh_call.call_args.args
+        assert "DELETE" in args
+        assert "/repos/o/r/issues/comments/42" in args

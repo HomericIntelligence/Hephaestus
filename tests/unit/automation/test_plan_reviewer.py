@@ -85,7 +85,7 @@ class TestGetLatestPlan:
         """_get_latest_plan returns plan text from matching comment."""
         comments = [
             {"body": "Some other comment"},
-            {"body": "## Implementation Plan\n\nStep 1: Do something\nStep 2: Do more"},
+            {"body": "# Implementation Plan\n\nStep 1: Do something\nStep 2: Do more"},
         ]
         with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
             mock_gh.return_value = _make_gh_result({"comments": comments})
@@ -97,8 +97,8 @@ class TestGetLatestPlan:
     def test_get_latest_plan_returns_last_plan(self, reviewer: PlanReviewer) -> None:
         """_get_latest_plan returns the LAST plan comment when multiple exist."""
         comments = [
-            {"body": "## Implementation Plan\n\nFirst plan"},
-            {"body": "## Implementation Plan\n\nSecond plan (updated)"},
+            {"body": "# Implementation Plan\n\nFirst plan"},
+            {"body": "# Implementation Plan\n\nSecond plan (updated)"},
         ]
         with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
             mock_gh.return_value = _make_gh_result({"comments": comments})
@@ -123,6 +123,43 @@ class TestGetLatestPlan:
         """_get_latest_plan returns None when gh call fails."""
         with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
             mock_gh.side_effect = RuntimeError("gh failed")
+            result = reviewer._get_latest_plan(123)
+
+        assert result is None
+
+    def test_get_latest_plan_ignores_review_comment(self, reviewer: PlanReviewer) -> None:
+        """A review comment that quotes the plan must never be picked as the plan.
+
+        Regression for #455/#468/#484: a ``## 🔍 Plan Review`` body contains
+        ``## Objective``/``## Plan`` as substrings when it quotes the plan, and
+        matching those caused the reviewer to review its own prior review.
+        """
+        comments = [
+            {"body": "# Implementation Plan\n\n## Objective\nDo the thing."},
+            # A later review comment quoting the plan's headings:
+            {
+                "body": (
+                    "## 🔍 Plan Review\n\nThe plan's ## Objective and ## Plan "
+                    "sections look fine.\n\n**Verdict: REVISE**"
+                )
+            },
+        ]
+        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
+            mock_gh.return_value = _make_gh_result({"comments": comments})
+            result = reviewer._get_latest_plan(123)
+
+        assert result is not None
+        # Must be the actual plan, NOT the review comment.
+        assert result.lstrip().startswith("# Implementation Plan")
+        assert "🔍 Plan Review" not in result
+
+    def test_get_latest_plan_review_only_issue_returns_none(self, reviewer: PlanReviewer) -> None:
+        """An issue with ONLY a review comment (no real plan) → None, not the review."""
+        comments = [
+            {"body": "## 🔍 Plan Review\n\nDiscusses a ## Plan.\n\n**Verdict: REVISE**"},
+        ]
+        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
+            mock_gh.return_value = _make_gh_result({"comments": comments})
             result = reviewer._get_latest_plan(123)
 
         assert result is None

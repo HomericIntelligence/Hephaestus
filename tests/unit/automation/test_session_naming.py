@@ -19,11 +19,42 @@ from hephaestus.automation.session_naming import (
     AGENT_PLANNER,
     AGENT_PR_REVIEWER,
     current_trunk_githash,
+    reviewer_agent,
     session_jsonl_path,
     session_name,
     session_uuid,
     short_githash,
 )
+
+
+class TestReviewerAgent:
+    """Per-iteration reviewer session tokens (fresh session each loop round)."""
+
+    def test_plan_reviewer_iteration_token(self) -> None:
+        assert reviewer_agent(AGENT_PLAN_REVIEWER, 0) == "plan-reviewer-r0"
+        assert reviewer_agent(AGENT_PR_REVIEWER, 2) == "pr-reviewer-r2"
+
+    def test_per_iteration_uuids_differ(self) -> None:
+        u0 = session_uuid("R", 5, reviewer_agent(AGENT_PLAN_REVIEWER, 0), "abc1234")
+        u1 = session_uuid("R", 5, reviewer_agent(AGENT_PLAN_REVIEWER, 1), "abc1234")
+        assert u0 != u1
+
+    def test_suffixed_reviewer_token_is_valid_session_agent(self) -> None:
+        # session_name must accept the reviewer_agent() form.
+        name = session_name("R", 5, reviewer_agent(AGENT_PR_REVIEWER, 3), "x")
+        assert name == "R_5_pr-reviewer-r3_x"
+
+    def test_rejects_non_reviewer_base(self) -> None:
+        with pytest.raises(ValueError, match="reviewer_agent expects"):
+            reviewer_agent(AGENT_IMPLEMENTER, 0)
+
+    def test_rejects_negative_iteration(self) -> None:
+        with pytest.raises(ValueError, match="iteration must be"):
+            reviewer_agent(AGENT_PLAN_REVIEWER, -1)
+
+    def test_unsuffixed_unknown_still_rejected(self) -> None:
+        with pytest.raises(ValueError, match="unknown agent"):
+            session_name("R", 5, "totally-bogus", "x")
 
 
 class TestSessionName:

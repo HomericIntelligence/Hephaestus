@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hephaestus.automation.models import PLAN_COMMENT_MARKERS, PlannerOptions
+from hephaestus.automation.models import PLAN_COMMENT_MARKER, PlannerOptions
 from hephaestus.automation.planner_state import PlannerStateManager
 
 # ---------------------------------------------------------------------------
@@ -33,7 +33,7 @@ def _make_options(issues: list[int] | None = None) -> PlannerOptions:
 
 
 def _plan_body() -> str:
-    return f"{PLAN_COMMENT_MARKERS[0]}\n\nStep 1: do the thing.\n"
+    return f"{PLAN_COMMENT_MARKER}\n\nStep 1: do the thing.\n"
 
 
 def _other_body() -> str:

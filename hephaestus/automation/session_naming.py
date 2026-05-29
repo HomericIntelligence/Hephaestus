@@ -52,6 +52,52 @@ _ALL_AGENTS = frozenset(
     }
 )
 
+# Reviewer agents that get a *fresh* session per loop iteration (see
+# reviewer_agent). The plan/impl reviewers must stay unbiased across the
+# review loop, so each iteration uses a distinct session UUID rather than
+# resuming the prior iteration's transcript. Implementer/planner/ci-driver
+# deliberately do NOT appear here — they resume one session across their stage.
+_PER_ITERATION_REVIEWERS = frozenset({AGENT_PLAN_REVIEWER, AGENT_PR_REVIEWER})
+
+
+def reviewer_agent(base_agent: str, iteration: int) -> str:
+    """Return a per-iteration reviewer agent token.
+
+    The two review loops (plan review, PR/impl review) must run as a *fresh*
+    Claude session every iteration so the reviewer never inherits its own
+    previous verdict. Because the session UUID is derived from the agent
+    string (see :func:`session_uuid`), appending the iteration index yields a
+    new session per round while keeping the family human-readable.
+
+    Args:
+        base_agent: ``AGENT_PLAN_REVIEWER`` or ``AGENT_PR_REVIEWER``.
+        iteration: Zero-based review-loop iteration index.
+
+    Returns:
+        ``f"{base_agent}-r{iteration}"`` (e.g. ``"plan-reviewer-r0"``).
+
+    Raises:
+        ValueError: If ``base_agent`` is not a per-iteration reviewer or
+            ``iteration`` is negative.
+
+    """
+    if base_agent not in _PER_ITERATION_REVIEWERS:
+        raise ValueError(
+            f"reviewer_agent expects one of {sorted(_PER_ITERATION_REVIEWERS)}, got {base_agent!r}"
+        )
+    if iteration < 0:
+        raise ValueError(f"iteration must be >= 0, got {iteration}")
+    return f"{base_agent}-r{iteration}"
+
+
+def _is_valid_agent(agent: str) -> bool:
+    """Return True for a known base agent or a per-iteration reviewer token."""
+    if agent in _ALL_AGENTS:
+        return True
+    # Accept the reviewer_agent() form: "<base>-r<N>".
+    base, sep, suffix = agent.rpartition("-r")
+    return bool(sep) and base in _PER_ITERATION_REVIEWERS and suffix.isdigit()
+
 
 def session_name(repo: str, issue: int | str, agent: str, githash: str) -> str:
     """Return the human-readable session name.
@@ -69,8 +115,11 @@ def session_name(repo: str, issue: int | str, agent: str, githash: str) -> str:
         ValueError: If any component is empty or ``agent`` is unknown.
 
     """
-    if agent not in _ALL_AGENTS:
-        raise ValueError(f"unknown agent {agent!r}; must be one of {sorted(_ALL_AGENTS)}")
+    if not _is_valid_agent(agent):
+        raise ValueError(
+            f"unknown agent {agent!r}; must be one of {sorted(_ALL_AGENTS)} "
+            f"or a per-iteration reviewer token (e.g. 'plan-reviewer-r0')"
+        )
     repo_s = repo.strip()
     githash_s = githash.strip()
     if not repo_s or not githash_s:
