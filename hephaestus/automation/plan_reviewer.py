@@ -23,7 +23,7 @@ from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_te
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.github.rate_limit import wait_until
 
-from .claude_invoke import invoke_claude_with_session, scan_quota_reset
+from .claude_invoke import invoke_claude_with_session, parse_review_verdict, scan_quota_reset
 from .claude_models import reviewer_model
 from .claude_timeouts import plan_reviewer_claude_timeout
 from .git_utils import get_repo_info, get_repo_root, get_repo_slug, issue_ref
@@ -34,7 +34,7 @@ from .review_state import (
     PLAN_REVIEW_PREFIX as _REVIEW_PREFIX_SHARED,
 )
 from .review_state import (
-    is_plan_review_approved,
+    is_plan_review_go,
 )
 from .session_naming import AGENT_PLAN_REVIEWER, current_trunk_githash
 from .status_tracker import StatusTracker
@@ -58,19 +58,16 @@ logger = logging.getLogger(__name__)
 # (see :mod:`hephaestus.automation.review_state` and issue #551).
 _REVIEW_PREFIX = _REVIEW_PREFIX_SHARED
 
-# Verdict marker emitted by Claude at the end of every plan review. See
-# PLAN_REVIEW_PROMPT in prompts.py — Claude is instructed to end its
-# response with exactly one of:
-#   **Verdict: APPROVED**  — plan is sound and ready to implement
-#   **Verdict: REVISE**    — plan needs changes (re-review next loop)
-#   **Verdict: BLOCK**     — plan has a fundamental problem
-_FINAL_VERDICT_MARKER = "**Verdict: APPROVED**"
+# Plan review verdict contract (see PLAN_REVIEW_PROMPT in prompts/planning.py):
+# Claude ends its response with exactly one of ``Verdict: GO`` /
+# ``Verdict: NOGO``. The review prose explains *why*; this line is the binary
+# gate, parsed by :func:`parse_review_verdict`.
 
 # Fallback marker appended by _post_review when Claude's output omits the
 # verdict line entirely (defence-in-depth — keeps the short-circuit gate
-# parseable even if the model misformats). REVISE is the safe default
+# parseable even if the model misformats). NOGO is the safe default
 # because it triggers re-review on the next loop.
-_FALLBACK_VERDICT_LINE = "**Verdict: REVISE**"
+_FALLBACK_VERDICT_LINE = "Verdict: NOGO"
 
 
 class PlanReviewer:
@@ -181,12 +178,12 @@ class PlanReviewer:
 
             # --- Read-only checks (safe in dry-run) ---
 
-            # Skip only when the LATEST plan review carries the APPROVED
-            # verdict marker. A REVISE/BLOCK verdict, or any older convention
-            # without the marker, re-runs the reviewer so an amended plan
-            # gets a fresh evaluation. (Previously this short-circuited on
-            # any prior `## 🔍 Plan Review` comment, which locked an issue
-            # out of re-review forever after the first interim verdict.)
+            # Skip only when the LATEST plan review is a GO. A NOGO verdict, or
+            # any older convention without a parseable verdict, re-runs the
+            # reviewer so an amended plan gets a fresh evaluation. (Previously
+            # this short-circuited on any prior `## 🔍 Plan Review` comment,
+            # which locked an issue out of re-review forever after the first
+            # interim verdict.)
             if self._latest_review_is_final(issue_number):
                 logger.info(
                     "Issue %s: latest plan review is APPROVED, skipping",
@@ -282,7 +279,7 @@ class PlanReviewer:
         # for ``--json`` output. On a long-running issue with >100 comments
         # the older ``gh issue view`` call silently truncated the head of
         # the list, so the "latest plan review" gate could see a stale
-        # APPROVED instead of the real most-recent REVISE/BLOCK. We now ask
+        # GO instead of the real most-recent NOGO. We now ask
         # GraphQL directly for the *last 100* comments in descending update
         # order — equivalent to "latest first" — and take the first matching
         # ``## 🔍 Plan Review`` body in iteration order. Bounded to one API
@@ -379,10 +376,10 @@ class PlanReviewer:
         return None
 
     def _latest_review_is_final(self, issue_number: int) -> bool:
-        """Return True iff the LATEST plan review on the issue is APPROVED.
+        """Return True iff the LATEST plan review on the issue is a GO.
 
         Thin delegate over
-        :func:`hephaestus.automation.review_state.is_plan_review_approved`,
+        :func:`hephaestus.automation.review_state.is_plan_review_go`,
         which is the single source of truth for this gate (also called by
         the implementer — see #551). The comments fetched by
         :meth:`_fetch_issue_comments` are forwarded so the API call is
@@ -393,11 +390,11 @@ class PlanReviewer:
             issue_number: GitHub issue number.
 
         Returns:
-            True if the latest plan review carries the APPROVED marker.
+            True if the latest plan review carries the GO verdict.
 
         """
         comments = self._fetch_issue_comments(issue_number)
-        return is_plan_review_approved(issue_number, comments=comments)
+        return is_plan_review_go(issue_number, comments=comments)
 
     def _run_claude_analysis(
         self,
@@ -555,20 +552,22 @@ class PlanReviewer:
         even when this standalone phase runs it converges to a single review
         comment per issue instead of accumulating duplicates (#455/#468/#484).
 
-        Defence-in-depth: if Claude's output omits the verdict line entirely
-        (model misformat), append `_FALLBACK_VERDICT_LINE` (= REVISE) so the
-        next-loop short-circuit gate always has a parseable marker. REVISE is
+        Defence-in-depth: if Claude's output omits a parseable verdict line
+        (model misformat), append `_FALLBACK_VERDICT_LINE` (= NOGO) so the
+        next-loop short-circuit gate always has a parseable marker. NOGO is
         the safe default — it re-runs the reviewer rather than silently
-        skipping a possibly-incomplete review.
+        skipping a possibly-incomplete review. Detection uses the same
+        :func:`parse_review_verdict` as the gate, so it tracks the GO/NOGO
+        contract rather than a brittle substring check.
 
         Args:
             issue_number: GitHub issue number.
             review_text: Review body text from Claude.
 
         """
-        if "**Verdict:" not in review_text:
+        if parse_review_verdict(review_text).verdict == "AMBIGUOUS":
             logger.warning(
-                "Issue %s: review body missing verdict line; appending fallback REVISE",
+                "Issue %s: review body missing parseable verdict line; appending fallback NOGO",
                 issue_ref(issue_number),
             )
             review_text = f"{review_text.rstrip()}\n\n{_FALLBACK_VERDICT_LINE}\n"

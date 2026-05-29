@@ -28,7 +28,7 @@ def test_already_has_pr_counted_separately(caplog: pytest.LogCaptureFixture) -> 
     results = {
         1: WorkerResult(issue_number=1, success=True, pr_number=101),  # real success
         2: WorkerResult(issue_number=2, success=True, pr_number=202, already_has_pr=True),
-        3: WorkerResult(issue_number=3, success=True, plan_review_not_approved=True),
+        3: WorkerResult(issue_number=3, success=True, plan_review_not_go=True),
         4: WorkerResult(issue_number=4, success=False, error="boom"),
     }
     with caplog.at_level(logging.INFO):
@@ -36,7 +36,7 @@ def test_already_has_pr_counted_separately(caplog: pytest.LogCaptureFixture) -> 
 
     text = caplog.text
     assert "Successful: 1" in text
-    assert "Deferred (awaiting APPROVED plan-review): 1" in text
+    assert "Deferred (awaiting GO plan-review): 1" in text
     assert "Skipped (open PR already exists): 1" in text
     assert "Failed: 1" in text
     # The skipped issue lists its PR but is NOT under "Successful PRs".

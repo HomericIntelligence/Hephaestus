@@ -50,12 +50,12 @@ class ImplementationSummaryPrinter:
         sub-counts plus failed sum to total.
         """
         total = len(results)
-        deferred = sum(1 for r in results.values() if r.plan_review_not_approved)
+        deferred = sum(1 for r in results.values() if r.plan_review_not_go)
         skipped_has_pr = sum(1 for r in results.values() if r.already_has_pr)
         successful = sum(
             1
             for r in results.values()
-            if r.success and not r.plan_review_not_approved and not r.already_has_pr
+            if r.success and not r.plan_review_not_go and not r.already_has_pr
         )
         failed = total - successful - deferred - skipped_has_pr
         return total, successful, deferred, skipped_has_pr, failed
@@ -69,7 +69,7 @@ class ImplementationSummaryPrinter:
         logger.info("=" * 60)
         logger.info("Total issues: %s", total)
         logger.info("Successful: %s", successful)
-        logger.info("Deferred (awaiting APPROVED plan-review): %s", deferred)
+        logger.info("Deferred (awaiting GO plan-review): %s", deferred)
         logger.info("Skipped (open PR already exists): %s", skipped_has_pr)
         logger.info("Failed: %s", failed)
 

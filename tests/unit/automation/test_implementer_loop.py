@@ -537,7 +537,7 @@ class TestRunImplReviewStep:
             patch.object(
                 implementer.phase_runner,
                 "_fetch_plan_and_review",
-                return_value=("PLAN body", "## 🔍 Plan Review\n**Verdict: APPROVED**"),
+                return_value=("PLAN body", "## 🔍 Plan Review\nVerdict: GO"),
             ),
             patch.object(implementer, "_collect_diff", return_value="the-diff"),
             patch(
@@ -567,7 +567,7 @@ class TestRunImplReviewStep:
         ctx = kwargs["context"]
         assert "the-diff" in ctx["pr_diff"]
         assert "PLAN body" in ctx["issue_body"]
-        assert "APPROVED" in ctx["issue_body"]
+        assert "Verdict: GO" in ctx["issue_body"]
 
     def test_reviewer_uses_per_iteration_session_token(
         self, implementer: IssueImplementer, tmp_path: Path
@@ -768,14 +768,14 @@ class TestFetchPlanAndReview:
 
         comments = [
             {"body": "# Implementation Plan\n\nStep 1"},
-            {"body": "## 🔍 Plan Review\n\n**Verdict: APPROVED**"},
+            {"body": "## 🔍 Plan Review\n\nVerdict: GO"},
             {"body": "some unrelated comment"},
         ]
         monkeypatch.setattr(review_state_mod, "_fetch_issue_comments_graphql", lambda _n: comments)
 
         plan, review = implementer.phase_runner._fetch_plan_and_review(1)
         assert "Implementation Plan" in plan
-        assert "APPROVED" in review
+        assert "Verdict: GO" in review
 
     def test_returns_empty_on_fetch_failure(
         self, implementer: IssueImplementer, monkeypatch: pytest.MonkeyPatch

@@ -81,7 +81,7 @@ def _fetch_signing_state(pr_number: int) -> list[dict[str, Any]]:
     is coerced to ``signature_valid=False`` rather than dropped.
 
     Failures are returned as an empty list; the reviewer treats an empty
-    signing-state as a policy BLOCK, so the caller still surfaces the
+    signing-state as a policy NOGO, so the caller still surfaces the
     violation rather than silently passing.
     """
     try:
@@ -544,7 +544,7 @@ class PRReviewer(BaseReviewer):
 
         # Fetch PR description, reviews/comments, and policy state. Best-effort
         # for everything except policy state — but the reviewer prompt treats
-        # an empty signing-state list as a BLOCK, so a failure here surfaces
+        # an empty signing-state list as a NOGO, so a failure here surfaces
         # as a policy violation rather than silently passing.
         #
         # Note: `gh pr view --json commits` returns commit OIDs but NOT the
@@ -586,7 +586,7 @@ class PRReviewer(BaseReviewer):
         except Exception as exc:
             logger.warning(
                 "PR #%d: failed to gather description/comments/policy state: %s — "
-                "review will proceed; missing policy state will trigger a BLOCK verdict",
+                "review will proceed; missing policy state will trigger a NOGO verdict",
                 pr_number,
                 exc,
             )

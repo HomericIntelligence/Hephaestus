@@ -97,16 +97,16 @@ class WorkerResult(BaseModel):
     branch_name: str | None = None
     worktree_path: str | None = None
     # Set True when the implementer skipped because the latest plan-review
-    # verdict is not APPROVED (REVISE / BLOCK / missing). The issue is not
+    # verdict is not GO (NOGO / missing / unparseable). The issue is not
     # failed — it should be retried on the next automation loop after the
     # planner amends and the reviewer re-evaluates. See #551.
-    plan_review_not_approved: bool = False
+    plan_review_not_go: bool = False
     # Set True when the implementer skipped because an open PR already exists
     # for this issue. Re-implementing would clobber in-flight work; the open
     # PR is handled by the implementer's in-loop PR-review + address-review
     # steps and the later drive-green stage. Not a failure.
     already_has_pr: bool = False
-    # Set True when the reviewer short-circuited (plan already APPROVED, or no
+    # Set True when the reviewer short-circuited (plan already cleared GO, or no
     # plan comment yet); the issue was not reviewed this pass and does not
     # count as work for loop convergence (#613).
     already_reviewed: bool = False

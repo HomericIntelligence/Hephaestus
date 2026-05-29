@@ -215,24 +215,23 @@ class TestRunTestsInWorktree:
 
 
 # ---------------------------------------------------------------------------
-# #551 — implementer must gate on APPROVED plan-review verdict
+# #551 — implementer must gate on GO plan-review verdict
 # ---------------------------------------------------------------------------
 
 
 class TestPlanReviewVerdictGate:
-    """#551: _implement_issue must skip when latest plan-review is not APPROVED.
+    """#551: _implement_issue must skip when latest plan-review is not GO.
 
     Behaviour matrix:
 
-    +----------------------------+-----------+-------------------------+
-    | Latest plan-review verdict | Implement?| ``plan_review_not_approved``|
-    +============================+===========+=========================+
-    | APPROVED                   | yes       | False                   |
-    | REVISE                     | no (skip) | True                    |
-    | BLOCK                      | no (skip) | True                    |
-    | missing (no review yet)    | no (skip) | True                    |
-    | NOGO-exhausted plan        | no (skip) | True                    |
-    +----------------------------+-----------+-------------------------+
+    +----------------------------+-----------+-----------------------+
+    | Latest plan-review verdict | Implement?| ``plan_review_not_go``|
+    +============================+===========+=======================+
+    | GO                         | yes       | False                 |
+    | NOGO                       | no (skip) | True                  |
+    | missing (no review yet)    | no (skip) | True                  |
+    | NOGO-exhausted plan        | no (skip) | True                  |
+    +----------------------------+-----------+-----------------------+
 
     The "no plan at all" path is covered by the pre-existing ``_has_plan``
     branch — the planner runs before the gate, and the gate only fires once
@@ -276,7 +275,7 @@ class TestPlanReviewVerdictGate:
                 return_value=None,
             ),
             patch(
-                "hephaestus.automation.implementer.is_plan_review_approved",
+                "hephaestus.automation.implementer.is_plan_review_go",
                 return_value=gate_return,
             ),
             # Everything past the gate — only reached when gate returns True.
@@ -296,46 +295,40 @@ class TestPlanReviewVerdictGate:
         ):
             return impl._implement_issue(1)
 
-    def test_approved_verdict_proceeds_to_implementation(
+    def test_go_verdict_proceeds_to_implementation(
         self, impl: IssueImplementer, tmp_path: Path
     ) -> None:
         result = self._drive_to_gate(impl, tmp_path, gate_return=True)
         assert result.success is True
-        assert result.plan_review_not_approved is False
+        assert result.plan_review_not_go is False
         assert result.pr_number == 999
 
-    def test_revise_verdict_skips(self, impl: IssueImplementer, tmp_path: Path) -> None:
-        # Mirror: REVISE is one of the non-APPROVED states the gate must reject.
+    def test_nogo_verdict_skips(self, impl: IssueImplementer, tmp_path: Path) -> None:
+        # NOGO is the single non-GO verdict the gate must reject (it subsumes
+        # the former REVISE and BLOCK states, which were never behaviorally
+        # distinct — the gate only ever asked "is it GO").
         result = self._drive_to_gate(impl, tmp_path, gate_return=False)
         assert result.success is True  # not a failure — retried next loop
-        assert result.plan_review_not_approved is True
+        assert result.plan_review_not_go is True
         assert result.pr_number is None
 
-    def test_block_verdict_skips(self, impl: IssueImplementer, tmp_path: Path) -> None:
-        # is_plan_review_approved returns False for BLOCK just like REVISE; the
-        # gate handles both uniformly. Asserting both paths makes the contract
-        # explicit and protects against accidental ``if verdict == "BLOCK"``
-        # special-casing creeping in.
-        result = self._drive_to_gate(impl, tmp_path, gate_return=False)
-        assert result.plan_review_not_approved is True
-
     def test_missing_review_skips(self, impl: IssueImplementer, tmp_path: Path) -> None:
-        # No plan-review posted yet → is_plan_review_approved returns False.
+        # No plan-review posted yet → is_plan_review_go returns False.
         result = self._drive_to_gate(impl, tmp_path, gate_return=False)
         assert result.success is True
-        assert result.plan_review_not_approved is True
+        assert result.plan_review_not_go is True
 
     def test_nogo_exhausted_plan_skips(self, impl: IssueImplementer, tmp_path: Path) -> None:
         """Skip NOGO-exhausted plans (planner.py:692-700).
 
         These still start with "# Implementation Plan", so ``_has_plan``
-        returns True, but the plan-reviewer will mark them BLOCK (or there
+        returns True, but the plan-reviewer will mark them NOGO (or there
         is no review yet). The new gate must skip them regardless. See
         #551 acceptance #4.
         """
         result = self._drive_to_gate(impl, tmp_path, gate_return=False)
         assert result.success is True
-        assert result.plan_review_not_approved is True
+        assert result.plan_review_not_go is True
 
     def test_no_plan_path_unchanged(self, impl: IssueImplementer, tmp_path: Path) -> None:
         """Sanity-check the pre-existing ``_has_plan`` branch.
@@ -356,7 +349,7 @@ class TestPlanReviewVerdictGate:
                 return_value=None,
             ),
             patch(
-                "hephaestus.automation.implementer.is_plan_review_approved",
+                "hephaestus.automation.implementer.is_plan_review_go",
                 return_value=False,
             ),
         ):
@@ -365,7 +358,7 @@ class TestPlanReviewVerdictGate:
         has_plan.assert_called_once_with(1)
         gen_plan.assert_called_once_with(1)
         assert result.success is True
-        assert result.plan_review_not_approved is True
+        assert result.plan_review_not_go is True
 
     def test_skip_uses_waiting_phase(self, impl: IssueImplementer, tmp_path: Path) -> None:
         """Skipping must record WAITING_FOR_PLAN_REVIEW in state.phase.
@@ -392,13 +385,13 @@ class TestPlanReviewVerdictGate:
                 return_value=None,
             ),
             patch(
-                "hephaestus.automation.implementer.is_plan_review_approved",
+                "hephaestus.automation.implementer.is_plan_review_go",
                 return_value=False,
             ),
         ):
             result = impl._implement_issue(1)
 
-        assert result.plan_review_not_approved is True
+        assert result.plan_review_not_go is True
         assert ImplementationPhase.WAITING_FOR_PLAN_REVIEW in captured_phases
 
 
@@ -465,7 +458,7 @@ class TestExistingPrSkipsImplementation:
             patch.object(impl, "_has_plan", return_value=True),
             patch.object(impl, "_save_state"),
             patch(
-                "hephaestus.automation.implementer.is_plan_review_approved",
+                "hephaestus.automation.implementer.is_plan_review_go",
                 return_value=True,
             ),
             patch.object(impl, "_run_advise", return_value="<!-- advise step skipped: test -->"),

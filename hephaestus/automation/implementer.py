@@ -24,7 +24,7 @@ from hephaestus.agents.runtime import (
 
 # NOTE: Several symbols below are re-imported here purely so existing tests
 # can keep patching them at the ``hephaestus.automation.implementer.X`` path
-# (e.g. ``patch("hephaestus.automation.implementer.is_plan_review_approved")``).
+# (e.g. ``patch("hephaestus.automation.implementer.is_plan_review_go")``).
 # :mod:`.implementer_phase_runner` deliberately routes its call sites through
 # this module — see :meth:`.implementer_phase_runner.ImplementationPhaseRunner._impl_module`
 # — so a patch here intercepts both call sites.
@@ -88,7 +88,7 @@ from .models import (
     WorkerResult,
 )
 from .pr_manager import commit_changes, create_pr
-from .review_state import is_plan_review_approved  # noqa: F401
+from .review_state import is_plan_review_go  # noqa: F401
 from .session_naming import AGENT_ADVISE, AGENT_IMPLEMENTER, current_trunk_githash  # noqa: F401
 from .status_tracker import StatusTracker
 from .worktree_manager import WorktreeManager
@@ -407,14 +407,13 @@ class IssueImplementer:
                         result = future.result()
                         results[issue_num] = result
 
-                        if result.success and result.plan_review_not_approved:
-                            # Deferred: plan exists but latest review is not
-                            # APPROVED. Do NOT mark completed — dependents
-                            # must still wait, and the issue will be retried
-                            # on the next automation loop after re-review.
-                            # See #551.
+                        if result.success and result.plan_review_not_go:
+                            # Deferred: plan exists but latest review is not GO.
+                            # Do NOT mark completed — dependents must still wait,
+                            # and the issue will be retried on the next
+                            # automation loop after re-review. See #551.
                             logger.info(
-                                "Issue #%s deferred: waiting for APPROVED plan-review",
+                                "Issue #%s deferred: waiting for GO plan-review",
                                 issue_num,
                             )
                         elif result.success:

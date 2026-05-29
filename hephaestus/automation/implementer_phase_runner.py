@@ -68,7 +68,7 @@ from .prompts import (
     get_implementation_prompt,
 )
 
-# NOTE: ``is_plan_review_approved``, ``fetch_issue_info``,
+# NOTE: ``is_plan_review_go``, ``fetch_issue_info``,
 # ``invoke_claude_with_session``, ``get_repo_slug``, ``current_trunk_githash``,
 # and ``AGENT_IMPLEMENTER`` are deliberately NOT imported here. Existing tests
 # patch them at ``hephaestus.automation.implementer.X`` so the call sites
@@ -181,7 +181,7 @@ class ImplementationPhaseRunner:
     def _impl_module(self) -> Any:
         """Return the ``hephaestus.automation.implementer`` module.
 
-        Used for dynamic lookup of patchable symbols (``is_plan_review_approved``,
+        Used for dynamic lookup of patchable symbols (``is_plan_review_go``,
         ``fetch_issue_info``, ``invoke_claude_with_session``, ``get_repo_slug``,
         ``current_trunk_githash``, ``AGENT_IMPLEMENTER``) so that tests which
         ``patch("hephaestus.automation.implementer.X", ...)`` keep working
@@ -294,23 +294,21 @@ class ImplementationPhaseRunner:
                 impl._save_state(state)
                 impl._generate_plan(issue_number)
 
-            # Gate on APPROVED plan-review verdict (#551). The legacy
-            # ``_has_plan`` check above only verifies a plan comment EXISTS;
-            # it does not look at the plan-reviewer's verdict, so a BLOCK
-            # or REVISE plan (or a NOGO-exhausted plan that still starts
-            # with "# Implementation Plan", see planner.py:692-700) used to
-            # be implemented just like an APPROVED one. We now defer the
-            # issue when the latest plan-review is anything other than
-            # APPROVED, so the next loop's plan-review phase can re-evaluate
-            # after the planner amends.
+            # Gate on a GO plan-review verdict (#551). The legacy ``_has_plan``
+            # check above only verifies a plan comment EXISTS; it does not look
+            # at the plan-reviewer's verdict, so a NOGO plan (or a NOGO-exhausted
+            # plan that still starts with "# Implementation Plan", see
+            # planner.py:692-700) used to be implemented just like a GO one. We
+            # now defer the issue when the latest plan-review is anything other
+            # than GO, so the planner can re-plan and the reviewer re-evaluate.
             self.status_tracker.update_slot(
                 slot_id, f"{issue_ref(issue_number)}: Checking plan-review verdict"
             )
-            if not self._impl_module.is_plan_review_approved(issue_number):
+            if not self._impl_module.is_plan_review_go(issue_number):
                 impl._log(
                     "info",
                     f"Issue #{issue_number}: latest plan-review verdict is not "
-                    f"APPROVED — deferring implementation until next loop",
+                    f"GO — deferring implementation until next loop",
                     thread_id,
                 )
                 with self.state_lock:
@@ -318,14 +316,14 @@ class ImplementationPhaseRunner:
                 impl._save_state(state)
                 self.status_tracker.update_slot(
                     slot_id,
-                    f"{issue_ref(issue_number)}: Waiting for APPROVED plan-review",
+                    f"{issue_ref(issue_number)}: Waiting for GO plan-review",
                 )
                 return WorkerResult(
                     issue_number=issue_number,
                     success=True,
                     branch_name=branch_name,
                     worktree_path=str(worktree_path),
-                    plan_review_not_approved=True,
+                    plan_review_not_go=True,
                 )
 
             # Fetch issue info for context

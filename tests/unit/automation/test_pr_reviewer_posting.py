@@ -405,10 +405,10 @@ class TestGatherPrContextPolicyState:
             {"oid": "deadbeef", "signature_valid": False, "signer": None}
         ]
 
-    def test_pr_view_failure_leaves_policy_state_at_block_default(
+    def test_pr_view_failure_leaves_policy_state_at_nogo_default(
         self, reviewer: PRReviewer, tmp_path: Path
     ) -> None:
-        """`gh pr view` failure must default policy state to BLOCK.
+        """`gh pr view` failure must default policy state to a NOGO.
 
         If we silently treated a fetch failure as "no policy state needed",
         the reviewer prompt would pass a PR that ought to be blocked.
@@ -449,7 +449,7 @@ class TestGatherImplReviewContext:
             issue_title="Add widget",
             issue_body="The widget body.",
             plan_text="# Implementation Plan\nStep 1",
-            plan_review_text="## 🔍 Plan Review\n**Verdict: APPROVED**",
+            plan_review_text="## 🔍 Plan Review\nVerdict: GO",
             diff_text="diff --git a/x b/x",
         )
         assert ctx["pr_diff"] == "diff --git a/x b/x"
@@ -459,7 +459,7 @@ class TestGatherImplReviewContext:
         assert "## PLAN" in ctx["issue_body"]
         assert "Step 1" in ctx["issue_body"]
         assert "## PLAN_REVIEW" in ctx["issue_body"]
-        assert "APPROVED" in ctx["issue_body"]
+        assert "Verdict: GO" in ctx["issue_body"]
 
     def test_missing_plan_sections_get_placeholders(self) -> None:
         ctx = gather_impl_review_context(

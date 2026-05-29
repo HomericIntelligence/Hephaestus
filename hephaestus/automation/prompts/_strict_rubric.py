@@ -49,16 +49,12 @@ EVALUATE THESE DIMENSIONS:
 # matches ``GO|NO-GO`` case-insensitively). Do NOT change the GO/NOGO tokens or
 # the ``Grade:`` line here without updating that parser in lockstep.
 #
-# Bounded re-ask, NOT silent REVISE: when a reviewer omits the verdict line,
-# ``parse_review_verdict`` already returns AMBIGUOUS (treated as NOGO → the loop
-# iterates), so the loop reviewers fail safe without a forced verdict. The
-# separate standalone plan reviewer (``PLAN_REVIEW_PROMPT`` →
-# ``plan_reviewer._post_review``) currently auto-appends ``**Verdict: REVISE**``
-# when its ``**Verdict: ...**`` line is missing; that silent REVISE can stall
-# convergence and SHOULD instead be a bounded re-ask of the model at that call
-# site (``plan_reviewer.py``, out of scope for this prompts-only change). The
-# strengthened wording below makes the verdict line unambiguous so a re-ask is
-# rarely needed; see follow-up tracked for the runner-side re-ask loop.
+# Fail-safe on a missing verdict: when a reviewer omits the verdict line,
+# ``parse_review_verdict`` returns AMBIGUOUS, which every gate treats as NOGO →
+# the loop iterates / the implementer defers. So a malformed review never
+# silently passes. The whole pipeline (plan review + PR review) now speaks the
+# single ``Verdict: GO|NOGO`` vocabulary parsed here; the strengthened wording
+# below makes the verdict line unambiguous so the AMBIGUOUS fallback is rare.
 _STRICT_REVIEW_OUTPUT_FORMAT = """
 **Required output format (verdict contract — MANDATORY):**
 
@@ -95,10 +91,10 @@ _PR_STRICT_RUBRIC_DIMENSIONS = """
 **PR-review-specific graded dimensions (each starts at F; promote only on
 concrete evidence from the artifacts above):**
 
-D1 — Policy compliance (HIGHEST PRIORITY / BLOCK gate).
+D1 — Policy compliance (HIGHEST PRIORITY / NOGO gate).
     The three mandatory gates below (Closes #N / auto-merge / signed
     commits) are graded as a single dimension. ANY violation forces an
-    overall BLOCK verdict, regardless of every other dimension's grade.
+    overall NOGO verdict, regardless of every other dimension's grade.
     Policy compliance is NEVER weighed against code quality — it is a
     hard precondition.
 
@@ -197,7 +193,7 @@ P7 — POLA — Principle Of Least Astonishment.
     failures, or behavior that contradicts the docstring/name.
 
 **Verdict floor (mandatory):** if ANY of P1–P7 reveals a critical or
-major finding, the verdict CANNOT be GO/APPROVED even if every other
+major finding, the verdict CANNOT be GO even if every other
 dimension scores A. Reviewer must explicitly downgrade and cite the
 offending principle by name (e.g. "Verdict: NOGO — P2/YAGNI: diff adds
 a config flag with no current consumer; P7/POLA: new flag's default
@@ -344,7 +340,7 @@ downgrade accordingly.
 #
 # Composite rubric injected into PR_REVIEW_ANALYSIS_PROMPT (site 4 / #581).
 # Order: strict grading scale → PR-specific dimensions (D1 policy is the
-# BLOCK gate) → seven software-engineering principles. The existing
+# NOGO gate) → seven software-engineering principles. The existing
 # policy-checks block in PR_REVIEW_ANALYSIS_PROMPT remains the
 # authoritative description of the three gates referenced by D1, and the
 # trailing JSON output format remains byte-exact for `_parse_json_block`.

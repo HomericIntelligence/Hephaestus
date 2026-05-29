@@ -9,7 +9,7 @@ import pytest
 
 from hephaestus.automation.models import PLAN_COMMENT_MARKER, PlannerOptions
 from hephaestus.automation.planner import MAX_REVIEW_ITERATIONS, Planner
-from hephaestus.automation.review_state import PLAN_REVIEW_PREFIX, is_plan_review_approved
+from hephaestus.automation.review_state import PLAN_REVIEW_PREFIX, is_plan_review_go
 
 
 @pytest.fixture(autouse=True)
@@ -258,15 +258,15 @@ class TestLoopUpsertsPlanAndReview:
         assert review_calls, "expected a REVIEW upsert"
         assert review_calls[0].args[2].startswith(PLAN_REVIEW_PREFIX)
 
-    def test_go_review_body_carries_canonical_approved_verdict(
+    def test_go_review_body_carries_go_verdict(
         self, planner: Planner, _patch_loop_upsert: Any
     ) -> None:
-        """A GO loop verdict must upsert a REVIEW comment ending in **Verdict: APPROVED**.
+        """A GO loop verdict must upsert a REVIEW comment carrying Verdict: GO.
 
-        The loop reviewer speaks GO/NOGO, but the implementer's gate
-        (is_plan_review_approved) reads the APPROVED/REVISE/BLOCK vocabulary via
-        review_state.VERDICT_LINE_RE. Without this canonical bridge line a GO
-        plan would never be implemented (the gate would not match GO).
+        The loop reviewer and the implementer's gate (is_plan_review_go) now
+        speak the same GO/NOGO vocabulary, parsed by parse_review_verdict. The
+        upserted review must therefore carry a GO verdict so the gate matches
+        and the plan gets implemented.
         """
         with (
             patch(
@@ -282,14 +282,14 @@ class TestLoopUpsertsPlanAndReview:
         review_body = next(
             c.args[2] for c in _patch_loop_upsert.call_args_list if c.args[1] == PLAN_REVIEW_PREFIX
         )
-        # is_plan_review_approved parses the LAST **Verdict: ...** line.
-        assert is_plan_review_approved(123, [{"body": review_body}]) is True
-        assert "**Verdict: APPROVED**" in review_body
+        # is_plan_review_go parses the verdict via parse_review_verdict.
+        assert is_plan_review_go(123, [{"body": review_body}]) is True
+        assert "Verdict: GO" in review_body
 
-    def test_nogo_review_body_carries_canonical_revise_verdict(
+    def test_nogo_review_body_carries_nogo_verdict(
         self, planner: Planner, _patch_loop_upsert: Any
     ) -> None:
-        """A NOGO-exhausted loop must upsert a REVIEW that the gate reads as NOT approved."""
+        """A NOGO-exhausted loop must upsert a REVIEW that the gate reads as NOT go."""
         with (
             patch(
                 "hephaestus.automation.planner_review_loop.gh_issue_json",
@@ -308,8 +308,8 @@ class TestLoopUpsertsPlanAndReview:
         review_body = [
             c.args[2] for c in _patch_loop_upsert.call_args_list if c.args[1] == PLAN_REVIEW_PREFIX
         ][-1]
-        assert "**Verdict: REVISE**" in review_body
-        assert is_plan_review_approved(123, [{"body": review_body}]) is False
+        assert "Verdict: NOGO" in review_body
+        assert is_plan_review_go(123, [{"body": review_body}]) is False
 
     def test_replan_plan_body_has_changes_from_review_section(
         self, planner: Planner, _patch_loop_upsert: Any

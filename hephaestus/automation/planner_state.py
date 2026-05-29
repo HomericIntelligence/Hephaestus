@@ -104,7 +104,7 @@ class PlannerStateManager:
 
         Stores results in the internal cache so subsequent calls to
         :meth:`has_existing_plan` and callers of
-        :func:`~hephaestus.automation.review_state.is_plan_review_approved`
+        :func:`~hephaestus.automation.review_state.is_plan_review_go`
         (which accept a pre-fetched ``comments`` list) can avoid per-issue
         round-trips.
 

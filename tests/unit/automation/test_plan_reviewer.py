@@ -140,7 +140,7 @@ class TestGetLatestPlan:
             {
                 "body": (
                     "## 🔍 Plan Review\n\nThe plan's ## Objective and ## Plan "
-                    "sections look fine.\n\n**Verdict: REVISE**"
+                    "sections look fine.\n\nVerdict: NOGO"
                 )
             },
         ]
@@ -156,7 +156,7 @@ class TestGetLatestPlan:
     def test_get_latest_plan_review_only_issue_returns_none(self, reviewer: PlanReviewer) -> None:
         """An issue with ONLY a review comment (no real plan) → None, not the review."""
         comments = [
-            {"body": "## 🔍 Plan Review\n\nDiscusses a ## Plan.\n\n**Verdict: REVISE**"},
+            {"body": "## 🔍 Plan Review\n\nDiscusses a ## Plan.\n\nVerdict: NOGO"},
         ]
         with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
             mock_gh.return_value = _make_gh_result({"comments": comments})
@@ -166,50 +166,40 @@ class TestGetLatestPlan:
 
 
 class TestLatestReviewIsFinal:
-    """Tests for the FINAL/APPROVED short-circuit gate.
+    """Tests for the FINAL/GO short-circuit gate.
 
     The reviewer skips an issue only when the LATEST plan-review comment
-    carries the `**Verdict: APPROVED**` marker. REVISE/BLOCK/no-marker
-    re-runs the reviewer so an amended plan gets a fresh evaluation.
+    carries the `Verdict: GO` marker. NOGO/no-marker re-runs the reviewer
+    so an amended plan gets a fresh evaluation.
     """
 
-    def test_skip_when_latest_review_is_approved(self, reviewer: PlanReviewer) -> None:
-        """APPROVED in the latest plan-review comment → skip."""
+    def test_skip_when_latest_review_is_go(self, reviewer: PlanReviewer) -> None:
+        """GO in the latest plan-review comment → skip."""
         comments = [
             {"body": "## Implementation Plan\n\nDo stuff"},
-            {"body": "## 🔍 Plan Review\n\nLooks good.\n\n**Verdict: APPROVED**"},
+            {"body": "## 🔍 Plan Review\n\nLooks good.\n\nVerdict: GO"},
         ]
         with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
             mock_gh.return_value = _make_gh_result({"comments": comments})
             assert reviewer._latest_review_is_final(123) is True
 
-    def test_rerun_when_latest_review_revise(self, reviewer: PlanReviewer) -> None:
-        """REVISE in the latest plan-review comment → re-run (not final)."""
+    def test_rerun_when_latest_review_nogo(self, reviewer: PlanReviewer) -> None:
+        """NOGO in the latest plan-review comment → re-run (not final)."""
         comments = [
             {"body": "## Implementation Plan\n\nDo stuff"},
-            {"body": "## 🔍 Plan Review\n\nNeeds work.\n\n**Verdict: REVISE**"},
+            {"body": "## 🔍 Plan Review\n\nNeeds work.\n\nVerdict: NOGO"},
         ]
         with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
             mock_gh.return_value = _make_gh_result({"comments": comments})
             assert reviewer._latest_review_is_final(123) is False
 
-    def test_rerun_when_latest_review_block(self, reviewer: PlanReviewer) -> None:
-        """BLOCK in the latest plan-review comment → re-run (not final)."""
-        comments = [
-            {"body": "## Implementation Plan\n\nDo stuff"},
-            {"body": "## 🔍 Plan Review\n\nFundamental problem.\n\n**Verdict: BLOCK**"},
-        ]
-        with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
-            mock_gh.return_value = _make_gh_result({"comments": comments})
-            assert reviewer._latest_review_is_final(123) is False
-
-    def test_rerun_when_older_approved_but_newer_revise(self, reviewer: PlanReviewer) -> None:
-        """An older APPROVED followed by a newer REVISE → re-run (latest wins)."""
+    def test_rerun_when_older_go_but_newer_nogo(self, reviewer: PlanReviewer) -> None:
+        """An older GO followed by a newer NOGO → re-run (latest wins)."""
         comments = [
             {"body": "## Implementation Plan\n\nFirst plan"},
-            {"body": "## 🔍 Plan Review\n\nOld pass.\n\n**Verdict: APPROVED**"},
+            {"body": "## 🔍 Plan Review\n\nOld pass.\n\nVerdict: GO"},
             {"body": "## Implementation Plan\n\nAmended plan"},
-            {"body": "## 🔍 Plan Review\n\nNew concerns.\n\n**Verdict: REVISE**"},
+            {"body": "## 🔍 Plan Review\n\nNew concerns.\n\nVerdict: NOGO"},
         ]
         with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
             mock_gh.return_value = _make_gh_result({"comments": comments})
@@ -241,12 +231,12 @@ class TestLatestReviewIsFinal:
             mock_gh.side_effect = RuntimeError("gh failed")
             assert reviewer._latest_review_is_final(123) is False
 
-    def test_false_when_approved_precedes_block_in_same_body(self, reviewer: PlanReviewer) -> None:
-        """Only the LAST verdict line counts — APPROVED then BLOCK → False.
+    def test_false_when_go_precedes_nogo_in_same_body(self, reviewer: PlanReviewer) -> None:
+        """Only the LAST verdict line counts — GO then NOGO → False.
 
         Claude is allowed to discuss multiple verdict options in prose; the
-        prompt instructs readers to take only the LAST matching line.
-        Substring ``in`` would mis-fire True here.
+        parser takes only the LAST matching line. Substring ``in`` would
+        mis-fire True here.
         """
         comments = [
             {"body": "## Implementation Plan\n\nDo stuff"},
@@ -254,9 +244,9 @@ class TestLatestReviewIsFinal:
                 "body": (
                     "## 🔍 Plan Review\n\n"
                     "Initial impression: looked sound.\n\n"
-                    "**Verdict: APPROVED**\n\n"
+                    "Verdict: GO\n\n"
                     "On reflection a fatal correctness bug surfaced.\n\n"
-                    "**Verdict: BLOCK**"
+                    "Verdict: NOGO"
                 )
             },
         ]
@@ -264,17 +254,17 @@ class TestLatestReviewIsFinal:
             mock_gh.return_value = _make_gh_result({"comments": comments})
             assert reviewer._latest_review_is_final(123) is False
 
-    def test_true_when_block_precedes_approved_in_same_body(self, reviewer: PlanReviewer) -> None:
-        """BLOCK then APPROVED → True (last verdict line wins)."""
+    def test_true_when_nogo_precedes_go_in_same_body(self, reviewer: PlanReviewer) -> None:
+        """NOGO then GO → True (last verdict line wins)."""
         comments = [
             {"body": "## Implementation Plan\n\nDo stuff"},
             {
                 "body": (
                     "## 🔍 Plan Review\n\n"
                     "First-pass concern.\n\n"
-                    "**Verdict: BLOCK**\n\n"
+                    "Verdict: NOGO\n\n"
                     "After re-reading, concern was unfounded.\n\n"
-                    "**Verdict: APPROVED**"
+                    "Verdict: GO"
                 )
             },
         ]
@@ -283,20 +273,20 @@ class TestLatestReviewIsFinal:
             assert reviewer._latest_review_is_final(123) is True
 
     def test_false_when_marker_is_quoted_in_discussion(self, reviewer: PlanReviewer) -> None:
-        """A quoted marker in prose must not fire the gate.
+        """A quoted marker mid-line must not fire the gate.
 
-        The substring check used to return True on inline mentions like
-        ``avoid using **Verdict: APPROVED** here`` — the regex requires the
-        marker to occupy an entire line.
+        The regex requires the verdict to start a line, so an inline mention
+        like ``avoid writing Verdict: GO here`` on a line that begins with
+        other prose must not match. The trailing NOGO line is the real verdict.
         """
         comments = [
             {"body": "## Implementation Plan\n\nDo stuff"},
             {
                 "body": (
                     "## 🔍 Plan Review\n\n"
-                    "Reviewer note: avoid using **Verdict: APPROVED** here "
+                    "Reviewer note: avoid writing Verdict: GO here "
                     "because the plan still has gaps.\n\n"
-                    "**Verdict: REVISE**"
+                    "Verdict: NOGO"
                 )
             },
         ]
@@ -314,17 +304,17 @@ class TestLatestReviewIsFinal:
         even when the issue has 150+ historical comments. See issue #553.
         """
         # Build 150 noise comments, then sandwich the real reviews so the
-        # latest review (REVISE) is well past index 100 in chronological
+        # latest review (NOGO) is well past index 100 in chronological
         # order. After the helper reverses to DESC order to mimic GraphQL,
         # the production code reverses back to chronological — the test
         # still authors the list chronologically.
         chronological: list[dict[str, Any]] = []
         for i in range(120):
             chronological.append({"body": f"Drive-by comment {i}"})
-        chronological.append({"body": "## 🔍 Plan Review\n\nOld pass.\n\n**Verdict: APPROVED**"})
+        chronological.append({"body": "## 🔍 Plan Review\n\nOld pass.\n\nVerdict: GO"})
         for i in range(120, 145):
             chronological.append({"body": f"Drive-by comment {i}"})
-        chronological.append({"body": "## 🔍 Plan Review\n\nNew concerns.\n\n**Verdict: REVISE**"})
+        chronological.append({"body": "## 🔍 Plan Review\n\nNew concerns.\n\nVerdict: NOGO"})
         # Total = 120 + 1 + 25 + 1 = 147; trim the OLDEST entries so the
         # remaining 100 (newest) still include both reviews. Real GraphQL
         # would do exactly this via ``last: 100`` + DESC ordering.
@@ -332,24 +322,18 @@ class TestLatestReviewIsFinal:
 
         with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
             mock_gh.return_value = _make_gh_result({"comments": newest_100})
-            # The latest review is REVISE → not final → re-run.
+            # The latest review is NOGO → not final → re-run.
             assert reviewer._latest_review_is_final(123) is False
 
-    def test_approved_marker_anywhere_in_latest_review_counts(self, reviewer: PlanReviewer) -> None:
+    def test_go_marker_anywhere_in_latest_review_counts(self, reviewer: PlanReviewer) -> None:
         """The marker may appear anywhere in the review body.
 
-        Claude is free to put `**Verdict: APPROVED**` on the last line or
-        anywhere else — we don't require strict end-of-text positioning.
+        Claude is free to put `Verdict: GO` on the last line or anywhere
+        else — we don't require strict end-of-text positioning.
         """
         comments = [
             {"body": "## Implementation Plan\n\nDo stuff"},
-            {
-                "body": (
-                    "## 🔍 Plan Review\n\n"
-                    "**Verdict: APPROVED**\n\n"
-                    "Long-form rationale follows below..."
-                )
-            },
+            {"body": ("## 🔍 Plan Review\n\nVerdict: GO\n\nLong-form rationale follows below...")},
         ]
         with patch("hephaestus.automation.plan_reviewer._gh_call") as mock_gh:
             mock_gh.return_value = _make_gh_result({"comments": comments})
@@ -366,7 +350,7 @@ class TestPostReviewVerdictFallback:
     """
 
     def test_appends_fallback_when_verdict_missing(self, reviewer: PlanReviewer) -> None:
-        """If Claude output has no `**Verdict:`, _post_review appends REVISE."""
+        """If Claude output has no parseable verdict, _post_review appends NOGO."""
         with patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_comment") as mock_upsert:
             reviewer._post_review(123, "Just analysis prose, no verdict line.")
 
@@ -374,21 +358,21 @@ class TestPostReviewVerdictFallback:
         assert mock_upsert.call_args[0][0] == 123
         assert mock_upsert.call_args[0][1] == "## 🔍 Plan Review"
         posted_body: str = mock_upsert.call_args[0][2]
-        assert "**Verdict: REVISE**" in posted_body
+        assert "Verdict: NOGO" in posted_body
         assert posted_body.startswith("## 🔍 Plan Review")
 
     def test_does_not_double_append_when_verdict_present(self, reviewer: PlanReviewer) -> None:
-        """If the review already has any **Verdict: line, no fallback is added."""
+        """If the review already has a parseable Verdict line, no fallback is added."""
         with patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_comment") as mock_upsert:
             reviewer._post_review(
                 123,
-                "Some analysis.\n\n**Verdict: APPROVED**",
+                "Some analysis.\n\nVerdict: GO",
             )
 
         posted_body: str = mock_upsert.call_args[0][2]
         # exactly one Verdict line, not two
-        assert posted_body.count("**Verdict:") == 1
-        assert "**Verdict: APPROVED**" in posted_body
+        assert posted_body.count("Verdict:") == 1
+        assert "Verdict: GO" in posted_body
 
 
 class TestRunClaudeAnalysis:
@@ -506,7 +490,7 @@ class TestReviewIssue:
         mock_upsert.assert_not_called()
 
     def test_review_skipped_if_latest_review_is_final(self, reviewer: PlanReviewer) -> None:
-        """When the latest plan review is APPROVED, skip posting."""
+        """When the latest plan review is GO, skip posting."""
         with (
             patch.object(reviewer, "_latest_review_is_final", return_value=True),
             patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_comment") as mock_upsert,
@@ -517,7 +501,7 @@ class TestReviewIssue:
         mock_upsert.assert_not_called()
 
     def test_review_posted(self, reviewer: PlanReviewer) -> None:
-        """When plan exists and no APPROVED review yet, UPSERTS review with correct prefix."""
+        """When plan exists and no GO review yet, UPSERTS review with correct prefix."""
         with (
             patch.object(reviewer, "_latest_review_is_final", return_value=False),
             patch.object(
@@ -527,7 +511,7 @@ class TestReviewIssue:
             patch.object(
                 reviewer,
                 "_run_claude_analysis",
-                return_value="Great plan! A few suggestions.\n\n**Verdict: APPROVED**",
+                return_value="Great plan! A few suggestions.\n\nVerdict: GO",
             ),
             patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_comment") as mock_upsert,
         ):
@@ -555,7 +539,7 @@ class TestReviewIssue:
             patch.object(
                 reviewer,
                 "_run_claude_analysis",
-                return_value="Review text\n\n**Verdict: REVISE**",
+                return_value="Review text\n\nVerdict: NOGO",
             ),
             patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_comment") as mock_upsert,
         ):

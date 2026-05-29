@@ -44,22 +44,22 @@ Analyze PR #{pr_number} linked to issue #{issue_number}.
 
 This repository enforces three non-negotiable PR properties. If ANY check fails,
 your summary MUST begin with `POLICY VIOLATION:` and your final verdict line
-MUST be `**Verdict: BLOCK**`. Inline code-quality findings can be reported in
-addition, but the BLOCK verdict cannot be overridden by them.
+MUST be `Verdict: NOGO`. Inline code-quality findings can be reported in
+addition, but the NOGO verdict cannot be overridden by them.
 
 1. **Closes #N:** the PR Description above must contain a line matching the
    regex `^Closes #\\d+\\s*$` (case-sensitive `Closes`, hash + number, on its
    own line). `Fixes`, `Resolves`, `closes`, `Closes:` do NOT satisfy the
-   policy. If absent, BLOCK and quote the relevant lines of the description.
+   policy. If absent, NOGO and quote the relevant lines of the description.
 2. **Auto-merge enabled:** the Auto-merge State block above contains a single
    line. If it reads `auto_merge_enabled=true`, the check passes. If it reads
-   `auto_merge_enabled=false`, BLOCK with a note explaining auto-merge must be
-   turned on via `gh pr merge <N> --auto --rebase`.
+   `auto_merge_enabled=false`, NOGO with a note explaining auto-merge must be
+   turned on via `gh pr merge <N> --auto --squash`.
 3. **Signed commits:** the Commit Signing State block above is a JSON array
    where each element is `{{"oid": "<sha>", "signature_valid": <bool>,
    "signer": "<login or null>"}}`. EVERY element must have
    `signature_valid: true`. If any commit has `signature_valid: false` or the
-   array is empty, BLOCK and list the offending OIDs.
+   array is empty, NOGO and list the offending OIDs.
 
 If all three checks pass, proceed to code-quality review below.
 
@@ -70,12 +70,13 @@ If all three checks pass, proceed to code-quality review below.
 Review the PR for correctness, completeness, and code quality. Identify any issues that should
 be addressed as inline review comments.
 
-**Output format:**
-Write your analysis in prose. End your response with exactly one of the following verdict
-lines (the parser takes the LAST matching line):
+**Output format (verdict contract — MANDATORY):**
+The review prose + inline comments explain *why*; the verdict line is a binary
+gate. Write your analysis in prose, then end your response with exactly one of
+the two verdict lines below (the parser takes the LAST matching line):
 
-**Verdict: APPROVED** — Policy passes and code is acceptable.
-**Verdict: BLOCK** — Policy violation OR fundamental code problem.
+Verdict: GO — Policy passes and code is acceptable.
+Verdict: NOGO — Policy violation OR fundamental code problem (explain in the review).
 
 After the verdict line, emit a single fenced JSON block:
 
@@ -122,7 +123,7 @@ def get_pr_review_analysis_prompt(
         auto_merge_enabled: Whether GitHub auto-merge is currently enabled on
             the PR. Callers MUST pass the real value; the default ``False``
             exists only to keep the signature backward-compatible and will
-            cause the reviewer to emit a BLOCK verdict.
+            cause the reviewer to emit a NOGO verdict.
         commits_signing_state: List of per-commit signing summaries. Each
             element must be a dict with keys ``oid`` (str), ``signature_valid``
             (bool), and ``signer`` (str or None). Defaults to an empty list,

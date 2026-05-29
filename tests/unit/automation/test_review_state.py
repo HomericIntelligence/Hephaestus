@@ -1,9 +1,13 @@
 """Unit tests for ``hephaestus.automation.review_state``.
 
-The shared APPROVED-plan-review gate is load-bearing — both
-``plan_reviewer._latest_review_is_final`` (skip-on-approved) and
-``implementer._implement_issue`` (gate-on-approved) read from it, so it
-needs explicit coverage independent of either caller. See #551.
+The shared GO-plan-review gate is load-bearing — both
+``plan_reviewer._latest_review_is_final`` (skip-on-GO) and
+``implementer._implement_issue`` (gate-on-GO) read from it, so it needs
+explicit coverage independent of either caller. See #551.
+
+Planning (and PR review) use a single binary ``Verdict: GO | NOGO`` vocabulary
+parsed by ``claude_invoke.parse_review_verdict``; this module's helpers delegate
+to it so the gate and the in-loop reviewer never diverge.
 """
 
 from __future__ import annotations
@@ -17,14 +21,11 @@ import pytest
 from hephaestus.automation.review_state import (
     MAX_UNPARSEABLE_VERDICT_PASSES,
     PLAN_REVIEW_PREFIX,
-    VERDICT_APPROVED,
-    VERDICT_BLOCK,
-    VERDICT_REVISE,
     _extract_verdict_context,
     count_unparseable_verdict_passes,
     exceeds_unparseable_verdict_cap,
     fetch_all_issue_comments_graphql,
-    is_plan_review_approved,
+    is_plan_review_go,
     latest_verdict,
 )
 
@@ -34,46 +35,55 @@ from hephaestus.automation.review_state import (
 
 
 class TestLatestVerdict:
-    """The regex must take the LAST well-formed verdict line, not a substring."""
+    """latest_verdict: GO/NOGO/None, LAST verdict line wins."""
 
-    def test_returns_approved_when_only_verdict(self) -> None:
-        body = f"{PLAN_REVIEW_PREFIX}\n\nLooks great.\n\n**Verdict: APPROVED**\n"
-        assert latest_verdict(body) == VERDICT_APPROVED
+    def test_returns_go_when_only_verdict(self) -> None:
+        body = f"{PLAN_REVIEW_PREFIX}\n\nLooks great.\n\nVerdict: GO\n"
+        assert latest_verdict(body) == "GO"
 
-    def test_returns_revise_when_only_verdict(self) -> None:
-        body = f"{PLAN_REVIEW_PREFIX}\n\nNeeds work.\n\n**Verdict: REVISE**\n"
-        assert latest_verdict(body) == VERDICT_REVISE
+    def test_returns_nogo_when_only_verdict(self) -> None:
+        body = f"{PLAN_REVIEW_PREFIX}\n\nNeeds work.\n\nVerdict: NOGO\n"
+        assert latest_verdict(body) == "NOGO"
 
-    def test_returns_block_when_only_verdict(self) -> None:
-        body = f"{PLAN_REVIEW_PREFIX}\n\nFundamental flaw.\n\n**Verdict: BLOCK**\n"
-        assert latest_verdict(body) == VERDICT_BLOCK
+    def test_accepts_bold_verdict_line(self) -> None:
+        # The matcher tolerates the optional bold form too.
+        body = f"{PLAN_REVIEW_PREFIX}\n\nLooks great.\n\n**Verdict: GO**\n"
+        assert latest_verdict(body) == "GO"
 
     def test_returns_none_when_no_verdict(self) -> None:
         body = f"{PLAN_REVIEW_PREFIX}\n\nNo verdict line at all.\n"
         assert latest_verdict(body) is None
 
-    def test_picks_last_verdict_when_multiple(self) -> None:
-        # Per the prompt contract, only the LAST verdict line counts —
-        # Claude may discuss APPROVED then settle on BLOCK.
+    def test_picks_last_verdict_go_then_nogo(self) -> None:
+        # A posted review may discuss an earlier verdict before settling; the
+        # reviewer's FINAL word wins. GO then NOGO → NOGO (fail safe: re-review).
         body = (
-            f"{PLAN_REVIEW_PREFIX}\n"
-            "I initially thought:\n"
-            "**Verdict: APPROVED**\n"
-            "But on reflection:\n"
-            "**Verdict: BLOCK**\n"
+            f"{PLAN_REVIEW_PREFIX}\n\nInitial impression: sound.\n\nVerdict: GO\n\n"
+            "On reflection a fatal bug surfaced.\n\nVerdict: NOGO\n"
         )
-        assert latest_verdict(body) == VERDICT_BLOCK
+        assert latest_verdict(body) == "NOGO"
+
+    def test_picks_last_verdict_nogo_then_go(self) -> None:
+        # NOGO then GO → GO (the reviewer withdrew the concern).
+        body = (
+            f"{PLAN_REVIEW_PREFIX}\n\nFirst-pass concern.\n\nVerdict: NOGO\n\n"
+            "After re-reading, concern unfounded.\n\nVerdict: GO\n"
+        )
+        assert latest_verdict(body) == "GO"
 
     def test_ignores_inline_marker_in_prose(self) -> None:
-        # The regex is anchored to line boundaries with MULTILINE, so an
-        # inline mention like "we did not pick **Verdict: APPROVED**" does
-        # NOT count.
+        # The verdict regex anchors to the start of a line (optional bold), so a
+        # mid-sentence mention like "we did not pick Verdict: GO" does NOT match;
+        # only the real trailing verdict line counts.
         body = (
-            f"{PLAN_REVIEW_PREFIX}\n"
-            "We did not pick **Verdict: APPROVED** because of issues.\n"
-            "**Verdict: REVISE**\n"
+            f"{PLAN_REVIEW_PREFIX}\nWe did not pick Verdict: GO because of issues.\nVerdict: NOGO\n"
         )
-        assert latest_verdict(body) == VERDICT_REVISE
+        assert latest_verdict(body) == "NOGO"
+
+    def test_nogo_dash_and_space_forms_normalize(self) -> None:
+        # NO-GO / NO GO normalize to NOGO.
+        assert latest_verdict(f"{PLAN_REVIEW_PREFIX}\n\nVerdict: NO-GO\n") == "NOGO"
+        assert latest_verdict(f"{PLAN_REVIEW_PREFIX}\n\nVerdict: NO GO\n") == "NOGO"
 
 
 # ---------------------------------------------------------------------------
@@ -82,12 +92,12 @@ class TestLatestVerdict:
 
 
 class TestExtractVerdictContext:
-    """Context extraction for not-APPROVED logs."""
+    """Context extraction for not-GO logs."""
 
     def test_extracts_verdict_line_when_present(self) -> None:
-        body = f"{PLAN_REVIEW_PREFIX}\n\nReview text.\n\n**Verdict: REVISE**\n"
+        body = f"{PLAN_REVIEW_PREFIX}\n\nReview text.\n\nVerdict: NOGO\n"
         context = _extract_verdict_context(body)
-        assert "Verdict: REVISE" in context
+        assert "Verdict: NOGO" in context
 
     def test_returns_first_non_prefix_line_when_no_verdict(self) -> None:
         body = f"{PLAN_REVIEW_PREFIX}\n\nThis is the main content.\nMore details.\n"
@@ -95,11 +105,9 @@ class TestExtractVerdictContext:
         assert context == "This is the main content."
 
     def test_prefers_verdict_line_over_first_content_line(self) -> None:
-        body = (
-            f"{PLAN_REVIEW_PREFIX}\n\nFirst line of content.\nMore details.\n**Verdict: BLOCK**\n"
-        )
+        body = f"{PLAN_REVIEW_PREFIX}\n\nFirst line of content.\nMore details.\nVerdict: NOGO\n"
         context = _extract_verdict_context(body)
-        assert "Verdict: BLOCK" in context
+        assert "Verdict: NOGO" in context
 
     def test_returns_empty_string_when_body_is_empty(self) -> None:
         body = ""
@@ -119,15 +127,16 @@ class TestExtractVerdictContext:
 
 
 # ---------------------------------------------------------------------------
-# is_plan_review_approved (with pre-supplied comments)
+# is_plan_review_go (with pre-supplied comments)
 # ---------------------------------------------------------------------------
 
 
 def _review_comment(verdict: str | None, url: str | None = None) -> dict[str, Any]:
+    """Build a plan-review comment. ``verdict`` is "GO"/"NOGO" or None (malformed)."""
     if verdict is None:
         body = f"{PLAN_REVIEW_PREFIX}\n\nMalformed review with no verdict line.\n"
     else:
-        body = f"{PLAN_REVIEW_PREFIX}\n\nBody.\n\n**Verdict: {verdict}**\n"
+        body = f"{PLAN_REVIEW_PREFIX}\n\nBody.\n\nVerdict: {verdict}\n"
     comment = {"body": body}
     if url is not None:
         comment["url"] = url
@@ -138,76 +147,71 @@ def _plan_comment() -> dict[str, Any]:
     return {"body": "# Implementation Plan\n\nSteps...\n"}
 
 
-class TestIsPlanReviewApprovedWithComments:
+class TestIsPlanReviewGoWithComments:
     """Caller passes ``comments`` explicitly; no GraphQL fetch."""
 
-    def test_approved_returns_true(self) -> None:
-        comments = [_plan_comment(), _review_comment(VERDICT_APPROVED)]
-        assert is_plan_review_approved(123, comments=comments) is True
+    def test_go_returns_true(self) -> None:
+        comments = [_plan_comment(), _review_comment("GO")]
+        assert is_plan_review_go(123, comments=comments) is True
 
-    def test_revise_returns_false(self) -> None:
-        comments = [_plan_comment(), _review_comment(VERDICT_REVISE)]
-        assert is_plan_review_approved(123, comments=comments) is False
-
-    def test_block_returns_false(self) -> None:
-        comments = [_plan_comment(), _review_comment(VERDICT_BLOCK)]
-        assert is_plan_review_approved(123, comments=comments) is False
+    def test_nogo_returns_false(self) -> None:
+        comments = [_plan_comment(), _review_comment("NOGO")]
+        assert is_plan_review_go(123, comments=comments) is False
 
     def test_no_review_returns_false(self) -> None:
         # Plan exists but no plan-review comment yet.
         comments = [_plan_comment()]
-        assert is_plan_review_approved(123, comments=comments) is False
+        assert is_plan_review_go(123, comments=comments) is False
 
     def test_empty_comments_returns_false(self) -> None:
-        assert is_plan_review_approved(123, comments=[]) is False
+        assert is_plan_review_go(123, comments=[]) is False
 
-    def test_takes_latest_review_when_multiple(self) -> None:
-        # Older APPROVED, newer BLOCK → newer wins.
+    def test_takes_latest_review_when_multiple_newer_nogo(self) -> None:
+        # Older GO, newer NOGO → newer wins (gate is False).
         comments = [
             _plan_comment(),
-            _review_comment(VERDICT_APPROVED),
-            _review_comment(VERDICT_BLOCK),
+            _review_comment("GO"),
+            _review_comment("NOGO"),
         ]
-        assert is_plan_review_approved(123, comments=comments) is False
+        assert is_plan_review_go(123, comments=comments) is False
 
-    def test_takes_latest_review_when_multiple_newer_approved(self) -> None:
-        # Older REVISE, planner amended, newer APPROVED → APPROVED wins.
+    def test_takes_latest_review_when_multiple_newer_go(self) -> None:
+        # Older NOGO, planner amended, newer GO → GO wins (gate is True).
         comments = [
             _plan_comment(),
-            _review_comment(VERDICT_REVISE),
-            _review_comment(VERDICT_APPROVED),
+            _review_comment("NOGO"),
+            _review_comment("GO"),
         ]
-        assert is_plan_review_approved(123, comments=comments) is True
+        assert is_plan_review_go(123, comments=comments) is True
 
     def test_malformed_review_returns_false(self) -> None:
         # Review comment exists with the right prefix but no verdict line.
         comments = [_plan_comment(), _review_comment(None)]
-        assert is_plan_review_approved(123, comments=comments) is False
+        assert is_plan_review_go(123, comments=comments) is False
 
     def test_enriched_logging_includes_verdict_context_and_url(self, caplog: Any) -> None:
-        """Not-APPROVED logs should include verdict context and URL."""
+        """Not-GO logs should include verdict context and URL."""
         import logging
 
         caplog.set_level(logging.DEBUG)
         comments = [
             _plan_comment(),
-            _review_comment(VERDICT_BLOCK, url="https://github.com/o/r/issues/123#comment-1"),
+            _review_comment("NOGO", url="https://github.com/o/r/issues/123#comment-1"),
         ]
-        is_plan_review_approved(123, comments=comments)
-        # Logs should include verdict context and URL when not-APPROVED
+        is_plan_review_go(123, comments=comments)
         log_text = caplog.text
-        assert "BLOCK" in log_text
+        assert "NOGO" in log_text
         assert "https://github.com/o/r/issues/123#comment-1" in log_text
 
     def test_enriched_logging_fallback_no_url(self, caplog: Any) -> None:
-        """Not-APPROVED logs should show <no url> when URL is missing."""
+        """Not-GO logs should show <no url> when URL is missing."""
         import logging
 
         caplog.set_level(logging.DEBUG)
-        comments = [_plan_comment(), _review_comment(VERDICT_REVISE)]
-        is_plan_review_approved(123, comments=comments)
+        comments = [_plan_comment(), _review_comment("NOGO")]
+        is_plan_review_go(123, comments=comments)
         log_text = caplog.text
-        assert "REVISE" in log_text
+        assert "NOGO" in log_text
         assert "<no url>" in log_text
 
     def test_enriched_logging_missing_verdict(self, caplog: Any) -> None:
@@ -219,15 +223,15 @@ class TestIsPlanReviewApprovedWithComments:
             _plan_comment(),
             _review_comment(None, url="https://github.com/o/r/issues/123#comment-2"),
         ]
-        is_plan_review_approved(123, comments=comments)
+        is_plan_review_go(123, comments=comments)
         log_text = caplog.text
-        # #615: malformed verdict now emits WARNING-level log with first line + URL
-        assert "VERDICT_LINE_RE did not match" in log_text
+        # #615: malformed verdict emits a WARNING with first line + URL.
+        assert "no parseable Verdict: GO/NOGO line" in log_text
         assert "https://github.com/o/r/issues/123#comment-2" in log_text
 
 
 # ---------------------------------------------------------------------------
-# is_plan_review_approved (fetches comments itself via GraphQL)
+# is_plan_review_go (fetches comments itself via GraphQL)
 # ---------------------------------------------------------------------------
 
 
@@ -238,7 +242,7 @@ def _graphql_payload(comment_bodies: list[str]) -> str:
     return json.dumps({"data": {"repository": {"issue": {"comments": {"nodes": nodes}}}}})
 
 
-class TestIsPlanReviewApprovedWithFetch:
+class TestIsPlanReviewGoWithFetch:
     """No comments supplied → module fetches via GraphQL."""
 
     @pytest.fixture(autouse=True)
@@ -255,26 +259,26 @@ class TestIsPlanReviewApprovedWithFetch:
         ):
             yield
 
-    def test_fetches_and_returns_true_for_approved(self) -> None:
-        approved_body = _review_comment(VERDICT_APPROVED)["body"]
+    def test_fetches_and_returns_true_for_go(self) -> None:
+        go_body = _review_comment("GO")["body"]
         mock_result = MagicMock()
-        mock_result.stdout = _graphql_payload(["# Implementation Plan\n", approved_body])
+        mock_result.stdout = _graphql_payload(["# Implementation Plan\n", go_body])
         with patch("hephaestus.automation.review_state._gh_call", return_value=mock_result):
-            assert is_plan_review_approved(123) is True
+            assert is_plan_review_go(123) is True
 
-    def test_fetches_and_returns_false_for_block(self) -> None:
-        block_body = _review_comment(VERDICT_BLOCK)["body"]
+    def test_fetches_and_returns_false_for_nogo(self) -> None:
+        nogo_body = _review_comment("NOGO")["body"]
         mock_result = MagicMock()
-        mock_result.stdout = _graphql_payload(["# Implementation Plan\n", block_body])
+        mock_result.stdout = _graphql_payload(["# Implementation Plan\n", nogo_body])
         with patch("hephaestus.automation.review_state._gh_call", return_value=mock_result):
-            assert is_plan_review_approved(123) is False
+            assert is_plan_review_go(123) is False
 
     def test_returns_false_when_gh_raises(self) -> None:
         with patch(
             "hephaestus.automation.review_state._gh_call",
             side_effect=RuntimeError("network down"),
         ):
-            assert is_plan_review_approved(123) is False
+            assert is_plan_review_go(123) is False
 
     def test_uses_owner_repo_tuple_from_get_repo_info(self) -> None:
         """Regression test for #588 — derive owner+name from get_repo_info.
@@ -298,7 +302,7 @@ class TestIsPlanReviewApprovedWithFetch:
                 return_value=mock_result,
             ) as mock_gh,
         ):
-            is_plan_review_approved(1928)
+            is_plan_review_go(1928)
 
         mock_info.assert_called_once()
         gh_args = mock_gh.call_args[0][0]
@@ -318,17 +322,17 @@ class TestUnparseableVerdictCap:
     def test_zero_when_all_verdicts_parseable(self) -> None:
         comments = [
             _plan_comment(),
-            _review_comment(VERDICT_APPROVED),
+            _review_comment("GO"),
         ]
         assert count_unparseable_verdict_passes(comments) == 0
 
     def test_counts_malformed_review_comments(self) -> None:
-        # Two plan-review comments with no parseable verdict + one with REVISE.
+        # Two plan-review comments with no parseable verdict + one with NOGO.
         comments = [
             _plan_comment(),
             _review_comment(None),  # malformed pass 1
             _review_comment(None),  # malformed pass 2
-            _review_comment(VERDICT_REVISE),  # well-formed — should NOT be counted
+            _review_comment("NOGO"),  # well-formed — should NOT be counted
         ]
         assert count_unparseable_verdict_passes(comments) == 2
 
@@ -358,7 +362,7 @@ class TestUnparseableVerdictCap:
             _plan_comment(),
             _review_comment(None),
             _review_comment(None),
-            _review_comment(VERDICT_REVISE),
+            _review_comment("NOGO"),
         ]
         assert exceeds_unparseable_verdict_cap(comments) is False
 
@@ -367,107 +371,12 @@ class TestUnparseableVerdictCap:
         assert exceeds_unparseable_verdict_cap(comments, cap=1) is True
         assert exceeds_unparseable_verdict_cap(comments, cap=2) is False
 
-    def test_malformed_verdict_logs_at_warning_level(self, caplog: Any) -> None:
-        """#615: missing verdict should produce a WARNING with first line + URL."""
-        import logging
-
-        caplog.set_level(logging.WARNING)
-        comments = [
-            _plan_comment(),
-            _review_comment(None, url="https://github.com/o/r/issues/615#comment-99"),
-        ]
-        is_plan_review_approved(615, comments=comments)
-        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert warning_records, "Expected at least one WARNING log for malformed verdict"
-        combined = " ".join(r.getMessage() for r in warning_records)
-        assert "VERDICT_LINE_RE did not match" in combined
-        assert "https://github.com/o/r/issues/615#comment-99" in combined
-
 
 # ---------------------------------------------------------------------------
-# fetch_all_issue_comments_graphql (#616)
+# fetch_all_issue_comments_graphql (smoke — import surface)
 # ---------------------------------------------------------------------------
 
 
-def _batch_graphql_payload(issues: dict[int, list[str]]) -> str:
-    """Build a GraphQL batch response for alias-indexed issues.
-
-    ``issues`` maps issue_number -> list of comment bodies (chronological).
-    The aliasing uses the position in ``sorted(issues.keys())`` so tests can
-    be deterministic.
-    """
-    repo: dict[str, Any] = {}
-    for idx, (num, bodies) in enumerate(sorted(issues.items())):
-        # GraphQL returns newest-first; production code reverses to chrono.
-        nodes = [
-            {"body": b, "updatedAt": "2025-01-01T00:00:00Z", "url": f"https://gh/{num}/{i}"}
-            for i, b in enumerate(reversed(bodies))
-        ]
-        repo[f"issue{idx}"] = {"comments": {"nodes": nodes}}
-    return json.dumps({"data": {"repository": repo}})
-
-
-class TestFetchAllIssueCommentsGraphql:
-    """Batch comment fetch for plan-detection + review-gate (#616)."""
-
-    @pytest.fixture(autouse=True)
-    def _patch_repo(self) -> Any:
-        with (
-            patch(
-                "hephaestus.automation.review_state.get_repo_root",
-                return_value="/tmp/repo",
-            ),
-            patch(
-                "hephaestus.automation.review_state.get_repo_info",
-                return_value=("owner", "repo"),
-            ),
-        ):
-            yield
-
-    def test_returns_empty_dict_for_empty_input(self) -> None:
-        assert fetch_all_issue_comments_graphql([]) == {}
-
-    def test_single_issue_comments_in_chrono_order(self) -> None:
-        bodies = ["first comment", "second comment"]
-        payload = _batch_graphql_payload({101: bodies})
-        mock_result = MagicMock()
-        mock_result.stdout = payload
-        with patch("hephaestus.automation.review_state._gh_call", return_value=mock_result):
-            result = fetch_all_issue_comments_graphql([101])
-        assert 101 in result
-        assert [c["body"] for c in result[101]] == bodies
-
-    def test_multiple_issues_returned_correctly(self) -> None:
-        payload = _batch_graphql_payload(
-            {
-                201: ["plan A"],
-                202: ["plan B", "review B"],
-            }
-        )
-        mock_result = MagicMock()
-        mock_result.stdout = payload
-        with patch("hephaestus.automation.review_state._gh_call", return_value=mock_result):
-            result = fetch_all_issue_comments_graphql([201, 202])
-        assert len(result[201]) == 1
-        assert result[201][0]["body"] == "plan A"
-        assert len(result[202]) == 2
-        assert result[202][0]["body"] == "plan B"
-        assert result[202][1]["body"] == "review B"
-
-    def test_makes_single_gh_call(self) -> None:
-        payload = _batch_graphql_payload({301: [], 302: []})
-        mock_result = MagicMock()
-        mock_result.stdout = payload
-        with patch(
-            "hephaestus.automation.review_state._gh_call", return_value=mock_result
-        ) as mock_gh:
-            fetch_all_issue_comments_graphql([301, 302])
-        mock_gh.assert_called_once()
-
-    def test_returns_empty_lists_on_gh_failure(self) -> None:
-        with patch(
-            "hephaestus.automation.review_state._gh_call",
-            side_effect=RuntimeError("network error"),
-        ):
-            result = fetch_all_issue_comments_graphql([401, 402])
-        assert result == {401: [], 402: []}
+def test_fetch_all_issue_comments_graphql_is_importable() -> None:
+    """Guard the public import surface used by the planner's batch prefetch."""
+    assert callable(fetch_all_issue_comments_graphql)

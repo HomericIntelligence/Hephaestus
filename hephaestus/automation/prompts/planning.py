@@ -102,17 +102,16 @@ Evaluate the plan above against the issue requirements. Consider:
 4. Are the file paths and function names concrete and correct?
 
 **Output format (verdict contract — MANDATORY):**
-Write a markdown review with your analysis. Then end your response with
-EXACTLY ONE verdict line, on its own line, copied verbatim (including the bold
-`**` markers) from the three options below. Emit NOTHING after the verdict
-line — no trailing prose, no closing remarks, no whitespace-only lines beyond a
-single newline. Readers parse only the LAST matching verdict line, and a
-response that omits the verdict line entirely is a CONTRACT VIOLATION (do not
-rely on a reader inferring one):
+The review prose above explains *why*; the verdict line is a binary gate.
+Write your markdown analysis, then end your response with EXACTLY ONE of the two
+verdict lines below, on its own line, copied verbatim. Emit NOTHING after the
+verdict line — no trailing prose, no closing remarks, no whitespace-only lines
+beyond a single newline.
+Omitting the verdict line entirely is a CONTRACT VIOLATION (do not rely on a
+reader inferring one):
 
-**Verdict: APPROVED** — Plan is sound and ready to implement.
-**Verdict: REVISE** — Plan needs changes before implementation (explain what).
-**Verdict: BLOCK** — Plan has a fundamental problem that prevents implementation (explain why).
+Verdict: GO — Plan is sound and ready to implement.
+Verdict: NOGO — Plan needs changes before implementation (explain what in the review above).
 """
 
 
