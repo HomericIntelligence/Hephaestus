@@ -47,6 +47,16 @@ class TestParseVersion:
     def test_four_components(self) -> None:
         assert _parse_version("1.2.3.4") == (1, 2, 3, 4)
 
+    def test_prerelease_suffix_dropped(self) -> None:
+        # "3rc1" is not all-digits, so the whole segment is dropped
+        assert _parse_version("1.2.3rc1") == (1, 2)
+
+    def test_dev_suffix_segment_dropped(self) -> None:
+        assert _parse_version("2.0.0.dev1") == (2, 0, 0)
+
+    def test_empty_string(self) -> None:
+        assert _parse_version("") == ()
+
 
 class TestParseConstraints:
     """Tests for _parse_constraints()."""

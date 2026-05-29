@@ -20,7 +20,6 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import importlib
 import os
 import re
 import sys
@@ -28,17 +27,14 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
+from hephaestus.config.pixi import is_deps_section
+from hephaestus.io.toml import import_tomllib
+from hephaestus.version.parsing import parse_version_tuple
 
 # ---------------------------------------------------------------------------
 # TOML loading (tomllib on 3.11+, tomli on 3.10, manual fallback)
 # ---------------------------------------------------------------------------
-_tomllib = None
-for _mod_name in ("tomllib", "tomli"):
-    try:
-        _tomllib = importlib.import_module(_mod_name)
-        break
-    except ModuleNotFoundError:
-        continue
+_tomllib = import_tomllib()
 
 try:
     import yaml as _yaml
@@ -226,11 +222,7 @@ def _is_deps_section_header(stripped: str) -> bool:
         True if this section contains conda/pip package→version entries.
 
     """
-    inner = stripped.lstrip("[").split("]")[0].split("#")[0].strip()
-    if inner == "dependencies":
-        return True
-    parts = inner.split(".")
-    return len(parts) == 3 and parts[0] == "feature" and parts[2] == "dependencies"
+    return is_deps_section(stripped, include_pypi=False)
 
 
 def _parse_pixi_dependencies_fallback(pixi_path: Path) -> dict[str, str]:
@@ -311,6 +303,9 @@ def load_pixi_versions(pixi_path: Path) -> dict[str, str]:
 def _version_tuple(version: str) -> tuple[int, ...]:
     """Convert a version string to a comparable tuple of integers.
 
+    Splits on ``.`` and coerces any non-integer segment to ``0`` so a noisy
+    suffix like ``"1.2.rc1"`` parses to ``(1, 2, 0)``.
+
     Args:
         version: Version string, e.g. ``"1.19.1"``.
 
@@ -318,13 +313,7 @@ def _version_tuple(version: str) -> tuple[int, ...]:
         Tuple of ints, e.g. ``(1, 19, 1)``.
 
     """
-    parts = []
-    for part in version.split("."):
-        try:
-            parts.append(int(part))
-        except ValueError:
-            parts.append(0)
-    return tuple(parts)
+    return parse_version_tuple(version, on_non_numeric="zero")
 
 
 def check_version_drift(

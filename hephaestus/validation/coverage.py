@@ -14,24 +14,18 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import importlib
 import logging
 import sys
 from pathlib import Path
 from typing import Any, cast
 
 from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
+from hephaestus.io.toml import import_tomllib
 from hephaestus.utils.helpers import get_repo_root
 
 logger = logging.getLogger(__name__)
 
-tomllib = None
-for _mod_name in ("tomllib", "tomli"):
-    try:
-        tomllib = importlib.import_module(_mod_name)
-        break
-    except ModuleNotFoundError:
-        continue
+tomllib = import_tomllib()
 
 
 def load_coverage_config(config_file: Path | None = None) -> dict[str, Any]:

@@ -14,21 +14,15 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import importlib
 import re
 import sys
 from pathlib import Path
 
 from hephaestus.cli.utils import add_json_arg, format_output
+from hephaestus.io.toml import import_tomllib
 from hephaestus.utils.helpers import get_repo_root
 
-tomllib = None
-for _mod_name in ("tomllib", "tomli"):
-    try:
-        tomllib = importlib.import_module(_mod_name)
-        break
-    except ModuleNotFoundError:
-        continue
+tomllib = import_tomllib()
 
 _CLASSIFIER_VERSION_RE = re.compile(r"Programming Language :: Python :: (\d+\.\d+)$")
 _DOCKERFILE_FROM_RE = re.compile(r"^\s*FROM\s+python:(\d+\.\d+)", re.IGNORECASE | re.MULTILINE)

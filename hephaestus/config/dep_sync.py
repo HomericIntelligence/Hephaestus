@@ -39,7 +39,9 @@ from pathlib import Path
 from typing import NamedTuple
 
 from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
+from hephaestus.config.pixi import is_deps_section
 from hephaestus.utils.helpers import METADATA_TIMEOUT
+from hephaestus.version.parsing import parse_version_tuple
 
 # Header written at the top of every auto-generated requirements file.
 _GENERATED_HEADER = """\
@@ -64,6 +66,9 @@ class VersionRange(NamedTuple):
 def _parse_version(v: str) -> tuple[int, ...]:
     """Parse a dotted version string into a tuple of ints.
 
+    Splits on ``.`` and ``-`` and drops any non-numeric segment, so a
+    pre-release suffix like ``"1.2.3rc1"`` parses to ``(1, 2)``.
+
     Args:
         v: Version string like ``"1.2.3"``.
 
@@ -71,7 +76,7 @@ def _parse_version(v: str) -> tuple[int, ...]:
         Tuple of integers, e.g. ``(1, 2, 3)``.
 
     """
-    return tuple(int(x) for x in re.split(r"[.\-]", v) if x.isdigit())
+    return parse_version_tuple(v, split_pattern=r"[.\-]", on_non_numeric="drop")
 
 
 def _parse_constraints(spec: str) -> list[VersionRange]:
@@ -145,17 +150,7 @@ def _is_deps_section(header: str) -> bool:
         True if the section contains package→version entries we care about.
 
     """
-    # Strip brackets and optional inline comment
-    inner = header.strip().lstrip("[").split("]")[0].split("#")[0].strip()
-    if inner in ("dependencies", "pypi-dependencies"):
-        return True
-    # feature.<name>.dependencies or feature.<name>.pypi-dependencies
-    parts = inner.split(".")
-    return (
-        len(parts) == 3
-        and parts[0] == "feature"
-        and parts[2] in ("dependencies", "pypi-dependencies")
-    )
+    return is_deps_section(header, include_pypi=True)
 
 
 def parse_pixi_toml(path: Path) -> dict[str, str]:
