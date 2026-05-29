@@ -142,6 +142,7 @@ def resolve_marketplace(mnemosyne_root: Path) -> tuple[Path | None, str]:
         Mnemosyne (or its manifest) cannot be made available. The ``reason``
         is forwarded into the :func:`advise_skipped` breadcrumb so a reader can
         tell "clone failed" apart from "manifest missing".
+
     """
     if not mnemosyne_root.exists() and not ensure_mnemosyne(mnemosyne_root):
         return None, "ProjectMnemosyne unavailable"

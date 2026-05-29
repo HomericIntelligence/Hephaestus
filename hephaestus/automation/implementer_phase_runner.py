@@ -94,12 +94,7 @@ def _prepend_advise(advise_findings: str, prompt: str) -> str:
     findings = advise_findings.strip()
     if not findings or findings.startswith("<!-- advise step skipped"):
         return prompt
-    return (
-        "## Prior Learnings from Team Knowledge Base\n\n"
-        f"{findings}\n\n"
-        "---\n\n"
-        f"{prompt}"
-    )
+    return f"## Prior Learnings from Team Knowledge Base\n\n{findings}\n\n---\n\n{prompt}"
 
 
 def _claude_quota_reset_epoch(*texts: str) -> int | None:
@@ -347,9 +342,7 @@ class ImplementationPhaseRunner:
             # are prepended to the implementation prompt context below.
             advise_findings = ""
             if self.options.enable_advise:
-                self.status_tracker.update_slot(
-                    slot_id, f"{issue_ref(issue_number)}: Advising"
-                )
+                self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Advising")
                 advise_findings = impl._run_advise(issue_number, issue.title, issue.body)
 
             # Run the selected implementation agent

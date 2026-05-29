@@ -413,9 +413,7 @@ class CIDriver:
         # into every fix-session prompt below.
         advise_findings = ""
         if self.options.enable_advise:
-            self.status_tracker.update_slot(
-                acquired_slot, f"{issue_ref(issue_number)}: advising"
-            )
+            self.status_tracker.update_slot(acquired_slot, f"{issue_ref(issue_number)}: advising")
             advise_findings = self._run_advise(issue_number)
 
         for iteration in range(self.options.max_fix_iterations):
@@ -640,9 +638,7 @@ class CIDriver:
         advise_block = ""
         findings = advise_findings.strip()
         if findings and not findings.startswith("<!-- advise step skipped"):
-            advise_block = (
-                "## Prior Learnings from Team Knowledge Base\n\n" f"{findings}\n\n" "---\n\n"
-            )
+            advise_block = f"## Prior Learnings from Team Knowledge Base\n\n{findings}\n\n---\n\n"
         prompt = (
             f"{advise_block}"
             f"Fix the CI failures for PR {pr_ref(pr_number)} (issue {issue_ref(issue_number)}).\n\n"

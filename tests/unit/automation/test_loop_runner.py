@@ -22,12 +22,54 @@ from hephaestus.automation.loop_runner import (
     PhaseResult,
     RepoResult,
     _phase_order_warnings,
+    _resolve_phase_bin,
     _summarize_loop,
     _validate_phases,
     process_repo,
     run_loop,
     run_phase,
 )
+
+# ---------------------------------------------------------------------------
+# Phase topology — the 6→3 stage collapse (#455/#468/#484)
+# ---------------------------------------------------------------------------
+
+
+def test_all_phases_is_three_stage_pipeline() -> None:
+    """The pipeline collapsed to exactly (plan, implement, drive-green).
+
+    Plan-review, PR-review, and address-review are no longer standalone phases;
+    they fold into plan/implement. This pins the canonical topology so a stray
+    re-introduction of a retired phase fails loudly.
+    """
+    assert ALL_PHASES == ("plan", "implement", "drive-green")
+
+
+@pytest.mark.parametrize("dropped", ["review-plans", "review-prs", "address-review"])
+def test_dropped_phases_do_not_resolve(dropped: str) -> None:
+    """The three retired phases must not resolve to an executable bin."""
+    assert _resolve_phase_bin(dropped) is None
+
+
+@pytest.mark.parametrize("dropped", ["review-plans", "review-prs", "address-review"])
+def test_dropped_phases_rejected_by_validation(dropped: str) -> None:
+    """``--phases`` must reject a retired phase name as unknown."""
+    with pytest.raises(SystemExit, match="Unknown phase"):
+        _validate_phases(dropped)
+
+
+@pytest.mark.parametrize("shim", ["review_plans.py", "review_issues.py", "address_review.py"])
+def test_retired_loop_dispatch_shims_are_deleted(shim: str) -> None:
+    """The loop-dispatch shim scripts the retired phases used must be gone.
+
+    Their in-loop logic moved into the planner/implementer; nothing dispatches
+    these scripts anymore. (The pr_reviewer/address_review MODULES and the
+    manual ``hephaestus-review-prs`` CLI are deliberately kept — only these
+    loop shims were removed.)
+    """
+    scripts_dir = Path(loop_runner.__file__).resolve().parents[2] / "scripts"
+    assert not (scripts_dir / shim).exists()
+
 
 # ---------------------------------------------------------------------------
 # CLI / config validation
