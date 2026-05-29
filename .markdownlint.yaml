@@ -1,22 +1,86 @@
 # Markdownlint configuration
 # https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
+#
+# Single source of truth for markdownlint. Consolidated from the former
+# .markdownlint.json (#686): both pre-commit (markdownlint-cli2 --config) and
+# CI (markdownlint-cli2-action) now reference this one file. The ruleset below
+# is the union that keeps every tracked markdown file (notably skills/**, which
+# use semantic inline-HTML tags and long prompt lines) linting clean.
 
 default: true
 
-MD013:
-  line_length: 120
-  heading_line_length: 120
-  code_block_line_length: 120
-  tables: false
-  headings: true
-  code_blocks: true
+# Headings must use the ATX (`#`) style, never Setext underlines.
+MD003:
+  style: atx
 
+# Unordered-list indentation is two spaces.
+MD007:
+  indent: 2
+
+# Line length is intentionally unbounded: agent skill prompts embed long,
+# unwrappable instruction lines and tables that must not be reflowed.
+MD013: false
+
+# Duplicate headings are allowed (repeated section titles across collapsible
+# blocks and rubrics are common in skill docs).
+MD024: false
+
+# Exactly one top-level (H1) heading per document.
+MD025: true
+
+# Inline HTML is restricted to this allow-list. The bulk of the entries are the
+# semantic prompt tags used throughout skills/** (e.g. <system>, <task>,
+# <section>) plus the handful of real HTML elements used for layout.
 MD033:
-  allowed_elements: [T, img, br, details, summary]
+  allowed_elements:
+    - details
+    - summary
+    - br
+    - img
+    - a
+    - sub
+    - sup
+    - system
+    - task
+    - section
+    - sections
+    - step
+    - principle
+    - sub_principle
+    - development_principles
+    - grading_rubric
+    - audit_sections
+    - analysis_instructions
+    - output_format
+    - important_notes
+    - criteria
+    - anti_inflation_rules
+    - workflow
+    - integrations
+    - constraints
+    - agent_tiers
+    - delegation_rules
+    - agent_prompt_template
+    - brief
+    - Brief
+    - level
+    - name
+    - what
+    - issue
+    - specific
+    - suggestion
+    - old
+    - new
+    - Why
+    - bullet
 
+# Emphasis-as-heading, bare code-fence language, first-line-heading, no-empty-link,
+# link-fragment, and table-column-style rules are all disabled to match the prose
+# and prompt-table conventions used across the repo's markdown.
 MD036: false
 MD040: false
 MD041: false
-
-MD046:
-  style: fenced
+MD042: false
+MD046: false
+MD051: false
+MD060: false
