@@ -14,11 +14,14 @@ only assert exit-0, not ``--help``-style usage output.
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from tests.unit.scripts.conftest import REPO_ROOT
 
 HELP_TIMEOUT_SECONDS = 30
 
@@ -54,11 +57,18 @@ def test_script_is_importable(script_path: Path, monkeypatch: pytest.MonkeyPatch
 
 def test_script_help_exits_zero(script_path: Path) -> None:
     """``python scripts/<name>.py --help`` must succeed within the timeout."""
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            [str(REPO_ROOT), *([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])]
+        ),
+    }
     proc = subprocess.run(
         [sys.executable, str(script_path), "--help"],
         capture_output=True,
         text=True,
         timeout=HELP_TIMEOUT_SECONDS,
+        env=env,
     )
     assert proc.returncode == 0, (
         f"{script_path.name} --help exited {proc.returncode}\n"
