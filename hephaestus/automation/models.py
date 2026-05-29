@@ -14,17 +14,11 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-# Markers that identify a plan comment posted by the planner. Used by both
-# the planner (to skip already-posted plans) and plan_reviewer (to locate
-# the plan to review). Single source of truth — adding a new heading style
-# only requires one edit.
-PLAN_COMMENT_MARKERS: tuple[str, ...] = (
-    "# Implementation Plan",
-    "## Implementation Plan",
-    "# Plan",
-    "## Plan",
-    "## Objective",
-)
+# The canonical heading the planner WRITES at the top of the single plan
+# comment. The pipeline upserts exactly one comment starting with this marker
+# (see github_api.gh_issue_upsert_comment). This is the only marker used to
+# *locate the plan to review*.
+PLAN_COMMENT_MARKER: str = "# Implementation Plan"
 
 
 class IssueState(str, Enum):
