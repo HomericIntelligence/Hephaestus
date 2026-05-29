@@ -8,6 +8,11 @@ ADDRESS_REVIEW_PROMPT = """
 You are the COORDINATOR for addressing the review threads on PR #{pr_number}
 (issue #{issue_number}).
 
+This runs IN-LOOP as part of the implement stage — it is no longer a separate
+pipeline phase. You are resolving the inline PR-review threads raised against
+the current diff so the same implement session can re-review and converge.
+These threads live on the PR, not on the issue.
+
 **Working Directory:** {worktree_path}
 
 {untrusted_notice}

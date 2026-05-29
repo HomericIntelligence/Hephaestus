@@ -11,17 +11,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import shutil
-import subprocess
-
-# fcntl is POSIX-only; CPython does not bundle it on Windows. Import lazily so
-# this module stays importable on Windows for tests that only need its
-# pure-Python helpers. The cross-process file locking that uses fcntl is only
-# reached on the live planner path.
-try:
-    import fcntl
-except ModuleNotFoundError:
-    fcntl = None  # type: ignore[assignment]
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -30,14 +19,15 @@ from typing import Any
 from hephaestus.agents.runtime import add_agent_argument
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 
+from .advise_runner import advise_skipped, ensure_mnemosyne, run_advise
 from .claude_models import advise_model
-from .git_utils import get_repo_root, issue_ref
+from .git_utils import issue_ref
 from .github_api import (
     GitHubRateLimitError,
-    gh_issue_comment,
+    gh_issue_upsert_comment,
     gh_list_open_issues,
 )
-from .models import PlannerOptions, PlanResult
+from .models import PLAN_COMMENT_MARKER, PlannerOptions, PlanResult
 from .planner_claude import PlannerClaudeRunner
 from .planner_review_loop import MAX_REVIEW_ITERATIONS, PlanReviewLoop
 from .planner_state import PlannerStateManager
@@ -59,8 +49,6 @@ class Planner:
     Supports parallel planning with rate limit handling and
     duplicate detection.
     """
-
-    _mnemosyne_lock: threading.Lock = threading.Lock()
 
     def __init__(self, options: PlannerOptions):
         """Initialize planner.
@@ -251,158 +239,64 @@ class Planner:
         )
 
     def _ensure_mnemosyne(self, mnemosyne_root: Path) -> bool:
-        """Clone ProjectMnemosyne if it does not exist locally.
+        """Clone or refresh ProjectMnemosyne (delegates to the shared runner).
 
-        Uses a class-level threading lock and an fcntl file lock to prevent
-        race conditions when multiple parallel workers call this simultaneously.
+        Thin wrapper around :func:`advise_runner.ensure_mnemosyne` kept on the
+        Planner so the existing ``patch.object(planner, "_ensure_mnemosyne")``
+        test seam still intercepts.
 
         Args:
-            mnemosyne_root: Expected local path for ProjectMnemosyne
+            mnemosyne_root: Expected local path for ProjectMnemosyne.
 
         Returns:
-            True if the directory exists (or was cloned successfully), False otherwise
+            True if the directory exists (or was cloned successfully), else False.
 
         """
-        with Planner._mnemosyne_lock:
-            # TOCTOU guard: re-check inside the lock
-            if mnemosyne_root.exists():
-                # Refresh stale clone with a fast-forward pull
-                try:
-                    subprocess.run(
-                        ["git", "-C", str(mnemosyne_root), "pull", "--ff-only"],
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                    )
-                    logger.debug("ProjectMnemosyne refreshed at %s", mnemosyne_root)
-                except Exception as e:
-                    logger.warning(
-                        "Failed to refresh ProjectMnemosyne (using existing clone): %s", e
-                    )
-                return True
-
-            lock_path = mnemosyne_root.parent / ".mnemosyne.lock"
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-            with open(lock_path, "w") as lock_file:
-                # POSIX-only file locking; on Windows fcntl is None and we
-                # degrade gracefully by relying on the in-process thread lock
-                # acquired by the surrounding `with self._mnemosyne_lock:`.
-                if fcntl is not None:
-                    fcntl.flock(lock_file, fcntl.LOCK_EX)
-                try:
-                    # Re-check after acquiring file lock
-                    if mnemosyne_root.exists():
-                        return True
-
-                    logger.info("Cloning ProjectMnemosyne to %s...", mnemosyne_root)
-                    subprocess.run(
-                        [
-                            "gh",
-                            "repo",
-                            "clone",
-                            "HomericIntelligence/ProjectMnemosyne",
-                            str(mnemosyne_root),
-                        ],
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        timeout=120,
-                    )
-                    logger.info("ProjectMnemosyne cloned successfully")
-                    # NOTE: do NOT unlink lock_path here — the file-lock sentinel
-                    # must remain on disk until the fd closes in the finally block.
-                    # Unlinking while LOCK_EX is held lets a second process open a
-                    # new inode at the same path and grab its own lock, breaking
-                    # cross-process mutual exclusion (#370).
-                    return True
-
-                except subprocess.TimeoutExpired:
-                    logger.warning(
-                        "gh repo clone timed out after 120 s; ProjectMnemosyne unavailable this run"
-                    )
-                    return False
-
-                except subprocess.CalledProcessError as e:
-                    logger.warning("Failed to clone ProjectMnemosyne: %s", e.stderr or e)
-                    return False
-
-                finally:
-                    if fcntl is not None:
-                        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        return ensure_mnemosyne(mnemosyne_root)
 
     def _run_advise(self, issue_number: int, issue_title: str, issue_body: str) -> str:
         """Search team knowledge base for relevant prior learnings.
 
+        Delegates the Mnemosyne setup + prompt construction to the shared
+        :mod:`advise_runner`, supplying the planner's own ``_call_claude`` (under
+        ``AGENT_ADVISE``, the cheap read-only advise session) as the invoker.
+        Kept as a method so the ``patch.object(planner, "_run_advise")`` test
+        seam — and the review loop's ``self.planner._run_advise(...)`` call —
+        keep working.
+
         Args:
-            issue_number: Issue number
-            issue_title: Issue title
-            issue_body: Issue body/description
+            issue_number: Issue number.
+            issue_title: Issue title.
+            issue_body: Issue body/description.
 
         Returns:
-            Advise findings text, or empty string if advise fails
+            Advise findings text, or an ``advise_skipped`` marker on failure.
 
         """
-        try:
-            # Locate ProjectMnemosyne
-            repo_root = get_repo_root()
-            mnemosyne_root = repo_root / "build" / "ProjectMnemosyne"
 
-            if not mnemosyne_root.exists() and not self._ensure_mnemosyne(mnemosyne_root):
-                return self._advise_skipped("ProjectMnemosyne unavailable")
-
-            marketplace_path = mnemosyne_root / ".claude-plugin" / "marketplace.json"
-            if not marketplace_path.exists():
-                logger.warning(
-                    "Marketplace file not found at %s; "
-                    "attempting recovery re-clone of ProjectMnemosyne",
-                    marketplace_path,
-                )
-                shutil.rmtree(mnemosyne_root, ignore_errors=True)
-                if not self._ensure_mnemosyne(mnemosyne_root) or not marketplace_path.exists():
-                    logger.error(
-                        "Recovery failed: marketplace.json still missing at %s; "
-                        "skipping advise step",
-                        marketplace_path,
-                    )
-                    return self._advise_skipped(f"marketplace.json missing at {marketplace_path}")
-
-            # Build advise prompt
-            advise_prompt = get_advise_prompt(
-                issue_number=issue_number,
-                issue_title=issue_title,
-                issue_body=issue_body,
-                marketplace_path=str(marketplace_path),
-                repo_root=str(repo_root),
-            )
-
-            # Call Claude with shorter timeout. /advise is light search work
-            # so it runs on the cheap model.
-            logger.info("Running advise for %s...", issue_ref(issue_number))
-            findings = self._call_claude(
-                advise_prompt,
+        def _invoke(prompt: str) -> str:
+            # /advise is light search work, so it runs on the cheap model with a
+            # short timeout under its own AGENT_ADVISE session.
+            return self._call_claude(
+                prompt,
                 model=advise_model(),
                 agent=AGENT_ADVISE,
                 issue_number=issue_number,
                 timeout=180,
             )
 
-            return findings
-
-        except Exception as e:
-            logger.warning("Advise step failed for %s: %s", issue_ref(issue_number), e)
-            return self._advise_skipped(f"unexpected error: {e}")
+        return run_advise(
+            issue_number=issue_number,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            invoke=_invoke,
+            build_prompt=get_advise_prompt,
+        )
 
     @staticmethod
     def _advise_skipped(reason: str) -> str:
-        """Return a marker string for plans that ran without advise findings.
-
-        A silent ``""`` made it impossible for the implementer (or a human
-        reading the plan) to tell whether advise wasn't attempted, was
-        attempted but found nothing, or actually failed.
-        """
-        return f"<!-- advise step skipped: {reason} -->"
+        """Return the advise skip marker (delegates to the shared runner)."""
+        return advise_skipped(reason)
 
     def _generate_plan(
         self,
@@ -430,7 +324,16 @@ class Planner:
         final_review: str | None = None,
         verdict_is_go: bool = True,
     ) -> None:
-        """Post plan to issue as a comment.
+        """Upsert the single PLAN comment on the issue.
+
+        Updates the issue's one ``# Implementation Plan`` comment in place
+        (via :func:`gh_issue_upsert_comment`) rather than appending a new one.
+        The review loop already upserts an in-progress plan comment every
+        iteration; this final upsert overwrites it with the canonical body
+        (NOGO banner + plan + final-review collapsible + footer), so after the
+        planner finishes the issue holds exactly one comment starting with
+        ``# Implementation Plan`` reflecting the final iteration. The separate
+        ``## 🔍 Plan Review`` comment is owned by the loop.
 
         Args:
             issue_number: Issue number
@@ -475,7 +378,7 @@ class Planner:
 *Generated by Claude Code Planner (strict review loop)*
 """
 
-        gh_issue_comment(issue_number, comment_body)
+        gh_issue_upsert_comment(issue_number, PLAN_COMMENT_MARKER, comment_body)
         logger.info("Posted plan to %s", issue_ref(issue_number))
 
     # ------------------------------------------------------------------

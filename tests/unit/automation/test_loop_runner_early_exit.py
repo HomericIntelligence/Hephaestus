@@ -208,24 +208,28 @@ class TestRepoResultProducedWork:
 
         assert result.produced_work is True
 
-    def test_review_plans_with_work(self) -> None:
-        """Repo with review-plans phase having work_units>0 has produced_work=True."""
+    def test_non_convergence_phase_work_ignored(self) -> None:
+        """A non-convergence phase (implement) with work alone does NOT signal work.
+
+        _CONVERGENCE_PHASES is now just {"plan"}, so an implement phase with
+        work_units>0 must not flip produced_work to True.
+        """
         result = RepoResult(
             repo="myrepo",
             loop_idx=1,
             phases=[
                 PhaseResult(
-                    name="review-plans",
+                    name="implement",
                     skipped=False,
-                    work_units=1,
+                    work_units=5,
                 )
             ],
         )
 
-        assert result.produced_work is True
+        assert result.produced_work is False
 
-    def test_convergence_phases_all_zero(self) -> None:
-        """Repo with all convergence phases at work_units=0 has produced_work=False."""
+    def test_convergence_phase_zero_work(self) -> None:
+        """Repo whose only convergence phase (plan) reports work_units=0 has produced_work=False."""
         result = RepoResult(
             repo="myrepo",
             loop_idx=1,
@@ -236,7 +240,7 @@ class TestRepoResultProducedWork:
                     work_units=0,
                 ),
                 PhaseResult(
-                    name="review-plans",
+                    name="implement",
                     skipped=False,
                     work_units=0,
                 ),
@@ -245,8 +249,12 @@ class TestRepoResultProducedWork:
 
         assert result.produced_work is False
 
-    def test_mixed_convergence_phases_any_work(self) -> None:
-        """Repo with at least one convergence phase having work returns True."""
+    def test_plan_work_among_other_phases(self) -> None:
+        """When plan reports work, produced_work is True regardless of other phases.
+
+        Only the plan (convergence) phase's work matters; an implement phase
+        with zero work does not suppress the plan signal.
+        """
         result = RepoResult(
             repo="myrepo",
             loop_idx=1,
@@ -254,12 +262,12 @@ class TestRepoResultProducedWork:
                 PhaseResult(
                     name="plan",
                     skipped=False,
-                    work_units=0,
+                    work_units=3,
                 ),
                 PhaseResult(
-                    name="review-plans",
+                    name="implement",
                     skipped=False,
-                    work_units=3,
+                    work_units=0,
                 ),
             ],
         )
@@ -303,10 +311,10 @@ class TestRunPhaseWorkReport:
 
 
 def _zero_work_result(repo: str, loop_idx: int) -> RepoResult:
-    """Return a RepoResult where all convergence phases report 0 work."""
+    """Return a RepoResult where the convergence phase (plan) reports 0 work."""
     rr = RepoResult(repo=repo, loop_idx=loop_idx)
     rr.phases.append(PhaseResult(name="plan", rc=0, work_units=0))
-    rr.phases.append(PhaseResult(name="review-plans", rc=0, work_units=0))
+    rr.phases.append(PhaseResult(name="implement", rc=0, work_units=0))
     return rr
 
 
@@ -314,7 +322,7 @@ def _work_result(repo: str, loop_idx: int, work_units: int = 3) -> RepoResult:
     """Return a RepoResult where plan produced work."""
     rr = RepoResult(repo=repo, loop_idx=loop_idx)
     rr.phases.append(PhaseResult(name="plan", rc=0, work_units=work_units))
-    rr.phases.append(PhaseResult(name="review-plans", rc=0, work_units=0))
+    rr.phases.append(PhaseResult(name="implement", rc=0, work_units=0))
     return rr
 
 
@@ -322,7 +330,7 @@ def _failed_result(repo: str, loop_idx: int) -> RepoResult:
     """Return a RepoResult with a phase failure and zero work units."""
     rr = RepoResult(repo=repo, loop_idx=loop_idx)
     rr.phases.append(PhaseResult(name="plan", rc=1, work_units=0))
-    rr.phases.append(PhaseResult(name="review-plans", rc=0, work_units=0))
+    rr.phases.append(PhaseResult(name="implement", rc=0, work_units=0))
     return rr
 
 

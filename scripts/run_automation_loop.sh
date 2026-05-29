@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
 # run_automation_loop.sh
 #
-# Clones all HomericIntelligence repos (excluding Odysseus), then runs
-# 6-phase pipeline: plan → review-plans → implement → review-PRs → address-review → drive-green
-# in a loop N times for every repo.
+# LEGACY bash driver — superseded by the `hephaestus-automation-loop` console
+# script (hephaestus.automation.loop_runner), which is now the canonical
+# pipeline driver. This script is kept for reference / fallback only.
+#
+# Clones all HomericIntelligence repos (excluding Odysseus), then runs the
+# 3-stage pipeline: plan → implement → drive-green in a loop N times for every
+# repo. Plan-review folded into `plan` (the planner owns its review loop) and
+# PR-review + address-review folded into `implement` (the implementer absorbs
+# them in-loop), so they are no longer standalone phases.
 # drive-green only runs on the final loop. Up to PARALLEL_REPOS repos are processed concurrently.
 #
 # Issue discovery:
-#   - plan, implement: each phase's Python entrypoint auto-discovers via
-#     gh_list_open_issues(), so issues opened mid-loop by an earlier phase are
-#     picked up by these phases automatically.
-#   - review-plans, review-prs, address-review, drive-green: these entrypoints
-#     declare --issues as REQUIRED (no auto-discovery). The orchestrator
-#     discovers open issues once per repo per loop (`gh issue list`) and passes
-#     them via --issues. Repos with zero open issues skip these four phases
-#     cleanly with a log line of the form
-#     "  [$repo] phase N/6 NAME SKIP (no open issues)" emitted on stderr.
+#   - plan, implement: each stage's Python entrypoint auto-discovers via
+#     gh_list_open_issues(), so issues opened mid-loop by an earlier stage are
+#     picked up by these stages automatically.
+#   - drive-green: this entrypoint declares --issues as REQUIRED (no
+#     auto-discovery). The orchestrator discovers open issues once per repo per
+#     loop (`gh issue list`) and passes them via --issues. Repos with zero open
+#     issues skip this stage cleanly with a log line of the form
+#     "  [$repo] stage N/3 NAME SKIP (no open issues)" emitted on stderr.
 #
 # Diagnostic stream routing:
 #   - stderr: every phase START / done / SKIP / Warning banner (operator
@@ -30,26 +35,26 @@
 #   --loops N                 Number of loop iterations (default: 5)
 #   --max-workers N           Parallel workers per repo per phase (default: 3)
 #   --parallel-repos N        Repos processed in parallel (default: 3)
-#   --phases LIST             Comma-separated subset of phases to run.
-#                             Valid: plan,review-plans,implement,review-prs,address-review,drive-green
-#                             Default: all six.
+#   --phases LIST             Comma-separated subset of stages to run.
+#                             Valid: plan,implement,drive-green
+#                             Default: all three.
 #                             Normal gates still apply (drive-green only on final loop).
-#                             Safety checks warn (stderr) if dependencies are
-#                             skipped, e.g. `implement` without `review-plans`,
-#                             `address-review` without `review-prs`, or
-#                             `drive-green` without `implement`/`address-review`.
-#                             Use --allow-unsafe-phase-order to silence these.
+#                             A safety check warns (stderr) if `drive-green` is
+#                             selected without `implement` (drive-green would
+#                             run against PRs not touched this invocation).
+#                             Use --allow-unsafe-phase-order to silence it.
 #   --allow-unsafe-phase-order
-#                             Suppress the dependency-ordering warnings emitted
-#                             when --phases skips a recommended predecessor
-#                             (e.g. running `plan,implement` without review).
-#                             Intended for operators deliberately running a
-#                             partial pipeline (e.g. bulk-creating plans first,
-#                             then implementing in a later invocation).
+#                             Suppress the dependency-ordering warning emitted
+#                             when --phases selects `drive-green` without
+#                             `implement`. Intended for operators deliberately
+#                             running a partial pipeline (e.g. driving existing
+#                             PRs green in a later invocation).
 #   --planner-model MODEL     Set HEPH_PLANNER_MODEL for child processes
-#   --reviewer-model MODEL    Set HEPH_REVIEWER_MODEL (covers plan-review and PR-review)
-#   --implementer-model MODEL Set HEPH_IMPLEMENTER_MODEL (covers implement, address-review,
-#                             ci-driver fresh sessions; --resume sites correctly omit --model)
+#   --reviewer-model MODEL    Set HEPH_REVIEWER_MODEL (covers the planner's in-loop
+#                             plan-review and the implementer's in-loop PR-review)
+#   --implementer-model MODEL Set HEPH_IMPLEMENTER_MODEL (covers implement incl. the
+#                             in-loop PR-review + address-review steps, and ci-driver
+#                             fresh sessions; --resume sites correctly omit --model)
 #   -h, --help                Show this help and exit
 
 set -euo pipefail
@@ -120,7 +125,7 @@ PARALLEL_REPOS=1
 PROJECTS_DIR="$HOME/Projects"
 ORG="HomericIntelligence"
 
-ALL_PHASES="plan,review-plans,implement,review-prs,address-review,drive-green"
+ALL_PHASES="plan,implement,drive-green"
 PHASES="$ALL_PHASES"
 ALLOW_UNSAFE_PHASE_ORDER=0
 
@@ -166,13 +171,14 @@ phase_enabled() {
 # ---------------------------------------------------------------------------
 # Dependency-ordering validation for --phases.
 #
-# Phase typos are caught above. This block additionally warns when a phase is
-# enabled without a recommended predecessor — running `implement` without
-# `review-plans`, for example, means plans get implemented unreviewed
-# (potentially NOGO-exhausted). The warning goes to stderr so it interleaves
-# with the rest of the phase-lifecycle log. Operators who deliberately want
-# a partial pipeline (e.g. bulk-plan now, implement in a later invocation)
-# pass `--allow-unsafe-phase-order` to suppress these warnings.
+# Phase typos are caught above. Plan-review and PR-review/address-review are no
+# longer separate stages (the planner owns its review loop; the implementer
+# absorbs PR-review + thread-addressing in-loop), so the only cross-stage
+# ordering hazard left is running `drive-green` without `implement` — it would
+# poll PRs not produced this invocation. The warning goes to stderr so it
+# interleaves with the rest of the stage-lifecycle log. Operators who
+# deliberately want a partial pipeline (e.g. drive existing PRs green in a
+# later invocation) pass `--allow-unsafe-phase-order` to suppress it.
 #
 # This is intentionally NOT a hard error: the orchestrator is a tool for
 # operators who know the pipeline, and forcing them to retype an opt-out for
@@ -186,23 +192,17 @@ phase_in_list() {
   esac
 }
 if [[ "$ALLOW_UNSAFE_PHASE_ORDER" -eq 0 ]]; then
-  if phase_in_list implement && ! phase_in_list review-plans; then
-    echo "WARNING: --phases includes 'implement' but not 'review-plans'; plans will be implemented without review (pass --allow-unsafe-phase-order to silence)" >&2
-  fi
-  if phase_in_list address-review && ! phase_in_list review-prs; then
-    echo "WARNING: --phases includes 'address-review' but not 'review-prs'; there will be no fresh review comments to address (pass --allow-unsafe-phase-order to silence)" >&2
-  fi
-  if phase_in_list drive-green && ! phase_in_list implement && ! phase_in_list address-review; then
-    echo "WARNING: --phases includes 'drive-green' but neither 'implement' nor 'address-review'; drive-green will run against PRs not touched this invocation (pass --allow-unsafe-phase-order to silence)" >&2
+  if phase_in_list drive-green && ! phase_in_list implement; then
+    echo "WARNING: --phases includes 'drive-green' but not 'implement'; drive-green will run against PRs not touched this invocation (pass --allow-unsafe-phase-order to silence)" >&2
   fi
 fi
 
 # ---------------------------------------------------------------------------
 # Phase banner helpers.
 #
-# Every phase block in process_repo wraps its work in a phase_start/phase_done
-# pair so the operator can see (a) which of the 6 phases actually ran for each
-# repo, (b) what exit code each phase returned, and (c) how long it took. A
+# Every stage block in process_repo wraps its work in a phase_start/phase_done
+# pair so the operator can see (a) which of the 3 stages actually ran for each
+# repo, (b) what exit code each stage returned, and (c) how long it took. A
 # silent abort inside process_repo (e.g. set -e tripping on an unguarded
 # infrastructure command) will be obvious from a missing `done` line.
 #
@@ -225,7 +225,7 @@ fi
 # ---------------------------------------------------------------------------
 phase_start() {
   local repo="$1" idx="$2" name="$3"
-  echo "  [$repo] phase $idx/6 $name START" >&2
+  echo "  [$repo] stage $idx/3 $name START" >&2
   date +%s
 }
 phase_done() {
@@ -233,7 +233,7 @@ phase_done() {
   local now elapsed
   now=$(date +%s)
   elapsed=$(( now >= t0 ? now - t0 : 0 ))
-  echo "  [$repo] phase $idx/6 $name done in ${elapsed}s (rc=$status)" >&2
+  echo "  [$repo] stage $idx/3 $name done in ${elapsed}s (rc=$status)" >&2
 }
 
 # Forward model selections via env vars to all child processes.
@@ -336,21 +336,22 @@ for repo in "${REPOS[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# process_repo: 6-phase pipeline for a single repo.
+# process_repo: 3-stage pipeline for a single repo.
 # Runs in a subshell so multiple repos can execute in parallel.
-# Each phase entrypoint auto-discovers open issues via gh_list_open_issues().
+# The plan and implement entrypoints auto-discover open issues via
+# gh_list_open_issues(); drive-green is passed the discovered list explicitly.
 # ---------------------------------------------------------------------------
 process_repo() {
   local repo="$1"
   local loop="$2"
   local dir="$PROJECTS_DIR/$repo"
 
-  # Defang errexit for the function body. Each phase below captures `rc=$?`
+  # Defang errexit for the function body. Each stage below captures `rc=$?`
   # explicitly and logs a structured warning on non-zero — that is the
   # authoritative error handler. An unguarded infrastructure command
   # (`git fetch`, mapfile + process substitution under `set -m`, a `local`
   # assignment whose RHS happens to be non-zero) must NOT silently abort
-  # the function and cause phases 2-6 to be skipped.
+  # the function and cause later stages to be skipped.
   #
   # Root cause of the original silent abort: bisected in #557.
   # The triggering command was `git -C "$dir" fetch origin --quiet` (pre-fix
@@ -358,21 +359,21 @@ process_repo() {
   # guard added by Bundle C / PR #570). When `$dir` referenced a clone whose
   # `origin` remote was absent or unreachable, git exited 128 ("'origin' does
   # not appear to be a git repository"). Under `set -euo pipefail` this
-  # aborted process_repo before phase 2's banner could fire, matching the
-  # observed log signature: `Planning complete` (planner exited 0) immediately
-  # followed by `Warning: repo job pid=… exited non-zero (continuing)` and
-  # zero output for phases 2-6.
+  # aborted process_repo before the implement stage's banner could fire,
+  # matching the observed log signature: `Planning complete` (planner exited 0)
+  # immediately followed by `Warning: repo job pid=… exited non-zero
+  # (continuing)` and zero output for the remaining stages.
   #
   # Reproducer: tests/shell/scripts/test_run_automation_loop.bats includes
-  # the `phase 2-6 still run when phase 1 exits non-zero` regression test;
-  # the original bisect harness lived at build/bisect_repro.sh (not committed
-  # — see PR description in #557 closure).
+  # the `later stages still run when the plan stage exits non-zero` regression
+  # test; the original bisect harness lived at build/bisect_repro.sh (not
+  # committed — see PR description in #557 closure).
   #
   # The broad `set +e` here is defense-in-depth — Bundle C tightened the
   # specific offender (`git fetch`) but other unguarded infrastructure
   # commands (e.g. a future `gh api ...` probe) could exhibit the same
-  # failure mode. Keeping `set +e` with explicit per-phase `rc=$?` capture
-  # is the POLA choice: future maintainers can add new phases without
+  # failure mode. Keeping `set +e` with explicit per-stage `rc=$?` capture
+  # is the POLA choice: future maintainers can add new stages without
   # rediscovering the errexit landmine.
   #
   # The `trap 'set -e' RETURN` below is defensive for hypothetical future
@@ -417,15 +418,13 @@ process_repo() {
     FOLLOW_UP_FLAG=(--no-follow-up)
   fi
 
-  # Discover this repo's open issues once per loop iteration. Four of the six
-  # phases (plan_reviewer, pr_reviewer, address_review, ci_driver) declare
-  # --issues as REQUIRED in argparse and have no auto-discovery — invoking them
-  # without --issues fails with exit code 2, which the `|| echo Warning…`
-  # clauses below would silently swallow. We share the same list across all
-  # four phases so a single `gh` call covers them. The `plan` and `implement`
-  # phases intentionally do NOT consume this list — both auto-discover via
-  # gh_list_open_issues() inside their main(), which lets them pick up issues
-  # opened mid-loop by an earlier phase.
+  # Discover this repo's open issues once per loop iteration. The drive-green
+  # stage (ci_driver) declares --issues as REQUIRED in argparse and has no
+  # auto-discovery — invoking it without --issues fails with exit code 2, which
+  # the `|| echo Warning…` clause below would silently swallow. The `plan` and
+  # `implement` stages intentionally do NOT consume this list — both
+  # auto-discover via gh_list_open_issues() inside their main(), which lets them
+  # pick up issues opened mid-loop by an earlier stage.
   local OPEN_ISSUES=()
   mapfile -t OPEN_ISSUES < <(
     gh issue list --repo "$ORG/$repo" --state open --limit 200 \
@@ -436,7 +435,7 @@ process_repo() {
     ISSUE_ARGS=(--issues "${OPEN_ISSUES[@]}")
   fi
 
-  # --- Phase 1: Plan ---
+  # --- Stage 1: Plan (planner owns its plan-review loop internally) ---
   if phase_enabled plan; then
     t0=$(phase_start "$repo" 1 plan)
     (
@@ -452,37 +451,12 @@ process_repo() {
     fi
     phase_done "$repo" 1 plan "$t0" "$rc"
   else
-    echo "  [$repo] phase 1/6 plan SKIP (disabled by --phases)" >&2
+    echo "  [$repo] stage 1/3 plan SKIP (disabled by --phases)" >&2
   fi
 
-  # --- Phase 2: Review Plans ---
-  if phase_enabled review-plans; then
-    if [[ ${#OPEN_ISSUES[@]} -eq 0 ]]; then
-      echo "  [$repo] phase 2/6 review-plans SKIP (no open issues)" >&2
-    else
-      t0=$(phase_start "$repo" 2 review-plans)
-      (
-        cd "$dir" || exit 1
-        "$PYTHON" "$SCRIPT_DIR/review_plans.py" \
-          "${ISSUE_ARGS[@]}" \
-          --max-workers "$MAX_WORKERS" \
-          -v \
-          "${DRY_RUN_FLAGS[@]}"
-      )
-      rc=$?
-      if [[ $rc -ne 0 ]]; then
-        echo "  [$repo] Warning: review-plans exited rc=$rc (loop $loop)" >&2
-        any_failure=1
-      fi
-      phase_done "$repo" 2 review-plans "$t0" "$rc"
-    fi
-  else
-    echo "  [$repo] phase 2/6 review-plans SKIP (disabled by --phases)" >&2
-  fi
-
-  # --- Phase 3: Implement ---
+  # --- Stage 2: Implement (absorbs PR-review + address-review in-loop) ---
   if phase_enabled implement; then
-    t0=$(phase_start "$repo" 3 implement)
+    t0=$(phase_start "$repo" 2 implement)
     (
       cd "$dir" || exit 1
       "$IMPL_BIN" \
@@ -497,72 +471,20 @@ process_repo() {
       echo "  [$repo] Warning: implement-issues exited rc=$rc (loop $loop)" >&2
       any_failure=1
     fi
-    phase_done "$repo" 3 implement "$t0" "$rc"
+    phase_done "$repo" 2 implement "$t0" "$rc"
   else
-    echo "  [$repo] phase 3/6 implement SKIP (disabled by --phases)" >&2
+    echo "  [$repo] stage 2/3 implement SKIP (disabled by --phases)" >&2
   fi
 
-  # --- Phase 4: Review PRs (inline comments) ---
-  if phase_enabled review-prs; then
-    if [[ ${#OPEN_ISSUES[@]} -eq 0 ]]; then
-      echo "  [$repo] phase 4/6 review-prs SKIP (no open issues)" >&2
-    else
-      t0=$(phase_start "$repo" 4 review-prs)
-      (
-        cd "$dir" || exit 1
-        "$PYTHON" "$SCRIPT_DIR/review_issues.py" \
-          "${ISSUE_ARGS[@]}" \
-          --max-workers "$MAX_WORKERS" \
-          --no-ui \
-          -v \
-          "${DRY_RUN_FLAGS[@]}"
-      )
-      rc=$?
-      if [[ $rc -ne 0 ]]; then
-        echo "  [$repo] Warning: review-issues exited rc=$rc (loop $loop)" >&2
-        any_failure=1
-      fi
-      phase_done "$repo" 4 review-prs "$t0" "$rc"
-    fi
-  else
-    echo "  [$repo] phase 4/6 review-prs SKIP (disabled by --phases)" >&2
-  fi
-
-  # --- Phase 5: Address Review Comments ---
-  if phase_enabled address-review; then
-    if [[ ${#OPEN_ISSUES[@]} -eq 0 ]]; then
-      echo "  [$repo] phase 5/6 address-review SKIP (no open issues)" >&2
-    else
-      t0=$(phase_start "$repo" 5 address-review)
-      (
-        cd "$dir" || exit 1
-        "$PYTHON" "$SCRIPT_DIR/address_review.py" \
-          "${ISSUE_ARGS[@]}" \
-          --max-workers "$MAX_WORKERS" \
-          --no-ui \
-          -v \
-          "${DRY_RUN_FLAGS[@]}"
-      )
-      rc=$?
-      if [[ $rc -ne 0 ]]; then
-        echo "  [$repo] Warning: address-review exited rc=$rc (loop $loop)" >&2
-        any_failure=1
-      fi
-      phase_done "$repo" 5 address-review "$t0" "$rc"
-    fi
-  else
-    echo "  [$repo] phase 5/6 address-review SKIP (disabled by --phases)" >&2
-  fi
-
-  # --- Phase 6: Drive PRs to Green CI (final loop only) ---
+  # --- Stage 3: Drive PRs to Green CI (final loop only) ---
   if ! phase_enabled drive-green; then
-    echo "  [$repo] phase 6/6 drive-green SKIP (disabled by --phases)" >&2
+    echo "  [$repo] stage 3/3 drive-green SKIP (disabled by --phases)" >&2
   elif [[ "$loop" -ne "$LOOPS" ]]; then
-    echo "  [$repo] phase 6/6 drive-green SKIP (not final loop)" >&2
+    echo "  [$repo] stage 3/3 drive-green SKIP (not final loop)" >&2
   elif [[ ${#OPEN_ISSUES[@]} -eq 0 ]]; then
-    echo "  [$repo] phase 6/6 drive-green SKIP (no open issues)" >&2
+    echo "  [$repo] stage 3/3 drive-green SKIP (no open issues)" >&2
   else
-    t0=$(phase_start "$repo" 6 drive-green)
+    t0=$(phase_start "$repo" 3 drive-green)
     (
       cd "$dir" || exit 1
       # Defence-in-depth: ci_driver also checks these envs and refuses to run
@@ -580,7 +502,7 @@ process_repo() {
       echo "  [$repo] Warning: drive-prs-green exited rc=$rc (loop $loop)" >&2
       any_failure=1
     fi
-    phase_done "$repo" 6 drive-green "$t0" "$rc"
+    phase_done "$repo" 3 drive-green "$t0" "$rc"
   fi
 
   # Return non-zero if ANY phase tripped its rc!=0 branch above. The outer

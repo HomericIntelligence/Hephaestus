@@ -8,17 +8,17 @@ Provides:
 
 Scope note (intentional)
 ------------------------
-This resolver is consulted by the **implementer phase only** — the planner,
-plan reviewer, PR reviewer, and address-review phases iterate the user's
-``--issues`` list directly, in declaration order. That is by design: those
-phases are read-mostly (or post-only), so an out-of-order plan/review
-comment is recoverable and reordering them across phases would be more
-complexity than benefit.
+This resolver is consulted by the **implement stage only** — the planner and
+its in-loop plan-review, plus the implementer's in-loop PR-review and
+address-review steps, iterate the user's ``--issues`` list directly, in
+declaration order. That is by design: those steps are read-mostly (or
+post-only), so an out-of-order plan/review comment is recoverable and
+reordering them would be more complexity than benefit.
 
-If you change a phase to take meaningful action that depends on dependency
+If you change a stage to take meaningful action that depends on dependency
 order (e.g. an "implement-then-merge" pipeline that must merge #A before
 posting a plan against #B), wire :class:`DependencyResolver` into that
-phase too — see ``IssueImplementer.run`` for the canonical call shape.
+stage too — see ``IssueImplementer.run`` for the canonical call shape.
 """
 
 import logging

@@ -1,9 +1,11 @@
-"""Multi-repo, multi-phase automation loop driver.
+"""Multi-repo, multi-stage automation loop driver.
 
 Replaces ``scripts/run_automation_loop.sh``. Iterates over all
-non-archived HomericIntelligence repos, running the 6-phase pipeline
-(plan → review-plans → implement → review-prs → address-review →
-drive-green) ``--loops`` times per repo.
+non-archived HomericIntelligence repos, running the 3-stage pipeline
+(plan → implement → drive-green) ``--loops`` times per repo. Plan-review,
+PR-review, and address-review are no longer standalone phases — the planner
+owns its review loop and the implementer absorbs PR-review + thread-addressing
+in-loop (#455/#468/#484).
 
 The key correctness invariant — and the reason this replaces the bash
 version — is that each phase is a plain ``subprocess.run`` call inside a
@@ -38,14 +40,14 @@ from hephaestus.cli.utils import add_json_arg, emit_json_status
 
 LOG = logging.getLogger(__name__)
 
-# Canonical phase ordering. Index 0 = phase 1 (plan), index 5 = phase 6
-# (drive-green). Matches the bash version's --phases flag exactly.
+# Canonical phase ordering. The pipeline collapsed from 6 phases to 3
+# session-stable stages (#455/#468/#484): the former standalone review-plans,
+# review-prs, and address-review phases are now in-loop steps of plan/implement
+# (the planner owns its review loop; the implementer absorbs PR-review +
+# thread-addressing). Index 0 = stage 1 (plan), index 2 = stage 3 (drive-green).
 ALL_PHASES: tuple[str, ...] = (
     "plan",
-    "review-plans",
     "implement",
-    "review-prs",
-    "address-review",
     "drive-green",
 )
 
@@ -67,12 +69,10 @@ def _parse_repo_list(value: str) -> list[str]:
     return [s.strip() for s in value.split(",") if s.strip()]
 
 
-# Phases 2/4/5/6 declare --issues as required in their argparse. Phases 1
-# and 3 auto-discover. This set drives the "skip when no open issues"
+# drive-green declares --issues as required in its argparse; plan and
+# implement auto-discover. This set drives the "skip when no open issues"
 # branch in process_repo.
-PHASES_REQUIRING_ISSUES: frozenset[str] = frozenset(
-    {"review-plans", "review-prs", "address-review", "drive-green"}
-)
+PHASES_REQUIRING_ISSUES: frozenset[str] = frozenset({"drive-green"})
 
 # Sentinel for cooperative shutdown on SIGINT/SIGTERM. Worker threads
 # check this between phases so an in-flight subprocess can still finish
@@ -126,8 +126,10 @@ class PhaseResult:
 
 
 # Phases that count toward loop convergence. Future phases opting into
-# convergence must be added here AND must call write_work_report.
-_CONVERGENCE_PHASES: frozenset[str] = frozenset({"plan", "review-plans"})
+# convergence must be added here AND must call write_work_report. The former
+# review-plans phase folded into ``plan`` (the planner now owns its review
+# loop), so ``plan`` is the sole convergence signal.
+_CONVERGENCE_PHASES: frozenset[str] = frozenset({"plan"})
 
 
 @dataclass
@@ -154,8 +156,10 @@ class RepoResult:
 def _summarize_loop(loop_results: list[RepoResult], loop_idx: int, elapsed_s: float) -> str:
     """Generate a one-line summary of loop execution for logs.
 
-    Counts: planned (non-skipped plan phases), reviewed (review-plans +
-    review-prs non-skipped), skipped (all skipped phases).
+    Counts: planned (non-skipped plan stages), implemented (non-skipped
+    implement stages), skipped (all skipped stages). Plan-review and PR-review
+    are now in-loop steps of plan/implement, so they no longer have their own
+    count.
 
     Args:
         loop_results: Results from all repos in this loop iteration.
@@ -163,28 +167,25 @@ def _summarize_loop(loop_results: list[RepoResult], loop_idx: int, elapsed_s: fl
         elapsed_s: Wall-clock seconds elapsed for the loop.
 
     Returns:
-        A summary string like "loop 1: planned=5 reviewed=3 skipped=2 elapsed=45s".
+        A summary string like "loop 1: planned=5 implemented=3 skipped=2 elapsed=45s".
 
     """
     total_planned = 0
-    total_reviewed = 0
+    total_implemented = 0
     total_skipped = 0
 
     for result in loop_results:
         for phase in result.phases:
             if phase.skipped:
                 total_skipped += 1
-            else:
-                # Count non-skipped plan phase
-                if phase.name == "plan":
-                    total_planned += 1
-                # Count non-skipped review phases
-                elif phase.name in ("review-plans", "review-prs"):
-                    total_reviewed += 1
+            elif phase.name == "plan":
+                total_planned += 1
+            elif phase.name == "implement":
+                total_implemented += 1
 
     elapsed = f"{elapsed_s:.0f}s"
     return (
-        f"loop {loop_idx}: planned={total_planned} reviewed={total_reviewed} "
+        f"loop {loop_idx}: planned={total_planned} implemented={total_implemented} "
         f"skipped={total_skipped} elapsed={elapsed}"
     )
 
@@ -262,7 +263,7 @@ def _read_work_report(path: str) -> int | None:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="hephaestus-automation-loop",
-        description="Run the 6-phase automation pipeline across HomericIntelligence repos.",
+        description="Run the 3-stage automation pipeline across HomericIntelligence repos.",
     )
     p.add_argument("--dry-run", action="store_true", help="Pass --dry-run to every phase")
     p.add_argument("--loops", type=int, default=5, help="Number of loop iterations (default: 5)")
@@ -346,27 +347,20 @@ def _validate_phases(phases_csv: str) -> tuple[str, ...]:
 
 
 def _phase_order_warnings(cfg: LoopConfig) -> list[str]:
-    """Replicate the bash script's dependency-ordering safety warnings."""
+    """Dependency-ordering safety warnings for the 3-stage pipeline.
+
+    Plan-review and PR-review/address-review are no longer separate phases —
+    the planner owns its review loop and the implementer absorbs PR-review +
+    thread-addressing in-loop, so the only cross-stage ordering hazard left is
+    running drive-green without implement (it would poll PRs not produced this
+    invocation).
+    """
     warnings: list[str] = []
     selected = set(cfg.phases)
-    if "implement" in selected and "review-plans" not in selected:
+    if "drive-green" in selected and "implement" not in selected:
         warnings.append(
-            "--phases includes 'implement' but not 'review-plans'; "
-            "plans will be implemented without review"
-        )
-    if "address-review" in selected and "review-prs" not in selected:
-        warnings.append(
-            "--phases includes 'address-review' but not 'review-prs'; "
-            "there will be no fresh review comments to address"
-        )
-    if (
-        "drive-green" in selected
-        and "implement" not in selected
-        and "address-review" not in selected
-    ):
-        warnings.append(
-            "--phases includes 'drive-green' but neither 'implement' nor "
-            "'address-review'; drive-green will run against PRs not touched this invocation"
+            "--phases includes 'drive-green' but not 'implement'; "
+            "drive-green will run against PRs not touched this invocation"
         )
     return warnings
 
@@ -617,15 +611,6 @@ def _resolve_phase_bin(phase: str) -> tuple[str, list[str]] | None:
     if phase == "implement":
         bin_path = shutil.which("hephaestus-implement-issues")
         return (bin_path, []) if bin_path else None
-    if phase == "review-plans":
-        py = sys.executable
-        return (py, [str(script_dir / "review_plans.py")])
-    if phase == "review-prs":
-        py = sys.executable
-        return (py, [str(script_dir / "review_issues.py")])
-    if phase == "address-review":
-        py = sys.executable
-        return (py, [str(script_dir / "address_review.py")])
     if phase == "drive-green":
         py = sys.executable
         return (py, [str(script_dir / "drive_prs_green.py")])
@@ -646,15 +631,12 @@ def _resolve_phase_bin(phase: str) -> tuple[str, list[str]] | None:
 #                  set on loop ≥ 3, scripts/run_automation_loop.sh:415-418)
 _PHASE_FLAGS: dict[str, dict[str, object]] = {
     "plan": {"max_workers": False, "no_ui": False, "issues": False},
-    "review-plans": {"max_workers": True, "no_ui": False, "issues": True},
     "implement": {
         "max_workers": True,
         "no_ui": True,
         "issues": False,
         "follow_up_loop_threshold": 3,
     },
-    "review-prs": {"max_workers": True, "no_ui": True, "issues": True},
-    "address-review": {"max_workers": True, "no_ui": True, "issues": True},
     "drive-green": {"max_workers": True, "no_ui": True, "issues": True},
 }
 
@@ -807,7 +789,7 @@ def process_repo(
     loop_idx: int,
     cfg: LoopConfig,
 ) -> RepoResult:
-    """Run the 6-phase pipeline for one repo. Never raises.
+    """Run the 3-stage pipeline for one repo. Never raises.
 
     Any exception inside the function (filesystem error, gh API explosion,
     unexpected programming bug) is caught and stashed in

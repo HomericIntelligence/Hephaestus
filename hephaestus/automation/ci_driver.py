@@ -31,13 +31,15 @@ from hephaestus.agents.runtime import (
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 
 from ._review_utils import find_pr_for_issue
+from .advise_runner import run_advise
 from .claude_invoke import invoke_claude_with_session
-from .claude_models import implementer_model
-from .claude_timeouts import ci_driver_claude_timeout
+from .claude_models import advise_model, implementer_model, learn_model
+from .claude_timeouts import ci_driver_claude_timeout, learn_claude_timeout
 from .git_utils import get_repo_root, get_repo_slug, issue_ref, pr_ref, run
-from .github_api import _gh_call, gh_pr_checks
+from .github_api import _gh_call, gh_issue_json, gh_pr_checks
 from .models import CIDriverOptions, WorkerResult
-from .session_naming import AGENT_IMPLEMENTER, current_trunk_githash
+from .prompts import get_advise_prompt
+from .session_naming import AGENT_ADVISE, AGENT_CI_DRIVER, current_trunk_githash
 from .status_tracker import StatusTracker
 from .worktree_manager import WorktreeManager
 
@@ -293,6 +295,14 @@ class CIDriver:
                         issue_number=issue_number, success=True, pr_number=pr_number
                     )
                 merge_ok = self._enable_auto_merge(pr_number)
+                if merge_ok:
+                    # PR is green and auto-merge is enabled — capture drive-green
+                    # learnings under AGENT_CI_DRIVER (Session 3). Non-fatal:
+                    # a failed learnings step must not flip the drive to failure.
+                    self.status_tracker.update_slot(
+                        acquired_slot, f"{issue_ref(issue_number)}: capturing learnings"
+                    )
+                    self._run_drive_green_learnings(issue_number, pr_number)
                 return WorkerResult(
                     issue_number=issue_number,
                     success=merge_ok,
@@ -336,6 +346,51 @@ class CIDriver:
         finally:
             self.status_tracker.release_slot(acquired_slot)
 
+    def _run_advise(self, issue_number: int) -> str:
+        """Pull prior learnings from ProjectMnemosyne before the CI fix loop.
+
+        Stage 3's advise-first step. Runs under ``AGENT_ADVISE`` (its own cheap,
+        read-only session), gated by ``enable_advise``; the findings are
+        prepended to the CI fix-session prompt. Delegates the Mnemosyne setup +
+        prompt build to the shared :mod:`advise_runner`; any failure degrades to
+        a skip marker so the drive never aborts over missing advice.
+        """
+        issue_data = gh_issue_json(issue_number)
+        issue_title = issue_data.get("title", f"Issue #{issue_number}")
+        issue_body = issue_data.get("body", "")
+
+        def _invoke(prompt: str) -> str:
+            if is_codex(self.options.agent):
+                result = run_codex_session(
+                    prompt,
+                    cwd=self.repo_root,
+                    timeout=180,
+                    sandbox="read-only",
+                )
+                return (result.stdout or "").strip()
+            githash = current_trunk_githash(self.repo_root)
+            repo_slug = get_repo_slug(self.repo_root)
+            stdout, _ = invoke_claude_with_session(
+                repo=repo_slug,
+                issue=issue_number,
+                agent=AGENT_ADVISE,
+                githash=githash,
+                prompt=prompt,
+                model=advise_model(),
+                cwd=self.repo_root,
+                timeout=180,
+                output_format="text",
+            )
+            return (stdout or "").strip()
+
+        return run_advise(
+            issue_number=issue_number,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            invoke=_invoke,
+            build_prompt=get_advise_prompt,
+        )
+
     def _attempt_ci_fixes(
         self,
         issue_number: int,
@@ -353,6 +408,14 @@ class CIDriver:
             WorkerResult on success or dry-run, None if all iterations failed.
 
         """
+        # Advise-first (#30): pull prior learnings once before the fix loop, so
+        # we only spend an advise call on PRs that actually need fixing. Fed
+        # into every fix-session prompt below.
+        advise_findings = ""
+        if self.options.enable_advise:
+            self.status_tracker.update_slot(acquired_slot, f"{issue_ref(issue_number)}: advising")
+            advise_findings = self._run_advise(issue_number)
+
         for iteration in range(self.options.max_fix_iterations):
             self.status_tracker.update_slot(
                 acquired_slot,
@@ -376,7 +439,7 @@ class CIDriver:
                 f"{issue_ref(issue_number)}: running CI fix session (attempt {iteration + 1})",
             )
             fixed = self._run_ci_fix_session(
-                issue_number, pr_number, worktree_path, ci_logs, session_id
+                issue_number, pr_number, worktree_path, ci_logs, session_id, advise_findings
             )
             if fixed:
                 logger.info(
@@ -555,6 +618,7 @@ class CIDriver:
         worktree_path: Path,
         ci_logs: str,
         session_id: str | None,
+        advise_findings: str = "",
     ) -> bool:
         """Invoke Claude to fix CI failures, then push the result.
 
@@ -564,12 +628,19 @@ class CIDriver:
             worktree_path: Path to the checked-out worktree.
             ci_logs: Combined CI failure log text.
             session_id: Optional Claude session ID to resume.
+            advise_findings: Prior learnings from the advise step, prepended to
+                the prompt as context. Empty or a skip marker contributes nothing.
 
         Returns:
             True if the fix session succeeded and the branch was pushed.
 
         """
+        advise_block = ""
+        findings = advise_findings.strip()
+        if findings and not findings.startswith("<!-- advise step skipped"):
+            advise_block = f"## Prior Learnings from Team Knowledge Base\n\n{findings}\n\n---\n\n"
         prompt = (
+            f"{advise_block}"
             f"Fix the CI failures for PR {pr_ref(pr_number)} (issue {issue_ref(issue_number)}).\n\n"
             f"Working directory: {worktree_path}\n\n"
             f"CI failure logs:\n{ci_logs}\n\n"
@@ -637,15 +708,17 @@ class CIDriver:
                     )
                     return False
 
-            # CI fix continues the implementer's session for this issue;
-            # ``session_id`` is honored only on the codex path above.
+            # drive-green runs its OWN session (Session 3, AGENT_CI_DRIVER),
+            # independent of the implementer's transcript. The first fix call
+            # creates it via --session-id; later calls resume it. The codex
+            # path above instead resumes the raw ``session_id`` it was handed.
             githash = current_trunk_githash(self.repo_root)
             repo_slug = get_repo_slug(self.repo_root)
             try:
                 stdout, _ = invoke_claude_with_session(
                     repo=repo_slug,
                     issue=issue_number,
-                    agent=AGENT_IMPLEMENTER,
+                    agent=AGENT_CI_DRIVER,
                     githash=githash,
                     prompt=prompt,
                     model=implementer_model(),
@@ -699,9 +772,11 @@ class CIDriver:
             return False
 
     def _enable_auto_merge(self, pr_number: int) -> bool:
-        """Enable auto-merge for the given PR using rebase strategy.
+        """Enable auto-merge for the given PR using squash strategy.
 
-        First attempts ``gh pr merge --auto --rebase``. On failure, if
+        First attempts ``gh pr merge --auto --squash``. This repo is
+        squash-only — rebase merges are disabled by branch protection, so the
+        primary path MUST use ``--squash``. On failure, if
         ``options.force_merge_on_stall`` is set, falls back to a direct
         squash merge (``gh pr merge --squash --delete-branch``). If both
         strategies fail, logs an ERROR and returns False.
@@ -715,12 +790,12 @@ class CIDriver:
 
         """
         try:
-            _gh_call(["pr", "merge", str(pr_number), "--auto", "--rebase"])
+            _gh_call(["pr", "merge", str(pr_number), "--auto", "--squash"])
             logger.info("Enabled auto-merge for PR #%s", pr_number)
             return True
         except subprocess.CalledProcessError as e:
             logger.warning(
-                "Could not enable auto-merge (--rebase) for PR #%s: %s; "
+                "Could not enable auto-merge (--squash) for PR #%s: %s; "
                 "will attempt squash-merge fallback if force_merge_on_stall is set",
                 pr_number,
                 e,
@@ -744,6 +819,76 @@ class CIDriver:
                 "PR #%s: both auto-merge and squash-merge fallback failed: %s",
                 pr_number,
                 fallback_err,
+            )
+            return False
+
+    def _run_drive_green_learnings(self, issue_number: int, pr_number: int) -> bool:
+        """Capture drive-green learnings under AGENT_CI_DRIVER (Session 3).
+
+        Runs after a PR reaches green and auto-merge is enabled, mirroring the
+        implementer's post-PR ``/learn`` step but scoped to *this* drive: what
+        made CI fail and how it was fixed. Resumes Session 3 (the
+        ``AGENT_CI_DRIVER`` session the fix session created) so the learnings
+        compound on the same transcript that did the work.
+
+        This is best-effort. Any failure is logged at WARNING and swallowed so
+        a flaky learnings step never flips a successful drive to failure.
+
+        Args:
+            issue_number: GitHub issue number.
+            pr_number: GitHub PR number.
+
+        Returns:
+            True if the learnings session completed, False otherwise.
+
+        """
+        # The Claude path resumes the deterministic AGENT_CI_DRIVER session via
+        # invoke_claude_with_session. Codex drive-green sessions are not
+        # persisted by this module, so there is no Session 3 to resume there.
+        if is_codex(self.options.agent):
+            logger.info(
+                "Issue #%s: skipping drive-green learnings (codex has no persisted "
+                "drive-green session to resume)",
+                issue_number,
+            )
+            return False
+
+        prompt = (
+            "/skills-registry-commands:learn "
+            f"You just drove PR {pr_ref(pr_number)} (issue {issue_ref(issue_number)}) "
+            "to green CI. Capture concise learnings about what made CI fail and how "
+            "you fixed it, scoped to this issue/PR. Commit the results and create a PR. "
+            "IMPORTANT: Only push skills to ProjectMnemosyne. "
+            "Do NOT create files under .claude-plugin/ in this repo."
+        )
+        try:
+            githash = current_trunk_githash(self.repo_root)
+            repo_slug = get_repo_slug(self.repo_root)
+            # Resume from the SAME worktree the fix session used: the Session 3
+            # transcript is probed by cwd (session_jsonl_path), so a different
+            # cwd would silently start a cold session instead of resuming.
+            worktree_path = self._get_worktree_path(issue_number, pr_number)
+            invoke_claude_with_session(
+                repo=repo_slug,
+                issue=issue_number,
+                agent=AGENT_CI_DRIVER,
+                githash=githash,
+                prompt=prompt,
+                model=learn_model(),
+                cwd=worktree_path,
+                timeout=learn_claude_timeout(),
+                output_format="text",
+                allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
+                extra_args=["--dangerously-skip-permissions"],
+                input_via_stdin=True,
+            )
+            logger.info("Issue #%s: drive-green learnings captured", issue_number)
+            return True
+        except Exception as e:  # broad: external claude process; non-blocking
+            logger.warning(
+                "Issue #%s: drive-green learnings failed (non-fatal): %s",
+                issue_number,
+                e,
             )
             return False
 

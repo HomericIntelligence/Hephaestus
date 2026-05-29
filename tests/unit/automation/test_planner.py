@@ -206,12 +206,19 @@ class TestCallClaude:
 
 
 class TestRunAdvise:
-    """Tests for _run_advise method."""
+    """Tests for the planner's _run_advise (delegates to advise_runner).
+
+    The Mnemosyne setup + prompt construction moved into the shared
+    ``advise_runner`` module (#30), so these patch that module's symbols
+    (``advise_runner.get_repo_root`` / ``advise_runner.ensure_mnemosyne`` /
+    ``advise_runner.shutil``) rather than the planner's. The planner still
+    supplies its own ``_call_claude`` as the invoker, so that patch stays.
+    """
 
     def test_returns_findings(self, planner: Any) -> None:
         """Test successful advise returns findings."""
         with (
-            patch("hephaestus.automation.planner.get_repo_root") as mock_get_repo,
+            patch("hephaestus.automation.advise_runner.get_repo_root") as mock_get_repo,
             patch.object(Path, "exists", return_value=True),
         ):
             mock_get_repo.return_value = Path("/repo")
@@ -227,11 +234,11 @@ class TestRunAdvise:
     def test_graceful_failure_on_error(self, planner: Any) -> None:
         """When advise errors, return a sentinel-comment (not silent ``""``).
 
-        N2 turned the silent-empty fallback into a marked-skipped breadcrumb so
+        The silent-empty fallback became a marked-skipped breadcrumb so
         downstream readers can tell "advise failed" apart from "advise found
         nothing".
         """
-        with patch("hephaestus.automation.planner.get_repo_root") as mock_get_repo:
+        with patch("hephaestus.automation.advise_runner.get_repo_root") as mock_get_repo:
             mock_get_repo.side_effect = RuntimeError("Git error")
 
             result = planner._run_advise(123, "Test Issue", "Issue body")
@@ -242,8 +249,10 @@ class TestRunAdvise:
     def test_skips_when_mnemosyne_missing_and_clone_fails(self, planner: Any) -> None:
         """Returns sentinel-comment when ProjectMnemosyne is missing and clone fails."""
         with (
-            patch("hephaestus.automation.planner.get_repo_root") as mock_get_repo,
-            patch.object(planner, "_ensure_mnemosyne", return_value=False) as mock_ensure,
+            patch("hephaestus.automation.advise_runner.get_repo_root") as mock_get_repo,
+            patch(
+                "hephaestus.automation.advise_runner.ensure_mnemosyne", return_value=False
+            ) as mock_ensure,
         ):
             mock_get_repo.return_value = Path("/repo")
 
@@ -260,13 +269,13 @@ class TestRunAdvise:
 
         def patched_exists(p: Path) -> bool:
             call_count[0] += 1
-            # First call: mnemosyne_root.exists() -> False (triggers _ensure_mnemosyne)
+            # First call: mnemosyne_root.exists() -> False (triggers ensure_mnemosyne)
             # Subsequent calls (marketplace check): True
             return call_count[0] != 1
 
         with (
-            patch("hephaestus.automation.planner.get_repo_root") as mock_get_repo,
-            patch.object(planner, "_ensure_mnemosyne", return_value=True),
+            patch("hephaestus.automation.advise_runner.get_repo_root") as mock_get_repo,
+            patch("hephaestus.automation.advise_runner.ensure_mnemosyne", return_value=True),
             patch.object(Path, "exists", patched_exists),
             patch.object(planner, "_call_claude", return_value="## Related Skills\nFound 2 skills"),
         ):
@@ -293,10 +302,12 @@ class TestRunAdvise:
             return True
 
         with (
-            patch("hephaestus.automation.planner.get_repo_root") as mock_get_repo,
+            patch("hephaestus.automation.advise_runner.get_repo_root") as mock_get_repo,
             patch.object(Path, "exists", patched_exists),
-            patch("hephaestus.automation.planner.shutil.rmtree") as mock_rmtree,
-            patch.object(planner, "_ensure_mnemosyne", return_value=True) as mock_ensure,
+            patch("hephaestus.automation.advise_runner.shutil.rmtree") as mock_rmtree,
+            patch(
+                "hephaestus.automation.advise_runner.ensure_mnemosyne", return_value=True
+            ) as mock_ensure,
             patch.object(planner, "_call_claude", return_value="## Found Skills\nSkill A"),
         ):
             mock_get_repo.return_value = Path("/repo")
@@ -316,10 +327,12 @@ class TestRunAdvise:
             return p.name != "marketplace.json"
 
         with (
-            patch("hephaestus.automation.planner.get_repo_root") as mock_get_repo,
+            patch("hephaestus.automation.advise_runner.get_repo_root") as mock_get_repo,
             patch.object(Path, "exists", patched_exists),
-            patch("hephaestus.automation.planner.shutil.rmtree") as mock_rmtree,
-            patch.object(planner, "_ensure_mnemosyne", return_value=False) as mock_ensure,
+            patch("hephaestus.automation.advise_runner.shutil.rmtree") as mock_rmtree,
+            patch(
+                "hephaestus.automation.advise_runner.ensure_mnemosyne", return_value=False
+            ) as mock_ensure,
         ):
             mock_get_repo.return_value = Path("/repo")
             result = planner._run_advise(123, "Test Issue", "Issue body")

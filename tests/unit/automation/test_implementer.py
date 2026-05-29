@@ -280,6 +280,7 @@ class TestPlanReviewVerdictGate:
                 return_value=gate_return,
             ),
             # Everything past the gate — only reached when gate returns True.
+            patch.object(impl, "_run_advise", return_value="<!-- advise step skipped: test -->"),
             patch.object(impl, "_run_claude_code", return_value="sess-1"),
             patch.object(
                 impl,
@@ -411,8 +412,8 @@ class TestExistingPrSkipsImplementation:
 
     The guard runs BEFORE worktree creation and the plan-review gate, so a
     re-run of the loop never re-implements (and never clobbers) an issue that
-    already has an in-flight PR. The open PR is handled by the later
-    review-prs / address-review / drive-green phases.
+    already has an in-flight PR. The open PR is handled by the implementer's
+    in-loop PR-review + address-review steps and the later drive-green stage.
     """
 
     @pytest.fixture
@@ -467,6 +468,7 @@ class TestExistingPrSkipsImplementation:
                 "hephaestus.automation.implementer.is_plan_review_approved",
                 return_value=True,
             ),
+            patch.object(impl, "_run_advise", return_value="<!-- advise step skipped: test -->"),
             patch.object(impl, "_run_claude_code", return_value="sess-1"),
             patch.object(impl, "_run_impl_review_loop", return_value=(1, "GO", "A")),
             patch.object(impl, "_finalize_pr", return_value=999),

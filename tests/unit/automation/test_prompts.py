@@ -45,6 +45,17 @@ class TestImplementationPrompt:
         # The agent must be told to abort on failure (no "best-effort" wording).
         assert "abort" in out.lower() or "non-negotiable" in out.lower()
 
+    def test_states_task_plan_review_context_model(self) -> None:
+        """The implementer prompt must declare TASK/PLAN/PLAN-REVIEW context."""
+        out = prompts.get_implementation_prompt(issue_number=42)
+        assert "Context you have" in out
+        assert "TASK" in out
+        assert "PLAN" in out
+        # The approved plan's review is part of the implementer's context.
+        assert "Plan Review" in out
+        # Later iterations address inline PR-review threads in the same session.
+        assert "PR-review thread" in out or "PR-review threads" in out
+
 
 class TestPRReviewAnalysisPrompt:
     """Tests for the policy-aware PR review analysis prompt."""
@@ -161,6 +172,82 @@ class TestPlanPrompt:
     def test_substitutes_issue_number(self) -> None:
         out = prompts.get_plan_prompt(99)
         assert "99" in out
+
+    def test_mentions_changes_from_review_section(self) -> None:
+        """Re-planning must produce a ``Changes from review`` section."""
+        out = prompts.get_plan_prompt(99)
+        assert "Changes from review" in out
+        # The prompt must scope it to the re-plan case (prior review present).
+        assert "## 🔍 Plan Review" in out
+
+    def test_states_task_plan_review_context_model(self) -> None:
+        """The planner prompt must declare the TASK/PLAN/REVIEW context it has."""
+        out = prompts.get_plan_prompt(99)
+        assert "Context you have" in out
+        assert "TASK" in out
+        assert "PRIOR PLAN" in out
+        assert "PRIOR REVIEW" in out
+        # It must say it produces the single Implementation Plan comment.
+        assert "# Implementation Plan" in out
+
+
+class TestPlanReviewContextAndVerdict:
+    """Plan-review prompts state their context model and a strict verdict contract."""
+
+    def _render_standalone(self) -> str:
+        return prompts.get_plan_review_prompt(
+            issue_number=1,
+            issue_title="t",
+            issue_body="b",
+            plan_text="p",
+        )
+
+    @staticmethod
+    def _render_loop(iteration: int) -> str:
+        return prompts.get_plan_loop_review_prompt(
+            issue_number=1,
+            issue_title="t",
+            issue_body="b",
+            plan_text="p",
+            learnings="",
+            iteration=iteration,
+            prior_review=None,
+        )
+
+    def test_standalone_review_states_plan_against_task(self) -> None:
+        """The standalone plan reviewer reviews the PLAN against the TASK only."""
+        out = self._render_standalone()
+        assert "TASK" in out
+        assert "PLAN" in out
+        # Must guard against the self-review bug (#455/#468/#484).
+        assert "455" in out or "self-review" in out.lower()
+
+    def test_loop_review_states_plan_against_task(self) -> None:
+        """The plan-loop reviewer reviews the PLAN against the TASK only."""
+        out = self._render_loop(0)
+        assert "TASK" in out
+        # It must say a prior review is not the artifact under review.
+        assert "never treat a prior review" in out.lower() or "self-review" in out.lower()
+
+    def test_standalone_verdict_contract_has_all_three_tokens(self) -> None:
+        """All three verdict tokens must appear and exactly-one-line is required."""
+        out = self._render_standalone()
+        for token in ("**Verdict: APPROVED**", "**Verdict: REVISE**", "**Verdict: BLOCK**"):
+            assert token in out, f"missing verdict token: {token}"
+        # The contract must demand exactly one verdict line and flag omission.
+        assert "EXACTLY ONE" in out
+        assert "CONTRACT VIOLATION" in out
+
+    def test_loop_review_verdict_contract_preserved(self) -> None:
+        """The GO/NOGO Grade/Verdict block (parser contract) must be intact."""
+        out = self._render_loop(0)
+        assert "Grade: <A|B|C|D|F>" in out
+        assert "Verdict: <GO|NOGO>" in out
+        # Both GO and NOGO tokens must be named in the contract text.
+        assert "Verdict: GO" in out
+        assert "Verdict: NOGO" in out
+        # The strengthened contract flags omission as a violation.
+        assert "CONTRACT VIOLATION" in out
 
 
 class TestAdvisePrompt:
@@ -479,6 +566,22 @@ class TestImplLoopStrictRubric:
             assert "Grade: <A|B|C|D|F>" in out
             assert "Verdict: <GO|NOGO>" in out
 
+    def test_impl_loop_prompt_states_context_model(self) -> None:
+        """The impl-loop reviewer must declare TASK/PLAN/PLAN-REVIEW + diff context."""
+        out = self._build(0)
+        assert "Context you have" in out
+        assert "TASK" in out
+        assert "PLAN" in out
+        # It judges the diff and posts inline PR review threads.
+        assert "inline PR review thread" in out
+
+    def test_impl_loop_verdict_contract_flags_omission(self) -> None:
+        """The strengthened GO/NOGO contract must flag a missing verdict line."""
+        out = self._build(0)
+        assert "CONTRACT VIOLATION" in out
+        assert "Verdict: GO" in out
+        assert "Verdict: NOGO" in out
+
 
 class TestAddressReviewPrompt:
     """The address-review prompt is a coordinator that fans out per-file sub-agents."""
@@ -508,6 +611,14 @@ class TestAddressReviewPrompt:
         """Each sub-agent must consult /hephaestus:advise before fixing."""
         out = self._build()
         assert "hephaestus:advise" in out
+
+    def test_states_in_loop_implement_stage_context(self) -> None:
+        """The prompt must state it runs in-loop within the implement stage."""
+        out = self._build()
+        assert "in-loop" in out.lower() or "IN-LOOP" in out
+        assert "implement stage" in out
+        # PR threads live on the PR, not the issue.
+        assert "live on the PR" in out
 
     def test_has_no_early_exit_and_file_ownership_guardrails(self) -> None:
         out = self._build()

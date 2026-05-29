@@ -357,27 +357,35 @@ class TestLatestReviewIsFinal:
 
 
 class TestPostReviewVerdictFallback:
-    """Tests for the defence-in-depth fallback verdict line in _post_review."""
+    """Tests for the defence-in-depth fallback verdict line in _post_review.
+
+    ``_post_review`` now UPSERTS the single ``## 🔍 Plan Review`` comment via
+    ``gh_issue_upsert_comment(issue_number, prefix, body)`` instead of appending
+    via ``gh_issue_comment``, so even the standalone phase converges to one
+    review comment (#455/#468/#484). The body is the third positional argument.
+    """
 
     def test_appends_fallback_when_verdict_missing(self, reviewer: PlanReviewer) -> None:
         """If Claude output has no `**Verdict:`, _post_review appends REVISE."""
-        with patch("hephaestus.automation.plan_reviewer.gh_issue_comment") as mock_comment:
+        with patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_comment") as mock_upsert:
             reviewer._post_review(123, "Just analysis prose, no verdict line.")
 
-        mock_comment.assert_called_once()
-        posted_body: str = mock_comment.call_args[0][1]
+        mock_upsert.assert_called_once()
+        assert mock_upsert.call_args[0][0] == 123
+        assert mock_upsert.call_args[0][1] == "## 🔍 Plan Review"
+        posted_body: str = mock_upsert.call_args[0][2]
         assert "**Verdict: REVISE**" in posted_body
         assert posted_body.startswith("## 🔍 Plan Review")
 
     def test_does_not_double_append_when_verdict_present(self, reviewer: PlanReviewer) -> None:
         """If the review already has any **Verdict: line, no fallback is added."""
-        with patch("hephaestus.automation.plan_reviewer.gh_issue_comment") as mock_comment:
+        with patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_comment") as mock_upsert:
             reviewer._post_review(
                 123,
                 "Some analysis.\n\n**Verdict: APPROVED**",
             )
 
-        posted_body: str = mock_comment.call_args[0][1]
+        posted_body: str = mock_upsert.call_args[0][2]
         # exactly one Verdict line, not two
         assert posted_body.count("**Verdict:") == 1
         assert "**Verdict: APPROVED**" in posted_body
@@ -490,26 +498,26 @@ class TestReviewIssue:
         with (
             patch.object(reviewer, "_latest_review_is_final", return_value=False),
             patch.object(reviewer, "_get_latest_plan", return_value=None),
-            patch("hephaestus.automation.plan_reviewer.gh_issue_comment") as mock_comment,
+            patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_comment") as mock_upsert,
         ):
             result = reviewer._review_issue(123, 0)
 
         assert result.success is True
-        mock_comment.assert_not_called()
+        mock_upsert.assert_not_called()
 
     def test_review_skipped_if_latest_review_is_final(self, reviewer: PlanReviewer) -> None:
         """When the latest plan review is APPROVED, skip posting."""
         with (
             patch.object(reviewer, "_latest_review_is_final", return_value=True),
-            patch("hephaestus.automation.plan_reviewer.gh_issue_comment") as mock_comment,
+            patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_comment") as mock_upsert,
         ):
             result = reviewer._review_issue(123, 0)
 
         assert result.success is True
-        mock_comment.assert_not_called()
+        mock_upsert.assert_not_called()
 
     def test_review_posted(self, reviewer: PlanReviewer) -> None:
-        """When plan exists and no APPROVED review yet, posts review with correct prefix."""
+        """When plan exists and no APPROVED review yet, UPSERTS review with correct prefix."""
         with (
             patch.object(reviewer, "_latest_review_is_final", return_value=False),
             patch.object(
@@ -521,19 +529,20 @@ class TestReviewIssue:
                 "_run_claude_analysis",
                 return_value="Great plan! A few suggestions.\n\n**Verdict: APPROVED**",
             ),
-            patch("hephaestus.automation.plan_reviewer.gh_issue_comment") as mock_comment,
+            patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_comment") as mock_upsert,
         ):
             mock_gh_json.return_value = {"title": "Test Issue", "body": "Issue body"}
             result = reviewer._review_issue(123, 0)
 
         assert result.success is True
-        mock_comment.assert_called_once()
-        posted_body: str = mock_comment.call_args[0][1]
+        mock_upsert.assert_called_once()
+        assert mock_upsert.call_args[0][1] == "## 🔍 Plan Review"
+        posted_body: str = mock_upsert.call_args[0][2]
         assert posted_body.startswith("## 🔍 Plan Review")
         assert "Great plan!" in posted_body
 
     def test_dry_run_no_post(self, mock_options: PlanReviewerOptions) -> None:
-        """dry_run=True → gh_issue_comment never called."""
+        """dry_run=True → gh_issue_upsert_comment never called."""
         mock_options.dry_run = True
         reviewer = PlanReviewer(mock_options)
 
@@ -548,13 +557,13 @@ class TestReviewIssue:
                 "_run_claude_analysis",
                 return_value="Review text\n\n**Verdict: REVISE**",
             ),
-            patch("hephaestus.automation.plan_reviewer.gh_issue_comment") as mock_comment,
+            patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_comment") as mock_upsert,
         ):
             mock_gh_json.return_value = {"title": "Test Issue", "body": "Issue body"}
             result = reviewer._review_issue(123, 0)
 
         assert result.success is True
-        mock_comment.assert_not_called()
+        mock_upsert.assert_not_called()
 
     def test_returns_failure_when_claude_returns_none(self, reviewer: PlanReviewer) -> None:
         """Returns failed WorkerResult when Claude analysis returns None."""

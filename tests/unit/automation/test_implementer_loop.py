@@ -40,14 +40,23 @@ def _nogo(grade: str = "D") -> str:
 
 
 class TestRunImplReviewLoop:
-    """Integration tests for IssueImplementer._run_impl_review_loop."""
+    """Integration tests for the Stage 2 in-loop review + address cycle (#28).
+
+    The loop now drives, per iteration:
+      1. ``_run_impl_review_step`` — a FRESH reviewer that posts inline PR
+         threads and returns ``(verdict_text, posted_thread_ids)``.
+      2. ``_run_address_review_step`` — resumes Session 2 to fix + resolve the
+         posted threads (only when the verdict is not GO and threads exist).
+    No separate ``review-prs`` / ``address-review`` OS process is spawned; both
+    steps are in-process callables on the implementer.
+    """
 
     def test_terminates_on_iter0_go(self, implementer: IssueImplementer, tmp_path: Path) -> None:
         with (
-            patch.object(implementer, "_collect_diff", return_value="diff"),
-            patch.object(implementer, "_collect_changed_files", return_value="files"),
-            patch.object(implementer, "_run_impl_review", return_value=_go()) as mock_rev,
-            patch.object(implementer, "_resume_impl_with_feedback") as mock_resume,
+            patch.object(
+                implementer, "_run_impl_review_step", return_value=(_go(), [])
+            ) as mock_rev,
+            patch.object(implementer, "_run_address_review_step") as mock_addr,
         ):
             iters, verdict, grade = implementer._run_impl_review_loop(
                 issue_number=1,
@@ -58,29 +67,30 @@ class TestRunImplReviewLoop:
                 session_id="sess",
                 slot_id=0,
                 thread_id=None,
+                pr_number=42,
             )
 
         assert iters == 1
         assert verdict == "GO"
         assert grade == "A"
         assert mock_rev.call_count == 1
-        # Resume must NOT be called because iteration 0 already passed
-        mock_resume.assert_not_called()
+        # Address step must NOT be called because iteration 0 already passed.
+        mock_addr.assert_not_called()
 
     def test_runs_3_iterations_on_sustained_nogo(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
         with (
-            patch.object(implementer, "_collect_diff", return_value="diff"),
-            patch.object(implementer, "_collect_changed_files", return_value="files"),
             patch.object(
                 implementer,
-                "_run_impl_review",
-                side_effect=[_nogo("D"), _nogo("C"), _nogo("B")],
+                "_run_impl_review_step",
+                side_effect=[
+                    (_nogo("D"), ["t0"]),
+                    (_nogo("C"), ["t1"]),
+                    (_nogo("B"), ["t2"]),
+                ],
             ) as mock_rev,
-            patch.object(
-                implementer, "_resume_impl_with_feedback", return_value=True
-            ) as mock_resume,
+            patch.object(implementer, "_run_address_review_step", return_value=True) as mock_addr,
         ):
             iters, verdict, grade = implementer._run_impl_review_loop(
                 issue_number=1,
@@ -91,26 +101,27 @@ class TestRunImplReviewLoop:
                 session_id="sess",
                 slot_id=0,
                 thread_id=None,
+                pr_number=42,
             )
 
         assert iters == MAX_REVIEW_ITERATIONS == 3
         assert verdict == "NOGO"
         assert grade == "B"  # last review's grade
         assert mock_rev.call_count == 3
-        # Resume called for iterations 1 and 2 (not 0)
-        assert mock_resume.call_count == 2
+        # Address called for iterations 0 and 1 (not after the final R2 review).
+        assert mock_addr.call_count == 2
 
-    def test_resume_failure_breaks_loop_early(
+    def test_address_resolving_nothing_breaks_loop_early(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
-        """If resume fails after R0 NOGO, the loop must stop, not silently rerun the review."""
+        """If the address step resolves no threads, the loop must stop, not spin."""
         with (
-            patch.object(implementer, "_collect_diff", return_value="diff"),
-            patch.object(implementer, "_collect_changed_files", return_value="files"),
             patch.object(
-                implementer, "_run_impl_review", side_effect=[_nogo("D"), _go()]
+                implementer,
+                "_run_impl_review_step",
+                side_effect=[(_nogo("D"), ["t0"]), (_go(), [])],
             ) as mock_rev,
-            patch.object(implementer, "_resume_impl_with_feedback", return_value=False),
+            patch.object(implementer, "_run_address_review_step", return_value=False),
         ):
             iters, verdict, _ = implementer._run_impl_review_loop(
                 issue_number=1,
@@ -121,21 +132,50 @@ class TestRunImplReviewLoop:
                 session_id="sess",
                 slot_id=0,
                 thread_id=None,
+                pr_number=42,
             )
 
-        assert iters == 1  # only the iter-0 review executed
+        assert iters == 1  # only the iter-0 review executed before the loop stopped
         assert verdict == "NOGO"
         assert mock_rev.call_count == 1
 
-    def test_no_session_id_runs_only_iter0(
+    def test_no_blocking_threads_terminates_loop(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
-        """Without a session_id we cannot resume, so the loop runs once and stops."""
+        """A NOGO verdict but zero posted threads converges (nothing to address)."""
         with (
-            patch.object(implementer, "_collect_diff", return_value="diff"),
-            patch.object(implementer, "_collect_changed_files", return_value="files"),
-            patch.object(implementer, "_run_impl_review", return_value=_nogo()) as mock_rev,
-            patch.object(implementer, "_resume_impl_with_feedback") as mock_resume,
+            patch.object(
+                implementer, "_run_impl_review_step", return_value=(_nogo("C"), [])
+            ) as mock_rev,
+            patch.object(implementer, "_run_address_review_step") as mock_addr,
+        ):
+            iters, verdict, _ = implementer._run_impl_review_loop(
+                issue_number=1,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=42,
+            )
+
+        assert iters == 1
+        assert verdict == "NOGO"
+        # No threads posted → nothing to address → loop stops without addressing.
+        mock_addr.assert_not_called()
+        assert mock_rev.call_count == 1
+
+    def test_no_session_id_stops_before_addressing(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """Without a session_id we cannot resume Session 2, so we never address."""
+        with (
+            patch.object(
+                implementer, "_run_impl_review_step", return_value=(_nogo(), ["t0"])
+            ) as mock_rev,
+            patch.object(implementer, "_run_address_review_step") as mock_addr,
         ):
             iters, verdict, _ = implementer._run_impl_review_loop(
                 issue_number=1,
@@ -146,11 +186,12 @@ class TestRunImplReviewLoop:
                 session_id=None,
                 slot_id=0,
                 thread_id=None,
+                pr_number=42,
             )
 
         assert iters == 1
         assert verdict == "NOGO"
-        mock_resume.assert_not_called()
+        mock_addr.assert_not_called()
         assert mock_rev.call_count == 1
 
     def test_prior_review_passed_to_next_reviewer(
@@ -159,12 +200,12 @@ class TestRunImplReviewLoop:
         """Each reviewer iteration receives the prior iteration's review."""
         review_r0 = _nogo("D")
         with (
-            patch.object(implementer, "_collect_diff", return_value="diff"),
-            patch.object(implementer, "_collect_changed_files", return_value="files"),
             patch.object(
-                implementer, "_run_impl_review", side_effect=[review_r0, _go()]
+                implementer,
+                "_run_impl_review_step",
+                side_effect=[(review_r0, ["t0"]), (_go(), [])],
             ) as mock_rev,
-            patch.object(implementer, "_resume_impl_with_feedback", return_value=True),
+            patch.object(implementer, "_run_address_review_step", return_value=True),
         ):
             implementer._run_impl_review_loop(
                 issue_number=1,
@@ -175,6 +216,7 @@ class TestRunImplReviewLoop:
                 session_id="sess",
                 slot_id=0,
                 thread_id=None,
+                pr_number=42,
             )
 
         # R0: prior_review None
@@ -184,6 +226,40 @@ class TestRunImplReviewLoop:
         # R0 has iteration=0; R1 has iteration=1
         assert mock_rev.call_args_list[0].kwargs["iteration"] == 0
         assert mock_rev.call_args_list[1].kwargs["iteration"] == 1
+
+    def test_no_pr_falls_back_to_diff_only_reviewer(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """With no PR (dry-run / agent didn't open one), review falls back to diff-only.
+
+        The diff-only fallback posts no inline threads and never addresses, so a
+        sustained NOGO simply re-reviews until the iteration cap.
+        """
+        with (
+            patch.object(implementer, "_collect_diff", return_value="diff"),
+            patch.object(implementer, "_collect_changed_files", return_value="files"),
+            patch.object(
+                implementer, "_run_impl_review", side_effect=[_nogo("D"), _nogo("C"), _nogo("B")]
+            ) as mock_diff_rev,
+            patch.object(implementer, "_run_address_review_step") as mock_addr,
+        ):
+            iters, verdict, _ = implementer._run_impl_review_loop(
+                issue_number=1,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=None,
+            )
+
+        assert iters == MAX_REVIEW_ITERATIONS == 3
+        assert verdict == "NOGO"
+        assert mock_diff_rev.call_count == 3
+        # No PR → in-loop address step is never invoked.
+        mock_addr.assert_not_called()
 
 
 class TestRunImplReviewFailsSafe:
@@ -448,3 +524,268 @@ class TestReviewIterationStatePersistence:
         iters, prior = implementer._load_review_iteration_state(9999)
         assert iters == 0
         assert prior is None
+
+
+class TestRunImplReviewStep:
+    """Stage 2 (#28): _run_impl_review_step folds in the inline-PR reviewer."""
+
+    def test_with_pr_posts_inline_threads_via_fresh_reviewer(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """With a PR, the step calls review_pr_inline with the per-iteration token."""
+        with (
+            patch.object(
+                implementer.phase_runner,
+                "_fetch_plan_and_review",
+                return_value=("PLAN body", "## 🔍 Plan Review\n**Verdict: APPROVED**"),
+            ),
+            patch.object(implementer, "_collect_diff", return_value="the-diff"),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.review_pr_inline",
+                return_value=(_nogo("C"), ["thread-1", "thread-2"]),
+            ) as mock_inline,
+        ):
+            text, thread_ids = implementer._run_impl_review_step(
+                issue_number=1,
+                issue_title="t",
+                issue_body="ib",
+                branch_name="b",
+                worktree_path=tmp_path,
+                pr_number=42,
+                iteration=1,
+                prior_review=None,
+            )
+
+        assert thread_ids == ["thread-1", "thread-2"]
+        assert "NOGO" in text
+        # The in-loop reviewer is invoked with the loop iteration so it derives
+        # a FRESH per-iteration reviewer session (reviewer_agent(..., 1)).
+        kwargs = mock_inline.call_args.kwargs
+        assert kwargs["iteration"] == 1
+        assert kwargs["pr_number"] == 42
+        # TASK + PLAN + PLAN_REVIEW + diff are folded into the reviewer context.
+        ctx = kwargs["context"]
+        assert "the-diff" in ctx["pr_diff"]
+        assert "PLAN body" in ctx["issue_body"]
+        assert "APPROVED" in ctx["issue_body"]
+
+    def test_reviewer_uses_per_iteration_session_token(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """review_pr_inline must derive the reviewer agent via reviewer_agent(..., i)."""
+        from hephaestus.automation.session_naming import AGENT_PR_REVIEWER, reviewer_agent
+
+        captured: dict[str, str] = {}
+
+        def _fake_invoke(*, review_agent: str, **_: object) -> dict[str, object]:
+            captured["review_agent"] = review_agent
+            return {"comments": [], "summary": _go()}
+
+        with (
+            patch.object(implementer.phase_runner, "_fetch_plan_and_review", return_value=("", "")),
+            patch.object(implementer, "_collect_diff", return_value="d"),
+            patch(
+                "hephaestus.automation.pr_reviewer.run_pr_review_analysis",
+                side_effect=_fake_invoke,
+            ),
+            patch(
+                "hephaestus.automation.pr_reviewer.gh_pr_review_post",
+                return_value=[],
+            ),
+        ):
+            implementer._run_impl_review_step(
+                issue_number=1,
+                issue_title="t",
+                issue_body="ib",
+                branch_name="b",
+                worktree_path=tmp_path,
+                pr_number=42,
+                iteration=2,
+                prior_review=None,
+            )
+
+        assert captured["review_agent"] == reviewer_agent(AGENT_PR_REVIEWER, 2)
+        assert captured["review_agent"] == "pr-reviewer-r2"
+
+    def test_no_pr_uses_diff_only_reviewer(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """Without a PR, the step falls back to the diff-only reviewer (no posting)."""
+        with (
+            patch.object(implementer, "_collect_diff", return_value="diff"),
+            patch.object(implementer, "_collect_changed_files", return_value="files"),
+            patch.object(implementer, "_run_impl_review", return_value=_go()) as mock_diff_rev,
+            patch("hephaestus.automation.implementer_phase_runner.review_pr_inline") as mock_inline,
+        ):
+            text, thread_ids = implementer._run_impl_review_step(
+                issue_number=1,
+                issue_title="t",
+                issue_body="ib",
+                branch_name="b",
+                worktree_path=tmp_path,
+                pr_number=None,
+                iteration=0,
+                prior_review=None,
+            )
+
+        assert thread_ids == []
+        assert "GO" in text
+        mock_diff_rev.assert_called_once()
+        mock_inline.assert_not_called()
+
+    def test_inline_failure_synthesizes_nogo(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """If the in-loop reviewer raises, the step returns a synthetic NOGO."""
+        with (
+            patch.object(implementer.phase_runner, "_fetch_plan_and_review", return_value=("", "")),
+            patch.object(implementer, "_collect_diff", return_value="d"),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.review_pr_inline",
+                side_effect=RuntimeError("reviewer down"),
+            ),
+        ):
+            text, thread_ids = implementer._run_impl_review_step(
+                issue_number=1,
+                issue_title="t",
+                issue_body="ib",
+                branch_name="b",
+                worktree_path=tmp_path,
+                pr_number=42,
+                iteration=0,
+                prior_review=None,
+            )
+
+        assert thread_ids == []
+        assert "Verdict: NOGO" in text
+        assert "Grade: F" in text
+
+
+class TestRunAddressReviewStep:
+    """Stage 2 (#28): _run_address_review_step folds in address-review in-loop."""
+
+    def test_addresses_commits_pushes_and_resolves(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """The step lists threads, runs the fix session, commits, pushes, resolves."""
+        threads = [
+            {"id": "t1", "path": "a.py", "line": 1, "body": "fix a"},
+            {"id": "t2", "path": "b.py", "line": 2, "body": "fix b"},
+        ]
+        with (
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_pr_list_unresolved_threads",
+                return_value=threads,
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.run_address_fix_session",
+                return_value={"addressed": ["t1"], "replies": {"t1": "fixed a"}},
+            ) as mock_fix,
+            patch.object(implementer.phase_runner, "_commit_if_changes") as mock_commit,
+            patch.object(implementer.phase_runner, "_push_branch") as mock_push,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.resolve_addressed_threads"
+            ) as mock_resolve,
+        ):
+            addressed = implementer._run_address_review_step(
+                issue_number=1,
+                pr_number=42,
+                branch_name="b",
+                worktree_path=tmp_path,
+                iteration=0,
+            )
+
+        assert addressed is True
+        # The fix session resumes Session 2 (AGENT_IMPLEMENTER) via the shared core.
+        assert mock_fix.call_args.kwargs["agent"] == implementer.options.agent
+        mock_commit.assert_called_once()
+        mock_push.assert_called_once()
+        # Hallucination guard: presented set is exactly the threads we listed.
+        resolve_args = mock_resolve.call_args
+        assert resolve_args.args[0] == ["t1"]
+        assert resolve_args.args[2] == {"t1", "t2"}
+
+    def test_no_unresolved_threads_returns_false(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """No unresolved threads → returns False without running a fix session."""
+        with (
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_pr_list_unresolved_threads",
+                return_value=[],
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.run_address_fix_session"
+            ) as mock_fix,
+        ):
+            addressed = implementer._run_address_review_step(
+                issue_number=1,
+                pr_number=42,
+                branch_name="b",
+                worktree_path=tmp_path,
+                iteration=0,
+            )
+
+        assert addressed is False
+        mock_fix.assert_not_called()
+
+    def test_nothing_addressed_returns_false(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """Fix session that addresses nothing → returns False (loop should stop)."""
+        threads = [{"id": "t1", "path": "a.py", "line": 1, "body": "fix a"}]
+        with (
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_pr_list_unresolved_threads",
+                return_value=threads,
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.run_address_fix_session",
+                return_value={"addressed": [], "replies": {}},
+            ),
+            patch.object(implementer.phase_runner, "_commit_if_changes"),
+            patch.object(implementer.phase_runner, "_push_branch"),
+            patch("hephaestus.automation.implementer_phase_runner.resolve_addressed_threads"),
+        ):
+            addressed = implementer._run_address_review_step(
+                issue_number=1,
+                pr_number=42,
+                branch_name="b",
+                worktree_path=tmp_path,
+                iteration=0,
+            )
+
+        assert addressed is False
+
+
+class TestFetchPlanAndReview:
+    """_fetch_plan_and_review extracts the PLAN + PLAN_REVIEW comments."""
+
+    def test_extracts_plan_and_review_bodies(
+        self, implementer: IssueImplementer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hephaestus.automation import review_state as review_state_mod
+
+        comments = [
+            {"body": "# Implementation Plan\n\nStep 1"},
+            {"body": "## 🔍 Plan Review\n\n**Verdict: APPROVED**"},
+            {"body": "some unrelated comment"},
+        ]
+        monkeypatch.setattr(review_state_mod, "_fetch_issue_comments_graphql", lambda _n: comments)
+
+        plan, review = implementer.phase_runner._fetch_plan_and_review(1)
+        assert "Implementation Plan" in plan
+        assert "APPROVED" in review
+
+    def test_returns_empty_on_fetch_failure(
+        self, implementer: IssueImplementer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hephaestus.automation import review_state as review_state_mod
+
+        def _boom(_n: int) -> list:
+            raise RuntimeError("graphql down")
+
+        monkeypatch.setattr(review_state_mod, "_fetch_issue_comments_graphql", _boom)
+        plan, review = implementer.phase_runner._fetch_plan_and_review(1)
+        assert plan == ""
+        assert review == ""

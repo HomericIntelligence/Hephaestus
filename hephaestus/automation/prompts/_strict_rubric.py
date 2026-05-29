@@ -43,16 +43,38 @@ EVALUATE THESE DIMENSIONS:
 6. Verification plan — concrete steps the reviewer can run to confirm
 """
 
+# Verdict contract for the strict loop reviewers (plan-loop + impl-loop). The
+# fenced ``Grade:`` / ``Verdict: <GO|NOGO>`` block below is parsed by
+# ``hephaestus.automation.claude_invoke.parse_review_verdict`` (``_VERDICT_RE``
+# matches ``GO|NO-GO`` case-insensitively). Do NOT change the GO/NOGO tokens or
+# the ``Grade:`` line here without updating that parser in lockstep.
+#
+# Bounded re-ask, NOT silent REVISE: when a reviewer omits the verdict line,
+# ``parse_review_verdict`` already returns AMBIGUOUS (treated as NOGO → the loop
+# iterates), so the loop reviewers fail safe without a forced verdict. The
+# separate standalone plan reviewer (``PLAN_REVIEW_PROMPT`` →
+# ``plan_reviewer._post_review``) currently auto-appends ``**Verdict: REVISE**``
+# when its ``**Verdict: ...**`` line is missing; that silent REVISE can stall
+# convergence and SHOULD instead be a bounded re-ask of the model at that call
+# site (``plan_reviewer.py``, out of scope for this prompts-only change). The
+# strengthened wording below makes the verdict line unambiguous so a re-ask is
+# rarely needed; see follow-up tracked for the runner-side re-ask loop.
 _STRICT_REVIEW_OUTPUT_FORMAT = """
-**Required output format — MUST end with these exact lines:**
+**Required output format (verdict contract — MANDATORY):**
+
+End your response with EXACTLY these two lines, in this order, each on its own
+line, and emit NOTHING after them (no trailing prose, no closing remarks):
 
 ```
 Grade: <A|B|C|D|F>
 Verdict: <GO|NOGO>
 ```
 
-GO is reserved for cases where you are CONFIDENT the artifact is ready as-is.
-Any major finding, missing dimension coverage, or "needs another iteration"
+The `Verdict:` line MUST be present and MUST read either `Verdict: GO` or
+`Verdict: NOGO`. Omitting it, or writing any other token, is a
+CONTRACT VIOLATION (do not rely on a reader inferring the verdict). GO is
+reserved for cases where you are CONFIDENT the artifact is ready as-is. Any
+major finding, missing dimension coverage, or "needs another iteration"
 critique → Verdict: NOGO. When in doubt, NOGO.
 """
 

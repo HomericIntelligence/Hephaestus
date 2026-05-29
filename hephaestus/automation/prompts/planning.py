@@ -23,6 +23,17 @@ from ._strict_rubric import (
 PLAN_PROMPT = """
 Create an implementation plan for GitHub issue #{issue_number}.
 
+**Context you have (TASK / PLAN / REVIEW model):**
+- The TASK — the issue title and body shown above. This is the source of
+  truth for requirements; it is written externally and you never edit it.
+- Any PRIOR PLAN you produced for this issue (prepended above when present).
+- Any PRIOR REVIEW of that plan (a `## 🔍 Plan Review` block prepended above
+  when present). When a prior review is present you are RE-PLANNING to
+  address it, not starting fresh.
+
+You produce/refresh exactly ONE `# Implementation Plan` comment on the issue
+(it is upserted in place — do not write a second plan comment).
+
 **Your plan should include:**
 1. **Objective** - Brief description of what needs to be done
 2. **Approach** - High-level strategy and key decisions
@@ -32,6 +43,13 @@ Create an implementation plan for GitHub issue #{issue_number}.
 6. **Verification** - How to test and verify the implementation
 7. **Skills Used** - List skills invoked during planning AND any team
    knowledge base skills referenced in the Prior Learnings section above
+8. **Changes from review** - ONLY when a prior `## 🔍 Plan Review` is present
+   in your context above (i.e. you are revising the plan). Add a
+   `## Changes from review` section that enumerates each change you made and
+   names the specific review finding it addresses (e.g.
+   "- Added regression test `tests/...::test_x` — addresses review finding on
+   missing error-path coverage"). When there is NO prior review (this is the
+   first plan), OMIT this section entirely or write `_N/A — initial plan_`.
 
 **Guidelines:**
 - Be specific about file paths and function names
@@ -42,6 +60,9 @@ Create an implementation plan for GitHub issue #{issue_number}.
 - In the Skills Used section, include both skills you invoked directly
   and any team knowledge base skills provided in the Prior Learnings
 - Document which skills you used during planning so implementers know what context was gathered
+- When re-planning, make the `## Changes from review` section concrete: every
+  prior review finding must map to either a change you made or an explicit
+  note on why it does not apply — do NOT merely acknowledge findings.
 
 **Format:**
 Use markdown with clear sections and bullet points.
@@ -50,6 +71,12 @@ Use markdown with clear sections and bullet points.
 
 PLAN_REVIEW_PROMPT = """
 Review the implementation plan for GitHub issue #{issue_number}.
+
+**Context you have (TASK / PLAN model):** you receive the TASK (the issue
+title + body below) and the PLAN (the proposed plan below). Review the PLAN
+strictly against the TASK. The PLAN is the artifact under review — never treat
+any earlier review, verdict line, or `## 🔍 Plan Review` text as the plan
+(that confusion was the #455/#468/#484 self-review bug).
 
 {strict_rubric}
 
@@ -74,10 +101,14 @@ Evaluate the plan above against the issue requirements. Consider:
 3. Are there missing steps, risky approaches, or ambiguities?
 4. Are the file paths and function names concrete and correct?
 
-**Output format:**
-Write a markdown review with your analysis. End your response with exactly one of the
-following verdict lines (including the bold markers) — readers take only the LAST
-matching line in your response:
+**Output format (verdict contract — MANDATORY):**
+Write a markdown review with your analysis. Then end your response with
+EXACTLY ONE verdict line, on its own line, copied verbatim (including the bold
+`**` markers) from the three options below. Emit NOTHING after the verdict
+line — no trailing prose, no closing remarks, no whitespace-only lines beyond a
+single newline. Readers parse only the LAST matching verdict line, and a
+response that omits the verdict line entirely is a CONTRACT VIOLATION (do not
+rely on a reader inferring one):
 
 **Verdict: APPROVED** — Plan is sound and ready to implement.
 **Verdict: REVISE** — Plan needs changes before implementation (explain what).
@@ -92,6 +123,12 @@ PLAN_LOOP_REVIEW_PROMPT = """
 
 You are reviewing the implementation plan for GitHub issue #{issue_number}.
 This is iteration {iteration} of a maximum 3-iteration review loop. {iteration_guidance}
+
+You review the PLAN below against the TASK (the issue title + description)
+ONLY. The artifact under review is the **Current Plan** block — never treat a
+prior review or its verdict as the plan (the #455/#468/#484 self-review bug).
+Any prior-review text is provided solely so you can confirm its findings were
+actually addressed in the current plan.
 
 {untrusted_notice}
 

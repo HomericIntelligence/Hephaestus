@@ -103,8 +103,8 @@ class WorkerResult(BaseModel):
     plan_review_not_approved: bool = False
     # Set True when the implementer skipped because an open PR already exists
     # for this issue. Re-implementing would clobber in-flight work; the open
-    # PR is handled by the later review-prs / address-review / drive-green
-    # phases. Not a failure.
+    # PR is handled by the implementer's in-loop PR-review + address-review
+    # steps and the later drive-green stage. Not a failure.
     already_has_pr: bool = False
     # Set True when the reviewer short-circuited (plan already APPROVED, or no
     # plan comment yet); the issue was not reviewed this pass and does not
@@ -147,6 +147,7 @@ class ImplementerOptions(BaseModel):
     skip_closed: bool = True
     auto_merge: bool = True
     dry_run: bool = False
+    enable_advise: bool = True
     enable_learn: bool = True
     enable_follow_up: bool = True
     enable_ui: bool = True
@@ -227,10 +228,12 @@ class CIDriverOptions(BaseModel):
     agent: str = "claude"
     max_workers: int = 3
     dry_run: bool = False
+    enable_advise: bool = True
+    enable_learn: bool = True
     enable_ui: bool = True
     verbose: bool = False
     max_fix_iterations: int = 1  # number of fix attempts before giving up
-    force_merge_on_stall: bool = False  # attempt squash-merge fallback if rebase auto-merge fails
+    force_merge_on_stall: bool = False  # attempt squash-merge fallback if auto-merge fails
 
 
 class DependencyGraph(BaseModel):

@@ -35,8 +35,19 @@ Implement GitHub issue #{issue_number}.
 
 ---
 
+**Context you have (TASK / PLAN / REVIEW model):**
+- The TASK — the issue title + description above (source of truth for
+  requirements; written externally, never edited by you).
+- The PLAN — the single `# Implementation Plan` comment on the issue, plus
+  its `## 🔍 Plan Review` (the approved plan and the review that approved it).
+  Read both before writing code; implement the approved plan.
+- On later loop iterations only: the inline PR-review threads raised against
+  your diff, which you must address in this same session before re-review.
+  Those threads live on the PR, not the issue.
+
 **Implementation Context:**
-- Run `gh issue view {issue_number} --comments` to read the full plan and any comments
+- Run `gh issue view {issue_number} --comments` to read the full plan and its
+  plan review, plus any comments
 - Follow the project's Python conventions and type hint all function signatures
 
 **Critical Requirements:**
@@ -110,6 +121,13 @@ IMPL_LOOP_REVIEW_PROMPT = """
 
 You are reviewing the implementation for GitHub issue #{issue_number}.
 This is iteration {iteration} of a maximum 3-iteration review loop. {iteration_guidance}
+
+**Context you have (TASK / PLAN / REVIEW model):** the TASK (issue title +
+description below), the PLAN and its `## 🔍 Plan Review` on the issue (the
+approved plan the diff is meant to implement), and the implementer's diff
+below. Judge the diff against the TASK and that approved PLAN. Post your
+concrete findings as inline PR review threads on the changed lines, then end
+with the single Grade/Verdict line defined at the bottom of this prompt.
 
 {untrusted_notice}
 

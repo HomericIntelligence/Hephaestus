@@ -27,7 +27,7 @@ from .claude_invoke import invoke_claude_with_session, scan_quota_reset
 from .claude_models import reviewer_model
 from .claude_timeouts import plan_reviewer_claude_timeout
 from .git_utils import get_repo_info, get_repo_root, get_repo_slug, issue_ref
-from .github_api import _gh_call, gh_issue_comment, gh_issue_json
+from .github_api import _gh_call, gh_issue_json, gh_issue_upsert_comment
 from .models import PLAN_COMMENT_MARKER, PlanReviewerOptions, WorkerResult
 from .prompts import get_plan_review_prompt
 from .review_state import (
@@ -548,7 +548,12 @@ class PlanReviewer:
             return None
 
     def _post_review(self, issue_number: int, review_text: str) -> None:
-        """Post the plan review as a comment on the issue.
+        """Upsert the plan review as the issue's single review comment.
+
+        Updates the one ``## 🔍 Plan Review`` comment in place (via
+        :func:`gh_issue_upsert_comment`) rather than appending a new one, so
+        even when this standalone phase runs it converges to a single review
+        comment per issue instead of accumulating duplicates (#455/#468/#484).
 
         Defence-in-depth: if Claude's output omits the verdict line entirely
         (model misformat), append `_FALLBACK_VERDICT_LINE` (= REVISE) so the
@@ -568,7 +573,7 @@ class PlanReviewer:
             )
             review_text = f"{review_text.rstrip()}\n\n{_FALLBACK_VERDICT_LINE}\n"
         comment_body = f"{_REVIEW_PREFIX}\n\n{review_text}"
-        gh_issue_comment(issue_number, comment_body)
+        gh_issue_upsert_comment(issue_number, _REVIEW_PREFIX, comment_body)
         logger.info("Posted plan review to issue #%s", issue_number)
 
     def _print_summary(self, results: dict[int, WorkerResult]) -> None:

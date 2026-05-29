@@ -8,7 +8,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.agents.runtime import AgentRunResult
-from hephaestus.automation.address_review import AddressReviewer
+from hephaestus.automation.address_review import (
+    AddressReviewer,
+    _parse_addressed_block,
+    resolve_addressed_threads,
+    run_address_fix_session,
+)
 from hephaestus.automation.models import AddressReviewOptions
 
 # ---------------------------------------------------------------------------
@@ -429,3 +434,101 @@ class TestAddressReviewerPreservedReporting:
             ar.run()
 
         mock_wm.cleanup_all.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Extracted module-level cores (Stage 2, #28) shared with the implementer loop
+# ---------------------------------------------------------------------------
+
+
+class TestParseAddressedBlock:
+    """_parse_addressed_block is the trace-free shared JSON parser."""
+
+    def test_extracts_last_block(self) -> None:
+        payload = {"addressed": ["t1"], "replies": {"t1": "fixed"}}
+        text = "```json\n{}\n```\nmore\n```json\n" + json.dumps(payload) + "\n```"
+        assert _parse_addressed_block(text)["addressed"] == ["t1"]
+
+    def test_no_block_defaults(self) -> None:
+        assert _parse_addressed_block("no json") == {"addressed": [], "replies": {}}
+
+    def test_invalid_json_defaults(self) -> None:
+        assert _parse_addressed_block("```json\n{bad}\n```") == {"addressed": [], "replies": {}}
+
+
+class TestResolveAddressedThreadsModuleLevel:
+    """Module-level resolve_addressed_threads keeps the #661 hallucination guard."""
+
+    def test_resolves_only_presented_threads(self) -> None:
+        with patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve:
+            resolve_addressed_threads(
+                ["t-real", "t-hallucinated"],
+                {"t-real": "fixed"},
+                {"t-real"},
+                dry_run=False,
+            )
+        # The hallucinated id (not in the presented set) must NOT be resolved.
+        mock_resolve.assert_called_once_with("t-real", "fixed", dry_run=False)
+
+    def test_forwards_dry_run(self) -> None:
+        with patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve:
+            resolve_addressed_threads(["t1"], {"t1": "r"}, {"t1"}, dry_run=True)
+        mock_resolve.assert_called_once_with("t1", "r", dry_run=True)
+
+
+class TestRunAddressFixSessionModuleLevel:
+    """run_address_fix_session is the shared fix-session core; resumes AGENT_IMPLEMENTER."""
+
+    def test_dry_run_returns_empty(self, tmp_path: Path) -> None:
+        out = run_address_fix_session(
+            issue_number=1,
+            pr_number=42,
+            worktree_path=tmp_path,
+            threads=[{"id": "t1", "path": "a.py", "line": 1, "body": "fix"}],
+            agent="claude",
+            repo_root=tmp_path,
+            parse_fn=_parse_addressed_block,
+            log_file=tmp_path / "log.txt",
+            dry_run=True,
+        )
+        assert out == {"addressed": [], "replies": {}}
+
+    def test_claude_path_resumes_implementer_session(self, tmp_path: Path) -> None:
+        """The Claude path invokes the implementer session (Session 2) and parses output."""
+        from hephaestus.automation.session_naming import AGENT_IMPLEMENTER
+
+        captured: dict[str, str] = {}
+
+        def _fake_invoke(*, agent: str, **_: object) -> tuple[str, str]:
+            captured["agent"] = agent
+            return (
+                '{"result": "```json\\n{\\"addressed\\": [\\"t1\\"], \\"replies\\": {}}\\n```"}',
+                "",
+            )
+
+        with (
+            patch("hephaestus.automation.address_review.get_repo_slug", return_value="Repo"),
+            patch(
+                "hephaestus.automation.address_review.current_trunk_githash",
+                return_value="abc1234",
+            ),
+            patch(
+                "hephaestus.automation.address_review.invoke_claude_with_session",
+                side_effect=_fake_invoke,
+            ),
+        ):
+            out = run_address_fix_session(
+                issue_number=1,
+                pr_number=42,
+                worktree_path=tmp_path,
+                threads=[{"id": "t1", "path": "a.py", "line": 1, "body": "fix"}],
+                agent="claude",
+                repo_root=tmp_path,
+                parse_fn=_parse_addressed_block,
+                log_file=tmp_path / "log.txt",
+                dry_run=False,
+            )
+
+        assert out["addressed"] == ["t1"]
+        # Fixes land in the long-lived implementer session, not a fresh one.
+        assert captured["agent"] == AGENT_IMPLEMENTER

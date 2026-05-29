@@ -8,7 +8,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation.models import ReviewerOptions
-from hephaestus.automation.pr_reviewer import PRReviewer, _parse_json_block
+from hephaestus.automation.pr_reviewer import (
+    PRReviewer,
+    _parse_json_block,
+    gather_impl_review_context,
+    review_pr_inline,
+    run_pr_review_analysis,
+)
 
 # ---------------------------------------------------------------------------
 # _parse_json_block (module-level function)
@@ -426,3 +432,148 @@ class TestGatherPrContextPolicyState:
             ctx = reviewer._gather_pr_context(pr_number=1, issue_number=1, worktree_path=tmp_path)
         assert ctx["auto_merge_enabled"] is False
         assert ctx["commits_signing_state"] == []
+
+
+# ---------------------------------------------------------------------------
+# Extracted in-loop cores (Stage 2, #28) shared with the implementer session
+# ---------------------------------------------------------------------------
+
+
+class TestGatherImplReviewContext:
+    """gather_impl_review_context folds TASK + PLAN + PLAN_REVIEW + diff together."""
+
+    def test_composes_full_context(self) -> None:
+        ctx = gather_impl_review_context(
+            pr_number=42,
+            issue_number=1,
+            issue_title="Add widget",
+            issue_body="The widget body.",
+            plan_text="# Implementation Plan\nStep 1",
+            plan_review_text="## 🔍 Plan Review\n**Verdict: APPROVED**",
+            diff_text="diff --git a/x b/x",
+        )
+        assert ctx["pr_diff"] == "diff --git a/x b/x"
+        # TASK title + body and both PLAN sections are surfaced to the reviewer.
+        assert "Add widget" in ctx["issue_body"]
+        assert "The widget body." in ctx["issue_body"]
+        assert "## PLAN" in ctx["issue_body"]
+        assert "Step 1" in ctx["issue_body"]
+        assert "## PLAN_REVIEW" in ctx["issue_body"]
+        assert "APPROVED" in ctx["issue_body"]
+
+    def test_missing_plan_sections_get_placeholders(self) -> None:
+        ctx = gather_impl_review_context(
+            pr_number=42,
+            issue_number=1,
+            issue_title="t",
+            issue_body="b",
+            plan_text="",
+            plan_review_text="",
+            diff_text="",
+        )
+        assert "no plan comment found" in ctx["issue_body"]
+        assert "no plan-review comment found" in ctx["issue_body"]
+
+
+class TestRunPrReviewAnalysis:
+    """run_pr_review_analysis is the shared analysis core (standalone + in-loop)."""
+
+    def test_dry_run_returns_placeholder(self, tmp_path: Path) -> None:
+        out = run_pr_review_analysis(
+            pr_number=1,
+            issue_number=1,
+            worktree_path=tmp_path,
+            context={},
+            agent="claude",
+            state_dir=tmp_path,
+            dry_run=True,
+        )
+        assert out["comments"] == []
+        assert "DRY RUN" in out["summary"]
+
+    def test_passes_review_agent_token_to_claude(self, tmp_path: Path) -> None:
+        """The review_agent token is forwarded verbatim to invoke_claude_with_session."""
+        captured: dict[str, str] = {}
+
+        def _fake_invoke(*, agent: str, **_: object) -> tuple[str, str]:
+            captured["agent"] = agent
+            return (
+                '{"result": "```json\\n{\\"comments\\": [], \\"summary\\": \\"ok\\"}\\n```"}',
+                "",
+            )
+
+        with (
+            patch("hephaestus.automation.pr_reviewer.get_repo_root", return_value=tmp_path),
+            patch("hephaestus.automation.pr_reviewer.get_repo_slug", return_value="Repo"),
+            patch(
+                "hephaestus.automation.pr_reviewer.current_trunk_githash",
+                return_value="abc1234",
+            ),
+            patch(
+                "hephaestus.automation.pr_reviewer.invoke_claude_with_session",
+                side_effect=_fake_invoke,
+            ),
+        ):
+            run_pr_review_analysis(
+                pr_number=1,
+                issue_number=1,
+                worktree_path=tmp_path,
+                context={"pr_diff": "d"},
+                agent="claude",
+                review_agent="pr-reviewer-r1",
+                state_dir=tmp_path,
+                dry_run=False,
+            )
+        assert captured["agent"] == "pr-reviewer-r1"
+
+
+class TestReviewPrInline:
+    """review_pr_inline runs a FRESH per-iteration reviewer and posts inline threads."""
+
+    def test_posts_threads_and_returns_verdict(self, tmp_path: Path) -> None:
+        analysis = {
+            "comments": [{"path": "a.py", "line": 1, "body": "fix"}],
+            "summary": "Findings.\n\nGrade: C\nVerdict: NOGO\n",
+        }
+        with (
+            patch(
+                "hephaestus.automation.pr_reviewer.run_pr_review_analysis",
+                return_value=analysis,
+            ) as mock_analysis,
+            patch(
+                "hephaestus.automation.pr_reviewer.gh_pr_review_post",
+                return_value=["thread-1"],
+            ) as mock_post,
+        ):
+            summary, thread_ids = review_pr_inline(
+                pr_number=42,
+                issue_number=1,
+                worktree_path=tmp_path,
+                context={"pr_diff": "d"},
+                agent="claude",
+                iteration=2,
+                state_dir=tmp_path,
+                dry_run=False,
+            )
+
+        assert thread_ids == ["thread-1"]
+        assert "NOGO" in summary
+        # FRESH per-iteration reviewer session: reviewer_agent(AGENT_PR_REVIEWER, 2).
+        assert mock_analysis.call_args.kwargs["review_agent"] == "pr-reviewer-r2"
+        mock_post.assert_called_once()
+        assert mock_post.call_args.kwargs["pr_number"] == 42
+
+    def test_dry_run_skips_posting(self, tmp_path: Path) -> None:
+        with patch("hephaestus.automation.pr_reviewer.gh_pr_review_post") as mock_post:
+            _summary, thread_ids = review_pr_inline(
+                pr_number=42,
+                issue_number=1,
+                worktree_path=tmp_path,
+                context={},
+                agent="claude",
+                iteration=0,
+                state_dir=tmp_path,
+                dry_run=True,
+            )
+        assert thread_ids == []
+        mock_post.assert_not_called()

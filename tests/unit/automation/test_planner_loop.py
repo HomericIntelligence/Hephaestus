@@ -2,12 +2,30 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation.models import PlannerOptions
+from hephaestus.automation.models import PLAN_COMMENT_MARKER, PlannerOptions
 from hephaestus.automation.planner import MAX_REVIEW_ITERATIONS, Planner
+from hephaestus.automation.review_state import PLAN_REVIEW_PREFIX, is_plan_review_approved
+
+
+@pytest.fixture(autouse=True)
+def _patch_loop_upsert() -> Any:
+    """Stub the per-iteration comment upsert so loop tests stay hermetic.
+
+    ``PlanReviewLoop.run`` now upserts the single PLAN and REVIEW comments on
+    every iteration (Stage 1). Without this stub the loop would issue real
+    ``gh api graphql`` / comment calls. Tests that need to inspect the upserts
+    re-patch this same target locally to capture call args.
+    """
+    with patch(
+        "hephaestus.automation.planner_review_loop.gh_issue_upsert_comment",
+        return_value=None,
+    ) as mock_upsert:
+        yield mock_upsert
 
 
 @pytest.fixture
@@ -141,6 +159,237 @@ class TestRunPlanReviewLoop:
         assert second_kwargs.get("prior_review") == review_iter0
 
 
+class TestLoopUpsertsPlanAndReview:
+    """Stage 1: each loop iteration upserts ONE plan + ONE review comment.
+
+    The issue must hold at most one ``# Implementation Plan`` and one
+    ``## 🔍 Plan Review`` comment, both upserted in place rather than appended
+    (the #455/#468/#484 self-review bug). These tests assert the loop calls
+    ``gh_issue_upsert_comment`` with the canonical markers and normalises the
+    bodies to start with those markers.
+    """
+
+    def test_upserts_plan_and_review_each_iteration(
+        self, planner: Planner, _patch_loop_upsert: Any
+    ) -> None:
+        """Three NOGO iterations → 3 plan upserts + 3 review upserts (6 total)."""
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
+                return_value={"title": "T", "body": "B"},
+            ),
+            patch.object(planner, "_generate_plan", side_effect=["plan v0", "plan v1", "plan v2"]),
+            patch.object(planner, "_capture_planner_learnings", return_value=""),
+            patch.object(
+                planner,
+                "_run_plan_review",
+                side_effect=[_nogo_review("D"), _nogo_review("C"), _nogo_review("B")],
+            ),
+        ):
+            planner._run_plan_review_loop(123, slot_id=0)
+
+        markers = [call.args[1] for call in _patch_loop_upsert.call_args_list]
+        assert markers.count(PLAN_COMMENT_MARKER) == 3
+        assert markers.count(PLAN_REVIEW_PREFIX) == 3
+
+    def test_plan_body_gets_marker_prepended_when_missing(
+        self, planner: Planner, _patch_loop_upsert: Any
+    ) -> None:
+        """A plan that lacks the marker must be upserted WITH the marker prefixed."""
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
+                return_value={"title": "T", "body": "B"},
+            ),
+            patch.object(planner, "_generate_plan", return_value="## Objective\nDo it"),
+            patch.object(planner, "_capture_planner_learnings", return_value=""),
+            patch.object(planner, "_run_plan_review", return_value=_go_review()),
+        ):
+            planner._run_plan_review_loop(123, slot_id=0)
+
+        plan_calls = [
+            c for c in _patch_loop_upsert.call_args_list if c.args[1] == PLAN_COMMENT_MARKER
+        ]
+        assert plan_calls, "expected a PLAN upsert"
+        plan_body = plan_calls[0].args[2]
+        assert plan_body.startswith(PLAN_COMMENT_MARKER)
+        assert "## Objective" in plan_body
+
+    def test_plan_body_passthrough_when_marker_present(
+        self, planner: Planner, _patch_loop_upsert: Any
+    ) -> None:
+        """A plan that already starts with the marker is upserted unchanged (no double marker)."""
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
+                return_value={"title": "T", "body": "B"},
+            ),
+            patch.object(planner, "_generate_plan", return_value=f"{PLAN_COMMENT_MARKER}\n\nbody"),
+            patch.object(planner, "_capture_planner_learnings", return_value=""),
+            patch.object(planner, "_run_plan_review", return_value=_go_review()),
+        ):
+            planner._run_plan_review_loop(123, slot_id=0)
+
+        plan_calls = [
+            c for c in _patch_loop_upsert.call_args_list if c.args[1] == PLAN_COMMENT_MARKER
+        ]
+        plan_body = plan_calls[0].args[2]
+        # Marker appears exactly once — not prepended a second time.
+        assert plan_body.count(PLAN_COMMENT_MARKER) == 1
+
+    def test_review_body_gets_prefix_prepended_when_missing(
+        self, planner: Planner, _patch_loop_upsert: Any
+    ) -> None:
+        """A reviewer output lacking the prefix must be upserted WITH the prefix."""
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
+                return_value={"title": "T", "body": "B"},
+            ),
+            patch.object(planner, "_generate_plan", return_value="plan"),
+            patch.object(planner, "_capture_planner_learnings", return_value=""),
+            patch.object(planner, "_run_plan_review", return_value=_go_review()),
+        ):
+            planner._run_plan_review_loop(123, slot_id=0)
+
+        review_calls = [
+            c for c in _patch_loop_upsert.call_args_list if c.args[1] == PLAN_REVIEW_PREFIX
+        ]
+        assert review_calls, "expected a REVIEW upsert"
+        assert review_calls[0].args[2].startswith(PLAN_REVIEW_PREFIX)
+
+    def test_go_review_body_carries_canonical_approved_verdict(
+        self, planner: Planner, _patch_loop_upsert: Any
+    ) -> None:
+        """A GO loop verdict must upsert a REVIEW comment ending in **Verdict: APPROVED**.
+
+        The loop reviewer speaks GO/NOGO, but the implementer's gate
+        (is_plan_review_approved) reads the APPROVED/REVISE/BLOCK vocabulary via
+        review_state.VERDICT_LINE_RE. Without this canonical bridge line a GO
+        plan would never be implemented (the gate would not match GO).
+        """
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
+                return_value={"title": "T", "body": "B"},
+            ),
+            patch.object(planner, "_generate_plan", return_value="plan"),
+            patch.object(planner, "_capture_planner_learnings", return_value=""),
+            patch.object(planner, "_run_plan_review", return_value=_go_review()),
+        ):
+            planner._run_plan_review_loop(123, slot_id=0)
+
+        review_body = next(
+            c.args[2] for c in _patch_loop_upsert.call_args_list if c.args[1] == PLAN_REVIEW_PREFIX
+        )
+        # is_plan_review_approved parses the LAST **Verdict: ...** line.
+        assert is_plan_review_approved(123, [{"body": review_body}]) is True
+        assert "**Verdict: APPROVED**" in review_body
+
+    def test_nogo_review_body_carries_canonical_revise_verdict(
+        self, planner: Planner, _patch_loop_upsert: Any
+    ) -> None:
+        """A NOGO-exhausted loop must upsert a REVIEW that the gate reads as NOT approved."""
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
+                return_value={"title": "T", "body": "B"},
+            ),
+            patch.object(planner, "_generate_plan", side_effect=["v0", "v1", "v2"]),
+            patch.object(planner, "_capture_planner_learnings", return_value=""),
+            patch.object(
+                planner,
+                "_run_plan_review",
+                side_effect=[_nogo_review("D"), _nogo_review("D"), _nogo_review("D")],
+            ),
+        ):
+            planner._run_plan_review_loop(123, slot_id=0)
+
+        review_body = [
+            c.args[2] for c in _patch_loop_upsert.call_args_list if c.args[1] == PLAN_REVIEW_PREFIX
+        ][-1]
+        assert "**Verdict: REVISE**" in review_body
+        assert is_plan_review_approved(123, [{"body": review_body}]) is False
+
+    def test_replan_plan_body_has_changes_from_review_section(
+        self, planner: Planner, _patch_loop_upsert: Any
+    ) -> None:
+        """On a re-plan (iteration > 0), the upserted PLAN must carry a Changes-from-review section.
+
+        Iteration 0 gets a NOGO, so iteration 1 re-plans with ``prior_review``
+        set. The model output here omits the section, so the loop must append
+        a defensive ``## Changes from review`` fallback.
+        """
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
+                return_value={"title": "T", "body": "B"},
+            ),
+            patch.object(planner, "_generate_plan", side_effect=["plan v0", "plan v1"]),
+            patch.object(planner, "_capture_planner_learnings", return_value=""),
+            patch.object(
+                planner,
+                "_run_plan_review",
+                side_effect=[_nogo_review("D"), _go_review()],
+            ),
+        ):
+            planner._run_plan_review_loop(123, slot_id=0)
+
+        plan_calls = [
+            c for c in _patch_loop_upsert.call_args_list if c.args[1] == PLAN_COMMENT_MARKER
+        ]
+        # First plan (iteration 0, no prior review) must NOT have the section.
+        assert "## Changes from review" not in plan_calls[0].args[2]
+        # Second plan (iteration 1, re-plan) MUST have it.
+        assert "## Changes from review" in plan_calls[1].args[2]
+
+    def test_replan_does_not_duplicate_existing_changes_section(
+        self, planner: Planner, _patch_loop_upsert: Any
+    ) -> None:
+        """If the re-planned model output already has the section, no fallback is appended."""
+        plan_with_section = "plan v1\n\n## Changes from review\n\nAddressed the prior NOGO."
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
+                return_value={"title": "T", "body": "B"},
+            ),
+            patch.object(planner, "_generate_plan", side_effect=["plan v0", plan_with_section]),
+            patch.object(planner, "_capture_planner_learnings", return_value=""),
+            patch.object(
+                planner,
+                "_run_plan_review",
+                side_effect=[_nogo_review("D"), _go_review()],
+            ),
+        ):
+            planner._run_plan_review_loop(123, slot_id=0)
+
+        plan_calls = [
+            c for c in _patch_loop_upsert.call_args_list if c.args[1] == PLAN_COMMENT_MARKER
+        ]
+        assert plan_calls[1].args[2].count("## Changes from review") == 1
+
+    def test_upsert_failure_does_not_abort_loop(self, planner: Planner) -> None:
+        """A failing upsert is non-fatal — the loop still completes and returns the plan."""
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
+                return_value={"title": "T", "body": "B"},
+            ),
+            patch(
+                "hephaestus.automation.planner_review_loop.gh_issue_upsert_comment",
+                side_effect=RuntimeError("github down"),
+            ),
+            patch.object(planner, "_generate_plan", return_value="plan v0"),
+            patch.object(planner, "_capture_planner_learnings", return_value=""),
+            patch.object(planner, "_run_plan_review", return_value=_go_review()),
+        ):
+            plan, _review, iters, verdict_is_go = planner._run_plan_review_loop(123, slot_id=0)
+
+        assert plan == "plan v0"
+        assert iters == 1
+        assert verdict_is_go is True
+
+
 class TestCapturePlannerLearnings:
     """Learnings capture must fail safely (return '') without raising."""
 
@@ -155,6 +404,22 @@ class TestCapturePlannerLearnings:
         with patch.object(planner, "_call_claude", return_value="- learning A\n- learning B"):
             out = planner._capture_planner_learnings(123, "plan text")
         assert "learning A" in out
+
+    def test_resumes_planner_session(self, planner: Planner) -> None:
+        """Stage 1: capturing learnings RESUMES the planner session (AGENT_PLANNER).
+
+        The learnings step must reuse the planner's own session so the model
+        still "remembers" the plan it just wrote, rather than opening a
+        separate AGENT_LEARNINGS session.
+        """
+        from hephaestus.automation.session_naming import AGENT_LEARNINGS, AGENT_PLANNER
+
+        with patch.object(planner, "_call_claude", return_value="- learning A") as mock_call:
+            planner._capture_planner_learnings(123, "plan text")
+
+        agent = mock_call.call_args.kwargs["agent"]
+        assert agent == AGENT_PLANNER
+        assert agent != AGENT_LEARNINGS
 
 
 class TestRunPlanReview:
@@ -175,48 +440,100 @@ class TestRunPlanReview:
         assert "Verdict: NOGO" in out
         assert "Grade: F" in out
 
+    def test_uses_fresh_per_iteration_reviewer_session(self, planner: Planner) -> None:
+        """Stage 1: the reviewer gets a FRESH session per iteration (``-r{iteration}``).
+
+        The reviewer must never resume its own prior verdict — each iteration
+        is an unbiased fresh session keyed on ``reviewer_agent(...)``.
+        """
+        from hephaestus.automation.session_naming import AGENT_PLAN_REVIEWER, reviewer_agent
+
+        captured: list[str] = []
+
+        def _capture(*_args: Any, **kwargs: Any) -> str:
+            captured.append(kwargs["agent"])
+            return _go_review()
+
+        with patch.object(planner, "_call_claude", side_effect=_capture):
+            for i in range(3):
+                planner._run_plan_review(
+                    issue_number=1,
+                    issue_title="t",
+                    issue_body="b",
+                    plan_text="p",
+                    learnings="",
+                    iteration=i,
+                    prior_review=None,
+                )
+
+        assert captured == [
+            reviewer_agent(AGENT_PLAN_REVIEWER, 0),
+            reviewer_agent(AGENT_PLAN_REVIEWER, 1),
+            reviewer_agent(AGENT_PLAN_REVIEWER, 2),
+        ]
+        # Each iteration is a distinct session token.
+        assert len(set(captured)) == 3
+
 
 class TestPostPlanWithReview:
-    """The final plan comment must include the final-review block."""
+    """The final plan comment must be UPSERTED and include the final-review block.
+
+    ``_post_plan`` now upserts the single ``# Implementation Plan`` comment via
+    ``gh_issue_upsert_comment(issue_number, PLAN_COMMENT_MARKER, body)`` instead
+    of appending via ``gh_issue_comment``, so the issue never accumulates
+    duplicate plan comments (#455/#468/#484). The body is the third positional
+    argument (marker is the second).
+    """
+
+    def test_post_plan_upserts_with_plan_marker(self, planner: Planner) -> None:
+        """The upsert must key off the canonical PLAN_COMMENT_MARKER."""
+        from hephaestus.automation.models import PLAN_COMMENT_MARKER
+
+        with patch("hephaestus.automation.planner.gh_issue_upsert_comment") as mock_cmt:
+            planner._post_plan(123, "plan body", final_review="Grade: B\nVerdict: GO")
+        assert mock_cmt.call_args[0][0] == 123
+        assert mock_cmt.call_args[0][1] == PLAN_COMMENT_MARKER
+        body = mock_cmt.call_args[0][2]
+        assert body.startswith(PLAN_COMMENT_MARKER)
 
     def test_post_plan_includes_review_when_present(self, planner: Planner) -> None:
-        with patch("hephaestus.automation.planner.gh_issue_comment") as mock_cmt:
+        with patch("hephaestus.automation.planner.gh_issue_upsert_comment") as mock_cmt:
             planner._post_plan(123, "plan body", final_review="Grade: B\nVerdict: GO")
-        body = mock_cmt.call_args[0][1]
+        body = mock_cmt.call_args[0][2]
         assert "plan body" in body
         assert "Grade: B" in body
         assert "Verdict: GO" in body
 
     def test_post_plan_omits_review_block_when_none(self, planner: Planner) -> None:
-        with patch("hephaestus.automation.planner.gh_issue_comment") as mock_cmt:
+        with patch("hephaestus.automation.planner.gh_issue_upsert_comment") as mock_cmt:
             planner._post_plan(123, "plan body", final_review=None)
-        body = mock_cmt.call_args[0][1]
+        body = mock_cmt.call_args[0][2]
         assert "plan body" in body
         assert "Final review verdict" not in body
 
     def test_post_plan_includes_nogo_banner_when_verdict_is_false(self, planner: Planner) -> None:
         """When verdict_is_go=False a NOGO-EXHAUSTED banner must appear in the comment (#369)."""
-        with patch("hephaestus.automation.planner.gh_issue_comment") as mock_cmt:
+        with patch("hephaestus.automation.planner.gh_issue_upsert_comment") as mock_cmt:
             planner._post_plan(
                 123,
                 "plan body",
                 final_review="Grade: D\nVerdict: NOGO",
                 verdict_is_go=False,
             )
-        body = mock_cmt.call_args[0][1]
+        body = mock_cmt.call_args[0][2]
         assert "NOGO-EXHAUSTED" in body
         assert "plan body" in body
 
     def test_post_plan_omits_nogo_banner_on_go(self, planner: Planner) -> None:
         """A GO plan must not include the NOGO banner."""
-        with patch("hephaestus.automation.planner.gh_issue_comment") as mock_cmt:
+        with patch("hephaestus.automation.planner.gh_issue_upsert_comment") as mock_cmt:
             planner._post_plan(
                 123,
                 "plan body",
                 final_review="Grade: A\nVerdict: GO",
                 verdict_is_go=True,
             )
-        body = mock_cmt.call_args[0][1]
+        body = mock_cmt.call_args[0][2]
         assert "NOGO-EXHAUSTED" not in body
         assert "plan body" in body
 

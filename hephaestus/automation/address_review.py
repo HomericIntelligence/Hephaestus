@@ -20,6 +20,7 @@ import re
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,6 +63,214 @@ from .status_tracker import StatusTracker  # noqa: F401 — re-exported for test
 from .worktree_manager import WorktreeManager  # noqa: F401 — re-exported for test patching
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_addressed_block(text: str) -> dict[str, Any]:
+    """Extract the last ```json``` block as an ``{"addressed", "replies"}`` dict.
+
+    Trace-free parser shared by the in-loop address step (#28). The standalone
+    :meth:`AddressReviewer._parse_json_block` wraps this with a diagnostic
+    trace-file writer; callers that don't need the trace use this directly.
+
+    Args:
+        text: Claude's full response text.
+
+    Returns:
+        Parsed dict with ``"addressed"`` and ``"replies"`` keys, or defaults
+        if no parseable ``json`` block is present.
+
+    """
+    matches = re.findall(r"```json\s*(.*?)\s*```", text, re.DOTALL)
+    if not matches:
+        return {"addressed": [], "replies": {}}
+    try:
+        return dict(json.loads(matches[-1]))
+    except json.JSONDecodeError:
+        return {"addressed": [], "replies": {}}
+
+
+def run_address_fix_session(
+    *,
+    issue_number: int,
+    pr_number: int,
+    worktree_path: Path,
+    threads: list[dict[str, Any]],
+    agent: str,
+    repo_root: Path,
+    parse_fn: Callable[[str], dict[str, Any]],
+    log_file: Path,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Run the address-review fix session and return Claude's parsed result.
+
+    Shared core of :meth:`AddressReviewer._run_fix_session` and the in-loop
+    implementer address step (Stage 2, #28). Builds the address-review prompt
+    (which fans out one sub-agent per file, #661), runs the implementer agent,
+    and returns the parsed ``{"addressed", "replies"}`` dict.
+
+    The Claude path resumes the implementer's deterministic
+    :data:`AGENT_IMPLEMENTER` session so fixes land in the same long-lived
+    Session 2 transcript. Codex starts a fresh session (it has no
+    deterministic-UUID resume).
+
+    Args:
+        issue_number: GitHub issue number.
+        pr_number: GitHub PR number.
+        worktree_path: Worktree containing the PR branch.
+        threads: Unresolved thread dicts (``id``/``path``/``line``/``body``).
+        agent: Selected implementation agent (``"claude"`` / ``"codex"``).
+        repo_root: Repo root used for session-naming githash + slug.
+        parse_fn: Callable ``(text) -> dict`` used to parse Claude's output.
+            The standalone path passes its trace-writing method; the in-loop
+            path passes :func:`_parse_addressed_block`.
+        log_file: Path to write the raw session log to.
+        dry_run: When True, skip the agent call and return empty result.
+
+    Returns:
+        Parsed dict with ``"addressed"`` and ``"replies"`` keys.
+
+    """
+    if dry_run:
+        logger.info("[DRY RUN] Would run fix session for PR #%s", pr_number)
+        return {"addressed": [], "replies": {}}
+
+    threads_json = json.dumps(
+        [
+            {
+                "thread_id": t["id"],
+                "path": t["path"],
+                "line": t.get("line"),
+                "body": t["body"],
+            }
+            for t in threads
+        ]
+    )
+
+    prompt = get_address_review_prompt(
+        pr_number=pr_number,
+        issue_number=issue_number,
+        worktree_path=str(worktree_path),
+        threads_json=threads_json,
+    )
+
+    prompt_file = worktree_path / f".claude-address-review-{issue_number}.md"
+    prompt_file.write_text(prompt)
+
+    try:
+        if is_codex(agent):
+            codex_result = run_codex_session(
+                prompt,
+                cwd=worktree_path,
+                timeout=address_review_claude_timeout(),
+                sandbox="workspace-write",
+            )
+            log = codex_result.stdout
+            if codex_result.session_id:
+                log = f"SESSION_ID: {codex_result.session_id}\n\n{log}"
+            log_file.write_text(log)
+            parsed = parse_fn(codex_result.stdout)
+            logger.info(
+                "Fix session complete for PR #%s; addressed %s thread(s)",
+                pr_number,
+                len(parsed.get("addressed", [])),
+            )
+            return parsed
+
+        githash = current_trunk_githash(repo_root)
+        repo_slug = get_repo_slug(repo_root)
+        stdout, _ = invoke_claude_with_session(
+            repo=repo_slug,
+            issue=issue_number,
+            agent=AGENT_IMPLEMENTER,
+            githash=githash,
+            prompt=prompt,
+            model=implementer_model(),
+            cwd=worktree_path,
+            timeout=address_review_claude_timeout(),
+            output_format="json",
+            permission_mode="dontAsk",
+            # Task: the session acts as a coordinator that dispatches one
+            # sub-agent per file of review threads. Skill: each sub-agent
+            # runs /hephaestus:advise before fixing. See prompts/address_review.py.
+            allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
+            input_via_stdin=True,
+        )
+        log_file.write_text(stdout or "")
+
+        # Extract response text from Claude's JSON wrapper
+        try:
+            data = json.loads(stdout or "{}")
+            response_text: str = data.get("result", stdout or "")
+        except (json.JSONDecodeError, AttributeError):
+            response_text = stdout or ""
+
+        parsed = parse_fn(response_text)
+        logger.info(
+            "Fix session complete for PR #%s; addressed %s thread(s)",
+            pr_number,
+            len(parsed.get("addressed", [])),
+        )
+        return parsed
+
+    except subprocess.CalledProcessError as e:
+        stdout = e.stdout or ""
+        stderr = e.stderr or ""
+        error_output = f"EXIT CODE: {e.returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
+        log_file.write_text(error_output)
+        raise RuntimeError(
+            f"Fix session failed for PR {pr_ref(pr_number)}: {e.stderr or e.stdout}"
+        ) from e
+    except subprocess.TimeoutExpired as e:
+        log_file.write_text(f"TIMEOUT after {e.timeout}s\n\nOutput:\n{e.output or ''}")
+        raise RuntimeError(f"Fix session timed out for PR {pr_ref(pr_number)}") from e
+    finally:
+        # Narrow exception: a missing prompt file is benign cleanup,
+        # but ENOSPC / permission errors are signal we want surfaced.
+        try:
+            prompt_file.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning("Could not unlink prompt file %s: %s", prompt_file, exc)
+
+
+def resolve_addressed_threads(
+    addressed: list[str],
+    replies: dict[str, str],
+    presented_thread_ids: set[str],
+    *,
+    dry_run: bool = False,
+) -> None:
+    """Resolve the review threads Claude explicitly fixed (with hallucination guard).
+
+    Shared core of :meth:`AddressReviewer._resolve_addressed_threads` and the
+    in-loop address step (#28). Only resolves threads listed in ``addressed``
+    AND present in ``presented_thread_ids`` — Claude's response is untrusted
+    input, so a hallucinated or cross-PR thread ID must never reach
+    :func:`gh_pr_resolve_thread`. Membership against the set actually presented
+    to Claude is the trust boundary (#661).
+
+    Args:
+        addressed: Thread-id strings Claude reported as fixed.
+        replies: Mapping of thread-id to a one-line reply describing the fix.
+        presented_thread_ids: Thread IDs we presented to Claude (the unresolved
+            set on this PR at fix time).
+        dry_run: Forwarded to :func:`gh_pr_resolve_thread`.
+
+    """
+    for thread_id in addressed:
+        if thread_id not in presented_thread_ids:
+            logger.warning(
+                "Skipping resolve of unknown thread_id %r — not in the "
+                "unresolved-set presented to Claude (likely hallucinated)",
+                thread_id,
+            )
+            continue
+        reply = replies.get(thread_id, "Addressed in code.")
+        try:
+            gh_pr_resolve_thread(thread_id, reply, dry_run=dry_run)
+        except Exception as e:
+            logger.warning("Could not resolve thread %s: %s", thread_id, e)
 
 
 class AddressReviewer(BaseReviewer):
@@ -542,7 +751,7 @@ class AddressReviewer(BaseReviewer):
         logger.info("Creating new worktree for issue #%s on branch %s", issue_number, branch_name)
         return self.worktree_manager.create_worktree(issue_number, branch_name)
 
-    def _run_fix_session(  # noqa: C901  # session-resume + fallback + cleanup + parse error paths
+    def _run_fix_session(
         self,
         issue_number: int,
         pr_number: int,
@@ -552,79 +761,63 @@ class AddressReviewer(BaseReviewer):
     ) -> dict[str, Any]:
         """Run Claude fix session to address review threads.
 
-        Builds the address review prompt and runs Claude with --resume if a
-        session_id is provided. Falls back to a fresh session if --resume fails.
+        Delegates to the module-level :func:`run_address_fix_session` so the
+        in-loop implementer step (#28) and this standalone phase share one
+        invocation core (DRY). The Claude path resumes the implementer's
+        deterministic session; ``session_id`` only feeds the Codex
+        resume-then-fallback path below.
 
         Args:
             issue_number: GitHub issue number
             pr_number: GitHub PR number
             worktree_path: Path to git worktree containing PR branch
             threads: List of unresolved thread dicts (id, path, line, body)
-            session_id: Previous Claude session ID to resume, or None for fresh session
+            session_id: Previous Codex session ID to resume, or None for fresh session
 
         Returns:
             Parsed dict with "addressed" and "replies" keys
 
         """
-        if self.options.dry_run:
-            logger.info("[DRY RUN] Would run fix session for PR #%s", pr_number)
-            return {"addressed": [], "replies": {}}
-
-        threads_json = json.dumps(
-            [
-                {
-                    "thread_id": t["id"],
-                    "path": t["path"],
-                    "line": t.get("line"),
-                    "body": t["body"],
-                }
-                for t in threads
-            ]
-        )
-
-        prompt = get_address_review_prompt(
-            pr_number=pr_number,
-            issue_number=issue_number,
-            worktree_path=str(worktree_path),
-            threads_json=threads_json,
-        )
-
-        prompt_file = worktree_path / f".claude-address-review-{issue_number}.md"
-        prompt_file.write_text(prompt)
         log_file = self.state_dir / f"address-review-{issue_number}.log"
 
-        try:
-            if is_codex(self.options.agent):
-                if session_id:
-                    try:
-                        codex_result = resume_codex_session(
-                            session_id,
-                            prompt,
-                            cwd=worktree_path,
-                            timeout=address_review_claude_timeout(),
-                        )
-                    except subprocess.CalledProcessError as e:
-                        logger.warning(
-                            "Issue #%s: Codex resume session %r failed for PR #%s; "
-                            "falling back to fresh session: %s",
-                            issue_number,
-                            session_id,
-                            pr_number,
-                            (e.stderr or e.stdout or "")[:300],
-                        )
-                        codex_result = run_codex_session(
-                            prompt,
-                            cwd=worktree_path,
-                            timeout=address_review_claude_timeout(),
-                            sandbox="workspace-write",
-                        )
-                else:
-                    codex_result = run_codex_session(
-                        prompt,
-                        cwd=worktree_path,
-                        timeout=address_review_claude_timeout(),
-                        sandbox="workspace-write",
-                    )
+        # Codex retains the resume-then-fallback behavior because it cannot
+        # derive a deterministic session UUID; run the resume attempt here and
+        # delegate the prompt build + parse to the shared core via a fresh run.
+        if not self.options.dry_run and is_codex(self.options.agent) and session_id:
+            threads_json = json.dumps(
+                [
+                    {
+                        "thread_id": t["id"],
+                        "path": t["path"],
+                        "line": t.get("line"),
+                        "body": t["body"],
+                    }
+                    for t in threads
+                ]
+            )
+            prompt = get_address_review_prompt(
+                pr_number=pr_number,
+                issue_number=issue_number,
+                worktree_path=str(worktree_path),
+                threads_json=threads_json,
+            )
+            try:
+                codex_result = resume_codex_session(
+                    session_id,
+                    prompt,
+                    cwd=worktree_path,
+                    timeout=address_review_claude_timeout(),
+                )
+            except subprocess.CalledProcessError as e:
+                logger.warning(
+                    "Issue #%s: Codex resume session %r failed for PR #%s; "
+                    "falling back to fresh session: %s",
+                    issue_number,
+                    session_id,
+                    pr_number,
+                    (e.stderr or e.stdout or "")[:300],
+                )
+            else:
                 log = codex_result.stdout
                 if codex_result.session_id:
                     log = f"SESSION_ID: {codex_result.session_id}\n\n{log}"
@@ -637,64 +830,17 @@ class AddressReviewer(BaseReviewer):
                 )
                 return parsed
 
-            # ``session_id`` is consumed only by the codex path above; the
-            # Claude path resumes the implementer's deterministic session.
-            githash = current_trunk_githash(self.repo_root)
-            repo_slug = get_repo_slug(self.repo_root)
-            stdout, _ = invoke_claude_with_session(
-                repo=repo_slug,
-                issue=issue_number,
-                agent=AGENT_IMPLEMENTER,
-                githash=githash,
-                prompt=prompt,
-                model=implementer_model(),
-                cwd=worktree_path,
-                timeout=address_review_claude_timeout(),
-                output_format="json",
-                permission_mode="dontAsk",
-                # Task: the session acts as a coordinator that dispatches one
-                # sub-agent per file of review threads. Skill: each sub-agent
-                # runs /hephaestus:advise before fixing. See prompts/address_review.py.
-                allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
-                input_via_stdin=True,
-            )
-            log_file.write_text(stdout or "")
-
-            # Extract response text from Claude's JSON wrapper
-            try:
-                data = json.loads(stdout or "{}")
-                response_text: str = data.get("result", stdout or "")
-            except (json.JSONDecodeError, AttributeError):
-                response_text = stdout or ""
-
-            parsed = self._parse_json_block(response_text, issue_number=issue_number)
-            logger.info(
-                "Fix session complete for PR #%s; addressed %s thread(s)",
-                pr_number,
-                len(parsed.get("addressed", [])),
-            )
-            return parsed
-
-        except subprocess.CalledProcessError as e:
-            stdout = e.stdout or ""
-            stderr = e.stderr or ""
-            error_output = f"EXIT CODE: {e.returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
-            log_file.write_text(error_output)
-            raise RuntimeError(
-                f"Fix session failed for PR {pr_ref(pr_number)}: {e.stderr or e.stdout}"
-            ) from e
-        except subprocess.TimeoutExpired as e:
-            log_file.write_text(f"TIMEOUT after {e.timeout}s\n\nOutput:\n{e.output or ''}")
-            raise RuntimeError(f"Fix session timed out for PR {pr_ref(pr_number)}") from e
-        finally:
-            # Narrow exception: a missing prompt file is benign cleanup,
-            # but ENOSPC / permission errors are signal we want surfaced.
-            try:
-                prompt_file.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                logger.warning("Could not unlink prompt file %s: %s", prompt_file, exc)
+        return run_address_fix_session(
+            issue_number=issue_number,
+            pr_number=pr_number,
+            worktree_path=worktree_path,
+            threads=threads,
+            agent=self.options.agent,
+            repo_root=self.repo_root,
+            parse_fn=lambda text: self._parse_json_block(text, issue_number=issue_number),
+            log_file=log_file,
+            dry_run=self.options.dry_run,
+        )
 
     def _parse_json_block(self, text: str, issue_number: int | None = None) -> dict[str, Any]:
         """Extract the last ```json ... ``` block from Claude's response.
@@ -791,19 +937,12 @@ class AddressReviewer(BaseReviewer):
                 (i.e. the unresolved set on this PR at fix time)
 
         """
-        for thread_id in addressed:
-            if thread_id not in presented_thread_ids:
-                logger.warning(
-                    "Skipping resolve of unknown thread_id %r — not in the "
-                    "unresolved-set presented to Claude (likely hallucinated)",
-                    thread_id,
-                )
-                continue
-            reply = replies.get(thread_id, "Addressed in code.")
-            try:
-                gh_pr_resolve_thread(thread_id, reply, dry_run=self.options.dry_run)
-            except Exception as e:
-                logger.warning("Could not resolve thread %s: %s", thread_id, e)
+        resolve_addressed_threads(
+            addressed,
+            replies,
+            presented_thread_ids,
+            dry_run=self.options.dry_run,
+        )
 
     def _commit_if_changes(self, issue_number: int, worktree_path: Path) -> None:
         """Commit any pending changes in the worktree.

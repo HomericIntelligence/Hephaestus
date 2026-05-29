@@ -7,7 +7,10 @@ Provides:
 - State persistence and UI monitoring
 
 This module does NOT commit, push, or fix code. Fixing is handled by
-address_review.py in a separate phase.
+address_review.py, which the implementer runs as an in-loop step of the
+implement stage (it is no longer a separate pipeline phase). This module is
+also exposed as the standalone ``hephaestus-review-prs`` console script for
+manual, out-of-band PR review.
 """
 
 from __future__ import annotations
@@ -43,7 +46,7 @@ from .git_utils import get_repo_info, get_repo_root, get_repo_slug, issue_ref, p
 from .github_api import _gh_call, fetch_issue_info, gh_pr_review_post
 from .models import ReviewerOptions, ReviewPhase, ReviewState, WorkerResult
 from .prompts import get_pr_review_analysis_prompt
-from .session_naming import AGENT_PR_REVIEWER, current_trunk_githash
+from .session_naming import AGENT_PR_REVIEWER, current_trunk_githash, reviewer_agent
 from .status_tracker import StatusTracker  # noqa: F401 — re-exported for test patching
 from .worktree_manager import WorktreeManager  # noqa: F401 — re-exported for test patching
 
@@ -137,6 +140,253 @@ def _parse_json_block(text: str) -> dict[str, Any]:
 
     """
     return parse_json_block(text)
+
+
+def run_pr_review_analysis(
+    *,
+    pr_number: int,
+    issue_number: int,
+    worktree_path: Path,
+    context: dict[str, Any],
+    agent: str,
+    review_agent: str = AGENT_PR_REVIEWER,
+    state_dir: Path,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Run a read-only reviewer session and return its parsed analysis.
+
+    Shared core of the standalone ``PRReviewer._run_analysis_session`` and the
+    in-loop implementer review step (Stage 2, #28). Builds the PR-review
+    analysis prompt, invokes the selected reviewer agent (Claude or Codex), and
+    returns the parsed ``{"comments", "summary"}`` dict. The reviewer prompt's
+    strict rubric emits a ``Grade:`` / ``Verdict:`` line inside ``summary`` so
+    callers can derive a verdict via
+    :func:`~hephaestus.automation.claude_invoke.parse_review_verdict`.
+
+    Args:
+        pr_number: GitHub PR number being reviewed.
+        issue_number: Linked GitHub issue number.
+        worktree_path: Worktree CWD for the reviewer session (read-only usage).
+        context: PR context dict (see :meth:`PRReviewer._gather_pr_context`).
+        agent: Selected implementation agent (``"claude"`` or ``"codex"``);
+            determines the runtime used to invoke the reviewer.
+        review_agent: Session-naming agent token for the Claude path. Defaults
+            to :data:`AGENT_PR_REVIEWER`; the in-loop caller passes a fresh
+            per-iteration token (``reviewer_agent(AGENT_PR_REVIEWER, i)``).
+        state_dir: Directory for the reviewer log file.
+        dry_run: When True, skip the agent call and return a placeholder dict.
+
+    Returns:
+        Parsed analysis dict with ``"comments"`` and ``"summary"`` keys.
+
+    """
+    if dry_run:
+        logger.info("[DRY RUN] Would run analysis session for PR #%s", pr_number)
+        return {"comments": [], "summary": "[DRY RUN] analysis skipped"}
+
+    prompt = get_pr_review_analysis_prompt(
+        pr_number=pr_number,
+        issue_number=issue_number,
+        pr_diff=context.get("pr_diff", ""),
+        issue_body=context.get("issue_body", ""),
+        ci_status=context.get("ci_status", ""),
+        pr_description=context.get("pr_description", ""),
+        auto_merge_enabled=bool(context.get("auto_merge_enabled", False)),
+        commits_signing_state=context.get("commits_signing_state") or [],
+    )
+
+    prompt_file = worktree_path / f".claude-pr-review-{issue_number}.md"
+    prompt_file.write_text(prompt)
+
+    log_file = state_dir / f"pr-review-analysis-{issue_number}.log"
+
+    try:
+        if is_codex(agent):
+            result = run_codex_text(
+                prompt,
+                cwd=worktree_path,
+                timeout=pr_reviewer_claude_timeout(),
+                sandbox="read-only",
+            )
+            log_file.write_text(result.stdout or "")
+            parsed = _parse_json_block(result.stdout or "")
+            logger.info(
+                "Analysis complete for PR #%s; found %s inline comment(s)",
+                pr_number,
+                len(parsed.get("comments", [])),
+            )
+            return parsed
+
+        repo_root = get_repo_root()
+        githash = current_trunk_githash(repo_root)
+        repo_slug = get_repo_slug(repo_root)
+        stdout, _ = invoke_claude_with_session(
+            repo=repo_slug,
+            issue=issue_number,
+            agent=review_agent,
+            githash=githash,
+            prompt=prompt,
+            model=reviewer_model(),
+            cwd=worktree_path,
+            timeout=pr_reviewer_claude_timeout(),
+            output_format="json",
+            permission_mode="dontAsk",
+            allowed_tools="Read,Glob,Grep",
+        )
+        log_file.write_text(stdout or "")
+
+        # Extract the response text from Claude's JSON wrapper
+        try:
+            data = json.loads(stdout or "{}")
+            response_text: str = data.get("result", stdout or "")
+        except (json.JSONDecodeError, AttributeError):
+            response_text = stdout or ""
+
+        parsed = _parse_json_block(response_text)
+        logger.info(
+            "Analysis complete for PR #%s; found %s inline comment(s)",
+            pr_number,
+            len(parsed.get("comments", [])),
+        )
+        return parsed
+
+    except subprocess.CalledProcessError as e:
+        stdout = e.stdout or ""
+        stderr = e.stderr or ""
+        error_output = f"EXIT CODE: {e.returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
+        log_file.write_text(error_output)
+        raise RuntimeError(
+            f"Analysis session failed for PR {pr_ref(pr_number)}: {e.stderr or e.stdout}"
+        ) from e
+    except subprocess.TimeoutExpired as e:
+        log_file.write_text(f"TIMEOUT after {e.timeout}s\n\nOutput:\n{e.output or ''}")
+        raise RuntimeError(f"Analysis session timed out for PR {pr_ref(pr_number)}") from e
+    finally:
+        with contextlib.suppress(Exception):
+            prompt_file.unlink()
+
+
+def gather_impl_review_context(
+    *,
+    pr_number: int,
+    issue_number: int,
+    issue_title: str,
+    issue_body: str,
+    plan_text: str,
+    plan_review_text: str,
+    diff_text: str,
+) -> dict[str, Any]:
+    """Assemble the PR-review context for an in-loop implementer review.
+
+    Folds the implementer-loop inputs (TASK = issue title+body, PLAN,
+    PLAN_REVIEW, and the impl diff) into the dict shape
+    :func:`run_pr_review_analysis` expects. The PLAN and PLAN_REVIEW comment
+    bodies are surfaced inside the ``issue_body`` field so the reviewer sees
+    the full design context the implementer worked from (Stage 2, #28).
+
+    Args:
+        pr_number: GitHub PR number under review.
+        issue_number: Linked GitHub issue number.
+        issue_title: Issue title (the TASK summary).
+        issue_body: Full issue body (the TASK detail).
+        plan_text: The implementation PLAN comment body (or "" if absent).
+        plan_review_text: The PLAN_REVIEW comment body (or "" if absent).
+        diff_text: ``gh pr diff`` / cumulative branch diff for the impl.
+
+    Returns:
+        Context dict consumable by :func:`run_pr_review_analysis`.
+
+    """
+    task_block = f"**Issue Title:** {issue_title}\n\n{issue_body}".strip()
+    plan_block = plan_text.strip() or "_(no plan comment found)_"
+    plan_review_block = plan_review_text.strip() or "_(no plan-review comment found)_"
+    composed_body = (
+        f"{task_block}\n\n"
+        f"---\n\n## PLAN\n\n{plan_block}\n\n"
+        f"---\n\n## PLAN_REVIEW\n\n{plan_review_block}"
+    )
+    return {
+        "pr_diff": diff_text or "",
+        "issue_body": composed_body,
+        "ci_status": "",
+        "review_comments": "",
+        "pr_description": "",
+        "auto_merge_enabled": True,
+        "commits_signing_state": [],
+    }
+
+
+def review_pr_inline(
+    *,
+    pr_number: int,
+    issue_number: int,
+    worktree_path: Path,
+    context: dict[str, Any],
+    agent: str,
+    iteration: int,
+    state_dir: Path,
+    dry_run: bool = False,
+) -> tuple[str, list[str]]:
+    """Review an impl PR in-loop: run analysis, post inline threads, return verdict.
+
+    This is the in-loop equivalent of ``PRReviewer._review_pr`` used by the
+    Stage 2 implementer session (#28). It runs a FRESH reviewer session per
+    iteration (``reviewer_agent(AGENT_PR_REVIEWER, iteration)``) so the reviewer
+    never inherits its own prior verdict, posts the analysis findings as inline
+    PR review threads via :func:`gh_pr_review_post`, and returns the reviewer's
+    summary text (carrying the ``Grade:`` / ``Verdict:`` line) plus the IDs of
+    the threads it created.
+
+    Args:
+        pr_number: GitHub PR number to review.
+        issue_number: Linked GitHub issue number.
+        worktree_path: Worktree CWD for the reviewer session.
+        context: PR context dict (see :func:`gather_impl_review_context`).
+        agent: Selected implementation agent (``"claude"`` / ``"codex"``).
+        iteration: Zero-based review-loop iteration (selects the fresh token).
+        state_dir: Directory for the reviewer log file.
+        dry_run: When True, skip the agent call and posting.
+
+    Returns:
+        ``(summary_text, posted_thread_ids)``. On dry-run, returns the
+        placeholder summary and an empty list.
+
+    """
+    review_token = reviewer_agent(AGENT_PR_REVIEWER, iteration)
+    analysis = run_pr_review_analysis(
+        pr_number=pr_number,
+        issue_number=issue_number,
+        worktree_path=worktree_path,
+        context=context,
+        agent=agent,
+        review_agent=review_token,
+        state_dir=state_dir,
+        dry_run=dry_run,
+    )
+    comments: list[dict[str, Any]] = analysis.get("comments", [])
+    summary: str = analysis.get("summary", "")
+
+    if dry_run:
+        logger.info(
+            "[DRY RUN] Would post %s inline comment(s) on PR %s",
+            len(comments),
+            pr_ref(pr_number),
+        )
+        return summary, []
+
+    thread_ids = gh_pr_review_post(
+        pr_number=pr_number,
+        comments=comments,
+        summary=summary,
+        dry_run=False,
+    )
+    logger.info(
+        "In-loop review R%s posted %s thread(s) on PR %s",
+        iteration,
+        len(thread_ids),
+        pr_ref(pr_number),
+    )
+    return summary, thread_ids
 
 
 class PRReviewer(BaseReviewer):
@@ -394,90 +644,16 @@ class PRReviewer(BaseReviewer):
             Parsed analysis result dict with keys "comments" and "summary"
 
         """
-        if self.options.dry_run:
-            logger.info("[DRY RUN] Would run analysis session for PR #%s", pr_number)
-            return {"comments": [], "summary": "[DRY RUN] analysis skipped"}
-
-        prompt = get_pr_review_analysis_prompt(
+        return run_pr_review_analysis(
             pr_number=pr_number,
             issue_number=issue_number,
-            pr_diff=context.get("pr_diff", ""),
-            issue_body=context.get("issue_body", ""),
-            ci_status=context.get("ci_status", ""),
-            pr_description=context.get("pr_description", ""),
-            auto_merge_enabled=bool(context.get("auto_merge_enabled", False)),
-            commits_signing_state=context.get("commits_signing_state") or [],
+            worktree_path=worktree_path,
+            context=context,
+            agent=self.options.agent,
+            review_agent=AGENT_PR_REVIEWER,
+            state_dir=self.state_dir,
+            dry_run=self.options.dry_run,
         )
-
-        prompt_file = worktree_path / f".claude-pr-review-{issue_number}.md"
-        prompt_file.write_text(prompt)
-
-        log_file = self.state_dir / f"pr-review-analysis-{issue_number}.log"
-
-        try:
-            if is_codex(self.options.agent):
-                result = run_codex_text(
-                    prompt,
-                    cwd=worktree_path,
-                    timeout=pr_reviewer_claude_timeout(),
-                    sandbox="read-only",
-                )
-                log_file.write_text(result.stdout or "")
-                parsed = _parse_json_block(result.stdout or "")
-                logger.info(
-                    "Analysis complete for PR #%s; found %s inline comment(s)",
-                    pr_number,
-                    len(parsed.get("comments", [])),
-                )
-                return parsed
-
-            repo_root = get_repo_root()
-            githash = current_trunk_githash(repo_root)
-            repo_slug = get_repo_slug(repo_root)
-            stdout, _ = invoke_claude_with_session(
-                repo=repo_slug,
-                issue=issue_number,
-                agent=AGENT_PR_REVIEWER,
-                githash=githash,
-                prompt=prompt,
-                model=reviewer_model(),
-                cwd=worktree_path,
-                timeout=pr_reviewer_claude_timeout(),
-                output_format="json",
-                permission_mode="dontAsk",
-                allowed_tools="Read,Glob,Grep",
-            )
-            log_file.write_text(stdout or "")
-
-            # Extract the response text from Claude's JSON wrapper
-            try:
-                data = json.loads(stdout or "{}")
-                response_text: str = data.get("result", stdout or "")
-            except (json.JSONDecodeError, AttributeError):
-                response_text = stdout or ""
-
-            parsed = _parse_json_block(response_text)
-            logger.info(
-                "Analysis complete for PR #%s; found %s inline comment(s)",
-                pr_number,
-                len(parsed.get("comments", [])),
-            )
-            return parsed
-
-        except subprocess.CalledProcessError as e:
-            stdout = e.stdout or ""
-            stderr = e.stderr or ""
-            error_output = f"EXIT CODE: {e.returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
-            log_file.write_text(error_output)
-            raise RuntimeError(
-                f"Analysis session failed for PR {pr_ref(pr_number)}: {e.stderr or e.stdout}"
-            ) from e
-        except subprocess.TimeoutExpired as e:
-            log_file.write_text(f"TIMEOUT after {e.timeout}s\n\nOutput:\n{e.output or ''}")
-            raise RuntimeError(f"Analysis session timed out for PR {pr_ref(pr_number)}") from e
-        finally:
-            with contextlib.suppress(Exception):
-                prompt_file.unlink()
 
     def _get_or_create_state(self, issue_number: int, pr_number: int) -> ReviewState:
         """Get or create review state for an issue.

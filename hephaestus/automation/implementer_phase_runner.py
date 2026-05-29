@@ -39,22 +39,30 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.github.rate_limit import wait_until
 
+from .address_review import (
+    resolve_addressed_threads,
+    run_address_fix_session,
+)
+from .advise_runner import run_advise
 from .claude_invoke import (
     SESSION_EXPIRED_PHRASES,
     parse_review_verdict,
 )
-from .claude_models import implementer_model, reviewer_model
+from .claude_models import advise_model, implementer_model, reviewer_model
 from .claude_timeouts import implementer_claude_timeout
 from .follow_up import parse_follow_up_items, run_follow_up_issues
 from .git_utils import issue_ref, pr_ref, run
+from .github_api import gh_pr_list_unresolved_threads
 from .learn import learn_needs_rerun, run_learn
 from .models import (
     ImplementationPhase,
     ImplementationState,
     WorkerResult,
 )
-from .pr_manager import ensure_pr_created
+from .pr_manager import commit_changes, ensure_pr_created
+from .pr_reviewer import gather_impl_review_context, review_pr_inline
 from .prompts import (
+    get_advise_prompt,
     get_impl_loop_review_prompt,
     get_impl_resume_feedback_prompt,
     get_implementation_prompt,
@@ -74,6 +82,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAX_REVIEW_ITERATIONS = 3
+
+
+def _prepend_advise(advise_findings: str, prompt: str) -> str:
+    """Prepend advise findings as a context block to an implementation prompt.
+
+    Returns ``prompt`` unchanged when there are no real findings — an empty
+    string or an ``advise_runner.advise_skipped`` HTML-comment marker (which
+    records *why* advise produced nothing) carries no guidance worth injecting.
+    """
+    findings = advise_findings.strip()
+    if not findings or findings.startswith("<!-- advise step skipped"):
+        return prompt
+    return f"## Prior Learnings from Team Knowledge Base\n\n{findings}\n\n---\n\n{prompt}"
 
 
 def _claude_quota_reset_epoch(*texts: str) -> int | None:
@@ -224,8 +245,8 @@ class ImplementationPhaseRunner:
 
             # Skip implementation entirely when an open PR already exists for
             # this issue. Re-running the agent would clobber in-flight work;
-            # the open PR is handled by the later review-prs / address-review /
-            # drive-green phases. Checked BEFORE create_worktree() so the skip
+            # an open PR from a prior loop is carried to green by the later
+            # drive-green stage. Checked BEFORE create_worktree() so the skip
             # path costs nothing. Looked up via _impl_module so tests can patch
             # ``hephaestus.automation.implementer.find_pr_for_issue``.
             self.status_tracker.update_slot(
@@ -313,21 +334,34 @@ class ImplementationPhaseRunner:
                 state.phase = ImplementationPhase.IMPLEMENTING
             impl._save_state(state)
 
-            # Run the selected implementation agent
             issue = self._impl_module.fetch_issue_info(issue_number)
+
+            # Advise-first (#30): pull prior learnings from ProjectMnemosyne
+            # before the implementation session. Runs under AGENT_ADVISE (its
+            # own cheap read-only session), gated by enable_advise; the findings
+            # are prepended to the implementation prompt context below.
+            advise_findings = ""
+            if self.options.enable_advise:
+                self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Advising")
+                advise_findings = impl._run_advise(issue_number, issue.title, issue.body)
+
+            # Run the selected implementation agent
             self.status_tracker.update_slot(
                 slot_id, f"{issue_ref(issue_number)}: Running {self.options.agent}"
             )
             session_id = impl._run_claude_code(
                 issue_number,
                 worktree_path,
-                get_implementation_prompt(
-                    issue_number=issue_number,
-                    issue_title=issue.title,
-                    issue_body=issue.body,
-                    branch_name=branch_name,
-                    worktree_path=str(worktree_path),
-                    repo_root=str(self.repo_root),
+                _prepend_advise(
+                    advise_findings,
+                    get_implementation_prompt(
+                        issue_number=issue_number,
+                        issue_title=issue.title,
+                        issue_body=issue.body,
+                        branch_name=branch_name,
+                        worktree_path=str(worktree_path),
+                        repo_root=str(self.repo_root),
+                    ),
                 ),
                 slot_id=slot_id,
             )
@@ -336,8 +370,18 @@ class ImplementationPhaseRunner:
                 state.session_agent = self.options.agent if session_id else None
             impl._save_state(state)
 
-            # Strict review loop re-uses the selected agent session when a
-            # session id was captured. Reviewer calls are always fresh so
+            # Create the PR up-front so the in-loop reviewer (Stage 2, #28) has
+            # a concrete PR to post INLINE review threads against. Verify commit,
+            # push, PR creation. ``_finalize_pr`` is idempotent — ``ensure_pr_
+            # created`` is a fallback that no-ops when the agent already opened
+            # the PR.
+            pr_number = impl._finalize_pr(issue_number, branch_name, worktree_path, state, slot_id)
+
+            # Strict review loop now absorbs the former ``review-prs`` and
+            # ``address-review`` phases: each iteration runs a FRESH reviewer
+            # session that posts inline PR threads, then resumes Session 2
+            # (AGENT_IMPLEMENTER) to address them, looping until GO / no
+            # blocking unresolved threads. Reviewer calls are always fresh so
             # their judgment is unbiased.
             with self.state_lock:
                 state.phase = ImplementationPhase.REVIEWING
@@ -352,6 +396,7 @@ class ImplementationPhaseRunner:
                 slot_id=slot_id,
                 thread_id=thread_id,
                 state=state,
+                pr_number=pr_number,
             )
             with self.state_lock:
                 state.review_iterations = iterations
@@ -359,8 +404,8 @@ class ImplementationPhaseRunner:
                 state.last_review_grade = last_grade
             impl._save_state(state)
 
-            # Verify commit, push, PR creation; then run /learn and follow-ups.
-            pr_number = impl._finalize_pr(issue_number, branch_name, worktree_path, state, slot_id)
+            # impl-learnings + follow-up filing stay in Session 2 (#28 §B),
+            # resuming AGENT_IMPLEMENTER AFTER the loop converges.
             impl._run_post_pr_followup(issue_number, worktree_path, state, slot_id)
 
             impl._log("info", f"Issue #{issue_number} completed: PR {pr_ref(pr_number)}", thread_id)
@@ -762,11 +807,55 @@ class ImplementationPhaseRunner:
             session_agent=session_agent,
         )
 
+    def _run_advise(self, issue_number: int, issue_title: str, issue_body: str) -> str:
+        """Search ProjectMnemosyne for prior learnings before implementing.
+
+        Stage 2's advise-first step. Runs under ``AGENT_ADVISE`` (a distinct,
+        cheap, read-only session) — NOT the implementer's Session 2 — so it
+        mirrors the planner's advise behavior and never pollutes the impl
+        transcript. The findings are prepended to the implementation prompt
+        context by the caller. Delegates the Mnemosyne setup + prompt build to
+        the shared :mod:`advise_runner`; any failure degrades to a skip marker.
+        """
+        _impl_mod = self._impl_module
+
+        def _invoke(prompt: str) -> str:
+            if is_codex(self.options.agent):
+                result = run_codex_text(
+                    prompt,
+                    cwd=self.repo_root,
+                    timeout=180,
+                    sandbox="read-only",
+                )
+                return (result.stdout or "").strip()
+            githash = _impl_mod.current_trunk_githash(self.repo_root)
+            repo_slug = _impl_mod.get_repo_slug(self.repo_root)
+            stdout, _ = _impl_mod.invoke_claude_with_session(
+                repo=repo_slug,
+                issue=issue_number,
+                agent=_impl_mod.AGENT_ADVISE,
+                githash=githash,
+                prompt=prompt,
+                model=advise_model(),
+                cwd=self.repo_root,
+                timeout=180,
+                output_format="text",
+            )
+            return (stdout or "").strip()
+
+        return run_advise(
+            issue_number=issue_number,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            invoke=_invoke,
+            build_prompt=get_advise_prompt,
+        )
+
     # ------------------------------------------------------------------
     # Strict review loop for implementer sessions
     # ------------------------------------------------------------------
 
-    def _run_impl_review_loop(
+    def _run_impl_review_loop(  # noqa: C901  # in-loop review + address has several outcome paths
         self,
         *,
         issue_number: int,
@@ -778,8 +867,23 @@ class ImplementationPhaseRunner:
         slot_id: int | None,
         thread_id: int | None,
         state: ImplementationState | None = None,
+        pr_number: int | None = None,
     ) -> tuple[int, str | None, str | None]:
-        """Run the bounded review loop for an implementation."""
+        """Run the bounded in-loop review + address cycle for an implementation.
+
+        Stage 2 (#28): each iteration runs a FRESH reviewer session
+        (``reviewer_agent(AGENT_PR_REVIEWER, i)``) that posts INLINE PR review
+        threads and returns a verdict; if the verdict is not GO and blocking
+        threads were posted, Session 2 (``AGENT_IMPLEMENTER``) is resumed to
+        address those threads (fix → commit → push → resolve), then the next
+        iteration re-reviews. The loop terminates on GO, on an iteration that
+        posts no blocking threads, or after :data:`MAX_REVIEW_ITERATIONS`.
+
+        When no ``pr_number`` is available (e.g. dry-run or the agent failed to
+        open a PR), the in-loop posting/addressing cannot run; the loop falls
+        back to the diff-only reviewer (no PR writes) so the verdict is still
+        surfaced.
+        """
         impl = self.impl
         last_verdict: str | None = None
         last_grade: str | None = None
@@ -787,55 +891,20 @@ class ImplementationPhaseRunner:
         iterations_run = 0
 
         for iteration in range(MAX_REVIEW_ITERATIONS):
-            # Iterations 1+ resume the impl session with the prior reviewer's
-            # critique, so the implementer can fix the flagged issues before
-            # the next review.
-            if iteration > 0:
-                if session_id is None:
-                    ref = issue_ref(issue_number)
-                    impl._log(
-                        "warning",
-                        f"{ref}: cannot iterate (no session_id from initial run); "
-                        "stopping review loop",
-                        thread_id,
-                    )
-                    break
-                if slot_id is not None:
-                    self.status_tracker.update_slot(
-                        slot_id, f"{issue_ref(issue_number)}: addressing review [R{iteration}]"
-                    )
-                resumed = impl._resume_impl_with_feedback(
-                    session_id=session_id,
-                    worktree_path=worktree_path,
-                    issue_number=issue_number,
-                    review_text=prior_review or "",
-                    prev_iteration=iteration - 1,
-                    verdict=last_verdict or "NOGO",
-                    state=state,
-                )
-                if not resumed:
-                    ref = issue_ref(issue_number)
-                    impl._log(
-                        "warning",
-                        f"{ref}: resume failed at R{iteration}; stopping review loop",
-                        thread_id,
-                    )
-                    break
-
-            # Compute the diff and changed-files list for the reviewer.
+            # Review step: a fresh reviewer session posts inline PR threads and
+            # returns its verdict text. ``prior_review`` carries the previous
+            # iteration's critique forward as reviewer context.
             if slot_id is not None:
                 self.status_tracker.update_slot(
                     slot_id, f"{issue_ref(issue_number)}: reviewing impl [R{iteration}]"
                 )
-            diff_text = impl._collect_diff(worktree_path, branch_name)
-            files_changed = impl._collect_changed_files(worktree_path, branch_name)
-
-            review_text = impl._run_impl_review(
+            review_text, posted_thread_ids = impl._run_impl_review_step(
                 issue_number=issue_number,
                 issue_title=issue_title,
                 issue_body=issue_body,
-                diff_text=diff_text,
-                files_changed=files_changed,
+                branch_name=branch_name,
+                worktree_path=worktree_path,
+                pr_number=pr_number,
                 iteration=iteration,
                 prior_review=prior_review,
             )
@@ -848,7 +917,7 @@ class ImplementationPhaseRunner:
             impl._log(
                 "info",
                 f"{issue_ref(issue_number)} R{iteration}: Verdict={verdict.verdict} "
-                f"Grade={verdict.grade or '?'}",
+                f"Grade={verdict.grade or '?'} threads={len(posted_thread_ids)}",
                 thread_id,
             )
 
@@ -866,8 +935,62 @@ class ImplementationPhaseRunner:
                 )
                 break
 
-            # Save this review for next iteration's context
+            # Convergence on "no blocking unresolved threads": the reviewer
+            # found nothing actionable to post, so there is nothing to address.
+            if pr_number is not None and not posted_thread_ids:
+                ref = issue_ref(issue_number)
+                impl._log(
+                    "info",
+                    f"{ref}: no blocking review threads on iteration {iteration} — "
+                    "review loop terminated",
+                    thread_id,
+                )
+                break
+
+            # Save this review for next iteration's context.
             prior_review = review_text
+
+            # On the final iteration there is no subsequent review to verify a
+            # fix, so addressing would be a wasted Session 2 resume + push.
+            # Stop here and let the warning below flag the non-GO outcome.
+            if iteration == MAX_REVIEW_ITERATIONS - 1:
+                break
+
+            # Address step: resume Session 2 to fix the posted threads, commit,
+            # push, and resolve the threads it actually addressed. Skipped when
+            # there is no PR (no inline threads to address) or no session to
+            # resume.
+            if pr_number is None:
+                continue
+            if session_id is None:
+                ref = issue_ref(issue_number)
+                impl._log(
+                    "warning",
+                    f"{ref}: cannot address review (no session_id from initial run); "
+                    "stopping review loop",
+                    thread_id,
+                )
+                break
+            if slot_id is not None:
+                self.status_tracker.update_slot(
+                    slot_id, f"{issue_ref(issue_number)}: addressing review [R{iteration}]"
+                )
+            addressed = impl._run_address_review_step(
+                issue_number=issue_number,
+                pr_number=pr_number,
+                branch_name=branch_name,
+                worktree_path=worktree_path,
+                iteration=iteration,
+            )
+            if not addressed:
+                ref = issue_ref(issue_number)
+                impl._log(
+                    "info",
+                    f"{ref}: address step resolved no threads on iteration {iteration}; "
+                    "stopping review loop",
+                    thread_id,
+                )
+                break
 
         # A2-003: Surface AMBIGUOUS verdict distinctly so operators can triage
         # without inspecting raw log files.
@@ -884,6 +1007,220 @@ class ImplementationPhaseRunner:
             )
 
         return iterations_run, last_verdict, last_grade
+
+    def _run_impl_review_step(
+        self,
+        *,
+        issue_number: int,
+        issue_title: str,
+        issue_body: str,
+        branch_name: str,
+        worktree_path: Path,
+        pr_number: int | None,
+        iteration: int,
+        prior_review: str | None,
+    ) -> tuple[str, list[str]]:
+        """Run one in-loop review and return ``(review_text, posted_thread_ids)``.
+
+        With a ``pr_number`` this folds in ``pr_reviewer``'s core
+        (:func:`review_pr_inline`): a fresh per-iteration reviewer session posts
+        INLINE PR review threads and returns its summary text (carrying the
+        ``Grade:`` / ``Verdict:`` line). The reviewer context includes the TASK
+        (issue title + body), the PLAN and PLAN_REVIEW comments, and the impl
+        diff (#28).
+
+        Without a ``pr_number`` (dry-run / no PR) it falls back to the diff-only
+        reviewer (:meth:`_run_impl_review`) which posts nothing.
+        """
+        impl = self.impl
+        if pr_number is None:
+            diff_text = impl._collect_diff(worktree_path, branch_name)
+            files_changed = impl._collect_changed_files(worktree_path, branch_name)
+            review_text = impl._run_impl_review(
+                issue_number=issue_number,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                diff_text=diff_text,
+                files_changed=files_changed,
+                iteration=iteration,
+                prior_review=prior_review,
+            )
+            return review_text, []
+
+        if self.options.dry_run:
+            logger.info("[DRY RUN] Would run in-loop PR review for #%s", pr_number)
+            return "Grade: A\nVerdict: GO\n", []
+
+        diff_text = impl._collect_diff(worktree_path, branch_name)
+        plan_text, plan_review_text = self._fetch_plan_and_review(issue_number)
+        context = gather_impl_review_context(
+            pr_number=pr_number,
+            issue_number=issue_number,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            plan_text=plan_text,
+            plan_review_text=plan_review_text,
+            diff_text=diff_text,
+        )
+        try:
+            return review_pr_inline(
+                pr_number=pr_number,
+                issue_number=issue_number,
+                worktree_path=worktree_path,
+                context=context,
+                agent=self.options.agent,
+                iteration=iteration,
+                state_dir=self.state_dir,
+                dry_run=False,
+            )
+        except Exception as e:
+            logger.error(
+                "#%s R%s: in-loop PR review failed: %s; treating as NOGO so the loop continues",
+                issue_number,
+                iteration,
+                e,
+            )
+            return (
+                f"In-loop reviewer invocation failed at iteration {iteration}: {e}\n\n"
+                "Grade: F\nVerdict: NOGO\n"
+            ), []
+
+    def _run_address_review_step(
+        self,
+        *,
+        issue_number: int,
+        pr_number: int,
+        branch_name: str,
+        worktree_path: Path,
+        iteration: int,
+    ) -> bool:
+        """Address the posted PR threads in-loop, resuming Session 2.
+
+        Folds in ``address_review``'s core: lists the unresolved threads on the
+        PR, runs the fix session (resuming ``AGENT_IMPLEMENTER`` via
+        :func:`run_address_fix_session`, which fans out one sub-agent per file
+        per #661), commits + pushes the fixes, then resolves only the threads
+        Claude actually addressed — guarded against hallucinated/cross-PR thread
+        IDs against the set we presented (#661).
+
+        Returns:
+            ``True`` if at least one thread was addressed (so the loop should
+            re-review); ``False`` when nothing was addressable (the loop stops).
+
+        """
+        threads = gh_pr_list_unresolved_threads(pr_number, dry_run=False)
+        if not threads:
+            logger.info(
+                "#%s R%s: no unresolved threads to address on PR %s",
+                issue_number,
+                iteration,
+                pr_ref(pr_number),
+            )
+            return False
+
+        log_file = self.state_dir / f"address-review-{issue_number}-r{iteration}.log"
+        fix_result = run_address_fix_session(
+            issue_number=issue_number,
+            pr_number=pr_number,
+            worktree_path=worktree_path,
+            threads=threads,
+            agent=self.options.agent,
+            repo_root=self.repo_root,
+            parse_fn=lambda text: self._parse_address_result(text, issue_number, iteration),
+            log_file=log_file,
+            dry_run=False,
+        )
+        addressed: list[str] = fix_result.get("addressed", [])
+        replies: dict[str, str] = fix_result.get("replies", {})
+
+        # Commit + push the fixes the address session produced.
+        self._commit_if_changes(issue_number, worktree_path)
+        self._push_branch(branch_name, worktree_path)
+
+        # Resolve only the threads actually addressed, guarded against
+        # hallucinated/cross-PR thread IDs (#661).
+        presented_thread_ids = {t["id"] for t in threads}
+        resolve_addressed_threads(addressed, replies, presented_thread_ids, dry_run=False)
+        return bool(addressed)
+
+    def _parse_address_result(self, text: str, issue_number: int, iteration: int) -> dict[str, Any]:
+        """Parse the address-session JSON block, tracing parse failures.
+
+        Wraps :func:`address_review._parse_addressed_block` but writes a
+        diagnostic trace file when the block is missing/malformed, so an empty
+        ``addressed`` list is distinguishable from "the model reviewed and
+        chose no fixes" (mirrors the standalone phase's behavior).
+        """
+        from .address_review import _parse_addressed_block
+
+        matches = _parse_addressed_block(text)
+        if not matches.get("addressed") and "```json" not in text:
+            with contextlib.suppress(Exception):
+                trace_path = self.state_dir / f"address-{issue_number}-r{iteration}.parse-error.log"
+                trace_path.write_text(
+                    f"reason: no fenced ```json block found in response\n\n"
+                    f"=== full response ===\n{text}"
+                )
+        return matches
+
+    def _fetch_plan_and_review(self, issue_number: int) -> tuple[str, str]:
+        """Return ``(plan_text, plan_review_text)`` for the reviewer context.
+
+        The PLAN comment is identified the same way :meth:`_has_plan` does
+        ("Implementation Plan" / "## Plan"); the PLAN_REVIEW comment is the one
+        whose body starts with ``review_state.PLAN_REVIEW_PREFIX``. Best-effort:
+        any fetch failure yields empty strings (looked up via ``_impl_module``
+        so tests can patch ``hephaestus.automation.implementer.review_state``).
+        """
+        plan_text = ""
+        plan_review_text = ""
+        try:
+            review_state = self._impl_module.review_state
+            comments = review_state._fetch_issue_comments_graphql(issue_number)
+            for comment in comments:
+                body = comment.get("body", "")
+                if body.startswith(review_state.PLAN_REVIEW_PREFIX):
+                    plan_review_text = body
+                elif "Implementation Plan" in body or "## Plan" in body:
+                    plan_text = body
+        except Exception as e:
+            logger.warning("#%s: failed to fetch PLAN/PLAN_REVIEW context: %s", issue_number, e)
+        return plan_text, plan_review_text
+
+    def _commit_if_changes(self, issue_number: int, worktree_path: Path) -> None:
+        """Commit any pending changes from the in-loop address step.
+
+        Silently skips when the worktree is clean. Mirrors
+        ``AddressReviewer._commit_if_changes``.
+        """
+        result = run(
+            ["git", "status", "--porcelain"],
+            cwd=worktree_path,
+            capture_output=True,
+        )
+        if not result.stdout.strip():
+            logger.info("No changes to commit for issue #%s", issue_number)
+            return
+        try:
+            commit_changes(issue_number, worktree_path)
+            logger.info("Committed in-loop address changes for issue #%s", issue_number)
+        except RuntimeError as e:
+            logger.warning("Commit skipped for issue #%s: %s", issue_number, e)
+
+    def _push_branch(self, branch_name: str, worktree_path: Path) -> None:
+        """Push *branch_name* to origin after an in-loop address step.
+
+        Mirrors ``AddressReviewer._push_branch``.
+
+        Raises:
+            RuntimeError: If the push fails.
+
+        """
+        try:
+            run(["git", "push", "origin", branch_name], cwd=worktree_path)
+            logger.info("Pushed branch %s to origin", branch_name)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to push branch {branch_name}: {e}") from e
 
     def _resume_impl_with_feedback(
         self,
