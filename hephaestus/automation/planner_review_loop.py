@@ -322,10 +322,16 @@ class PlanReviewLoop:
                 requires the ``## Changes from review`` section.
 
         """
+        # Normalise so ``body`` ALWAYS begins exactly at the marker (index 0).
+        # ``plan.lstrip()`` in the passthrough is load-bearing: a plan that
+        # arrives with leading whitespace (e.g. "\n\n# Implementation Plan…")
+        # would otherwise keep the whitespace, breaking both ``startswith`` and
+        # the banner-insert slice below (#700).
+        stripped = plan.lstrip()
         body = (
-            plan
-            if plan.lstrip().startswith(PLAN_COMMENT_MARKER)
-            else f"{PLAN_COMMENT_MARKER}\n\n{plan}"
+            stripped
+            if stripped.startswith(PLAN_COMMENT_MARKER)
+            else f"{PLAN_COMMENT_MARKER}\n\n{stripped}"
         )
         # Guard (#695): if the model returned a contentless narrative/changelog
         # with no recognised plan sections, prepend a visible warning so the

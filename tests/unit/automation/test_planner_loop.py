@@ -457,6 +457,56 @@ class TestPlanBodyContentGuard:
         assert "PLAN-CONTENT-MISSING" not in body
         assert "## Objective" in body
 
+    def test_leading_whitespace_marker_not_corrupted_by_banner(
+        self, planner: Planner, _patch_loop_upsert: Any
+    ) -> None:
+        """A leading-whitespace marker must not be sliced mid-token by the banner insert.
+
+        Regression (#700): when the plan arrives with leading whitespace before
+        the marker, the passthrough branch kept the whitespace, so the banner
+        insert's ``body[len(MARKER):]`` slice cut into the whitespace+marker and
+        produced a corrupted/duplicated marker. The body must still begin with
+        exactly one intact ``# Implementation Plan`` marker after flagging.
+        """
+        changelog = "\n\n# Implementation Plan\n\nFixed and verified. The comment now has the plan."
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
+                return_value={"title": "T", "body": "B"},
+            ),
+            patch.object(planner, "_generate_plan", return_value=changelog),
+            patch.object(planner, "_capture_planner_learnings", return_value=""),
+            patch.object(planner, "_run_plan_review", return_value=_nogo_review()),
+        ):
+            planner._run_plan_review_loop(123, slot_id=0)
+
+        body = self._plan_calls(_patch_loop_upsert)[0].args[2]
+        assert body.startswith(PLAN_COMMENT_MARKER)
+        assert body.count(PLAN_COMMENT_MARKER) == 1
+        assert "PLAN-CONTENT-MISSING" in body
+
+    def test_leading_whitespace_valid_plan_passes_clean(
+        self, planner: Planner, _patch_loop_upsert: Any
+    ) -> None:
+        """A valid plan with leading whitespace + marker is unflagged and uncorrupted."""
+        plan = "\n# Implementation Plan\n\n## Objective\nDo X."
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
+                return_value={"title": "T", "body": "B"},
+            ),
+            patch.object(planner, "_generate_plan", return_value=plan),
+            patch.object(planner, "_capture_planner_learnings", return_value=""),
+            patch.object(planner, "_run_plan_review", return_value=_go_review()),
+        ):
+            planner._run_plan_review_loop(123, slot_id=0)
+
+        body = self._plan_calls(_patch_loop_upsert)[0].args[2]
+        assert body.startswith(PLAN_COMMENT_MARKER)
+        assert body.count(PLAN_COMMENT_MARKER) == 1
+        assert "PLAN-CONTENT-MISSING" not in body
+        assert "## Objective" in body
+
 
 class TestCapturePlannerLearnings:
     """Learnings capture must fail safely (return '') without raising."""
