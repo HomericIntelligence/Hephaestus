@@ -215,6 +215,7 @@ class TestAllRequiredGreen:
         with (
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
             patch.object(driver, "_enable_auto_merge") as mock_merge,
+            patch.object(driver, "_run_drive_green_learnings"),
         ):
             result = driver._drive_issue(123, 456, 0)
 
@@ -265,6 +266,7 @@ class TestRequiredVsNonRequired:
         with (
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
             patch.object(driver, "_enable_auto_merge") as mock_merge,
+            patch.object(driver, "_run_drive_green_learnings"),
         ):
             result = driver._drive_issue(123, 456, 0)
 
@@ -282,6 +284,7 @@ class TestRequiredVsNonRequired:
         with (
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
             patch.object(driver, "_enable_auto_merge") as mock_merge,
+            patch.object(driver, "_run_drive_green_learnings"),
         ):
             result = driver._drive_issue(123, 456, 0)
 
@@ -386,16 +389,20 @@ class TestNoCiChecks:
 class TestEnableAutoMerge:
     """Tests for _enable_auto_merge fallback logic (#376)."""
 
-    def test_rebase_success_returns_true(self, driver: CIDriver) -> None:
-        """Successful --auto --rebase returns True."""
+    def test_squash_success_returns_true(self, driver: CIDriver) -> None:
+        """Successful --auto --squash returns True (squash-only repo)."""
         with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh:
             result = driver._enable_auto_merge(99)
 
         assert result is True
         assert mock_gh.call_count == 1
+        # Primary auto-merge MUST be squash — rebase is disabled by branch protection.
+        primary_call_args = mock_gh.call_args_list[0][0][0]
+        assert "--squash" in primary_call_args
+        assert "--rebase" not in primary_call_args
 
-    def test_rebase_failure_no_fallback_flag_returns_false(self, driver: CIDriver) -> None:
-        """--auto --rebase fails; force_merge_on_stall=False → returns False, no fallback."""
+    def test_squash_failure_no_fallback_flag_returns_false(self, driver: CIDriver) -> None:
+        """--auto --squash fails; force_merge_on_stall=False → returns False, no fallback."""
         driver.options.force_merge_on_stall = False
         with patch(
             "hephaestus.automation.ci_driver._gh_call",
@@ -404,11 +411,11 @@ class TestEnableAutoMerge:
             result = driver._enable_auto_merge(99)
 
         assert result is False
-        # Only 1 gh call (the failed --auto --rebase); no fallback call
+        # Only 1 gh call (the failed --auto --squash); no fallback call
         assert mock_gh.call_count == 1
 
-    def test_rebase_failure_with_fallback_flag_tries_squash(self, driver: CIDriver) -> None:
-        """--auto --rebase fails; force_merge_on_stall=True → tries squash, returns True."""
+    def test_squash_failure_with_fallback_flag_tries_squash(self, driver: CIDriver) -> None:
+        """--auto --squash fails; force_merge_on_stall=True → tries squash, returns True."""
         driver.options.force_merge_on_stall = True
         call_results = [
             subprocess.CalledProcessError(1, "gh"),  # first call: --auto fails
@@ -434,16 +441,86 @@ class TestEnableAutoMerge:
         assert result is False
 
     def test_auto_merge_failure_propagates_to_drive_issue(self, driver: CIDriver) -> None:
-        """When _enable_auto_merge returns False, _drive_issue returns success=False."""
+        """When _enable_auto_merge returns False, _drive_issue returns success=False.
+
+        Learnings must NOT run when auto-merge fails (gated to success).
+        """
         checks = [_make_check("test", required=True)]
         with (
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
             patch.object(driver, "_enable_auto_merge", return_value=False),
+            patch.object(driver, "_run_drive_green_learnings") as mock_learn,
         ):
             result = driver._drive_issue(123, 456, 0)
 
         assert result.success is False
         assert result.error is not None
+        mock_learn.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: drive-green learnings step (AGENT_CI_DRIVER, Session 3)
+# ---------------------------------------------------------------------------
+
+
+class TestDriveGreenLearnings:
+    """Tests for the post-green learnings capture under AGENT_CI_DRIVER."""
+
+    def test_learnings_runs_on_success_under_ci_driver_agent(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """All required green + auto-merge ok → learnings resumes Session 3."""
+        from hephaestus.automation.session_naming import AGENT_CI_DRIVER
+
+        wt = tmp_path / "wt-123"
+        checks = [_make_check("test", required=True)]
+        with (
+            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
+            patch.object(driver, "_enable_auto_merge", return_value=True),
+            patch.object(driver, "_get_worktree_path", return_value=wt),
+            patch(
+                "hephaestus.automation.ci_driver.invoke_claude_with_session",
+                return_value=("ok", "sid"),
+            ) as mock_invoke,
+            patch("hephaestus.automation.ci_driver.get_repo_slug", return_value="ProjectX"),
+            patch("hephaestus.automation.ci_driver.current_trunk_githash", return_value="abc1234"),
+        ):
+            result = driver._drive_issue(123, 456, 0)
+
+        assert result.success is True
+        mock_invoke.assert_called_once()
+        assert mock_invoke.call_args.kwargs["agent"] == AGENT_CI_DRIVER
+        assert mock_invoke.call_args.kwargs["issue"] == 123
+        # Must resume from the worktree so the Session 3 transcript is found.
+        assert mock_invoke.call_args.kwargs["cwd"] == wt
+
+    def test_learnings_failure_is_non_fatal(self, driver: CIDriver, tmp_path: Path) -> None:
+        """A raising learnings session must not flip a successful drive to failure."""
+        checks = [_make_check("test", required=True)]
+        with (
+            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
+            patch.object(driver, "_enable_auto_merge", return_value=True),
+            patch.object(driver, "_get_worktree_path", return_value=tmp_path),
+            patch(
+                "hephaestus.automation.ci_driver.invoke_claude_with_session",
+                side_effect=RuntimeError("boom"),
+            ),
+            patch("hephaestus.automation.ci_driver.get_repo_slug", return_value="ProjectX"),
+            patch("hephaestus.automation.ci_driver.current_trunk_githash", return_value="abc1234"),
+        ):
+            result = driver._drive_issue(123, 456, 0)
+
+        # Drive still succeeds even though learnings raised.
+        assert result.success is True
+
+    def test_learnings_skipped_for_codex(self, driver: CIDriver) -> None:
+        """Codex has no persisted drive-green session, so learnings is skipped."""
+        driver.options.agent = "codex"
+        with patch("hephaestus.automation.ci_driver.invoke_claude_with_session") as mock_invoke:
+            result = driver._run_drive_green_learnings(123, 456)
+
+        assert result is False
+        mock_invoke.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +553,7 @@ class TestCIPollLoop:
             patch("hephaestus.automation.ci_driver.gh_pr_checks", side_effect=side_effect),
             patch("hephaestus.automation.ci_driver.time.sleep"),
             patch.object(driver, "_enable_auto_merge", return_value=True),
+            patch.object(driver, "_run_drive_green_learnings"),
         ):
             result = driver._drive_issue(123, 456, 0)
 
@@ -541,6 +619,7 @@ class TestRunCleanup:
             patch.object(d, "_discover_prs", return_value={1: 10}),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[green_check]),
             patch.object(d, "_enable_auto_merge", return_value=True),
+            patch.object(d, "_run_drive_green_learnings"),
         ):
             d.run()
 
@@ -575,6 +654,7 @@ class TestRunCleanup:
             patch.object(d, "_discover_prs", return_value={1: 10}),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[green_check]),
             patch.object(d, "_enable_auto_merge", return_value=True),
+            patch.object(d, "_run_drive_green_learnings"),
             caplog.at_level(logging.INFO, logger="hephaestus.automation.ci_driver"),
         ):
             d.run()

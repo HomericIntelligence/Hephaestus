@@ -2,16 +2,17 @@
 
 The phase modules split into two categories:
 
-- **Self-agent phases** (`plan_reviewer`, `pr_reviewer`, `implementer`) own
-  their own session identity — each passes its dedicated ``AGENT_*`` constant
-  to ``invoke_claude_with_session`` so its session UUID is distinct from
-  every other phase's.
-- **Continuation phases** (`address_review`, `ci_driver`) deliberately resume
-  the implementer's session. Address-review applies code fixes to satisfy PR
-  review feedback; ci_driver applies code fixes to make CI green. Both
-  continue the same line of work the implementer started, so both pass
-  ``AGENT_IMPLEMENTER`` to land on the same session UUID. This is intentional
-  and is the mechanism that gives those phases warm prompt cache.
+- **Self-agent phases** (`plan_reviewer`, `pr_reviewer`, `implementer`,
+  `ci_driver`) own their own session identity — each passes its dedicated
+  ``AGENT_*`` constant to ``invoke_claude_with_session`` so its session UUID
+  is distinct from every other phase's. ``ci_driver`` owns Session 3
+  (``AGENT_CI_DRIVER``): drive-green polls CI, runs its own fix sessions, and
+  captures its own learnings on a transcript independent of the implementer.
+- **Continuation phases** (`address_review`) deliberately resume the
+  implementer's session. Address-review applies code fixes to satisfy PR
+  review feedback, continuing the same line of work the implementer started,
+  so it passes ``AGENT_IMPLEMENTER`` to land on the same session UUID. This is
+  intentional and is the mechanism that gives that phase a warm prompt cache.
 
 These tests assert source-text properties (not runtime mock behavior)
 because constructing valid Options objects for every phase is brittle and
@@ -45,6 +46,9 @@ SELF_AGENT_PHASES: list[tuple[str, str, tuple[str, ...]]] = [
     ("plan_reviewer.py", "AGENT_PLAN_REVIEWER", ()),
     ("pr_reviewer.py", "AGENT_PR_REVIEWER", ()),
     ("implementer.py", "AGENT_IMPLEMENTER", ("implementer_phase_runner.py",)),
+    # ci_driver owns Session 3 (AGENT_CI_DRIVER): its fix sessions and its
+    # post-green learnings run on a transcript independent of the implementer.
+    ("ci_driver.py", "AGENT_CI_DRIVER", ()),
 ]
 
 
@@ -52,7 +56,6 @@ SELF_AGENT_PHASES: list[tuple[str, str, tuple[str, ...]]] = [
 # warm prompt cache while continuing the same line of work.
 CONTINUATION_PHASES: list[str] = [
     "address_review.py",
-    "ci_driver.py",
 ]
 
 
@@ -118,11 +121,11 @@ def test_self_agent_phase_does_not_use_foreign_agent(
 
 @pytest.mark.parametrize("module_file", CONTINUATION_PHASES)
 def test_continuation_phase_resumes_implementer_session(module_file: str) -> None:
-    """address_review and ci_driver deliberately resume the implementer.
+    """address_review deliberately resumes the implementer.
 
-    Both phases apply code fixes that continue the implementer's line of work.
-    Passing AGENT_IMPLEMENTER lands them on the implementer's deterministic
-    session UUID, giving them a warm prompt cache. Any other AGENT_* constant
+    Address-review applies code fixes that continue the implementer's line of
+    work. Passing AGENT_IMPLEMENTER lands it on the implementer's deterministic
+    session UUID, giving it a warm prompt cache. Any other AGENT_* constant
     here would create a fresh cold session and silently undo the cache reuse.
     """
     src = (AUTOMATION_DIR / module_file).read_text()
