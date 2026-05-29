@@ -2,6 +2,19 @@ name: Required Checks
 
 on:
   pull_request:
+    # Default types are [opened, synchronize, reopened], which do NOT fire when
+    # auto-merge is toggled after PR creation — so pr-policy's auto-merge check
+    # was stuck with its PR-open verdict until the next push (the race that #680
+    # papered over with `needs: lint`). Re-running on auto_merge_enabled /
+    # auto_merge_disabled (and ready_for_review) makes that gate converge on the
+    # true state with no timing reliance. See pr-policy below.
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - auto_merge_enabled
+      - auto_merge_disabled
   push:
     branches: [main]
 
@@ -59,7 +72,9 @@ jobs:
           fi
           if grep -nE '^[[:space:]]*continue-on-error:[[:space:]]*true[[:space:]]*$' "${files[@]}"; then
             echo ""
-            echo '::error::Found "continue-on-error: true" above. Fix the root cause per HomericIntelligence/Odysseus#280.'
+            msg='::error::Found "continue-on-error: true" above.'
+            msg+=' Fix the root cause per HomericIntelligence/Odysseus#280.'
+            echo "$msg"
             exit 1
           fi
           echo 'OK: no "continue-on-error: true" found'
@@ -88,7 +103,10 @@ jobs:
           fi
           if grep -nF '::warning::' "${scan_files[@]}"; then
             echo ""
-            echo '::error::Found advisory annotations above. Make the underlying tool fail-fast or use echo "WARN:" to stdout. See HomericIntelligence/Odysseus#282 Bucket F.'
+            msg='::error::Found advisory annotations above.'
+            msg+=' Make the underlying tool fail-fast or use echo "WARN:" to stdout.'
+            msg+=' See HomericIntelligence/Odysseus#282 Bucket F.'
+            echo "$msg"
             exit 1
           fi
           echo 'OK: no advisory annotations found'
@@ -245,12 +263,12 @@ jobs:
     #   3. Every commit on the PR has a verified signature.
     # Push events are skipped because there is no PR to inspect.
     #
-    # `needs: lint` defers this gate until lint passes. Besides matching how
-    # every other downstream job here is gated, it removes a race: pr-policy is
-    # a ~3s check that, run on PR-open, used to evaluate the auto-merge check
-    # (#2) before `gh pr merge --auto` had registered, reporting a spurious
-    # failure. Waiting on lint gives auto-merge time to land before #2 reads it.
-    needs: lint
+    # This gate intentionally has NO `needs:` — it runs immediately and
+    # re-runs whenever auto-merge is toggled (see the auto_merge_enabled /
+    # auto_merge_disabled trigger types in `on.pull_request` above), so the
+    # auto-merge check (#2) converges on the PR's true state without depending
+    # on another job's timing. The earlier `needs: lint` workaround (#680) only
+    # delayed the read and left a required-check-skipped-on-lint-failure wrinkle.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -306,7 +324,9 @@ jobs:
           if printf '%s\n' "$body" | grep -qE '^Closes #[0-9]+[[:space:]]*$'; then
             echo "OK: PR body contains a Closes #N line"
           else
-            echo '::error::PR body must contain a line matching `^Closes #N$` (literal "Closes", capital C, on its own line). See CLAUDE.md PR policy.'
+            msg='::error::PR body must contain a line matching `^Closes #N$`'
+            msg+=' (literal "Closes", capital C, on its own line). See CLAUDE.md PR policy.'
+            echo "$msg"
             exit 1
           fi
 
@@ -316,7 +336,9 @@ jobs:
           set -euo pipefail
           state=$(jq -r '.autoMergeRequest' pr.json)
           if [ "$state" = "null" ] || [ -z "$state" ]; then
-            echo "::error::Auto-merge is not enabled on this PR. Run: gh pr merge $PR_NUMBER --auto --rebase  (or --squash if rebase is disallowed)"
+            msg="::error::Auto-merge is not enabled on this PR."
+            msg+=" Run: gh pr merge $PR_NUMBER --auto --squash  (this repo is squash-only)."
+            echo "$msg"
             exit 1
           fi
           echo "OK: auto-merge is enabled"
@@ -335,7 +357,9 @@ jobs:
             echo "::error::The following commits are unsigned or have invalid signatures:"
             # shellcheck disable=SC2086  # word-splitting of $bad is intentional
             printf '  %s\n' $bad
-            echo "::error::Every commit MUST be cryptographically signed. Re-sign with: git rebase --exec 'git commit --amend --no-edit -S' origin/main"
+            msg="::error::Every commit MUST be cryptographically signed."
+            msg+=" Re-sign with: git rebase --exec 'git commit --amend --no-edit -S' origin/main"
+            echo "$msg"
             exit 1
           fi
           echo "OK: all commits have verified signatures"
@@ -365,7 +389,10 @@ jobs:
         run: pip install -e ".[dev,schema]"
 
       - name: Run unit tests
-        run: pytest tests/unit --override-ini="addopts=" -v --strict-markers --cov=hephaestus --cov-report=term-missing --cov-report=xml --cov-fail-under=80
+        run: |
+          pytest tests/unit --override-ini="addopts=" -v --strict-markers \
+            --cov=hephaestus --cov-report=term-missing --cov-report=xml \
+            --cov-fail-under=80
 
       - name: Check unit test structure
         # Use the strict CLI (also flags loose test_*.py files at tests/unit/ root).
@@ -498,7 +525,8 @@ jobs:
       - name: Run Gitleaks
         run: |
           wget -q https://github.com/gitleaks/gitleaks/releases/download/v8.30.0/gitleaks_8.30.0_linux_x64.tar.gz
-          echo "79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e  gitleaks_8.30.0_linux_x64.tar.gz" | sha256sum --check
+          expected_sha=79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e
+          echo "$expected_sha  gitleaks_8.30.0_linux_x64.tar.gz" | sha256sum --check
           tar -xzf gitleaks_8.30.0_linux_x64.tar.gz
           chmod +x gitleaks
           if [ -f .gitleaks.toml ]; then
