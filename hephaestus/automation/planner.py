@@ -117,8 +117,15 @@ class Planner:
         return self.state_mgr.filter()
 
     def _has_existing_plan(self, issue_number: int) -> bool:
-        """Check if an issue already has a plan (delegates to state manager)."""
-        return self.state_mgr.has_existing_plan(issue_number)
+        """Check if an issue has a plan whose latest review is parseable.
+
+        Delegates to :meth:`PlannerStateManager.has_usable_plan` (#702): an
+        issue counts as "already planned" only when its latest plan-review
+        comment carries a parseable ``Verdict: GO/NOGO`` line. Issues with a
+        plan but an unparseable (pre-contract) review are re-planned so the
+        loop self-heals stale reviews without manual cleanup.
+        """
+        return self.state_mgr.has_usable_plan(issue_number)
 
     def _plan_issue(self, issue_number: int) -> PlanResult:
         """Plan a single issue.

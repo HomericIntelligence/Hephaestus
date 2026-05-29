@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from .git_utils import issue_ref
 from .github_api import _gh_call, prefetch_issue_states
 from .models import PLAN_COMMENT_MARKER
-from .review_state import PLAN_REVIEW_PREFIX, fetch_all_issue_comments_graphql
+from .review_state import PLAN_REVIEW_PREFIX, fetch_all_issue_comments_graphql, latest_verdict
 
 if TYPE_CHECKING:
     from .models import PlannerOptions
@@ -194,3 +194,47 @@ class PlannerStateManager:
                 "Failed to check for existing plan on %s: %s", issue_ref(issue_number), e
             )
             return False
+
+    def has_usable_plan(self, issue_number: int) -> bool:
+        """Return True iff the issue has a plan AND a parseable plan-review.
+
+        Self-heal gate (#702). The planner skips an issue when it already has
+        a plan comment, but the implementer also needs the latest plan-review
+        to carry a parseable ``Verdict: GO/NOGO`` line; otherwise the GO-gate
+        stays False forever and the issue is stuck. By returning ``False`` for
+        "plan exists but the latest review is unparseable," the planner
+        re-plans (and re-reviews) the issue on the next loop, which self-heals
+        the stale-review case without manual cleanup.
+
+        Semantics:
+
+        - No plan comment → ``False`` (delegates to existing plan-existence check).
+        - Plan but no review yet → ``True`` (review will run in this loop).
+        - Plan + latest review carries a parseable verdict (GO or NOGO) → ``True``.
+          A parseable NOGO is a real reviewer signal, not a stale comment;
+          the implementer's existing NOGO-defer logic handles it downstream.
+        - Plan + latest review is unparseable (no ``Verdict:`` line) → ``False``,
+          flagging re-plan needed.
+
+        Args:
+            issue_number: Issue number to check.
+
+        Returns:
+            ``True`` when the planner may skip; ``False`` when re-planning is needed.
+
+        """
+        if not self.has_existing_plan(issue_number):
+            return False
+        cached = self.get_cached_comments(issue_number)
+        if cached is None:
+            # Without the cache the cheapest signal is "plan present" — preserve
+            # the prior behaviour rather than make a second uncached gh round-trip.
+            return True
+        latest_review_body: str | None = None
+        for comment in cached:
+            body = str(comment.get("body", ""))
+            if body.startswith(PLAN_REVIEW_PREFIX):
+                latest_review_body = body
+        if latest_review_body is None:
+            return True
+        return latest_verdict(latest_review_body) is not None

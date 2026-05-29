@@ -40,6 +40,20 @@ def _other_body() -> str:
     return "Just a regular comment with no plan marker.\n"
 
 
+def _review_body(verdict: str = "GO") -> str:
+    """Build a parseable plan-review body carrying a verdict line."""
+    return f"## 🔍 Plan Review\n\nLooks good.\n\nGrade: A\nVerdict: {verdict}\n"
+
+
+def _unparseable_review_body() -> str:
+    """Build a plan-review-prefixed body with no parseable ``Verdict:`` line.
+
+    Mirrors the pre-verdict-contract review comments observed across the org
+    (320 ``no parseable Verdict`` warnings during the 2026-05-29 org run).
+    """
+    return "## 🔍 Plan Review\n\nThe plan looks fine — implement it.\n"
+
+
 # ---------------------------------------------------------------------------
 # prefetch_comments / get_cached_comments
 # ---------------------------------------------------------------------------
@@ -183,3 +197,102 @@ class TestHasExistingPlanFallback:
             side_effect=RuntimeError("network error"),
         ):
             assert mgr.has_existing_plan(43) is False
+
+
+# ---------------------------------------------------------------------------
+# has_usable_plan — self-heals stale unparseable plan-review comments (#702)
+# ---------------------------------------------------------------------------
+
+
+class TestHasUsablePlan:
+    """has_usable_plan = plan comment present AND latest plan-review parseable.
+
+    Background (#702): the org-wide 2026-05-29 loop run logged 320
+    "no parseable Verdict" warnings. Those issues had a plan comment AND a
+    plan-review comment, but the review predated the Verdict: GO/NOGO contract
+    so the implementer's GO-gate stayed False forever — the loop never
+    re-planned them because ``has_existing_plan`` only checked for the plan
+    comment, not whether its review was usable.
+
+    ``has_usable_plan`` returns True iff BOTH the plan comment exists AND the
+    latest plan-review comment carries a parseable verdict. When the review
+    is unparseable, the next loop will re-plan (and re-review) the issue,
+    self-healing without manual cleanup.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _patch_repo(self) -> Any:
+        with (
+            patch(
+                "hephaestus.automation.review_state.get_repo_root",
+                return_value="/tmp/repo",
+            ),
+            patch(
+                "hephaestus.automation.review_state.get_repo_info",
+                return_value=("owner", "repo"),
+            ),
+        ):
+            yield
+
+    def _mgr_with_cache(self, cache: dict[int, list[dict[str, Any]]]) -> PlannerStateManager:
+        mgr = PlannerStateManager(_make_options(issues=list(cache.keys())))
+        with patch(
+            "hephaestus.automation.planner_state.fetch_all_issue_comments_graphql",
+            return_value=cache,
+        ):
+            mgr.prefetch_comments(list(cache.keys()))
+        return mgr
+
+    def test_returns_true_when_plan_and_parseable_go_review_present(self) -> None:
+        """Healthy state: plan + GO-verdict review → usable."""
+        mgr = self._mgr_with_cache(
+            {51: [{"body": _plan_body()}, {"body": _review_body("GO")}]}
+        )
+        assert mgr.has_usable_plan(51) is True
+
+    def test_returns_true_when_plan_and_parseable_nogo_review_present(self) -> None:
+        """A parseable NOGO is still 'usable' for the gate — the implementer reads it.
+
+        The intent of has_usable_plan is purely "is the review parseable?" — a
+        NOGO is a real reviewer signal, not a stale-comment defect. The
+        implementer's existing NOGO-defer logic handles it downstream.
+        """
+        mgr = self._mgr_with_cache(
+            {52: [{"body": _plan_body()}, {"body": _review_body("NOGO")}]}
+        )
+        assert mgr.has_usable_plan(52) is True
+
+    def test_returns_false_when_plan_present_but_review_unparseable(self) -> None:
+        """The #702 case: plan + verdict-less review → NOT usable → re-plan next loop."""
+        mgr = self._mgr_with_cache(
+            {53: [{"body": _plan_body()}, {"body": _unparseable_review_body()}]}
+        )
+        assert mgr.has_usable_plan(53) is False
+
+    def test_returns_false_when_no_plan_comment(self) -> None:
+        """No plan at all → not usable (delegates to existing existence semantics)."""
+        mgr = self._mgr_with_cache({54: [{"body": _other_body()}]})
+        assert mgr.has_usable_plan(54) is False
+
+    def test_returns_true_when_plan_present_and_no_review_yet(self) -> None:
+        """A plan with no review yet is 'usable' — the review will run this loop.
+
+        This preserves the prior has_existing_plan semantics for the
+        no-review-yet case so the loop's normal "plan posted, awaiting review"
+        flow is unaffected.
+        """
+        mgr = self._mgr_with_cache({55: [{"body": _plan_body()}]})
+        assert mgr.has_usable_plan(55) is True
+
+    def test_latest_review_wins_when_multiple_reviews_present(self) -> None:
+        """Most-recent review's parseability decides — older unparseable review is ignored."""
+        mgr = self._mgr_with_cache(
+            {
+                56: [
+                    {"body": _plan_body()},
+                    {"body": _unparseable_review_body()},   # older, stale
+                    {"body": _review_body("GO")},            # newer, valid
+                ]
+            }
+        )
+        assert mgr.has_usable_plan(56) is True
