@@ -54,7 +54,7 @@ repos:
         name: Markdown Lint
         description: Lint markdown files for consistency
         exclude: ^(build/|docs/)
-        args: ['--config', '.markdownlint.json', '--fix']
+        args: ['--config', '.markdownlint.yaml', '--fix']
 
   # YAML linting
   - repo: https://github.com/adrienverge/yamllint

@@ -116,15 +116,23 @@ def _mock_pr_found(pr_number: int) -> Any:
 class TestNoPrFoundSkipsGracefully:
     """Tests for graceful handling when no PR exists for an issue."""
 
-    def test_no_pr_found_skips_gracefully(self, reviewer: PRReviewer) -> None:
-        """No PR for issue → _review_pr returns WorkerResult(success=True)."""
+    def test_no_pr_found_yields_failed_result_with_diagnostic(self, reviewer: PRReviewer) -> None:
+        """A nonexistent PR (#0) makes _review_pr fail with a PR-diff diagnostic.
+
+        The "skip when no PR" decision lives in run()/_discover_prs (covered by
+        test_run_returns_empty_when_no_prs). When _review_pr is nonetheless
+        handed a PR number that cannot be fetched, it must surface a failed
+        WorkerResult that names the offending issue rather than crashing the
+        worker thread.
+        """
         with patch.object(reviewer, "_find_pr_for_issue", return_value=None):
             result = reviewer._review_pr(issue_number=123, pr_number=0)
 
-        # When _find_pr_for_issue returns None the issue is skipped successfully.
-        # However _review_pr receives pr_number directly — test _discover_prs instead.
-        # We test the full run() path via _discover_prs returning empty dict.
-        assert result is not None  # any WorkerResult is fine; real guard is in run()
+        assert result.success is False
+        assert result.issue_number == 123
+        assert result.pr_number is None
+        assert result.error is not None
+        assert "#0" in result.error
 
     def test_run_returns_empty_when_no_prs(self, reviewer: PRReviewer) -> None:
         """run() returns {} when no PRs are discovered."""
@@ -280,9 +288,14 @@ class TestReviewPostsInlineComments:
 
         assert result.success is True
         mock_post.assert_called_once()
-        call_kwargs = mock_post.call_args
-        assert call_kwargs[1]["pr_number"] == 42 or call_kwargs[0][0] == 42
-        assert "comments" in (call_kwargs[1] if call_kwargs[1] else {}) or mock_post.called
+        # gh_pr_review_post is invoked entirely by keyword (see _review_pr).
+        post_kwargs = mock_post.call_args.kwargs
+        assert post_kwargs["pr_number"] == 42
+        assert post_kwargs["comments"] == comments
+        assert post_kwargs["summary"] == "Looks mostly good"
+        assert post_kwargs["dry_run"] is False
+        # The posted thread IDs propagate onto the saved review state.
+        assert result.pr_number == 42
 
 
 class TestGatherPrContextPolicyState:
