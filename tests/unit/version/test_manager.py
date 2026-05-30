@@ -315,6 +315,66 @@ def test_version_manager_update_pyproject_no_version_section(tmp_path):
     assert pyproject.read_text() == original
 
 
+def test_version_manager_update_pyproject_skips_hatch_vcs_dynamic(tmp_path):
+    """update_pyproject_file() no-ops on hatch-vcs projects (dynamic version)."""
+    import logging
+
+    pyproject = tmp_path / "pyproject.toml"
+    original = (
+        '[project]\nname = "mypkg"\ndynamic = ["version"]\n\n[tool.hatch.version]\nsource = "vcs"\n'
+    )
+    pyproject.write_text(original)
+
+    # Attach a list-handler directly to the module logger because the project's
+    # custom get_logger() sets propagate=False, which makes pytest's caplog
+    # (rooted at the root logger) miss the records.
+    module_logger = logging.getLogger("hephaestus.version.manager")
+    records: list[logging.LogRecord] = []
+
+    class _ListHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _ListHandler(level=logging.WARNING)
+    module_logger.addHandler(handler)
+    try:
+        manager = VersionManager(
+            repo_root=tmp_path,
+            version_files=[],
+            init_files=[],
+            pyproject_file=pyproject,
+        )
+        manager.update_pyproject_file(pyproject, "1.2.3", verbose=True)
+    finally:
+        module_logger.removeHandler(handler)
+
+    # File content must be untouched — writing [project].version on a hatch-vcs
+    # project would either silently fail or, on a misconfigured repo, trip the
+    # check-version-single-source pre-commit hook.
+    assert pyproject.read_text() == original
+    # A warning must be logged so callers (e.g. release scripts) see the no-op.
+    messages = [rec.getMessage() for rec in records]
+    assert any("hatch-vcs" in m for m in messages)
+    assert any("git tag -s v1.2.3" in m for m in messages)
+
+
+def test_version_manager_update_pyproject_still_writes_static_project(tmp_path):
+    """update_pyproject_file() still writes on plain static-[project].version projects."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "mypkg"\nversion = "0.1.0"\n')
+
+    manager = VersionManager(
+        repo_root=tmp_path,
+        version_files=[],
+        init_files=[],
+        pyproject_file=pyproject,
+    )
+
+    manager.update_pyproject_file(pyproject, "2.0.0", verbose=False)
+
+    assert 'version = "2.0.0"' in pyproject.read_text()
+
+
 def test_version_manager_update_pyproject_missing_file(tmp_path):
     """update_pyproject_file() handles missing pyproject.toml gracefully."""
     missing = tmp_path / "pyproject.toml"
