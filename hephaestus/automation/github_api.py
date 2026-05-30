@@ -182,6 +182,55 @@ def gh_create_label(name: str, color: str = "ededed", description: str = "") -> 
     logger.info("Created missing label '%s'", name)
 
 
+def gh_issue_add_labels(issue_number: int, labels: list[str]) -> None:
+    """Add labels to an existing issue, auto-creating any that don't exist yet.
+
+    Idempotent: applying a label the issue already has is a no-op from
+    GitHub's perspective. Missing repo-level labels are created on demand via
+    :func:`gh_create_label`, which is what the state-label rollout relies on
+    (a repo that hasn't run ``hephaestus-ensure-state-labels`` yet will still
+    work — the first reviewer pass creates the labels).
+
+    Args:
+        issue_number: Issue to label.
+        labels: Label names to add. Empty list is a no-op.
+
+    """
+    if not labels:
+        return
+    existing = gh_list_labels()
+    for label in labels:
+        if label not in existing:
+            gh_create_label(label)
+    cmd = ["issue", "edit", str(issue_number)]
+    for label in labels:
+        cmd += ["--add-label", label]
+    _gh_call(cmd)
+    logger.info("Added labels %s to issue #%s", labels, issue_number)
+
+
+def gh_issue_remove_labels(issue_number: int, labels: list[str]) -> None:
+    """Remove labels from an existing issue.
+
+    Tolerant of labels the issue does not actually carry — ``gh issue edit
+    --remove-label`` reports those as a no-op rather than erroring. Used to
+    keep the ``state:*`` family mutually-exclusive (apply one, remove the
+    other two).
+
+    Args:
+        issue_number: Issue to modify.
+        labels: Label names to remove. Empty list is a no-op.
+
+    """
+    if not labels:
+        return
+    cmd = ["issue", "edit", str(issue_number)]
+    for label in labels:
+        cmd += ["--remove-label", label]
+    _gh_call(cmd)
+    logger.info("Removed labels %s from issue #%s", labels, issue_number)
+
+
 # GraphQL emits "Resource not accessible by …" with HTTP 200 when the token
 # is valid but lacks scope for the mutation (e.g. addComment outside the PAT's
 # allowed orgs). None of the HTTP-status patterns above match it, so without

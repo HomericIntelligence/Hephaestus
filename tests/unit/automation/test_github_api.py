@@ -14,10 +14,12 @@ from hephaestus.automation.github_api import (
     _gh_call,
     fetch_issue_info,
     gh_create_label,
+    gh_issue_add_labels,
     gh_issue_comment,
     gh_issue_create,
     gh_issue_delete_comment,
     gh_issue_json,
+    gh_issue_remove_labels,
     gh_issue_upsert_comment,
     gh_list_labels,
     gh_list_open_issues,
@@ -29,13 +31,10 @@ from hephaestus.automation.github_api import (
     write_secure,
 )
 from hephaestus.automation.models import IssueState
-from hephaestus.resilience.circuit_breaker import reset_all_circuit_breakers
 
-
-@pytest.fixture(autouse=True)
-def _reset_circuit_breakers() -> None:
-    """Reset all circuit breakers before each test to prevent cross-test contamination."""
-    reset_all_circuit_breakers()
+# Circuit-breaker reset is now an autouse package-scope fixture in
+# ``tests/unit/automation/conftest.py`` (#708), so it applies to every test
+# under the automation package — not just this file.
 
 
 class TestGhIssueJson:
@@ -841,6 +840,87 @@ class TestGhListLabels:
         gh_create_label("testing")
 
         assert "testing" in _github_api_module._label_cache
+
+
+class TestGhIssueAddLabels:
+    """Tests for gh_issue_add_labels (#704)."""
+
+    def teardown_method(self) -> None:
+        _github_api_module._label_cache = None
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_no_labels_is_noop(self, mock_gh_call: Any) -> None:
+        gh_issue_add_labels(42, [])
+        mock_gh_call.assert_not_called()
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch(
+        "hephaestus.automation.github_api.gh_list_labels",
+        return_value={"bug", "state:plan-go"},
+    )
+    @patch("hephaestus.automation.github_api.gh_create_label")
+    def test_existing_label_skips_create(
+        self, mock_create: Any, _mock_list: Any, mock_gh_call: Any
+    ) -> None:
+        """A label that already exists in the repo is not re-created."""
+        gh_issue_add_labels(42, ["state:plan-go"])
+        mock_create.assert_not_called()
+        # Exactly one edit call to add the label.
+        assert mock_gh_call.call_count == 1
+        args = mock_gh_call.call_args[0][0]
+        assert args[:3] == ["issue", "edit", "42"]
+        assert "--add-label" in args
+        assert "state:plan-go" in args
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.gh_list_labels", return_value={"bug"})
+    @patch("hephaestus.automation.github_api.gh_create_label")
+    def test_missing_label_is_auto_created(
+        self, mock_create: Any, _mock_list: Any, mock_gh_call: Any
+    ) -> None:
+        """A label not yet present in the repo is created before the edit call."""
+        gh_issue_add_labels(42, ["state:plan-go"])
+        mock_create.assert_called_once_with("state:plan-go")
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.gh_list_labels", return_value={"bug"})
+    @patch("hephaestus.automation.github_api.gh_create_label")
+    def test_multiple_labels_share_one_edit_call(
+        self, mock_create: Any, _mock_list: Any, mock_gh_call: Any
+    ) -> None:
+        """All labels go in a single ``gh issue edit`` invocation."""
+        gh_issue_add_labels(42, ["state:plan-go", "state:plan-no-go"])
+        assert mock_gh_call.call_count == 1
+        args = mock_gh_call.call_args[0][0]
+        # Two --add-label flags, one per label.
+        assert args.count("--add-label") == 2
+        assert "state:plan-go" in args
+        assert "state:plan-no-go" in args
+
+
+class TestGhIssueRemoveLabels:
+    """Tests for gh_issue_remove_labels (#704)."""
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_no_labels_is_noop(self, mock_gh_call: Any) -> None:
+        gh_issue_remove_labels(42, [])
+        mock_gh_call.assert_not_called()
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_single_label_remove(self, mock_gh_call: Any) -> None:
+        gh_issue_remove_labels(42, ["state:plan-no-go"])
+        assert mock_gh_call.call_count == 1
+        args = mock_gh_call.call_args[0][0]
+        assert args[:3] == ["issue", "edit", "42"]
+        assert "--remove-label" in args
+        assert "state:plan-no-go" in args
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_multiple_labels_share_one_call(self, mock_gh_call: Any) -> None:
+        gh_issue_remove_labels(42, ["state:plan-no-go", "state:needs-plan"])
+        assert mock_gh_call.call_count == 1
+        args = mock_gh_call.call_args[0][0]
+        assert args.count("--remove-label") == 2
 
 
 class TestGhListOpenIssues:

@@ -218,6 +218,7 @@ with `--help` to see full usage.
 | `hephaestus-implement-issues` | Bulk issue implementation using Claude Code or Codex in parallel worktrees |
 | `hephaestus-review-prs` | Read-only PR review automation using Claude Code or Codex in parallel worktrees |
 | `hephaestus-agent-stage` | Run one Claude or Codex automation stage with prompt and skill context |
+| `hephaestus-ensure-state-labels` | Idempotently provision `state:needs-plan` / `state:plan-no-go` / `state:plan-go` labels on one or more repos |
 
 ### GitHub
 

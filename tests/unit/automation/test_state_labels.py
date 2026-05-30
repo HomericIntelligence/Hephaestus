@@ -1,0 +1,130 @@
+"""Tests for ``hephaestus.automation.state_labels``.
+
+Pure-function module — the helpers interpret a labels iterable from a GitHub
+issue and report which state the issue is in. The state machine is documented
+in the module docstring; these tests cover every transition.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from hephaestus.automation.state_labels import (
+    ALL_STATE_LABELS,
+    STATE_LABEL_SPECS,
+    STATE_NEEDS_PLAN,
+    STATE_PLAN_GO,
+    STATE_PLAN_NO_GO,
+    has_label,
+    is_plan_go,
+    is_plan_no_go,
+    needs_plan,
+)
+
+
+class TestLabelVocabulary:
+    """The three state-label names + the ALL tuple are stable identifiers."""
+
+    def test_three_distinct_state_labels(self) -> None:
+        assert len({STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO}) == 3
+
+    def test_all_state_labels_covers_each(self) -> None:
+        assert set(ALL_STATE_LABELS) == {
+            STATE_NEEDS_PLAN,
+            STATE_PLAN_NO_GO,
+            STATE_PLAN_GO,
+        }
+
+    def test_state_prefix(self) -> None:
+        """Every state label uses the ``state:`` family prefix."""
+        for label in ALL_STATE_LABELS:
+            assert label.startswith("state:")
+
+    def test_label_specs_cover_every_label(self) -> None:
+        """The provisioning script needs a colour+description for each label."""
+        assert set(STATE_LABEL_SPECS.keys()) == set(ALL_STATE_LABELS)
+        for spec in STATE_LABEL_SPECS.values():
+            assert "color" in spec
+            assert "description" in spec
+            # Hex colour without leading '#'.
+            assert len(spec["color"]) == 6
+            int(spec["color"], 16)
+
+
+class TestHasLabel:
+    """``has_label`` is a thin convenience wrapper around ``in``."""
+
+    def test_present(self) -> None:
+        assert has_label(["bug", STATE_PLAN_GO], STATE_PLAN_GO) is True
+
+    def test_absent(self) -> None:
+        assert has_label(["bug", "enhancement"], STATE_PLAN_GO) is False
+
+    def test_empty(self) -> None:
+        assert has_label([], STATE_PLAN_GO) is False
+
+
+class TestIsPlanGo:
+    """``state:plan-go`` is the terminal-approved state."""
+
+    def test_label_present_returns_true(self) -> None:
+        assert is_plan_go([STATE_PLAN_GO, "bug"]) is True
+
+    def test_label_absent_returns_false(self) -> None:
+        assert is_plan_go(["bug", "enhancement"]) is False
+
+    def test_no_go_label_does_not_imply_go(self) -> None:
+        assert is_plan_go([STATE_PLAN_NO_GO]) is False
+
+    def test_needs_plan_label_does_not_imply_go(self) -> None:
+        assert is_plan_go([STATE_NEEDS_PLAN]) is False
+
+
+class TestIsPlanNoGo:
+    """``state:plan-no-go`` indicates the latest reviewer pass was NOGO."""
+
+    def test_label_present_returns_true(self) -> None:
+        assert is_plan_no_go([STATE_PLAN_NO_GO]) is True
+
+    def test_label_absent_returns_false(self) -> None:
+        assert is_plan_no_go(["bug"]) is False
+
+    def test_go_label_does_not_imply_no_go(self) -> None:
+        assert is_plan_no_go([STATE_PLAN_GO]) is False
+
+
+class TestNeedsPlan:
+    """Issues need a plan when ``state:needs-plan`` is set OR no state label is set."""
+
+    def test_explicit_needs_plan_label(self) -> None:
+        assert needs_plan([STATE_NEEDS_PLAN, "bug"]) is True
+
+    def test_no_state_label_at_all(self) -> None:
+        """Absence of any state label is functionally 'needs a plan'."""
+        assert needs_plan(["bug", "enhancement"]) is True
+
+    def test_empty_labels_needs_plan(self) -> None:
+        assert needs_plan([]) is True
+
+    def test_plan_go_does_not_need_plan(self) -> None:
+        assert needs_plan([STATE_PLAN_GO]) is False
+
+    def test_plan_no_go_does_not_need_plan(self) -> None:
+        """A NOGO issue has a plan; it's just being re-iterated. Not needs-plan."""
+        assert needs_plan([STATE_PLAN_NO_GO]) is False
+
+    @pytest.mark.parametrize(
+        "labels",
+        [
+            [STATE_PLAN_GO, STATE_NEEDS_PLAN],
+            [STATE_PLAN_NO_GO, STATE_NEEDS_PLAN],
+        ],
+    )
+    def test_terminal_state_wins_over_needs_plan_when_both_present(self, labels: list[str]) -> None:
+        """Terminal label wins over needs-plan when both are present.
+
+        Defensive against label churn during the reviewer's apply/remove
+        sequence: if a terminal label is present, ``needs_plan`` reports
+        False even when ``state:needs-plan`` was not yet removed.
+        """
+        assert needs_plan(labels) is False

@@ -124,8 +124,21 @@ class TestNoPrFoundSkipsGracefully:
         handed a PR number that cannot be fetched, it must surface a failed
         WorkerResult that names the offending issue rather than crashing the
         worker thread.
+
+        Patches ``_gh_call`` at the pr_reviewer module level so the inner
+        diff-fetch raises deterministically. Without this, CI test ordering
+        can trip the GitHub API circuit breaker before this test runs, and
+        the captured error becomes "circuit breaker is open" instead of the
+        domain-specific ``#0`` diagnostic the test exists to verify (#708).
         """
-        with patch.object(reviewer, "_find_pr_for_issue", return_value=None):
+        gh_diff_failure = RuntimeError("no diff for PR #0 (test fixture)")
+        with (
+            patch.object(reviewer, "_find_pr_for_issue", return_value=None),
+            patch(
+                "hephaestus.automation.pr_reviewer._gh_call",
+                side_effect=gh_diff_failure,
+            ),
+        ):
             result = reviewer._review_pr(issue_number=123, pr_number=0)
 
         assert result.success is False

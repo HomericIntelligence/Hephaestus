@@ -256,6 +256,14 @@ class TestIsPlanReviewGoWithFetch:
                 "hephaestus.automation.review_state.get_repo_info",
                 return_value=("owner", "name"),
             ),
+            # #704: is_plan_review_go also lazy-fetches labels via
+            # gh_issue_json when neither labels nor comments were supplied.
+            # Return an empty-labels issue so the comment-scan path is
+            # exercised (which is what these legacy tests target).
+            patch(
+                "hephaestus.automation.review_state.gh_issue_json",
+                return_value={"labels": []},
+            ),
         ):
             yield
 
