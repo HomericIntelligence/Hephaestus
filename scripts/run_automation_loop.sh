@@ -122,7 +122,19 @@ DRY_RUN=0
 LOOPS=5
 MAX_WORKERS=3
 PARALLEL_REPOS=1
-PROJECTS_DIR="$HOME/Projects"
+# Resolve projects root: explicit PROJECTS_ROOT env var (if it points to a real
+# directory) wins; otherwise fall back to ~/Projects with a warning. Mirrors
+# hephaestus.config.paths.resolve_projects_dir() for the bash entry point. (#704)
+if [ -n "${PROJECTS_ROOT:-}" ] && [ -d "$PROJECTS_ROOT" ]; then
+  PROJECTS_DIR="$PROJECTS_ROOT"
+else
+  if [ -n "${PROJECTS_ROOT:-}" ]; then
+    echo "WARNING: PROJECTS_ROOT=$PROJECTS_ROOT does not exist; falling back to $HOME/Projects" >&2
+  else
+    echo "WARNING: PROJECTS_ROOT not set; falling back to $HOME/Projects" >&2
+  fi
+  PROJECTS_DIR="$HOME/Projects"
+fi
 ORG="HomericIntelligence"
 
 ALL_PHASES="plan,implement,drive-green"

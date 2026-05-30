@@ -245,9 +245,7 @@ class TestHasUsablePlan:
 
     def test_returns_true_when_plan_and_parseable_go_review_present(self) -> None:
         """Healthy state: plan + GO-verdict review → usable."""
-        mgr = self._mgr_with_cache(
-            {51: [{"body": _plan_body()}, {"body": _review_body("GO")}]}
-        )
+        mgr = self._mgr_with_cache({51: [{"body": _plan_body()}, {"body": _review_body("GO")}]})
         assert mgr.has_usable_plan(51) is True
 
     def test_returns_true_when_plan_and_parseable_nogo_review_present(self) -> None:
@@ -257,9 +255,7 @@ class TestHasUsablePlan:
         NOGO is a real reviewer signal, not a stale-comment defect. The
         implementer's existing NOGO-defer logic handles it downstream.
         """
-        mgr = self._mgr_with_cache(
-            {52: [{"body": _plan_body()}, {"body": _review_body("NOGO")}]}
-        )
+        mgr = self._mgr_with_cache({52: [{"body": _plan_body()}, {"body": _review_body("NOGO")}]})
         assert mgr.has_usable_plan(52) is True
 
     def test_returns_false_when_plan_present_but_review_unparseable(self) -> None:
@@ -290,8 +286,8 @@ class TestHasUsablePlan:
             {
                 56: [
                     {"body": _plan_body()},
-                    {"body": _unparseable_review_body()},   # older, stale
-                    {"body": _review_body("GO")},            # newer, valid
+                    {"body": _unparseable_review_body()},  # older, stale
+                    {"body": _review_body("GO")},  # newer, valid
                 ]
             }
         )
