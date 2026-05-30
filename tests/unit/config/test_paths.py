@@ -8,6 +8,7 @@ per-process de-duplication guard.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,7 @@ from hephaestus.config.paths import DEFAULT_PROJECTS_DIR, resolve_projects_dir
 
 
 @pytest.fixture(autouse=True)
-def _reset_warned_keys() -> None:
+def _reset_warned_keys() -> Iterator[None]:
     """Clear the per-process warning-dedup guard before & after each test.
 
     Without this, tests would leak state into each other and the
