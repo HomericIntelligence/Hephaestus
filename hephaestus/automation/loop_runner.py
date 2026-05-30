@@ -38,6 +38,7 @@ from urllib.parse import urlparse
 
 from hephaestus.automation.claude_timeouts import gh_cli_timeout
 from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.config.paths import DEFAULT_PROJECTS_DIR, resolve_projects_dir
 from hephaestus.resilience.subprocess_resilience import resilient_call
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
@@ -79,7 +80,11 @@ ALL_PHASES: tuple[str, ...] = (
     "drive-green",
 )
 
-DEFAULT_PROJECTS_DIR = Path.home() / "Projects"
+# DEFAULT_PROJECTS_DIR is re-exported from hephaestus.config.paths so existing
+# tests that patch this module-level name continue to work. See #704: the
+# projects root is now resolved at runtime via resolve_projects_dir() so that
+# the ``PROJECTS_ROOT`` env var can override the historical ``~/Projects``
+# default without code changes here.
 
 # Sentinel for ``--org`` invoked with no argument (auto-detect from cwd).
 # Module-level identity guarantees ``args.org is _ORG_AUTODETECT`` is the
@@ -344,9 +349,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--projects-dir",
-        type=Path,
-        default=DEFAULT_PROJECTS_DIR,
-        help=f"Local directory containing repo clones (default: {DEFAULT_PROJECTS_DIR})",
+        type=str,
+        default=None,
+        help=(
+            "Local directory containing repo clones. When omitted, resolved from "
+            "the ``PROJECTS_ROOT`` env var (if set and existing), otherwise "
+            f"falls back to ``{DEFAULT_PROJECTS_DIR}``."
+        ),
     )
     p.add_argument(
         "--phase-timeout",
@@ -1222,7 +1231,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         reviewer_model=args.reviewer_model,
         implementer_model=args.implementer_model,
         org=org,
-        projects_dir=args.projects_dir,
+        projects_dir=resolve_projects_dir(args.projects_dir),
         # A non-positive --phase-timeout explicitly disables the bound; any
         # positive value (including the env-overridable default) applies it.
         phase_timeout_s=(
