@@ -79,3 +79,6 @@ htmlcov/
 # Claude Code agent prompt artifacts (accidentally-committed temporary files)
 /.claude-prompt-*.md
 /.claude-followup-*.md
+
+# Claude Code scheduled-task runtime lock (per-machine, per-process — not source)
+.claude/scheduled_tasks.lock
