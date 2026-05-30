@@ -22,11 +22,17 @@ from .claude_invoke import parse_review_verdict
 from .claude_models import learn_model, planner_model, reviewer_model
 from .claude_timeouts import planner_claude_timeout
 from .git_utils import issue_ref
-from .github_api import gh_issue_json, gh_issue_upsert_comment
+from .github_api import (
+    gh_issue_add_labels,
+    gh_issue_json,
+    gh_issue_remove_labels,
+    gh_issue_upsert_comment,
+)
 from .models import PLAN_COMMENT_MARKER
 from .prompts import get_plan_loop_review_prompt, get_plan_prompt
 from .review_state import PLAN_REVIEW_PREFIX
 from .session_naming import AGENT_PLAN_REVIEWER, AGENT_PLANNER, reviewer_agent
+from .state_labels import STATE_NEEDS_PLAN, STATE_PLAN_GO, STATE_PLAN_NO_GO
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +284,13 @@ class PlanReviewLoop:
             # verdict line is itself the gate the implementer reads.
             self._upsert_review_comment(issue_number, review_text)
 
+            # Apply the state label corresponding to this iteration's verdict.
+            # GO → state:plan-go (terminal — implementer trusts it absolutely).
+            # NOGO (each iteration) → state:plan-no-go.
+            # Either way, remove state:needs-plan (and the opposite terminal
+            # label if it was set on a prior pass).
+            self._apply_state_label(issue_number, is_go=verdict.is_go)
+
             if verdict.is_go:
                 logger.info(
                     "%s: GO on iteration %s — loop terminated",
@@ -396,6 +409,50 @@ class PlanReviewLoop:
             logger.warning(
                 "%s: failed to upsert review comment (non-fatal): %s",
                 issue_ref(issue_number),
+                e,
+            )
+
+    def _apply_state_label(self, issue_number: int, *, is_go: bool) -> None:
+        """Apply the verdict's ``state:*`` label and remove the others (#704).
+
+        The state-label family is mutually exclusive. On GO, set
+        ``state:plan-go`` and remove both ``state:plan-no-go`` and
+        ``state:needs-plan``. On NOGO (each iteration), set
+        ``state:plan-no-go`` and remove ``state:plan-go`` (in case a prior
+        run had set it) plus ``state:needs-plan``.
+
+        Failure is non-fatal: the label apply/remove is best-effort, mirroring
+        the upsert helpers above. The reviewer's verdict comment is still the
+        ultimate fallback for the backfill path.
+
+        Args:
+            issue_number: GitHub issue number.
+            is_go: ``True`` when the reviewer's verdict is GO; ``False`` for
+                NOGO (either per-iteration or NOGO-exhausted).
+
+        """
+        if is_go:
+            label_to_add = STATE_PLAN_GO
+            labels_to_remove = [STATE_PLAN_NO_GO, STATE_NEEDS_PLAN]
+        else:
+            label_to_add = STATE_PLAN_NO_GO
+            labels_to_remove = [STATE_PLAN_GO, STATE_NEEDS_PLAN]
+        try:
+            gh_issue_add_labels(issue_number, [label_to_add])
+        except Exception as e:
+            logger.warning(
+                "%s: failed to add label %r (non-fatal): %s",
+                issue_ref(issue_number),
+                label_to_add,
+                e,
+            )
+        try:
+            gh_issue_remove_labels(issue_number, labels_to_remove)
+        except Exception as e:
+            logger.warning(
+                "%s: failed to remove labels %s (non-fatal): %s",
+                issue_ref(issue_number),
+                labels_to_remove,
                 e,
             )
 

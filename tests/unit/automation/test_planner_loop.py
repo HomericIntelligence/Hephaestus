@@ -14,17 +14,22 @@ from hephaestus.automation.review_state import PLAN_REVIEW_PREFIX, is_plan_revie
 
 @pytest.fixture(autouse=True)
 def _patch_loop_upsert() -> Any:
-    """Stub the per-iteration comment upsert so loop tests stay hermetic.
+    """Stub the per-iteration comment upsert + label mutations so loop tests stay hermetic.
 
-    ``PlanReviewLoop.run`` now upserts the single PLAN and REVIEW comments on
-    every iteration (Stage 1). Without this stub the loop would issue real
-    ``gh api graphql`` / comment calls. Tests that need to inspect the upserts
-    re-patch this same target locally to capture call args.
+    ``PlanReviewLoop.run`` upserts the PLAN and REVIEW comments AND applies a
+    ``state:*`` label via ``gh_issue_add_labels`` / ``gh_issue_remove_labels``
+    (#704) on every iteration. Without these stubs the loop would issue real
+    ``gh`` calls. Tests that need to inspect the upserts re-patch the upsert
+    target locally; label-mutation tests re-patch the label targets the same way.
     """
-    with patch(
-        "hephaestus.automation.planner_review_loop.gh_issue_upsert_comment",
-        return_value=None,
-    ) as mock_upsert:
+    with (
+        patch(
+            "hephaestus.automation.planner_review_loop.gh_issue_upsert_comment",
+            return_value=None,
+        ) as mock_upsert,
+        patch("hephaestus.automation.planner_review_loop.gh_issue_add_labels"),
+        patch("hephaestus.automation.planner_review_loop.gh_issue_remove_labels"),
+    ):
         yield mock_upsert
 
 

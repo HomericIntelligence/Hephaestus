@@ -32,7 +32,9 @@ import re
 from typing import Any
 
 from .git_utils import get_repo_info, get_repo_root, issue_ref
-from .github_api import _gh_call
+from .github_api import _gh_call, gh_issue_add_labels, gh_issue_json
+from .state_labels import STATE_PLAN_GO, STATE_PLAN_NO_GO
+from .state_labels import is_plan_go as labels_are_plan_go
 
 logger = logging.getLogger(__name__)
 
@@ -322,34 +324,76 @@ def fetch_all_issue_comments_graphql(
     return result_map
 
 
-def is_plan_review_go(
+def is_plan_review_go(  # noqa: C901  # labels-first gate with comment-scan backfill
     issue_number: int,
     comments: list[dict[str, Any]] | None = None,
+    issue_labels: list[str] | None = None,
 ) -> bool:
-    """Return True iff the LATEST plan-review on the issue is a GO.
+    """Return True iff the issue's plan is approved (``state:plan-go``).
 
-    Single source of truth for the plan-review gate. Used by
-    :meth:`PlanReviewer._latest_review_is_final` (so the reviewer skips issues
-    whose plan was already cleared) and by the implementer (so it never
-    implements a NOGO plan, or one with no review at all). The verdict is read
-    by :func:`latest_verdict` (LAST verdict line wins — the reviewer's final
-    word gates).
+    Labels-first gate (#704). The reviewer applies ``state:plan-go`` on the
+    first unambiguous GO verdict (and ``state:plan-no-go`` on NOGO); this
+    function trusts the label as the single source of truth. The
+    comment-scan path remains as a one-time **backfill** for issues whose
+    plan reached GO before the labels rollout — when no state label is set
+    but the latest plan-review comment parses to ``Verdict: GO``, this
+    function also applies ``state:plan-go`` to the issue so subsequent
+    runs short-circuit on the label.
 
     Args:
-        issue_number: GitHub issue number. Only used for logging and as
-            input to the GraphQL fetch when ``comments`` is ``None``.
-        comments: Pre-fetched list of issue comment dicts in
-            chronological order, or ``None`` to fetch via GraphQL.
-            Each dict must expose ``body``. Callers may pass a
-            per-instance cache; the implementer passes ``None``.
+        issue_number: GitHub issue number. Used for logging, lazy label
+            fetch (when ``issue_labels`` is ``None``), and the backfill
+            ``gh_issue_add_labels`` call.
+        comments: Pre-fetched list of issue comment dicts in chronological
+            order, or ``None`` to fetch via GraphQL. Each dict must expose
+            ``body``. Only consulted on the backfill path.
+        issue_labels: Pre-fetched list of label names currently on the issue,
+            or ``None`` to fetch lazily via :func:`gh_issue_json`. Callers
+            that already have the labels in hand (e.g. the implementer's
+            per-issue load) should pass them to avoid an extra round-trip.
 
     Returns:
-        ``True`` iff at least one plan-review comment exists *and* the most
-        recent one parses to an unambiguous ``GO``. ``False`` for all other
-        states: NOGO verdict, unparseable/ambiguous verdict, missing review, or
-        comment-fetch failure.
+        ``True`` iff ``state:plan-go`` is present on the issue (or the
+        backfill scan promotes it). ``False`` when ``state:plan-no-go`` is
+        present, when neither state label is set and no GO is found in the
+        comments, or when label/comment fetch fails.
 
     """
+    # ── Labels-first short-circuit ────────────────────────────────────────
+    # Only fetch labels when the caller passed NEITHER labels nor comments.
+    # Callers that already have comments in hand (e.g. legacy tests, the
+    # plan_reviewer's per-instance comment cache) intentionally exercise the
+    # comment-scan path and need not trigger an extra round-trip.
+    if issue_labels is None and comments is None:
+        try:
+            issue_data = gh_issue_json(issue_number)
+            issue_labels = [
+                label.get("name", "")
+                for label in issue_data.get("labels", [])
+                if label.get("name")
+            ]
+        except Exception as e:
+            logger.debug(
+                "Issue %s: could not fetch labels for plan-go gate (%s); "
+                "falling back to comment scan",
+                issue_ref(issue_number),
+                e,
+            )
+            issue_labels = []
+    if issue_labels is not None:
+        if labels_are_plan_go(issue_labels):
+            logger.debug(
+                "Issue %s: state:plan-go label present — GO", issue_ref(issue_number)
+            )
+            return True
+        if STATE_PLAN_NO_GO in set(issue_labels):
+            logger.debug(
+                "Issue %s: state:plan-no-go label present — NOGO",
+                issue_ref(issue_number),
+            )
+            return False
+
+    # ── Backfill path: no state label yet; scan comments for a GO verdict ─
     if comments is None:
         comments = _fetch_issue_comments_graphql(issue_number)
 
@@ -362,23 +406,29 @@ def is_plan_review_go(
             latest_review_url = comment.get("url")
 
     if latest_review_body is None:
-        logger.debug(
-            "Issue %s: no plan-review comment found",
-            issue_ref(issue_number),
-        )
+        logger.debug("Issue %s: no plan-review comment found", issue_ref(issue_number))
         return False
 
     # Last-verdict-wins (see latest_verdict): the reviewer's FINAL word gates.
     verdict = latest_verdict(latest_review_body)
     if verdict == "GO":
-        logger.debug(
-            "Issue %s: latest plan review is GO",
+        logger.info(
+            "Issue %s: backfilling state:plan-go label from existing GO review",
             issue_ref(issue_number),
         )
-    elif verdict is None:
-        # No parseable verdict line — log at WARNING with the first line of the
-        # offending body and its URL so the malformed output can be inspected
-        # without digging through raw GitHub comments (root cause of #615).
+        try:
+            gh_issue_add_labels(issue_number, [STATE_PLAN_GO])
+        except Exception as e:
+            logger.warning(
+                "Issue %s: failed to backfill state:plan-go label (%s); "
+                "GO gate still True via comment scan",
+                issue_ref(issue_number),
+                e,
+            )
+        return True
+    if verdict is None:
+        # No parseable verdict line — log WARNING with the first line of the
+        # offending body and its URL (root cause of #615).
         first_line = latest_review_body.split("\n", 1)[0].strip()
         url_part = latest_review_url or "<no url>"
         logger.warning(
@@ -398,4 +448,4 @@ def is_plan_review_go(
             context,
             url_part,
         )
-    return verdict == "GO"
+    return False

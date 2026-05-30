@@ -34,6 +34,7 @@ from .planner_state import PlannerStateManager
 from .prompts import (
     get_advise_prompt,
 )
+from .review_state import is_plan_review_go
 from .session_naming import AGENT_ADVISE
 from .status_tracker import StatusTracker
 from .work_report import write_work_report
@@ -117,15 +118,16 @@ class Planner:
         return self.state_mgr.filter()
 
     def _has_existing_plan(self, issue_number: int) -> bool:
-        """Check if an issue has a plan whose latest review is parseable.
+        """Skip the planner when the issue is already in ``state:plan-go``.
 
-        Delegates to :meth:`PlannerStateManager.has_usable_plan` (#702): an
-        issue counts as "already planned" only when its latest plan-review
-        comment carries a parseable ``Verdict: GO/NOGO`` line. Issues with a
-        plan but an unparseable (pre-contract) review are re-planned so the
-        loop self-heals stale reviews without manual cleanup.
+        Labels-first gate (#704). An issue counts as "already planned" iff
+        ``is_plan_review_go`` returns True, which is now keyed on the
+        ``state:plan-go`` label (with a one-time comment-scan backfill for
+        issues that converged before the labels rollout). Issues in
+        ``state:plan-no-go`` or with no state label at all are re-planned so
+        the loop drives them toward GO without churning on GO'd ones.
         """
-        return self.state_mgr.has_usable_plan(issue_number)
+        return is_plan_review_go(issue_number)
 
     def _plan_issue(self, issue_number: int) -> PlanResult:
         """Plan a single issue.
