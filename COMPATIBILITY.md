@@ -20,11 +20,13 @@ follows the deprecation policy below.
 ProjectHephaestus ships **two independently versioned artifacts**:
 
 - **The Python package** (`homericintelligence-hephaestus`) — version is **tag-driven**
-  via hatch-vcs (derived from the latest `vX.Y.Z` git tag; currently `0.9.2`). This is
-  the version the Semantic Versioning guarantees in this document apply to.
+  via hatch-vcs (derived from the latest `vX.Y.Z` git tag; see
+  [latest release](https://github.com/HomericIntelligence/ProjectHephaestus/releases/latest)).
+  This is the version the Semantic Versioning guarantees in this document apply to.
 - **The Claude Code plugin** (`hephaestus`, declared in `.claude-plugin/`) — carries its
-  own `version` field (currently `3.0.0`) that tracks the skill/command surface, not the
-  Python API.
+  own `version` field (declared in
+  [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json)) that tracks the
+  skill/command surface, not the Python API.
 
 These two version numbers are **not** coupled and will not match. The plugin version
 says nothing about the Python package version and vice versa. See

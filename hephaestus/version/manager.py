@@ -2,13 +2,22 @@
 
 """Version management utilities for updating and verifying version files.
 
-The authoritative project version lives in pyproject.toml under [project].version.
-This module keeps secondary version files in sync:
+This module supports two version-source models:
+
+1. **Static pyproject** — ``[project].version = "x.y.z"`` is the source of truth.
+   ``update_pyproject_file()`` rewrites that field; ``verify()`` reads it.
+2. **hatch-vcs dynamic** — ``pyproject.toml`` declares ``dynamic = ["version"]``
+   with ``[tool.hatch.version] source = "vcs"`` and the version is derived from
+   the latest ``vX.Y.Z`` git tag. There is **no** static ``[project].version``.
+   On such projects, ``update_pyproject_file()`` no-ops with a warning (writing
+   would reintroduce the field that the project's ``check-version-single-source``
+   pre-commit hook explicitly rejects).
+
+This module keeps secondary version files in sync regardless of model:
 - VERSION (root file)
 - __init__.py (__version__ attribute)
 
-Note: pixi.toml intentionally has no version field. The package version is
-provided to pixi via the editable install from pyproject.toml.
+Note: pixi.toml intentionally has no version field.
 """
 
 import re
@@ -26,6 +35,21 @@ class _UnsetType:
 
 
 _UNSET = _UnsetType()  # sentinel: use default pyproject_file path
+
+
+_HATCH_VCS_DYNAMIC_RE = re.compile(r'^\s*dynamic\s*=\s*\[\s*[^]]*"version"[^]]*\]', re.MULTILINE)
+
+
+def _is_hatch_vcs_project(pyproject_content: str) -> bool:
+    """Return True if pyproject.toml declares a dynamic version via hatch-vcs.
+
+    Detection is intentionally lenient: any ``dynamic = [..., "version", ...]``
+    declaration is sufficient. The narrower form
+    ``[tool.hatch.version] source = "vcs"`` is a stronger signal but the dynamic
+    declaration alone is enough to mean ``[project].version`` should not exist
+    and therefore should not be written.
+    """
+    return bool(_HATCH_VCS_DYNAMIC_RE.search(pyproject_content))
 
 
 def parse_version(version: str) -> tuple[int, int, int]:
@@ -111,6 +135,12 @@ class VersionManager:
     ) -> None:
         """Update version in pyproject.toml [project].version.
 
+        On hatch-vcs projects (``dynamic = ["version"]`` declared), this is a
+        no-op with an explanatory warning: the version is derived from git tags
+        and rewriting ``[project].version`` would either silently fail (no field
+        to match) or, on a misconfigured repo, reintroduce a static field that
+        the ``check-version-single-source`` pre-commit hook rejects.
+
         Args:
             pyproject_file: Path to pyproject.toml
             version: New version string
@@ -122,10 +152,21 @@ class VersionManager:
                 logger.warning("  %s not found, skipping", pyproject_file)
             return
 
+        content = pyproject_file.read_text()
+
+        if _is_hatch_vcs_project(content):
+            if verbose:
+                logger.warning(
+                    "  %s declares dynamic version via hatch-vcs; "
+                    "skipping [project].version rewrite "
+                    "(tag the release with `git tag -s v%s` instead)",
+                    pyproject_file,
+                    version,
+                )
+            return
+
         if verbose:
             logger.info("Updating %s...", pyproject_file)
-
-        content = pyproject_file.read_text()
 
         # Replace version = "x.y.z" only within the [project] section.
         # The negative lookahead (?!\[) stops the section match at the next header.
