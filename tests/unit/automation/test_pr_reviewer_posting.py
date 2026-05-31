@@ -532,10 +532,6 @@ class TestRunPrReviewAnalysis:
             patch("hephaestus.automation.pr_reviewer.get_repo_root", return_value=tmp_path),
             patch("hephaestus.automation.pr_reviewer.get_repo_slug", return_value="Repo"),
             patch(
-                "hephaestus.automation.pr_reviewer.current_trunk_githash",
-                return_value="abc1234",
-            ),
-            patch(
                 "hephaestus.automation.pr_reviewer.invoke_claude_with_session",
                 side_effect=_fake_invoke,
             ),

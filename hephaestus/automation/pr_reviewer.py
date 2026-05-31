@@ -46,7 +46,7 @@ from .git_utils import get_repo_info, get_repo_root, get_repo_slug, issue_ref, p
 from .github_api import _gh_call, fetch_issue_info, gh_pr_review_post
 from .models import ReviewerOptions, ReviewPhase, ReviewState, WorkerResult
 from .prompts import get_pr_review_analysis_prompt
-from .session_naming import AGENT_PR_REVIEWER, current_trunk_githash, reviewer_agent
+from .session_naming import AGENT_PR_REVIEWER, reviewer_agent
 from .status_tracker import StatusTracker  # noqa: F401 — re-exported for test patching
 from .worktree_manager import WorktreeManager  # noqa: F401 — re-exported for test patching
 
@@ -218,13 +218,11 @@ def run_pr_review_analysis(
             return parsed
 
         repo_root = get_repo_root()
-        githash = current_trunk_githash(repo_root)
         repo_slug = get_repo_slug(repo_root)
         stdout, _ = invoke_claude_with_session(
             repo=repo_slug,
             issue=issue_number,
             agent=review_agent,
-            githash=githash,
             prompt=prompt,
             model=reviewer_model(),
             cwd=worktree_path,
