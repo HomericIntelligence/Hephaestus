@@ -217,10 +217,10 @@ class TestSessionExpiredFallback:
         assert m.call_count == 1
 
     def test_create_already_in_use_falls_back_to_resume(self, fake_home: Path) -> None:
-        """When the CLI rejects --session-id with 'already in use', fall back to --resume. (#822)
+        """Fall back to --resume when --session-id is rejected as already-in-use.
 
         Defends against encoding drift between hephaestus's transcript probe
-        and the Claude CLI's actual session storage.
+        and the Claude CLI's actual session storage. (#822)
         """
         cwd = fake_home / "work"
         cwd.mkdir()

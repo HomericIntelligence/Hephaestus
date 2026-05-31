@@ -192,8 +192,9 @@ class TestSessionJsonlPath:
     def test_dot_prefixed_segment_encodes_dot_as_dash(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A `.worktrees` segment must yield `--worktrees-`, matching the
-        Claude CLI's actual on-disk encoding. (#822)
+        """Encode a `.worktrees` segment as `--worktrees-`, not `-.worktrees-`.
+
+        Matches the Claude CLI's actual on-disk encoding. (#822)
         """
         monkeypatch.setenv("HOME", str(tmp_path))
         target = tmp_path / "build" / ".worktrees" / "issue-5451"
@@ -216,8 +217,9 @@ class TestSessionJsonlPath:
     def test_mid_segment_dot_also_rewritten(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Mid-segment dots (e.g. `v1.2.3`) are rewritten too — matches the
-        CLI's flat `.` -> `-` rule. Documented edge case, not a bug.
+        """Rewrite mid-segment dots (e.g. `v1.2.3`) too.
+
+        Matches the CLI's flat `.` -> `-` rule. Documented edge case, not a bug.
         """
         monkeypatch.setenv("HOME", str(tmp_path))
         target = tmp_path / "release" / "v1.2.3" / "build"
