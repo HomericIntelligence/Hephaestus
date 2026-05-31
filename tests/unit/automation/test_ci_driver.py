@@ -167,6 +167,12 @@ def test_codex_ci_fix_session_falls_back_to_fresh_on_resume_failure(
         stderr="session not found",
     )
     fresh_result = AgentRunResult(stdout="fixed", stderr="", session_id="fresh-session")
+    # rev-parse HEAD returns SHA_PRE first (snapshot before agent) then SHA_POST
+    # (after agent) — a non-zero SHA delta proves the agent committed.
+    pre_post_sequence = [
+        MagicMock(stdout="aaaa1111\n"),
+        MagicMock(stdout="bbbb2222\n"),
+    ]
 
     with (
         patch("hephaestus.automation.ci_driver.resume_codex_session", side_effect=resume_error),
@@ -178,6 +184,7 @@ def test_codex_ci_fix_session_falls_back_to_fresh_on_resume_failure(
             "hephaestus.automation.ci_driver.push_current_branch_with_lease_on_divergence"
         ) as mock_push,
         patch("hephaestus.automation.ci_driver.sync_worktree_to_remote_branch") as mock_sync,
+        patch("hephaestus.automation.ci_driver.run", side_effect=pre_post_sequence),
     ):
         result = driver._run_ci_fix_session(
             issue_number=123,
@@ -196,6 +203,46 @@ def test_codex_ci_fix_session_falls_back_to_fresh_on_resume_failure(
     # And the push must target the PR's head branch explicitly — not bare HEAD —
     # so a Claude-side branch switch cannot route the fix to a stray branch (#832).
     mock_push.assert_called_once_with(tmp_path, branch="456-pr-head", push_ref="HEAD:456-pr-head")
+
+
+def test_codex_ci_fix_session_skips_push_when_head_did_not_advance(
+    driver: CIDriver,
+    tmp_path: Path,
+) -> None:
+    """Agent returned without committing → no push, no false success log (#836)."""
+    driver.options.agent = "codex"
+    fresh_result = AgentRunResult(stdout="no changes needed", stderr="", session_id="x")
+    # Pre and post snapshots return the SAME SHA → agent made no commit.
+    unchanged_sha = MagicMock(stdout="cafef00d\n")
+
+    with (
+        patch(
+            "hephaestus.automation.ci_driver.run_codex_session",
+            return_value=fresh_result,
+        ),
+        patch(
+            "hephaestus.automation.ci_driver.push_current_branch_with_lease_on_divergence"
+        ) as mock_push,
+        patch("hephaestus.automation.ci_driver.sync_worktree_to_remote_branch"),
+        patch(
+            "hephaestus.automation.ci_driver.run",
+            side_effect=[unchanged_sha, unchanged_sha],
+        ),
+    ):
+        result = driver._run_ci_fix_session(
+            issue_number=789,
+            pr_number=101,
+            worktree_path=tmp_path,
+            ci_logs="failed",
+            session_id=None,
+            pr_head_branch="789-impl",
+        )
+
+    # The iteration must report failure rather than a bogus success.
+    assert result is False
+    # And we must NOT have attempted a push — the prior bug was that a silent
+    # no-op push exited 0 and the driver logged "pushed CI fixes" anyway.
+    mock_push.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
