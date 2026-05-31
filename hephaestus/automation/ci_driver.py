@@ -41,6 +41,7 @@ from .git_utils import (
     issue_ref,
     pr_ref,
     push_current_branch_with_lease_on_divergence,
+    sync_worktree_to_remote_branch,
 )
 from .github_api import _gh_call, gh_issue_json, gh_pr_checks
 from .models import CIDriverOptions, WorkerResult
@@ -430,6 +431,10 @@ class CIDriver:
             ci_logs = self._get_failing_ci_logs(pr_number)
             session_id = self._load_impl_session_id(issue_number)
             worktree_path = self._get_worktree_path(issue_number, pr_number)
+            # Resolve the PR's actual head-branch name once per iteration. The
+            # CI fix push must target THIS remote ref even if Claude switches
+            # branches locally during the session (#832).
+            pr_head_branch = self._get_pr_branch(pr_number)
 
             if self.options.dry_run:
                 logger.info(
@@ -445,7 +450,13 @@ class CIDriver:
                 f"{issue_ref(issue_number)}: running CI fix session (attempt {iteration + 1})",
             )
             fixed = self._run_ci_fix_session(
-                issue_number, pr_number, worktree_path, ci_logs, session_id, advise_findings
+                issue_number,
+                pr_number,
+                worktree_path,
+                ci_logs,
+                session_id,
+                advise_findings,
+                pr_head_branch=pr_head_branch,
             )
             if fixed:
                 logger.info(
@@ -625,6 +636,8 @@ class CIDriver:
         ci_logs: str,
         session_id: str | None,
         advise_findings: str = "",
+        *,
+        pr_head_branch: str,
     ) -> bool:
         """Invoke Claude to fix CI failures, then push the result.
 
@@ -636,11 +649,31 @@ class CIDriver:
             session_id: Optional Claude session ID to resume.
             advise_findings: Prior learnings from the advise step, prepended to
                 the prompt as context. Empty or a skip marker contributes nothing.
+            pr_head_branch: The PR's head-branch name on the remote. The push
+                uses this as the destination refspec so the fix lands on the
+                actual PR branch even if the agent switched branches locally
+                during the session (#832).
 
         Returns:
             True if the fix session succeeded and the branch was pushed.
 
         """
+        # Sync the worktree to the PR's actual remote head BEFORE the agent
+        # runs. WorktreeManager may have reused a stale local branch ref that
+        # pointed at an old ``main`` tip — without this reset the agent would
+        # commit on top of the wrong base and the force-with-lease push would
+        # either no-op or regress the PR (#832).
+        try:
+            sync_worktree_to_remote_branch(worktree_path, pr_head_branch)
+        except subprocess.CalledProcessError as exc:
+            logger.error(
+                "Issue #%s: failed to sync worktree to origin/%s before CI fix: %s",
+                issue_number,
+                pr_head_branch,
+                (exc.stderr or exc.stdout or "")[:300],
+            )
+            return False
+
         advise_block = ""
         findings = advise_findings.strip()
         if findings and not findings.startswith("<!-- advise step skipped"):
@@ -648,12 +681,15 @@ class CIDriver:
         prompt = (
             f"{advise_block}"
             f"Fix the CI failures for PR {pr_ref(pr_number)} (issue {issue_ref(issue_number)}).\n\n"
-            f"Working directory: {worktree_path}\n\n"
+            f"Working directory: {worktree_path}\n"
+            f"Current branch (DO NOT change): {pr_head_branch}\n\n"
             f"CI failure logs:\n{ci_logs}\n\n"
             "Fix the code to make the CI checks pass. After fixing:\n"
             "1. Run: pixi run python -m pytest tests/ -v\n"
             "2. Run: pre-commit run --all-files\n"
-            "3. Commit changes (do NOT push)\n\n"
+            "3. Commit changes (do NOT push) on the current branch — DO NOT run "
+            "`git checkout -b`, `git switch -c`, or any other command that creates "
+            "or switches to a different branch\n\n"
             f"Commit message: fix: Address CI failures for PR {pr_ref(pr_number)}\n"
         )
 
@@ -705,7 +741,11 @@ class CIDriver:
                     return False
 
                 try:
-                    push_current_branch_with_lease_on_divergence(worktree_path)
+                    push_current_branch_with_lease_on_divergence(
+                        worktree_path,
+                        branch=pr_head_branch,
+                        push_ref=f"HEAD:{pr_head_branch}",
+                    )
                     logger.info("Issue #%s: pushed CI fixes for PR #%s", issue_number, pr_number)
                     return True
                 except Exception as push_err:
@@ -749,7 +789,11 @@ class CIDriver:
             if claude_result.returncode == 0:
                 # Push the fixes
                 try:
-                    push_current_branch_with_lease_on_divergence(worktree_path)
+                    push_current_branch_with_lease_on_divergence(
+                        worktree_path,
+                        branch=pr_head_branch,
+                        push_ref=f"HEAD:{pr_head_branch}",
+                    )
                     logger.info("Issue #%s: pushed CI fixes for PR #%s", issue_number, pr_number)
                     return True
                 except Exception as push_err:

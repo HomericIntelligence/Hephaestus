@@ -305,18 +305,19 @@ def push_current_branch_with_lease_on_divergence(
     *,
     branch: str | None = None,
     remote: str = "origin",
+    push_ref: str = "HEAD",
 ) -> subprocess.CompletedProcess[str]:
     """Push ``HEAD`` to ``<remote>``; on divergence, fetch + force-with-lease retry.
 
-    The first attempt is a plain ``git push <remote> HEAD``. If that fails with a
+    The first attempt is ``git push <remote> <push_ref>``. If that fails with a
     non-fast-forward / fetch-first rejection — the exact symptom seen when a
     second CI-fix iteration runs before the bot's previous push has been mirrored
     locally, or when a human commits to the bot's branch — we then:
 
     1. ``git fetch <remote> <branch>`` to update the remote-tracking ref.
-    2. ``git push --force-with-lease=<branch> <remote> HEAD:<branch>`` so the
-       push refuses if a *new* commit landed between step 1 and now (the safety
-       guarantee `--force-with-lease` provides over a bare `--force`).
+    2. ``git push --force-with-lease=<branch> <remote> <push_ref_or_default>`` so
+       the push refuses if a *new* commit landed between step 1 and now (the
+       safety guarantee ``--force-with-lease`` provides over a bare ``--force``).
 
     Any other error from the first push (auth failure, network, etc.) is
     re-raised unchanged. The second push's failure is also re-raised — callers
@@ -324,9 +325,15 @@ def push_current_branch_with_lease_on_divergence(
 
     Args:
         cwd: Worktree path to run the git commands in.
-        branch: Branch name. If omitted, derived from ``git rev-parse
-            --abbrev-ref HEAD`` in ``cwd``.
+        branch: Branch name on the remote. If omitted, derived from ``git
+            rev-parse --abbrev-ref HEAD`` in ``cwd``.
         remote: Remote name (default ``origin``).
+        push_ref: Refspec to push. Defaults to ``"HEAD"`` (push the current
+            branch to whatever the remote tracks). When the local HEAD may
+            have been moved off the target branch by an agent (#832), callers
+            should pass an explicit refspec like ``f"HEAD:{branch}"`` to force
+            the push to land on the named remote branch regardless of local
+            branch state.
 
     Returns:
         The successful push's ``CompletedProcess``.
@@ -344,7 +351,7 @@ def push_current_branch_with_lease_on_divergence(
                 "git",
                 "push",
                 remote,
-                "HEAD",
+                push_ref,
             ],
             cwd=cwd,
         )
@@ -364,16 +371,63 @@ def push_current_branch_with_lease_on_divergence(
         # compare against. If this fetch fails, raise — we cannot safely
         # lease-push without an up-to-date remote-tracking ref.
         run(["git", "fetch", remote, branch], cwd=cwd)
+        # The lease retry preserves any explicit ``push_ref`` the caller passed
+        # so HEAD lands on the right *remote* branch even if the local HEAD has
+        # drifted (#832). The default ``"HEAD"`` is rewritten to
+        # ``HEAD:<branch>`` so the lease push and the initial push behave
+        # consistently when no explicit refspec is given.
+        lease_push_ref = push_ref if push_ref != "HEAD" else f"HEAD:{branch}"
         return run(
             [
                 "git",
                 "push",
                 f"--force-with-lease={branch}",
                 remote,
-                f"HEAD:{branch}",
+                lease_push_ref,
             ],
             cwd=cwd,
         )
+
+
+def sync_worktree_to_remote_branch(
+    cwd: Path,
+    branch: str,
+    *,
+    remote: str = "origin",
+) -> None:
+    """Reset ``cwd`` to ``<remote>/<branch>`` so the agent starts from the PR head.
+
+    The worktree may have been created from a stale local branch (e.g.
+    ``WorktreeManager`` reused an existing local ref that pointed at the repo's
+    old ``main`` tip from a previous run, never noticing that ``origin/<branch>``
+    has advanced). Before any agent runs in this worktree, we want HEAD to
+    match the PR's actual head on the remote so the agent's commit is built on
+    top of the real PR history.
+
+    This runs in two steps in ``cwd``:
+
+    1. ``git fetch <remote> <branch>`` — updates the remote-tracking ref so the
+       reset has a current target.
+    2. ``git reset --hard <remote>/<branch>`` — moves HEAD to the PR's actual
+       head, discarding any divergent local commits or working-tree edits.
+
+    The worktree is throwaway (the driver removes it after each issue), so
+    ``reset --hard`` is safe here: there is no human work to preserve.
+
+    Args:
+        cwd: Worktree path.
+        branch: Remote branch name (the PR's head).
+        remote: Remote name (default ``origin``).
+
+    Raises:
+        subprocess.CalledProcessError: If either git command fails. Callers
+            should treat this as a hard error — without a synced HEAD the
+            subsequent CI-fix push would land on the wrong base.
+
+    """
+    logger.info("Syncing worktree at %s to %s/%s before agent run", cwd, remote, branch)
+    run(["git", "fetch", remote, branch], cwd=cwd)
+    run(["git", "reset", "--hard", f"{remote}/{branch}"], cwd=cwd)
 
 
 def is_clean_working_tree(repo_root: Path | None = None) -> bool:

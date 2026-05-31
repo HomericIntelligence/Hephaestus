@@ -177,6 +177,7 @@ def test_codex_ci_fix_session_falls_back_to_fresh_on_resume_failure(
         patch(
             "hephaestus.automation.ci_driver.push_current_branch_with_lease_on_divergence"
         ) as mock_push,
+        patch("hephaestus.automation.ci_driver.sync_worktree_to_remote_branch") as mock_sync,
     ):
         result = driver._run_ci_fix_session(
             issue_number=123,
@@ -184,11 +185,17 @@ def test_codex_ci_fix_session_falls_back_to_fresh_on_resume_failure(
             worktree_path=tmp_path,
             ci_logs="failed",
             session_id="old-session",
+            pr_head_branch="456-pr-head",
         )
 
     assert result is True
     mock_fresh.assert_called_once()
-    mock_push.assert_called_once_with(tmp_path)
+    # Worktree must be reset to the PR's remote head *before* the agent runs
+    # so the fix is committed on top of the real PR history (#832).
+    mock_sync.assert_called_once_with(tmp_path, "456-pr-head")
+    # And the push must target the PR's head branch explicitly — not bare HEAD —
+    # so a Claude-side branch switch cannot route the fix to a stray branch (#832).
+    mock_push.assert_called_once_with(tmp_path, branch="456-pr-head", push_ref="HEAD:456-pr-head")
 
 
 # ---------------------------------------------------------------------------
@@ -771,6 +778,7 @@ class TestNoDeadTempfile:
                 worktree_path=tmp_path,
                 ci_logs="",
                 session_id=None,
+                pr_head_branch="some-branch",
             )
 
         txt_files = list(tmp_path.glob("*.txt"))

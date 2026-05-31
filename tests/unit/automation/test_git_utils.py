@@ -17,6 +17,7 @@ from hephaestus.automation.git_utils import (
     push_current_branch_with_lease_on_divergence,
     run,
     safe_git_fetch,
+    sync_worktree_to_remote_branch,
 )
 
 
@@ -404,3 +405,80 @@ class TestPushCurrentBranchWithLeaseOnDivergence:
         with pytest.raises(subprocess.CalledProcessError) as exc_info:
             push_current_branch_with_lease_on_divergence(worktree, branch="511-impl")
         assert exc_info.value.stderr == "stale info\n"
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_explicit_push_ref_used_on_initial_push(self, mock_run: Any) -> None:
+        """When push_ref is set, the initial push uses it as the refspec (#832)."""
+        # Without this, a Claude-side branch switch would route the push to a
+        # stray branch instead of the PR's head.
+        mock_run.return_value = Mock(returncode=0)
+        worktree = Path("/tmp/worktree-xyz")
+
+        push_current_branch_with_lease_on_divergence(
+            worktree, branch="5391-auto-impl", push_ref="HEAD:5391-auto-impl"
+        )
+
+        args, _ = mock_run.call_args
+        assert args[0] == ["git", "push", "origin", "HEAD:5391-auto-impl"]
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_explicit_push_ref_preserved_in_lease_retry(self, mock_run: Any) -> None:
+        """The lease-retry path must use the same explicit push_ref (#832)."""
+        worktree = Path("/tmp/worktree-xyz")
+        push_err = subprocess.CalledProcessError(
+            1,
+            ["git", "push", "origin", "HEAD:5391-auto-impl"],
+            output="",
+            stderr="non-fast-forward\n",
+        )
+        mock_run.side_effect = [push_err, Mock(returncode=0), Mock(returncode=0)]
+
+        push_current_branch_with_lease_on_divergence(
+            worktree, branch="5391-auto-impl", push_ref="HEAD:5391-auto-impl"
+        )
+
+        # 3rd call must be the lease push using the explicit refspec.
+        lease_args, _ = mock_run.call_args_list[2]
+        assert lease_args[0] == [
+            "git",
+            "push",
+            "--force-with-lease=5391-auto-impl",
+            "origin",
+            "HEAD:5391-auto-impl",
+        ]
+
+
+class TestSyncWorktreeToRemoteBranch:
+    """Tests for sync_worktree_to_remote_branch (#832 — reset before agent)."""
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_fetches_then_resets_to_remote_head(self, mock_run: Any) -> None:
+        """Runs ``git fetch origin <branch>`` then ``git reset --hard origin/<branch>``."""
+        mock_run.return_value = Mock(returncode=0)
+        worktree = Path("/tmp/worktree-xyz")
+
+        sync_worktree_to_remote_branch(worktree, "5450-auto-impl")
+
+        assert mock_run.call_count == 2
+        fetch_args, fetch_kwargs = mock_run.call_args_list[0]
+        assert fetch_args[0] == ["git", "fetch", "origin", "5450-auto-impl"]
+        assert fetch_kwargs["cwd"] == worktree
+        reset_args, reset_kwargs = mock_run.call_args_list[1]
+        assert reset_args[0] == ["git", "reset", "--hard", "origin/5450-auto-impl"]
+        assert reset_kwargs["cwd"] == worktree
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_fetch_failure_propagates(self, mock_run: Any) -> None:
+        """If fetch fails, raise — we cannot safely reset to a stale ref."""
+        fetch_err = subprocess.CalledProcessError(
+            128,
+            ["git", "fetch"],
+            output="",
+            stderr="fatal: unable to access remote\n",
+        )
+        mock_run.side_effect = [fetch_err]
+
+        with pytest.raises(subprocess.CalledProcessError):
+            sync_worktree_to_remote_branch(Path("/tmp/worktree-xyz"), "any-branch")
+        # Reset must NOT have run after a fetch failure.
+        assert mock_run.call_count == 1
