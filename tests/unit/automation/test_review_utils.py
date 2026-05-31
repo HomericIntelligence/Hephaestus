@@ -78,8 +78,9 @@ class TestFindPrForIssue:
             call_count += 1
             if "--head" in args:
                 return _make_gh_result([])
-            # body search
-            return _make_gh_result([{"number": 99}])
+            # Body search candidate — body must contain ``Closes #N`` on its
+            # own line, matching pr-policy's exact-line gate.
+            return _make_gh_result([{"number": 99, "body": "Summary.\n\nCloses #123\n"}])
 
         with patch(
             "hephaestus.automation._review_utils._gh_call",
@@ -89,6 +90,69 @@ class TestFindPrForIssue:
 
         assert result == 99
         assert call_count == 2
+
+    def test_body_search_rejects_substring_match(self) -> None:
+        """Body containing ``Closes #1234`` must NOT match a query for issue #12."""
+
+        # Regression for #826: GitHub's full-text search returns substring
+        # matches, so a PR whose body says ``Closes #1234`` would be returned
+        # for ``Closes #12 in:body`` queries. Without the regex post-filter
+        # the driver would resolve issue #12 to the wrong PR.
+        def _side_effect(args: list[str], **kw: Any) -> MagicMock:
+            if "--head" in args:
+                return _make_gh_result([])
+            return _make_gh_result([{"number": 9999, "body": "Closes #1234\n"}])
+
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            side_effect=_side_effect,
+        ):
+            result = find_pr_for_issue(12)
+
+        assert result is None
+
+    def test_body_search_rejects_grouped_closes(self) -> None:
+        """``Closes #12, #18, #28`` (one-line grouped list) does not match."""
+
+        # The grouped form is what the strict-audit tracking PRs use. They
+        # mention many issue numbers on one line, but pr-policy requires
+        # each Closes on its own line, so we should not resolve any of those
+        # issues to such a PR via Strategy 3.
+        def _side_effect(args: list[str], **kw: Any) -> MagicMock:
+            if "--head" in args:
+                return _make_gh_result([])
+            return _make_gh_result([{"number": 5000, "body": "Closes #12, #18, #28, #29\n"}])
+
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            side_effect=_side_effect,
+        ):
+            result = find_pr_for_issue(28)
+
+        assert result is None
+
+    def test_body_search_picks_exact_match_among_candidates(self) -> None:
+        """Among multiple candidates, the first one with a real Closes line wins."""
+
+        # The first candidate has only a substring match; the second one is
+        # the real PR. The fix must skip the bogus first candidate.
+        def _side_effect(args: list[str], **kw: Any) -> MagicMock:
+            if "--head" in args:
+                return _make_gh_result([])
+            return _make_gh_result(
+                [
+                    {"number": 9999, "body": "Closes #1234\n"},  # substring
+                    {"number": 71, "body": "Closes #12\n"},  # exact
+                ]
+            )
+
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            side_effect=_side_effect,
+        ):
+            result = find_pr_for_issue(12)
+
+        assert result == 71
 
     def test_returns_none_when_nothing_found(self) -> None:
         """All strategies return empty → None."""
@@ -129,7 +193,7 @@ class TestFindPrForIssue:
         call_results = [
             _make_gh_result([]),  # branch-name: empty
             _make_gh_result({"state": "CLOSED", "number": 55}),  # gh pr view: closed
-            _make_gh_result([{"number": 77}]),  # body search: match
+            _make_gh_result([{"number": 77, "body": "Closes #123\n"}]),  # body search: match
         ]
         call_iter = iter(call_results)
 
@@ -155,7 +219,7 @@ class TestFindPrForIssue:
         def _side_effect(args: list[str], **kw: Any) -> MagicMock:
             if "--head" in args:
                 raise subprocess.CalledProcessError(1, "gh")
-            return _make_gh_result([{"number": 10}])
+            return _make_gh_result([{"number": 10, "body": "Closes #123\n"}])
 
         with patch(
             "hephaestus.automation._review_utils._gh_call",

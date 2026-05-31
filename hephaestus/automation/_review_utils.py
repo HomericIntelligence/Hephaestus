@@ -249,8 +249,13 @@ def find_pr_for_issue(
                 logger.debug("Review state PR lookup failed for issue #%d: %s", issue_number, e)
 
     # Strategy 3: PR-body text search.
-    # Search for the canonical "Closes #N" link so we don't false-match a PR
-    # that merely mentions the issue number in passing ("related to #123").
+    # Search for the canonical "Closes #N" link, then *verify* via regex that
+    # the matching PR's body really contains ``Closes #N`` on its own line —
+    # GitHub's full-text search returns substring matches, so a PR whose body
+    # says ``Closes #1234`` would be returned for ``Closes #12`` queries, and
+    # a grouped audit PR with body ``Closes #12, #18, #28`` would be returned
+    # for *each* of those numbers. The post-filter mirrors the ``pr-policy``
+    # CI gate's exact-line check (``^Closes #<N>$`` per line).
     try:
         result = _gh_call(
             [
@@ -261,17 +266,24 @@ def find_pr_for_issue(
                 "--search",
                 f"Closes #{issue_number} in:body",
                 "--json",
-                "number",
+                "number,body",
                 "--limit",
-                "5",
+                "10",
             ],
             check=False,
         )
         pr_data = json.loads(result.stdout or "[]")
-        if pr_data:
-            pr_number = int(pr_data[0]["number"])
-            logger.info("Found PR #%d for issue #%d via body search", pr_number, issue_number)
-            return pr_number
+        # ``Closes #<N>`` on its own line, capital C, no colon. Anchored to
+        # line boundaries (re.MULTILINE) so ``Closes #1234`` cannot match a
+        # query for #12, and grouped ``Closes #12, #18`` cannot match either
+        # — only PRs that follow ``pr-policy``'s exact-line format match.
+        closes_pattern = re.compile(rf"^Closes #{issue_number}\b", re.MULTILINE)
+        for candidate in pr_data:
+            body = candidate.get("body") or ""
+            if closes_pattern.search(body):
+                pr_number = int(candidate["number"])
+                logger.info("Found PR #%d for issue #%d via body search", pr_number, issue_number)
+                return pr_number
     except Exception as e:
         logger.debug("Body search failed for issue #%d: %s", issue_number, e)
 
