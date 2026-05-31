@@ -284,6 +284,98 @@ def get_current_branch(repo_root: Path | None = None) -> str:
         raise RuntimeError(f"Failed to get current branch: {e}") from e
 
 
+# When the remote branch has advanced (someone else — or a parallel ci_driver
+# worker — pushed in the meantime), ``git push`` reports one of these two
+# stderr fragments. We catch them to trigger a fetch + force-with-lease retry
+# rather than abandoning the CI fix after a single attempt.
+_PUSH_REJECTED_FRAGMENTS: tuple[str, ...] = (
+    "non-fast-forward",
+    "fetch first",
+)
+
+
+def _is_push_rejected_diverged(exc: subprocess.CalledProcessError) -> bool:
+    """Return True iff ``git push`` failed because the remote branch diverged."""
+    blob = (exc.stderr or "") + (exc.stdout or "")
+    return any(fragment in blob for fragment in _PUSH_REJECTED_FRAGMENTS)
+
+
+def push_current_branch_with_lease_on_divergence(
+    cwd: Path,
+    *,
+    branch: str | None = None,
+    remote: str = "origin",
+) -> subprocess.CompletedProcess[str]:
+    """Push ``HEAD`` to ``<remote>``; on divergence, fetch + force-with-lease retry.
+
+    The first attempt is a plain ``git push <remote> HEAD``. If that fails with a
+    non-fast-forward / fetch-first rejection — the exact symptom seen when a
+    second CI-fix iteration runs before the bot's previous push has been mirrored
+    locally, or when a human commits to the bot's branch — we then:
+
+    1. ``git fetch <remote> <branch>`` to update the remote-tracking ref.
+    2. ``git push --force-with-lease=<branch> <remote> HEAD:<branch>`` so the
+       push refuses if a *new* commit landed between step 1 and now (the safety
+       guarantee `--force-with-lease` provides over a bare `--force`).
+
+    Any other error from the first push (auth failure, network, etc.) is
+    re-raised unchanged. The second push's failure is also re-raised — callers
+    log it and treat the issue as failed.
+
+    Args:
+        cwd: Worktree path to run the git commands in.
+        branch: Branch name. If omitted, derived from ``git rev-parse
+            --abbrev-ref HEAD`` in ``cwd``.
+        remote: Remote name (default ``origin``).
+
+    Returns:
+        The successful push's ``CompletedProcess``.
+
+    Raises:
+        subprocess.CalledProcessError: If both the initial push and the
+            lease-retry push fail. The exception is the *retry* failure if the
+            initial push was a recognized divergence, otherwise the *initial*
+            failure.
+
+    """
+    try:
+        return run(
+            [
+                "git",
+                "push",
+                remote,
+                "HEAD",
+            ],
+            cwd=cwd,
+        )
+    except subprocess.CalledProcessError as exc:
+        if not _is_push_rejected_diverged(exc):
+            raise
+        # Resolve the branch name lazily — most callers know it, but we don't
+        # want to require it on every caller.
+        if branch is None:
+            branch = get_current_branch(cwd)
+        logger.warning(
+            "git push to %s/%s rejected as diverged; fetching + force-with-lease retry",
+            remote,
+            branch,
+        )
+        # Fetch the canonical tip so the lease check has something current to
+        # compare against. If this fetch fails, raise — we cannot safely
+        # lease-push without an up-to-date remote-tracking ref.
+        run(["git", "fetch", remote, branch], cwd=cwd)
+        return run(
+            [
+                "git",
+                "push",
+                f"--force-with-lease={branch}",
+                remote,
+                f"HEAD:{branch}",
+            ],
+            cwd=cwd,
+        )
+
+
 def is_clean_working_tree(repo_root: Path | None = None) -> bool:
     """Check if the working tree is clean (no uncommitted changes).
 

@@ -174,7 +174,9 @@ def test_codex_ci_fix_session_falls_back_to_fresh_on_resume_failure(
             "hephaestus.automation.ci_driver.run_codex_session",
             return_value=fresh_result,
         ) as mock_fresh,
-        patch("hephaestus.automation.ci_driver.run") as mock_run,
+        patch(
+            "hephaestus.automation.ci_driver.push_current_branch_with_lease_on_divergence"
+        ) as mock_push,
     ):
         result = driver._run_ci_fix_session(
             issue_number=123,
@@ -186,7 +188,7 @@ def test_codex_ci_fix_session_falls_back_to_fresh_on_resume_failure(
 
     assert result is True
     mock_fresh.assert_called_once()
-    mock_run.assert_called_once_with(["git", "push", "origin", "HEAD"], cwd=tmp_path)
+    mock_push.assert_called_once_with(tmp_path)
 
 
 # ---------------------------------------------------------------------------

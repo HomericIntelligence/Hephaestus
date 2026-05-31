@@ -35,7 +35,13 @@ from .advise_runner import run_advise
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import advise_model, implementer_model, learn_model
 from .claude_timeouts import ci_driver_claude_timeout, learn_claude_timeout
-from .git_utils import get_repo_root, get_repo_slug, issue_ref, pr_ref, run
+from .git_utils import (
+    get_repo_root,
+    get_repo_slug,
+    issue_ref,
+    pr_ref,
+    push_current_branch_with_lease_on_divergence,
+)
 from .github_api import _gh_call, gh_issue_json, gh_pr_checks
 from .models import CIDriverOptions, WorkerResult
 from .prompts import get_advise_prompt
@@ -699,7 +705,7 @@ class CIDriver:
                     return False
 
                 try:
-                    run(["git", "push", "origin", "HEAD"], cwd=worktree_path)
+                    push_current_branch_with_lease_on_divergence(worktree_path)
                     logger.info("Issue #%s: pushed CI fixes for PR #%s", issue_number, pr_number)
                     return True
                 except Exception as push_err:
@@ -743,7 +749,7 @@ class CIDriver:
             if claude_result.returncode == 0:
                 # Push the fixes
                 try:
-                    run(["git", "push", "origin", "HEAD"], cwd=worktree_path)
+                    push_current_branch_with_lease_on_divergence(worktree_path)
                     logger.info("Issue #%s: pushed CI fixes for PR #%s", issue_number, pr_number)
                     return True
                 except Exception as push_err:

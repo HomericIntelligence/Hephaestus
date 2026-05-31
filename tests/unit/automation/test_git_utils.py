@@ -14,6 +14,7 @@ from hephaestus.automation.git_utils import (
     get_repo_info,
     get_repo_root,
     is_clean_working_tree,
+    push_current_branch_with_lease_on_divergence,
     run,
     safe_git_fetch,
 )
@@ -269,3 +270,137 @@ class TestSafeGitFetch:
         assert result is False
         # With retry_with_backoff(max_retries=2), it runs initial + 2 retries = 3
         assert mock_run.call_count == 3
+
+
+class TestPushCurrentBranchWithLeaseOnDivergence:
+    """Tests for push_current_branch_with_lease_on_divergence."""
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_happy_path_plain_push(self, mock_run: Any) -> None:
+        """Successful initial push: no fetch, no force, single git invocation."""
+        mock_run.return_value = Mock(returncode=0)
+        worktree = Path("/tmp/worktree-xyz")
+
+        result = push_current_branch_with_lease_on_divergence(worktree)
+
+        assert result is mock_run.return_value
+        assert mock_run.call_count == 1
+        args, _kwargs = mock_run.call_args
+        assert args[0] == ["git", "push", "origin", "HEAD"]
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_non_fast_forward_triggers_fetch_and_lease(self, mock_run: Any) -> None:
+        """non-fast-forward rejection → fetch + force-with-lease retry succeeds."""
+        worktree = Path("/tmp/worktree-xyz")
+        push_err = subprocess.CalledProcessError(
+            1,
+            ["git", "push", "origin", "HEAD"],
+            output="",
+            stderr=" ! [rejected]   HEAD -> 511-impl (non-fast-forward)\n",
+        )
+        # Sequence: push fails, get_current_branch, fetch, lease push (all succeed).
+        mock_run.side_effect = [
+            push_err,
+            Mock(returncode=0, stdout="511-impl\n"),  # get_current_branch
+            Mock(returncode=0),  # fetch
+            Mock(returncode=0),  # lease push
+        ]
+
+        result = push_current_branch_with_lease_on_divergence(worktree)
+
+        assert result.returncode == 0
+        assert mock_run.call_count == 4
+        # 3rd call must be a fetch of the diverged branch.
+        fetch_args, _ = mock_run.call_args_list[2]
+        assert fetch_args[0] == ["git", "fetch", "origin", "511-impl"]
+        # 4th call must be the lease-protected push.
+        lease_args, _ = mock_run.call_args_list[3]
+        assert lease_args[0] == [
+            "git",
+            "push",
+            "--force-with-lease=511-impl",
+            "origin",
+            "HEAD:511-impl",
+        ]
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_fetch_first_also_triggers_lease(self, mock_run: Any) -> None:
+        """'fetch first' rejection text triggers the same retry path."""
+        worktree = Path("/tmp/worktree-xyz")
+        push_err = subprocess.CalledProcessError(
+            1,
+            ["git", "push", "origin", "HEAD"],
+            output="",
+            stderr=" ! [rejected]   HEAD -> 43-impl (fetch first)\n",
+        )
+        mock_run.side_effect = [
+            push_err,
+            Mock(returncode=0, stdout="43-impl\n"),
+            Mock(returncode=0),
+            Mock(returncode=0),
+        ]
+
+        push_current_branch_with_lease_on_divergence(worktree)
+        # Confirm the retry path executed (4 git invocations).
+        assert mock_run.call_count == 4
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_branch_arg_skips_get_current_branch(self, mock_run: Any) -> None:
+        """If caller passes branch=, no rev-parse call is needed for lease retry."""
+        worktree = Path("/tmp/worktree-xyz")
+        push_err = subprocess.CalledProcessError(
+            1,
+            ["git", "push", "origin", "HEAD"],
+            output="",
+            stderr="non-fast-forward\n",
+        )
+        # Only 3 calls now: failed push, fetch, lease push.
+        mock_run.side_effect = [push_err, Mock(returncode=0), Mock(returncode=0)]
+
+        push_current_branch_with_lease_on_divergence(worktree, branch="577-nomad-vessel-groups")
+
+        assert mock_run.call_count == 3
+        fetch_args, _ = mock_run.call_args_list[1]
+        assert fetch_args[0] == ["git", "fetch", "origin", "577-nomad-vessel-groups"]
+        lease_args, _ = mock_run.call_args_list[2]
+        assert "--force-with-lease=577-nomad-vessel-groups" in lease_args[0]
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_unrelated_push_failure_raises(self, mock_run: Any) -> None:
+        """Auth/network failures (not divergence) propagate without retry."""
+        worktree = Path("/tmp/worktree-xyz")
+        push_err = subprocess.CalledProcessError(
+            128,
+            ["git", "push", "origin", "HEAD"],
+            output="",
+            stderr="fatal: could not read Username for 'https://github.com'\n",
+        )
+        mock_run.side_effect = [push_err]
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            push_current_branch_with_lease_on_divergence(worktree)
+        # The original (non-divergence) error is re-raised — not silently swallowed.
+        assert exc_info.value.returncode == 128
+        assert mock_run.call_count == 1
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_lease_push_failure_propagates(self, mock_run: Any) -> None:
+        """If the lease-protected retry also fails, the caller sees that error."""
+        worktree = Path("/tmp/worktree-xyz")
+        push_err = subprocess.CalledProcessError(
+            1,
+            ["git", "push", "origin", "HEAD"],
+            output="",
+            stderr="non-fast-forward\n",
+        )
+        lease_err = subprocess.CalledProcessError(
+            1,
+            ["git", "push", "--force-with-lease=511-impl", "origin", "HEAD:511-impl"],
+            output="",
+            stderr="stale info\n",
+        )
+        mock_run.side_effect = [push_err, Mock(returncode=0), lease_err]
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            push_current_branch_with_lease_on_divergence(worktree, branch="511-impl")
+        assert exc_info.value.stderr == "stale info\n"
