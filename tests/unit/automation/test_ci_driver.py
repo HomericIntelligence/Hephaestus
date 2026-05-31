@@ -291,6 +291,19 @@ class TestDiscoverPrsDedupe:
             result = driver._discover_prs([1, 2, 3])
         assert result == {1: 100}
 
+    def test_shared_pr_issues_populated_for_arming_fanout(self, driver: CIDriver) -> None:
+        """_discover_prs must record EVERY sibling per PR for the #840 fan-out."""
+        # The arming flow in #840 walks driver.shared_pr_issues[pr_num] to
+        # write one arming record per issue covered by a multi-issue PR. If
+        # the dedupe forgets the siblings, only the canonical issue gets a
+        # /learn on merge and the other 8 lose their lessons.
+        siblings_for_103 = [12, 22, 23, 28, 29, 37, 39, 59, 64]
+        side_effect = [103] * len(siblings_for_103) + [200]
+        with patch.object(driver, "_find_pr_for_issue", side_effect=side_effect):
+            driver._discover_prs([*siblings_for_103, 99])
+        assert driver.shared_pr_issues[103] == siblings_for_103
+        assert driver.shared_pr_issues[200] == [99]
+
 
 # ---------------------------------------------------------------------------
 # #838: repo done-state — open PR count must be zero
@@ -714,57 +727,271 @@ class TestEnableAutoMerge:
 
 
 class TestDriveGreenLearnings:
-    """Tests for the post-green learnings capture under AGENT_CI_DRIVER."""
+    """Tests for the post-merge /learn capture under AGENT_CI_DRIVER (#840).
 
-    def test_learnings_runs_on_success_under_ci_driver_agent(
+    /learn no longer fires when auto-merge is *armed* — it fires when GitHub
+    reports the PR as MERGED on a subsequent run. The drive success path
+    writes one arming record per sibling issue (covering the #834 shared-PR
+    fan-out); ``_check_arming_on_drive_start`` is what triggers /learn next
+    time. Each arming record is idempotent and self-clears on
+    abandoned-PR or head-SHA-advanced states.
+    """
+
+    def test_auto_merge_armed_writes_arming_record_but_no_learn(
         self, driver: CIDriver, tmp_path: Path
     ) -> None:
-        """All required green + auto-merge ok → learnings resumes Session 3."""
-        from hephaestus.automation.session_naming import AGENT_CI_DRIVER
-
-        wt = tmp_path / "wt-123"
+        """All-green + auto-merge ok → arming record written, /learn NOT called."""
         checks = [_make_check("test", required=True)]
+        # The dedupe map normally drives shared_pr_issues; for this test
+        # set it up directly with a single-issue PR.
+        driver.shared_pr_issues = {456: [123]}
         with (
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
             patch.object(driver, "_enable_auto_merge", return_value=True),
-            patch.object(driver, "_get_worktree_path", return_value=wt),
+            patch.object(driver, "_get_pr_branch", return_value="123-impl"),
+            patch.object(
+                driver,
+                "_gh_pr_state",
+                return_value={"state": "OPEN", "headRefOid": "abc1234"},
+            ),
             patch(
                 "hephaestus.automation.ci_driver.invoke_claude_with_session",
                 return_value=("ok", "sid"),
             ) as mock_invoke,
-            patch("hephaestus.automation.ci_driver.get_repo_slug", return_value="ProjectX"),
-            patch("hephaestus.automation.ci_driver.current_trunk_githash", return_value="abc1234"),
         ):
             result = driver._drive_issue(123, 456, 0)
 
         assert result.success is True
-        mock_invoke.assert_called_once()
-        assert mock_invoke.call_args.kwargs["agent"] == AGENT_CI_DRIVER
-        assert mock_invoke.call_args.kwargs["issue"] == 123
-        # Must resume from the worktree so the Session 3 transcript is found.
-        assert mock_invoke.call_args.kwargs["cwd"] == wt
+        # No /learn yet — only an arming record on disk.
+        mock_invoke.assert_not_called()
+        record = driver._load_arming_state(123)
+        assert record is not None
+        assert record["pr_number"] == 456
+        assert record["pr_head_branch"] == "123-impl"
+        assert record["head_sha_at_arming"] == "abc1234"
+        assert record["learn_captured_at"] is None
 
-    def test_learnings_failure_is_non_fatal(self, driver: CIDriver, tmp_path: Path) -> None:
-        """A raising learnings session must not flip a successful drive to failure."""
-        checks = [_make_check("test", required=True)]
+    def test_arming_fans_out_across_shared_pr_group(self, driver: CIDriver) -> None:
+        """A PR closing 9 issues → 9 arming records (so 9 /learns fire on merge)."""
+        # Reproduces the ProjectNestor scenario from #834: PR #103 closes nine
+        # issues. The canonical issue drives it, but every sibling needs its
+        # own arming record so each one gets its own /learn capture once the
+        # PR finally merges in a subsequent run (#840).
+        siblings = [12, 22, 23, 28, 29, 37, 39, 59, 64]
+        driver.shared_pr_issues = {103: siblings}
+
+        driver._arm_drive_green(pr_number=103, pr_head_branch="12-impl", pr_head_sha="abc")
+
+        for issue in siblings:
+            record = driver._load_arming_state(issue)
+            assert record is not None, f"missing arming record for issue #{issue}"
+            assert record["pr_number"] == 103
+            assert record["learn_captured_at"] is None
+
+    def test_arming_skips_already_captured_record(self, driver: CIDriver) -> None:
+        """An issue with learn_captured_at set must not be re-armed."""
+        # Idempotency guard: re-running the drive should not clobber a record
+        # whose /learn already fired.
+        driver.shared_pr_issues = {500: [42]}
+        driver._save_arming_state(
+            42,
+            {
+                "pr_number": 500,
+                "pr_head_branch": "old-branch",
+                "head_sha_at_arming": "deadbee",
+                "armed_at": "2026-01-01T00:00:00Z",
+                "learn_captured_at": "2026-01-02T00:00:00Z",
+            },
+        )
+
+        driver._arm_drive_green(pr_number=500, pr_head_branch="new-branch", pr_head_sha="cafef00d")
+
+        record = driver._load_arming_state(42)
+        assert record is not None
+        # The pre-existing captured timestamp survives — no overwrite.
+        assert record["learn_captured_at"] == "2026-01-02T00:00:00Z"
+        assert record["pr_head_branch"] == "old-branch"
+
+    def test_check_armed_pr_merged_fires_learn_once(self, driver: CIDriver) -> None:
+        """An armed issue whose PR is now MERGED triggers /learn exactly once."""
+        driver._save_arming_state(
+            42,
+            {
+                "pr_number": 500,
+                "pr_head_branch": "42-impl",
+                "head_sha_at_arming": "abc1234",
+                "armed_at": "2026-01-01T00:00:00Z",
+                "learn_captured_at": None,
+            },
+        )
         with (
-            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
-            patch.object(driver, "_enable_auto_merge", return_value=True),
-            patch.object(driver, "_get_worktree_path", return_value=tmp_path),
-            patch(
-                "hephaestus.automation.ci_driver.invoke_claude_with_session",
-                side_effect=RuntimeError("boom"),
+            patch.object(
+                driver,
+                "_gh_pr_state",
+                return_value={
+                    "state": "MERGED",
+                    "headRefOid": "abc1234",
+                    "mergedAt": "2026-01-02T00:00:00Z",
+                },
             ),
-            patch("hephaestus.automation.ci_driver.get_repo_slug", return_value="ProjectX"),
-            patch("hephaestus.automation.ci_driver.current_trunk_githash", return_value="abc1234"),
+            patch.object(driver, "_run_drive_green_learnings", return_value=True) as mock_learn,
         ):
-            result = driver._drive_issue(123, 456, 0)
+            result = driver._check_arming_on_drive_start(42, 500)
 
-        # Drive still succeeds even though learnings raised.
+        assert result is not None
         assert result.success is True
+        mock_learn.assert_called_once_with(42, 500)
+        # Captured timestamp is now set so subsequent runs short-circuit.
+        record = driver._load_arming_state(42)
+        assert record is not None
+        assert record["learn_captured_at"] is not None
+
+    def test_check_armed_pr_merged_skips_when_already_captured(self, driver: CIDriver) -> None:
+        """learn_captured_at != None → return success without re-firing /learn."""
+        driver._save_arming_state(
+            42,
+            {
+                "pr_number": 500,
+                "pr_head_branch": "42-impl",
+                "head_sha_at_arming": "abc1234",
+                "armed_at": "2026-01-01T00:00:00Z",
+                "learn_captured_at": "2026-01-02T00:00:00Z",
+            },
+        )
+        with (
+            patch.object(driver, "_gh_pr_state") as mock_state,
+            patch.object(driver, "_run_drive_green_learnings") as mock_learn,
+        ):
+            result = driver._check_arming_on_drive_start(42, 500)
+
+        assert result is not None
+        assert result.success is True
+        # Already captured — no /learn re-fire, no state query needed.
+        mock_learn.assert_not_called()
+        mock_state.assert_not_called()
+
+    def test_check_armed_pr_open_at_same_sha_short_circuits(self, driver: CIDriver) -> None:
+        """OPEN at the armed SHA → success, /learn not fired, record kept."""
+        driver._save_arming_state(
+            42,
+            {
+                "pr_number": 500,
+                "pr_head_branch": "42-impl",
+                "head_sha_at_arming": "abc1234",
+                "armed_at": "2026-01-01T00:00:00Z",
+                "learn_captured_at": None,
+            },
+        )
+        with (
+            patch.object(
+                driver,
+                "_gh_pr_state",
+                return_value={"state": "OPEN", "headRefOid": "abc1234"},
+            ),
+            patch.object(driver, "_run_drive_green_learnings") as mock_learn,
+        ):
+            result = driver._check_arming_on_drive_start(42, 500)
+
+        assert result is not None
+        assert result.success is True
+        mock_learn.assert_not_called()
+        # Record preserved for the next run.
+        assert driver._load_arming_state(42) is not None
+
+    def test_check_armed_pr_head_advanced_clears_record_and_falls_through(
+        self, driver: CIDriver
+    ) -> None:
+        """OPEN with a different head SHA → drop record, return None (re-enter drive)."""
+        driver._save_arming_state(
+            42,
+            {
+                "pr_number": 500,
+                "pr_head_branch": "42-impl",
+                "head_sha_at_arming": "abc1234",
+                "armed_at": "2026-01-01T00:00:00Z",
+                "learn_captured_at": None,
+            },
+        )
+        with patch.object(
+            driver,
+            "_gh_pr_state",
+            return_value={"state": "OPEN", "headRefOid": "fffffff"},
+        ):
+            result = driver._check_arming_on_drive_start(42, 500)
+
+        # None → caller will re-enter the normal drive path.
+        assert result is None
+        # Record cleared so the next /enable_auto_merge can re-arm fresh.
+        assert driver._load_arming_state(42) is None
+
+    def test_check_armed_pr_closed_without_merge_clears_record(self, driver: CIDriver) -> None:
+        """CLOSED-without-merge → drop record, return None, /learn NOT fired."""
+        # Lessons aren't load-bearing if nothing shipped; capturing /learn
+        # for an abandoned PR would pollute Mnemosyne with false-positives.
+        driver._save_arming_state(
+            42,
+            {
+                "pr_number": 500,
+                "pr_head_branch": "42-impl",
+                "head_sha_at_arming": "abc1234",
+                "armed_at": "2026-01-01T00:00:00Z",
+                "learn_captured_at": None,
+            },
+        )
+        with (
+            patch.object(
+                driver,
+                "_gh_pr_state",
+                return_value={"state": "CLOSED", "headRefOid": "abc1234"},
+            ),
+            patch.object(driver, "_run_drive_green_learnings") as mock_learn,
+        ):
+            result = driver._check_arming_on_drive_start(42, 500)
+
+        assert result is None
+        mock_learn.assert_not_called()
+        assert driver._load_arming_state(42) is None
+
+    def test_check_with_no_arming_record_returns_none(self, driver: CIDriver) -> None:
+        """No prior arming → return None (fall through to the normal drive)."""
+        result = driver._check_arming_on_drive_start(42, 500)
+        assert result is None
+
+    def test_learn_failure_marks_captured_to_avoid_loop(self, driver: CIDriver) -> None:
+        """A failing /learn still flips learn_captured_at so we don't loop forever."""
+        # If /learn fails (model quota, network, etc.) and we retried it on
+        # every subsequent run, we'd churn API calls for the same issue
+        # indefinitely. Best-effort: mark captured, log the failure, move on.
+        driver._save_arming_state(
+            42,
+            {
+                "pr_number": 500,
+                "pr_head_branch": "42-impl",
+                "head_sha_at_arming": "abc1234",
+                "armed_at": "2026-01-01T00:00:00Z",
+                "learn_captured_at": None,
+            },
+        )
+        with (
+            patch.object(
+                driver,
+                "_gh_pr_state",
+                return_value={"state": "MERGED", "headRefOid": "abc1234"},
+            ),
+            patch.object(driver, "_run_drive_green_learnings", return_value=False),
+        ):
+            result = driver._check_arming_on_drive_start(42, 500)
+
+        assert result is not None
+        assert result.success is True
+        record = driver._load_arming_state(42)
+        assert record is not None
+        assert record["learn_captured_at"] is not None
 
     def test_learnings_skipped_for_codex(self, driver: CIDriver) -> None:
         """Codex has no persisted drive-green session, so learnings is skipped."""
+        # Direct test of _run_drive_green_learnings — the codex path is
+        # untouched by the #840 arming rework.
         driver.options.agent = "codex"
         with patch("hephaestus.automation.ci_driver.invoke_claude_with_session") as mock_invoke:
             result = driver._run_drive_green_learnings(123, 456)

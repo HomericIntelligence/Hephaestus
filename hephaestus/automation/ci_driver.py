@@ -85,6 +85,12 @@ class CIDriver:
         # after the per-issue drive completes. The repo is only "done" when
         # this is empty (#838).
         self.open_prs_remaining: list[dict[str, Any]] = []
+        # Populated by _discover_prs: maps pr_number -> ALL issues that
+        # resolved to that PR. Used when arming /learn for the success path
+        # so every sibling issue covered by a multi-issue PR gets its own
+        # arming record (and therefore its own /learn capture once the PR
+        # actually merges in a subsequent run). #840 +on top of #834.
+        self.shared_pr_issues: dict[int, list[int]] = {}
 
     def run(self) -> dict[int, WorkerResult]:  # noqa: C901  # thread pool + finally + preserve report
         """Run the CI driver on all configured issues.
@@ -306,6 +312,13 @@ class CIDriver:
         for issue_num, pr_num in raw_map.items():
             pr_to_issues.setdefault(pr_num, []).append(issue_num)
 
+        # Stash the full PR→[issues] map so the success path (#840) can write
+        # an arming record for *every* sibling issue when a shared-PR group
+        # auto-merge-arms. Without this, only the canonical issue would ever
+        # get its post-merge ``/learn`` capture; the other N-1 deferred
+        # issues would silently lose their lessons.
+        self.shared_pr_issues = {pr: sorted(issues) for pr, issues in pr_to_issues.items()}
+
         deduped: dict[int, int] = {}
         for pr_num, issues in pr_to_issues.items():
             canonical = min(issues)
@@ -352,6 +365,16 @@ class CIDriver:
         _ci_poll_max_wait: int = int(os.environ.get("HEPH_CI_POLL_MAX_WAIT", "600"))
 
         try:
+            # Detected-merge / armed-state short-circuit (#840). If a prior
+            # run armed this issue's PR and GitHub now reports it MERGED,
+            # capture /learn once and return. If it's still OPEN at the
+            # armed SHA, no further drive work is needed. Falls through to
+            # the normal drive only when there's no record, the arming is
+            # stale, or the PR was abandoned without merging.
+            armed_result = self._check_arming_on_drive_start(issue_number, pr_number)
+            if armed_result is not None:
+                return armed_result
+
             self.status_tracker.update_slot(
                 acquired_slot, f"{issue_ref(issue_number)}: fetching checks"
             )
@@ -442,13 +465,20 @@ class CIDriver:
                     )
                 merge_ok = self._enable_auto_merge(pr_number)
                 if merge_ok:
-                    # PR is green and auto-merge is enabled — capture drive-green
-                    # learnings under AGENT_CI_DRIVER (Session 3). Non-fatal:
-                    # a failed learnings step must not flip the drive to failure.
+                    # PR is green and auto-merge is enabled — but do NOT
+                    # capture /learn here (#840). Auto-merge-armed is not
+                    # the same as merged: CI flake, branch-protection block,
+                    # human cancellation can still keep the PR open. Instead
+                    # write an arming record per sibling issue (#834) and
+                    # let the NEXT run's _check_arming_on_drive_start fire
+                    # /learn once GitHub reports the PR as MERGED.
                     self.status_tracker.update_slot(
-                        acquired_slot, f"{issue_ref(issue_number)}: capturing learnings"
+                        acquired_slot, f"{issue_ref(issue_number)}: arming for post-merge /learn"
                     )
-                    self._run_drive_green_learnings(issue_number, pr_number)
+                    gh_state = self._gh_pr_state(pr_number)
+                    pr_head_sha = (gh_state or {}).get("headRefOid", "") or ""
+                    pr_head_branch = self._get_pr_branch(pr_number)
+                    self._arm_drive_green(pr_number, pr_head_branch, pr_head_sha)
                 return WorkerResult(
                     issue_number=issue_number,
                     success=merge_ok,
@@ -731,6 +761,201 @@ class CIDriver:
         except Exception as e:
             logger.warning("Could not fetch CI logs for PR #%s: %s", pr_number, e)
             return ""
+
+    # ------------------------------------------------------------------
+    # Drive-green arming records (#840)
+    #
+    # Each issue whose PR auto-merge-armed gets a small JSON record at
+    # ``state_dir / "drive-green-armed-<issue>.json"`` so the NEXT run can
+    # detect "the PR finally merged" and fire ``/learn`` exactly once — even
+    # for the N-1 deferred siblings from the #834 shared-PR dedupe. Firing
+    # ``/learn`` on auto-merge-armed (the prior behavior) polluted
+    # ProjectMnemosyne with lessons from PRs that never actually shipped.
+    # ------------------------------------------------------------------
+
+    def _arming_state_path(self, issue_number: int) -> Path:
+        return self.state_dir / f"drive-green-armed-{issue_number}.json"
+
+    def _load_arming_state(self, issue_number: int) -> dict[str, Any] | None:
+        """Return the parsed arming record for ``issue_number`` or ``None``."""
+        path = self._arming_state_path(issue_number)
+        if not path.exists():
+            return None
+        try:
+            return dict(json.loads(path.read_text()))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "Could not read arming record for issue #%s: %s; ignoring",
+                issue_number,
+                exc,
+            )
+            return None
+
+    def _save_arming_state(self, issue_number: int, record: dict[str, Any]) -> None:
+        """Persist the arming record. Best-effort; logs and swallows IO errors."""
+        path = self._arming_state_path(issue_number)
+        try:
+            path.write_text(json.dumps(record, indent=2, sort_keys=True))
+        except OSError as exc:
+            logger.warning(
+                "Could not write arming record for issue #%s: %s",
+                issue_number,
+                exc,
+            )
+
+    def _clear_arming_state(self, issue_number: int) -> None:
+        path = self._arming_state_path(issue_number)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning(
+                "Could not delete arming record for issue #%s: %s",
+                issue_number,
+                exc,
+            )
+
+    def _arm_drive_green(self, pr_number: int, pr_head_branch: str, pr_head_sha: str) -> None:
+        """Record arming for every issue that resolved to ``pr_number``.
+
+        Called on the auto-merge-armed success path in the same run. For a
+        shared-PR group (#834), this writes one arming record per sibling
+        issue so each one gets its own ``/learn`` capture once the PR merges
+        in a subsequent run. The canonical issue and all deferred siblings
+        share the same ``pr_number`` and ``pr_head_branch`` — they differ
+        only in the issue id encoded in the filename.
+        """
+        siblings = self.shared_pr_issues.get(pr_number, [])
+        if not siblings:
+            # Defensive: the PR map should always know the issue, but if not
+            # we still want SOMETHING to fire /learn on the next run.
+            return
+        armed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        for issue_num in siblings:
+            existing = self._load_arming_state(issue_num) or {}
+            if existing.get("learn_captured_at"):
+                # Already captured — don't overwrite the captured timestamp.
+                continue
+            record = {
+                "pr_number": pr_number,
+                "pr_head_branch": pr_head_branch,
+                "head_sha_at_arming": pr_head_sha,
+                "armed_at": armed_at,
+                "learn_captured_at": None,
+            }
+            self._save_arming_state(issue_num, record)
+            logger.info(
+                "Issue #%s: armed for /learn on merge of PR #%s (head=%s @ %s)",
+                issue_num,
+                pr_number,
+                pr_head_branch,
+                pr_head_sha[:8] if pr_head_sha else "?",
+            )
+
+    def _gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+        """Return ``{state, headRefOid, mergedAt}`` for ``pr_number`` or ``None``.
+
+        Used by the on-drive-start check (#840) to detect post-merge so the
+        ``/learn`` capture can fire exactly once per issue.
+        """
+        try:
+            result = _gh_call(
+                ["pr", "view", str(pr_number), "--json", "state,headRefOid,mergedAt"],
+                check=False,
+            )
+            return dict(json.loads(result.stdout or "{}"))
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "Could not fetch PR #%s state for arming check: %s",
+                pr_number,
+                exc,
+            )
+            return None
+
+    def _check_arming_on_drive_start(
+        self, issue_number: int, pr_number: int
+    ) -> WorkerResult | None:
+        """Fire ``/learn`` if a prior run armed and the PR has since merged.
+
+        Called at the top of ``_drive_issue``. Returns:
+
+        - ``WorkerResult(success=True, ...)`` if the arming record handled
+          the issue (merge detected + ``/learn`` fired, OR still in flight,
+          OR already-captured). Caller returns this directly without doing
+          any further drive work.
+        - ``None`` if the issue should fall through to the normal drive
+          path (no arming record, arming stale, or PR abandoned).
+        """
+        record = self._load_arming_state(issue_number)
+        if record is None:
+            return None
+        if record.get("learn_captured_at"):
+            logger.info(
+                "Issue #%s: /learn already captured at %s; skipping further drive",
+                issue_number,
+                record["learn_captured_at"],
+            )
+            return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+
+        gh_state = self._gh_pr_state(pr_number)
+        if gh_state is None:
+            # Treat unknown state as "still in flight" — don't redo the drive.
+            # The next run will retry the check.
+            return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+
+        state = (gh_state.get("state") or "").upper()
+        current_sha = gh_state.get("headRefOid") or ""
+
+        if state == "MERGED":
+            logger.info(
+                "Issue #%s: PR #%s detected as MERGED; capturing /learn",
+                issue_number,
+                pr_number,
+            )
+            self.status_tracker.update_slot(
+                0, f"{issue_ref(issue_number)}: capturing post-merge /learn"
+            )
+            self._run_drive_green_learnings(issue_number, pr_number)
+            # Mark captured even if /learn failed — it's best-effort and
+            # retrying it on every subsequent run would churn API calls.
+            record["learn_captured_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            self._save_arming_state(issue_number, record)
+            return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+
+        if state == "CLOSED":
+            # PR closed without merging. Lessons are not load-bearing if
+            # nothing shipped. Drop the record and fall through so the
+            # normal flow can decide what to do (likely "no open PR").
+            logger.info(
+                "Issue #%s: PR #%s was CLOSED without merging; dropping arming record",
+                issue_number,
+                pr_number,
+            )
+            self._clear_arming_state(issue_number)
+            return None
+
+        # OPEN
+        armed_sha = record.get("head_sha_at_arming") or ""
+        if current_sha and armed_sha and current_sha != armed_sha:
+            # The PR was force-pushed (or rebased) after arming. The arming
+            # is stale — re-enter the drive so it can re-arm at the new tip.
+            logger.info(
+                "Issue #%s: PR #%s head advanced from %s to %s since arming; re-entering drive",
+                issue_number,
+                pr_number,
+                armed_sha[:8],
+                current_sha[:8],
+            )
+            self._clear_arming_state(issue_number)
+            return None
+
+        # Still in flight at the same arming SHA — auto-merge is presumably
+        # still waiting on CI / branch protection. Nothing more to do.
+        logger.info(
+            "Issue #%s: PR #%s still OPEN at the armed SHA; waiting for merge",
+            issue_number,
+            pr_number,
+        )
+        return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
     def _load_impl_session_id(self, issue_number: int) -> str | None:
         """Load the Claude session ID from the implementer's saved state.
@@ -1116,10 +1341,23 @@ class CIDriver:
         try:
             githash = current_trunk_githash(self.repo_root)
             repo_slug = get_repo_slug(self.repo_root)
-            # Resume from the SAME worktree the fix session used: the Session 3
-            # transcript is probed by cwd (session_jsonl_path), so a different
-            # cwd would silently start a cold session instead of resuming.
-            worktree_path = self._get_worktree_path(issue_number, pr_number)
+            # Best-effort: try to resume in the original worktree (so the
+            # AGENT_CI_DRIVER transcript is found by ``session_jsonl_path``).
+            # In the post-merge code path (#840) the PR's head branch may be
+            # gone from the remote, so ``_get_worktree_path`` could fail. In
+            # that case fall back to ``repo_root`` cwd — the prompt is
+            # self-contained, and a fresh ``--session-id`` create still
+            # captures the lesson.
+            try:
+                cwd = self._get_worktree_path(issue_number, pr_number)
+            except Exception as wt_err:
+                logger.info(
+                    "Issue #%s: no worktree available for /learn (%s); "
+                    "falling back to repo root for a fresh session",
+                    issue_number,
+                    wt_err,
+                )
+                cwd = self.repo_root
             invoke_claude_with_session(
                 repo=repo_slug,
                 issue=issue_number,
@@ -1127,7 +1365,7 @@ class CIDriver:
                 githash=githash,
                 prompt=prompt,
                 model=learn_model(),
-                cwd=worktree_path,
+                cwd=cwd,
                 timeout=learn_claude_timeout(),
                 output_format="text",
                 allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
