@@ -18,6 +18,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +46,12 @@ from .git_utils import (
     run,
     sync_worktree_to_remote_branch,
 )
-from .github_api import _gh_call, gh_issue_json, gh_pr_checks
+from .github_api import (
+    _gh_call,
+    gh_issue_json,
+    gh_pr_checks,
+    gh_pr_list_unresolved_threads,
+)
 from .models import CIDriverOptions, WorkerResult
 from .prompts import get_advise_prompt
 from .session_naming import AGENT_ADVISE, AGENT_CI_DRIVER
@@ -990,6 +996,305 @@ class CIDriver:
             logger.warning("Could not load session_id for issue #%s: %s", issue_number, e)
             return None
 
+    def _format_review_threads_block(self, pr_number: int) -> str:
+        """Render unresolved PR review threads as a Markdown block for the prompt.
+
+        Returns the empty string when there are no unresolved threads or when
+        the lookup fails — the CI fix loop is never gated on review-thread
+        availability (#846). Network/JSON errors are downgraded to an info log
+        so a transient GitHub blip cannot block forward progress.
+        """
+        try:
+            threads = gh_pr_list_unresolved_threads(pr_number, dry_run=self.options.dry_run)
+        except Exception as exc:
+            logger.info(
+                "Issue PR #%s: failed to fetch unresolved review threads (%s); "
+                "skipping review-thread injection",
+                pr_number,
+                exc,
+            )
+            return ""
+        if not threads:
+            return ""
+        lines = [
+            "## Unresolved PR Review Threads",
+            "",
+            (
+                "Address each thread below BEFORE pushing your CI fix. An unresolved "
+                "thread means a reviewer (human or bot) flagged a real concern. Resolve "
+                "the underlying issue in code; the thread is closed automatically when "
+                "the line it points at changes."
+            ),
+            "",
+        ]
+        for i, t in enumerate(threads, 1):
+            loc = t.get("path") or "<no path>"
+            line_no = t.get("line")
+            loc_str = f"{loc}:{line_no}" if line_no is not None else loc
+            body = (t.get("body") or "").strip() or "<empty body>"
+            lines.append(f"### Thread {i} — {loc_str}")
+            lines.append("")
+            lines.append(body)
+            lines.append("")
+        lines.append("---")
+        lines.append("")
+        return "\n".join(lines)
+
+    def _failing_required_check_names(self, pr_number: int) -> list[str]:
+        """Return names of required checks that are currently failing.
+
+        Used by the no-commit retry path (#846) to name the actual offenders
+        verbatim in the force-engagement prompt. Returns an empty list if
+        the lookup fails — the caller treats that as "cannot prove still
+        red" and skips the retry rather than launching Claude blind.
+        """
+        try:
+            checks = gh_pr_checks(pr_number, dry_run=self.options.dry_run)
+        except Exception as exc:
+            logger.info(
+                "PR #%s: failed to re-check CI for no-commit retry decision (%s)",
+                pr_number,
+                exc,
+            )
+            return []
+        if not checks:
+            return []
+        required = [c for c in checks if c.get("required")] or checks
+        return [
+            c.get("name", "")
+            for c in required
+            if c.get("status") == "completed" and c.get("conclusion") == "failure"
+        ]
+
+    def _force_engagement_prompt(
+        self,
+        *,
+        issue_number: int,
+        pr_number: int,
+        worktree_path: Path,
+        pr_head_branch: str,
+        failing_check_names: list[str],
+        review_threads_block: str,
+    ) -> str:
+        """Build the retry prompt when the agent returned without committing (#846).
+
+        The retry must engage the agent enough to either (a) produce a real
+        fix or (b) explicitly say why CI cannot pass. The prompt names the
+        failing checks verbatim, re-emphasises the existing PR/branch
+        invariant, and re-emphasises signed commits — a no-commit retry is a
+        contract violation that the agent has to address head-on.
+        """
+        failing_block = "\n".join(f"- {n}" for n in failing_check_names) or "- (unknown)"
+        return (
+            f"{review_threads_block}"
+            f"## Force-Engagement Retry — Previous Turn Produced No Commit\n\n"
+            f"You just returned from a CI-fix session for PR {pr_ref(pr_number)} "
+            f"(issue {issue_ref(issue_number)}) WITHOUT producing a new commit on "
+            f"branch `{pr_head_branch}`. The required CI checks below are STILL "
+            f"failing on the remote:\n\n"
+            f"{failing_block}\n\n"
+            f"Returning no commit when required checks are still red is itself a "
+            f"bug — either fix the code so the failing checks pass, or, if no fix "
+            f"is possible, write a commit that documents the blocker in the PR "
+            f"description and references the upstream cause.\n\n"
+            f"Working directory: {worktree_path}\n"
+            f"Current branch (DO NOT change, DO NOT create a new branch): "
+            f"{pr_head_branch}\n\n"
+            f"Required behaviour:\n"
+            f"1. Re-read the failing check logs for the names listed above.\n"
+            f"2. Make the minimal change that addresses each failure.\n"
+            f"3. Run `pixi run python -m pytest tests/ -v` and "
+            f"`pre-commit run --all-files` locally to verify before committing.\n"
+            f"4. **Every commit MUST be cryptographically signed (`git commit -S`).** "
+            f"NEVER use `--no-verify`. The repository's CI gate rejects unsigned "
+            f"commits and any commit that bypassed pre-commit hooks.\n"
+            f"5. Do NOT run `git checkout -b`, `git switch -c`, or any command "
+            f"that creates or switches branches — the fix has to land on "
+            f"`{pr_head_branch}`.\n\n"
+            f"If after the steps above you still cannot produce a commit, reply "
+            f"with a single line `BLOCKED: <one-sentence reason>` and stop."
+        )
+
+    def _record_repeated_no_commit(
+        self,
+        *,
+        issue_number: int,
+        pr_number: int,
+        pr_head_branch: str,
+        failing_check_names: list[str],
+    ) -> None:
+        """Persist a marker for the next ecosystem run (#846).
+
+        Writes ``state_dir / "repeated-no-commit-<pr>.json"`` so a future
+        run (and the human reading the logs) can see which PRs got stuck
+        in the no-commit loop. We deliberately do NOT delete the arming
+        record here — the PR is still open and may yet land via another
+        actor; the marker file is purely a forensics aid.
+        """
+        marker = self.state_dir / f"repeated-no-commit-{pr_number}.json"
+        try:
+            marker.write_text(
+                json.dumps(
+                    {
+                        "issue_number": issue_number,
+                        "pr_number": pr_number,
+                        "pr_head_branch": pr_head_branch,
+                        "failing_required_checks": failing_check_names,
+                        "recorded_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+        except OSError as exc:
+            logger.warning(
+                "Issue #%s: failed to write repeated-no-commit marker for PR #%s: %s",
+                issue_number,
+                pr_number,
+                exc,
+            )
+
+    def _retry_no_commit_once(  # codex/claude branches stay coupled to keep one retry path
+        self,
+        *,
+        issue_number: int,
+        pr_number: int,
+        worktree_path: Path,
+        pr_head_branch: str,
+        pre_agent_sha: str,
+        session_id: str | None,
+    ) -> bool:
+        """Re-invoke the same agent session once when the first turn produced no commit (#846).
+
+        Only fires when the PR still has failing required checks — a green PR
+        that arrived via concurrent activity should NOT be perturbed. Stays on
+        the same ``(repo, issue, AGENT_CI_DRIVER)`` session so the agent's
+        transcript is continuous; the existing PR and branch are preserved
+        (no new PR, no new branch, no force-push to a new ref).
+
+        Args:
+            issue_number: GitHub issue number for the PR.
+            pr_number: PR number to retry on.
+            worktree_path: Worktree the agent runs in (same as the first turn).
+            pr_head_branch: PR head branch name; the retry must not switch off it.
+            pre_agent_sha: HEAD SHA from before the first turn (used as the
+                no-commit baseline for the retry too — if the retry doesn't
+                advance past this, we treat it as repeated-no-commit).
+            session_id: Codex resume id (Claude resumes by deterministic UUID).
+
+        Returns:
+            True if the retry produced a new commit (caller should push).
+            False if CI is green now, the retry returned no commit again, or
+            any error path fired. On repeated-no-commit, writes a forensics
+            marker to ``state_dir``.
+
+        """
+        failing = self._failing_required_check_names(pr_number)
+        if not failing:
+            logger.info(
+                "Issue #%s: no-commit turn but PR #%s has no failing required checks; "
+                "skipping force-engagement retry",
+                issue_number,
+                pr_number,
+            )
+            return False
+
+        review_threads_block = self._format_review_threads_block(pr_number)
+        retry_prompt = self._force_engagement_prompt(
+            issue_number=issue_number,
+            pr_number=pr_number,
+            worktree_path=worktree_path,
+            pr_head_branch=pr_head_branch,
+            failing_check_names=failing,
+            review_threads_block=review_threads_block,
+        )
+
+        logger.warning(
+            "Issue #%s: no-commit on first CI fix turn; re-invoking with "
+            "force-engagement prompt (failing: %s)",
+            issue_number,
+            ", ".join(failing) or "<unknown>",
+        )
+
+        try:
+            if is_codex(self.options.agent):
+                if session_id:
+                    try:
+                        resume_codex_session(
+                            session_id,
+                            retry_prompt,
+                            cwd=worktree_path,
+                            timeout=ci_driver_claude_timeout(),
+                        )
+                    except subprocess.CalledProcessError as exc:
+                        logger.warning(
+                            "Issue #%s: Codex retry resume failed for PR #%s; "
+                            "falling back to fresh session: %s",
+                            issue_number,
+                            pr_number,
+                            (exc.stderr or exc.stdout or "")[:300],
+                        )
+                        run_codex_session(
+                            retry_prompt,
+                            cwd=worktree_path,
+                            timeout=ci_driver_claude_timeout(),
+                            sandbox="workspace-write",
+                        )
+                else:
+                    run_codex_session(
+                        retry_prompt,
+                        cwd=worktree_path,
+                        timeout=ci_driver_claude_timeout(),
+                        sandbox="workspace-write",
+                    )
+            else:
+                repo_slug = get_repo_slug(self.repo_root)
+                invoke_claude_with_session(
+                    repo=repo_slug,
+                    issue=issue_number,
+                    agent=AGENT_CI_DRIVER,
+                    prompt=retry_prompt,
+                    model=implementer_model(),
+                    cwd=worktree_path,
+                    timeout=ci_driver_claude_timeout(),
+                    output_format="json",
+                    allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
+                    extra_args=["--dangerously-skip-permissions"],
+                    input_via_stdin=True,
+                )
+        except subprocess.CalledProcessError as exc:
+            logger.error(
+                "Issue #%s: no-commit retry session failed for PR #%s: %s",
+                issue_number,
+                pr_number,
+                (exc.stderr or exc.stdout or "")[:300],
+            )
+            return False
+        except subprocess.TimeoutExpired:
+            logger.error(
+                "Issue #%s: no-commit retry session timed out for PR #%s",
+                issue_number,
+                pr_number,
+            )
+            return False
+
+        if self._head_advanced(worktree_path, pre_agent_sha, issue_number):
+            return True
+
+        logger.error(
+            "Issue #%s: REPEATED no-commit on PR #%s after force-engagement retry; "
+            "marking and moving on",
+            issue_number,
+            pr_number,
+        )
+        self._record_repeated_no_commit(
+            issue_number=issue_number,
+            pr_number=pr_number,
+            pr_head_branch=pr_head_branch,
+            failing_check_names=failing,
+        )
+        return False
+
     def _head_advanced(
         self,
         worktree_path: Path,
@@ -1099,8 +1404,13 @@ class CIDriver:
         findings = advise_findings.strip()
         if findings and not findings.startswith("<!-- advise step skipped"):
             advise_block = f"## Prior Learnings from Team Knowledge Base\n\n{findings}\n\n---\n\n"
+        # Inject any unresolved PR review threads at the top of the prompt so
+        # the agent addresses reviewer feedback BEFORE re-running CI — an
+        # unresolved bot/human comment is usually the actual blocker (#846).
+        review_threads_block = self._format_review_threads_block(pr_number)
         prompt = (
             f"{advise_block}"
+            f"{review_threads_block}"
             f"Fix the CI failures for PR {pr_ref(pr_number)} (issue {issue_ref(issue_number)}).\n\n"
             f"Working directory: {worktree_path}\n"
             f"Current branch (DO NOT change): {pr_head_branch}\n\n"
@@ -1110,7 +1420,9 @@ class CIDriver:
             "2. Run: pre-commit run --all-files\n"
             "3. Commit changes (do NOT push) on the current branch — DO NOT run "
             "`git checkout -b`, `git switch -c`, or any other command that creates "
-            "or switches to a different branch\n\n"
+            "or switches to a different branch\n"
+            "4. Every commit MUST be cryptographically signed (`git commit -S`); "
+            "NEVER use `--no-verify`.\n\n"
             f"Commit message: fix: Address CI failures for PR {pr_ref(pr_number)}\n"
         )
 
@@ -1161,8 +1473,23 @@ class CIDriver:
                     )
                     return False
 
-                if not self._head_advanced(worktree_path, pre_agent_sha, issue_number):
-                    return False
+                # First turn produced no commit → force-engage once on the
+                # same session before giving up (#846). Stays on the same PR +
+                # branch (no new PR, no new branch). Nested two-step keeps the
+                # head-advance check and the retry decision separate for
+                # readability.
+                if not self._head_advanced(  # noqa: SIM102
+                    worktree_path, pre_agent_sha, issue_number
+                ):
+                    if not self._retry_no_commit_once(
+                        issue_number=issue_number,
+                        pr_number=pr_number,
+                        worktree_path=worktree_path,
+                        pr_head_branch=pr_head_branch,
+                        pre_agent_sha=pre_agent_sha,
+                        session_id=session_id,
+                    ):
+                        return False
                 try:
                     push_current_branch_with_lease_on_divergence(
                         worktree_path,
@@ -1209,8 +1536,23 @@ class CIDriver:
 
             if claude_result.returncode == 0:
                 # Push the fixes
-                if not self._head_advanced(worktree_path, pre_agent_sha, issue_number):
-                    return False
+                # First turn produced no commit → force-engage once on the
+                # same session before giving up (#846). Stays on the same PR +
+                # branch (no new PR, no new branch). Nested two-step keeps the
+                # head-advance check and the retry decision separate for
+                # readability.
+                if not self._head_advanced(  # noqa: SIM102
+                    worktree_path, pre_agent_sha, issue_number
+                ):
+                    if not self._retry_no_commit_once(
+                        issue_number=issue_number,
+                        pr_number=pr_number,
+                        worktree_path=worktree_path,
+                        pr_head_branch=pr_head_branch,
+                        pre_agent_sha=pre_agent_sha,
+                        session_id=session_id,
+                    ):
+                        return False
                 try:
                     push_current_branch_with_lease_on_divergence(
                         worktree_path,

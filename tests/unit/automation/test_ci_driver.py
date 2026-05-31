@@ -209,7 +209,13 @@ def test_codex_ci_fix_session_skips_push_when_head_did_not_advance(
     driver: CIDriver,
     tmp_path: Path,
 ) -> None:
-    """Agent returned without committing → no push, no false success log (#836)."""
+    """Agent returned without committing → no push, no false success log (#836).
+
+    Under #846 the no-commit case re-checks required CI; when there are no
+    failing required checks (mocked here as a clean rollup), the
+    force-engagement retry is correctly suppressed and the iteration still
+    reports failure with no push attempted.
+    """
     driver.options.agent = "codex"
     fresh_result = AgentRunResult(stdout="no changes needed", stderr="", session_id="x")
     # Pre and post snapshots return the SAME SHA → agent made no commit.
@@ -227,6 +233,14 @@ def test_codex_ci_fix_session_skips_push_when_head_did_not_advance(
         patch(
             "hephaestus.automation.ci_driver.run",
             side_effect=[unchanged_sha, unchanged_sha],
+        ),
+        patch(
+            "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+            return_value=[],
+        ),
+        patch(
+            "hephaestus.automation.ci_driver.gh_pr_checks",
+            return_value=[],
         ),
     ):
         result = driver._run_ci_fix_session(
@@ -1225,3 +1239,308 @@ class TestBodySearch:
         assert body_search_calls, "No gh call with --search found"
         search_arg = str(body_search_calls[0])
         assert "Closes #42" in search_arg
+
+
+# ---------------------------------------------------------------------------
+# #846: no-commit retry + review-thread injection
+# ---------------------------------------------------------------------------
+
+
+class TestReviewThreadInjection:
+    """Unresolved PR review threads must be fetched and folded into the fix prompt."""
+
+    def test_no_unresolved_threads_returns_empty_string(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """No unresolved threads → no block injected (avoid prompt noise)."""
+        with patch(
+            "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads", return_value=[]
+        ):
+            result = driver._format_review_threads_block(pr_number=999)
+        assert result == ""
+
+    def test_unresolved_threads_rendered_verbatim(self, driver: CIDriver, tmp_path: Path) -> None:
+        """Each unresolved thread's body, path, and line appear verbatim in the block."""
+        threads = [
+            {"id": "t1", "path": "src/a.py", "line": 42, "body": "Use safe_write here."},
+            {"id": "t2", "path": "src/b.py", "line": None, "body": "Magic constant."},
+        ]
+        with patch(
+            "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+            return_value=threads,
+        ):
+            block = driver._format_review_threads_block(pr_number=42)
+        assert "## Unresolved PR Review Threads" in block
+        assert "src/a.py:42" in block
+        assert "Use safe_write here." in block
+        assert "src/b.py" in block  # line None → no trailing :None
+        assert "src/b.py:None" not in block
+        assert "Magic constant." in block
+
+    def test_graphql_failure_is_swallowed(self, driver: CIDriver, tmp_path: Path) -> None:
+        """A gh failure must not block the drive — empty string + info log only."""
+        with patch(
+            "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+            side_effect=RuntimeError("graphql down"),
+        ):
+            assert driver._format_review_threads_block(pr_number=7) == ""
+
+
+class TestFailingRequiredCheckNames:
+    """Required-check failure naming for the force-engagement retry prompt."""
+
+    def test_all_green_returns_empty(self, driver: CIDriver) -> None:
+        checks = [_make_check("lint", conclusion="success")]
+        with patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks):
+            assert driver._failing_required_check_names(pr_number=1) == []
+
+    def test_one_required_failure_returned(self, driver: CIDriver) -> None:
+        checks = [
+            _make_check("lint", conclusion="success"),
+            _make_check("test", conclusion="failure"),
+            _make_check("non-req", conclusion="failure", required=False),
+        ]
+        with patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks):
+            names = driver._failing_required_check_names(pr_number=1)
+        assert names == ["test"]
+
+    def test_no_required_defined_falls_back_to_all_checks(self, driver: CIDriver) -> None:
+        """When no check is marked required, the helper treats all checks as required."""
+        checks = [
+            _make_check("only-check", conclusion="failure", required=False),
+        ]
+        with patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks):
+            assert driver._failing_required_check_names(pr_number=1) == ["only-check"]
+
+    def test_gh_failure_returns_empty(self, driver: CIDriver) -> None:
+        """A gh blip must not promote the no-commit to a retry — empty list = skip."""
+        with patch(
+            "hephaestus.automation.ci_driver.gh_pr_checks",
+            side_effect=RuntimeError("api down"),
+        ):
+            assert driver._failing_required_check_names(pr_number=1) == []
+
+
+class TestForceEngagementPrompt:
+    """The retry prompt must name failing checks verbatim and re-state invariants."""
+
+    def test_prompt_names_failing_checks_and_branch(self, driver: CIDriver, tmp_path: Path) -> None:
+        prompt = driver._force_engagement_prompt(
+            issue_number=1,
+            pr_number=2,
+            worktree_path=tmp_path,
+            pr_head_branch="1-fix",
+            failing_check_names=["lint", "test-py310"],
+            review_threads_block="",
+        )
+        # The failing-check names must be in the prompt body, not a placeholder.
+        assert "- lint" in prompt
+        assert "- test-py310" in prompt
+        # PR + issue identifiers visible (the prompt uses pr_ref/issue_ref
+        # which include the repo slug when available, so just assert the
+        # numbers + the "PR"/"issue" keywords land in the right order).
+        assert "#2" in prompt
+        assert "#1" in prompt
+        assert "issue " in prompt.lower()
+        assert "pr " in prompt.lower()
+        # The branch invariant is restated — agent must not switch branches.
+        assert "1-fix" in prompt
+        assert "DO NOT create a new branch" in prompt
+        # Signed-commits and no --no-verify re-stated (user requirement).
+        assert "git commit -S" in prompt
+        assert "--no-verify" in prompt
+
+    def test_review_threads_block_prepended_when_nonempty(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        prompt = driver._force_engagement_prompt(
+            issue_number=1,
+            pr_number=2,
+            worktree_path=tmp_path,
+            pr_head_branch="1-fix",
+            failing_check_names=["lint"],
+            review_threads_block="## Unresolved PR Review Threads\n\nSee below.\n",
+        )
+        assert prompt.startswith("## Unresolved PR Review Threads")
+
+
+class TestNoCommitRetry:
+    """Force-engagement retry path: triggers, stays on PR/branch, bounded once."""
+
+    def _patch_common(
+        self,
+        *,
+        failing_checks: list[str],
+        head_after_retry: str,
+        pre_sha: str = "cafef00d",
+    ) -> dict[str, Any]:
+        """Build the common patch dict for retry tests."""
+        return {
+            "failing_checks": failing_checks,
+            "head_after_retry": head_after_retry,
+            "pre_sha": pre_sha,
+        }
+
+    def test_retry_skipped_when_no_failing_required_checks(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """No-commit + green CI → no retry, returns False (don't perturb a passing PR)."""
+        with (
+            patch(
+                "hephaestus.automation.ci_driver.gh_pr_checks",
+                return_value=[_make_check("lint", conclusion="success")],
+            ),
+            patch("hephaestus.automation.ci_driver.invoke_claude_with_session") as mock_invoke,
+            patch(
+                "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+                return_value=[],
+            ),
+        ):
+            result = driver._retry_no_commit_once(
+                issue_number=1,
+                pr_number=2,
+                worktree_path=tmp_path,
+                pr_head_branch="1-fix",
+                pre_agent_sha="cafef00d",
+                session_id=None,
+            )
+        assert result is False
+        mock_invoke.assert_not_called()
+
+    def test_retry_fires_when_failing_and_returns_true_on_commit(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """No-commit + failing CI → one resumed claude call; HEAD advanced ⇒ True."""
+        post_sha = MagicMock(stdout="deadbeef\n")
+        with (
+            patch(
+                "hephaestus.automation.ci_driver.gh_pr_checks",
+                return_value=[_make_check("lint", conclusion="failure")],
+            ),
+            patch(
+                "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+                return_value=[],
+            ),
+            patch(
+                "hephaestus.automation.ci_driver.invoke_claude_with_session",
+                return_value=("done", "sess"),
+            ) as mock_invoke,
+            patch("hephaestus.automation.ci_driver.run", return_value=post_sha),
+        ):
+            result = driver._retry_no_commit_once(
+                issue_number=1,
+                pr_number=2,
+                worktree_path=tmp_path,
+                pr_head_branch="1-fix",
+                pre_agent_sha="cafef00d",
+                session_id=None,
+            )
+        assert result is True
+        # Exactly one retry — never two, never zero.
+        mock_invoke.assert_called_once()
+        # The retry must stay on the same (repo, issue, AGENT_CI_DRIVER) session.
+        kwargs = mock_invoke.call_args.kwargs
+        assert kwargs["agent"] == "ci-driver"
+        assert kwargs["issue"] == 1
+
+    def test_repeated_no_commit_returns_false_and_writes_marker(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """Retry returned without commit too → False + state_dir marker (#846)."""
+        unchanged = MagicMock(stdout="cafef00d\n")  # post == pre
+        with (
+            patch(
+                "hephaestus.automation.ci_driver.gh_pr_checks",
+                return_value=[_make_check("lint", conclusion="failure")],
+            ),
+            patch(
+                "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+                return_value=[],
+            ),
+            patch(
+                "hephaestus.automation.ci_driver.invoke_claude_with_session",
+                return_value=("nope", "sess"),
+            ) as mock_invoke,
+            patch("hephaestus.automation.ci_driver.run", return_value=unchanged),
+        ):
+            result = driver._retry_no_commit_once(
+                issue_number=1,
+                pr_number=2,
+                worktree_path=tmp_path,
+                pr_head_branch="1-fix",
+                pre_agent_sha="cafef00d",
+                session_id=None,
+            )
+        assert result is False
+        # Exactly ONE retry — must not loop forever.
+        mock_invoke.assert_called_once()
+        # Forensics marker is written next to the arming-state files.
+        marker = driver.state_dir / "repeated-no-commit-2.json"
+        assert marker.exists()
+        payload = json.loads(marker.read_text())
+        assert payload["pr_number"] == 2
+        assert payload["pr_head_branch"] == "1-fix"
+        assert payload["failing_required_checks"] == ["lint"]
+
+    def test_retry_exception_returns_false_no_marker(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """A subprocess error during retry → False, no marker (could not prove repeated)."""
+        with (
+            patch(
+                "hephaestus.automation.ci_driver.gh_pr_checks",
+                return_value=[_make_check("lint", conclusion="failure")],
+            ),
+            patch(
+                "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+                return_value=[],
+            ),
+            patch(
+                "hephaestus.automation.ci_driver.invoke_claude_with_session",
+                side_effect=subprocess.CalledProcessError(1, ["claude"], stderr="boom"),
+            ),
+        ):
+            result = driver._retry_no_commit_once(
+                issue_number=1,
+                pr_number=2,
+                worktree_path=tmp_path,
+                pr_head_branch="1-fix",
+                pre_agent_sha="cafef00d",
+                session_id=None,
+            )
+        assert result is False
+        # Marker is only for *repeated* no-commit — a subprocess failure is a
+        # different signal and we don't want to confuse the forensics record.
+        assert not (driver.state_dir / "repeated-no-commit-2.json").exists()
+
+    def test_retry_codex_path_resumes_session(self, driver: CIDriver, tmp_path: Path) -> None:
+        """Codex agent + session_id → resume_codex_session called once with the session."""
+        driver.options.agent = "codex"
+        post_sha = MagicMock(stdout="deadbeef\n")
+        with (
+            patch(
+                "hephaestus.automation.ci_driver.gh_pr_checks",
+                return_value=[_make_check("lint", conclusion="failure")],
+            ),
+            patch(
+                "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+                return_value=[],
+            ),
+            patch(
+                "hephaestus.automation.ci_driver.resume_codex_session",
+                return_value=AgentRunResult(stdout="ok", stderr="", session_id="s"),
+            ) as mock_resume,
+            patch("hephaestus.automation.ci_driver.run_codex_session") as mock_fresh,
+            patch("hephaestus.automation.ci_driver.run", return_value=post_sha),
+        ):
+            result = driver._retry_no_commit_once(
+                issue_number=1,
+                pr_number=2,
+                worktree_path=tmp_path,
+                pr_head_branch="1-fix",
+                pre_agent_sha="cafef00d",
+                session_id="old-codex-session",
+            )
+        assert result is True
+        mock_resume.assert_called_once()
+        mock_fresh.assert_not_called()
