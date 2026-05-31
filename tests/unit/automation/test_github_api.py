@@ -1469,6 +1469,41 @@ class TestGhPrChecks:
         assert check["status"] == "in_progress"
         assert check["conclusion"] is None
 
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_no_checks_reported_returns_empty(self, mock_gh_call: Any) -> None:
+        """Regression for #827: gh's 'no checks reported' stderr maps to ``[]``.
+
+        ``gh pr checks`` exits non-zero with stderr ``no checks reported on the
+        '<branch>' branch`` when the PR has no check runs registered yet (fresh
+        PR, no workflows configured, etc.). Previously this aborted the entire
+        CI drive with an unexpected-error log. The driver now treats it as the
+        empty-result case.
+        """
+        mock_gh_call.side_effect = subprocess.CalledProcessError(
+            1,
+            ["gh", "pr", "checks"],
+            output="",
+            stderr="no checks reported on the '45-ecosystem-health' branch\n",
+        )
+
+        assert gh_pr_checks(289) == []
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_other_called_process_error_still_raises(self, mock_gh_call: Any) -> None:
+        """Auth / network / unrelated gh failures still propagate."""
+        # We only swallow the exact "no checks reported" stderr — every other
+        # CalledProcessError still surfaces so genuine failures fail loud.
+        mock_gh_call.side_effect = subprocess.CalledProcessError(
+            128,
+            ["gh", "pr", "checks"],
+            output="",
+            stderr="HTTP 401: Bad credentials\n",
+        )
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            gh_pr_checks(289)
+        assert exc_info.value.returncode == 128
+
 
 class TestUpsertAndDeleteComment:
     """Idempotent plan/review comment lifecycle (one comment per role)."""

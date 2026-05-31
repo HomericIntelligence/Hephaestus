@@ -1463,6 +1463,20 @@ def _map_pr_check(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ``gh pr checks`` exits non-zero with this stderr when the PR's head branch
+# has no check runs registered yet (a fresh PR before workflows have been
+# scheduled, or a repo with no CI configured for the branch). It is *not* a
+# real error — it is the empty result — so callers should see ``[]`` rather
+# than a hard failure that aborts the entire CI drive.
+_GH_PR_CHECKS_NO_CHECKS_FRAGMENT: str = "no checks reported"
+
+
+def _is_gh_pr_checks_no_checks_error(exc: subprocess.CalledProcessError) -> bool:
+    """Return True iff a failed ``gh pr checks`` is the no-checks-yet case."""
+    blob = (exc.stderr or "") + (exc.stdout or "")
+    return _GH_PR_CHECKS_NO_CHECKS_FRAGMENT in blob
+
+
 def gh_pr_checks(
     pr_number: int,
     dry_run: bool = False,
@@ -1475,7 +1489,8 @@ def gh_pr_checks(
 
     Returns:
         List of check dicts with keys: name (str), status (str), conclusion (str | None),
-        required (bool).
+        required (bool). Empty list if the PR has no check runs yet (``gh pr checks``
+        treats this as an error but the driver treats it as the empty case).
 
         ``gh pr checks --json`` does not expose ``status``/``conclusion``/``required`` — it
         exposes ``state`` (e.g. ``SUCCESS``/``FAILURE``/``PENDING``) and ``bucket``
@@ -1488,7 +1503,17 @@ def gh_pr_checks(
         logger.info("[dry_run] Would fetch CI checks for PR #%s", pr_number)
         return []
 
-    result = _gh_call(["pr", "checks", str(pr_number), "--json", "name,state,bucket,workflow"])
+    try:
+        result = _gh_call(["pr", "checks", str(pr_number), "--json", "name,state,bucket,workflow"])
+    except subprocess.CalledProcessError as exc:
+        if _is_gh_pr_checks_no_checks_error(exc):
+            logger.info(
+                "PR #%s has no check runs registered yet (gh: %s); treating as empty",
+                pr_number,
+                _GH_PR_CHECKS_NO_CHECKS_FRAGMENT,
+            )
+            return []
+        raise
     raw: list[dict[str, Any]] = json.loads(result.stdout)
 
     checks: list[dict[str, Any]] = [_map_pr_check(item) for item in raw]
