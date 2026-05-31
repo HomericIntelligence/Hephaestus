@@ -35,14 +35,14 @@ class TestReviewerAgent:
         assert reviewer_agent(AGENT_PR_REVIEWER, 2) == "pr-reviewer-r2"
 
     def test_per_iteration_uuids_differ(self) -> None:
-        u0 = session_uuid("R", 5, reviewer_agent(AGENT_PLAN_REVIEWER, 0), "abc1234")
-        u1 = session_uuid("R", 5, reviewer_agent(AGENT_PLAN_REVIEWER, 1), "abc1234")
+        u0 = session_uuid("R", 5, reviewer_agent(AGENT_PLAN_REVIEWER, 0))
+        u1 = session_uuid("R", 5, reviewer_agent(AGENT_PLAN_REVIEWER, 1))
         assert u0 != u1
 
     def test_suffixed_reviewer_token_is_valid_session_agent(self) -> None:
         # session_name must accept the reviewer_agent() form.
-        name = session_name("R", 5, reviewer_agent(AGENT_PR_REVIEWER, 3), "x")
-        assert name == "R_5_pr-reviewer-r3_x"
+        name = session_name("R", 5, reviewer_agent(AGENT_PR_REVIEWER, 3))
+        assert name == "R_5_pr-reviewer-r3"
 
     def test_rejects_non_reviewer_base(self) -> None:
         with pytest.raises(ValueError, match="reviewer_agent expects"):
@@ -54,72 +54,65 @@ class TestReviewerAgent:
 
     def test_unsuffixed_unknown_still_rejected(self) -> None:
         with pytest.raises(ValueError, match="unknown agent"):
-            session_name("R", 5, "totally-bogus", "x")
+            session_name("R", 5, "totally-bogus")
 
 
 class TestSessionName:
-    """Human-readable session name construction."""
+    """Human-readable session name construction.
+
+    Per #841 the tuple is (repo, issue, agent) — no githash. The transcript
+    persists across main-bumps so resume keeps working as a long-lived
+    artifact is touched again.
+    """
 
     def test_basic(self) -> None:
-        assert (
-            session_name("ProjectScylla", 1944, AGENT_PLANNER, "abc1234")
-            == "ProjectScylla_1944_planner_abc1234"
-        )
+        assert session_name("ProjectScylla", 1944, AGENT_PLANNER) == "ProjectScylla_1944_planner"
 
     def test_strips_hash_prefix_from_issue(self) -> None:
-        assert session_name("R", "#42", AGENT_PLANNER, "x") == "R_42_planner_x"
+        assert session_name("R", "#42", AGENT_PLANNER) == "R_42_planner"
 
     def test_int_and_str_issue_equivalent(self) -> None:
-        assert session_name("R", 42, AGENT_PLANNER, "x") == session_name(
-            "R", "42", AGENT_PLANNER, "x"
-        )
+        assert session_name("R", 42, AGENT_PLANNER) == session_name("R", "42", AGENT_PLANNER)
 
     def test_unknown_agent_raises(self) -> None:
         with pytest.raises(ValueError, match="unknown agent"):
-            session_name("R", 1, "wizard", "x")
+            session_name("R", 1, "wizard")
 
     @pytest.mark.parametrize(
-        ("repo", "issue", "gh"),
-        [("", 1, "x"), ("R", 1, ""), ("R", "", "x")],
+        ("repo", "issue"),
+        [("", 1), ("R", "")],
     )
-    def test_empty_components_raise(self, repo: str, issue: int | str, gh: str) -> None:
+    def test_empty_components_raise(self, repo: str, issue: int | str) -> None:
         with pytest.raises(ValueError):
-            session_name(repo, issue, AGENT_PLANNER, gh)
+            session_name(repo, issue, AGENT_PLANNER)
 
     def test_whitespace_stripped(self) -> None:
-        assert session_name("  R  ", 1, AGENT_PLANNER, "  abc  ") == "R_1_planner_abc"
+        assert session_name("  R  ", 1, AGENT_PLANNER) == "R_1_planner"
 
 
 class TestSessionUUID:
-    """Deterministic UUIDv5 derivation from (repo, issue, agent, githash)."""
+    """Deterministic UUIDv5 derivation from (repo, issue, agent)."""
 
     def test_deterministic(self) -> None:
-        a = session_uuid("ProjectScylla", 1944, AGENT_PLANNER, "abc1234")
-        b = session_uuid("ProjectScylla", 1944, AGENT_PLANNER, "abc1234")
+        a = session_uuid("ProjectScylla", 1944, AGENT_PLANNER)
+        b = session_uuid("ProjectScylla", 1944, AGENT_PLANNER)
         assert a == b
 
     def test_returns_valid_uuid(self) -> None:
-        sid = session_uuid("ProjectScylla", 1944, AGENT_PLANNER, "abc1234")
+        sid = session_uuid("ProjectScylla", 1944, AGENT_PLANNER)
         # uuid.UUID raises ValueError on invalid input.
         uuid.UUID(sid)
 
     def test_different_agent_different_uuid(self) -> None:
-        a = session_uuid("R", 1, AGENT_PLANNER, "x")
-        b = session_uuid("R", 1, AGENT_PLAN_REVIEWER, "x")
+        a = session_uuid("R", 1, AGENT_PLANNER)
+        b = session_uuid("R", 1, AGENT_PLAN_REVIEWER)
         assert a != b
 
     def test_different_repo_different_uuid(self) -> None:
-        assert session_uuid("R1", 1, AGENT_PLANNER, "x") != session_uuid(
-            "R2", 1, AGENT_PLANNER, "x"
-        )
+        assert session_uuid("R1", 1, AGENT_PLANNER) != session_uuid("R2", 1, AGENT_PLANNER)
 
     def test_different_issue_different_uuid(self) -> None:
-        assert session_uuid("R", 1, AGENT_PLANNER, "x") != session_uuid("R", 2, AGENT_PLANNER, "x")
-
-    def test_different_githash_different_uuid(self) -> None:
-        assert session_uuid("R", 1, AGENT_PLANNER, "abc1234") != session_uuid(
-            "R", 1, AGENT_PLANNER, "def5678"
-        )
+        assert session_uuid("R", 1, AGENT_PLANNER) != session_uuid("R", 2, AGENT_PLANNER)
 
     def test_each_agent_constant_yields_distinct_uuid(self) -> None:
         agents = [
@@ -132,8 +125,29 @@ class TestSessionUUID:
             AGENT_ADDRESS_REVIEW,
             AGENT_CI_DRIVER,
         ]
-        uuids = {session_uuid("R", 1, a, "x") for a in agents}
+        uuids = {session_uuid("R", 1, a) for a in agents}
         assert len(uuids) == len(agents)
+
+    def test_signature_does_not_accept_githash_kw(self) -> None:
+        """Regression for #841: passing a githash kwarg must be a TypeError.
+
+        The whole point of #841 is that the session id is a function of the
+        artifact (repo, issue, agent) only — never a commit. If a caller
+        sneaks ``githash=`` back into ``invoke_claude_with_session``, that
+        kwarg would silently end up here and produce a different UUID per
+        main-bump. Making the function refuse the kwarg outright keeps the
+        invariant load-bearing rather than aspirational.
+
+        Implementation note: the kwarg is invoked via ``**`` unpacking so
+        static analyzers cannot resolve the offending parameter name back
+        to the now-githash-free signatures — otherwise this very test
+        would itself be flagged as "wrong arg name" on every PR scan.
+        """
+        bad_kwargs = {"githash": "abc1234"}
+        with pytest.raises(TypeError):
+            session_uuid("R", 1, AGENT_PLANNER, **bad_kwargs)
+        with pytest.raises(TypeError):
+            session_name("R", 1, AGENT_PLANNER, **bad_kwargs)
 
 
 class TestShortGithash:
@@ -185,7 +199,7 @@ class TestSessionJsonlPath:
         assert p.parent.parent == tmp_path / ".claude" / "projects"
 
     def test_uuid_in_filename(self, tmp_path: Path) -> None:
-        sid = session_uuid("R", 1, AGENT_IMPLEMENTER, "abc1234")
+        sid = session_uuid("R", 1, AGENT_IMPLEMENTER)
         p = session_jsonl_path(sid, tmp_path)
         assert p.name == f"{sid}.jsonl"
 

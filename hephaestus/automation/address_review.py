@@ -58,7 +58,7 @@ from .github_api import (
 )
 from .models import AddressReviewOptions, ReviewPhase, ReviewState, WorkerResult
 from .prompts import get_address_review_prompt
-from .session_naming import AGENT_IMPLEMENTER, current_trunk_githash
+from .session_naming import AGENT_IMPLEMENTER
 from .status_tracker import StatusTracker  # noqa: F401 — re-exported for test patching
 from .worktree_manager import WorktreeManager  # noqa: F401 — re-exported for test patching
 
@@ -176,13 +176,11 @@ def run_address_fix_session(
             )
             return parsed
 
-        githash = current_trunk_githash(repo_root)
         repo_slug = get_repo_slug(repo_root)
         stdout, _ = invoke_claude_with_session(
             repo=repo_slug,
             issue=issue_number,
             agent=AGENT_IMPLEMENTER,
-            githash=githash,
             prompt=prompt,
             model=implementer_model(),
             cwd=worktree_path,

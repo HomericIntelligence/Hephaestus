@@ -1,13 +1,15 @@
 """Deterministic Claude-session naming for the automation pipeline.
 
-Within a given trunk git SHA, every Claude invocation for the same
-``(repo, issue, agent)`` tuple lands on the SAME Claude CLI session — first
-call creates it via ``--session-id``, every later call resumes it via
-``--resume``. This restores prompt-cache reuse across loop iterations.
+Every Claude invocation for the same ``(repo, issue, agent)`` tuple lands on
+the SAME Claude CLI session — first call creates it via ``--session-id``,
+every later call resumes it via ``--resume``. This restores prompt-cache
+reuse across loop iterations *and* across main-bumps (#841): the artifact
+being worked on is the issue/PR, not the commit at which the loop started,
+so the session must persist as long as the issue does.
 
 Names
 -----
-Human-readable: ``<repo>_<issue>_<agent>_<githash>``
+Human-readable: ``<repo>_<issue>_<agent>``
 
 Session ID (what ``claude --session-id`` accepts):
 ``str(uuid.uuid5(NAMESPACE_DNS, <human-readable>))``
@@ -99,14 +101,19 @@ def _is_valid_agent(agent: str) -> bool:
     return bool(sep) and base in _PER_ITERATION_REVIEWERS and suffix.isdigit()
 
 
-def session_name(repo: str, issue: int | str, agent: str, githash: str) -> str:
+def session_name(repo: str, issue: int | str, agent: str) -> str:
     """Return the human-readable session name.
+
+    The tuple is intentionally **(repo, issue, agent) only** — no githash.
+    The Claude transcript persists across main-bumps so a long-running
+    drive (CI fix loop, planner, implementer) resumes its context whenever
+    the same artifact (issue/PR) is touched again, instead of being
+    discarded every time main advances (#841).
 
     Args:
         repo: Repository slug without owner (e.g. ``"ProjectScylla"``).
         issue: Issue number; leading ``#`` is stripped.
         agent: One of the ``AGENT_*`` constants in this module.
-        githash: Short SHA of the trunk HEAD captured at loop start.
 
     Returns:
         Underscore-joined name suitable for ``claude --name``.
@@ -121,18 +128,17 @@ def session_name(repo: str, issue: int | str, agent: str, githash: str) -> str:
             f"or a per-iteration reviewer token (e.g. 'plan-reviewer-r0')"
         )
     repo_s = repo.strip()
-    githash_s = githash.strip()
-    if not repo_s or not githash_s:
-        raise ValueError("repo and githash must be non-empty")
+    if not repo_s:
+        raise ValueError("repo must be non-empty")
     issue_s = str(issue).lstrip("#").strip()
     if not issue_s:
         raise ValueError("issue must be non-empty")
-    return f"{repo_s}_{issue_s}_{agent}_{githash_s}"
+    return f"{repo_s}_{issue_s}_{agent}"
 
 
-def session_uuid(repo: str, issue: int | str, agent: str, githash: str) -> str:
+def session_uuid(repo: str, issue: int | str, agent: str) -> str:
     """Return the deterministic UUIDv5 session ID for the tuple."""
-    name = session_name(repo, issue, agent, githash)
+    name = session_name(repo, issue, agent)
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, name))
 
 

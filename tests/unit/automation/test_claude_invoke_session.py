@@ -62,7 +62,6 @@ class TestCreateVsResume:
             repo="R",
             issue=1,
             agent=AGENT_PLANNER,
-            githash="x",
             prompt="hi",
             model="sonnet",
             cwd=cwd,
@@ -72,19 +71,18 @@ class TestCreateVsResume:
         assert "--name" in argv
         assert "--resume" not in argv
         assert out == "ok"
-        assert sid == session_uuid("R", 1, AGENT_PLANNER, "x")
+        assert sid == session_uuid("R", 1, AGENT_PLANNER)
 
     def test_subsequent_call_uses_resume(self, stub_run: MagicMock, fake_home: Path) -> None:
         cwd = fake_home / "work"
         cwd.mkdir()
-        sid = session_uuid("R", 1, AGENT_PLANNER, "x")
+        sid = session_uuid("R", 1, AGENT_PLANNER)
         _make_existing_jsonl(fake_home, cwd, sid)
 
         invoke_claude_with_session(
             repo="R",
             issue=1,
             agent=AGENT_PLANNER,
-            githash="x",
             prompt="hi",
             model="sonnet",
             cwd=cwd,
@@ -104,7 +102,6 @@ class TestCreateVsResume:
             repo="R",
             issue=1,
             agent=AGENT_PLANNER,
-            githash="x",
             prompt="hi",
             model="sonnet",
             cwd=cwd,
@@ -113,7 +110,6 @@ class TestCreateVsResume:
             repo="R",
             issue=1,
             agent=AGENT_PLAN_REVIEWER,
-            githash="x",
             prompt="hi",
             model="sonnet",
             cwd=cwd,
@@ -127,7 +123,7 @@ class TestSessionExpiredFallback:
     def test_expired_resume_falls_back_to_create(self, fake_home: Path) -> None:
         cwd = fake_home / "work"
         cwd.mkdir()
-        sid = session_uuid("R", 1, AGENT_PLANNER, "x")
+        sid = session_uuid("R", 1, AGENT_PLANNER)
         _make_existing_jsonl(fake_home, cwd, sid)
 
         expired_exc = subprocess.CalledProcessError(
@@ -145,7 +141,6 @@ class TestSessionExpiredFallback:
                 repo="R",
                 issue=1,
                 agent=AGENT_PLANNER,
-                githash="x",
                 prompt="hi",
                 model="sonnet",
                 cwd=cwd,
@@ -169,7 +164,7 @@ class TestSessionExpiredFallback:
         """
         cwd = fake_home / "work"
         cwd.mkdir()
-        sid = session_uuid("R", 1, AGENT_PLANNER, "x")
+        sid = session_uuid("R", 1, AGENT_PLANNER)
         _make_existing_jsonl(fake_home, cwd, sid)
 
         transient = subprocess.CalledProcessError(
@@ -184,7 +179,6 @@ class TestSessionExpiredFallback:
                 repo="R",
                 issue=1,
                 agent=AGENT_PLANNER,
-                githash="x",
                 prompt="hi",
                 model="sonnet",
                 cwd=cwd,
@@ -209,7 +203,6 @@ class TestSessionExpiredFallback:
                     repo="R",
                     issue=1,
                     agent=AGENT_PLANNER,
-                    githash="x",
                     prompt="hi",
                     model="sonnet",
                     cwd=cwd,
@@ -241,7 +234,6 @@ class TestSessionExpiredFallback:
                 repo="R",
                 issue=1,
                 agent=AGENT_PLANNER,
-                githash="x",
                 prompt="hi",
                 model="sonnet",
                 cwd=cwd,
@@ -266,7 +258,6 @@ class TestArgvAssembly:
             repo="R",
             issue=1,
             agent=AGENT_PLANNER,
-            githash="x",
             prompt="hi",
             model="sonnet",
             cwd=cwd,
@@ -299,7 +290,6 @@ class TestArgvAssembly:
             repo="R",
             issue=1,
             agent=AGENT_PLANNER,
-            githash="x",
             prompt="the-prompt",
             model="sonnet",
             cwd=cwd,
@@ -322,7 +312,6 @@ class TestArgvAssembly:
             repo="R",
             issue=1,
             agent=AGENT_PLANNER,
-            githash="x",
             prompt="hi",
             model="sonnet",
             cwd=cwd,
@@ -337,7 +326,7 @@ class TestRecreateOnResumeFailureToggle:
     def test_propagates_called_process_error(self, fake_home: Path) -> None:
         cwd = fake_home / "work"
         cwd.mkdir()
-        sid = session_uuid("R", 1, AGENT_PLANNER, "x")
+        sid = session_uuid("R", 1, AGENT_PLANNER)
         _make_existing_jsonl(fake_home, cwd, sid)
 
         boom = subprocess.CalledProcessError(
@@ -349,7 +338,6 @@ class TestRecreateOnResumeFailureToggle:
                     repo="R",
                     issue=1,
                     agent=AGENT_PLANNER,
-                    githash="x",
                     prompt="hi",
                     model="sonnet",
                     cwd=cwd,
@@ -371,7 +359,7 @@ class TestEndToEndSessionResume:
     def test_create_then_resume_lands_on_same_uuid(self, fake_home: Path) -> None:
         cwd = fake_home / "work"
         cwd.mkdir()
-        expected_sid = session_uuid("ProjectScylla", 1944, AGENT_PLANNER, "abc1234")
+        expected_sid = session_uuid("ProjectScylla", 1944, AGENT_PLANNER)
 
         # The first call's mock must write the JSONL on disk to simulate
         # what the real ``claude --session-id`` invocation does.
@@ -390,7 +378,6 @@ class TestEndToEndSessionResume:
                 repo="ProjectScylla",
                 issue=1944,
                 agent=AGENT_PLANNER,
-                githash="abc1234",
                 prompt="iter 0",
                 model="sonnet",
                 cwd=cwd,
@@ -399,7 +386,6 @@ class TestEndToEndSessionResume:
                 repo="ProjectScylla",
                 issue=1944,
                 agent=AGENT_PLANNER,
-                githash="abc1234",
                 prompt="iter 1",
                 model="sonnet",
                 cwd=cwd,
@@ -423,13 +409,20 @@ class TestEndToEndSessionResume:
         assert first_argv[-1] == "iter 0"
         assert second_argv[-1] == "iter 1"
 
-    def test_different_githash_starts_fresh_family(self, fake_home: Path) -> None:
-        """A new trunk SHA must produce a different UUID (fresh session family)."""
+    def test_session_id_is_githash_invariant(self, fake_home: Path) -> None:
+        """The session UUID depends only on (repo, issue, agent) — #841.
+
+        Regression for #841: the prior behavior fed ``current_trunk_githash``
+        into the session-naming tuple, so every main-bump forked a new
+        session family. The whole loop is now PR/issue-scoped: the same
+        (repo, issue, agent) tuple must always resume the same transcript.
+        """
         cwd = fake_home / "work"
         cwd.mkdir()
-        sid_old = session_uuid("R", 1, AGENT_PLANNER, "abc1234")
-        sid_new = session_uuid("R", 1, AGENT_PLANNER, "def5678")
-        _make_existing_jsonl(fake_home, cwd, sid_old)
+        sid_first_call = session_uuid("R", 1, AGENT_PLANNER)
+
+        # Pre-populate the transcript so the call resumes rather than creates.
+        _make_existing_jsonl(fake_home, cwd, sid_first_call)
 
         with patch("hephaestus.automation.claude_invoke.subprocess.run") as m:
             m.return_value = MagicMock(stdout="ok", stderr="", returncode=0)
@@ -437,16 +430,14 @@ class TestEndToEndSessionResume:
                 repo="R",
                 issue=1,
                 agent=AGENT_PLANNER,
-                githash="def5678",  # new trunk SHA
                 prompt="hi",
                 model="sonnet",
                 cwd=cwd,
             )
 
-        assert returned_sid == sid_new
-        assert returned_sid != sid_old
+        assert returned_sid == sid_first_call
         argv = _argv(m.call_args)
-        # No prior JSONL exists for the new SHA → must --session-id (create), not --resume.
-        assert "--session-id" in argv
-        assert sid_new in argv
-        assert "--resume" not in argv
+        # Existing transcript → resume the same session, never create a new one.
+        assert "--resume" in argv
+        assert sid_first_call in argv
+        assert "--session-id" not in argv

@@ -57,7 +57,6 @@ def invoke_claude_with_session(  # noqa: C901  # state machine: argv assembly + 
     repo: str,
     issue: int | str,
     agent: str,
-    githash: str,
     prompt: str,
     model: str,
     cwd: Path,
@@ -72,14 +71,17 @@ def invoke_claude_with_session(  # noqa: C901  # state machine: argv assembly + 
 ) -> tuple[str, str]:
     """Invoke Claude with a deterministic session.
 
-    First call for the ``(repo, issue, agent, githash)`` tuple uses
+    First call for the ``(repo, issue, agent)`` tuple uses
     ``--session-id <uuid>`` to create the session. Every later call uses
-    ``--resume <uuid>``. By default any ``--resume`` failure retries once
-    with ``--session-id`` to recreate; quota-cap detection happens one
-    layer up. Pass ``recreate_on_resume_failure=False`` to propagate the
-    ``CalledProcessError`` instead — needed by callers that must apply
-    their own session-expired classification (e.g. the impl review-loop
-    feedback path stops iterating on expiry rather than restarting).
+    ``--resume <uuid>``. The session is scoped to the artifact (issue/PR),
+    not to a commit SHA, so the transcript persists across main-bumps for
+    the entire lifetime of the issue (#841). By default any ``--resume``
+    failure retries once with ``--session-id`` to recreate; quota-cap
+    detection happens one layer up. Pass ``recreate_on_resume_failure=False``
+    to propagate the ``CalledProcessError`` instead — needed by callers
+    that must apply their own session-expired classification (e.g. the
+    impl review-loop feedback path stops iterating on expiry rather than
+    restarting).
 
     Args:
         repo: Repository slug (e.g. ``"ProjectScylla"``).
@@ -87,7 +89,6 @@ def invoke_claude_with_session(  # noqa: C901  # state machine: argv assembly + 
             :func:`session_naming.session_name`.
         agent: One of the ``AGENT_*`` constants in
             :mod:`hephaestus.automation.session_naming`.
-        githash: Short trunk SHA for the loop iteration.
         prompt: Prompt text. Passed as a positional argv unless
             ``input_via_stdin`` is True.
         model: ``--model`` value (use ``planner_model()`` /
@@ -124,7 +125,7 @@ def invoke_claude_with_session(  # noqa: C901  # state machine: argv assembly + 
         subprocess.TimeoutExpired: If the call exceeds ``timeout``.
 
     """
-    display_name = session_name(repo, issue, agent, githash)
+    display_name = session_name(repo, issue, agent)
     sid = str(uuid.uuid5(uuid.NAMESPACE_DNS, display_name))
     transcript = session_jsonl_path(sid, cwd)
     should_resume = transcript.exists()

@@ -18,7 +18,6 @@ from hephaestus.github.rate_limit import wait_until
 
 from .claude_invoke import invoke_claude_with_session, scan_quota_reset
 from .git_utils import get_repo_root, get_repo_slug
-from .session_naming import current_trunk_githash
 
 if TYPE_CHECKING:
     from .models import PlannerOptions
@@ -84,14 +83,12 @@ class PlannerClaudeRunner:
 
         repo_root = get_repo_root()
         repo = get_repo_slug(repo_root)
-        githash = current_trunk_githash(repo_root)
 
         try:
             stdout, _ = invoke_claude_with_session(
                 repo=repo,
                 issue=issue_number,
                 agent=agent,
-                githash=githash,
                 prompt=prompt,
                 model=model,
                 cwd=repo_root,

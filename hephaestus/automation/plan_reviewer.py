@@ -36,7 +36,7 @@ from .review_state import (
 from .review_state import (
     is_plan_review_go,
 )
-from .session_naming import AGENT_PLAN_REVIEWER, current_trunk_githash
+from .session_naming import AGENT_PLAN_REVIEWER
 from .status_tracker import StatusTracker
 from .work_report import write_work_report
 
@@ -438,14 +438,12 @@ class PlanReviewer:
 
         repo_root = get_repo_root()
         repo = get_repo_slug(repo_root)
-        githash = current_trunk_githash(repo_root)
 
         try:
             stdout, _ = invoke_claude_with_session(
                 repo=repo,
                 issue=issue_number,
                 agent=AGENT_PLAN_REVIEWER,
-                githash=githash,
                 prompt=prompt,
                 model=reviewer_model(),
                 cwd=repo_root,

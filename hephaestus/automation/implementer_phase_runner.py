@@ -826,13 +826,11 @@ class ImplementationPhaseRunner:
                     sandbox="read-only",
                 )
                 return (result.stdout or "").strip()
-            githash = _impl_mod.current_trunk_githash(self.repo_root)
             repo_slug = _impl_mod.get_repo_slug(self.repo_root)
             stdout, _ = _impl_mod.invoke_claude_with_session(
                 repo=repo_slug,
                 issue=issue_number,
                 agent=_impl_mod.AGENT_ADVISE,
-                githash=githash,
                 prompt=prompt,
                 model=advise_model(),
                 cwd=self.repo_root,
@@ -1277,14 +1275,12 @@ class ImplementationPhaseRunner:
         # ``recreate_on_resume_failure=False`` propagates the underlying error
         # so we can preserve the "stop iterating on expiry" contract.
         _impl_mod = self._impl_module
-        githash = _impl_mod.current_trunk_githash(self.repo_root)
         repo_slug = _impl_mod.get_repo_slug(self.repo_root)
         try:
             _impl_mod.invoke_claude_with_session(
                 repo=repo_slug,
                 issue=issue_number,
                 agent=_impl_mod.AGENT_IMPLEMENTER,
-                githash=githash,
                 prompt=prompt,
                 model=implementer_model(),
                 cwd=worktree_path,
@@ -1553,7 +1549,6 @@ class ImplementationPhaseRunner:
         prompt_file.write_text(prompt)
 
         _impl_mod = self._impl_module
-        githash = _impl_mod.current_trunk_githash(self.repo_root)
         repo_slug = _impl_mod.get_repo_slug(self.repo_root)
 
         try:
@@ -1561,7 +1556,6 @@ class ImplementationPhaseRunner:
                 repo=repo_slug,
                 issue=issue_number,
                 agent=_impl_mod.AGENT_IMPLEMENTER,
-                githash=githash,
                 prompt=prompt,
                 model=implementer_model(),
                 cwd=worktree_path,

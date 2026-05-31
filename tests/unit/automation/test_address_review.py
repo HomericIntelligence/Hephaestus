@@ -509,10 +509,6 @@ class TestRunAddressFixSessionModuleLevel:
         with (
             patch("hephaestus.automation.address_review.get_repo_slug", return_value="Repo"),
             patch(
-                "hephaestus.automation.address_review.current_trunk_githash",
-                return_value="abc1234",
-            ),
-            patch(
                 "hephaestus.automation.address_review.invoke_claude_with_session",
                 side_effect=_fake_invoke,
             ),
