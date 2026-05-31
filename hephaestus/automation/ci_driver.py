@@ -111,15 +111,28 @@ class CIDriver:
             self.options.max_workers,
         )
 
-        if not self.options.issues:
-            logger.warning("No issues to process")
+        # Sweep orphaned arming records BEFORE discovery (#848). PRs whose
+        # tracking issue is closed will not appear in any future issue list,
+        # so the only chance to fire their post-merge ``/learn`` is a
+        # state_dir scan independent of the run's input issue list.
+        if not self.options.dry_run:
+            self._sweep_orphaned_arming_records()
+
+        # Empty --issues is allowed: bot-PR discovery (#848) may still
+        # surface open Dependabot PRs to drive. Only abort if BOTH input
+        # issues and bot discovery are off.
+        if not self.options.issues and not self.options.include_bot_prs:
+            logger.warning("No issues to process and bot-PR discovery disabled")
             return {}
 
         # Pre-discover PRs — only submit workers for issues that have an open PR.
         # This prevents Claude from being launched for issues with no PR at all.
         pr_map = self._discover_prs(self.options.issues)
         if not pr_map:
-            logger.warning("No open PRs found for the specified issues — nothing to drive")
+            logger.warning(
+                "No open PRs found for the specified issues (and no open bot PRs) "
+                "— nothing to drive"
+            )
             return {}
 
         logger.info("Found %s PR(s) to drive to green: %s", len(pr_map), pr_map)
@@ -277,6 +290,75 @@ class CIDriver:
             )
         return normalised
 
+    def _discover_bot_prs(self) -> dict[int, int]:
+        """Enumerate every open ``is_bot=true`` PR on the repo (#848).
+
+        Bot PRs (Dependabot, github-actions, etc.) carry NO ``Closes #N``
+        link to an issue, so the issue-driven discovery path can never see
+        them — they are architecturally invisible. Without this enumeration
+        a repo can sit with dozens of stranded Dependabot PRs forever while
+        the ecosystem script cheerfully reports "driven" because every
+        listed issue had no matching PR.
+
+        Returns a mapping where each bot PR's number is used both as the
+        synthetic issue key AND the PR number. Downstream code is taught
+        (``_is_bot_pr_mode``) to detect the equality and skip issue-data
+        fetches that would 404 on a synthetic key.
+
+        Returns:
+            Mapping of ``pr_number -> pr_number`` for every open bot PR.
+            Empty dict if the lookup fails or returns nothing — bot
+            discovery must never abort the drive.
+
+        """
+        try:
+            owner, repo = get_repo_info(self.repo_root)
+        except RuntimeError as exc:
+            logger.info("Bot-PR discovery skipped: could not resolve owner/name (%s)", exc)
+            return {}
+
+        try:
+            result = _gh_call(
+                [
+                    "api",
+                    "--paginate",
+                    f"/repos/{owner}/{repo}/pulls?state=open&per_page=100",
+                ],
+                check=False,
+            )
+            raw_pulls: list[dict[str, Any]] = json.loads(result.stdout or "[]")
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            logger.info("Bot-PR discovery skipped: gh api failed (%s)", exc)
+            return {}
+
+        bot_prs: dict[int, int] = {}
+        for pr in raw_pulls:
+            user = pr.get("user") or {}
+            if user.get("type") != "Bot":
+                continue
+            number = pr.get("number")
+            if isinstance(number, int):
+                bot_prs[number] = number
+
+        if bot_prs:
+            logger.info(
+                "Discovered %s open bot-authored PR(s): %s",
+                len(bot_prs),
+                sorted(bot_prs),
+            )
+        return bot_prs
+
+    def _is_bot_pr_mode(self, issue_number: int, pr_number: int) -> bool:
+        """Return True iff this work item is a synthetic-issue bot PR (#848).
+
+        The bot-PR enumeration uses the PR number as a stand-in for an
+        issue number because Dependabot PRs have no associated issue.
+        Anywhere we would normally call ``gh issue view <issue_number>``
+        we must instead short-circuit; this helper centralises the check
+        so a single rule (issue == pr) keeps both ends honest.
+        """
+        return issue_number == pr_number
+
     def _discover_prs(self, issue_numbers: list[int]) -> dict[int, int]:
         """Pre-discover open PRs for all issues, deduped by PR.
 
@@ -292,6 +374,11 @@ class CIDriver:
         We dedupe at discovery time: keep one canonical issue per PR (the
         lowest-numbered, for deterministic ordering and stable logs), and
         defer the others.
+
+        When ``options.include_bot_prs`` is True (default), the result is
+        unioned with every open ``is_bot=true`` PR on the repo (#848). Bot
+        PRs lack ``Closes #N`` links and would otherwise be invisible. Each
+        bot PR is keyed by its own number as the synthetic issue.
 
         Args:
             issue_numbers: Issue numbers to check
@@ -340,6 +427,23 @@ class CIDriver:
                     canonical,
                     deferred,
                 )
+
+        # Union with open bot-authored PRs (#848). Bot PRs are keyed by their
+        # own number as the synthetic issue; ``_is_bot_pr_mode`` detects the
+        # equality and short-circuits downstream ``gh issue view`` calls that
+        # would otherwise 404 on the synthetic key. PRs already discovered via
+        # the issue-driven path are NOT overwritten — a bot PR that happens to
+        # carry a Closes link (rare but possible) stays under its real issue.
+        if self.options.include_bot_prs:
+            bot_prs = self._discover_bot_prs()
+            for pr_num, _ in bot_prs.items():
+                if pr_num in deduped.values():
+                    continue
+                deduped[pr_num] = pr_num
+                # Bot PRs are PR-scoped only; record the PR-as-issue mapping
+                # so the shared-PR fan-out machinery treats the bot PR as a
+                # solo work item without inventing nonexistent issue numbers.
+                self.shared_pr_issues.setdefault(pr_num, [pr_num])
         return deduped
 
     def _drive_issue(  # noqa: C901  # poll loop + required-check classification + fix path
@@ -590,9 +694,12 @@ class CIDriver:
         """
         # Advise-first (#30): pull prior learnings once before the fix loop, so
         # we only spend an advise call on PRs that actually need fixing. Fed
-        # into every fix-session prompt below.
+        # into every fix-session prompt below. Skipped for bot-PR work items
+        # (#848): the issue number is synthetic (equals the PR number) so
+        # ``gh issue view`` would 404; there is also no human-authored issue
+        # body that would meaningfully steer the advise prompt.
         advise_findings = ""
-        if self.options.enable_advise:
+        if self.options.enable_advise and not self._is_bot_pr_mode(issue_number, pr_number):
             self.status_tracker.update_slot(acquired_slot, f"{issue_ref(issue_number)}: advising")
             advise_findings = self._run_advise(issue_number)
 
@@ -874,6 +981,74 @@ class CIDriver:
                 exc,
             )
             return None
+
+    def _sweep_orphaned_arming_records(self) -> None:  # noqa: C901  # one record loop with three state branches; splitting it just hides the contract
+        """Drop CLOSED records and capture missed ``/learn`` for MERGED orphans (#848).
+
+        The per-issue ``_check_arming_on_drive_start`` only fires when the
+        issue is in the current run's input list. If a PR was replaced via
+        the fresh-branch-reopen workflow (the replacement PR merged out of
+        band of the bot, the original was closed), the arming record points
+        at the closed PR and the issue itself is closed — the next run's
+        ``gh issue list --state open`` won't include it, so the record
+        leaks forever and ``/learn`` is silently lost.
+
+        Sweep every ``drive-green-armed-*.json`` at startup: drop records
+        whose PR is CLOSED-not-merged, fire ``/learn`` once for records
+        whose PR is MERGED (then mark ``learn_captured_at``), leave OPEN
+        records alone for the normal per-issue path to handle.
+        """
+        try:
+            records = sorted(self.state_dir.glob("drive-green-armed-*.json"))
+        except OSError as exc:
+            logger.info("Arming sweep skipped: state_dir scan failed (%s)", exc)
+            return
+        if not records:
+            return
+        logger.info("Sweeping %s arming record(s) for orphan resolution", len(records))
+        for path in records:
+            stem = path.stem  # drive-green-armed-<issue>
+            try:
+                issue_number = int(stem.rsplit("-", 1)[-1])
+            except ValueError:
+                logger.info("Arming sweep: ignoring malformed filename %s", path.name)
+                continue
+            record = self._load_arming_state(issue_number)
+            if record is None:
+                continue
+            if record.get("learn_captured_at"):
+                continue
+            pr_number = record.get("pr_number")
+            if not isinstance(pr_number, int):
+                logger.info(
+                    "Arming sweep: dropping record %s with non-integer pr_number",
+                    path.name,
+                )
+                self._clear_arming_state(issue_number)
+                continue
+            gh_state = self._gh_pr_state(pr_number)
+            if gh_state is None:
+                # Unknown state — leave alone; the per-issue path or the
+                # next sweep can retry.
+                continue
+            state = (gh_state.get("state") or "").upper()
+            if state == "MERGED":
+                logger.info(
+                    "Arming sweep: issue #%s / PR #%s MERGED; firing /learn",
+                    issue_number,
+                    pr_number,
+                )
+                self._run_drive_green_learnings(issue_number, pr_number)
+                record["learn_captured_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                self._save_arming_state(issue_number, record)
+            elif state == "CLOSED":
+                logger.info(
+                    "Arming sweep: issue #%s / PR #%s CLOSED-not-merged; dropping record",
+                    issue_number,
+                    pr_number,
+                )
+                self._clear_arming_state(issue_number)
+            # OPEN: leave for the per-issue path / next sweep.
 
     def _check_arming_on_drive_start(
         self, issue_number: int, pr_number: int
@@ -1810,9 +1985,13 @@ Examples:
     parser.add_argument(
         "--issues",
         type=int,
-        nargs="+",
-        required=True,
-        help="Issue numbers whose PRs should be driven to green CI",
+        nargs="*",
+        default=[],
+        help=(
+            "Issue numbers whose PRs should be driven to green CI. Optional: "
+            "when omitted, the driver still picks up open bot-authored PRs via "
+            "--include-bot-prs (default on) (#848)."
+        ),
     )
     add_agent_argument(parser)
     parser.add_argument(
@@ -1847,6 +2026,19 @@ Examples:
             "run unless HEPH_LOOP_INDEX == HEPH_TOTAL_LOOPS or both are unset; "
             "use --force-run to override (e.g. ad-hoc invocation outside the "
             "automation loop). Setting HEPH_CI_DRIVER_FORCE=1 has the same effect."
+        ),
+    )
+    parser.add_argument(
+        "--no-include-bot-prs",
+        dest="include_bot_prs",
+        action="store_false",
+        default=True,
+        help=(
+            "Suppress the union of open bot-authored PRs (Dependabot, "
+            "github-actions, etc.) into the work set. By default the driver "
+            "unions every open is_bot=true PR with the issue-driven list so "
+            "Dependabot PRs are not architecturally invisible (#848). Pass "
+            "this flag only when you explicitly want issue-driven scope."
         ),
     )
     add_json_arg(parser)
@@ -1919,6 +2111,7 @@ def main() -> int:
             dry_run=args.dry_run,
             enable_ui=not args.no_ui and not args.json,
             verbose=args.verbose,
+            include_bot_prs=args.include_bot_prs,
         )
 
         driver = CIDriver(options)

@@ -234,6 +234,11 @@ class CIDriverOptions(BaseModel):
     verbose: bool = False
     max_fix_iterations: int = 1  # number of fix attempts before giving up
     force_merge_on_stall: bool = False  # attempt squash-merge fallback if auto-merge fails
+    # When True, _discover_prs unions the issue-driven set with every open
+    # bot-authored PR on the repo (#848). Bot PRs (Dependabot, github-actions,
+    # etc.) carry no ``Closes #N`` link so they are architecturally invisible
+    # to issue-driven discovery; without this they leak forever.
+    include_bot_prs: bool = True
 
 
 class DependencyGraph(BaseModel):
