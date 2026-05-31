@@ -178,7 +178,21 @@ def invoke_claude_with_session(  # noqa: C901  # state machine: argv assembly + 
         )
 
     if not should_resume:
-        return _run(create=True).stdout, sid
+        try:
+            return _run(create=True).stdout, sid
+        except subprocess.CalledProcessError as exc:
+            # Defense in depth (#822): the probe says no transcript exists
+            # but the CLI says the session is already registered. Encoding
+            # drift between hephaestus and the CLI can desync the probe;
+            # treat the rejection as proof the session exists and resume it.
+            stderr = (exc.stderr or "") + (exc.stdout or "")
+            if "already in use" in stderr.lower():
+                logger.warning(
+                    "claude --session-id %s rejected as already in use; resuming instead",
+                    sid,
+                )
+                return _run(create=False).stdout, sid
+            raise
 
     try:
         return _run(create=False).stdout, sid

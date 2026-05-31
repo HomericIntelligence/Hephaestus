@@ -173,9 +173,13 @@ def current_trunk_githash(repo_path: Path | None = None) -> str:
 def session_jsonl_path(uuid_str: str, cwd: Path) -> Path:
     """Return the path where Claude Code persists a session's transcript.
 
-    Claude encodes the cwd into the directory name by replacing each ``/``
-    with ``-``. Used to detect whether a session already exists (and thus
-    should be resumed) or needs to be created.
+    Claude encodes the cwd into the projects-directory name by replacing
+    BOTH ``/`` and ``.`` with ``-``. Probing only ``/`` (as a prior version
+    of this helper did) misses every cwd containing a dot-prefixed segment
+    like ``.worktrees``, ``.git``, or ``.venv``: ``transcript.exists()``
+    returns False even though the JSONL is on disk, the caller goes down
+    the ``--session-id`` create path, and the CLI rejects with ``Session ID
+    <uuid> is already in use``. (#822)
     """
-    encoded = str(cwd.resolve()).replace("/", "-")
+    encoded = str(cwd.resolve()).replace("/", "-").replace(".", "-")
     return Path.home() / ".claude" / "projects" / encoded / f"{uuid_str}.jsonl"

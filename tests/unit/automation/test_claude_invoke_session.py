@@ -194,7 +194,7 @@ class TestSessionExpiredFallback:
         assert "--session-id" in _argv(m.call_args_list[1])
 
     def test_create_failure_propagates(self, fake_home: Path) -> None:
-        """A first-call (--session-id) failure is not retried."""
+        """A first-call (--session-id) failure for an unrelated reason is not retried."""
         cwd = fake_home / "work"
         cwd.mkdir()
         other = subprocess.CalledProcessError(
@@ -215,6 +215,43 @@ class TestSessionExpiredFallback:
                     cwd=cwd,
                 )
         assert m.call_count == 1
+
+    def test_create_already_in_use_falls_back_to_resume(self, fake_home: Path) -> None:
+        """Fall back to --resume when --session-id is rejected as already-in-use.
+
+        Defends against encoding drift between hephaestus's transcript probe
+        and the Claude CLI's actual session storage. (#822)
+        """
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        already = subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["claude"],
+            output="",
+            stderr="Error: Session ID abc is already in use.",
+        )
+        ok = subprocess.CompletedProcess(
+            args=["claude"], returncode=0, stdout="resumed-ok", stderr=""
+        )
+        with patch(
+            "hephaestus.automation.claude_invoke.subprocess.run",
+            side_effect=[already, ok],
+        ) as m:
+            stdout, _ = invoke_claude_with_session(
+                repo="R",
+                issue=1,
+                agent=AGENT_PLANNER,
+                githash="x",
+                prompt="hi",
+                model="sonnet",
+                cwd=cwd,
+            )
+        assert stdout == "resumed-ok"
+        assert m.call_count == 2
+        first_argv = m.call_args_list[0][0][0]
+        second_argv = m.call_args_list[1][0][0]
+        assert "--session-id" in first_argv
+        assert "--resume" in second_argv
 
 
 class TestArgvAssembly:

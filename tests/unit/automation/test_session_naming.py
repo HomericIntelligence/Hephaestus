@@ -176,13 +176,11 @@ class TestSessionJsonlPath:
 
     def test_path_encoding(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
-        # Path.home() reads $HOME at call time, so no reimport needed.
         target = tmp_path / "Projects" / "Foo"
         target.mkdir(parents=True)
         p = session_jsonl_path("abc-uuid", target)
         assert p.name == "abc-uuid.jsonl"
-        # The encoded segment is the resolved path with `/` -> `-`.
-        encoded = str(target.resolve()).replace("/", "-")
+        encoded = str(target.resolve()).replace("/", "-").replace(".", "-")
         assert encoded in str(p)
         assert p.parent.parent == tmp_path / ".claude" / "projects"
 
@@ -190,6 +188,45 @@ class TestSessionJsonlPath:
         sid = session_uuid("R", 1, AGENT_IMPLEMENTER, "abc1234")
         p = session_jsonl_path(sid, tmp_path)
         assert p.name == f"{sid}.jsonl"
+
+    def test_dot_prefixed_segment_encodes_dot_as_dash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Encode a `.worktrees` segment as `--worktrees-`, not `-.worktrees-`.
+
+        Matches the Claude CLI's actual on-disk encoding. (#822)
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        target = tmp_path / "build" / ".worktrees" / "issue-5451"
+        target.mkdir(parents=True)
+        p = session_jsonl_path("u", target)
+        # `/.worktrees/` becomes `--worktrees-`, NOT `-.worktrees-`.
+        assert "--worktrees-issue-5451" in str(p)
+        assert "-.worktrees-" not in str(p)
+
+    def test_multiple_dot_segments_all_rewritten(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        target = tmp_path / ".venv" / ".tox" / "y"
+        target.mkdir(parents=True)
+        p = session_jsonl_path("u", target)
+        # Both leading dots get rewritten.
+        assert "." not in p.parent.name
+
+    def test_mid_segment_dot_also_rewritten(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rewrite mid-segment dots (e.g. `v1.2.3`) too.
+
+        Matches the CLI's flat `.` -> `-` rule. Documented edge case, not a bug.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        target = tmp_path / "release" / "v1.2.3" / "build"
+        target.mkdir(parents=True)
+        p = session_jsonl_path("u", target)
+        assert "v1-2-3" in p.parent.name
+        assert "v1.2.3" not in p.parent.name
 
 
 class TestCurrentTrunkGithash:
