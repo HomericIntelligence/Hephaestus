@@ -41,6 +41,7 @@ from .git_utils import (
     issue_ref,
     pr_ref,
     push_current_branch_with_lease_on_divergence,
+    run,
     sync_worktree_to_remote_branch,
 )
 from .github_api import _gh_call, gh_issue_json, gh_pr_checks
@@ -667,6 +668,50 @@ class CIDriver:
             logger.warning("Could not load session_id for issue #%s: %s", issue_number, e)
             return None
 
+    def _head_advanced(
+        self,
+        worktree_path: Path,
+        pre_agent_sha: str,
+        issue_number: int,
+    ) -> bool:
+        """Return True iff HEAD has moved past ``pre_agent_sha`` after the agent ran.
+
+        Called between the agent session and the push to detect the
+        no-commit-made case (#836). When ``pre_agent_sha`` still matches HEAD
+        the agent did not commit anything, so a force-with-lease push of
+        HEAD:<branch> would be a silent 0-exit no-op and the driver would
+        falsely log "pushed CI fixes". We instead log a warning and return
+        False so the iteration counts as failed.
+
+        Args:
+            worktree_path: Worktree to inspect.
+            pre_agent_sha: HEAD SHA captured right after the pre-agent sync.
+            issue_number: For log context.
+
+        Returns:
+            True if HEAD moved (something to push); False if it did not (or
+            if reading HEAD failed — we treat that as "don't push" too).
+
+        """
+        try:
+            post_agent_sha = run(["git", "rev-parse", "HEAD"], cwd=worktree_path).stdout.strip()
+        except subprocess.CalledProcessError as exc:
+            logger.error(
+                "Issue #%s: failed to read HEAD after CI fix session: %s",
+                issue_number,
+                (exc.stderr or exc.stdout or "")[:300],
+            )
+            return False
+        if post_agent_sha == pre_agent_sha:
+            logger.warning(
+                "Issue #%s: agent session produced no new commit (HEAD unchanged "
+                "at %s); skipping push and treating iteration as failed",
+                issue_number,
+                pre_agent_sha[:8],
+            )
+            return False
+        return True
+
     def _run_ci_fix_session(  # noqa: C901  # provider resume/fallback paths are intentionally coupled
         self,
         issue_number: int,
@@ -709,6 +754,21 @@ class CIDriver:
                 "Issue #%s: failed to sync worktree to origin/%s before CI fix: %s",
                 issue_number,
                 pr_head_branch,
+                (exc.stderr or exc.stdout or "")[:300],
+            )
+            return False
+
+        # Snapshot HEAD immediately after the sync. The push helper exits 0
+        # silently when HEAD == origin/<branch> (nothing to push), so without
+        # this guard we logged "pushed CI fixes" for sessions that returned
+        # without committing — the remote was unchanged but the driver
+        # claimed success (#836). The post-agent HEAD is compared below.
+        try:
+            pre_agent_sha = run(["git", "rev-parse", "HEAD"], cwd=worktree_path).stdout.strip()
+        except subprocess.CalledProcessError as exc:
+            logger.error(
+                "Issue #%s: failed to snapshot HEAD before CI fix session: %s",
+                issue_number,
                 (exc.stderr or exc.stdout or "")[:300],
             )
             return False
@@ -779,6 +839,8 @@ class CIDriver:
                     )
                     return False
 
+                if not self._head_advanced(worktree_path, pre_agent_sha, issue_number):
+                    return False
                 try:
                     push_current_branch_with_lease_on_divergence(
                         worktree_path,
@@ -827,6 +889,8 @@ class CIDriver:
 
             if claude_result.returncode == 0:
                 # Push the fixes
+                if not self._head_advanced(worktree_path, pre_agent_sha, issue_number):
+                    return False
                 try:
                     push_current_branch_with_lease_on_divergence(
                         worktree_path,
