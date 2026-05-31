@@ -293,6 +293,104 @@ class TestDiscoverPrsDedupe:
 
 
 # ---------------------------------------------------------------------------
+# #838: repo done-state — open PR count must be zero
+# ---------------------------------------------------------------------------
+
+
+class TestOpenPrsRemaining:
+    """Tests for #838: repo is only "done" when no open PRs remain."""
+
+    def test_no_open_prs_marks_repo_done(self, driver: CIDriver) -> None:
+        """Empty paginated response → ``open_prs_remaining`` is empty."""
+        # gh api --paginate emits a concatenated JSON array; an empty repo
+        # surfaces as ``[]``. The driver must read this as "done".
+        result_mock = MagicMock(stdout="[]")
+        with (
+            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch("hephaestus.automation.ci_driver._gh_call", return_value=result_mock),
+        ):
+            remaining = driver._list_open_prs_remaining()
+        assert remaining == []
+
+    def test_open_prs_normalised_from_rest_shape(self, driver: CIDriver) -> None:
+        """REST snake_case fields are normalised to the gh-CLI camelCase shape."""
+        # gh api returns the GitHub REST shape (``head.ref``, ``auto_merge``);
+        # downstream consumers in this module expect gh-CLI shape.
+        rest_pulls = [
+            {
+                "number": 1,
+                "title": "first",
+                "head": {"ref": "branch-1"},
+                "auto_merge": {"enabled_by": {"login": "bot"}},
+            },
+            {
+                "number": 2,
+                "title": "second",
+                "head": {"ref": "branch-2"},
+                "auto_merge": None,
+            },
+        ]
+        result_mock = MagicMock(stdout=json.dumps(rest_pulls))
+        with (
+            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch("hephaestus.automation.ci_driver._gh_call", return_value=result_mock),
+        ):
+            remaining = driver._list_open_prs_remaining()
+        assert remaining == [
+            {
+                "number": 1,
+                "title": "first",
+                "headRefName": "branch-1",
+                "autoMergeRequest": {"enabled_by": {"login": "bot"}},
+            },
+            {
+                "number": 2,
+                "title": "second",
+                "headRefName": "branch-2",
+                "autoMergeRequest": None,
+            },
+        ]
+
+    def test_gh_failure_returns_unknown_marker(self, driver: CIDriver) -> None:
+        """If gh fails we treat the state as unknown — repo is NOT done."""
+        # The conservative default: if we can't list open PRs we don't claim
+        # the repo is clean. ``main()`` reads non-empty open_prs_remaining as
+        # a failure.
+        with (
+            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch(
+                "hephaestus.automation.ci_driver._gh_call",
+                side_effect=subprocess.CalledProcessError(1, "gh", stderr="rate limited"),
+            ),
+        ):
+            remaining = driver._list_open_prs_remaining()
+        assert len(remaining) == 1
+        assert remaining[0]["number"] == -1
+        assert "unknown" in remaining[0]["title"].lower()
+
+    def test_gh_pagination_endpoint_used(self, driver: CIDriver) -> None:
+        """The call must include ``--paginate`` so all open PRs are returned, not 100."""
+        # Without --paginate a repo with 200 open dependabot PRs would falsely
+        # pass the done-check after looking at only 100.
+        result_mock = MagicMock(stdout="[]")
+        with (
+            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch(
+                "hephaestus.automation.ci_driver._gh_call",
+                return_value=result_mock,
+            ) as mock_gh,
+        ):
+            driver._list_open_prs_remaining()
+
+        args, _ = mock_gh.call_args
+        cmd = args[0]
+        assert "api" in cmd
+        assert "--paginate" in cmd
+        # And it must be the repo-scoped pulls endpoint, not the search API.
+        assert any("/repos/o/r/pulls" in a for a in cmd)
+
+
+# ---------------------------------------------------------------------------
 # _drive_issue: no PR found
 # ---------------------------------------------------------------------------
 

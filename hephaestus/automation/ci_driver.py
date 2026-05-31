@@ -36,6 +36,7 @@ from .claude_invoke import invoke_claude_with_session
 from .claude_models import advise_model, implementer_model, learn_model
 from .claude_timeouts import ci_driver_claude_timeout, learn_claude_timeout
 from .git_utils import (
+    get_repo_info,
     get_repo_root,
     get_repo_slug,
     issue_ref,
@@ -80,6 +81,10 @@ class CIDriver:
         self.worktree_manager = WorktreeManager()
         self.status_tracker = StatusTracker(options.max_workers)
         self.lock = threading.Lock()
+        # Populated at the end of run() with the open PRs left on the repo
+        # after the per-issue drive completes. The repo is only "done" when
+        # this is empty (#838).
+        self.open_prs_remaining: list[dict[str, Any]] = []
 
     def run(self) -> dict[int, WorkerResult]:  # noqa: C901  # thread pool + finally + preserve report
         """Run the CI driver on all configured issues.
@@ -164,7 +169,101 @@ class CIDriver:
                 logger.info("Inspect or discard them with: git worktree remove --force <path>")
 
         self._print_summary(results)
+
+        # After every input issue's drive completes, verify the repo is truly
+        # clean by listing remaining open PRs. The repo is only "done" when
+        # this is empty (#838). Stored on the driver so ``main()`` can check
+        # it without changing ``run()``'s established return type.
+        self.open_prs_remaining = [] if self.options.dry_run else self._list_open_prs_remaining()
+        if self.open_prs_remaining:
+            logger.warning(
+                "%d open PR(s) remain on the repo — not done:",
+                len(self.open_prs_remaining),
+            )
+            for pr in self.open_prs_remaining:
+                # ``autoMergeRequest`` is None when auto-merge is not armed;
+                # the blob is non-None otherwise. We don't trust auto-merge
+                # alone to mean "done" since CI may still fail, branch
+                # protection may block, etc. — but we surface the state for
+                # triage so operators can see WHY each PR is still open.
+                am_state = (
+                    "armed (waiting on CI / branch protection)"
+                    if pr.get("autoMergeRequest")
+                    else "NOT armed (needs manual action)"
+                )
+                logger.warning(
+                    "  - PR #%s %r head=%s auto-merge=%s",
+                    pr.get("number"),
+                    pr.get("title", ""),
+                    pr.get("headRefName", ""),
+                    am_state,
+                )
+
         return results
+
+    def _list_open_prs_remaining(self) -> list[dict[str, Any]]:
+        """Return the list of open PRs left on the repo after the drive (#838).
+
+        A repo is only truly "driven" when there are zero open PRs left. The
+        per-issue ``_drive_issue`` loop's notion of success — every issue's
+        PR moved to green and/or got auto-merge enabled — does NOT imply the
+        repo is clean: PRs that have not yet merged (auto-merge waiting on
+        CI), PRs from issues outside the input set, and PRs opened by
+        humans/other-automation all leave open work behind.
+
+        Uses ``gh api --paginate`` so the result is the FULL set of open PRs,
+        not a capped prefix. A repo with hundreds of dependabot PRs would
+        otherwise pass the done-check after looking at only 100 of them.
+
+        Returns:
+            One dict per open PR with keys ``number``, ``title``,
+            ``headRefName``, and ``autoMergeRequest`` (None or the auto-merge
+            metadata blob). Empty list iff the repo is clean.
+
+        """
+        try:
+            owner, repo = get_repo_info(self.repo_root)
+        except RuntimeError as exc:
+            logger.error("Could not resolve repo owner/name to list open PRs: %s", exc)
+            # Unknown ownership ⇒ treat as not-done so operators investigate.
+            return [{"number": -1, "title": "(unknown: cannot resolve repo)"}]
+
+        # ``gh api --paginate`` walks ``Link: rel="next"`` headers and emits
+        # a single concatenated JSON array across all pages. ``per_page=100``
+        # is GitHub's max page size; we issue the minimum number of calls.
+        # We use ``gh api`` directly (not ``gh pr list``) because the latter
+        # caps at ``--limit`` even with paginate semantics; gh's REST proxy
+        # paginates without an upper bound.
+        try:
+            result = _gh_call(
+                [
+                    "api",
+                    "--paginate",
+                    f"/repos/{owner}/{repo}/pulls?state=open&per_page=100",
+                ],
+                check=False,
+            )
+            raw_pulls: list[dict[str, Any]] = json.loads(result.stdout or "[]")
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            # If we cannot determine the open-PR count, the safest default is
+            # to assume the repo is NOT done — surface the unknown state as a
+            # failure so operators don't walk away on a false-green.
+            logger.error("Could not list open PRs to verify repo done-state: %s", exc)
+            return [{"number": -1, "title": "(unknown: gh api pulls failed)"}]
+
+        # The REST shape exposes ``head.ref`` and ``auto_merge`` (snake_case);
+        # normalise to the gh-CLI shape consumers downstream already use.
+        normalised: list[dict[str, Any]] = []
+        for pr in raw_pulls:
+            normalised.append(
+                {
+                    "number": pr.get("number"),
+                    "title": pr.get("title", ""),
+                    "headRefName": (pr.get("head") or {}).get("ref", ""),
+                    "autoMergeRequest": pr.get("auto_merge"),
+                }
+            )
+        return normalised
 
     def _discover_prs(self, issue_numbers: list[int]) -> dict[int, int]:
         """Pre-discover open PRs for all issues, deduped by PR.
@@ -1252,15 +1351,32 @@ def main() -> int:
         results = driver.run()
 
         failed = [num for num, result in results.items() if not result.success]
-        if failed:
-            log.error("CI drive failed for %s issue(s): %s", len(failed), failed)
+        # The repo is "done" only when there are zero open PRs left — even
+        # an empty ``failed`` list is not sufficient because auto-merge may
+        # still be pending, PRs from outside the input set may remain, etc.
+        # (#838). ``driver.open_prs_remaining`` is populated by ``run()``.
+        remaining_pr_numbers = [pr.get("number") for pr in driver.open_prs_remaining]
+        if failed or remaining_pr_numbers:
+            if failed:
+                log.error("CI drive failed for %s issue(s): %s", len(failed), failed)
+            if remaining_pr_numbers:
+                log.error(
+                    "Repo not done: %s open PR(s) remain: %s",
+                    len(remaining_pr_numbers),
+                    remaining_pr_numbers,
+                )
             if args.json:
-                emit_json_status(1, issues=args.issues, failed=failed)
+                emit_json_status(
+                    1,
+                    issues=args.issues,
+                    failed=failed,
+                    open_prs_remaining=remaining_pr_numbers,
+                )
             return 1
 
         log.info("CI driver complete")
         if args.json:
-            emit_json_status(0, issues=args.issues, failed=[])
+            emit_json_status(0, issues=args.issues, failed=[], open_prs_remaining=[])
         return 0
 
     except KeyboardInterrupt:
