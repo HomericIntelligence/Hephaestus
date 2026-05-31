@@ -199,6 +199,53 @@ def test_codex_ci_fix_session_falls_back_to_fresh_on_resume_failure(
 
 
 # ---------------------------------------------------------------------------
+# _discover_prs: dedupe shared-PR
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverPrsDedupe:
+    """Tests for #834: PRs that close multiple issues are processed once."""
+
+    def test_single_issue_per_pr_unchanged(self, driver: CIDriver) -> None:
+        """The 1:1 mapping case is unchanged: every input issue resolves to a PR."""
+        with patch.object(driver, "_find_pr_for_issue", side_effect=[100, 101, 102]):
+            result = driver._discover_prs([1, 2, 3])
+        assert result == {1: 100, 2: 101, 3: 102}
+
+    def test_multiple_issues_one_pr_collapses_to_lowest(self, driver: CIDriver) -> None:
+        """Nine issues → same PR → result has one entry keyed by the lowest issue (#834)."""
+        # Reproduces the ProjectNestor failure: PR #103 closes nine issues.
+        # Without dedupe the driver would race nine workers against the same
+        # branch and the eight losers would fail `git worktree add`.
+        with patch.object(
+            driver,
+            "_find_pr_for_issue",
+            side_effect=[103] * 9,
+        ):
+            result = driver._discover_prs([64, 59, 39, 37, 29, 28, 23, 22, 12])
+
+        assert result == {12: 103}
+
+    def test_mixed_shared_and_unique_prs(self, driver: CIDriver) -> None:
+        """Mix of shared and unique PRs: each PR appears once, shared via lowest issue."""
+        # 1,2 → PR 100 (shared); 3 → PR 200 (unique); 4,5 → PR 300 (shared)
+        with patch.object(
+            driver,
+            "_find_pr_for_issue",
+            side_effect=[100, 100, 200, 300, 300],
+        ):
+            result = driver._discover_prs([1, 2, 3, 4, 5])
+        assert result == {1: 100, 3: 200, 4: 300}
+
+    def test_no_pr_skipped_separately_from_shared(self, driver: CIDriver) -> None:
+        """Issues with no PR are dropped; remaining issues still get deduped."""
+        # 1 → PR 100; 2 → no PR; 3 → PR 100 (shared with 1)
+        with patch.object(driver, "_find_pr_for_issue", side_effect=[100, None, 100]):
+            result = driver._discover_prs([1, 2, 3])
+        assert result == {1: 100}
+
+
+# ---------------------------------------------------------------------------
 # _drive_issue: no PR found
 # ---------------------------------------------------------------------------
 

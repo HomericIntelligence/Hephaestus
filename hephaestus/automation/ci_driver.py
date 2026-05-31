@@ -166,23 +166,62 @@ class CIDriver:
         return results
 
     def _discover_prs(self, issue_numbers: list[int]) -> dict[int, int]:
-        """Pre-discover open PRs for all issues.
+        """Pre-discover open PRs for all issues, deduped by PR.
+
+        When a single PR closes multiple issues (a legitimate ``pr-policy``
+        configuration — audit rollups, dependency bumps that cover several
+        CVEs, etc.), every one of those issues resolves to the same PR. The
+        downstream worker loop would then race N threads to check the same
+        branch out into N different worktree paths, and ``git worktree add``
+        rejects all but the first because a branch can only be checked out
+        once. The losers were marked CI-failed even though the PR was being
+        driven correctly by the first issue (#834).
+
+        We dedupe at discovery time: keep one canonical issue per PR (the
+        lowest-numbered, for deterministic ordering and stable logs), and
+        defer the others.
 
         Args:
             issue_numbers: Issue numbers to check
 
         Returns:
-            Mapping of issue_number -> pr_number for issues that have an open PR
+            Mapping of canonical_issue_number -> pr_number, with at most one
+            entry per PR.
 
         """
-        pr_map: dict[int, int] = {}
+        # Per-issue lookup first; preserve insertion order so the "lowest
+        # numbered issue wins" tie-break is stable across runs given the same
+        # input list.
+        raw_map: dict[int, int] = {}
         for issue_num in issue_numbers:
             pr_number = self._find_pr_for_issue(issue_num)
             if pr_number is not None:
-                pr_map[issue_num] = pr_number
+                raw_map[issue_num] = pr_number
             else:
                 logger.info("Issue #%s: no open PR found, skipping", issue_num)
-        return pr_map
+
+        # Group by PR, then pick a canonical issue per PR (the smallest one)
+        # and log the deferred siblings so operators can see the dedupe.
+        pr_to_issues: dict[int, list[int]] = {}
+        for issue_num, pr_num in raw_map.items():
+            pr_to_issues.setdefault(pr_num, []).append(issue_num)
+
+        deduped: dict[int, int] = {}
+        for pr_num, issues in pr_to_issues.items():
+            canonical = min(issues)
+            deduped[canonical] = pr_num
+            if len(issues) > 1:
+                deferred = sorted(i for i in issues if i != canonical)
+                logger.info(
+                    "PR #%s closes multiple issues %s; driving via issue #%s, "
+                    "deferring %s (single PR cannot be checked out into multiple "
+                    "worktrees concurrently)",
+                    pr_num,
+                    sorted(issues),
+                    canonical,
+                    deferred,
+                )
+        return deduped
 
     def _drive_issue(  # noqa: C901  # poll loop + required-check classification + fix path
         self, issue_number: int, pr_number: int, slot_id: int
