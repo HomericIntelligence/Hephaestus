@@ -46,12 +46,16 @@ ProjectHephaestus/
 │   ├── validation/             # README, schema, and structural validation
 │   └── version/                # Version management
 ├── scripts/                    # Automation and maintenance scripts
+├── skills/                     # Claude Code skill definitions (23 entries; kebab-case naming for plugin format)
 ├── tests/                      # Unit and integration tests
 │   ├── unit/                   # Unit tests (mirrors hephaestus/ structure)
 │   └── integration/            # Integration tests
 ├── docs/                       # Documentation
 └── .claude/                    # Claude Code configurations
 ```
+
+Skill directories use kebab-case (`code-review`, `git-worktrees`) per the
+Claude Code plugin format. All Python packages use lowercase_snake_case.
 
 ## Python Development Guidelines
 
