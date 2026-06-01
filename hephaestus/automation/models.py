@@ -239,6 +239,11 @@ class CIDriverOptions(BaseModel):
     # etc.) carry no ``Closes #N`` link so they are architecturally invisible
     # to issue-driven discovery; without this they leak forever.
     include_bot_prs: bool = True
+    # When True (default), _drive_issue first attempts a mechanical ``git
+    # rebase`` onto the base branch for PRs that are behind/conflicting, pushing
+    # the result with --force-with-lease — no agent spend. Only PRs whose rebase
+    # hits real conflicts fall through to the Claude/Codex agent (#871).
+    enable_mechanical_rebase: bool = True
 
 
 class DependencyGraph(BaseModel):

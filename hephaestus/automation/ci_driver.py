@@ -43,6 +43,7 @@ from .git_utils import (
     issue_ref,
     pr_ref,
     push_current_branch_with_lease_on_divergence,
+    rebase_worktree_onto,
     run,
     sync_worktree_to_remote_branch,
 )
@@ -485,6 +486,14 @@ class CIDriver:
             if armed_result is not None:
                 return armed_result
 
+            # 1b. Mechanical rebase first (#871). A PR that is merely behind the
+            # base branch is rebased + pushed here with no agent spend; the push
+            # re-triggers CI, and the poll loop below evaluates the rebased head.
+            # PRs whose rebase hits real conflicts are left untouched and fall
+            # through to the agent path (Claude handles the actual conflict).
+            if self.options.enable_mechanical_rebase and not self.options.dry_run:
+                self._attempt_mechanical_rebase(issue_number, pr_number, acquired_slot)
+
             self.status_tracker.update_slot(
                 acquired_slot, f"{issue_ref(issue_number)}: fetching checks"
             )
@@ -631,6 +640,129 @@ class CIDriver:
 
         finally:
             self.status_tracker.release_slot(acquired_slot)
+
+    def _attempt_mechanical_rebase(
+        self,
+        issue_number: int,
+        pr_number: int,
+        acquired_slot: int,
+    ) -> bool:
+        """Rebase a behind/conflicting PR onto its base branch with no agent (#871).
+
+        The cheap, deterministic path: a PR that is merely behind its base (or
+        whose changes don't textually overlap) is rebased and pushed here. Only a
+        PR whose rebase hits real conflicts falls through to the CI-fix agent.
+
+        Flow:
+
+        1. Query ``mergeStateStatus`` / ``mergeable`` / ``baseRefName``. Skip
+           (return ``False``) unless the PR is ``BEHIND`` or ``DIRTY`` /
+           ``CONFLICTING`` — a PR already on top of its base needs no rebase and
+           the normal check-status path handles it.
+        2. Sync the worktree to the PR head, then ``rebase_worktree_onto`` the
+           base branch.
+        3. Clean rebase → push ``HEAD:<pr-head>`` with ``--force-with-lease`` and
+           return ``True``. The push re-triggers CI; the caller's poll loop
+           evaluates the rebased head.
+        4. Conflicts → the rebase is aborted inside ``rebase_worktree_onto``;
+           return ``False`` so the caller continues to the agent path.
+
+        Any unexpected git/subprocess error is logged and swallowed (returns
+        ``False``) — a mechanical-rebase failure must never crash the worker; the
+        agent path is always the safe fallback.
+
+        Args:
+            issue_number: GitHub issue number for the PR.
+            pr_number: PR number to rebase.
+            acquired_slot: Worker slot ID for status tracking.
+
+        Returns:
+            ``True`` if the PR was mechanically rebased and pushed; ``False`` if
+            no rebase was needed, the rebase conflicted, or an error occurred.
+
+        """
+        try:
+            result = _gh_call(
+                [
+                    "pr",
+                    "view",
+                    str(pr_number),
+                    "--json",
+                    "mergeStateStatus,mergeable,headRefName,baseRefName",
+                ],
+                check=False,
+            )
+            state = dict(json.loads(result.stdout or "{}"))
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "Issue #%s: could not fetch PR #%s merge state for rebase; "
+                "skipping mechanical rebase: %s",
+                issue_number,
+                pr_number,
+                exc,
+            )
+            return False
+
+        merge_state = str(state.get("mergeStateStatus") or "").upper()
+        # Only behind-base / conflicting PRs need a rebase. CLEAN / BLOCKED /
+        # UNSTABLE / HAS_HOOKS PRs are already on top of their base — let the
+        # check-status path handle them. (BLOCKED is the review-gated case.)
+        if merge_state not in ("BEHIND", "DIRTY", "CONFLICTING"):
+            return False
+
+        pr_head_branch = str(state.get("headRefName") or "") or self._get_pr_branch(pr_number)
+        base_branch = str(state.get("baseRefName") or "main") or "main"
+        if not pr_head_branch:
+            logger.warning(
+                "Issue #%s: PR #%s has no resolvable head branch; skipping rebase",
+                issue_number,
+                pr_number,
+            )
+            return False
+
+        self.status_tracker.update_slot(
+            acquired_slot,
+            f"{issue_ref(issue_number)}: mechanical rebase onto {base_branch}",
+        )
+
+        try:
+            worktree_path = self._get_worktree_path(issue_number, pr_number)
+            # Land on the PR's actual remote head before rebasing so we replay the
+            # PR's commits (not a stale local ref) onto the base (#832).
+            sync_worktree_to_remote_branch(worktree_path, pr_head_branch)
+
+            if not rebase_worktree_onto(worktree_path, base_branch):
+                logger.info(
+                    "Issue #%s: PR #%s (%s) has rebase conflicts onto %s; deferring to agent",
+                    issue_number,
+                    pr_number,
+                    merge_state,
+                    base_branch,
+                )
+                return False
+
+            # Clean rebase rewrote history — lease-push to the PR head. The helper
+            # no-ops cleanly if the rebase was already up to date (HEAD unchanged).
+            push_current_branch_with_lease_on_divergence(
+                worktree_path,
+                branch=pr_head_branch,
+                push_ref=f"HEAD:{pr_head_branch}",
+            )
+            logger.info(
+                "Issue #%s: mechanically rebased PR #%s onto %s and pushed (no agent)",
+                issue_number,
+                pr_number,
+                base_branch,
+            )
+            return True
+        except subprocess.CalledProcessError as exc:
+            logger.warning(
+                "Issue #%s: mechanical rebase of PR #%s failed (%s); falling through to agent",
+                issue_number,
+                pr_number,
+                (exc.stderr or exc.stdout or "")[:300],
+            )
+            return False
 
     def _run_advise(self, issue_number: int) -> str:
         """Pull prior learnings from ProjectMnemosyne before the CI fix loop.
@@ -2041,6 +2173,19 @@ Examples:
             "this flag only when you explicitly want issue-driven scope."
         ),
     )
+    parser.add_argument(
+        "--no-mechanical-rebase",
+        dest="enable_mechanical_rebase",
+        action="store_false",
+        default=True,
+        help=(
+            "Disable the mechanical git rebase that runs before the CI-fix "
+            "agent. By default a PR that is behind/conflicting with its base is "
+            "rebased and pushed with no agent spend; only PRs whose rebase hits "
+            "real conflicts fall through to the agent (#871). Pass this flag to "
+            "require the agent for all behind/conflicting PRs."
+        ),
+    )
     add_json_arg(parser)
 
     return parser.parse_args()
@@ -2112,6 +2257,7 @@ def main() -> int:
             enable_ui=not args.no_ui and not args.json,
             verbose=args.verbose,
             include_bot_prs=args.include_bot_prs,
+            enable_mechanical_rebase=args.enable_mechanical_rebase,
         )
 
         driver = CIDriver(options)

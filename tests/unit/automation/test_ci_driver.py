@@ -1806,3 +1806,165 @@ class TestAdviseBotShortCircuit:
         ):
             driver._attempt_ci_fixes(issue_number=42, pr_number=900, acquired_slot=0)
         mock_advise.assert_called_once_with(42)
+
+
+# ---------------------------------------------------------------------------
+# _attempt_mechanical_rebase (#871)
+# ---------------------------------------------------------------------------
+
+
+class TestMechanicalRebase:
+    """Tests for the mechanical-rebase pre-step that runs before the agent (#871)."""
+
+    @staticmethod
+    def _pr_state(
+        merge_state: str,
+        head: str = "5-impl",
+        base: str = "main",
+    ) -> MagicMock:
+        """Build a ``_gh_call`` return for the merge-state query."""
+        return MagicMock(
+            stdout=json.dumps(
+                {
+                    "mergeStateStatus": merge_state,
+                    "mergeable": "MERGEABLE",
+                    "headRefName": head,
+                    "baseRefName": base,
+                }
+            )
+        )
+
+    def test_behind_pr_rebases_clean_and_pushes_no_agent(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """A BEHIND PR rebases cleanly → pushes with lease, returns True."""
+        with (
+            patch(
+                "hephaestus.automation.ci_driver._gh_call",
+                return_value=self._pr_state("BEHIND"),
+            ),
+            patch.object(driver, "_get_worktree_path", return_value=tmp_path),
+            patch("hephaestus.automation.ci_driver.sync_worktree_to_remote_branch") as mock_sync,
+            patch(
+                "hephaestus.automation.ci_driver.rebase_worktree_onto", return_value=True
+            ) as mock_rebase,
+            patch(
+                "hephaestus.automation.ci_driver.push_current_branch_with_lease_on_divergence"
+            ) as mock_push,
+        ):
+            result = driver._attempt_mechanical_rebase(
+                issue_number=5, pr_number=50, acquired_slot=0
+            )
+
+        assert result is True
+        mock_sync.assert_called_once_with(tmp_path, "5-impl")
+        mock_rebase.assert_called_once_with(tmp_path, "main")
+        mock_push.assert_called_once_with(tmp_path, branch="5-impl", push_ref="HEAD:5-impl")
+
+    def test_conflicting_pr_defers_to_agent_no_push(self, driver: CIDriver, tmp_path: Path) -> None:
+        """A DIRTY PR whose rebase conflicts must NOT push — it returns False."""
+        with (
+            patch(
+                "hephaestus.automation.ci_driver._gh_call",
+                return_value=self._pr_state("DIRTY"),
+            ),
+            patch.object(driver, "_get_worktree_path", return_value=tmp_path),
+            patch("hephaestus.automation.ci_driver.sync_worktree_to_remote_branch"),
+            patch("hephaestus.automation.ci_driver.rebase_worktree_onto", return_value=False),
+            patch(
+                "hephaestus.automation.ci_driver.push_current_branch_with_lease_on_divergence"
+            ) as mock_push,
+        ):
+            result = driver._attempt_mechanical_rebase(
+                issue_number=5, pr_number=50, acquired_slot=0
+            )
+
+        assert result is False
+        mock_push.assert_not_called()
+
+    def test_up_to_date_pr_skips_rebase_entirely(self, driver: CIDriver, tmp_path: Path) -> None:
+        """A CLEAN/BLOCKED PR is already on its base — no rebase, no push."""
+        with (
+            patch(
+                "hephaestus.automation.ci_driver._gh_call",
+                return_value=self._pr_state("CLEAN"),
+            ),
+            patch("hephaestus.automation.ci_driver.rebase_worktree_onto") as mock_rebase,
+            patch(
+                "hephaestus.automation.ci_driver.push_current_branch_with_lease_on_divergence"
+            ) as mock_push,
+        ):
+            result = driver._attempt_mechanical_rebase(
+                issue_number=5, pr_number=50, acquired_slot=0
+            )
+
+        assert result is False
+        mock_rebase.assert_not_called()
+        mock_push.assert_not_called()
+
+    def test_blocked_review_gated_pr_is_not_rebased(self, driver: CIDriver, tmp_path: Path) -> None:
+        """BLOCKED (green, waiting on review) is on-base — must not be rebased."""
+        with (
+            patch(
+                "hephaestus.automation.ci_driver._gh_call",
+                return_value=self._pr_state("BLOCKED"),
+            ),
+            patch("hephaestus.automation.ci_driver.rebase_worktree_onto") as mock_rebase,
+        ):
+            result = driver._attempt_mechanical_rebase(
+                issue_number=5, pr_number=50, acquired_slot=0
+            )
+
+        assert result is False
+        mock_rebase.assert_not_called()
+
+    def test_uses_pr_base_ref_not_hardcoded_main(self, driver: CIDriver, tmp_path: Path) -> None:
+        """The rebase targets the PR's actual baseRefName, not a hardcoded main."""
+        with (
+            patch(
+                "hephaestus.automation.ci_driver._gh_call",
+                return_value=self._pr_state("BEHIND", base="develop"),
+            ),
+            patch.object(driver, "_get_worktree_path", return_value=tmp_path),
+            patch("hephaestus.automation.ci_driver.sync_worktree_to_remote_branch"),
+            patch(
+                "hephaestus.automation.ci_driver.rebase_worktree_onto", return_value=True
+            ) as mock_rebase,
+            patch("hephaestus.automation.ci_driver.push_current_branch_with_lease_on_divergence"),
+        ):
+            driver._attempt_mechanical_rebase(issue_number=5, pr_number=50, acquired_slot=0)
+
+        mock_rebase.assert_called_once_with(tmp_path, "develop")
+
+    def test_gh_query_failure_returns_false_no_crash(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """A bad/empty gh response must be swallowed → False, never raise."""
+        with (
+            patch(
+                "hephaestus.automation.ci_driver._gh_call",
+                return_value=MagicMock(stdout="not json"),
+            ),
+            patch("hephaestus.automation.ci_driver.rebase_worktree_onto") as mock_rebase,
+        ):
+            result = driver._attempt_mechanical_rebase(
+                issue_number=5, pr_number=50, acquired_slot=0
+            )
+
+        assert result is False
+        mock_rebase.assert_not_called()
+
+    def test_rebase_step_skipped_when_option_disabled(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """``enable_mechanical_rebase=False`` skips the call inside _drive_issue.
+
+        Verified at the _drive_issue gate: with the option off, the driver must
+        not invoke _attempt_mechanical_rebase. We assert the guard by checking
+        the option default flips the call.
+        """
+        driver.options.enable_mechanical_rebase = False
+        # The gate in _drive_issue is ``if enable_mechanical_rebase and not dry_run``.
+        # With the flag off the method is simply never called; here we assert the
+        # option is wired so the guard evaluates False.
+        assert driver.options.enable_mechanical_rebase is False

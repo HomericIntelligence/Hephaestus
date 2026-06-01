@@ -15,6 +15,7 @@ from hephaestus.automation.git_utils import (
     get_repo_root,
     is_clean_working_tree,
     push_current_branch_with_lease_on_divergence,
+    rebase_worktree_onto,
     run,
     safe_git_fetch,
     sync_worktree_to_remote_branch,
@@ -482,3 +483,64 @@ class TestSyncWorktreeToRemoteBranch:
             sync_worktree_to_remote_branch(Path("/tmp/worktree-xyz"), "any-branch")
         # Reset must NOT have run after a fetch failure.
         assert mock_run.call_count == 1
+
+
+class TestRebaseWorktreeOnto:
+    """Tests for rebase_worktree_onto (#871 — mechanical rebase before agent)."""
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_clean_rebase_fetches_then_rebases_returns_true(self, mock_run: Any) -> None:
+        """Runs ``git fetch origin <base>`` then ``git rebase origin/<base>`` → True."""
+        mock_run.return_value = Mock(returncode=0)
+        worktree = Path("/tmp/worktree-xyz")
+
+        assert rebase_worktree_onto(worktree, "main") is True
+
+        assert mock_run.call_count == 2
+        fetch_args, fetch_kwargs = mock_run.call_args_list[0]
+        assert fetch_args[0] == ["git", "fetch", "origin", "main"]
+        assert fetch_kwargs["cwd"] == worktree
+        rebase_args, rebase_kwargs = mock_run.call_args_list[1]
+        assert rebase_args[0] == ["git", "rebase", "origin/main"]
+        assert rebase_kwargs["cwd"] == worktree
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_conflict_aborts_and_returns_false(self, mock_run: Any) -> None:
+        """A rebase conflict triggers ``git rebase --abort`` and returns False."""
+        rebase_err = subprocess.CalledProcessError(
+            1, ["git", "rebase"], output="", stderr="CONFLICT (content)\n"
+        )
+        # fetch ok, rebase conflicts, abort ok.
+        mock_run.side_effect = [Mock(returncode=0), rebase_err, Mock(returncode=0)]
+        worktree = Path("/tmp/worktree-xyz")
+
+        assert rebase_worktree_onto(worktree, "main") is False
+
+        assert mock_run.call_count == 3
+        abort_args, abort_kwargs = mock_run.call_args_list[2]
+        assert abort_args[0] == ["git", "rebase", "--abort"]
+        # The abort must be best-effort so it cannot mask the conflict signal.
+        assert abort_kwargs.get("check") is False
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_fetch_failure_propagates(self, mock_run: Any) -> None:
+        """A fetch failure is a hard error (no current base) — it raises."""
+        fetch_err = subprocess.CalledProcessError(
+            128, ["git", "fetch"], output="", stderr="fatal: unable to access remote\n"
+        )
+        mock_run.side_effect = [fetch_err]
+
+        with pytest.raises(subprocess.CalledProcessError):
+            rebase_worktree_onto(Path("/tmp/worktree-xyz"), "main")
+        # Rebase must NOT have run after a fetch failure.
+        assert mock_run.call_count == 1
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_custom_base_and_remote(self, mock_run: Any) -> None:
+        """Base branch and remote are threaded into both git commands."""
+        mock_run.return_value = Mock(returncode=0)
+
+        assert rebase_worktree_onto(Path("/wt"), "develop", remote="upstream") is True
+
+        assert mock_run.call_args_list[0][0][0] == ["git", "fetch", "upstream", "develop"]
+        assert mock_run.call_args_list[1][0][0] == ["git", "rebase", "upstream/develop"]

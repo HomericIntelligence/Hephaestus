@@ -430,6 +430,67 @@ def sync_worktree_to_remote_branch(
     run(["git", "reset", "--hard", f"{remote}/{branch}"], cwd=cwd)
 
 
+def rebase_worktree_onto(
+    cwd: Path,
+    base_branch: str = "main",
+    *,
+    remote: str = "origin",
+) -> bool:
+    """Mechanically rebase the worktree at ``cwd`` onto ``<remote>/<base_branch>``.
+
+    This is the cheap, deterministic path for PRs that are merely *behind* the
+    base branch (or have textually non-overlapping changes): a plain ``git
+    rebase`` resolves them with no agent involvement. Only when the rebase hits a
+    real conflict do we hand off to the CI-fix agent.
+
+    Two steps in ``cwd``:
+
+    1. ``git fetch <remote> <base_branch>`` — refresh the remote-tracking ref so
+       the rebase target is current.
+    2. ``git rebase <remote>/<base_branch>`` — replay the PR's commits on top of
+       the latest base. On conflict, ``git rebase --abort`` restores the
+       pre-rebase HEAD so the worktree is left clean for the agent path.
+
+    The caller is expected to push the rebased HEAD with
+    :func:`push_current_branch_with_lease_on_divergence` (the rebase rewrites
+    history, so a lease push is required).
+
+    Args:
+        cwd: Worktree path (already synced to the PR head).
+        base_branch: Branch to rebase onto (default ``main``).
+        remote: Remote name (default ``origin``).
+
+    Returns:
+        ``True`` if the rebase applied cleanly (HEAD may or may not have moved —
+        an already-up-to-date PR rebases cleanly to a no-op). ``False`` if the
+        rebase hit conflicts and was aborted, signalling the caller to fall back
+        to the agent.
+
+    Raises:
+        subprocess.CalledProcessError: If the ``git fetch`` fails. A fetch
+            failure is a hard error (no current base to rebase onto); the conflict
+            case is handled internally and returns ``False`` rather than raising.
+
+    """
+    run(["git", "fetch", remote, base_branch], cwd=cwd)
+    try:
+        run(["git", "rebase", f"{remote}/{base_branch}"], cwd=cwd)
+        logger.info("Rebased worktree at %s onto %s/%s cleanly", cwd, remote, base_branch)
+        return True
+    except subprocess.CalledProcessError:
+        # Conflicts — abort so the worktree is restored to the PR head, then let
+        # the caller hand the real conflict to the agent. ``check=False`` because
+        # an abort that itself errors must not mask the conflict signal.
+        run(["git", "rebase", "--abort"], cwd=cwd, check=False)
+        logger.info(
+            "Rebase of worktree at %s onto %s/%s hit conflicts; aborted",
+            cwd,
+            remote,
+            base_branch,
+        )
+        return False
+
+
 def is_clean_working_tree(repo_root: Path | None = None) -> bool:
     """Check if the working tree is clean (no uncommitted changes).
 
