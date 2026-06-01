@@ -127,8 +127,8 @@ class TestScanFileDetectsViolations:
         findings = scan_file(md, tmp_path)
         assert any(f.rule == "no-verify-in-commit" for f in findings)
 
-    def test_detects_squash_merge_strategy(self, tmp_path: Path) -> None:
-        """Should flag gh pr merge that uses --squash."""
+    def test_detects_rebase_merge_strategy(self, tmp_path: Path) -> None:
+        """Should flag gh pr merge that uses --rebase (rebase merges disabled)."""
         md = make_md(
             tmp_path,
             "bad.md",
@@ -136,7 +136,7 @@ class TestScanFileDetectsViolations:
             # Doc
 
             ```bash
-            gh pr merge --squash
+            gh pr merge --auto --rebase
             ```
             """,
         )
@@ -152,7 +152,39 @@ class TestScanFileDetectsViolations:
             # Doc
 
             ```bash
-            gh pr merge --merge
+            gh pr merge --auto --merge
+            ```
+            """,
+        )
+        findings = scan_file(md, tmp_path)
+        assert any(f.rule == "wrong-merge-strategy" for f in findings)
+
+    def test_detects_missing_auto_flag(self, tmp_path: Path) -> None:
+        """Should flag gh pr merge --squash when --auto is missing."""
+        md = make_md(
+            tmp_path,
+            "bad.md",
+            """\
+            # Doc
+
+            ```bash
+            gh pr merge --squash
+            ```
+            """,
+        )
+        findings = scan_file(md, tmp_path)
+        assert any(f.rule == "wrong-merge-strategy" for f in findings)
+
+    def test_detects_missing_squash_flag(self, tmp_path: Path) -> None:
+        """Should flag gh pr merge --auto when --squash is missing."""
+        md = make_md(
+            tmp_path,
+            "bad.md",
+            """\
+            # Doc
+
+            ```bash
+            gh pr merge --auto
             ```
             """,
         )
@@ -215,8 +247,8 @@ class TestScanFilePassesCleanExamples:
         )
         assert scan_file(md, tmp_path) == []
 
-    def test_passes_rebase_merge_strategy(self, tmp_path: Path) -> None:
-        """Gh pr merge --auto --rebase should produce no findings."""
+    def test_passes_squash_merge_strategy(self, tmp_path: Path) -> None:
+        """Gh pr merge --auto --squash should produce no findings."""
         md = make_md(
             tmp_path,
             "good.md",
@@ -224,14 +256,14 @@ class TestScanFilePassesCleanExamples:
             # Doc
 
             ```bash
-            gh pr merge --auto --rebase
+            gh pr merge --auto --squash
             ```
             """,
         )
         assert scan_file(md, tmp_path) == []
 
-    def test_passes_rebase_merge_strategy_with_pr_number(self, tmp_path: Path) -> None:
-        """Gh pr merge with PR number and --auto --rebase should produce no findings."""
+    def test_passes_squash_merge_strategy_with_pr_number(self, tmp_path: Path) -> None:
+        """Gh pr merge with PR number and --auto --squash should produce no findings."""
         md = make_md(
             tmp_path,
             "good.md",
@@ -239,7 +271,22 @@ class TestScanFilePassesCleanExamples:
             # Doc
 
             ```bash
-            gh pr merge 42 --auto --rebase
+            gh pr merge 42 --auto --squash
+            ```
+            """,
+        )
+        assert scan_file(md, tmp_path) == []
+
+    def test_passes_squash_merge_strategy_reversed_order(self, tmp_path: Path) -> None:
+        """Gh pr merge --squash --auto (flags reversed) should produce no findings."""
+        md = make_md(
+            tmp_path,
+            "good.md",
+            """\
+            # Doc
+
+            ```bash
+            gh pr merge --squash --auto
             ```
             """,
         )

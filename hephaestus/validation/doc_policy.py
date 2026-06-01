@@ -10,7 +10,8 @@ Policies enforced:
 
 - ``gh pr create`` must NOT include ``--label``
 - ``git commit`` must NOT use ``--no-verify``
-- ``gh pr merge`` must use ``--auto --rebase`` (not ``--merge`` or ``--squash``)
+- ``gh pr merge`` must use ``--auto --squash`` (not ``--merge`` or ``--rebase``;
+  rebase merges are disabled on this repo — squash-only per CLAUDE.md)
 - ``git push`` must NOT push directly to ``main``/``master``
 
 Excluded paths (archived / test-fixture content that is not authoritative):
@@ -111,8 +112,26 @@ _RAW_RULES: list[tuple[str, Severity, str, str]] = [
     (
         "wrong-merge-strategy",
         Severity.CRITICAL,
-        "gh pr merge must use --auto --rebase, not --merge or --squash",
-        r"gh\s+pr\s+merge\b(?!.*--auto\s+--rebase\b)(?!.*--rebase\s+--auto\b).*(?:--merge\b|--squash\b)",
+        (
+            "gh pr merge must use --auto --squash (squash-only; rebase merges "
+            "are disabled on this repo per CLAUDE.md). --merge and --rebase "
+            "are rejected as merge-strategy flags."
+        ),
+        # Flag any ``gh pr merge`` invocation that does NOT carry both
+        # ``--auto`` AND ``--squash`` (in either order), OR that carries one
+        # of the rejected merge-strategy flags ``--merge`` / ``--rebase``.
+        #
+        # Implementation: this regex matches when the line contains
+        # ``gh pr merge`` and either lacks the required ``--auto --squash``
+        # combination, or includes a rejected strategy flag.
+        r"gh\s+pr\s+merge\b"
+        r"(?:"
+        # rejected merge-strategy flags
+        r"(?=.*--merge\b)"
+        r"|(?=.*--rebase\b)"
+        # OR missing the required --auto / --squash combination
+        r"|(?!.*--auto\s+--squash\b)(?!.*--squash\s+--auto\b)"
+        r")",
     ),
     (
         "push-direct-to-main",
