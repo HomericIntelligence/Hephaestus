@@ -6,7 +6,6 @@ As of 2026-05-24. Python >= 3.10 required.
 
 | Version | Supported       |
 |---------|-----------------|
-| 1.x     | ✅ Supported    |
 | 0.9.x   | ✅ Supported    |
 | < 0.9   | ❌ End of life  |
 

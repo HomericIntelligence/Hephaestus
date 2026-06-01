@@ -139,7 +139,7 @@ Add to `pyproject.toml`:
 ```toml
 [project]
 dependencies = [
-    "homericintelligence-hephaestus>=1.0,<2",
+    "homericintelligence-hephaestus>=0.9,<1",
 ]
 ```
 
@@ -147,10 +147,12 @@ Or add a PyPI entry to `pixi.toml`:
 
 ```toml
 [pypi-dependencies]
-homericintelligence-hephaestus = ">=1.0,<2"
+homericintelligence-hephaestus = ">=0.9,<1"
 ```
 
 Then run `pixi install` to resolve the dependency.
+
+After 1.0 ships, bump these constraints to `>=1.0,<2`.
 
 **For local development (path dependency):**
 
