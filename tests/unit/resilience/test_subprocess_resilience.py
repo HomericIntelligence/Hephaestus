@@ -146,3 +146,86 @@ class TestResilientCall:
                 initial_delay=0.01,
                 max_delay=0.1,
             )
+
+
+class TestRetryPredicateWiring:
+    """Tests that resilient_call actually invokes is_transient_subprocess_error.
+
+    Before this wire-up, resilient_call only matched on the
+    TRANSIENT_SUBPROCESS_ERRORS exception tuple, so non-transient OSErrors
+    (e.g. permission denied) and intentional TimeoutExpired errors burned
+    three pointless retries. The predicate gates retries on stderr-pattern
+    content as well as exception type.
+    """
+
+    @patch("time.sleep")
+    def test_non_transient_oserror_does_not_retry(self, mock_sleep) -> None:
+        """OSError without a transient pattern is raised after a single call."""
+        call_count = 0
+
+        def permission_denied() -> None:
+            nonlocal call_count
+            call_count += 1
+            raise OSError(13, "Permission denied")
+
+        with pytest.raises(OSError, match="Permission denied"):
+            resilient_call(
+                permission_denied,
+                max_retries=3,
+                initial_delay=0.01,
+                max_delay=0.1,
+            )
+
+        # Predicate rejects → propagate immediately, no retries, no sleeps.
+        assert call_count == 1
+        mock_sleep.assert_not_called()
+
+    @patch("time.sleep")
+    def test_transient_stderr_pattern_retries(self, mock_sleep) -> None:
+        """CalledProcessError with transient stderr is retried until success."""
+        call_count = 0
+
+        def flaky_subprocess() -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise subprocess.CalledProcessError(
+                    returncode=1,
+                    cmd="git fetch",
+                    stderr="fatal: Connection reset by peer",
+                )
+            return "ok"
+
+        result = resilient_call(
+            flaky_subprocess,
+            max_retries=3,
+            initial_delay=0.01,
+            max_delay=0.1,
+        )
+
+        assert result == "ok"
+        assert call_count == 3
+        # Two retries before success → two sleeps.
+        assert mock_sleep.call_count == 2
+
+    @patch("time.sleep")
+    def test_timeout_expired_does_not_retry(self, mock_sleep) -> None:
+        """subprocess.TimeoutExpired is intentional and bypasses retry."""
+        call_count = 0
+
+        def times_out() -> None:
+            nonlocal call_count
+            call_count += 1
+            raise subprocess.TimeoutExpired(cmd="long-job", timeout=30)
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            resilient_call(
+                times_out,
+                max_retries=3,
+                initial_delay=0.01,
+                max_delay=0.1,
+            )
+
+        # Predicate returns False for TimeoutExpired → no retries, no sleeps.
+        assert call_count == 1
+        mock_sleep.assert_not_called()
