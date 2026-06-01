@@ -45,11 +45,17 @@ TRANSIENT_ERROR_PATTERNS: list[str] = [
 ]
 
 
-def is_transient_subprocess_error(error: Exception) -> bool:
+def is_transient_subprocess_error(error: BaseException) -> bool:
     """Check if a subprocess error is transient and should be retried.
 
     Checks both the exception type and any stderr content in the error
     message for known transient patterns.
+
+    Accepts ``BaseException`` so the function is directly usable as a
+    ``retry_predicate`` for :func:`hephaestus.utils.retry.retry_with_backoff`
+    (which calls predicates with the broadest exception type). Non-Exception
+    base exceptions (e.g. ``KeyboardInterrupt``) fall through the type checks
+    and return ``False``.
 
     Args:
         error: Exception to check
@@ -94,6 +100,12 @@ def resilient_call(
     Rate limit errors are NOT retried — they propagate immediately for
     the caller to handle.
 
+    Only *transient* errors are retried: the broad ``TRANSIENT_SUBPROCESS_ERRORS``
+    tuple is paired with :func:`is_transient_subprocess_error` as a predicate
+    so that, e.g., a ``PermissionError`` (``OSError``) does not waste three
+    retries on a clearly non-transient failure, and ``subprocess.TimeoutExpired``
+    propagates immediately because timeouts are intentional, not flakes.
+
     Args:
         func: Function to call
         *args: Positional arguments for func
@@ -121,6 +133,7 @@ def resilient_call(
         backoff_factor=2,
         max_delay=max_delay,
         retry_on=TRANSIENT_SUBPROCESS_ERRORS,
+        retry_predicate=is_transient_subprocess_error,
         logger=logger.warning,
         jitter=True,
     )

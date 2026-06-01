@@ -49,6 +49,35 @@ def is_network_error(error: BaseException) -> bool:
     return any(keyword in error_str for keyword in NETWORK_ERROR_KEYWORDS)
 
 
+def _compute_backoff_delay(
+    attempt: int,
+    initial_delay: float,
+    backoff_factor: int,
+    max_delay: float | None,
+    jitter: bool,
+) -> float:
+    """Compute the sleep delay for the given retry attempt.
+
+    Args:
+        attempt: Zero-based attempt index (0 for the first retry).
+        initial_delay: Initial delay in seconds before first retry.
+        backoff_factor: Multiplier for delay between retries.
+        max_delay: Optional cap (applied *before* jitter so the actual sleep
+            value can reach max_delay * 1.25 at most when jitter=True).
+        jitter: If True, perturb the delay by ±25 %.
+
+    Returns:
+        Sleep duration in seconds (always >= 0.1).
+
+    """
+    delay: float = initial_delay * (backoff_factor**attempt)
+    if max_delay is not None:
+        delay = min(delay, max_delay)
+    if jitter:
+        delay = float(delay + random.uniform(-0.25 * delay, 0.25 * delay))
+    return max(0.1, delay)
+
+
 def retry_with_backoff(
     max_retries: int = 3,
     initial_delay: float = 1.0,
@@ -57,6 +86,7 @@ def retry_with_backoff(
     retry_on: tuple[type[BaseException], ...] = (Exception,),
     logger: Callable[[str], None] | None = None,
     max_delay: float | None = None,
+    retry_predicate: Callable[[BaseException], bool] | None = None,
 ) -> Callable[[F], F]:
     """Retry a function with exponential backoff.
 
@@ -68,6 +98,11 @@ def retry_with_backoff(
         retry_on: Tuple of exception types to retry on (default: all exceptions)
         logger: Optional logging function for retry attempts
         max_delay: Maximum delay cap in seconds (default: None, no cap)
+        retry_predicate: Optional callable applied *after* the ``retry_on``
+            isinstance check. If provided and the predicate returns ``False``
+            for the raised exception, the exception is re-raised immediately
+            without retrying. Lets callers filter beyond exception type — for
+            example, retry only ``OSError``s whose message looks transient.
 
     Returns:
         Decorated function with retry logic
@@ -84,6 +119,14 @@ def retry_with_backoff(
             # Only retry on specific exceptions
             return requests.get("https://api.example.com")
 
+        @retry_with_backoff(
+            retry_on=(OSError,),
+            retry_predicate=lambda e: "connection reset" in str(e).lower(),
+        )
+        def transient_only():
+            # Retries OSErrors only when their message looks transient
+            ...
+
     """
 
     def decorator(func: F) -> F:
@@ -97,24 +140,19 @@ def retry_with_backoff(
                 except retry_on as e:
                     last_exception = e
 
+                    # Honor a caller-supplied filter that runs *after* the
+                    # isinstance check. If it rejects the exception, propagate
+                    # immediately so non-transient failures don't waste retries.
+                    if retry_predicate is not None and not retry_predicate(e):
+                        raise
+
                     # Don't retry on last attempt
                     if attempt == max_retries:
                         break
 
-                    # Calculate delay with exponential backoff
-                    delay = initial_delay * (backoff_factor**attempt)
-
-                    # Cap delay if max_delay is specified
-                    if max_delay is not None:
-                        delay = min(delay, max_delay)
-
-                    # Add jitter if requested (±25%)
-                    if jitter:
-                        jitter_amount = random.uniform(-0.25 * delay, 0.25 * delay)
-                        delay += jitter_amount
-
-                    # Ensure delay is positive
-                    delay = max(0.1, delay)
+                    delay = _compute_backoff_delay(
+                        attempt, initial_delay, backoff_factor, max_delay, jitter
+                    )
 
                     # Log retry attempt
                     if logger:
