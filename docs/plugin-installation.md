@@ -15,7 +15,7 @@ ProjectHephaestus ships as a Claude Code plugin in addition to a Python package.
 
 The plugin ships **23 skills**. The table is kept in sync with the
 `skills/` directory by the `hephaestus-check-skill-catalog` pre-commit hook —
-adding or removing a skill without updating this table will fail CI.
+adding or removing a skill without updating this table, or shipping a skill without valid frontmatter, will fail CI.
 
 | Skill | Description |
 |-------|-------------|

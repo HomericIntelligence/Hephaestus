@@ -1,3 +1,9 @@
+---
+name: create-reusable-utilities
+description: Port and generalize utility scripts from one project into ProjectHephaestus for cross-project reuse
+allowed-tools: [Read, Write, Edit, Bash, Grep, Glob]
+---
+
 # Create Reusable Utilities
 
 ## Overview

@@ -1,7 +1,7 @@
 ---
 name: tidy
 description: Tidy local branches in the CURRENT repo. Runs `gh tidy --rebase-all --trunk <default>` interactively, then dispatches a Myrmidon swarm to finish any rebases that gh-tidy could not complete. The swarm NEVER deletes branches — only gh-tidy can, via its own y/N prompts.
-argument-hint: <optional: --dry-run | --no-swarm | --trunk BRANCH | --max-concurrent N>
+argument-hint: "<optional: --dry-run | --no-swarm | --trunk BRANCH | --max-concurrent N>"
 allowed-tools: [Bash, Read]
 ---
 

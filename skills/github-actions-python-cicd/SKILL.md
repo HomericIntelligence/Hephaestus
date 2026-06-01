@@ -1,3 +1,9 @@
+---
+name: github-actions-python-cicd
+description: Set up a comprehensive GitHub Actions CI/CD pipeline for a Python project with multi-version testing
+allowed-tools: [Read, Write, Edit, Bash, Grep, Glob]
+---
+
 # GitHub Actions Python CI/CD Setup
 
 ## Overview

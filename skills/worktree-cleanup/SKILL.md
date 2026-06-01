@@ -1,7 +1,7 @@
 ---
 name: worktree-cleanup
-description: Audit every git worktree, ensure all state is committed, then prune worktrees cleanly. NEVER deletes branches — that's `gh tidy`'s job. Use when: (1) `git worktree list` shows many entries after a parallel session, (2) you suspect uncommitted work in worktrees, (3) you want to clean up before running `gh tidy`.
-argument-hint: <optional: --dry-run>
+description: "Audit every git worktree, ensure all state is committed, then prune worktrees cleanly. NEVER deletes branches — that's `gh tidy`'s job. Use when: (1) `git worktree list` shows many entries after a parallel session, (2) you suspect uncommitted work in worktrees, (3) you want to clean up before running `gh tidy`."
+argument-hint: "<optional: --dry-run>"
 allowed-tools: [Bash, Read]
 ---
 

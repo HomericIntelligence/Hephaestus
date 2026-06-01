@@ -40,14 +40,23 @@ def make_table(tmp_path: Path, skill_names: list[str]) -> Path:
     return path
 
 
-def make_skills_dir(tmp_path: Path, skill_names: list[str]) -> Path:
+def make_skills_dir(
+    tmp_path: Path,
+    skill_names: list[str],
+    *,
+    with_frontmatter: bool = True,
+) -> Path:
     """Create a skills/ directory with one subdir per name (each has SKILL.md)."""
     skills_dir = tmp_path / "skills"
     skills_dir.mkdir()
     for name in skill_names:
         sub = skills_dir / name
         sub.mkdir()
-        (sub / "SKILL.md").write_text(f"# {name}\n")
+        if with_frontmatter:
+            content = f"---\nname: {name}\ndescription: Test skill {name}\n---\n\n# {name}\n"
+        else:
+            content = f"# {name}\n"
+        (sub / "SKILL.md").write_text(content)
     return skills_dir
 
 
@@ -193,6 +202,25 @@ class TestMainExitCodes:
         """Main exits 1 when the table lists a skill that is not shipped."""
         table = make_table(tmp_path, ["alpha", "removed"])
         skills_dir = make_skills_dir(tmp_path, ["alpha"])
+        result = main(["--table", str(table), "--skills-dir", str(skills_dir)])
+        assert result == 1
+
+    def test_returns_nonzero_when_skill_missing_frontmatter(self, tmp_path: Path) -> None:
+        """Main exits 1 when a shipped skill has no YAML frontmatter."""
+        table = make_table(tmp_path, ["alpha"])
+        skills_dir = make_skills_dir(tmp_path, ["alpha"], with_frontmatter=False)
+        result = main(["--table", str(table), "--skills-dir", str(skills_dir)])
+        assert result == 1
+
+    def test_returns_nonzero_when_skill_frontmatter_name_mismatches_dir(
+        self, tmp_path: Path
+    ) -> None:
+        """Main exits 1 when frontmatter name does not match the skill directory."""
+        table = make_table(tmp_path, ["alpha"])
+        skills_dir = make_skills_dir(tmp_path, ["alpha"])
+        (skills_dir / "alpha" / "SKILL.md").write_text(
+            "---\nname: beta\ndescription: Wrong skill name\n---\n\n# Alpha\n"
+        )
         result = main(["--table", str(table), "--skills-dir", str(skills_dir)])
         assert result == 1
 

@@ -2,7 +2,9 @@ r"""Validate that docs/plugin-installation.md lists every shipped skill.
 
 Reads the markdown table under the "What the Plugin Provides" section and
 asserts each row matches a skill discovered by
-:func:`hephaestus.discovery.skills.discover_skills`.
+:func:`hephaestus.discovery.skills.discover_skills`. It also validates each
+shipped skill has loadable YAML frontmatter with a name matching its
+directory.
 
 The check is wired into pre-commit (see ``.pre-commit-config.yaml``) and runs
 whenever ``docs/plugin-installation.md`` or anything under ``skills/`` changes,
@@ -17,7 +19,7 @@ Usage::
 
 Exit codes:
     0: Table lists every shipped skill and no extras.
-    1: Mismatch — table is missing skills, lists removed skills, or both.
+    1: Mismatch — table is missing skills, lists removed skills, or a skill has invalid frontmatter.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ import re
 import sys
 from pathlib import Path
 
+from hephaestus.agents.frontmatter import check_agent_file, extract_frontmatter_parsed
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.discovery.skills import discover_skills
 from hephaestus.utils.helpers import get_repo_root
@@ -127,6 +130,54 @@ def check_skill_catalog(table_path: Path, skills_dir: Path) -> tuple[set[str], s
     return missing, extra
 
 
+def check_skill_frontmatter(skills_dir: Path) -> dict[str, list[str]]:
+    """Validate each shipped skill has loadable plugin metadata.
+
+    Args:
+        skills_dir: Path to the ``skills/`` directory.
+
+    Returns:
+        Mapping of skill directory name to validation errors. Empty means all
+        shipped skills have valid frontmatter.
+
+    """
+    if not skills_dir.exists():
+        return {}
+
+    errors_by_skill: dict[str, list[str]] = {}
+    required_fields: dict[str, type] = {"name": str, "description": str}
+    optional_fields: dict[str, type] = {"argument-hint": str, "allowed-tools": list}
+
+    for skill_file in sorted(skills_dir.glob("*/SKILL.md")):
+        skill_name = skill_file.parent.name
+        is_valid, errors = check_agent_file(
+            skill_file,
+            required_fields=required_fields,
+            optional_fields=optional_fields,
+        )
+        skill_errors = list(errors)
+
+        if is_valid:
+            parsed = extract_frontmatter_parsed(skill_file.read_text(encoding="utf-8"))
+            if parsed is None:
+                skill_errors.append("No parseable YAML frontmatter found")
+            else:
+                _raw, frontmatter = parsed
+                frontmatter_name = frontmatter.get("name")
+                if frontmatter_name != skill_name:
+                    skill_errors.append(
+                        f"Frontmatter name {frontmatter_name!r} must match directory {skill_name!r}"
+                    )
+                description = frontmatter.get("description", "")
+                if isinstance(description, str) and not description.strip():
+                    skill_errors.append("Field 'description' must not be empty")
+
+        if skill_errors:
+            errors_by_skill[skill_name] = skill_errors
+
+    return errors_by_skill
+
+
 def _format_diff(missing: set[str], extra: set[str]) -> str:
     """Format the missing/extra diff as a human-readable report."""
     lines: list[str] = []
@@ -140,6 +191,18 @@ def _format_diff(missing: set[str], extra: set[str]) -> str:
         lines.append("Extra in catalog (documented but not shipped):")
         for name in sorted(extra):
             lines.append(f"  - {name}")
+    return "\n".join(lines)
+
+
+def _format_frontmatter_errors(errors_by_skill: dict[str, list[str]]) -> str:
+    """Format skill frontmatter validation errors for text output."""
+    lines: list[str] = []
+    if errors_by_skill:
+        lines.append("Invalid skill frontmatter:")
+        for name in sorted(errors_by_skill):
+            lines.append(f"  - {name}:")
+            for error in errors_by_skill[name]:
+                lines.append(f"      - {error}")
     return "\n".join(lines)
 
 
@@ -183,7 +246,8 @@ def main(argv: list[str] | None = None) -> int:
     skills_dir: Path = args.skills_dir or (repo_root / "skills")
 
     missing, extra = check_skill_catalog(table_path, skills_dir)
-    ok = not missing and not extra
+    frontmatter_errors = check_skill_frontmatter(skills_dir)
+    ok = not missing and not extra and not frontmatter_errors
     exit_code = 0 if ok else 1
 
     if args.json:
@@ -192,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
             message=("skill catalog is in sync" if ok else "skill catalog is out of sync"),
             missing=sorted(missing),
             extra=sorted(extra),
+            frontmatter_errors=frontmatter_errors,
             table=str(table_path),
             skills_dir=str(skills_dir),
         )
@@ -202,9 +267,18 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("ERROR: docs/plugin-installation.md is out of sync with skills/.")
         print()
-        print(_format_diff(missing, extra))
-        print()
-        print("Fix by updating the catalog table or by removing the deleted skill.")
+        diff = _format_diff(missing, extra)
+        frontmatter_report = _format_frontmatter_errors(frontmatter_errors)
+        if diff:
+            print(diff)
+            print()
+        if frontmatter_report:
+            print(frontmatter_report)
+            print()
+        print(
+            "Fix by updating the catalog table, removing the deleted skill, "
+            "or correcting skill frontmatter."
+        )
 
     return exit_code
 

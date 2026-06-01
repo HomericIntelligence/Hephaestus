@@ -1,7 +1,7 @@
 ---
 name: finish-branch
 description: Use when implementation is complete and all tests pass — guides branch completion by presenting structured options for merge, PR creation, or cleanup
-argument-hint: <optional: base branch name>
+argument-hint: "<optional: base branch name>"
 allowed-tools: [Bash, Read]
 ---
 
