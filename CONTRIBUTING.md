@@ -126,7 +126,7 @@ that violates any of them is blocked:
 2. **Reference the issue**: the PR body must contain the literal line `Closes #<n>`
    (capital `C`, no colon, on its own line). `Fixes`, `Resolves`, `closes`, and
    `Closes:` are **not** accepted.
-3. **Enable auto-merge**: `gh pr merge --auto`.
+3. **Enable auto-merge**: `gh pr merge --auto --squash`.
 
 Also: ensure tests pass locally (`pixi run test`), keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages, and never bypass

@@ -339,7 +339,7 @@ three rules — a PR that violates any of them is blocked:
 3. Push the branch (`git push -u origin 123-amazing-feature`).
 4. Open a pull request whose body contains the literal line `Closes #123`
    (capital `C`, no colon, on its own line — `Fixes`/`Resolves` are **not** accepted).
-5. Enable auto-merge: `gh pr merge --auto`.
+5. Enable auto-merge: `gh pr merge --auto --squash`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full process.
 
