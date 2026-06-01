@@ -315,7 +315,7 @@ Sub-agents that create PRs must follow:
 3. `git commit -m "type(scope): description"`
 4. `git push -u origin <branch>`
 5. `gh pr create --title "..." --body "..."`
-6. `gh pr merge --auto --rebase`
+6. `gh pr merge --auto --squash`
 </constraints>
 
 <agent_prompt_template>
