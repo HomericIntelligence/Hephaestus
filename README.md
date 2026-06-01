@@ -122,6 +122,17 @@ Then enable it in your project's `.claude/settings.json`:
 
 See [docs/plugin-installation.md](docs/plugin-installation.md) for the full installation guide and skill reference.
 
+### As a Codex Plugin
+
+ProjectHephaestus also ships Codex plugin metadata for the same `hephaestus` skill set.
+
+```bash
+codex plugin marketplace add HomericIntelligence/ProjectHephaestus --ref main
+codex plugin add hephaestus@project-hephaestus
+```
+
+The Codex manifest lives in [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json), and the marketplace entry lives in [`.agents/plugins/marketplace.json`](.agents/plugins/marketplace.json).
+
 ### Installing in Another Project
 
 ProjectHephaestus is published to PyPI as `homericintelligence-hephaestus`.

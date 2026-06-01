@@ -1,6 +1,6 @@
 ---
 name: python-repo-modernization
-description: "Bring a partially modernized Python repo to production-grade quality: fix bugs, restructure tests, enhance CI/pre-commit, prepare for PyPI publishing"
+description: Bring a partially modernized Python repo to production-grade quality by fixing bugs, restructuring tests, enhancing CI/pre-commit, and preparing for PyPI publishing
 allowed-tools: [Read, Write, Edit, Bash, Grep, Glob]
 ---
 

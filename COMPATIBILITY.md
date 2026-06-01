@@ -15,9 +15,9 @@ ProjectHephaestus supports **Python 3.10+** (`requires-python = ">=3.10"` in
 support for a Python minor version is treated as a backwards-incompatible change and
 follows the deprecation policy below.
 
-## Versioning: Python Package vs Claude Code Plugin
+## Versioning: Python Package vs Agent Plugins
 
-ProjectHephaestus ships **two independently versioned artifacts**:
+ProjectHephaestus ships **independently versioned artifacts**:
 
 - **The Python package** (`homericintelligence-hephaestus`) — version is **tag-driven**
   via hatch-vcs (derived from the latest `vX.Y.Z` git tag; see
@@ -27,8 +27,13 @@ ProjectHephaestus ships **two independently versioned artifacts**:
   own `version` field (declared in
   [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json)) that tracks the
   skill/command surface, not the Python API.
+- **The Codex plugin** (`hephaestus`, declared in `.codex-plugin/`) — carries its
+  own `version` field (declared in
+  [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json)) and exposes the same
+  skill surface through the Codex plugin marketplace metadata in
+  [`.agents/plugins/marketplace.json`](.agents/plugins/marketplace.json).
 
-These two version numbers are **not** coupled and will not match. The plugin version
+These version numbers are **not** coupled and will not match. A plugin version
 says nothing about the Python package version and vice versa. See
 [`docs/plugin-installation.md`](docs/plugin-installation.md) for plugin installation.
 

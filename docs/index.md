@@ -43,7 +43,7 @@ full function signatures, docstrings, and type annotations for all 44 CLI entry 
 
 See the [README](../README.md) for installation and development setup instructions.
 
-- [Plugin Installation Guide](plugin-installation.md) — Install the Claude Code plugin and enable skills in your project
+- [Plugin Installation Guide](plugin-installation.md) — Install the Claude Code or Codex plugin and enable skills in your project
 
 ## Contributing
 

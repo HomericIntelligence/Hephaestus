@@ -1,14 +1,15 @@
-# ProjectHephaestus Claude Code Plugin — Installation Guide
+# ProjectHephaestus Agent Plugin — Installation Guide
 
-ProjectHephaestus ships as a Claude Code plugin in addition to a Python package. Installing the plugin gives any repository in your ecosystem access to the `hephaestus` skill set.
+ProjectHephaestus ships as a Claude Code plugin and a Codex plugin in addition to a Python package. Installing the plugin gives any repository in your ecosystem access to the `hephaestus` skill set.
 
 > **Note on versions:** The plugin version (declared in
-> [`.claude-plugin/plugin.json`](../.claude-plugin/plugin.json)) and the Python package
+> [`.claude-plugin/plugin.json`](../.claude-plugin/plugin.json) and
+> [`.codex-plugin/plugin.json`](../.codex-plugin/plugin.json)) and the Python package
 > version (tag-driven via hatch-vcs; see
 > [latest release](https://github.com/HomericIntelligence/ProjectHephaestus/releases/latest))
 > are **separate artifacts** with independent version numbers — they are not coupled and
 > will not match. See
-> [`COMPATIBILITY.md`](../COMPATIBILITY.md#versioning-python-package-vs-claude-code-plugin)
+> [`COMPATIBILITY.md`](../COMPATIBILITY.md#versioning-python-package-vs-agent-plugins)
 > for details.
 
 ## What the Plugin Provides
@@ -45,19 +46,39 @@ adding or removing a skill without updating this table, or shipping a skill with
 
 ## Installation
 
-### From GitHub (recommended)
+### Claude Code From GitHub
 
 ```bash
 claude plugin install HomericIntelligence/ProjectHephaestus
 ```
 
-### From a local clone
+### Claude Code From a Local Clone
 
 ```bash
 claude plugin install /path/to/ProjectHephaestus
 ```
 
-## Enabling in a Project
+### Codex From GitHub
+
+```bash
+codex plugin marketplace add HomericIntelligence/ProjectHephaestus --ref main
+codex plugin add hephaestus@project-hephaestus
+```
+
+### Codex From a Local Clone
+
+```bash
+codex plugin marketplace add /path/to/ProjectHephaestus
+codex plugin add hephaestus@project-hephaestus
+```
+
+The Codex marketplace entry is declared in
+[`.agents/plugins/marketplace.json`](../.agents/plugins/marketplace.json). It points
+Codex at `plugins/hephaestus`, which is a lightweight compatibility wrapper around the
+canonical [`.codex-plugin/plugin.json`](../.codex-plugin/plugin.json) manifest and
+shared [`skills/`](../skills) directory.
+
+## Enabling in a Claude Code Project
 
 After installing, enable the plugin in your project's `.claude/settings.json`:
 
@@ -69,7 +90,7 @@ After installing, enable the plugin in your project's `.claude/settings.json`:
 }
 ```
 
-## Verifying Installation
+## Verifying Claude Code Installation
 
 Check that the plugin appears in your project's enabled plugins:
 
@@ -78,6 +99,18 @@ cat .claude/settings.json
 ```
 
 You should see `hephaestus@ProjectHephaestus` listed under `enabledPlugins`. Skills will then be available as both `/repo-analyze` and the fully-qualified `hephaestus:repo-analyze` form.
+
+## Verifying Codex Installation
+
+Check that Codex can see the configured marketplace:
+
+```bash
+codex plugin marketplace list
+codex plugin list --marketplace project-hephaestus
+```
+
+After installation, `hephaestus@project-hephaestus` should show as installed and
+enabled.
 
 ## Usage Examples
 
