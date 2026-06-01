@@ -419,7 +419,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
     # Enable auto-merge so the PR merges automatically once CI passes
     # Note: gh pr merge requires a PR number when using --repo
     PR_NUMBER=$(gh pr list --repo HomericIntelligence/ProjectMnemosyne --head "skill/<name>" --json number --jq '.[0].number')
-    gh pr merge "$PR_NUMBER" --auto --rebase --repo HomericIntelligence/ProjectMnemosyne
+    gh pr merge "$PR_NUMBER" --auto --squash --repo HomericIntelligence/ProjectMnemosyne
     ```
 
 10. **Cleanup worktree** (always clean up after PR creation):
