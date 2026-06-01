@@ -257,6 +257,7 @@ with `--help` to see full usage.
 | `hephaestus-check-docstrings` | Check Python docstrings for genuine sentence fragments |
 | `hephaestus-check-python-version` | Check Python version consistency across project configuration files |
 | `hephaestus-check-readmes` | Markdown validation utilities for HomericIntelligence projects |
+| `hephaestus-check-skill-catalog` | Ensure `docs/plugin-installation.md` lists every skill shipped under `skills/` |
 | `hephaestus-check-stale-scripts` | Detect scripts in `scripts/` with no references in CI configs or other scripts |
 | `hephaestus-check-test-structure` | Validate unit test directory structure |
 | `hephaestus-check-tier-labels` | Enforce tier label consistency across all project Markdown files |
