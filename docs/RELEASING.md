@@ -49,6 +49,85 @@ Publishing uses OIDC trusted publishing — no `PYPI_API_TOKEN` secret is needed
 in the `pypi` GitHub Environment which must have the corresponding trusted publisher configured on
 PyPI. See the [PyPI documentation](https://docs.pypi.org/trusted-publishers/) for setup.
 
+## GPG signing keys for auto-tag
+
+Release tags pushed by `.github/workflows/auto-tag.yml` are **GPG-signed annotated tags**
+(`git tag -s`). This matches the repo-wide signed-commits policy: every commit on `main` is
+signed, so every tag created from those commits should carry the same cryptographic provenance.
+
+### Required repository secrets
+
+`auto-tag.yml` imports a GPG key via [`crazy-max/ghaction-import-gpg`](https://github.com/crazy-max/ghaction-import-gpg)
+(pinned to a commit SHA — Dependabot's `github-actions` ecosystem already watches it). The
+action reads two repository secrets:
+
+| Secret | Purpose |
+|--------|---------|
+| `GPG_PRIVATE_KEY` | The ASCII-armored export of the signing key (starts with the standard PGP private-key block header). |
+| `GPG_PASSPHRASE` | Passphrase that unlocks `GPG_PRIVATE_KEY`. Set even if the key has none — leave empty. |
+
+Without both secrets the workflow **fails on the import step before any tag is created**.
+That is intentional: there is no half-state where an unsigned tag is pushed because secrets
+are missing.
+
+### Key requirements
+
+- **Algorithm**: RSA 4096 (or Ed25519). RSA 2048 is acceptable but discouraged for new keys.
+- **User ID email**: must match the `user.email` the workflow configures
+  (`github-actions[bot]@users.noreply.github.com`) so verification clients accept the signature.
+- **Expiry**: at least 1 year past the next planned release cadence. A key that expires
+  mid-cycle silently breaks `auto-tag.yml` on its next run.
+- **Subkey scope**: a signing-capable subkey is sufficient; the primary key does not need to
+  be uploaded.
+
+### Initial setup
+
+```bash
+# 1. Generate a dedicated release-signing key (on a trusted machine).
+gpg --quick-gen-key 'github-actions[bot] <github-actions[bot]@users.noreply.github.com>' \
+    rsa4096 sign 2y
+
+# 2. Export the armored private key + record the passphrase used above.
+KEY_ID=$(gpg --list-secret-keys --keyid-format=long --with-colons \
+         'github-actions[bot]@users.noreply.github.com' \
+         | awk -F: '/^sec/ {print $5; exit}')
+gpg --armor --export-secret-keys "${KEY_ID}" > /tmp/auto-tag-private.asc
+
+# 3. Upload to GitHub repo secrets.
+gh secret set GPG_PRIVATE_KEY < /tmp/auto-tag-private.asc
+gh secret set GPG_PASSPHRASE   # paste passphrase when prompted
+
+# 4. Wipe the local export.
+shred -u /tmp/auto-tag-private.asc
+
+# 5. Publish the corresponding public key so consumers can verify tags.
+gpg --armor --export "${KEY_ID}" | gh release upload <some-release> -    # or push to keys.openpgp.org
+```
+
+### Rotation
+
+Plan rotation **before** the existing key expires. The procedure is the same as initial setup
+plus a verification dry-run:
+
+1. Generate the new key (steps 1-2 above).
+2. `gh secret set GPG_PRIVATE_KEY` + `gh secret set GPG_PASSPHRASE` — this overwrites both
+   atomically.
+3. Trigger `Auto Tag Release` via **Actions → Run workflow** with `bump_kind=patch` on a
+   throwaway test branch (or against a non-`main` ref) and confirm the import step succeeds.
+4. Revoke the old key once a release cycle has passed.
+
+### Failure modes
+
+| Symptom | Diagnosis |
+|---------|-----------|
+| `Error: gpg: ... no secret key` on the import step | `GPG_PRIVATE_KEY` secret is missing or truncated; re-upload the armored export. |
+| Import step succeeds but `git tag -s` fails with `gpg: signing failed` | Passphrase mismatch — `GPG_PASSPHRASE` does not unlock `GPG_PRIVATE_KEY`. |
+| `gpg: signing failed: Inappropriate ioctl for device` | Missing `GPG_TTY` — the import action sets this; if the failure recurs, re-pin to the latest version. |
+| Workflow ran fine yesterday, fails today with `gpg: key ... has expired` | The signing key expired. Rotate per the procedure above and re-trigger. |
+
+If the import step fails for any reason, no tag is created and no release artifact is produced
+(see the idempotency guarantee in #432).
+
 ## Rollback
 
 A release produces a published-then-immutable PyPI artifact plus a git tag and a
