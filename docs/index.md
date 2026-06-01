@@ -37,7 +37,7 @@ just docs        # outputs to docs/api/
 ```
 
 The generated `docs/api/` directory is git-ignored; run the command locally to browse
-full function signatures, docstrings, and type annotations for all 37+ CLI entry points.
+full function signatures, docstrings, and type annotations for all 44 CLI entry points.
 
 ## Setup
 
