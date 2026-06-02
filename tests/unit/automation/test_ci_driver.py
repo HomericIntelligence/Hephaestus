@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.agents.runtime import AgentRunResult
-from hephaestus.automation.ci_driver import CIDriver
-from hephaestus.automation.models import CIDriverOptions
+from hephaestus.automation.ci_driver import CIDriver, _evaluate_run_result
+from hephaestus.automation.models import CIDriverOptions, WorkerResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -451,11 +451,12 @@ class TestAllRequiredGreen:
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
             patch.object(driver, "_enable_auto_merge") as mock_merge,
             patch.object(driver, "_run_drive_green_learnings"),
+            patch.object(driver, "_wait_for_pr_terminal", return_value="MERGED"),
         ):
             result = driver._drive_issue(123, 456, 0)
 
         assert result.success is True
-        mock_merge.assert_called_once_with(456)
+        mock_merge.assert_called_once_with(456, is_bot_pr=False)
 
     def test_dry_run_no_auto_merge(self, mock_options: CIDriverOptions, tmp_path: Path) -> None:
         """dry_run=True, all green → gh pr merge not called."""
@@ -502,12 +503,13 @@ class TestRequiredVsNonRequired:
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
             patch.object(driver, "_enable_auto_merge") as mock_merge,
             patch.object(driver, "_run_drive_green_learnings"),
+            patch.object(driver, "_wait_for_pr_terminal", return_value="MERGED"),
         ):
             result = driver._drive_issue(123, 456, 0)
 
         # All non-required treated as required → all green → auto-merge
         assert result.success is True
-        mock_merge.assert_called_once_with(456)
+        mock_merge.assert_called_once_with(456, is_bot_pr=False)
 
     def test_required_vs_nonrequired_only_required_gates_green(self, driver: CIDriver) -> None:
         """Mix of required/non-required; only required=True ones gate green."""
@@ -520,11 +522,12 @@ class TestRequiredVsNonRequired:
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
             patch.object(driver, "_enable_auto_merge") as mock_merge,
             patch.object(driver, "_run_drive_green_learnings"),
+            patch.object(driver, "_wait_for_pr_terminal", return_value="MERGED"),
         ):
             result = driver._drive_issue(123, 456, 0)
 
         assert result.success is True
-        mock_merge.assert_called_once_with(456)
+        mock_merge.assert_called_once_with(456, is_bot_pr=False)
 
     def test_failing_required_runs_fix_session(self, driver: CIDriver) -> None:
         """Required check failed → _run_ci_fix_session called."""
@@ -772,6 +775,9 @@ class TestDriveGreenLearnings:
                 "hephaestus.automation.ci_driver.invoke_claude_with_session",
                 return_value=("ok", "sid"),
             ) as mock_invoke,
+            # Don't block on the post-arm wait loop; we only assert the
+            # arming record is written here, not the merge outcome.
+            patch.object(driver, "_wait_for_pr_terminal", return_value="TIMEOUT"),
         ):
             result = driver._drive_issue(123, 456, 0)
 
@@ -884,8 +890,8 @@ class TestDriveGreenLearnings:
         mock_learn.assert_not_called()
         mock_state.assert_not_called()
 
-    def test_check_armed_pr_open_at_same_sha_short_circuits(self, driver: CIDriver) -> None:
-        """OPEN at the armed SHA → success, /learn not fired, record kept."""
+    def test_check_armed_pr_open_at_same_sha_waits_then_pending(self, driver: CIDriver) -> None:
+        """OPEN at the armed SHA → wait; still pending (TIMEOUT) keeps the record."""
         driver._save_arming_state(
             42,
             {
@@ -903,6 +909,8 @@ class TestDriveGreenLearnings:
                 return_value={"state": "OPEN", "headRefOid": "abc1234"},
             ),
             patch.object(driver, "_run_drive_green_learnings") as mock_learn,
+            # The PR never resolves within the budget → TIMEOUT (still pending).
+            patch.object(driver, "_wait_for_pr_terminal", return_value="TIMEOUT"),
         ):
             result = driver._check_arming_on_drive_start(42, 500)
 
@@ -911,6 +919,37 @@ class TestDriveGreenLearnings:
         mock_learn.assert_not_called()
         # Record preserved for the next run.
         assert driver._load_arming_state(42) is not None
+
+    def test_check_armed_pr_merges_during_wait_fires_learn(self, driver: CIDriver) -> None:
+        """OPEN at armed SHA that merges during the wait → /learn fires once."""
+        driver._save_arming_state(
+            42,
+            {
+                "pr_number": 500,
+                "pr_head_branch": "42-impl",
+                "head_sha_at_arming": "abc1234",
+                "armed_at": "2026-01-01T00:00:00Z",
+                "learn_captured_at": None,
+            },
+        )
+        with (
+            patch.object(
+                driver,
+                "_gh_pr_state",
+                return_value={"state": "OPEN", "headRefOid": "abc1234"},
+            ),
+            patch.object(driver, "_run_drive_green_learnings") as mock_learn,
+            patch.object(driver, "_wait_for_pr_terminal", return_value="MERGED"),
+        ):
+            result = driver._check_arming_on_drive_start(42, 500)
+
+        assert result is not None
+        assert result.success is True
+        mock_learn.assert_called_once_with(42, 500)
+        # Record marked captured so /learn never re-fires.
+        record = driver._load_arming_state(42)
+        assert record is not None
+        assert record["learn_captured_at"] is not None
 
     def test_check_armed_pr_head_advanced_clears_record_and_falls_through(
         self, driver: CIDriver
@@ -1045,6 +1084,7 @@ class TestCIPollLoop:
             patch("hephaestus.automation.ci_driver.time.sleep"),
             patch.object(driver, "_enable_auto_merge", return_value=True),
             patch.object(driver, "_run_drive_green_learnings"),
+            patch.object(driver, "_wait_for_pr_terminal", return_value="MERGED"),
         ):
             result = driver._drive_issue(123, 456, 0)
 
@@ -1111,6 +1151,8 @@ class TestRunCleanup:
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[green_check]),
             patch.object(d, "_enable_auto_merge", return_value=True),
             patch.object(d, "_run_drive_green_learnings"),
+            # Don't block the worker on the post-arm wait loop (#838).
+            patch.object(d, "_wait_for_pr_terminal", return_value="MERGED"),
         ):
             d.run()
 
@@ -1146,6 +1188,8 @@ class TestRunCleanup:
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[green_check]),
             patch.object(d, "_enable_auto_merge", return_value=True),
             patch.object(d, "_run_drive_green_learnings"),
+            # Don't block the worker on the post-arm wait loop (#838).
+            patch.object(d, "_wait_for_pr_terminal", return_value="MERGED"),
             caplog.at_level(logging.INFO, logger="hephaestus.automation.ci_driver"),
         ):
             d.run()
@@ -1472,8 +1516,9 @@ class TestNoCommitRetry:
                 session_id=None,
             )
         assert result is False
-        # Exactly ONE retry — must not loop forever.
-        mock_invoke.assert_called_once()
+        # Bounded retries — re-engages up to max_retries (default 2) before
+        # giving up, so a single no-op turn is no longer terminal (#846).
+        assert mock_invoke.call_count == 2
         # Forensics marker is written next to the arming-state files.
         marker = driver.state_dir / "repeated-no-commit-2.json"
         assert marker.exists()
@@ -1968,3 +2013,114 @@ class TestMechanicalRebase:
         # With the flag off the method is simply never called; here we assert the
         # option is wired so the guard evaluates False.
         assert driver.options.enable_mechanical_rebase is False
+
+
+# ---------------------------------------------------------------------------
+# #838: wait-for-merge + final-gate honesty
+# ---------------------------------------------------------------------------
+
+
+class TestWaitForPrTerminal:
+    """``_wait_for_pr_terminal`` blocks until a real terminal state (#838)."""
+
+    def test_merged_returns_merged(self, driver: CIDriver) -> None:
+        with patch.object(driver, "_gh_pr_state", return_value={"state": "MERGED"}):
+            assert driver._wait_for_pr_terminal(1, 2) == "MERGED"
+
+    def test_closed_returns_closed(self, driver: CIDriver) -> None:
+        with patch.object(driver, "_gh_pr_state", return_value={"state": "CLOSED"}):
+            assert driver._wait_for_pr_terminal(1, 2) == "CLOSED"
+
+    def test_open_with_red_required_check_returns_failing(self, driver: CIDriver) -> None:
+        # OPEN but a required check is red → react immediately, don't wait it out.
+        with (
+            patch.object(driver, "_gh_pr_state", return_value={"state": "OPEN"}),
+            patch.object(driver, "_failing_required_check_names", return_value=["lint"]),
+        ):
+            assert driver._wait_for_pr_terminal(1, 2) == "FAILING"
+
+    def test_open_and_green_times_out(
+        self, driver: CIDriver, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # OPEN, no failing checks, never merges → bounded by HEPH_PR_MERGE_MAX_WAIT.
+        monkeypatch.setenv("HEPH_PR_MERGE_MAX_WAIT", "0")
+        with (
+            patch.object(driver, "_gh_pr_state", return_value={"state": "OPEN"}),
+            patch.object(driver, "_failing_required_check_names", return_value=[]),
+            patch("hephaestus.automation.ci_driver.time.sleep") as mock_sleep,
+        ):
+            assert driver._wait_for_pr_terminal(1, 2) == "TIMEOUT"
+        # With a 0s budget the very first sleep would overrun → no sleep at all.
+        mock_sleep.assert_not_called()
+
+    def test_dry_run_short_circuits_to_timeout(
+        self, mock_options: CIDriverOptions, tmp_path: Path
+    ) -> None:
+        mock_options.dry_run = True
+        with (
+            patch("hephaestus.automation.ci_driver.get_repo_root", return_value=tmp_path),
+            patch("hephaestus.automation.ci_driver.WorktreeManager"),
+            patch("hephaestus.automation.ci_driver.StatusTracker"),
+        ):
+            d = CIDriver(mock_options)
+            d.state_dir = tmp_path
+        # Must not touch the network in dry-run.
+        with patch.object(d, "_gh_pr_state") as mock_state:
+            assert d._wait_for_pr_terminal(1, 2) == "TIMEOUT"
+        mock_state.assert_not_called()
+
+
+class TestEnableAutoMergeBotRetry:
+    """Bot PRs get a strategy-agnostic ``--auto`` retry before giving up (#848)."""
+
+    def test_bot_pr_falls_back_to_strategy_agnostic_auto(self, driver: CIDriver) -> None:
+        calls: list[list[str]] = []
+
+        def fake_gh(args: list[str]) -> MagicMock:
+            calls.append(args)
+            # First call (--auto --squash) fails; second (--auto) succeeds.
+            if "--squash" in args:
+                raise subprocess.CalledProcessError(1, args, stderr="squash disabled")
+            return MagicMock(stdout="")
+
+        with patch("hephaestus.automation.ci_driver._gh_call", side_effect=fake_gh):
+            ok = driver._enable_auto_merge(2, is_bot_pr=True)
+        assert ok is True
+        # Exactly two arming attempts: --squash then strategy-agnostic --auto.
+        assert ["pr", "merge", "2", "--auto", "--squash"] in calls
+        assert ["pr", "merge", "2", "--auto"] in calls
+
+    def test_non_bot_pr_does_not_get_extra_retry(self, driver: CIDriver) -> None:
+        # force_merge_on_stall is False by default → no fallback for human PRs.
+        with patch(
+            "hephaestus.automation.ci_driver._gh_call",
+            side_effect=subprocess.CalledProcessError(1, ["gh"], stderr="nope"),
+        ) as mock_gh:
+            ok = driver._enable_auto_merge(2, is_bot_pr=False)
+        assert ok is False
+        # Only the primary --squash attempt; no strategy-agnostic retry.
+        assert mock_gh.call_count == 1
+
+
+class TestEvaluateRunResult:
+    """The final gate separates armed-pending PRs from genuinely-stuck ones (#838)."""
+
+    def test_clean_repo_is_zero(self) -> None:
+        results = {1: WorkerResult(issue_number=1, success=True, pr_number=10)}
+        assert _evaluate_run_result(results, [], issues=[1], as_json=False) == 0
+
+    def test_armed_pending_only_is_zero(self) -> None:
+        # A PR still merging on its own must NOT red-flag the repo.
+        results = {1: WorkerResult(issue_number=1, success=True, pr_number=10)}
+        remaining = [{"number": 10, "autoMergeRequest": {"enabledAt": "now"}}]
+        assert _evaluate_run_result(results, remaining, issues=[1], as_json=False) == 0
+
+    def test_needs_action_pr_is_one(self) -> None:
+        # An un-armed PR genuinely needs manual action → failure.
+        results = {1: WorkerResult(issue_number=1, success=True, pr_number=10)}
+        remaining = [{"number": 11, "autoMergeRequest": None}]
+        assert _evaluate_run_result(results, remaining, issues=[1], as_json=False) == 1
+
+    def test_failed_issue_is_one(self) -> None:
+        results = {1: WorkerResult(issue_number=1, success=False, pr_number=10)}
+        assert _evaluate_run_result(results, [], issues=[1], as_json=False) == 1

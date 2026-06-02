@@ -582,7 +582,9 @@ class CIDriver:
                     return WorkerResult(
                         issue_number=issue_number, success=True, pr_number=pr_number
                     )
-                merge_ok = self._enable_auto_merge(pr_number)
+                merge_ok = self._enable_auto_merge(
+                    pr_number, is_bot_pr=self._is_bot_pr_mode(issue_number, pr_number)
+                )
                 if merge_ok:
                     # PR is green and auto-merge is enabled — but do NOT
                     # capture /learn here (#840). Auto-merge-armed is not
@@ -598,6 +600,24 @@ class CIDriver:
                     pr_head_sha = (gh_state or {}).get("headRefOid", "") or ""
                     pr_head_branch = self._get_pr_branch(pr_number)
                     self._arm_drive_green(pr_number, pr_head_branch, pr_head_sha)
+
+                    # Block until the armed PR actually finishes instead of
+                    # returning the instant auto-merge is enabled (#838). If CI
+                    # goes red after arming, drop into the fix path; otherwise
+                    # MERGED/CLOSED/TIMEOUT are all "nothing more to drive here".
+                    outcome = self._wait_for_pr_terminal(issue_number, pr_number)
+                    if outcome == "FAILING":
+                        fix_result = self._attempt_ci_fixes(issue_number, pr_number, acquired_slot)
+                        if fix_result is not None:
+                            return fix_result
+                        return WorkerResult(
+                            issue_number=issue_number,
+                            success=False,
+                            pr_number=pr_number,
+                            error=(
+                                f"CI fix failed after {self.options.max_fix_iterations} attempt(s)"
+                            ),
+                        )
                 return WorkerResult(
                     issue_number=issue_number,
                     success=merge_ok,
@@ -1114,6 +1134,83 @@ class CIDriver:
             )
             return None
 
+    def _wait_for_pr_terminal(self, issue_number: int, pr_number: int) -> str:
+        """Block until an armed PR reaches a terminal state, or times out.
+
+        Once a PR's auto-merge is armed, the driver historically observed the
+        OPEN state once and returned success — declaring the repo "not done"
+        on PRs that were seconds away from merging (#838 false-failure class).
+        Instead, poll the PR until it actually finishes so the driver can react
+        to the real outcome (merge, abandonment, or freshly-red CI).
+
+        Polls ``_gh_pr_state`` with exponential backoff (``min(2**n, 60)`` cap,
+        matching the CI-pending poll loop in ``_drive_issue``), bounded by
+        ``HEPH_PR_MERGE_MAX_WAIT`` seconds (default 1800). On each OPEN poll we
+        also inspect required checks: a required check concluding ``failure``
+        returns ``FAILING`` straight away rather than waiting out the timeout.
+
+        Args:
+            issue_number: GitHub issue number (for status/log lines).
+            pr_number: PR whose merge we are waiting on.
+
+        Returns:
+            One of ``"MERGED"``, ``"CLOSED"``, ``"FAILING"``, or ``"TIMEOUT"``.
+
+        """
+        if self.options.dry_run:
+            return "TIMEOUT"
+
+        max_wait = int(os.environ.get("HEPH_PR_MERGE_MAX_WAIT", "1800"))
+        elapsed = 0
+        attempt = 0
+        iref = issue_ref(issue_number)
+
+        while True:
+            gh_state = self._gh_pr_state(pr_number)
+            state = ((gh_state or {}).get("state") or "").upper()
+
+            if state == "MERGED":
+                logger.info("Issue #%s: PR #%s merged", issue_number, pr_number)
+                return "MERGED"
+            if state == "CLOSED":
+                logger.info(
+                    "Issue #%s: PR #%s closed without merging while waiting",
+                    issue_number,
+                    pr_number,
+                )
+                return "CLOSED"
+
+            # Still OPEN (or unknown). If a required check has gone red since
+            # arming, stop waiting and let the caller drive a fix.
+            failing = self._failing_required_check_names(pr_number)
+            if failing:
+                logger.warning(
+                    "Issue #%s: PR #%s went red while awaiting merge (failing: %s)",
+                    issue_number,
+                    pr_number,
+                    ", ".join(failing),
+                )
+                return "FAILING"
+
+            sleep_secs = min(2**attempt, 60)
+            if elapsed + sleep_secs > max_wait:
+                logger.warning(
+                    "Issue #%s: PR #%s still OPEN after %ss (limit %ss); leaving armed and pending",
+                    issue_number,
+                    pr_number,
+                    elapsed,
+                    max_wait,
+                )
+                return "TIMEOUT"
+
+            self.status_tracker.update_slot(
+                0,
+                f"{iref}: PR #{pr_number} awaiting merge ({elapsed}s elapsed)",
+            )
+            time.sleep(sleep_secs)
+            elapsed += sleep_secs
+            attempt += 1
+
     def _sweep_orphaned_arming_records(self) -> None:  # noqa: C901  # one record loop with three state branches; splitting it just hides the contract
         """Drop CLOSED records and capture missed ``/learn`` for MERGED orphans (#848).
 
@@ -1260,12 +1357,33 @@ class CIDriver:
             return None
 
         # Still in flight at the same arming SHA — auto-merge is presumably
-        # still waiting on CI / branch protection. Nothing more to do.
+        # still waiting on CI / branch protection. Block until it finishes
+        # (#838) rather than returning success on a PR that may still go red.
         logger.info(
             "Issue #%s: PR #%s still OPEN at the armed SHA; waiting for merge",
             issue_number,
             pr_number,
         )
+        outcome = self._wait_for_pr_terminal(issue_number, pr_number)
+        if outcome == "MERGED":
+            # Fire the post-merge /learn exactly once, mirroring the MERGED
+            # branch above so we don't lose the capture by exiting early.
+            self.status_tracker.update_slot(
+                0, f"{issue_ref(issue_number)}: capturing post-merge /learn"
+            )
+            self._run_drive_green_learnings(issue_number, pr_number)
+            record["learn_captured_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            self._save_arming_state(issue_number, record)
+            return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+        if outcome == "CLOSED":
+            self._clear_arming_state(issue_number)
+            return None
+        if outcome == "FAILING":
+            # PR went red after arming — clear the stale arming and fall
+            # through so the normal drive path can fix it.
+            self._clear_arming_state(issue_number)
+            return None
+        # TIMEOUT — still pending; leave armed for a later pass to resolve.
         return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
     def _load_impl_session_id(self, issue_number: int) -> str | None:
@@ -1470,8 +1588,17 @@ class CIDriver:
         pr_head_branch: str,
         pre_agent_sha: str,
         session_id: str | None,
+        max_retries: int = 2,
     ) -> bool:
-        """Re-invoke the same agent session once when the first turn produced no commit (#846).
+        """Re-invoke the agent up to ``max_retries`` times after a no-commit turn (#846).
+
+        A single no-op agent turn used to be terminal: with
+        ``max_fix_iterations=1`` the whole issue failed the instant the first
+        force-engagement retry also returned no commit. That cost real PRs
+        (AchaeanFleet #691/#683, Hermes #643). We now re-engage up to
+        ``max_retries`` times before recording the forensics marker, re-checking
+        between attempts so a PR that goes green (or where a commit lands)
+        short-circuits immediately.
 
         Only fires when the PR still has failing required checks — a green PR
         that arrived via concurrent activity should NOT be perturbed. Stays on
@@ -1496,51 +1623,62 @@ class CIDriver:
             marker to ``state_dir``.
 
         """
-        failing = self._failing_required_check_names(pr_number)
-        if not failing:
-            logger.info(
-                "Issue #%s: no-commit turn but PR #%s has no failing required checks; "
-                "skipping force-engagement retry",
-                issue_number,
-                pr_number,
+        failing: list[str] = []
+        for retry in range(1, max_retries + 1):
+            failing = self._failing_required_check_names(pr_number)
+            if not failing:
+                logger.info(
+                    "Issue #%s: no-commit turn but PR #%s has no failing required "
+                    "checks; skipping force-engagement retry",
+                    issue_number,
+                    pr_number,
+                )
+                return False
+
+            review_threads_block = self._format_review_threads_block(pr_number)
+            retry_prompt = self._force_engagement_prompt(
+                issue_number=issue_number,
+                pr_number=pr_number,
+                worktree_path=worktree_path,
+                pr_head_branch=pr_head_branch,
+                failing_check_names=failing,
+                review_threads_block=review_threads_block,
             )
-            return False
 
-        review_threads_block = self._format_review_threads_block(pr_number)
-        retry_prompt = self._force_engagement_prompt(
-            issue_number=issue_number,
-            pr_number=pr_number,
-            worktree_path=worktree_path,
-            pr_head_branch=pr_head_branch,
-            failing_check_names=failing,
-            review_threads_block=review_threads_block,
-        )
+            logger.warning(
+                "Issue #%s: no-commit on CI fix turn; re-invoking with "
+                "force-engagement prompt (retry %s/%s, failing: %s)",
+                issue_number,
+                retry,
+                max_retries,
+                ", ".join(failing) or "<unknown>",
+            )
 
-        logger.warning(
-            "Issue #%s: no-commit on first CI fix turn; re-invoking with "
-            "force-engagement prompt (failing: %s)",
-            issue_number,
-            ", ".join(failing) or "<unknown>",
-        )
-
-        try:
-            if is_codex(self.options.agent):
-                if session_id:
-                    try:
-                        resume_codex_session(
-                            session_id,
-                            retry_prompt,
-                            cwd=worktree_path,
-                            timeout=ci_driver_claude_timeout(),
-                        )
-                    except subprocess.CalledProcessError as exc:
-                        logger.warning(
-                            "Issue #%s: Codex retry resume failed for PR #%s; "
-                            "falling back to fresh session: %s",
-                            issue_number,
-                            pr_number,
-                            (exc.stderr or exc.stdout or "")[:300],
-                        )
+            try:
+                if is_codex(self.options.agent):
+                    if session_id:
+                        try:
+                            resume_codex_session(
+                                session_id,
+                                retry_prompt,
+                                cwd=worktree_path,
+                                timeout=ci_driver_claude_timeout(),
+                            )
+                        except subprocess.CalledProcessError as exc:
+                            logger.warning(
+                                "Issue #%s: Codex retry resume failed for PR #%s; "
+                                "falling back to fresh session: %s",
+                                issue_number,
+                                pr_number,
+                                (exc.stderr or exc.stdout or "")[:300],
+                            )
+                            run_codex_session(
+                                retry_prompt,
+                                cwd=worktree_path,
+                                timeout=ci_driver_claude_timeout(),
+                                sandbox="workspace-write",
+                            )
+                    else:
                         run_codex_session(
                             retry_prompt,
                             cwd=worktree_path,
@@ -1548,51 +1686,53 @@ class CIDriver:
                             sandbox="workspace-write",
                         )
                 else:
-                    run_codex_session(
-                        retry_prompt,
+                    repo_slug = get_repo_slug(self.repo_root)
+                    invoke_claude_with_session(
+                        repo=repo_slug,
+                        issue=issue_number,
+                        agent=AGENT_CI_DRIVER,
+                        prompt=retry_prompt,
+                        model=implementer_model(),
                         cwd=worktree_path,
                         timeout=ci_driver_claude_timeout(),
-                        sandbox="workspace-write",
+                        output_format="json",
+                        allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
+                        extra_args=["--dangerously-skip-permissions"],
+                        input_via_stdin=True,
                     )
-            else:
-                repo_slug = get_repo_slug(self.repo_root)
-                invoke_claude_with_session(
-                    repo=repo_slug,
-                    issue=issue_number,
-                    agent=AGENT_CI_DRIVER,
-                    prompt=retry_prompt,
-                    model=implementer_model(),
-                    cwd=worktree_path,
-                    timeout=ci_driver_claude_timeout(),
-                    output_format="json",
-                    allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
-                    extra_args=["--dangerously-skip-permissions"],
-                    input_via_stdin=True,
+            except subprocess.CalledProcessError as exc:
+                logger.error(
+                    "Issue #%s: no-commit retry session failed for PR #%s: %s",
+                    issue_number,
+                    pr_number,
+                    (exc.stderr or exc.stdout or "")[:300],
                 )
-        except subprocess.CalledProcessError as exc:
-            logger.error(
-                "Issue #%s: no-commit retry session failed for PR #%s: %s",
-                issue_number,
-                pr_number,
-                (exc.stderr or exc.stdout or "")[:300],
-            )
-            return False
-        except subprocess.TimeoutExpired:
-            logger.error(
-                "Issue #%s: no-commit retry session timed out for PR #%s",
-                issue_number,
-                pr_number,
-            )
-            return False
+                return False
+            except subprocess.TimeoutExpired:
+                logger.error(
+                    "Issue #%s: no-commit retry session timed out for PR #%s",
+                    issue_number,
+                    pr_number,
+                )
+                return False
 
-        if self._head_advanced(worktree_path, pre_agent_sha, issue_number):
-            return True
+            if self._head_advanced(worktree_path, pre_agent_sha, issue_number):
+                return True
+
+            logger.warning(
+                "Issue #%s: still no commit on PR #%s after force-engagement retry %s/%s",
+                issue_number,
+                pr_number,
+                retry,
+                max_retries,
+            )
 
         logger.error(
-            "Issue #%s: REPEATED no-commit on PR #%s after force-engagement retry; "
-            "marking and moving on",
+            "Issue #%s: REPEATED no-commit on PR #%s after %s force-engagement "
+            "retries; marking and moving on",
             issue_number,
             pr_number,
+            max_retries,
         )
         self._record_repeated_no_commit(
             issue_number=issue_number,
@@ -1893,7 +2033,7 @@ class CIDriver:
             )
             return False
 
-    def _enable_auto_merge(self, pr_number: int) -> bool:
+    def _enable_auto_merge(self, pr_number: int, is_bot_pr: bool = False) -> bool:
         """Enable auto-merge for the given PR using squash strategy.
 
         First attempts ``gh pr merge --auto --squash``. This repo is
@@ -1903,8 +2043,16 @@ class CIDriver:
         squash merge (``gh pr merge --squash --delete-branch``). If both
         strategies fail, logs an ERROR and returns False.
 
+        For bot-authored PRs (Dependabot etc., #848) a green PR left ``NOT
+        armed`` accumulates forever and keeps the repo perpetually "not done".
+        Those PRs are low-risk dependency bumps, so before giving up we make a
+        strategy-agnostic ``gh pr merge --auto`` attempt (no ``--squash``),
+        letting whatever merge method the repo actually allows take effect.
+
         Args:
             pr_number: GitHub PR number.
+            is_bot_pr: True when this is a bot-authored PR, enabling the
+                strategy-agnostic arming retry described above.
 
         Returns:
             True if auto-merge was enabled (or fallback merge succeeded),
@@ -1922,6 +2070,21 @@ class CIDriver:
                 pr_number,
                 e,
             )
+
+        # Bot PRs: try arming without forcing a strategy before stronger
+        # fallbacks. A repo that disallows squash (rebase/merge-only) would
+        # otherwise strand every Dependabot PR as NOT armed.
+        if is_bot_pr:
+            try:
+                _gh_call(["pr", "merge", str(pr_number), "--auto"])
+                logger.info("Enabled auto-merge (strategy-agnostic) for bot PR #%s", pr_number)
+                return True
+            except subprocess.CalledProcessError as bot_err:
+                logger.warning(
+                    "Could not enable strategy-agnostic auto-merge for bot PR #%s: %s",
+                    pr_number,
+                    bot_err,
+                )
 
         if not self.options.force_merge_on_stall:
             logger.error(
@@ -2222,6 +2385,70 @@ def _final_loop_gate_passes(force: bool) -> tuple[bool, str]:
     return True, f"final loop {idx}/{total}"
 
 
+def _evaluate_run_result(
+    results: dict[int, WorkerResult],
+    open_prs_remaining: list[dict[str, Any]],
+    *,
+    issues: list[int],
+    as_json: bool,
+) -> int:
+    """Map a completed drive into a process exit code (#838).
+
+    The repo is "done" when no PR still needs human action. After the
+    wait-for-merge change the driver blocks on armed PRs until they merge or go
+    red, so a PR that is STILL armed-and-pending at exit is just slow CI we
+    already waited on — it must not red-flag the repo. We partition the
+    remaining open PRs into ``armed_pending`` (auto-merge armed, merging on its
+    own) vs ``needs_action`` (un-armed, genuinely stuck) and only fail on the
+    latter (or on per-issue failures).
+
+    Args:
+        results: Per-issue worker results from ``CIDriver.run()``.
+        open_prs_remaining: Open PRs left on the repo (each carries
+            ``number`` and ``autoMergeRequest``).
+        issues: The input issue list (echoed into JSON status).
+        as_json: Whether to emit a machine-readable status line.
+
+    Returns:
+        ``0`` if clean (possibly with armed-pending PRs still merging),
+        ``1`` if any issue failed or any PR needs manual action.
+
+    """
+    log = logging.getLogger(__name__)
+    failed = [num for num, result in results.items() if not result.success]
+    armed_pending = [pr.get("number") for pr in open_prs_remaining if pr.get("autoMergeRequest")]
+    needs_action = [pr.get("number") for pr in open_prs_remaining if not pr.get("autoMergeRequest")]
+    if armed_pending:
+        log.warning(
+            "%s PR(s) armed and still merging (waited; not a failure): %s",
+            len(armed_pending),
+            armed_pending,
+        )
+    if failed or needs_action:
+        if failed:
+            log.error("CI drive failed for %s issue(s): %s", len(failed), failed)
+        if needs_action:
+            log.error(
+                "Repo not done: %s open PR(s) need manual action: %s",
+                len(needs_action),
+                needs_action,
+            )
+        if as_json:
+            emit_json_status(
+                1,
+                issues=issues,
+                failed=failed,
+                needs_action=needs_action,
+                armed_pending=armed_pending,
+            )
+        return 1
+
+    log.info("CI driver complete")
+    if as_json:
+        emit_json_status(0, issues=issues, failed=[], needs_action=[], armed_pending=armed_pending)
+    return 0
+
+
 def main() -> int:
     """Execute the CI driver workflow.
 
@@ -2262,35 +2489,9 @@ def main() -> int:
 
         driver = CIDriver(options)
         results = driver.run()
-
-        failed = [num for num, result in results.items() if not result.success]
-        # The repo is "done" only when there are zero open PRs left — even
-        # an empty ``failed`` list is not sufficient because auto-merge may
-        # still be pending, PRs from outside the input set may remain, etc.
-        # (#838). ``driver.open_prs_remaining`` is populated by ``run()``.
-        remaining_pr_numbers = [pr.get("number") for pr in driver.open_prs_remaining]
-        if failed or remaining_pr_numbers:
-            if failed:
-                log.error("CI drive failed for %s issue(s): %s", len(failed), failed)
-            if remaining_pr_numbers:
-                log.error(
-                    "Repo not done: %s open PR(s) remain: %s",
-                    len(remaining_pr_numbers),
-                    remaining_pr_numbers,
-                )
-            if args.json:
-                emit_json_status(
-                    1,
-                    issues=args.issues,
-                    failed=failed,
-                    open_prs_remaining=remaining_pr_numbers,
-                )
-            return 1
-
-        log.info("CI driver complete")
-        if args.json:
-            emit_json_status(0, issues=args.issues, failed=[], open_prs_remaining=[])
-        return 0
+        return _evaluate_run_result(
+            results, driver.open_prs_remaining, issues=args.issues, as_json=args.json
+        )
 
     except KeyboardInterrupt:
         log.warning("Interrupted by user")
