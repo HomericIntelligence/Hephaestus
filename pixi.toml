@@ -41,6 +41,10 @@ pip = "*"
 pydantic = ">=2.12.5,<3"
 pygments = ">=2.20.0"  # CVE-2026-4539
 pygithub = ">=2.9.1,<3"
+# Transitive via pygithub. Pinned to pull the security fix for
+# PYSEC-2026-175/177/178/179 (all fixed in 2.13.0); without this the locked
+# env resolves to 2.12.1 and pip-audit fails the dependency scan.
+pyjwt = ">=2.13.0"
 # Build backend for the `dev-install` editable install.
 hatchling = ">=1.27.0,<2"
 hatch-vcs = ">=0.4.0,<1"
