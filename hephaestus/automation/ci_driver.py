@@ -608,6 +608,11 @@ class CIDriver:
                     outcome = self._wait_for_pr_terminal(issue_number, pr_number)
                     if outcome == "FAILING":
                         fix_result = self._attempt_ci_fixes(issue_number, pr_number, acquired_slot)
+                        if fix_result is not None and fix_result.success:
+                            rearmed = self._recheck_and_arm_after_fix(
+                                issue_number, pr_number, acquired_slot
+                            )
+                            return rearmed if rearmed is not None else fix_result
                         if fix_result is not None:
                             return fix_result
                         return WorkerResult(
@@ -618,6 +623,8 @@ class CIDriver:
                                 f"CI fix failed after {self.options.max_fix_iterations} attempt(s)"
                             ),
                         )
+                    if outcome == "DIRTY":
+                        return self._resolve_dirty_pr(issue_number, pr_number, acquired_slot)
                 return WorkerResult(
                     issue_number=issue_number,
                     success=merge_ok,
@@ -640,6 +647,15 @@ class CIDriver:
 
             # 6. Attempt fix iterations
             fix_result = self._attempt_ci_fixes(issue_number, pr_number, acquired_slot)
+            if fix_result is not None and fix_result.success:
+                # A fix was pushed, which re-triggers CI. The old code returned
+                # success here and walked away, leaving a now-green PR NOT armed
+                # (it never re-polled or enabled auto-merge). Re-enter the
+                # check→arm→wait flow ONCE so the fixed PR actually arms.
+                rearmed = self._recheck_and_arm_after_fix(issue_number, pr_number, acquired_slot)
+                if rearmed is not None:
+                    return rearmed
+                return fix_result
             if fix_result is not None:
                 return fix_result
 
@@ -827,11 +843,138 @@ class CIDriver:
             build_prompt=get_advise_prompt,
         )
 
+    def _recheck_and_arm_after_fix(
+        self, issue_number: int, pr_number: int, acquired_slot: int
+    ) -> WorkerResult | None:
+        """After a CI fix is pushed, re-poll checks and arm if now green.
+
+        The fix push re-triggers CI. Historically ``_attempt_ci_fixes`` returned
+        success the instant a fix landed and never came back to arm the PR, so a
+        now-green PR sat ``NOT armed`` forever (observed: ProjectHermes #645,
+        which ended ``CLEAN`` but un-armed). This re-enters the
+        check→arm→wait flow ONCE.
+
+        Returns:
+            A terminal ``WorkerResult`` if the PR armed (and we waited on it), or
+            ``None`` if CI is still pending / not green yet — in which case the
+            caller keeps the fix's success result and a later run arms it.
+
+        """
+        if self.options.dry_run:
+            return None
+
+        # Bounded poll for the freshly-pushed run to conclude. Reuse the same
+        # backoff/cap pattern as the main poll loop.
+        max_wait = int(os.environ.get("HEPH_CI_POLL_MAX_WAIT", "600"))
+        elapsed = 0
+        attempt = 0
+        while True:
+            checks = gh_pr_checks(pr_number, dry_run=self.options.dry_run)
+            required = [c for c in checks if c.get("required", False)] or checks
+            if required and all(c.get("status") == "completed" for c in required):
+                break
+            sleep_secs = min(2**attempt, 60)
+            if elapsed + sleep_secs > max_wait:
+                logger.info(
+                    "Issue #%s: post-fix CI still pending after %ss; leaving for next run",
+                    issue_number,
+                    elapsed,
+                )
+                return None
+            self.status_tracker.update_slot(
+                acquired_slot,
+                f"{issue_ref(issue_number)}: awaiting post-fix CI ({elapsed}s)",
+            )
+            time.sleep(sleep_secs)
+            elapsed += sleep_secs
+            attempt += 1
+
+        required = [c for c in checks if c.get("required", False)] or checks
+        if not all(c.get("conclusion") in ("success", "skipped", "neutral") for c in required):
+            # Still red after the fix — let the normal failure handling stand.
+            return None
+
+        self.status_tracker.update_slot(
+            acquired_slot, f"{issue_ref(issue_number)}: enabling auto-merge (post-fix)"
+        )
+        merge_ok = self._enable_auto_merge(
+            pr_number, is_bot_pr=self._is_bot_pr_mode(issue_number, pr_number)
+        )
+        if not merge_ok:
+            return WorkerResult(
+                issue_number=issue_number,
+                success=False,
+                pr_number=pr_number,
+                error=f"auto-merge failed for PR {pr_ref(pr_number)}",
+            )
+        gh_state = self._gh_pr_state(pr_number)
+        pr_head_sha = (gh_state or {}).get("headRefOid", "") or ""
+        pr_head_branch = self._get_pr_branch(pr_number)
+        self._arm_drive_green(pr_number, pr_head_branch, pr_head_sha)
+        self._wait_for_pr_terminal(issue_number, pr_number)
+        return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+
+    def _resolve_dirty_pr(
+        self, issue_number: int, pr_number: int, acquired_slot: int
+    ) -> WorkerResult:
+        """Resolve an armed-but-DIRTY (merge-conflict) PR (#838 follow-up).
+
+        ``_wait_for_pr_terminal`` returns ``"DIRTY"`` for an armed PR with a
+        merge conflict — it can never merge while armed, and waiting out the
+        1800s timeout makes no progress. First try the cheap mechanical rebase;
+        if that lands cleanly the push re-triggers CI and we re-arm. If the
+        rebase still conflicts, hand it to the agent with explicit
+        conflict-resolution instructions (the normal fix path only fires on
+        failing *checks*, and a conflicted PR has none — so the agent would
+        otherwise get no guidance).
+
+        Returns a terminal ``WorkerResult``.
+        """
+        if self.options.dry_run:
+            return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+
+        # 1. Cheap path: mechanical rebase. Returns True only on a clean
+        #    rebase+push, in which case re-poll and arm the rebased head.
+        if self._attempt_mechanical_rebase(issue_number, pr_number, acquired_slot):
+            rearmed = self._recheck_and_arm_after_fix(issue_number, pr_number, acquired_slot)
+            if rearmed is not None:
+                return rearmed
+            return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+
+        # 2. Rebase still conflicts → agent resolves the conflict explicitly.
+        base_branch = "main"
+        try:
+            result = _gh_call(["pr", "view", str(pr_number), "--json", "baseRefName"], check=False)
+            base_branch = dict(json.loads(result.stdout or "{}")).get("baseRefName") or "main"
+        except (subprocess.CalledProcessError, json.JSONDecodeError):
+            pass
+        conflict_context = (
+            f"This PR has a MERGE CONFLICT with `origin/{base_branch}` "
+            f"(mergeStateStatus=DIRTY) — it cannot merge until the conflict is "
+            f"resolved. Rebase the PR head branch onto `origin/{base_branch}` and "
+            f"resolve every conflict, keeping both the PR's intent and the latest "
+            f"base changes. Then commit the resolution (signed). There may be NO "
+            f"failing CI checks — the conflict itself is the blocker."
+        )
+        fix_result = self._attempt_ci_fixes(
+            issue_number, pr_number, acquired_slot, extra_context=conflict_context
+        )
+        if fix_result is not None and fix_result.success:
+            rearmed = self._recheck_and_arm_after_fix(issue_number, pr_number, acquired_slot)
+            return rearmed if rearmed is not None else fix_result
+        return WorkerResult(
+            issue_number=issue_number,
+            success=False,
+            pr_number=pr_number,
+            error=f"PR {pr_ref(pr_number)} has an unresolved merge conflict",
+        )
+
     def _attempt_ci_fixes(
         self,
         issue_number: int,
         pr_number: int,
         acquired_slot: int,
+        extra_context: str = "",
     ) -> WorkerResult | None:
         """Attempt CI fix iterations for a failing PR.
 
@@ -839,6 +982,9 @@ class CIDriver:
             issue_number: GitHub issue number.
             pr_number: GitHub PR number.
             acquired_slot: Worker slot ID for status tracking.
+            extra_context: Optional text prepended to the CI failure logs in the
+                fix-session prompt — e.g. merge-conflict resolution instructions
+                for a DIRTY PR, where ``_get_failing_ci_logs`` alone is empty.
 
         Returns:
             WorkerResult on success or dry-run, None if all iterations failed.
@@ -861,6 +1007,8 @@ class CIDriver:
                 f"{issue_ref(issue_number)}: fetching CI logs (attempt {iteration + 1})",
             )
             ci_logs = self._get_failing_ci_logs(pr_number)
+            if extra_context:
+                ci_logs = f"{extra_context}\n\n{ci_logs}".strip()
             session_id = self._load_impl_session_id(issue_number)
             worktree_path = self._get_worktree_path(issue_number, pr_number)
             # Resolve the PR's actual head-branch name once per iteration. The
@@ -1115,14 +1263,22 @@ class CIDriver:
             )
 
     def _gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
-        """Return ``{state, headRefOid, mergedAt}`` for ``pr_number`` or ``None``.
+        """Return ``{state, headRefOid, mergedAt, mergeStateStatus}`` or ``None``.
 
         Used by the on-drive-start check (#840) to detect post-merge so the
-        ``/learn`` capture can fire exactly once per issue.
+        ``/learn`` capture can fire exactly once per issue, and by
+        ``_wait_for_pr_terminal`` to detect a ``DIRTY`` (merge-conflict) PR that
+        would otherwise sit armed-but-unmergeable until the timeout.
         """
         try:
             result = _gh_call(
-                ["pr", "view", str(pr_number), "--json", "state,headRefOid,mergedAt"],
+                [
+                    "pr",
+                    "view",
+                    str(pr_number),
+                    "--json",
+                    "state,headRefOid,mergedAt,mergeStateStatus",
+                ],
                 check=False,
             )
             return dict(json.loads(result.stdout or "{}"))
@@ -1154,7 +1310,9 @@ class CIDriver:
             pr_number: PR whose merge we are waiting on.
 
         Returns:
-            One of ``"MERGED"``, ``"CLOSED"``, ``"FAILING"``, or ``"TIMEOUT"``.
+            One of ``"MERGED"``, ``"CLOSED"``, ``"FAILING"``, ``"DIRTY"`` (the
+            PR has a merge conflict and will never merge while armed — caller
+            should rebase/resolve), or ``"TIMEOUT"``.
 
         """
         if self.options.dry_run:
@@ -1191,6 +1349,20 @@ class CIDriver:
                     ", ".join(failing),
                 )
                 return "FAILING"
+
+            # An armed PR that is DIRTY/CONFLICTING has a merge conflict with
+            # the base branch — it can never merge while armed, so waiting out
+            # the full timeout is pointless. Stop and let the caller rebase /
+            # hand it to the agent to resolve the conflict.
+            merge_status = ((gh_state or {}).get("mergeStateStatus") or "").upper()
+            if merge_status in ("DIRTY", "CONFLICTING"):
+                logger.warning(
+                    "Issue #%s: PR #%s is %s (merge conflict) while armed; needs rebase/resolution",
+                    issue_number,
+                    pr_number,
+                    merge_status,
+                )
+                return "DIRTY"
 
             sleep_secs = min(2**attempt, 60)
             if elapsed + sleep_secs > max_wait:
@@ -1378,9 +1550,10 @@ class CIDriver:
         if outcome == "CLOSED":
             self._clear_arming_state(issue_number)
             return None
-        if outcome == "FAILING":
-            # PR went red after arming — clear the stale arming and fall
-            # through so the normal drive path can fix it.
+        if outcome in ("FAILING", "DIRTY"):
+            # PR went red (FAILING) or now conflicts (DIRTY) after arming —
+            # clear the stale arming and fall through so the normal drive path
+            # re-arms and routes to the fix / _resolve_dirty_pr handling.
             self._clear_arming_state(issue_number)
             return None
         # TIMEOUT — still pending; leave armed for a later pass to resolve.
@@ -1519,9 +1692,12 @@ class CIDriver:
             f"failing on the remote:\n\n"
             f"{failing_block}\n\n"
             f"Returning no commit when required checks are still red is itself a "
-            f"bug — either fix the code so the failing checks pass, or, if no fix "
-            f"is possible, write a commit that documents the blocker in the PR "
-            f"description and references the upstream cause.\n\n"
+            f"bug — fix the code so the failing checks pass. If no code fix is "
+            f"possible, DO NOT commit a 'blocker' file: a new Markdown/docs file "
+            f"will itself fail the repo's lint gates (e.g. markdownlint) and turn "
+            f"one red check into two. Instead leave the tree unchanged and report "
+            f"the blocker via the `BLOCKED:` line below — do NOT commit any file to "
+            f"document it.\n\n"
             f"Working directory: {worktree_path}\n"
             f"Current branch (DO NOT change, DO NOT create a new branch): "
             f"{pr_head_branch}\n\n"
@@ -1529,13 +1705,17 @@ class CIDriver:
             f"1. Re-read the failing check logs for the names listed above.\n"
             f"2. Make the minimal change that addresses each failure.\n"
             f"3. Run `pixi run python -m pytest tests/ -v` and "
-            f"`pre-commit run --all-files` locally to verify before committing.\n"
+            f"`pre-commit run --all-files` locally to verify before committing. "
+            f"This MUST include any markdown/lint hooks — every file you add or "
+            f"edit has to pass the repo's own linters, with no rule disabled.\n"
             f"4. **Every commit MUST be cryptographically signed (`git commit -S`).** "
             f"NEVER use `--no-verify`. The repository's CI gate rejects unsigned "
             f"commits and any commit that bypassed pre-commit hooks.\n"
             f"5. Do NOT run `git checkout -b`, `git switch -c`, or any command "
             f"that creates or switches branches — the fix has to land on "
-            f"`{pr_head_branch}`.\n\n"
+            f"`{pr_head_branch}`.\n"
+            f"6. Do NOT add a new top-level `CI_BLOCKER.md` or similar doc file to "
+            f"record the blocker — use the `BLOCKED:` line instead.\n\n"
             f"If after the steps above you still cannot produce a commit, reply "
             f"with a single line `BLOCKED: <one-sentence reason>` and stop."
         )

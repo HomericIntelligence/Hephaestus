@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -143,11 +144,17 @@ def invoke_claude_with_session(  # noqa: C901  # state machine: argv assembly + 
     if not input_via_stdin:
         base_tail.append(prompt)
 
-    def _build(create: bool) -> list[str]:
-        mode = ["--session-id", sid, "--name", display_name] if create else ["--resume", sid]
+    def _build(
+        create: bool, sid_override: str | None = None, name_override: str | None = None
+    ) -> list[str]:
+        use_sid = sid_override or sid
+        use_name = name_override or display_name
+        mode = ["--session-id", use_sid, "--name", use_name] if create else ["--resume", use_sid]
         return ["claude", *mode, *base_tail]
 
-    def _run(create: bool) -> subprocess.CompletedProcess[str]:
+    def _run(
+        create: bool, sid_override: str | None = None, name_override: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         # CLAUDECODE is set by an outer Claude Code process to refuse nested
         # invocations; clear it so the automation subprocess can launch.
@@ -158,12 +165,12 @@ def invoke_claude_with_session(  # noqa: C901  # state machine: argv assembly + 
         cid = get_current_correlation_id()
         if cid:
             env["GH_TRACE_ID"] = cid
-        cmd = _build(create)
+        cmd = _build(create, sid_override=sid_override, name_override=name_override)
         logger.debug(
             "claude invoke: agent=%s issue=%s sid=%s mode=%s",
             agent,
             issue,
-            sid,
+            sid_override or sid,
             "create" if create else "resume",
         )
         return subprocess.run(
@@ -187,13 +194,44 @@ def invoke_claude_with_session(  # noqa: C901  # state machine: argv assembly + 
             # drift between hephaestus and the CLI can desync the probe;
             # treat the rejection as proof the session exists and resume it.
             stderr = (exc.stderr or "") + (exc.stdout or "")
-            if "already in use" in stderr.lower():
-                logger.warning(
-                    "claude --session-id %s rejected as already in use; resuming instead",
-                    sid,
-                )
-                return _run(create=False).stdout, sid
-            raise
+            if "already in use" not in stderr.lower():
+                raise
+            # Under concurrency (3 parallel CI-fix workers) two workers can race
+            # on the same deterministic UUIDv5 session before the transcript is
+            # on disk; the loser hits "already in use" (observed: ProjectHermes
+            # #647). The session may still be initializing in the sibling worker,
+            # so resume can ALSO fail. Retry resume with backoff; if it never
+            # frees, fall back to a FRESH unique session so the drive proceeds
+            # instead of aborting the PR.
+            logger.warning(
+                "claude --session-id %s rejected as already in use; resuming instead",
+                sid,
+            )
+            for resume_attempt in range(3):
+                try:
+                    return _run(create=False).stdout, sid
+                except subprocess.CalledProcessError as resume_exc:
+                    logger.warning(
+                        "claude --resume %s failed (attempt %s/3): %s",
+                        sid,
+                        resume_attempt + 1,
+                        ((resume_exc.stderr or "") + (resume_exc.stdout or ""))[:200],
+                    )
+                    time.sleep(2 * (resume_attempt + 1))
+            # Resume never succeeded — derive a fresh, unique session so this
+            # worker is not coupled to the contended id. uuid4 guarantees no
+            # collision with the deterministic id or another worker's fresh one.
+            fresh_sid = str(uuid.uuid4())
+            fresh_name = f"{display_name}-{fresh_sid[:8]}"
+            logger.warning(
+                "claude session %s unrecoverable; creating fresh session %s",
+                sid,
+                fresh_sid,
+            )
+            return (
+                _run(create=True, sid_override=fresh_sid, name_override=fresh_name).stdout,
+                fresh_sid,
+            )
 
     try:
         return _run(create=False).stdout, sid
