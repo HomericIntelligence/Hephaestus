@@ -1151,6 +1151,8 @@ class TestRunCleanup:
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[green_check]),
             patch.object(d, "_enable_auto_merge", return_value=True),
             patch.object(d, "_run_drive_green_learnings"),
+            # Don't block the worker on the post-arm wait loop (#838).
+            patch.object(d, "_wait_for_pr_terminal", return_value="MERGED"),
         ):
             d.run()
 
@@ -1186,6 +1188,8 @@ class TestRunCleanup:
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[green_check]),
             patch.object(d, "_enable_auto_merge", return_value=True),
             patch.object(d, "_run_drive_green_learnings"),
+            # Don't block the worker on the post-arm wait loop (#838).
+            patch.object(d, "_wait_for_pr_terminal", return_value="MERGED"),
             caplog.at_level(logging.INFO, logger="hephaestus.automation.ci_driver"),
         ):
             d.run()
