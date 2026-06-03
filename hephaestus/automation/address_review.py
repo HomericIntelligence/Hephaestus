@@ -966,7 +966,7 @@ class AddressReviewer(BaseReviewer):
         try:
             from .pr_manager import commit_changes
 
-            commit_changes(issue_number, worktree_path)
+            commit_changes(issue_number, worktree_path, self.options.agent)
             logger.info("Committed fix changes for issue #%s", issue_number)
         except RuntimeError as e:
             # commit_changes raises RuntimeError if nothing to commit; already checked above

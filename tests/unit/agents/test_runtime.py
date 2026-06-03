@@ -190,8 +190,8 @@ def test_run_claude_text_read_only_omits_write_permissions(tmp_path: Path) -> No
 def test_resolve_agent_prefers_claude_when_both_exist() -> None:
     """Omitted --agent auto-detects, preferring Claude when both CLIs exist."""
     with patch("hephaestus.agents.runtime.shutil.which") as mock_which:
-        mock_which.side_effect = (
-            lambda name: f"/bin/{name}" if name in {"claude", "codex"} else None
+        mock_which.side_effect = lambda name: (
+            f"/bin/{name}" if name in {"claude", "codex"} else None
         )
 
         assert agent_runtime.resolve_agent(None) == "claude"

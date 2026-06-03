@@ -140,11 +140,13 @@ class GitHubUnavailableError(RuntimeError):
     pass
 
 
-def gh_list_labels(refresh: bool = False) -> set[str]:
+def gh_list_labels(refresh: bool = False, *, raise_on_error: bool = False) -> set[str]:
     """Return the set of label names that exist in the current repository.
 
     Args:
         refresh: If True, bypass the in-process cache and re-fetch.
+        raise_on_error: If True, propagate label-list failures instead of
+            returning an empty set.
 
     Returns:
         Set of existing label names.
@@ -161,6 +163,8 @@ def gh_list_labels(refresh: bool = False) -> set[str]:
         return _label_cache
     except Exception as e:
         logger.warning("Could not fetch label list: %s; proceeding without validation", e)
+        if raise_on_error:
+            raise RuntimeError("Could not fetch label list") from e
         return set()
 
 
@@ -224,15 +228,25 @@ def gh_issue_remove_labels(issue_number: int, labels: list[str]) -> None:
     """
     if not labels:
         return
-    existing = gh_list_labels()
-    labels_to_remove = [label for label in labels if label in existing]
-    missing = sorted(set(labels) - existing)
-    if missing:
-        logger.debug(
-            "Skipping removal of repo labels that do not exist for issue #%s: %s",
+    try:
+        existing = gh_list_labels(raise_on_error=True)
+    except RuntimeError as exc:
+        logger.warning(
+            "Could not validate repo labels before removing from issue #%s; "
+            "attempting requested removals without filtering: %s",
             issue_number,
-            missing,
+            exc,
         )
+        labels_to_remove = list(labels)
+    else:
+        labels_to_remove = [label for label in labels if label in existing]
+        missing = sorted(set(labels) - existing)
+        if missing:
+            logger.debug(
+                "Skipping removal of repo labels that do not exist for issue #%s: %s",
+                issue_number,
+                missing,
+            )
     if not labels_to_remove:
         return
     cmd = ["issue", "edit", str(issue_number)]

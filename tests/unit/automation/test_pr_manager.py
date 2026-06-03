@@ -121,10 +121,7 @@ class TestEnsurePRCreated:
             patch.object(pr_manager, "_gh_call", return_value=gh_mock),
             patch.object(pr_manager, "create_pr", return_value=42) as create_mock,
         ):
-            assert (
-                pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"), agent="codex")
-                == 42
-            )
+            assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"), agent="codex") == 42
             create_mock.assert_called_once_with(1, "branch", False, agent="codex")
 
 

@@ -933,6 +933,18 @@ class TestGhIssueRemoveLabels:
         gh_issue_remove_labels(42, ["state:plan-go", "state:needs-plan"])
         mock_gh_call.assert_not_called()
 
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.gh_list_labels", side_effect=RuntimeError("boom"))
+    def test_label_list_failure_attempts_requested_removals(
+        self, _mock_list: Any, mock_gh_call: Any
+    ) -> None:
+        gh_issue_remove_labels(42, ["state:plan-go", "state:needs-plan"])
+        args = mock_gh_call.call_args[0][0]
+        assert args[:3] == ["issue", "edit", "42"]
+        assert args.count("--remove-label") == 2
+        assert "state:plan-go" in args
+        assert "state:needs-plan" in args
+
 
 class TestGhListOpenIssues:
     """Tests for gh_list_open_issues."""
