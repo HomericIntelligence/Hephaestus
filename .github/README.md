@@ -42,11 +42,12 @@ Builds and publishes the package to PyPI on version tag push (`v*`).
 
 The consolidated required-status-check gate that runs on every pull request to
 `main` (and on push to `main`). It aggregates lint, markdownlint, `pixi-check`,
-shellcheck, the `pr-policy` gate (enforces `Closes #N`, auto-merge enabled, and
-signed commits), unit/integration/shell tests, wheel build, security scans
-(pip-audit, Gitleaks, bandit), workflow-schema validation, and version-sync. It
-also re-runs on `auto_merge_enabled` / `auto_merge_disabled` events so the
-`pr-policy` auto-merge check converges without timing races.
+shellcheck, the `pr-policy` gate (enforces `Closes #N`, signed commits, and
+the auto-merge state machine), unit/integration/shell tests, wheel build,
+security scans (pip-audit, Gitleaks, bandit), workflow-schema validation, and
+version-sync. It also re-runs on `auto_merge_enabled` / `auto_merge_disabled`
+and `labeled` / `unlabeled` events so the `pr-policy` auto-merge check
+converges without timing races.
 
 ### Auto-Tag Workflow (`workflows/auto-tag.yml`)
 

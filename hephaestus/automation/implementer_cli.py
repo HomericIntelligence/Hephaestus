@@ -121,7 +121,7 @@ Examples:
     parser.add_argument(
         "--no-auto-merge",
         action="store_true",
-        help="Don't enable auto-merge on created PRs",
+        help="Don't enable auto-merge after implementation-review GO",
     )
     parser.add_argument(
         "--dry-run",

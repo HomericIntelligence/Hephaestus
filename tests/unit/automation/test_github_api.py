@@ -986,22 +986,23 @@ class TestGhPrCreate:
 
     @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_successful_pr_creation(self, mock_gh_call: Any, _mock_signed: Any) -> None:
+    def test_successful_pr_creation_defers_auto_merge(
+        self, mock_gh_call: Any, _mock_signed: Any
+    ) -> None:
         """Test successful PR creation."""
         mock_create_result = Mock()
         mock_create_result.stdout = "https://github.com/owner/repo/pull/456"
-        mock_merge_result = Mock()
-        mock_gh_call.side_effect = [mock_create_result, mock_merge_result]
+        mock_gh_call.return_value = mock_create_result
 
         pr_number = gh_pr_create(
             branch="feature-branch",
             title="Test PR",
             body=_POLICY_BODY,
-            auto_merge=True,
         )
 
         assert pr_number == 456
-        assert mock_gh_call.call_count == 2  # create + auto-merge
+        assert mock_gh_call.call_count == 1
+        assert "--base" in mock_gh_call.call_args.args[0]
 
     @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
@@ -1044,7 +1045,7 @@ class TestGhPrCreate:
     def test_pr_creation_auto_merge_failure_raises(
         self, mock_gh_call: Any, _mock_signed: Any
     ) -> None:
-        """Auto-merge is mandatory; a failure must raise, not warn."""
+        """Immediate auto-merge remains available for non-implementation callers."""
         mock_create_result = Mock()
         mock_create_result.stdout = "https://github.com/owner/repo/pull/456"
 
@@ -1149,9 +1150,9 @@ class TestGhPrCreate:
             branch="feature-branch",
             title="Test PR",
             body=_POLICY_BODY,
-            auto_merge=True,
         )
         assert pr_number == 42
+        assert mock_gh_call.call_count == 1
 
 
 class TestWriteSecure:

@@ -935,17 +935,19 @@ def gh_pr_create(
     branch: str,
     title: str,
     body: str,
-    auto_merge: bool = True,
+    auto_merge: bool = False,
     base: str = "main",
 ) -> int:
     """Create a pull request.
 
-    Enforces three policy properties at creation time:
+    Enforces PR body and signing policy at creation time:
 
     1. *body* must contain a literal ``Closes #N`` line.
     2. Every commit on *branch* (vs *base*) must be cryptographically signed.
-    3. Auto-merge MUST be enabled when ``auto_merge=True`` (the default); a
-       failure to enable auto-merge raises instead of warning.
+
+    When ``auto_merge=True`` the helper also arms auto-merge immediately. The
+    implementation pipeline deliberately passes ``False`` until the in-loop
+    implementation review marks the PR GO.
 
     The CI gate (``.github/workflows/_required.yml`` job ``pr-policy``) and the
     PR review prompt re-check the same three properties, so a slip past one
@@ -955,7 +957,7 @@ def gh_pr_create(
         branch: Branch name
         title: PR title
         body: PR description
-        auto_merge: Whether to enable auto-merge (default True; required by policy)
+        auto_merge: Whether to enable auto-merge immediately (default False)
         base: Base branch to compare against for signed-commit validation
 
     Returns:
@@ -963,8 +965,8 @@ def gh_pr_create(
 
     Raises:
         ValueError: If *body* lacks ``Closes #N`` or *branch* has unsigned commits.
-        RuntimeError: If the underlying ``gh`` CLI call fails, or auto-merge
-            cannot be enabled when ``auto_merge=True``.
+        RuntimeError: If the underlying ``gh`` CLI call fails, or immediate
+            auto-merge cannot be enabled when ``auto_merge=True``.
 
     """
     # Policy gate #1: PR body must reference the closing issue.
@@ -982,6 +984,8 @@ def gh_pr_create(
                     "create",
                     "--head",
                     branch,
+                    "--base",
+                    base,
                     "--title",
                     title,
                     "--body-file",
@@ -1000,19 +1004,16 @@ def gh_pr_create(
 
         logger.info("Created PR #%s", pr_number)
 
-        # Policy gate #3: auto-merge is mandatory when requested. A failure here
-        # used to log a warning; under the new policy it must raise so the
-        # operator sees the violation.
         if auto_merge:
             try:
-                _gh_call(["pr", "merge", str(pr_number), "--auto", "--rebase"])
+                _gh_call(["pr", "merge", str(pr_number), "--auto", "--squash"])
                 logger.info("Enabled auto-merge for PR #%s", pr_number)
             except Exception as e:
                 logger.error("Failed to enable auto-merge for PR #%s: %s", pr_number, e)
                 raise RuntimeError(
                     f"Auto-merge could not be enabled for PR #{pr_number}: {e}. "
-                    "Auto-merge is required by repo policy; resolve the underlying "
-                    "issue (e.g. branch protection, merge method) and re-run."
+                    "Resolve the underlying issue (e.g. branch protection, merge method) "
+                    "and re-run."
                 ) from e
 
         return pr_number

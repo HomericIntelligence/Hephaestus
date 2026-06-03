@@ -34,15 +34,17 @@ class TestImplementationPrompt:
         assert "1" in out
 
     def test_enforces_pr_policy(self) -> None:
-        """Implementer prompt must require Closes #N, auto-merge, and signed commits."""
+        """Implementer prompt must require Closes #N, deferred auto-merge, and signatures."""
         out = prompts.get_implementation_prompt(issue_number=42)
         # All three policy properties must be named in the prompt.
         assert "Closes #42" in out
         assert "MANDATORY" in out
         assert "git commit -S" in out
-        assert "--auto --rebase" in out
+        assert "DO NOT enable auto-merge yet" in out
+        assert "state:implementation-go" in out
         # Verification command must include all three fields.
         assert "autoMergeRequest" in out
+        assert ".autoMergeRequest == null" in out
         assert "isValid" in out
         # The agent must be told to abort on failure (no "best-effort" wording).
         assert "abort" in out.lower() or "non-negotiable" in out.lower()
@@ -72,6 +74,8 @@ class TestPRReviewAnalysisPrompt:
         # Each of the three policy checks must be explicitly enumerated.
         assert "Closes #N" in out or "Closes #\\d" in out
         assert "auto_merge_enabled" in out
+        assert "MUST read" in out
+        assert "auto_merge_enabled=false" in out
         assert "signature_valid" in out
         # The NOGO / POLICY VIOLATION sentinels must be present.
         assert "POLICY VIOLATION" in out

@@ -18,8 +18,19 @@ from hephaestus.agents.runtime import is_codex
 from ._secret_patterns import SECRET_FILE_EXTENSIONS, SECRET_FILE_NAMES
 from .claude_models import implementer_model
 from .git_utils import issue_ref, run
-from .github_api import _gh_call, fetch_issue_info, gh_pr_create
+from .github_api import (
+    _gh_call,
+    fetch_issue_info,
+    gh_issue_add_labels,
+    gh_issue_remove_labels,
+    gh_pr_create,
+)
 from .prompts import get_pr_description
+from .state_labels import (
+    STATE_IMPLEMENTATION_GO,
+    STATE_IMPLEMENTATION_NO_GO,
+    is_implementation_go,
+)
 from .status_tracker import StatusTracker
 
 logger = logging.getLogger(__name__)
@@ -35,6 +46,72 @@ def _coauthor_for_agent(agent: str) -> tuple[str, str]:
     if is_codex(agent):
         return ("Codex", "noreply@openai.com")
     return (implementer_model(), "noreply@anthropic.com")
+
+
+def _detect_default_base_branch(worktree_path: Path) -> str:
+    """Return the repo default branch name for PR/signature ranges."""
+    result = run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
+        cwd=worktree_path,
+        capture_output=True,
+        check=False,
+    )
+    ref = (result.stdout or "").strip()
+    if ref.startswith("origin/") and len(ref) > len("origin/"):
+        return ref.removeprefix("origin/")
+    return "main"
+
+
+def _pr_auto_merge_enabled(pr_number: int) -> bool:
+    """Return whether GitHub currently has auto-merge armed for a PR."""
+    result = _gh_call(["pr", "view", str(pr_number), "--json", "autoMergeRequest"])
+    data = json.loads(result.stdout or "{}")
+    return data.get("autoMergeRequest") is not None
+
+
+def ensure_pr_auto_merge_deferred(pr_number: int) -> None:
+    """Disable premature auto-merge before implementation review reaches GO."""
+    if not _pr_auto_merge_enabled(pr_number):
+        return
+    _gh_call(["pr", "merge", str(pr_number), "--disable-auto"])
+    logger.warning(
+        "Disabled premature auto-merge for PR #%s; implementation review has not reached GO yet",
+        pr_number,
+    )
+
+
+def mark_pr_implementation_go(pr_number: int) -> None:
+    """Mark a PR as implementation-review GO."""
+    gh_issue_add_labels(pr_number, [STATE_IMPLEMENTATION_GO])
+    gh_issue_remove_labels(pr_number, [STATE_IMPLEMENTATION_NO_GO])
+
+
+def mark_pr_implementation_no_go(pr_number: int) -> None:
+    """Mark a PR as implementation-review not-GO."""
+    gh_issue_add_labels(pr_number, [STATE_IMPLEMENTATION_NO_GO])
+    gh_issue_remove_labels(pr_number, [STATE_IMPLEMENTATION_GO])
+
+
+def pr_has_implementation_go_label(pr: dict[str, object]) -> bool:
+    """Return True when a PR dictionary carries the implementation-GO label."""
+    labels = pr.get("labels")
+    if not isinstance(labels, list):
+        return False
+    names: list[str] = []
+    for label in labels:
+        if isinstance(label, str):
+            names.append(label)
+        elif isinstance(label, dict):
+            name = label.get("name")
+            if isinstance(name, str):
+                names.append(name)
+    return is_implementation_go(names)
+
+
+def enable_auto_merge_after_implementation_go(pr_number: int) -> None:
+    """Arm auto-merge after implementation review has labeled the PR GO."""
+    _gh_call(["pr", "merge", str(pr_number), "--auto", "--squash"])
+    logger.info("Enabled auto-merge for implementation-GO PR #%s", pr_number)
 
 
 def commit_changes(issue_number: int, worktree_path: Path, agent: str = "claude") -> None:
@@ -142,7 +219,8 @@ def ensure_pr_created(
         issue_number: Issue number
         branch_name: Git branch name
         worktree_path: Path to worktree
-        auto_merge: Whether to enable auto-merge on the PR
+        auto_merge: Whether the caller eventually wants auto-merge. The PR is
+            still created with auto-merge disabled until implementation review GO.
         status_tracker: StatusTracker instance for slot updates (optional)
         slot_id: Worker slot ID for status updates
         agent: Selected implementation agent for generated PR metadata.
@@ -204,7 +282,19 @@ def ensure_pr_created(
 
     # PR doesn't exist, create it
     logger.warning("No PR found for branch %s, creating one...", branch_name)
-    pr_number = create_pr(issue_number, branch_name, auto_merge, agent=agent)
+    if auto_merge:
+        logger.info(
+            "Deferring auto-merge for branch %s until implementation review marks the PR GO",
+            branch_name,
+        )
+    base_branch = _detect_default_base_branch(worktree_path)
+    pr_number = create_pr(
+        issue_number,
+        branch_name,
+        auto_merge=False,
+        agent=agent,
+        base=base_branch,
+    )
     logger.info("Created PR #%s", pr_number)
     return pr_number
 
@@ -214,6 +304,7 @@ def create_pr(
     branch_name: str,
     auto_merge: bool = False,
     agent: str = "claude",
+    base: str = "main",
 ) -> int:
     """Create pull request for issue.
 
@@ -243,4 +334,5 @@ def create_pr(
         title=pr_title,
         body=pr_body,
         auto_merge=auto_merge,
+        base=base,
     )

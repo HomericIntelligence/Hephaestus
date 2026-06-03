@@ -97,6 +97,7 @@ class TestEnsurePRCreated:
                 _status("abc1234 commit msg"),  # git log
                 _status(""),  # ls-remote (not pushed)
                 _status(""),  # git push
+                _status("origin/master"),  # default base branch
             ]
         )
         gh_mock = _status("[]")
@@ -106,13 +107,16 @@ class TestEnsurePRCreated:
             patch.object(pr_manager, "create_pr", return_value=42) as create_mock,
         ):
             assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt")) == 42
-            create_mock.assert_called_once_with(1, "branch", False, agent="claude")
+            create_mock.assert_called_once_with(
+                1, "branch", auto_merge=False, agent="claude", base="master"
+            )
 
     def test_creates_pr_with_selected_agent_metadata(self) -> None:
         run_mock = MagicMock(
             side_effect=[
                 _status("abc1234 commit msg"),
                 _status("refs/heads/branch"),
+                _status("origin/master"),
             ]
         )
         gh_mock = _status("[]")
@@ -122,7 +126,9 @@ class TestEnsurePRCreated:
             patch.object(pr_manager, "create_pr", return_value=42) as create_mock,
         ):
             assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"), agent="codex") == 42
-            create_mock.assert_called_once_with(1, "branch", False, agent="codex")
+            create_mock.assert_called_once_with(
+                1, "branch", auto_merge=False, agent="codex", base="master"
+            )
 
 
 class TestCreatePR:
@@ -139,6 +145,7 @@ class TestCreatePR:
         assert kwargs["branch"] == "branch"
         assert "Add feature X" in kwargs["title"]
         assert kwargs["auto_merge"] is True
+        assert kwargs["base"] == "main"
         assert "Closes #5" in kwargs["body"]
         assert "Automated implementation via Codex" in kwargs["body"]
         assert "Claude Code" not in kwargs["body"]

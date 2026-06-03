@@ -41,6 +41,11 @@ def _make_check(
     }
 
 
+def _impl_go(driver: CIDriver) -> Any:
+    """Patch a PR as already approved by implementation review."""
+    return patch.object(driver, "_pr_has_implementation_go", return_value=True)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -376,6 +381,7 @@ class TestOpenPrsRemaining:
                 "head": {"ref": "branch-1"},
                 "auto_merge": {"enabled_by": {"login": "bot"}},
                 "user": {"type": "User"},
+                "labels": [{"name": "state:implementation-go"}],
             },
             {
                 "number": 2,
@@ -398,6 +404,7 @@ class TestOpenPrsRemaining:
                 "headRefName": "branch-1",
                 "autoMergeRequest": {"enabled_by": {"login": "bot"}},
                 "isBot": False,
+                "labels": ["state:implementation-go"],
             },
             {
                 "number": 2,
@@ -405,6 +412,7 @@ class TestOpenPrsRemaining:
                 "headRefName": "branch-2",
                 "autoMergeRequest": None,
                 "isBot": True,
+                "labels": [],
             },
         ]
 
@@ -479,6 +487,7 @@ class TestAllRequiredGreen:
         ]
         with (
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
+            _impl_go(driver),
             patch.object(driver, "_enable_auto_merge") as mock_merge,
             patch.object(driver, "_run_drive_green_learnings"),
             patch.object(driver, "_wait_for_pr_terminal", return_value="MERGED"),
@@ -487,6 +496,21 @@ class TestAllRequiredGreen:
 
         assert result.success is True
         mock_merge.assert_called_once_with(456, is_bot_pr=False)
+
+    def test_all_required_green_without_impl_go_does_not_arm(self, driver: CIDriver) -> None:
+        """Green CI is not enough; implementation review must mark the PR GO."""
+        checks = [_make_check("test", required=True)]
+        with (
+            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
+            patch.object(driver, "_pr_has_implementation_go", return_value=False),
+            patch.object(driver, "_enable_auto_merge") as mock_merge,
+            patch.object(driver, "_wait_for_pr_terminal") as mock_wait,
+        ):
+            result = driver._drive_issue(123, 456, 0)
+
+        assert result.success is True
+        mock_merge.assert_not_called()
+        mock_wait.assert_not_called()
 
     def test_dry_run_no_auto_merge(self, mock_options: CIDriverOptions, tmp_path: Path) -> None:
         """dry_run=True, all green → gh pr merge not called."""
@@ -503,6 +527,7 @@ class TestAllRequiredGreen:
         checks = [_make_check("test", required=True)]
         with (
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
+            _impl_go(dry_driver),
             patch.object(dry_driver, "_enable_auto_merge") as mock_merge,
             patch("hephaestus.automation.ci_driver._gh_call") as mock_gh,
         ):
@@ -531,6 +556,7 @@ class TestRequiredVsNonRequired:
         ]
         with (
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
+            _impl_go(driver),
             patch.object(driver, "_enable_auto_merge") as mock_merge,
             patch.object(driver, "_run_drive_green_learnings"),
             patch.object(driver, "_wait_for_pr_terminal", return_value="MERGED"),
@@ -550,6 +576,7 @@ class TestRequiredVsNonRequired:
         ]
         with (
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
+            _impl_go(driver),
             patch.object(driver, "_enable_auto_merge") as mock_merge,
             patch.object(driver, "_run_drive_green_learnings"),
             patch.object(driver, "_wait_for_pr_terminal", return_value="MERGED"),
@@ -758,6 +785,7 @@ class TestEnableAutoMerge:
         checks = [_make_check("test", required=True)]
         with (
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
+            _impl_go(driver),
             patch.object(driver, "_enable_auto_merge", return_value=False),
             patch.object(driver, "_run_drive_green_learnings") as mock_learn,
         ):
@@ -794,6 +822,7 @@ class TestDriveGreenLearnings:
         driver.shared_pr_issues = {456: [123]}
         with (
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
+            _impl_go(driver),
             patch.object(driver, "_enable_auto_merge", return_value=True),
             patch.object(driver, "_get_pr_branch", return_value="123-impl"),
             patch.object(
@@ -1112,6 +1141,7 @@ class TestCIPollLoop:
         with (
             patch("hephaestus.automation.ci_driver.gh_pr_checks", side_effect=side_effect),
             patch("hephaestus.automation.ci_driver.time.sleep"),
+            _impl_go(driver),
             patch.object(driver, "_enable_auto_merge", return_value=True),
             patch.object(driver, "_run_drive_green_learnings"),
             patch.object(driver, "_wait_for_pr_terminal", return_value="MERGED"),
@@ -1179,6 +1209,7 @@ class TestRunCleanup:
         with (
             patch.object(d, "_discover_prs", return_value={1: 10}),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[green_check]),
+            _impl_go(d),
             patch.object(d, "_enable_auto_merge", return_value=True),
             patch.object(d, "_run_drive_green_learnings"),
             # Don't block the worker on the post-arm wait loop (#838).
@@ -1216,6 +1247,7 @@ class TestRunCleanup:
         with (
             patch.object(d, "_discover_prs", return_value={1: 10}),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[green_check]),
+            _impl_go(d),
             patch.object(d, "_enable_auto_merge", return_value=True),
             patch.object(d, "_run_drive_green_learnings"),
             # Don't block the worker on the post-arm wait loop (#838).
@@ -2128,6 +2160,7 @@ class TestRecheckAndArmAfterFix:
         green = [_make_check("test", required=True, conclusion="success")]
         with (
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=green),
+            _impl_go(driver),
             patch.object(driver, "_enable_auto_merge", return_value=True) as mock_arm,
             patch.object(driver, "_gh_pr_state", return_value={"headRefOid": "abc"}),
             patch.object(driver, "_get_pr_branch", return_value="b"),
@@ -2250,13 +2283,28 @@ class TestEnableAutoMergeBotRetry:
 
 
 class TestArmAllUnarmedOpenPrs:
-    """The blanket arm-all pass marks every un-armed open PR auto-merge (#882)."""
+    """The arm-all pass marks implementation-GO un-armed PRs auto-merge (#882)."""
 
     def test_arms_only_unarmed_prs_and_passes_bot_flag(self, driver: CIDriver) -> None:
         open_prs: list[dict[str, Any]] = [
-            {"number": 10, "autoMergeRequest": {"x": 1}, "isBot": False},  # already armed
-            {"number": 11, "autoMergeRequest": None, "isBot": True},  # arm (bot)
-            {"number": 12, "autoMergeRequest": None, "isBot": False},  # arm (human)
+            {
+                "number": 10,
+                "autoMergeRequest": {"x": 1},
+                "labels": [{"name": "state:implementation-go"}],
+                "isBot": False,
+            },  # already armed
+            {
+                "number": 11,
+                "autoMergeRequest": None,
+                "labels": [{"name": "state:implementation-go"}],
+                "isBot": True,
+            },  # arm (bot)
+            {
+                "number": 12,
+                "autoMergeRequest": None,
+                "labels": [{"name": "state:implementation-go"}],
+                "isBot": False,
+            },  # arm (human)
         ]
         refreshed = [
             {"number": 10, "autoMergeRequest": {"x": 1}},
@@ -2274,6 +2322,19 @@ class TestArmAllUnarmedOpenPrs:
         assert called == {11: True, 12: False}
         # Returns the re-listed PRs so the gate sees fresh armed state.
         assert result == refreshed
+
+    def test_skips_unapproved_unarmed_prs(self, driver: CIDriver) -> None:
+        open_prs: list[dict[str, Any]] = [
+            {"number": 12, "autoMergeRequest": None, "labels": [], "isBot": False}
+        ]
+        with (
+            patch.object(driver, "_enable_auto_merge") as mock_arm,
+            patch.object(driver, "_list_open_prs_remaining") as mock_list,
+        ):
+            result = driver._arm_all_unarmed_open_prs(open_prs)
+        mock_arm.assert_not_called()
+        mock_list.assert_not_called()
+        assert result is open_prs
 
     def test_no_unarmed_prs_is_noop(self, driver: CIDriver) -> None:
         open_prs: list[dict[str, Any]] = [

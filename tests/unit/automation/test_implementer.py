@@ -288,6 +288,12 @@ class TestPlanReviewVerdictGate:
             ),
             patch.object(impl, "_finalize_pr", return_value=999),
             patch.object(impl, "_run_post_pr_followup"),
+            patch("hephaestus.automation.implementer_phase_runner.ensure_pr_auto_merge_deferred"),
+            patch("hephaestus.automation.implementer_phase_runner.mark_pr_implementation_go"),
+            patch(
+                "hephaestus.automation.implementer_phase_runner."
+                "enable_auto_merge_after_implementation_go"
+            ),
             patch(
                 "hephaestus.automation.implementer.fetch_issue_info",
                 return_value=MagicMock(title="t", body="b"),
@@ -465,6 +471,12 @@ class TestExistingPrSkipsImplementation:
             patch.object(impl, "_run_claude_code", return_value="sess-1"),
             patch.object(impl, "_run_impl_review_loop", return_value=(1, "GO", "A")),
             patch.object(impl, "_finalize_pr", return_value=999),
+            patch("hephaestus.automation.implementer_phase_runner.ensure_pr_auto_merge_deferred"),
+            patch("hephaestus.automation.implementer_phase_runner.mark_pr_implementation_go"),
+            patch(
+                "hephaestus.automation.implementer_phase_runner."
+                "enable_auto_merge_after_implementation_go"
+            ),
             patch.object(impl, "_run_post_pr_followup"),
             patch(
                 "hephaestus.automation.implementer.fetch_issue_info",

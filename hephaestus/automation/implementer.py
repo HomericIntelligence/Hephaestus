@@ -725,7 +725,7 @@ class IssueImplementer:
         return create_pr(
             issue_number,
             branch_name,
-            self.options.auto_merge,
+            auto_merge=False,
             agent=self.options.agent,
         )
 

@@ -59,7 +59,14 @@ from .models import (
     ImplementationState,
     WorkerResult,
 )
-from .pr_manager import commit_changes, ensure_pr_created
+from .pr_manager import (
+    commit_changes,
+    enable_auto_merge_after_implementation_go,
+    ensure_pr_auto_merge_deferred,
+    ensure_pr_created,
+    mark_pr_implementation_go,
+    mark_pr_implementation_no_go,
+)
 from .pr_reviewer import gather_impl_review_context, review_pr_inline
 from .prompts import (
     get_advise_prompt_builder,
@@ -374,6 +381,7 @@ class ImplementationPhaseRunner:
             # created`` is a fallback that no-ops when the agent already opened
             # the PR.
             pr_number = impl._finalize_pr(issue_number, branch_name, worktree_path, state, slot_id)
+            ensure_pr_auto_merge_deferred(pr_number)
 
             # Strict review loop now absorbs the former ``review-prs`` and
             # ``address-review`` phases: each iteration runs a FRESH reviewer
@@ -401,6 +409,23 @@ class ImplementationPhaseRunner:
                 state.last_review_verdict = last_verdict
                 state.last_review_grade = last_grade
             impl._save_state(state)
+
+            if last_verdict == "GO":
+                mark_pr_implementation_go(pr_number)
+                if self.options.auto_merge:
+                    if slot_id is not None:
+                        self.status_tracker.update_slot(
+                            slot_id, f"{issue_ref(issue_number)}: enabling auto-merge"
+                        )
+                    enable_auto_merge_after_implementation_go(pr_number)
+            else:
+                mark_pr_implementation_no_go(pr_number)
+                impl._log(
+                    "warning",
+                    f"{issue_ref(issue_number)}: implementation review did not reach GO; "
+                    f"auto-merge remains disabled for {pr_ref(pr_number)}",
+                    thread_id,
+                )
 
             # impl-learnings + follow-up filing stay in Session 2 (#28 §B),
             # resuming AGENT_IMPLEMENTER AFTER the loop converges.

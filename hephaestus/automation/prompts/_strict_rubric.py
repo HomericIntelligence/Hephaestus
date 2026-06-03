@@ -92,9 +92,10 @@ _PR_STRICT_RUBRIC_DIMENSIONS = """
 concrete evidence from the artifacts above):**
 
 D1 — Policy compliance (HIGHEST PRIORITY / NOGO gate).
-    The three mandatory gates below (Closes #N / auto-merge / signed
-    commits) are graded as a single dimension. ANY violation forces an
-    overall NOGO verdict, regardless of every other dimension's grade.
+    The three mandatory gates below (Closes #N / auto-merge deferred until
+    implementation GO / signed commits) are graded as a single dimension. ANY
+    violation forces an overall NOGO verdict, regardless of every other
+    dimension's grade.
     Policy compliance is NEVER weighed against code quality — it is a
     hard precondition.
 

@@ -51,10 +51,11 @@ addition, but the NOGO verdict cannot be overridden by them.
    regex `^Closes #\\d+\\s*$` (case-sensitive `Closes`, hash + number, on its
    own line). `Fixes`, `Resolves`, `closes`, `Closes:` do NOT satisfy the
    policy. If absent, NOGO and quote the relevant lines of the description.
-2. **Auto-merge enabled:** the Auto-merge State block above contains a single
-   line. If it reads `auto_merge_enabled=true`, the check passes. If it reads
-   `auto_merge_enabled=false`, NOGO with a note explaining auto-merge must be
-   turned on via `gh pr merge <N> --auto --squash`.
+2. **Auto-merge deferred until implementation GO:** the Auto-merge State block
+   above contains a single line. During implementation review it MUST read
+   `auto_merge_enabled=false`. If it reads `auto_merge_enabled=true`, NOGO with
+   a note explaining auto-merge must stay disabled until this review returns GO
+   and the automation applies `state:implementation-go`.
 3. **Signed commits:** the Commit Signing State block above is a JSON array
    where each element is `{{"oid": "<sha>", "signature_valid": <bool>,
    "signer": "<login or null>"}}`. EVERY element must have
@@ -75,7 +76,7 @@ The review prose + inline comments explain *why*; the verdict line is a binary
 gate. Write your analysis in prose, then end your response with exactly one of
 the two verdict lines below (the parser takes the LAST matching line):
 
-Verdict: GO — Policy passes and code is acceptable.
+Verdict: GO — Policy passes, auto-merge is deferred, and code is acceptable.
 Verdict: NOGO — Policy violation OR fundamental code problem (explain in the review).
 
 After the verdict line, emit a single fenced JSON block:

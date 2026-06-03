@@ -26,6 +26,28 @@ from hephaestus.automation.session_naming import (
     short_githash,
 )
 
+_GIT_REPO_ENV_KEYS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+)
+
+
+def _git_test_env() -> dict[str, str]:
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    for key in _GIT_REPO_ENV_KEYS:
+        env.pop(key, None)
+    return env
+
 
 class TestReviewerAgent:
     """Per-iteration reviewer session tokens (fresh session each loop round)."""
@@ -154,13 +176,7 @@ class TestShortGithash:
     """``git rev-parse --short=7 HEAD`` wrapper with graceful failure."""
 
     def test_real_repo(self, tmp_path: Path) -> None:
-        env = {
-            **os.environ,
-            "GIT_AUTHOR_NAME": "t",
-            "GIT_AUTHOR_EMAIL": "t@t",
-            "GIT_COMMITTER_NAME": "t",
-            "GIT_COMMITTER_EMAIL": "t@t",
-        }
+        env = _git_test_env()
         subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True, env=env)
         subprocess.run(
             [
@@ -182,6 +198,12 @@ class TestShortGithash:
         assert all(c in "0123456789abcdef" for c in h)
 
     def test_missing_repo_returns_unknown(self, tmp_path: Path) -> None:
+        assert short_githash(tmp_path) == "unknown"
+
+    def test_ignores_outer_git_dir_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GIT_DIR", str(Path.cwd() / ".git"))
         assert short_githash(tmp_path) == "unknown"
 
 
@@ -256,13 +278,7 @@ class TestCurrentTrunkGithash:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("HEPH_TRUNK_GITHASH", raising=False)
-        env = {
-            **os.environ,
-            "GIT_AUTHOR_NAME": "t",
-            "GIT_AUTHOR_EMAIL": "t@t",
-            "GIT_COMMITTER_NAME": "t",
-            "GIT_COMMITTER_EMAIL": "t@t",
-        }
+        env = _git_test_env()
         subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True, env=env)
         subprocess.run(
             [

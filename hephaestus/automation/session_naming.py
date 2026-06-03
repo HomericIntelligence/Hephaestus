@@ -60,6 +60,22 @@ _ALL_AGENTS = frozenset(
 # resuming the prior iteration's transcript. Implementer/planner/ci-driver
 # deliberately do NOT appear here — they resume one session across their stage.
 _PER_ITERATION_REVIEWERS = frozenset({AGENT_PLAN_REVIEWER, AGENT_PR_REVIEWER})
+_GIT_REPO_ENV_KEYS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+)
+
+
+def _repo_scoped_git_env() -> dict[str, str]:
+    """Return environment for explicit ``git -C`` calls, ignoring outer repos."""
+    env = os.environ.copy()
+    for key in _GIT_REPO_ENV_KEYS:
+        env.pop(key, None)
+    return env
 
 
 def reviewer_agent(base_agent: str, iteration: int) -> str:
@@ -153,6 +169,7 @@ def short_githash(repo_path: Path) -> str:
             ["git", "-C", str(repo_path), "rev-parse", "--short=7", "HEAD"],
             check=True,
             capture_output=True,
+            env=_repo_scoped_git_env(),
             text=True,
             timeout=5,
         )

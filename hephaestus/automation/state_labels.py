@@ -43,6 +43,13 @@ STATE_PLAN_GO = "state:plan-go"
 #: present" / "remove all of these" operations.
 ALL_STATE_LABELS = (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO)
 
+# PR-scoped implementation-review state labels. These deliberately live outside
+# ALL_STATE_LABELS so issue-level plan state remains independent from PR review
+# state.
+STATE_IMPLEMENTATION_NO_GO = "state:implementation-no-go"
+STATE_IMPLEMENTATION_GO = "state:implementation-go"
+ALL_IMPLEMENTATION_STATE_LABELS = (STATE_IMPLEMENTATION_NO_GO, STATE_IMPLEMENTATION_GO)
+
 #: Per-label colour (hex without leading ``#``) and short description. The
 #: provisioning script (``hephaestus-ensure-state-labels``) uses these when
 #: creating the labels on a repo so they have a consistent look across the org.
@@ -90,6 +97,11 @@ def is_plan_no_go(labels: Iterable[str]) -> bool:
     on the next loop.
     """
     return has_label(labels, STATE_PLAN_NO_GO)
+
+
+def is_implementation_go(labels: Iterable[str]) -> bool:
+    """Return ``True`` iff a PR carries the implementation-review GO label."""
+    return has_label(labels, STATE_IMPLEMENTATION_GO)
 
 
 def needs_plan(labels: Iterable[str]) -> bool:

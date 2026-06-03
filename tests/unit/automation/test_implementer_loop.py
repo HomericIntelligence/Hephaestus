@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -517,12 +518,87 @@ class TestReviewIterationStatePersistence:
         prior_file = implementer.state_dir / "review-prior-42.txt"
         assert iter_file.exists(), "review-iter-42.json not created"
         assert prior_file.exists(), "review-prior-42.txt not created"
-
-        import json
-
         data = json.loads(iter_file.read_text())
         assert data["iterations_run"] == 2
         assert prior_file.read_text() == "prior text"
+
+
+class TestImplementationAutoMergeGate:
+    """Implementation PR auto-merge must wait for implementation-review GO."""
+
+    def _drive(
+        self,
+        implementer: IssueImplementer,
+        tmp_path: Path,
+        *,
+        review_verdict: str,
+        auto_merge: bool,
+    ) -> None:
+        implementer.options.auto_merge = auto_merge
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir(exist_ok=True)
+        with (
+            patch(
+                "hephaestus.automation.implementer_phase_runner.ensure_pr_auto_merge_deferred"
+            ) as mock_defer,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_go"
+            ) as mock_go,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_no_go"
+            ) as mock_nogo,
+            patch(
+                "hephaestus.automation.implementer_phase_runner."
+                "enable_auto_merge_after_implementation_go"
+            ) as mock_arm,
+            patch.object(
+                implementer.worktree_manager, "create_worktree", return_value=worktree_path
+            ),
+            patch.object(implementer, "_has_plan", return_value=True),
+            patch.object(implementer, "_save_state"),
+            patch("hephaestus.automation.implementer.find_pr_for_issue", return_value=None),
+            patch("hephaestus.automation.implementer.is_plan_review_go", return_value=True),
+            patch.object(implementer, "_run_advise", return_value=""),
+            patch.object(implementer, "_run_claude_code", return_value="session-1"),
+            patch.object(implementer, "_finalize_pr", return_value=456),
+            patch.object(
+                implementer, "_run_impl_review_loop", return_value=(1, review_verdict, "A")
+            ),
+            patch.object(implementer, "_run_post_pr_followup"),
+            patch("hephaestus.automation.implementer.fetch_issue_info") as mock_issue,
+        ):
+            mock_issue.return_value.title = "title"
+            mock_issue.return_value.body = "body"
+
+            result = implementer._implement_issue(1)
+
+        assert result.success is True
+        mock_defer.assert_called_once_with(456)
+        if review_verdict == "GO":
+            mock_go.assert_called_once_with(456)
+            mock_nogo.assert_not_called()
+        else:
+            mock_go.assert_not_called()
+            mock_nogo.assert_called_once_with(456)
+        if review_verdict == "GO" and auto_merge:
+            mock_arm.assert_called_once_with(456)
+        else:
+            mock_arm.assert_not_called()
+
+    def test_go_review_labels_pr_then_arms_auto_merge(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        self._drive(implementer, tmp_path, review_verdict="GO", auto_merge=True)
+
+    def test_nogo_review_leaves_auto_merge_disabled(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        self._drive(implementer, tmp_path, review_verdict="NOGO", auto_merge=True)
+
+    def test_go_review_respects_no_auto_merge_option(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        self._drive(implementer, tmp_path, review_verdict="GO", auto_merge=False)
 
     def test_load_review_iteration_state_round_trips(self, implementer: IssueImplementer) -> None:
         """Round-trip: save then load must return the same values."""

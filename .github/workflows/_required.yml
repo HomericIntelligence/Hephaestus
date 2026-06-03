@@ -3,16 +3,19 @@ name: Required Checks
 on:
   pull_request:
     # Default types are [opened, synchronize, reopened], which do NOT fire when
-    # auto-merge is toggled after PR creation — so pr-policy's auto-merge check
-    # was stuck with its PR-open verdict until the next push (the race that #680
-    # papered over with `needs: lint`). Re-running on auto_merge_enabled /
-    # auto_merge_disabled (and ready_for_review) makes that gate converge on the
-    # true state with no timing reliance. See pr-policy below.
+    # auto-merge is toggled or labels are changed after PR creation — so
+    # pr-policy's auto-merge check was stuck with its PR-open verdict until the
+    # next push (the race that #680 papered over with `needs: lint`).
+    # Re-running on auto_merge_enabled / auto_merge_disabled, labeled /
+    # unlabeled, and ready_for_review makes that gate converge on the true
+    # state with no timing reliance. See pr-policy below.
     types:
       - opened
       - synchronize
       - reopened
       - ready_for_review
+      - labeled
+      - unlabeled
       - auto_merge_enabled
       - auto_merge_disabled
   push:
@@ -259,15 +262,17 @@ jobs:
     # Enforces repo PR policy on every PR. Three independent checks (each
     # gated by `if: always()` so one failure still surfaces the others):
     #   1. PR body contains `Closes #N` on its own line.
-    #   2. Auto-merge is enabled on the PR.
+    #   2. Auto-merge matches implementation-review state:
+    #      disabled before `state:implementation-go`, enabled after it.
     #   3. Every commit on the PR has a verified signature.
     # Push events are skipped because there is no PR to inspect.
     #
     # This gate intentionally has NO `needs:` — it runs immediately and
-    # re-runs whenever auto-merge is toggled (see the auto_merge_enabled /
-    # auto_merge_disabled trigger types in `on.pull_request` above), so the
-    # auto-merge check (#2) converges on the PR's true state without depending
-    # on another job's timing. The earlier `needs: lint` workaround (#680) only
+    # re-runs whenever auto-merge is toggled or labels change (see the
+    # auto_merge_enabled / auto_merge_disabled and labeled / unlabeled trigger
+    # types in `on.pull_request` above), so the auto-merge check (#2) converges
+    # on the PR's true state without depending on another job's timing.
+    # The earlier `needs: lint` workaround (#680) only
     # delayed the read and left a required-check-skipped-on-lint-failure wrinkle.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
@@ -286,13 +291,13 @@ jobs:
           REPO_NAME: ${{ github.event.repository.name }}
         run: |
           set -euo pipefail
-          # `gh pr view --json body,autoMergeRequest` exposes body + auto-merge
-          # state but DOES NOT expose per-commit signatures; we use the GraphQL
-          # API for that. Two separate queries are fine here — the workflow
-          # runs at most once per PR event and the policy gate must be cheap
-          # to read and debug.
+          # `gh pr view --json body,autoMergeRequest,labels` exposes body,
+          # auto-merge state, and implementation-review labels but DOES NOT
+          # expose per-commit signatures; we use the GraphQL API for that. Two
+          # separate queries are fine here — the workflow runs at most once per
+          # PR event and the policy gate must be cheap to read and debug.
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-            --json body,autoMergeRequest \
+            --json body,autoMergeRequest,labels \
             > pr.json
           gh api graphql \
             -f query='query($owner:String!,$name:String!,$pr:Int!) {
@@ -330,18 +335,30 @@ jobs:
             exit 1
           fi
 
-      - name: "Check 2: auto-merge enabled"
+      - name: "Check 2: auto-merge matches implementation-review state"
         if: always() && steps.fetch.outcome == 'success'
         run: |
           set -euo pipefail
           state=$(jq -r '.autoMergeRequest' pr.json)
-          if [ "$state" = "null" ] || [ -z "$state" ]; then
-            msg="::error::Auto-merge is not enabled on this PR."
-            msg+=" Run: gh pr merge $PR_NUMBER --auto --squash  (this repo is squash-only)."
-            echo "$msg"
-            exit 1
+          implementation_go=$(jq -r '[(.labels // [])[].name] | index("state:implementation-go") != null' pr.json)
+          if [ "$implementation_go" = "true" ]; then
+            if [ "$state" = "null" ] || [ -z "$state" ]; then
+              msg="::error::PR has state:implementation-go but auto-merge is not enabled."
+              msg+=" Run: gh pr merge $PR_NUMBER --auto --squash  (this repo is squash-only)."
+              echo "$msg"
+              exit 1
+            fi
+            echo "OK: implementation-GO PR has auto-merge enabled"
+          else
+            if [ "$state" != "null" ] && [ -n "$state" ]; then
+              msg="::error::Auto-merge is enabled before implementation review GO."
+              msg+=" Remove it with: gh pr merge $PR_NUMBER --disable-auto"
+              msg+="; re-enable only after state:implementation-go is applied."
+              echo "$msg"
+              exit 1
+            fi
+            echo "OK: auto-merge is deferred until implementation review GO"
           fi
-          echo "OK: auto-merge is enabled"
 
       - name: "Check 3: every commit is signed"
         if: always() && steps.fetch.outcome == 'success'

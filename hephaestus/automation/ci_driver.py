@@ -55,6 +55,7 @@ from .github_api import (
     gh_pr_list_unresolved_threads,
 )
 from .models import CIDriverOptions, WorkerResult
+from .pr_manager import pr_has_implementation_go_label
 from .prompts import get_advise_prompt_builder
 from .session_naming import AGENT_ADVISE, AGENT_CI_DRIVER
 from .status_tracker import StatusTracker
@@ -202,12 +203,10 @@ class CIDriver:
         # this is empty (#838). Stored on the driver so ``main()`` can check
         # it without changing ``run()``'s established return type.
         self.open_prs_remaining = [] if self.options.dry_run else self._list_open_prs_remaining()
-        # Arm auto-merge on EVERY un-armed open PR before the final report
-        # (#882). A PR the driver fixed-and-pushed, or one that arrived green
-        # from elsewhere, can end CLEAN but un-armed and then never merge
-        # (observed: ProjectHermes #645/#648). Arming is idempotent and a
-        # no-op for PRs GitHub won't let merge yet (conflicts / red CI / review
-        # gates), so a blanket pass is safe and drains the ready ones.
+        # Arm auto-merge on every implementation-GO un-armed open PR before
+        # the final report (#882). The implementation-GO label is the policy
+        # gate: PRs must not be queued for merge until in-loop implementation
+        # review has approved them.
         if self.open_prs_remaining and not self.options.dry_run:
             self.open_prs_remaining = self._arm_all_unarmed_open_prs(self.open_prs_remaining)
         if self.open_prs_remaining:
@@ -290,27 +289,28 @@ class CIDriver:
         # normalise to the gh-CLI shape consumers downstream already use.
         normalised: list[dict[str, Any]] = []
         for pr in raw_pulls:
+            labels = pr.get("labels") or []
             normalised.append(
                 {
                     "number": pr.get("number"),
                     "title": pr.get("title", ""),
                     "headRefName": (pr.get("head") or {}).get("ref", ""),
                     "autoMergeRequest": pr.get("auto_merge"),
+                    "labels": [
+                        label.get("name", "") for label in labels if isinstance(label, dict)
+                    ],
                     "isBot": (pr.get("user") or {}).get("type") == "Bot",
                 }
             )
         return normalised
 
     def _arm_all_unarmed_open_prs(self, open_prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Arm auto-merge on every un-armed open PR, then refresh their state (#882).
+        """Arm auto-merge on every implementation-GO un-armed open PR (#882).
 
         The per-issue drive only arms PRs it processed; a PR fixed-and-pushed by
         the driver (or one that arrived green from another actor) can end CLEAN
-        but un-armed and never merge. This blanket pass arms anything not yet
-        armed. ``_enable_auto_merge`` is idempotent and GitHub simply queues the
-        request for PRs it won't merge yet (conflicts / failing CI / required
-        review), so arming a not-yet-mergeable PR is a harmless no-op rather than
-        a force-merge.
+        but un-armed and never merge. This pass arms only PRs already marked
+        ``state:implementation-go`` so review approval remains the merge gate.
 
         Returns the open-PR list with ``autoMergeRequest`` refreshed for any PR
         that armed, so the caller's final gate reports the true state.
@@ -322,6 +322,12 @@ class CIDriver:
                 continue
             if pr.get("autoMergeRequest"):
                 continue  # already armed
+            if not pr_has_implementation_go_label(pr):
+                logger.info(
+                    "PR #%s lacks state:implementation-go; leaving auto-merge disabled",
+                    number,
+                )
+                continue
             if self._enable_auto_merge(number, is_bot_pr=bool(pr.get("isBot"))):
                 armed_now.append(number)
         if not armed_now:
@@ -613,6 +619,19 @@ class CIDriver:
             )
 
             if all_green:
+                if not self._pr_has_implementation_go(pr_number):
+                    logger.info(
+                        "Issue #%s: PR #%s is green but lacks state:implementation-go; "
+                        "leaving auto-merge disabled until implementation review approves it",
+                        issue_number,
+                        pr_number,
+                    )
+                    return WorkerResult(
+                        issue_number=issue_number,
+                        success=True,
+                        pr_number=pr_number,
+                    )
+
                 self.status_tracker.update_slot(
                     acquired_slot, f"{issue_ref(issue_number)}: enabling auto-merge"
                 )
@@ -937,6 +956,15 @@ class CIDriver:
         if not all(c.get("conclusion") in ("success", "skipped", "neutral") for c in required):
             # Still red after the fix — let the normal failure handling stand.
             return None
+
+        if not self._pr_has_implementation_go(pr_number):
+            logger.info(
+                "Issue #%s: PR #%s is green after fix but lacks state:implementation-go; "
+                "leaving auto-merge disabled until implementation review approves it",
+                issue_number,
+                pr_number,
+            )
+            return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
         self.status_tracker.update_slot(
             acquired_slot, f"{issue_ref(issue_number)}: enabling auto-merge (post-fix)"
@@ -1337,6 +1365,22 @@ class CIDriver:
                 exc,
             )
             return None
+
+    def _pr_has_implementation_go(self, pr_number: int) -> bool:
+        """Return whether a PR has the implementation-review GO label."""
+        try:
+            result = _gh_call(
+                ["pr", "view", str(pr_number), "--json", "labels"],
+                check=False,
+            )
+            return pr_has_implementation_go_label(dict(json.loads(result.stdout or "{}")))
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "Could not fetch PR #%s labels for implementation-GO gate: %s",
+                pr_number,
+                exc,
+            )
+            return False
 
     def _wait_for_pr_terminal(self, issue_number: int, pr_number: int) -> str:
         """Block until an armed PR reaches a terminal state, or times out.

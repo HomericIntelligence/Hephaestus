@@ -14,7 +14,7 @@ A piece of work is **done** when every item below is true.
 | 1 | Branch named `<issue-number>-<description>` | Convention (PR reviewer) |
 | 2 | PR body contains the literal line `Closes #<issue-number>` (capital C, no colon, on its own line) | CI gate `pr-policy` (`.github/workflows/_required.yml`) |
 | 3 | Every commit on the branch is cryptographically signed (`git commit -S`) | CI gate `pr-policy` |
-| 4 | Auto-merge is enabled with `--squash` (NOT `--rebase`; the repo disallows rebase merges) | CI gate `pr-policy` |
+| 4 | Auto-merge is disabled until `state:implementation-go`, then enabled with `--squash` (NOT `--rebase`; the repo disallows rebase merges) | CI gate `pr-policy` |
 | 5 | Commit messages follow Conventional Commits (`type(scope): description`) | PR reviewer (no automated gate) |
 | 6 | `pixi run ruff check hephaestus/ tests/` passes | CI job `lint` |
 | 7 | `pixi run ruff format --check hephaestus/ tests/` passes (no files would be reformatted) | CI job `lint` |

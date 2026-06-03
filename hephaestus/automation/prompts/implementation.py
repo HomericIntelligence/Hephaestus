@@ -89,16 +89,15 @@ After implementation is complete and tests pass:
    on its own line, with the literal keyword `Closes` (capital C). The
    variants `Fixes #N`, `Resolves #N`, `Closes: #N`, `closes #n` are NOT
    accepted by the policy check — even though GitHub recognizes them.
-4. IMMEDIATELY after PR creation, enable auto-merge:
-       gh pr merge <PR#> --auto --rebase
-   Fall back to `--squash` ONLY if rebase merging is disabled for the repo.
-5. Verify all three policy properties before declaring done. ``gh pr view``
-   exposes body + auto-merge state but NOT per-commit signatures, so the
-   verification uses two queries — the REST projection for body/auto-merge
-   and GraphQL for signing state:
-       # Body and auto-merge state:
+4. DO NOT enable auto-merge yet. Auto-merge is armed only after the
+   implementation-review loop marks the PR with `state:implementation-go`.
+5. Verify the creation-time policy properties before declaring done.
+   ``gh pr view`` exposes the body but NOT per-commit signatures, so the
+   verification uses two queries — the REST projection for body and GraphQL
+   for signing state:
+       # Body:
        gh pr view <PR#> --json body,autoMergeRequest \\
-         -q '.body | test("(?m)^Closes #\\\\d+\\\\s*$"), .autoMergeRequest != null'
+         -q '.body | test("(?m)^Closes #\\\\d+\\\\s*$"), .autoMergeRequest == null'
        # Per-commit signing state (GraphQL — replace OWNER/REPO/PR#):
        gh api graphql -f query='query($owner:String!,$name:String!,$pr:Int!){{
          repository(owner:$owner,name:$name){{
@@ -106,7 +105,7 @@ After implementation is complete and tests pass:
              commits(first:100){{ nodes{{ commit{{ oid signature{{ isValid }} }} }} }} }} }} }}' \\
          -F owner=OWNER -F name=REPO -F pr=<PR#> \\
          -q '[.data.repository.pullRequest.commits.nodes[].commit.signature.isValid] | all'
-   All three queries must return `true`. If any fails, fix it before
+   All three checks must return `true`. If any fails, fix it before
    reporting completion.
 
 A PR that fails any of these three checks will be BLOCKED at code review and
