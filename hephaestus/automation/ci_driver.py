@@ -201,6 +201,14 @@ class CIDriver:
         # this is empty (#838). Stored on the driver so ``main()`` can check
         # it without changing ``run()``'s established return type.
         self.open_prs_remaining = [] if self.options.dry_run else self._list_open_prs_remaining()
+        # Arm auto-merge on EVERY un-armed open PR before the final report
+        # (#882). A PR the driver fixed-and-pushed, or one that arrived green
+        # from elsewhere, can end CLEAN but un-armed and then never merge
+        # (observed: ProjectHermes #645/#648). Arming is idempotent and a
+        # no-op for PRs GitHub won't let merge yet (conflicts / red CI / review
+        # gates), so a blanket pass is safe and drains the ready ones.
+        if self.open_prs_remaining and not self.options.dry_run:
+            self.open_prs_remaining = self._arm_all_unarmed_open_prs(self.open_prs_remaining)
         if self.open_prs_remaining:
             logger.warning(
                 "%d open PR(s) remain on the repo — not done:",
@@ -287,9 +295,44 @@ class CIDriver:
                     "title": pr.get("title", ""),
                     "headRefName": (pr.get("head") or {}).get("ref", ""),
                     "autoMergeRequest": pr.get("auto_merge"),
+                    "isBot": (pr.get("user") or {}).get("type") == "Bot",
                 }
             )
         return normalised
+
+    def _arm_all_unarmed_open_prs(self, open_prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Arm auto-merge on every un-armed open PR, then refresh their state (#882).
+
+        The per-issue drive only arms PRs it processed; a PR fixed-and-pushed by
+        the driver (or one that arrived green from another actor) can end CLEAN
+        but un-armed and never merge. This blanket pass arms anything not yet
+        armed. ``_enable_auto_merge`` is idempotent and GitHub simply queues the
+        request for PRs it won't merge yet (conflicts / failing CI / required
+        review), so arming a not-yet-mergeable PR is a harmless no-op rather than
+        a force-merge.
+
+        Returns the open-PR list with ``autoMergeRequest`` refreshed for any PR
+        that armed, so the caller's final gate reports the true state.
+        """
+        armed_now: list[int] = []
+        for pr in open_prs:
+            number = pr.get("number")
+            if not isinstance(number, int) or number < 0:
+                continue
+            if pr.get("autoMergeRequest"):
+                continue  # already armed
+            if self._enable_auto_merge(number, is_bot_pr=bool(pr.get("isBot"))):
+                armed_now.append(number)
+        if not armed_now:
+            return open_prs
+        logger.info(
+            "Armed auto-merge on %d previously-unarmed open PR(s): %s",
+            len(armed_now),
+            sorted(armed_now),
+        )
+        # Re-list so the final gate sees the freshly-armed PRs as armed_pending
+        # rather than needs_action.
+        return self._list_open_prs_remaining()
 
     def _discover_bot_prs(self) -> dict[int, int]:
         """Enumerate every open ``is_bot=true`` PR on the repo (#848).

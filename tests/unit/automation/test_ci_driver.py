@@ -349,12 +349,14 @@ class TestOpenPrsRemaining:
                 "title": "first",
                 "head": {"ref": "branch-1"},
                 "auto_merge": {"enabled_by": {"login": "bot"}},
+                "user": {"type": "User"},
             },
             {
                 "number": 2,
                 "title": "second",
                 "head": {"ref": "branch-2"},
                 "auto_merge": None,
+                "user": {"type": "Bot"},
             },
         ]
         result_mock = MagicMock(stdout=json.dumps(rest_pulls))
@@ -369,12 +371,14 @@ class TestOpenPrsRemaining:
                 "title": "first",
                 "headRefName": "branch-1",
                 "autoMergeRequest": {"enabled_by": {"login": "bot"}},
+                "isBot": False,
             },
             {
                 "number": 2,
                 "title": "second",
                 "headRefName": "branch-2",
                 "autoMergeRequest": None,
+                "isBot": True,
             },
         ]
 
@@ -2100,6 +2104,56 @@ class TestEnableAutoMergeBotRetry:
         assert ok is False
         # Only the primary --squash attempt; no strategy-agnostic retry.
         assert mock_gh.call_count == 1
+
+
+class TestArmAllUnarmedOpenPrs:
+    """The blanket arm-all pass marks every un-armed open PR auto-merge (#882)."""
+
+    def test_arms_only_unarmed_prs_and_passes_bot_flag(self, driver: CIDriver) -> None:
+        open_prs: list[dict[str, Any]] = [
+            {"number": 10, "autoMergeRequest": {"x": 1}, "isBot": False},  # already armed
+            {"number": 11, "autoMergeRequest": None, "isBot": True},  # arm (bot)
+            {"number": 12, "autoMergeRequest": None, "isBot": False},  # arm (human)
+        ]
+        refreshed = [
+            {"number": 10, "autoMergeRequest": {"x": 1}},
+            {"number": 11, "autoMergeRequest": {"x": 1}},
+            {"number": 12, "autoMergeRequest": {"x": 1}},
+        ]
+        with (
+            patch.object(driver, "_enable_auto_merge", return_value=True) as mock_arm,
+            patch.object(driver, "_list_open_prs_remaining", return_value=refreshed),
+        ):
+            result = driver._arm_all_unarmed_open_prs(open_prs)
+        # Already-armed #10 is skipped; #11 and #12 are armed.
+        assert mock_arm.call_count == 2
+        called = {c.args[0]: c.kwargs.get("is_bot_pr") for c in mock_arm.call_args_list}
+        assert called == {11: True, 12: False}
+        # Returns the re-listed PRs so the gate sees fresh armed state.
+        assert result == refreshed
+
+    def test_no_unarmed_prs_is_noop(self, driver: CIDriver) -> None:
+        open_prs: list[dict[str, Any]] = [
+            {"number": 10, "autoMergeRequest": {"x": 1}, "isBot": False}
+        ]
+        with (
+            patch.object(driver, "_enable_auto_merge") as mock_arm,
+            patch.object(driver, "_list_open_prs_remaining") as mock_list,
+        ):
+            result = driver._arm_all_unarmed_open_prs(open_prs)
+        mock_arm.assert_not_called()
+        mock_list.assert_not_called()  # no re-list when nothing armed
+        assert result is open_prs
+
+    def test_skips_sentinel_unknown_pr(self, driver: CIDriver) -> None:
+        # _list_open_prs_remaining returns [{"number": -1, ...}] on lookup failure.
+        open_prs: list[dict[str, Any]] = [
+            {"number": -1, "title": "(unknown)", "autoMergeRequest": None}
+        ]
+        with patch.object(driver, "_enable_auto_merge") as mock_arm:
+            result = driver._arm_all_unarmed_open_prs(open_prs)
+        mock_arm.assert_not_called()
+        assert result is open_prs
 
 
 class TestEvaluateRunResult:
