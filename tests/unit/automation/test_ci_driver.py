@@ -1397,6 +1397,14 @@ class TestForceEngagementPrompt:
         # Signed-commits and no --no-verify re-stated (user requirement).
         assert "git commit -S" in prompt
         assert "--no-verify" in prompt
+        # Bug 4: the agent must NOT be told to commit a blocker file (a new
+        # Markdown file fails the repo's markdownlint and turns 1 red check into
+        # 2). It should use the BLOCKED: line and never disable a lint rule.
+        assert "CI_BLOCKER.md" in prompt  # explicitly named as forbidden
+        assert "BLOCKED:" in prompt
+        assert "no rule disabled" in prompt
+        # The old "write a commit that documents the blocker" instruction is gone.
+        assert "write a commit that documents the blocker" not in prompt
 
     def test_review_threads_block_prepended_when_nonempty(
         self, driver: CIDriver, tmp_path: Path
@@ -2043,6 +2051,19 @@ class TestWaitForPrTerminal:
         ):
             assert driver._wait_for_pr_terminal(1, 2) == "FAILING"
 
+    def test_open_dirty_returns_dirty(self, driver: CIDriver) -> None:
+        # OPEN, checks green, but mergeStateStatus DIRTY (conflict) → DIRTY,
+        # don't wait out the full timeout on an unmergeable armed PR (#838).
+        with (
+            patch.object(
+                driver,
+                "_gh_pr_state",
+                return_value={"state": "OPEN", "mergeStateStatus": "DIRTY"},
+            ),
+            patch.object(driver, "_failing_required_check_names", return_value=[]),
+        ):
+            assert driver._wait_for_pr_terminal(1, 2) == "DIRTY"
+
     def test_open_and_green_times_out(
         self, driver: CIDriver, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2072,6 +2093,102 @@ class TestWaitForPrTerminal:
         with patch.object(d, "_gh_pr_state") as mock_state:
             assert d._wait_for_pr_terminal(1, 2) == "TIMEOUT"
         mock_state.assert_not_called()
+
+
+class TestRecheckAndArmAfterFix:
+    """A pushed CI fix must re-poll + arm; never leave a now-green PR un-armed."""
+
+    def test_green_after_fix_arms_and_waits(self, driver: CIDriver) -> None:
+        green = [_make_check("test", required=True, conclusion="success")]
+        with (
+            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=green),
+            patch.object(driver, "_enable_auto_merge", return_value=True) as mock_arm,
+            patch.object(driver, "_gh_pr_state", return_value={"headRefOid": "abc"}),
+            patch.object(driver, "_get_pr_branch", return_value="b"),
+            patch.object(driver, "_arm_drive_green") as mock_record,
+            patch.object(driver, "_wait_for_pr_terminal", return_value="MERGED") as mock_wait,
+        ):
+            result = driver._recheck_and_arm_after_fix(1, 2, 0)
+        assert result is not None and result.success is True
+        mock_arm.assert_called_once()
+        mock_record.assert_called_once()
+        mock_wait.assert_called_once()
+
+    def test_still_pending_after_fix_returns_none(
+        self, driver: CIDriver, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # CI hasn't concluded yet after the push → None (caller keeps fix success;
+        # a later run arms it). Bounded by HEPH_CI_POLL_MAX_WAIT.
+        monkeypatch.setenv("HEPH_CI_POLL_MAX_WAIT", "0")
+        pending = [_make_check("test", status="in_progress", conclusion="", required=True)]
+        with (
+            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=pending),
+            patch("hephaestus.automation.ci_driver.time.sleep"),
+            patch.object(driver, "_enable_auto_merge") as mock_arm,
+        ):
+            assert driver._recheck_and_arm_after_fix(1, 2, 0) is None
+        mock_arm.assert_not_called()
+
+    def test_still_red_after_fix_returns_none(self, driver: CIDriver) -> None:
+        red = [_make_check("test", required=True, conclusion="failure")]
+        with (
+            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=red),
+            patch.object(driver, "_enable_auto_merge") as mock_arm,
+        ):
+            assert driver._recheck_and_arm_after_fix(1, 2, 0) is None
+        mock_arm.assert_not_called()
+
+
+class TestResolveDirtyPr:
+    """An armed-but-DIRTY PR is rebased, then handed to the agent if still conflicting."""
+
+    def test_clean_mechanical_rebase_then_arm(self, driver: CIDriver) -> None:
+        with (
+            patch.object(driver, "_attempt_mechanical_rebase", return_value=True) as mock_rb,
+            patch.object(
+                driver,
+                "_recheck_and_arm_after_fix",
+                return_value=WorkerResult(issue_number=1, success=True, pr_number=2),
+            ) as mock_rearm,
+        ):
+            result = driver._resolve_dirty_pr(1, 2, 0)
+        assert result.success is True
+        mock_rb.assert_called_once()
+        mock_rearm.assert_called_once()
+
+    def test_conflict_routes_to_agent_with_context(self, driver: CIDriver) -> None:
+        with (
+            patch.object(driver, "_attempt_mechanical_rebase", return_value=False),
+            patch(
+                "hephaestus.automation.ci_driver._gh_call",
+                return_value=MagicMock(stdout='{"baseRefName":"main"}'),
+            ),
+            patch.object(
+                driver,
+                "_attempt_ci_fixes",
+                return_value=WorkerResult(issue_number=1, success=True, pr_number=2),
+            ) as mock_fix,
+            patch.object(
+                driver,
+                "_recheck_and_arm_after_fix",
+                return_value=WorkerResult(issue_number=1, success=True, pr_number=2),
+            ),
+        ):
+            result = driver._resolve_dirty_pr(1, 2, 0)
+        assert result.success is True
+        # The agent must get explicit conflict-resolution context.
+        ctx = mock_fix.call_args.kwargs.get("extra_context", "")
+        assert "MERGE CONFLICT" in ctx
+
+    def test_unresolved_conflict_returns_failure(self, driver: CIDriver) -> None:
+        with (
+            patch.object(driver, "_attempt_mechanical_rebase", return_value=False),
+            patch("hephaestus.automation.ci_driver._gh_call", return_value=MagicMock(stdout="{}")),
+            patch.object(driver, "_attempt_ci_fixes", return_value=None),
+        ):
+            result = driver._resolve_dirty_pr(1, 2, 0)
+        assert result.success is False
+        assert "conflict" in (result.error or "").lower()
 
 
 class TestEnableAutoMergeBotRetry:

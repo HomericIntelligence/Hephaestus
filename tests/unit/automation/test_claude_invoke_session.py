@@ -245,6 +245,56 @@ class TestSessionExpiredFallback:
         assert "--session-id" in first_argv
         assert "--resume" in second_argv
 
+    def test_in_use_then_resume_fails_creates_fresh_session(self, fake_home: Path) -> None:
+        """Create in-use → resume keeps failing → fall back to a FRESH session.
+
+        Under 3 parallel CI-fix workers, two can race on the same deterministic
+        session UUID; the loser hits "already in use" and resume can also fail
+        while the sibling is still initializing. Rather than aborting the PR
+        (observed: ProjectHermes #647), derive a fresh unique session.
+        """
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        already = subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["claude"],
+            output="",
+            stderr="Error: Session ID abc is already in use.",
+        )
+        resume_fail = subprocess.CalledProcessError(
+            returncode=1, cmd=["claude"], output="", stderr="cannot resume: locked"
+        )
+        fresh_ok = subprocess.CompletedProcess(
+            args=["claude"], returncode=0, stdout="fresh-ok", stderr=""
+        )
+        # create(in-use) → resume×3 fail → fresh create ok
+        with (
+            patch(
+                "hephaestus.automation.claude_invoke.subprocess.run",
+                side_effect=[already, resume_fail, resume_fail, resume_fail, fresh_ok],
+            ) as m,
+            patch("hephaestus.automation.claude_invoke.time.sleep"),
+        ):
+            stdout, returned_sid = invoke_claude_with_session(
+                repo="R",
+                issue=1,
+                agent=AGENT_PLANNER,
+                prompt="hi",
+                model="sonnet",
+                cwd=cwd,
+            )
+        assert stdout == "fresh-ok"
+        # 1 create + 3 resume + 1 fresh create
+        assert m.call_count == 5
+        # The final call is a fresh --session-id create with a DIFFERENT id.
+        final_argv = m.call_args_list[-1][0][0]
+        assert "--session-id" in final_argv
+        fresh_sid = final_argv[final_argv.index("--session-id") + 1]
+        assert returned_sid == fresh_sid
+        # The deterministic id and the fresh id must differ.
+        orig_sid = m.call_args_list[0][0][0][m.call_args_list[0][0][0].index("--session-id") + 1]
+        assert fresh_sid != orig_sid
+
 
 class TestArgvAssembly:
     """Optional flags appear in argv at the right positions."""
