@@ -104,8 +104,7 @@ __all__ = [
 ]
 
 # Default implementation timeout in seconds. Actual runtime value is read from
-# ``HEPH_IMPLEMENTER_AGENT_TIMEOUT`` (or legacy
-# ``HEPH_IMPLEMENTER_CLAUDE_TIMEOUT``) by
+# ``HEPH_IMPLEMENTER_AGENT_TIMEOUT`` by
 # :func:`.claude_timeouts.implementer_claude_timeout`; this constant serves as
 # the documented default and can be used in tests.
 _CLAUDE_IMPL_TIMEOUT: int = 1800
