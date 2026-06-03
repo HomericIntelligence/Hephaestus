@@ -18,7 +18,7 @@ def test_planner_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Planner timeout uses the documented default when unset."""
     _clear_planner_timeout_env(monkeypatch)
 
-    assert claude_timeouts.planner_claude_timeout() == 300
+    assert claude_timeouts.planner_claude_timeout() == 600
 
 
 def test_planner_timeout_legacy_env_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -47,7 +47,7 @@ def test_planner_timeout_invalid_agent_env_logs_and_defaults(
     monkeypatch.setenv("HEPH_PLANNER_AGENT_TIMEOUT", "slow")
 
     with caplog.at_level(logging.WARNING, logger="hephaestus.automation.claude_timeouts"):
-        assert claude_timeouts.planner_claude_timeout() == 300
+        assert claude_timeouts.planner_claude_timeout() == 600
 
     assert any("HEPH_PLANNER_AGENT_TIMEOUT" in record.message for record in caplog.records)
 
@@ -57,7 +57,7 @@ def test_advise_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HEPH_ADVISE_AGENT_TIMEOUT", raising=False)
     monkeypatch.delenv("HEPH_ADVISE_CLAUDE_TIMEOUT", raising=False)
 
-    assert claude_timeouts.advise_claude_timeout() == 180
+    assert claude_timeouts.advise_claude_timeout() == 360
 
 
 def test_advise_timeout_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:

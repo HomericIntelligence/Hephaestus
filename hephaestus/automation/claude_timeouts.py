@@ -37,10 +37,10 @@ def _read_int_env(name: str, default: int, *, legacy_name: str | None = None) ->
 
 
 def planner_claude_timeout() -> int:
-    """Timeout for agent calls inside the planner (default 300s)."""
+    """Timeout for agent calls inside the planner (default 600s)."""
     return _read_int_env(
         "HEPH_PLANNER_AGENT_TIMEOUT",
-        300,
+        600,
         legacy_name="HEPH_PLANNER_CLAUDE_TIMEOUT",
     )
 
@@ -64,10 +64,10 @@ def implementer_claude_timeout() -> int:
 
 
 def advise_claude_timeout() -> int:
-    """Timeout for lightweight advise agent calls (default 180s)."""
+    """Timeout for lightweight advise agent calls (default 360s)."""
     return _read_int_env(
         "HEPH_ADVISE_AGENT_TIMEOUT",
-        180,
+        360,
         legacy_name="HEPH_ADVISE_CLAUDE_TIMEOUT",
     )
 
