@@ -15,6 +15,11 @@ from typing import Any, Literal
 AgentName = Literal["claude", "codex"]
 AGENT_CHOICES: tuple[AgentName, ...] = ("claude", "codex")
 DEFAULT_AGENT: AgentName = "claude"
+AGENT_AUTH_STATUS_TIMEOUT = 10
+AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
+    "claude": (("claude", "auth", "status"),),
+    "codex": (("codex", "login", "status"),),
+}
 
 
 @dataclass(frozen=True)
@@ -34,28 +39,59 @@ def add_agent_argument(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "Agent backend to invoke for model-driven steps "
-            "(default: auto-detect, preferring claude when available)"
+            "(default: auto-detect authenticated backend, preferring claude when authenticated)"
         ),
     )
+
+
+def is_agent_authenticated(agent: AgentName) -> bool:
+    """Return True when the provider CLI is installed and reports logged-in auth."""
+    if shutil.which(agent) is None:
+        return False
+
+    for cmd in AGENT_AUTH_STATUS_COMMANDS[agent]:
+        try:
+            result = subprocess.run(
+                list(cmd),
+                text=True,
+                capture_output=True,
+                timeout=AGENT_AUTH_STATUS_TIMEOUT,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0:
+            return True
+    return False
 
 
 def resolve_agent(agent: str | None) -> AgentName:
     """Resolve an optional provider selection into a concrete backend.
 
-    When the operator omits ``--agent``, prefer Claude if both provider CLIs
-    are present. Codex is the fallback when Claude is absent.
+    When the operator omits ``--agent``, choose an installed provider that also
+    reports authenticated status. Claude still wins ties when both providers are
+    authenticated.
     """
     if agent is not None:
         if agent not in AGENT_CHOICES:
             raise ValueError(f"Unsupported agent: {agent}")
         return agent
-    if shutil.which("claude"):
-        return "claude"
-    if shutil.which("codex"):
-        return "codex"
+
+    installed_agents = tuple(agent_name for agent_name in AGENT_CHOICES if shutil.which(agent_name))
+    if not installed_agents:
+        raise RuntimeError(
+            "No supported agent backend found on PATH. Install `claude` or `codex`, "
+            "or pass --agent after installing the selected backend."
+        )
+
+    for agent_name in installed_agents:
+        if is_agent_authenticated(agent_name):
+            return agent_name
+
     raise RuntimeError(
-        "No supported agent backend found on PATH. Install `claude` or `codex`, "
-        "or pass --agent after installing the selected backend."
+        "Supported agent backends are installed but none are authenticated. "
+        "Run `claude auth status` or `codex login status`, then log in to the "
+        "provider you want automation to use."
     )
 
 
