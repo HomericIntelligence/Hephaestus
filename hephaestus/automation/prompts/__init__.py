@@ -43,7 +43,13 @@ from ._strict_rubric import _STRICT_GRADING_AND_ANTI_INFLATION as _STRICT_GRADIN
 from ._strict_rubric import _STRICT_REVIEW_OUTPUT_FORMAT as _STRICT_REVIEW_OUTPUT_FORMAT
 from ._strict_rubric import _STRICT_REVIEW_RUBRIC as _STRICT_REVIEW_RUBRIC
 from .address_review import ADDRESS_REVIEW_PROMPT, get_address_review_prompt
-from .advise import ADVISE_PROMPT, get_advise_prompt
+from .advise import (
+    ADVISE_PROMPT,
+    CODEX_ADVISE_PROMPT,
+    get_advise_prompt,
+    get_advise_prompt_builder,
+    get_codex_advise_prompt,
+)
 from .follow_up import FOLLOW_UP_PROMPT, get_follow_up_prompt
 from .implementation import (
     IMPL_LOOP_REVIEW_PROMPT,
@@ -70,6 +76,7 @@ from .pr_review import (
 __all__ = [
     "ADDRESS_REVIEW_PROMPT",
     "ADVISE_PROMPT",
+    "CODEX_ADVISE_PROMPT",
     "FOLLOW_UP_PROMPT",
     "IMPLEMENTATION_PROMPT",
     "IMPL_LOOP_REVIEW_PROMPT",
@@ -80,6 +87,8 @@ __all__ = [
     "PR_REVIEW_ANALYSIS_PROMPT",
     "get_address_review_prompt",
     "get_advise_prompt",
+    "get_advise_prompt_builder",
+    "get_codex_advise_prompt",
     "get_follow_up_prompt",
     "get_impl_loop_review_prompt",
     "get_impl_resume_feedback_prompt",

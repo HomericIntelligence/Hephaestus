@@ -39,6 +39,21 @@ def _nogo(grade: str = "D") -> str:
     return f"Findings.\n\nGrade: {grade}\nVerdict: NOGO\n"
 
 
+def test_codex_implementer_advise_uses_codex_prompt_builder(
+    implementer: IssueImplementer,
+) -> None:
+    """Codex implementer runs should trigger the Codex `$advise` skill prompt."""
+    implementer.options.agent = "codex"
+
+    with patch(
+        "hephaestus.automation.implementer_phase_runner.run_advise", return_value="findings"
+    ) as run:
+        result = implementer._run_advise(123, "Test Issue", "Issue body")
+
+    assert result == "findings"
+    assert run.call_args.kwargs["build_prompt"].__name__ == "get_codex_advise_prompt"
+
+
 class TestRunImplReviewLoop:
     """Integration tests for the Stage 2 in-loop review + address cycle (#28).
 

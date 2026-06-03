@@ -1,5 +1,9 @@
 """Advise-phase prompt: search the team knowledge base before planning."""
 
+from collections.abc import Callable
+
+from hephaestus.agents.runtime import is_codex
+
 from ._shared import _relativize_path
 
 ADVISE_PROMPT = """
@@ -48,6 +52,16 @@ None found
 **Important:** Only return findings from the actual marketplace. Do not speculate or invent skills.
 """
 
+CODEX_ADVISE_PROMPT = """$advise Search team knowledge before planning this issue.
+
+Issue #{issue_number}: {issue_title}
+
+Body:
+{issue_body}
+
+Return the advise findings only, in markdown. Do not implement or modify files.
+"""
+
 
 def get_advise_prompt(
     issue_number: int,
@@ -78,3 +92,32 @@ def get_advise_prompt(
         issue_body=issue_body,
         marketplace_path=safe_marketplace_path,
     )
+
+
+def get_codex_advise_prompt(
+    issue_number: int,
+    issue_title: str,
+    issue_body: str,
+    marketplace_path: str,
+    repo_root: str | None = None,
+) -> str:
+    """Get the Codex advise prompt using Codex's ``$advise`` skill trigger.
+
+    Codex skills are invoked with ``$skill-name`` rather than Claude slash
+    commands. The marketplace path is accepted for the shared runner call
+    signature but intentionally not interpolated: the installed Codex advise
+    skill owns Mnemosyne clone/update and marketplace discovery.
+    """
+    del marketplace_path, repo_root
+    return CODEX_ADVISE_PROMPT.format(
+        issue_number=issue_number,
+        issue_title=issue_title,
+        issue_body=issue_body,
+    )
+
+
+def get_advise_prompt_builder(agent: str) -> Callable[..., str]:
+    """Return the provider-specific advise prompt builder."""
+    if is_codex(agent):
+        return get_codex_advise_prompt
+    return get_advise_prompt

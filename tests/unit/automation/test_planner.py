@@ -231,6 +231,17 @@ class TestRunAdvise:
                 assert "Related Skills" in result
                 assert "Found 3 skills" in result
 
+    def test_codex_advise_uses_codex_prompt_builder(self, mock_options: Any) -> None:
+        """Codex runs should trigger the Codex `$advise` skill prompt."""
+        mock_options.agent = "codex"
+        planner = Planner(mock_options)
+
+        with patch("hephaestus.automation.planner.run_advise", return_value="findings") as run:
+            result = planner._run_advise(123, "Test Issue", "Issue body")
+
+        assert result == "findings"
+        assert run.call_args.kwargs["build_prompt"].__name__ == "get_codex_advise_prompt"
+
     def test_graceful_failure_on_error(self, planner: Any) -> None:
         """When advise errors, return a sentinel-comment (not silent ``""``).
 

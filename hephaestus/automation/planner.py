@@ -32,9 +32,7 @@ from .models import PLAN_COMMENT_MARKER, PlannerOptions, PlanResult
 from .planner_claude import PlannerClaudeRunner
 from .planner_review_loop import MAX_REVIEW_ITERATIONS, PlanReviewLoop
 from .planner_state import PlannerStateManager
-from .prompts import (
-    get_advise_prompt,
-)
+from .prompts import get_advise_prompt_builder
 from .review_state import is_plan_review_go
 from .session_naming import AGENT_ADVISE
 from .status_tracker import StatusTracker
@@ -300,7 +298,7 @@ class Planner:
             issue_title=issue_title,
             issue_body=issue_body,
             invoke=_invoke,
-            build_prompt=get_advise_prompt,
+            build_prompt=get_advise_prompt_builder(self.options.agent),
         )
 
     @staticmethod

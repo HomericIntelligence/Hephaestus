@@ -268,6 +268,23 @@ def test_codex_ci_fix_session_skips_push_when_head_did_not_advance(
     mock_push.assert_not_called()
 
 
+def test_codex_ci_advise_uses_codex_prompt_builder(driver: CIDriver) -> None:
+    """Codex CI repair runs should trigger the Codex `$advise` skill prompt."""
+    driver.options.agent = "codex"
+
+    with (
+        patch(
+            "hephaestus.automation.ci_driver.gh_issue_json",
+            return_value={"title": "Test Issue", "body": "Issue body"},
+        ),
+        patch("hephaestus.automation.ci_driver.run_advise", return_value="findings") as run,
+    ):
+        result = driver._run_advise(123)
+
+    assert result == "findings"
+    assert run.call_args.kwargs["build_prompt"].__name__ == "get_codex_advise_prompt"
+
+
 # ---------------------------------------------------------------------------
 # _discover_prs: dedupe shared-PR
 # ---------------------------------------------------------------------------

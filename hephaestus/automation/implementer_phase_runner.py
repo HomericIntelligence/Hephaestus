@@ -62,7 +62,7 @@ from .models import (
 from .pr_manager import commit_changes, ensure_pr_created
 from .pr_reviewer import gather_impl_review_context, review_pr_inline
 from .prompts import (
-    get_advise_prompt,
+    get_advise_prompt_builder,
     get_impl_loop_review_prompt,
     get_impl_resume_feedback_prompt,
     get_implementation_prompt,
@@ -844,7 +844,7 @@ class ImplementationPhaseRunner:
             issue_title=issue_title,
             issue_body=issue_body,
             invoke=_invoke,
-            build_prompt=get_advise_prompt,
+            build_prompt=get_advise_prompt_builder(self.options.agent),
         )
 
     # ------------------------------------------------------------------

@@ -1,17 +1,16 @@
-"""Shared ``/advise`` runner for every pipeline stage.
+"""Shared advise runner for every pipeline stage.
 
 Each of the three session-stable stages (plan, implement, drive-green) begins
-with an ``/advise`` step that searches ProjectMnemosyne for relevant prior
+with an advise step that searches ProjectMnemosyne for relevant prior
 learnings before doing any work. The Mnemosyne clone/refresh, prompt
 construction, and skip-marker conventions are identical across stages, so they
 live here once (DRY) rather than being copied into ``planner.py``,
 ``implementer_phase_runner.py``, and ``ci_driver.py``.
 
-The only thing that differs per stage is *how* Claude is invoked (the planner
-routes through ``Planner._call_claude``; the implementer and CI driver use
-``invoke_claude_with_session``). Callers therefore pass an ``invoke`` callable
-that takes the advise prompt and returns Claude's text output; this module owns
-everything around it. The advise call always runs under
+The only thing that differs per stage is *how* the selected agent is invoked.
+Callers therefore pass an ``invoke`` callable that takes the advise prompt and
+returns the agent's text output; this module owns everything around it. The
+advise call always runs under
 :data:`~hephaestus.automation.session_naming.AGENT_ADVISE` — a distinct, cheap,
 read-only session — so it never pollutes the stage's main transcript.
 """
@@ -173,10 +172,10 @@ def run_advise(
     invoke: Callable[[str], str],
     build_prompt: Callable[..., str],
 ) -> str:
-    """Run the ``/advise`` step and return findings (or a skip marker).
+    """Run the advise step and return findings (or a skip marker).
 
     Locates ProjectMnemosyne (cloning/refreshing as needed), builds the advise
-    prompt, and invokes Claude via the stage-supplied ``invoke`` callable. Any
+    prompt, and invokes the selected agent via the stage-supplied ``invoke`` callable. Any
     failure degrades to an :func:`advise_skipped` marker so a stage never aborts
     just because advice could not be gathered.
 
@@ -185,7 +184,7 @@ def run_advise(
         issue_title: Issue title.
         issue_body: Issue body/description.
         invoke: Stage-specific callable that runs the advise prompt under
-            ``AGENT_ADVISE`` and returns Claude's text output.
+            ``AGENT_ADVISE`` and returns the agent's text output.
         build_prompt: The advise prompt builder (``prompts.get_advise_prompt``),
             injected so this module need not import the prompts package.
 

@@ -55,7 +55,7 @@ from .github_api import (
     gh_pr_list_unresolved_threads,
 )
 from .models import CIDriverOptions, WorkerResult
-from .prompts import get_advise_prompt
+from .prompts import get_advise_prompt_builder
 from .session_naming import AGENT_ADVISE, AGENT_CI_DRIVER
 from .status_tracker import StatusTracker
 from .worktree_manager import WorktreeManager
@@ -884,7 +884,7 @@ class CIDriver:
             issue_title=issue_title,
             issue_body=issue_body,
             invoke=_invoke,
-            build_prompt=get_advise_prompt,
+            build_prompt=get_advise_prompt_builder(self.options.agent),
         )
 
     def _recheck_and_arm_after_fix(

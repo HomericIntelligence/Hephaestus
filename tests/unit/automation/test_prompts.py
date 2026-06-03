@@ -295,6 +295,25 @@ class TestAdvisePrompt:
         assert "7" in out
         assert "/mp.json" in out
 
+    def test_codex_prompt_uses_dollar_advise_skill_trigger(self) -> None:
+        """Codex automation should invoke the installed skill, not manual slash syntax."""
+        out = prompts.get_codex_advise_prompt(
+            issue_number=7,
+            issue_title="t",
+            issue_body="b",
+            marketplace_path="/mp.json",
+        )
+
+        assert out.startswith("$advise ")
+        assert "/advise" not in out
+        assert "Issue #7: t" in out
+        assert "b" in out
+
+    def test_advise_prompt_builder_selects_codex_prompt(self) -> None:
+        """Provider-specific advise prompt selection keeps stage callers simple."""
+        assert prompts.get_advise_prompt_builder("codex") is prompts.get_codex_advise_prompt
+        assert prompts.get_advise_prompt_builder("claude") is prompts.get_advise_prompt
+
 
 class TestFollowUpPrompt:
     """Tests for follow up prompt."""
