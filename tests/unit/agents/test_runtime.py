@@ -187,22 +187,53 @@ def test_run_claude_text_read_only_omits_write_permissions(tmp_path: Path) -> No
     assert "--allowedTools" not in captured_cmd
 
 
-def test_resolve_agent_prefers_claude_when_both_exist() -> None:
-    """Omitted --agent auto-detects, preferring Claude when both CLIs exist."""
+def test_resolve_agent_prefers_claude_when_both_are_authenticated() -> None:
+    """Omitted --agent prefers Claude only when both CLIs are authenticated."""
     with patch("hephaestus.agents.runtime.shutil.which") as mock_which:
         mock_which.side_effect = lambda name: (
             f"/bin/{name}" if name in {"claude", "codex"} else None
         )
 
-        assert agent_runtime.resolve_agent(None) == "claude"
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                ["auth", "status"], 0, stdout="logged in", stderr=""
+            )
+
+            assert agent_runtime.resolve_agent(None) == "claude"
 
 
-def test_resolve_agent_uses_codex_when_claude_absent() -> None:
-    """Codex is the fallback when Claude is not installed."""
+def test_resolve_agent_uses_authenticated_codex_when_claude_absent() -> None:
+    """Codex is the fallback when Claude is not installed and Codex is authenticated."""
     with patch("hephaestus.agents.runtime.shutil.which") as mock_which:
         mock_which.side_effect = lambda name: "/bin/codex" if name == "codex" else None
 
-        assert agent_runtime.resolve_agent(None) == "codex"
+        with patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                ["codex", "login", "status"], 0, stdout="Logged in using ChatGPT", stderr=""
+            ),
+        ):
+            assert agent_runtime.resolve_agent(None) == "codex"
+
+
+def test_resolve_agent_uses_codex_when_only_codex_is_authenticated() -> None:
+    """An installed but unauthenticated Claude CLI should not beat authenticated Codex."""
+    with patch("hephaestus.agents.runtime.shutil.which") as mock_which:
+        mock_which.side_effect = lambda name: (
+            f"/bin/{name}" if name in {"claude", "codex"} else None
+        )
+
+        def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if cmd == ["claude", "auth", "status"]:
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="Not logged in")
+            if cmd == ["codex", "login", "status"]:
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout="Logged in using ChatGPT", stderr=""
+                )
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            assert agent_runtime.resolve_agent(None) == "codex"
 
 
 def test_resolve_agent_explicit_codex_overrides_claude() -> None:
@@ -216,6 +247,23 @@ def test_resolve_agent_errors_when_no_provider_exists() -> None:
     with patch("hephaestus.agents.runtime.shutil.which", return_value=None):
         with pytest.raises(RuntimeError, match="No supported agent backend"):
             agent_runtime.resolve_agent(None)
+
+
+def test_resolve_agent_errors_when_no_provider_is_authenticated() -> None:
+    """Installed providers must prove authentication before auto-selection."""
+    with patch("hephaestus.agents.runtime.shutil.which") as mock_which:
+        mock_which.side_effect = lambda name: (
+            f"/bin/{name}" if name in {"claude", "codex"} else None
+        )
+
+        with patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                ["auth", "status"], 1, stdout="", stderr="Not logged in"
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="none are authenticated"):
+                agent_runtime.resolve_agent(None)
 
 
 def test_add_agent_argument_defaults_to_auto_detect() -> None:
