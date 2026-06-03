@@ -82,6 +82,8 @@ ALL_PHASES: tuple[str, ...] = (
     "drive-green",
 )
 
+FINAL_LOOP_ONLY_PHASES: frozenset[str] = frozenset({"drive-green"})
+
 # DEFAULT_PROJECTS_DIR is re-exported from hephaestus.config.paths so existing
 # tests that patch this module-level name continue to work. See #704: the
 # projects root is now resolved at runtime via resolve_projects_dir() so that
@@ -440,12 +442,22 @@ def _phase_order_warnings(cfg: LoopConfig) -> list[str]:
     """
     warnings: list[str] = []
     selected = set(cfg.phases)
+    if "plan" in selected and "implement" not in selected:
+        warnings.append(
+            "--phases includes 'plan' but not 'implement'; this is planning-only "
+            "and will not create implementation PRs"
+        )
     if "drive-green" in selected and "implement" not in selected:
         warnings.append(
             "--phases includes 'drive-green' but not 'implement'; "
             "drive-green will run against PRs not touched this invocation"
         )
     return warnings
+
+
+def _has_pending_final_loop_phase(cfg: LoopConfig, loop_idx: int) -> bool:
+    """Return true when early-exit would skip a selected final-loop-only phase."""
+    return loop_idx < cfg.loops and any(phase in cfg.phases for phase in FINAL_LOOP_ONLY_PHASES)
 
 
 # ---------------------------------------------------------------------------
@@ -1010,8 +1022,8 @@ def _process_repo_inner(
             )
             continue
 
-        # drive-green only runs on the final loop. Mirrors bash behavior.
-        if phase == "drive-green" and loop_idx != cfg.loops:
+        # Some phases only run on the configured final loop. Mirrors bash behavior.
+        if phase in FINAL_LOOP_ONLY_PHASES and loop_idx != cfg.loops:
             LOG.info("[%s] phase %s SKIP (not final loop)", repo, phase)
             result.phases.append(
                 PhaseResult(name=phase, skipped=True, skip_reason="not final loop")
@@ -1202,13 +1214,14 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
         # (#614)
         if (
             loop_idx < cfg.loops
+            and not _has_pending_final_loop_phase(cfg, loop_idx)
             and not any(r.any_failure for r in loop_results)
             and not any(r.produced_work for r in loop_results)
         ):
             LOG.info(
                 "Early exit after loop %d/%d: full pass produced 0 new plans"
                 " and 0 non-skipped reviews across all %d repo(s)."
-                " Remaining loops skipped — use --loops to override upper bound.",
+                " Remaining loops skipped.",
                 loop_idx,
                 cfg.loops,
                 len(repos),

@@ -109,6 +109,13 @@ def test_phase_order_warnings_drive_green_without_implement_warns() -> None:
     assert any("drive-green" in w and "implement" in w for w in warnings)
 
 
+def test_phase_order_warnings_plan_without_implement_warns() -> None:
+    """Plan selected without implement makes the invocation planning-only."""
+    cfg = LoopConfig(phases=("plan",))
+    warnings = _phase_order_warnings(cfg)
+    assert any("planning-only" in w and "implementation PRs" in w for w in warnings)
+
+
 def test_phase_order_warnings_drive_green_with_implement_silent() -> None:
     """drive-green selected alongside implement produces no warning."""
     cfg = LoopConfig(phases=("implement", "drive-green"))

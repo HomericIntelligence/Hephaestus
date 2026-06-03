@@ -432,13 +432,14 @@ class TestRunLoopEarlyExit:
     """Tests for early-exit logic in run_loop (#614)."""
 
     def test_early_exit_fires_on_zero_work_pass(self, tmp_path: Path) -> None:
-        """When a full pass across all repos produces 0 new plans and 0 reviews, break early.
+        """When a non-final pass produces 0 new plans and 0 reviews, break early.
 
-        A 5-loop config should stop after loop 1 when no repo reports any work.
+        A 5-loop config with no final-loop-only phases should stop after loop 1
+        when no repo reports any work.
         """
         projects = tmp_path
         (projects / "r1" / ".git").mkdir(parents=True)
-        cfg = LoopConfig(loops=5, projects_dir=projects)
+        cfg = LoopConfig(loops=5, projects_dir=projects, phases=("plan", "implement"))
 
         call_count = 0
 
@@ -453,6 +454,25 @@ class TestRunLoopEarlyExit:
         # Only loop 1 should have run — early-exit fires immediately.
         assert max(r.loop_idx for r in results) == 1
         assert call_count == 1
+
+    def test_early_exit_does_not_skip_selected_final_loop_phase(self, tmp_path: Path) -> None:
+        """A selected final-loop-only phase prevents early-exit before its loop."""
+        projects = tmp_path
+        (projects / "r1" / ".git").mkdir(parents=True)
+        cfg = LoopConfig(loops=3, projects_dir=projects)
+
+        call_count = 0
+
+        def fake_process(repo: str, loop_idx: int, cfg: LoopConfig) -> RepoResult:
+            nonlocal call_count
+            call_count += 1
+            return _zero_work_result(repo, loop_idx)
+
+        with patch.object(loop_runner, "process_repo", side_effect=fake_process):
+            results = run_loop(cfg, repos=["r1"])
+
+        assert max(r.loop_idx for r in results) == 3
+        assert call_count == 3
 
     def test_loops_caps_when_work_continues_every_loop(self, tmp_path: Path) -> None:
         """--loops is still respected as an upper bound when work is produced each loop.
