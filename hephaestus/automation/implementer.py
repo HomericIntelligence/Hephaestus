@@ -1,4 +1,4 @@
-"""Bulk issue implementation using Claude Code in parallel worktrees.
+"""Bulk issue implementation using the selected coding agent in parallel worktrees.
 
 Provides:
 - Dependency-aware parallel implementation
@@ -103,10 +103,11 @@ __all__ = [
     "main",
 ]
 
-# Default Claude implementation timeout in seconds. Actual runtime value is
-# read from the ``HEPH_IMPLEMENTER_CLAUDE_TIMEOUT`` env-var by
-# :func:`.claude_timeouts.implementer_claude_timeout`; this constant serves
-# as the documented default and can be used in tests.
+# Default implementation timeout in seconds. Actual runtime value is read from
+# ``HEPH_IMPLEMENTER_AGENT_TIMEOUT`` (or legacy
+# ``HEPH_IMPLEMENTER_CLAUDE_TIMEOUT``) by
+# :func:`.claude_timeouts.implementer_claude_timeout`; this constant serves as
+# the documented default and can be used in tests.
 _CLAUDE_IMPL_TIMEOUT: int = 1800
 
 
@@ -114,7 +115,7 @@ logger = logging.getLogger(__name__)
 
 
 class IssueImplementer:
-    """Implements GitHub issues in parallel using Claude Code.
+    """Implements GitHub issues in parallel using the selected coding agent.
 
     Features:
     - Dependency resolution and topological ordering
@@ -706,7 +707,7 @@ class IssueImplementer:
 
     def _commit_changes(self, issue_number: int, worktree_path: Path) -> None:
         """Commit changes in worktree."""
-        commit_changes(issue_number, worktree_path)
+        commit_changes(issue_number, worktree_path, self.options.agent)
 
     def _ensure_pr_created(
         self,
@@ -722,7 +723,12 @@ class IssueImplementer:
 
     def _create_pr(self, issue_number: int, branch_name: str) -> int:
         """Create pull request for issue."""
-        return create_pr(issue_number, branch_name, self.options.auto_merge)
+        return create_pr(
+            issue_number,
+            branch_name,
+            self.options.auto_merge,
+            agent=self.options.agent,
+        )
 
     def _get_or_create_state(self, issue_number: int) -> ImplementationState:
         """Get or create implementation state for an issue."""

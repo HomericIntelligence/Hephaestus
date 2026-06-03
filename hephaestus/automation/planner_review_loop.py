@@ -112,7 +112,7 @@ class PlannerHost(Protocol):
         cached_advise: str | None = None,
         cached_issue_data: dict[str, Any] | None = None,
     ) -> str:
-        """Generate implementation plan using Claude Code."""
+        """Generate implementation plan using the selected coding agent."""
         pass
 
     def _capture_planner_learnings(self, issue_number: int, plan: str) -> str:
@@ -465,7 +465,7 @@ class PlanReviewLoop:
         cached_advise: str | None = None,
         cached_issue_data: dict[str, Any] | None = None,
     ) -> str:
-        """Generate implementation plan using Claude Code.
+        """Generate implementation plan using the selected coding agent.
 
         Args:
             issue_number: Issue number to plan

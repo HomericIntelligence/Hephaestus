@@ -7,7 +7,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from hephaestus.agents.runtime import add_agent_argument, run_claude_text, run_codex_session
+from hephaestus.agents.runtime import (
+    add_agent_argument,
+    resolve_agent,
+    run_claude_text,
+    run_codex_session,
+)
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 
 
@@ -146,11 +151,14 @@ def run_agent(args: argparse.Namespace) -> int:
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    if args.agent == "claude":
+    agent = resolve_agent(args.agent)
+    args.agent = agent
+
+    if agent == "claude":
         return run_claude(args, prompt, repo_root, output_file, log_file)
-    if args.agent == "codex":
+    if agent == "codex":
         return run_codex(args, prompt, repo_root, output_file, log_file)
-    raise ValueError(f"Unsupported agent: {args.agent}")
+    raise ValueError(f"Unsupported agent: {agent}")
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1,4 +1,4 @@
-"""Bulk issue planning using Claude Code.
+"""Bulk issue planning using the selected coding agent.
 
 Provides:
 - Parallel issue planning
@@ -16,11 +16,12 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.runtime import add_agent_argument
+from hephaestus.agents.runtime import add_agent_argument, resolve_agent
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 
 from .advise_runner import advise_skipped, ensure_mnemosyne, run_advise
 from .claude_models import advise_model
+from .claude_timeouts import advise_claude_timeout
 from .git_utils import issue_ref
 from .github_api import (
     GitHubRateLimitError,
@@ -45,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 
 class Planner:
-    """Plans GitHub issues using Claude Code.
+    """Plans GitHub issues using Claude Code or Codex.
 
     Supports parallel planning with rate limit handling and
     duplicate detection.
@@ -291,7 +292,7 @@ class Planner:
                 model=advise_model(),
                 agent=AGENT_ADVISE,
                 issue_number=issue_number,
-                timeout=180,
+                timeout=advise_claude_timeout(),
             )
 
         return run_advise(
@@ -468,7 +469,7 @@ def _parse_args() -> argparse.Namespace:
     from pathlib import Path
 
     parser = argparse.ArgumentParser(
-        description="Bulk plan GitHub issues using Claude Code",
+        description="Bulk plan GitHub issues using Claude Code or Codex",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -503,9 +504,8 @@ Examples:
         "--dry-run",
         action="store_true",
         help=(
-            "Suppress GitHub mutations (no issue comments posted). NOTE: Claude "
-            "is still invoked to generate plans — dry-run still incurs full "
-            "Claude token cost. It is for correctness rehearsal, not cost preview."
+            "Suppress GitHub mutations and agent calls (no issue comments posted). "
+            "This is for wiring and discovery rehearsal, not plan generation."
         ),
     )
     parser.add_argument(
@@ -559,6 +559,7 @@ def main() -> int:
 
     log = logging.getLogger(__name__)
     log.info("Starting issue planner")
+    agent = resolve_agent(args.agent)
 
     if not args.issues:
         try:
@@ -588,7 +589,7 @@ def main() -> int:
     try:
         options = PlannerOptions(
             issues=args.issues,
-            agent=args.agent,
+            agent=agent,
             dry_run=args.dry_run,
             force=args.force,
             parallel=args.parallel,

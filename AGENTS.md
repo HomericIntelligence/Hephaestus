@@ -9,8 +9,9 @@ for the catalog of skills the agents invoke, see the [`skills/`](skills/) direct
 
 The `hephaestus.automation` subpackage drives a 3-stage issue/PR pipeline
 (plan → implement → drive-green). Each stage runs an external coding agent —
-either **Claude Code** or **Codex** — chosen per invocation via the `--agent`
-CLI flag (see `hephaestus.agents.runtime.add_agent_argument`). Plan review and
+either **Claude Code** or **Codex** — chosen per invocation via the optional
+`--agent` CLI flag, or auto-detected with a Claude preference when omitted
+(see `hephaestus.agents.runtime.add_agent_argument`). Plan review and
 PR-review/address-review are no longer standalone stages: the planner owns its
 review loop and the implementer absorbs PR-review + thread-addressing in-loop.
 

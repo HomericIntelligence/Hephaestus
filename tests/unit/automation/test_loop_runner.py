@@ -10,6 +10,7 @@ subsequent phases from being attempted.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -118,6 +119,30 @@ def test_phase_order_warnings_silent_on_full_pipeline() -> None:
     """Phase order warnings silent on full pipeline."""
     cfg = LoopConfig(phases=ALL_PHASES)
     assert _phase_order_warnings(cfg) == []
+
+
+def test_parse_args_agent_defaults_to_auto_detect() -> None:
+    """Omitted --agent should defer to runtime auto-detection."""
+    args = loop_runner._parse_args([])
+    assert args.agent is None
+
+
+def test_parse_args_accepts_explicit_codex_agent() -> None:
+    """Operators can still force Codex explicitly."""
+    args = loop_runner._parse_args(["--agent", "codex"])
+    assert args.agent == "codex"
+
+
+def test_parse_args_accepts_no_advise() -> None:
+    """The loop runner can disable advise across child phases."""
+    args = loop_runner._parse_args(["--no-advise"])
+    assert args.no_advise is True
+
+
+def test_parse_args_accepts_issue_scope() -> None:
+    """The loop runner can scope child phases to a comma-separated issue list."""
+    args = loop_runner._parse_args(["--issues", "8, 13"])
+    assert args.issues == [8, 13]
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +453,33 @@ def test_build_phase_argv_plan_omits_issues() -> None:
     assert "--issues" not in argv
 
 
+def test_build_phase_argv_plan_forwards_explicit_issues() -> None:
+    """Plan receives --issues only when the loop is explicitly scoped."""
+    cfg = LoopConfig(issues=[8, 13])
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/plan", [])):
+        argv = loop_runner._build_phase_argv("plan", cfg, open_issues=[1, 2])
+    assert argv is not None
+    assert argv[argv.index("--issues") + 1 : argv.index("--issues") + 3] == ["8", "13"]
+
+
+def test_build_phase_argv_implement_forwards_explicit_issues() -> None:
+    """Implement receives the loop issue scope when set."""
+    cfg = LoopConfig(issues=[8])
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/impl", [])):
+        argv = loop_runner._build_phase_argv("implement", cfg, open_issues=[1, 2])
+    assert argv is not None
+    assert argv[argv.index("--issues") + 1] == "8"
+
+
+def test_build_phase_argv_forwards_resolved_agent() -> None:
+    """Every child phase receives the concrete provider selected by the loop."""
+    cfg = LoopConfig(agent="codex")
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/plan", [])):
+        argv = loop_runner._build_phase_argv("plan", cfg, open_issues=[])
+    assert argv is not None
+    assert argv[argv.index("--agent") + 1] == "codex"
+
+
 def test_build_phase_argv_drive_green_includes_issues() -> None:
     """drive-green forwards the open-issue list via --issues (the only phase that does)."""
     cfg = LoopConfig()
@@ -444,6 +496,16 @@ def test_build_phase_argv_passes_dry_run() -> None:
     with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/plan", [])):
         argv = loop_runner._build_phase_argv("plan", cfg, open_issues=[])
     assert argv is not None and "--dry-run" in argv
+
+
+def test_build_phase_argv_passes_no_advise_to_all_phases() -> None:
+    """Loop-level --no-advise is forwarded to every current child phase."""
+    cfg = LoopConfig(no_advise=True)
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/phase", [])):
+        for phase in ("plan", "implement", "drive-green"):
+            argv = loop_runner._build_phase_argv(phase, cfg, open_issues=[1])
+            assert argv is not None
+            assert "--no-advise" in argv
 
 
 def test_build_phase_argv_implement_has_single_max_workers() -> None:
@@ -484,12 +546,24 @@ def test_build_phase_argv_implement_no_follow_up_on_loop_3() -> None:
     assert argv_loop5 is not None and "--no-follow-up" in argv_loop5
 
 
-def test_build_phase_argv_plan_omits_max_workers() -> None:
-    """Plan phase does not accept --max-workers (auto-discovers internally)."""
+def test_resolve_phase_bin_falls_back_to_python_module_when_console_script_absent() -> None:
+    """Source checkouts without installed console scripts should still run phases."""
+    with patch("hephaestus.automation.loop_runner.shutil.which", return_value=None):
+        resolved = _resolve_phase_bin("plan")
+    assert resolved is not None
+    executable, leading = resolved
+    assert executable == sys.executable
+    assert leading == ["-m", "hephaestus.automation.planner"]
+
+
+def test_build_phase_argv_plan_uses_parallel_worker_flag() -> None:
+    """Plan phase receives worker count via its --parallel flag."""
     cfg = LoopConfig(max_workers=4)
     with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/plan", [])):
         argv = loop_runner._build_phase_argv("plan", cfg, open_issues=[])
-    assert argv is not None and "--max-workers" not in argv
+    assert argv is not None
+    assert "--max-workers" not in argv
+    assert argv[argv.index("--parallel") + 1] == "4"
 
 
 def test_phase_env_loop_index_only_for_drive_green() -> None:
@@ -711,6 +785,19 @@ def test_resolve_org_and_repos_repos_flag_falls_back_to_explicit_org() -> None:
     with patch(
         "hephaestus.automation.loop_runner._detect_cwd_repo",
         return_value=(None, None),
+    ):
+        org, repos, err = loop_runner._resolve_org_and_repos(args)
+    assert err is None
+    assert org == "Bar"
+    assert repos == ["foo"]
+
+
+def test_resolve_org_and_repos_repos_flag_prefers_explicit_org() -> None:
+    """``--repos foo --org Bar`` should not be overridden by the cwd repo's org."""
+    args = loop_runner._parse_args(["--repos", "foo", "--org", "Bar"])
+    with patch(
+        "hephaestus.automation.loop_runner._detect_cwd_repo",
+        return_value=("CwdOrg", "CurrentRepo"),
     ):
         org, repos, err = loop_runner._resolve_org_and_repos(args)
     assert err is None
@@ -974,6 +1061,37 @@ class TestResilientCallAdoption:
             sha = _rebase_main("Repo", tmp_path)
         assert sha == "def5678"
 
+    def test_rebase_main_uses_origin_head_default_branch(self, tmp_path: Path) -> None:
+        """Repos whose default branch is master must not be rebased against origin/main."""
+        calls: list[list[str]] = []
+
+        def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(argv)
+            if "symbolic-ref" in argv:
+                return _completed(stdout="origin/master\n")
+            if "rev-parse" in argv:
+                return _completed(stdout="def5678")
+            return _completed()
+
+        with (
+            patch("hephaestus.automation.loop_runner.resilient_call", return_value=_completed()),
+            patch("hephaestus.automation.loop_runner.subprocess.run", side_effect=fake_run),
+        ):
+            sha = _rebase_main("Repo", tmp_path)
+
+        assert sha == "def5678"
+        assert ["git", "-C", str(tmp_path), "rebase", "origin/master", "--quiet"] in calls
+        unexpected_reset = [
+            "git",
+            "-C",
+            str(tmp_path),
+            "reset",
+            "--hard",
+            "origin/main",
+            "--quiet",
+        ]
+        assert unexpected_reset not in calls
+
 
 class TestDefaultPhaseTimeout:
     """run_phase must apply a default timeout when --phase-timeout is absent (#684)."""
@@ -1036,8 +1154,32 @@ class TestDefaultPhaseTimeout:
             patch.object(loop_runner, "_clone_missing_repos"),
             patch.object(loop_runner, "run_loop", side_effect=_capture),
         ):
-            main(["--repos", "Repo", "--dry-run", "--loops", "1"])
+            main(["--repos", "Repo", "--dry-run", "--loops", "1", "--agent", "claude"])
         assert captured["cfg"].phase_timeout_s == _default_phase_timeout_s()
+
+    def test_main_resolves_agent_before_building_config(self) -> None:
+        """LoopConfig stores the concrete auto-detected provider."""
+        captured: dict[str, LoopConfig] = {}
+
+        def _capture(cfg: LoopConfig, _repos: list[str]) -> list[RepoResult]:
+            captured["cfg"] = cfg
+            return []
+
+        with (
+            patch.object(
+                loop_runner,
+                "_resolve_org_and_repos",
+                return_value=("Org", ["Repo"], None),
+            ),
+            patch.object(loop_runner, "_preflight_token_scopes"),
+            patch.object(loop_runner, "_clone_missing_repos"),
+            patch.object(loop_runner, "resolve_agent", return_value="codex") as mock_resolve,
+            patch.object(loop_runner, "run_loop", side_effect=_capture),
+        ):
+            main(["--repos", "Repo", "--dry-run", "--loops", "1"])
+
+        mock_resolve.assert_called_once_with(None)
+        assert captured["cfg"].agent == "codex"
 
     def test_main_disables_phase_timeout_when_zero(self) -> None:
         """``--phase-timeout 0`` explicitly disables the bound (None)."""
@@ -1057,5 +1199,5 @@ class TestDefaultPhaseTimeout:
             patch.object(loop_runner, "_clone_missing_repos"),
             patch.object(loop_runner, "run_loop", side_effect=_capture),
         ):
-            main(["--repos", "Repo", "--phase-timeout", "0", "--loops", "1"])
+            main(["--repos", "Repo", "--phase-timeout", "0", "--loops", "1", "--agent", "claude"])
         assert captured["cfg"].phase_timeout_s is None

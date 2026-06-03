@@ -177,7 +177,7 @@ def _parse_rejected_entry(item: Any) -> RejectedItem | None:
 
 
 def parse_follow_up_response(text: str) -> FollowUpResponse:
-    """Parse the sectioned follow-up schema from Claude's response.
+    """Parse the sectioned follow-up schema from an agent response.
 
     Tolerates fenced JSON, bare JSON, and silently drops malformed items
     (logged at WARNING). Items with categories outside the allowed set are

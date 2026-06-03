@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -9,12 +10,20 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.agents.runtime import AgentRunResult
+from hephaestus.automation import ci_driver
 from hephaestus.automation.ci_driver import CIDriver, _evaluate_run_result
 from hephaestus.automation.models import CIDriverOptions, WorkerResult
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def test_parse_args_accepts_no_advise(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI driver exposes the same advise disable flag as other agent phases."""
+    monkeypatch.setattr(sys, "argv", ["ci", "--no-advise"])
+    args = ci_driver._parse_args()
+    assert args.no_advise is True
 
 
 def _make_check(

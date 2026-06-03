@@ -49,7 +49,7 @@ from .claude_invoke import (
     parse_review_verdict,
 )
 from .claude_models import advise_model, implementer_model, reviewer_model
-from .claude_timeouts import implementer_claude_timeout
+from .claude_timeouts import advise_claude_timeout, implementer_claude_timeout
 from .follow_up import parse_follow_up_items, run_follow_up_issues
 from .git_utils import issue_ref, pr_ref, run
 from .github_api import gh_pr_list_unresolved_threads
@@ -822,7 +822,7 @@ class ImplementationPhaseRunner:
                 result = run_codex_text(
                     prompt,
                     cwd=self.repo_root,
-                    timeout=180,
+                    timeout=advise_claude_timeout(),
                     sandbox="read-only",
                 )
                 return (result.stdout or "").strip()
@@ -834,7 +834,7 @@ class ImplementationPhaseRunner:
                 prompt=prompt,
                 model=advise_model(),
                 cwd=self.repo_root,
-                timeout=180,
+                timeout=advise_claude_timeout(),
                 output_format="text",
             )
             return (stdout or "").strip()
@@ -1198,7 +1198,7 @@ class ImplementationPhaseRunner:
             logger.info("No changes to commit for issue #%s", issue_number)
             return
         try:
-            commit_changes(issue_number, worktree_path)
+            commit_changes(issue_number, worktree_path, self.options.agent)
             logger.info("Committed in-loop address changes for issue #%s", issue_number)
         except RuntimeError as e:
             logger.warning("Commit skipped for issue #%s: %s", issue_number, e)
@@ -1683,4 +1683,5 @@ class ImplementationPhaseRunner:
             self.options.auto_merge,
             self.status_tracker,
             slot_id,
+            self.options.agent,
         )

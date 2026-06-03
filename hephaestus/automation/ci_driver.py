@@ -25,6 +25,7 @@ from typing import Any
 from hephaestus.agents.runtime import (
     add_agent_argument,
     is_codex,
+    resolve_agent,
     resume_codex_session,
     run_codex_session,
     session_agent_matches,
@@ -35,7 +36,7 @@ from ._review_utils import find_pr_for_issue
 from .advise_runner import run_advise
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import advise_model, implementer_model, learn_model
-from .claude_timeouts import ci_driver_claude_timeout, learn_claude_timeout
+from .claude_timeouts import advise_claude_timeout, ci_driver_claude_timeout, learn_claude_timeout
 from .git_utils import (
     get_repo_info,
     get_repo_root,
@@ -861,7 +862,7 @@ class CIDriver:
                 result = run_codex_session(
                     prompt,
                     cwd=self.repo_root,
-                    timeout=180,
+                    timeout=advise_claude_timeout(),
                     sandbox="read-only",
                 )
                 return (result.stdout or "").strip()
@@ -873,7 +874,7 @@ class CIDriver:
                 prompt=prompt,
                 model=advise_model(),
                 cwd=self.repo_root,
-                timeout=180,
+                timeout=advise_claude_timeout(),
                 output_format="text",
             )
             return (stdout or "").strip()
@@ -1607,7 +1608,7 @@ class CIDriver:
         return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
     def _load_impl_session_id(self, issue_number: int) -> str | None:
-        """Load the Claude session ID from the implementer's saved state.
+        """Load the agent session ID from the implementer's saved state.
 
         Args:
             issue_number: GitHub issue number.
@@ -2024,14 +2025,14 @@ class CIDriver:
         *,
         pr_head_branch: str,
     ) -> bool:
-        """Invoke Claude to fix CI failures, then push the result.
+        """Invoke the selected coding agent to fix CI failures, then push the result.
 
         Args:
             issue_number: GitHub issue number.
             pr_number: GitHub PR number.
             worktree_path: Path to the checked-out worktree.
             ci_logs: Combined CI failure log text.
-            session_id: Optional Claude session ID to resume.
+            session_id: Optional agent session ID to resume.
             advise_findings: Prior learnings from the advise step, prepended to
                 the prompt as context. Empty or a skip marker contributes nothing.
             pr_head_branch: The PR's head-branch name on the remote. The push
@@ -2535,6 +2536,11 @@ Examples:
         help="Disable curses UI (use plain logging instead)",
     )
     parser.add_argument(
+        "--no-advise",
+        action="store_true",
+        help="Skip the advise step before CI fixing",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -2685,6 +2691,7 @@ def main() -> int:
     """
     args = _parse_args()
     _setup_logging(args.verbose)
+    agent = resolve_agent(args.agent)
 
     log = logging.getLogger(__name__)
 
@@ -2705,9 +2712,10 @@ def main() -> int:
     try:
         options = CIDriverOptions(
             issues=args.issues,
-            agent=args.agent,
+            agent=agent,
             max_workers=args.max_workers,
             dry_run=args.dry_run,
+            enable_advise=not args.no_advise,
             enable_ui=not args.no_ui and not args.json,
             verbose=args.verbose,
             include_bot_prs=args.include_bot_prs,

@@ -251,7 +251,10 @@ class TestMain:
             }
 
         monkeypatch.setattr(fleet_sync, "process_repo", fake_process)
-        monkeypatch.setattr("sys.argv", ["fleet-sync", "--repos", "owner/a", "--json", "--dry-run"])
+        monkeypatch.setattr(
+            "sys.argv",
+            ["fleet-sync", "--repos", "owner/a", "--json", "--dry-run", "--agent", "claude"],
+        )
         assert fleet_sync.main() == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "ok"
@@ -274,7 +277,10 @@ class TestMain:
             }
 
         monkeypatch.setattr(fleet_sync, "process_repo", fake_process)
-        monkeypatch.setattr("sys.argv", ["fleet-sync", "--repos", "owner/a", "--json", "--dry-run"])
+        monkeypatch.setattr(
+            "sys.argv",
+            ["fleet-sync", "--repos", "owner/a", "--json", "--dry-run", "--agent", "claude"],
+        )
         assert fleet_sync.main() == 1
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "error"
@@ -299,7 +305,7 @@ class TestMain:
         monkeypatch.setattr(fleet_sync, "process_repo", fake_process)
         monkeypatch.setattr(
             "sys.argv",
-            ["fleet-sync", "--repos", "owner/a", "owner/b", "--dry-run"],
+            ["fleet-sync", "--repos", "owner/a", "owner/b", "--dry-run", "--agent", "claude"],
         )
         assert fleet_sync.main() == 0
         assert calls == ["owner/a", "owner/b"]

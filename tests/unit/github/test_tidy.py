@@ -172,7 +172,7 @@ class TestMain:
         import json
 
         monkeypatch.setattr(tidy_module, "_validate_environment", lambda: None)
-        monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--json"])
+        monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--json", "--agent", "claude"])
         assert tidy_module.main() == 1
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "error"
@@ -193,7 +193,7 @@ class TestMain:
         monkeypatch.setattr(tidy_module, "_detect_default_branch", lambda _x: "main")
         monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry: (0, ""))
         monkeypatch.setattr(tidy_module, "parse_problem_branches", lambda _o: [])
-        monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--json"])
+        monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--json", "--agent", "claude"])
         assert tidy_module.main() == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "ok"
@@ -214,7 +214,9 @@ class TestMain:
         monkeypatch.setattr(tidy_module, "_detect_default_branch", lambda _x: "main")
         monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry: (0, ""))
         monkeypatch.setattr(tidy_module, "parse_problem_branches", lambda _o: ["feature/a"])
-        monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--json", "--no-swarm"])
+        monkeypatch.setattr(
+            "sys.argv", ["hephaestus-tidy", "--json", "--no-swarm", "--agent", "claude"]
+        )
         assert tidy_module.main() == 1
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "error"
@@ -235,7 +237,9 @@ class TestMain:
         monkeypatch.setattr(tidy_module, "_detect_default_branch", lambda _x: "main")
         monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry: (0, ""))
         monkeypatch.setattr(tidy_module, "parse_problem_branches", lambda _o: ["feature/a"])
-        monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--json", "--dry-run"])
+        monkeypatch.setattr(
+            "sys.argv", ["hephaestus-tidy", "--json", "--dry-run", "--agent", "claude"]
+        )
         assert tidy_module.main() == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "ok"
@@ -261,7 +265,7 @@ class TestMain:
             return {"feature/a": "rebased"}
 
         monkeypatch.setattr(tidy_module, "_dispatch_swarm", fake_dispatch)
-        monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--json"])
+        monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--json", "--agent", "claude"])
         assert tidy_module.main() == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "ok"
@@ -270,7 +274,7 @@ class TestMain:
     def test_env_validation_failure_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Without --json, env-validation failure still exits 1."""
         monkeypatch.setattr(tidy_module, "_validate_environment", lambda: None)
-        monkeypatch.setattr("sys.argv", ["hephaestus-tidy"])
+        monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--agent", "claude"])
         assert tidy_module.main() == 1
 
 

@@ -581,7 +581,16 @@ class TestMainLoopsRunReporting:
             captured["code"] = code
             captured.update(kwargs)
 
-        argv = ["--json", "--repos", "r1", "--loops", str(configured_loops), "--dry-run"]
+        argv = [
+            "--json",
+            "--repos",
+            "r1",
+            "--loops",
+            str(configured_loops),
+            "--dry-run",
+            "--agent",
+            "claude",
+        ]
         with (
             patch.object(loop_runner, "_resolve_org_and_repos", return_value=("Org", ["r1"], None)),
             patch.object(loop_runner, "_clone_missing_repos"),
@@ -700,7 +709,10 @@ class TestPlanReviewerAlreadyReviewedFlag:
         mock_reviewer.run.return_value = results
         captured: dict[str, int] = {}
 
-        monkeypatch.setattr("sys.argv", ["plan-reviewer", "--issues", "1", "2", "3", "4"])
+        monkeypatch.setattr(
+            "sys.argv",
+            ["plan-reviewer", "--issues", "1", "2", "3", "4", "--agent", "claude"],
+        )
         with (
             patch.object(plan_reviewer_mod, "PlanReviewer", return_value=mock_reviewer),
             patch.object(
@@ -739,7 +751,9 @@ class TestPlannerMainWorkReport:
         mock_planner.run.return_value = results
         captured: dict[str, int] = {}
 
-        monkeypatch.setattr("sys.argv", ["planner", "--issues", "10", "11", "12"])
+        monkeypatch.setattr(
+            "sys.argv", ["planner", "--issues", "10", "11", "12", "--agent", "claude"]
+        )
         with (
             patch.object(planner_mod, "Planner", return_value=mock_planner),
             patch.object(
@@ -768,7 +782,7 @@ class TestPlannerMainWorkReport:
         mock_planner.run.return_value = results
         captured: dict[str, int] = {}
 
-        monkeypatch.setattr("sys.argv", ["planner", "--issues", "10", "11"])
+        monkeypatch.setattr("sys.argv", ["planner", "--issues", "10", "11", "--agent", "claude"])
         with (
             patch.object(planner_mod, "Planner", return_value=mock_planner),
             patch.object(

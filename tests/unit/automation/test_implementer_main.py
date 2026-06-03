@@ -37,7 +37,7 @@ def test_main_returns_zero_when_no_open_issues(
     """
     from hephaestus.automation import implementer
 
-    monkeypatch.setattr(sys, "argv", ["impl", "--dry-run", "--no-ui"])
+    monkeypatch.setattr(sys, "argv", ["impl", "--dry-run", "--no-ui", "--agent", "claude"])
 
     with (
         patch.object(implementer, "gh_list_open_issues", return_value=[]),
@@ -60,7 +60,7 @@ def test_main_health_check_returns_zero(
     """
     from hephaestus.automation import implementer
 
-    monkeypatch.setattr(sys, "argv", ["impl", "--health-check", "--no-ui"])
+    monkeypatch.setattr(sys, "argv", ["impl", "--health-check", "--no-ui", "--agent", "claude"])
 
     with patch.object(implementer, "get_repo_root", return_value=tmp_path):
         rc = implementer.main()
@@ -80,7 +80,7 @@ def test_no_ui_flag_skips_curses(
     """
     from hephaestus.automation import implementer
 
-    monkeypatch.setattr(sys, "argv", ["impl", "--dry-run", "--no-ui"])
+    monkeypatch.setattr(sys, "argv", ["impl", "--dry-run", "--no-ui", "--agent", "claude"])
 
     with (
         patch.object(implementer, "gh_list_open_issues", return_value=[]),

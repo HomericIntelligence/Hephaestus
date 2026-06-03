@@ -140,11 +140,13 @@ class GitHubUnavailableError(RuntimeError):
     pass
 
 
-def gh_list_labels(refresh: bool = False) -> set[str]:
+def gh_list_labels(refresh: bool = False, *, raise_on_error: bool = False) -> set[str]:
     """Return the set of label names that exist in the current repository.
 
     Args:
         refresh: If True, bypass the in-process cache and re-fetch.
+        raise_on_error: If True, propagate label-list failures instead of
+            returning an empty set.
 
     Returns:
         Set of existing label names.
@@ -161,6 +163,8 @@ def gh_list_labels(refresh: bool = False) -> set[str]:
         return _label_cache
     except Exception as e:
         logger.warning("Could not fetch label list: %s; proceeding without validation", e)
+        if raise_on_error:
+            raise RuntimeError("Could not fetch label list") from e
         return set()
 
 
@@ -212,10 +216,10 @@ def gh_issue_add_labels(issue_number: int, labels: list[str]) -> None:
 def gh_issue_remove_labels(issue_number: int, labels: list[str]) -> None:
     """Remove labels from an existing issue.
 
-    Tolerant of labels the issue does not actually carry — ``gh issue edit
-    --remove-label`` reports those as a no-op rather than erroring. Used to
-    keep the ``state:*`` family mutually-exclusive (apply one, remove the
-    other two).
+    Tolerant of labels the issue does not actually carry, and of mutually
+    exclusive state labels that have not been created in the repository yet.
+    Used to keep the ``state:*`` family mutually-exclusive (apply one, remove
+    the other two).
 
     Args:
         issue_number: Issue to modify.
@@ -224,11 +228,32 @@ def gh_issue_remove_labels(issue_number: int, labels: list[str]) -> None:
     """
     if not labels:
         return
+    try:
+        existing = gh_list_labels(raise_on_error=True)
+    except RuntimeError as exc:
+        logger.warning(
+            "Could not validate repo labels before removing from issue #%s; "
+            "attempting requested removals without filtering: %s",
+            issue_number,
+            exc,
+        )
+        labels_to_remove = list(labels)
+    else:
+        labels_to_remove = [label for label in labels if label in existing]
+        missing = sorted(set(labels) - existing)
+        if missing:
+            logger.debug(
+                "Skipping removal of repo labels that do not exist for issue #%s: %s",
+                issue_number,
+                missing,
+            )
+    if not labels_to_remove:
+        return
     cmd = ["issue", "edit", str(issue_number)]
-    for label in labels:
+    for label in labels_to_remove:
         cmd += ["--remove-label", label]
     _gh_call(cmd)
-    logger.info("Removed labels %s from issue #%s", labels, issue_number)
+    logger.info("Removed labels %s from issue #%s", labels_to_remove, issue_number)
 
 
 # GraphQL emits "Resource not accessible by …" with HTTP 200 when the token

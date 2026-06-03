@@ -106,7 +106,23 @@ class TestEnsurePRCreated:
             patch.object(pr_manager, "create_pr", return_value=42) as create_mock,
         ):
             assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt")) == 42
-            create_mock.assert_called_once_with(1, "branch", False)
+            create_mock.assert_called_once_with(1, "branch", False, agent="claude")
+
+    def test_creates_pr_with_selected_agent_metadata(self) -> None:
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),
+                _status("refs/heads/branch"),
+            ]
+        )
+        gh_mock = _status("[]")
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "_gh_call", return_value=gh_mock),
+            patch.object(pr_manager, "create_pr", return_value=42) as create_mock,
+        ):
+            assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"), agent="codex") == 42
+            create_mock.assert_called_once_with(1, "branch", False, agent="codex")
 
 
 class TestCreatePR:
@@ -118,12 +134,14 @@ class TestCreatePR:
             patch.object(pr_manager, "fetch_issue_info", return_value=issue),
             patch.object(pr_manager, "gh_pr_create", return_value=7) as gh_mock,
         ):
-            assert pr_manager.create_pr(5, "branch", auto_merge=True) == 7
+            assert pr_manager.create_pr(5, "branch", auto_merge=True, agent="codex") == 7
         kwargs = gh_mock.call_args.kwargs
         assert kwargs["branch"] == "branch"
         assert "Add feature X" in kwargs["title"]
         assert kwargs["auto_merge"] is True
         assert "Closes #5" in kwargs["body"]
+        assert "Automated implementation via Codex" in kwargs["body"]
+        assert "Claude Code" not in kwargs["body"]
 
 
 # ---------------------------------------------------------------------------
@@ -185,3 +203,26 @@ class TestCoAuthorLine:
         commit_call = run_mock.call_args_list[2].args[0]
         commit_msg = commit_call[-1]
         assert "claude-env-override-5" in commit_msg
+
+    def test_codex_coauthor_does_not_use_claude_model(self) -> None:
+        porcelain = " M foo.py\n"
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),
+                _status(""),
+                _status(""),
+            ]
+        )
+        issue = MagicMock(title="codex fallback commit")
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "implementer_model") as mock_model,
+        ):
+            pr_manager.commit_changes(30, Path("/tmp/wt"), agent="codex")
+
+        commit_call = run_mock.call_args_list[2].args[0]
+        commit_msg = commit_call[-1]
+        assert "Co-Authored-By: Codex <noreply@openai.com>" in commit_msg
+        mock_model.assert_not_called()

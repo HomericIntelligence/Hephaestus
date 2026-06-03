@@ -218,7 +218,7 @@ class AddressReviewOptions(BaseModel):
     dry_run: bool = False
     enable_ui: bool = True
     verbose: bool = False
-    resume_impl_session: bool = True  # attempt to resume implementer's Claude session
+    resume_impl_session: bool = True  # attempt to resume implementer's saved agent session
 
 
 class CIDriverOptions(BaseModel):

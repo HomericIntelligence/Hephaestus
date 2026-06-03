@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
+from hephaestus.agents.runtime import add_agent_argument, resolve_agent
 from hephaestus.automation.claude_timeouts import gh_cli_timeout
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.config.paths import DEFAULT_PROJECTS_DIR, resolve_projects_dir
@@ -48,14 +49,15 @@ LOG = logging.getLogger(__name__)
 def _default_phase_timeout_s() -> float:
     """Return the default per-phase timeout in seconds.
 
-    A phase that shells out to ``claude`` can stall indefinitely on a network
-    hang; a non-``None`` default ensures the worker thread is always bounded
-    even when the operator does not pass ``--phase-timeout``. Overridable via
-    ``HEPH_PHASE_TIMEOUT`` (seconds). Mirrors the graceful-fallback contract of
-    :mod:`hephaestus.automation.claude_timeouts`: a malformed env value logs a
-    warning and falls back to the default rather than crashing at startup.
+    A phase that shells out to an external coding agent can stall indefinitely
+    on a network hang; a non-``None`` default ensures the worker thread is
+    always bounded even when the operator does not pass ``--phase-timeout``.
+    Overridable via ``HEPH_PHASE_TIMEOUT`` (seconds). Mirrors the
+    graceful-fallback contract of :mod:`hephaestus.automation.claude_timeouts`:
+    a malformed env value logs a warning and falls back to the default rather
+    than crashing at startup.
 
-    The 3600s (1h) default comfortably exceeds the longest in-phase Claude
+    The 3600s (1h) default comfortably exceeds the longest in-phase agent
     timeout (the implementer's 1800s) so a healthy phase never trips it.
     """
     default = 3600
@@ -100,6 +102,27 @@ def _parse_repo_list(value: str) -> list[str]:
     --repos".
     """
     return [s.strip() for s in value.split(",") if s.strip()]
+
+
+def _parse_issue_list(value: str) -> list[int]:
+    """Split a comma-separated issue list into positive integers."""
+    issues: list[int] = []
+    for part in value.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        try:
+            issue = int(item)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"expected comma-separated issue numbers, got {item!r}"
+            ) from exc
+        if issue <= 0:
+            raise argparse.ArgumentTypeError(
+                f"issue numbers must be positive integers, got {issue}"
+            )
+        issues.append(issue)
+    return issues
 
 
 # drive-green declares --issues as required in its argparse; plan and
@@ -231,7 +254,10 @@ class LoopConfig:
     max_workers: int = 3
     parallel_repos: int = 1
     phases: tuple[str, ...] = ALL_PHASES
+    agent: str = "claude"
+    issues: list[int] = field(default_factory=list)
     dry_run: bool = False
+    no_advise: bool = False
     allow_unsafe_phase_order: bool = False
     planner_model: str = ""
     reviewer_model: str = ""
@@ -318,6 +344,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--phases",
         default=",".join(ALL_PHASES),
         help=f"Comma-separated subset of phases to run. Valid: {','.join(ALL_PHASES)}",
+    )
+    add_agent_argument(p)
+    p.add_argument(
+        "--issues",
+        type=_parse_issue_list,
+        default=None,
+        help=(
+            "Comma-separated issue numbers to pass to issue-scoped phases "
+            "(plan, implement, drive-green). Default: phase auto-discovery."
+        ),
+    )
+    p.add_argument(
+        "--no-advise",
+        action="store_true",
+        help="Pass --no-advise to phases that support the advise preflight",
     )
     p.add_argument(
         "--allow-unsafe-phase-order",
@@ -612,12 +653,46 @@ def _clone_missing_repos(org: str, repos: list[str], projects_dir: Path) -> None
             LOG.error("[%s] clone failed: %s — repo will be marked failed", repo, exc)
 
 
+def _detect_remote_base_ref(repo: str, repo_dir: Path) -> str:
+    """Return the remote default branch ref for ``repo_dir``."""
+    try:
+        symbolic = subprocess.run(
+            ["git", "-C", str(repo_dir), "symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=METADATA_TIMEOUT,
+        )
+        detected = symbolic.stdout.strip()
+        if symbolic.returncode == 0 and detected:
+            return detected
+    except subprocess.TimeoutExpired:
+        LOG.warning("[%s] default-branch detection timed out; trying fallback refs", repo)
+
+    for candidate in ("origin/main", "origin/master"):
+        try:
+            verified = subprocess.run(
+                ["git", "-C", str(repo_dir), "rev-parse", "--verify", candidate],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=METADATA_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            continue
+        if verified.returncode == 0:
+            LOG.warning("[%s] using fallback base ref %s", repo, candidate)
+            return candidate
+    LOG.warning("[%s] could not detect base ref; falling back to origin/main", repo)
+    return "origin/main"
+
+
 def _rebase_main(repo: str, repo_dir: Path) -> str:
-    """Fetch + rebase main; return short trunk SHA (or 'unknown')."""
+    """Fetch + rebase the remote default branch; return short trunk SHA."""
     # The fetch touches the network, so route it through resilient_call:
     # transient failures retry with backoff and a genuine stall is capped by
     # NETWORK_TIMEOUT (#684). A timeout after retries is non-fatal here — the
-    # subsequent rebase against a stale origin/main is still safe.
+    # subsequent rebase against a stale remote base is still safe.
     try:
         resilient_call(
             subprocess.run,
@@ -627,9 +702,10 @@ def _rebase_main(repo: str, repo_dir: Path) -> str:
             circuit_breaker_name="git-fetch",
         )
     except subprocess.TimeoutExpired:
-        LOG.warning("[%s] git fetch timed out; rebasing against stale origin/main", repo)
+        LOG.warning("[%s] git fetch timed out; rebasing against stale remote base", repo)
+    base_ref = _detect_remote_base_ref(repo, repo_dir)
     rb = subprocess.run(
-        ["git", "-C", str(repo_dir), "rebase", "origin/main", "--quiet"],
+        ["git", "-C", str(repo_dir), "rebase", base_ref, "--quiet"],
         capture_output=True,
         text=True,
         check=False,
@@ -638,7 +714,7 @@ def _rebase_main(repo: str, repo_dir: Path) -> str:
     if rb.returncode != 0:
         # Mid-rebase state; fall back to a hard reset so the loop can continue.
         # This mirrors the bash script's exact behavior.
-        LOG.warning("[%s] rebase failed, hard-resetting to origin/main", repo)
+        LOG.warning("[%s] rebase failed, hard-resetting to %s", repo, base_ref)
         subprocess.run(
             ["git", "-C", str(repo_dir), "rebase", "--abort"],
             capture_output=True,
@@ -646,7 +722,7 @@ def _rebase_main(repo: str, repo_dir: Path) -> str:
             timeout=METADATA_TIMEOUT,
         )
         subprocess.run(
-            ["git", "-C", str(repo_dir), "reset", "--hard", "origin/main", "--quiet"],
+            ["git", "-C", str(repo_dir), "reset", "--hard", base_ref, "--quiet"],
             capture_output=True,
             check=False,
             timeout=METADATA_TIMEOUT,
@@ -669,18 +745,20 @@ def _rebase_main(repo: str, repo_dir: Path) -> str:
 def _resolve_phase_bin(phase: str) -> tuple[str, list[str]] | None:
     """Return ``(executable, leading_args)`` for ``phase``.
 
-    Returns ``None`` if the phase's binary cannot be found on PATH. The
-    caller treats that as a phase-skip rather than a runner crash so a
-    misconfigured pixi env produces a useful per-phase error rather than
-    a tear-down.
+    Known phases fall back to this source checkout when console scripts are
+    not installed on PATH. Unknown phases still return ``None``.
     """
     script_dir = Path(__file__).resolve().parents[2] / "scripts"
     if phase == "plan":
         bin_path = shutil.which("hephaestus-plan-issues")
-        return (bin_path, []) if bin_path else None
+        if bin_path:
+            return (bin_path, [])
+        return (sys.executable, ["-m", "hephaestus.automation.planner"])
     if phase == "implement":
         bin_path = shutil.which("hephaestus-implement-issues")
-        return (bin_path, []) if bin_path else None
+        if bin_path:
+            return (bin_path, [])
+        return (sys.executable, ["-m", "hephaestus.automation.implementer"])
     if phase == "drive-green":
         py = sys.executable
         return (py, [str(script_dir / "drive_prs_green.py")])
@@ -691,23 +769,29 @@ def _resolve_phase_bin(phase: str) -> tuple[str, list[str]] | None:
 # at scripts/run_automation_loop.sh:444-576. Encoded as a table so each
 # phase's flags are obvious at a glance and impossible to duplicate.
 #
-# - "max_workers": pass `--max-workers N`
+# - "worker_arg": pass this worker-count flag with N, or None for no worker flag
 # - "no_ui":       pass `--no-ui`
-# - "issues":      pass `--issues N N N` when open_issues is non-empty
-#                  (skip when no open issues — that case is already gated
-#                  in process_repo via the "no open issues" SKIP branch)
+# - "issues":      "explicit" passes loop-level --issues only when set;
+#                  "open" passes the repo open-issue list when non-empty
+# - "advise":      pass `--no-advise` when the loop-level flag is set
 # - "follow_up_loop_threshold": if non-None, pass `--no-follow-up` when
 #                  loop_idx >= threshold (bash equivalent: FOLLOW_UP_FLAG
 #                  set on loop ≥ 3, scripts/run_automation_loop.sh:415-418)
 _PHASE_FLAGS: dict[str, dict[str, object]] = {
-    "plan": {"max_workers": False, "no_ui": False, "issues": False},
+    "plan": {"worker_arg": "--parallel", "no_ui": False, "issues": "explicit", "advise": True},
     "implement": {
-        "max_workers": True,
+        "worker_arg": "--max-workers",
         "no_ui": True,
-        "issues": False,
+        "issues": "explicit",
+        "advise": True,
         "follow_up_loop_threshold": 3,
     },
-    "drive-green": {"max_workers": True, "no_ui": True, "issues": True},
+    "drive-green": {
+        "worker_arg": "--max-workers",
+        "no_ui": True,
+        "issues": "open",
+        "advise": True,
+    },
 }
 
 
@@ -728,15 +812,21 @@ def _build_phase_argv(
 
     # All phases support -v / --dry-run uniformly.
     argv.append("-v")
+    argv.extend(["--agent", cfg.agent])
     if cfg.dry_run:
         argv.append("--dry-run")
+    if cfg.no_advise and flags.get("advise"):
+        argv.append("--no-advise")
 
-    if flags["issues"] and open_issues:
+    issue_mode = flags.get("issues")
+    issue_numbers = cfg.issues if issue_mode == "explicit" else open_issues
+    if issue_mode and issue_numbers:
         argv.append("--issues")
-        argv.extend(str(n) for n in open_issues)
+        argv.extend(str(n) for n in issue_numbers)
 
-    if flags["max_workers"]:
-        argv.extend(["--max-workers", str(cfg.max_workers)])
+    worker_arg = flags.get("worker_arg")
+    if isinstance(worker_arg, str):
+        argv.extend([worker_arg, str(cfg.max_workers)])
 
     if flags["no_ui"]:
         argv.append("--no-ui")
@@ -771,6 +861,11 @@ def _phase_env(
     if cfg.implementer_model:
         env["HEPH_IMPLEMENTER_MODEL"] = cfg.implementer_model
     env["HEPH_TRUNK_GITHASH"] = trunk_sha
+    project_root = str(Path(__file__).resolve().parents[2])
+    if env.get("PYTHONPATH"):
+        env["PYTHONPATH"] = f"{project_root}{os.pathsep}{env['PYTHONPATH']}"
+    else:
+        env["PYTHONPATH"] = project_root
     if phase == "drive-green":
         env["HEPH_LOOP_INDEX"] = str(loop_idx)
         env["HEPH_TOTAL_LOOPS"] = str(cfg.loops)
@@ -806,7 +901,7 @@ def run_phase(
     env = _phase_env(cfg, loop_idx, trunk_sha, phase)
 
     # Create work report file path and inject into env (#613)
-    build_dir = cfg.projects_dir.parent / "build"
+    build_dir = repo_dir / "build"
     work_report_path = _make_work_report_path(str(build_dir))
     env["HEPH_WORK_REPORT"] = work_report_path
 
@@ -896,9 +991,9 @@ def _process_repo_inner(
     trunk_sha = _rebase_main(repo, repo_dir)
     LOG.info("[%s] trunk=%s", repo, trunk_sha)
 
-    # Open-issue discovery happens once per repo per loop. Phases 2/4/5/6
-    # need this list; the others auto-discover internally.
-    open_issues = _list_open_issue_numbers(cfg.org, repo)
+    # Open-issue discovery happens once per repo per loop. When the operator
+    # scopes the loop explicitly, reuse that bounded list for child phases.
+    open_issues = cfg.issues or _list_open_issue_numbers(cfg.org, repo)
 
     for phase in ALL_PHASES:
         if _shutdown_requested():
@@ -1161,7 +1256,7 @@ def _resolve_org_and_repos(
     if args.repos:
         detected_org, _ = _detect_cwd_repo()
         explicit_org = args.org if isinstance(args.org, str) else None
-        org = detected_org or explicit_org
+        org = explicit_org or detected_org
         if not org:
             return (
                 "",
@@ -1207,6 +1302,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
     """Console-script entry point. Returns the process exit code."""
     args = _parse_args(argv)
     _setup_logging(args.verbose)
+    agent = resolve_agent(args.agent)
 
     phases = _validate_phases(args.phases)
 
@@ -1225,7 +1321,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         max_workers=args.max_workers,
         parallel_repos=args.parallel_repos,
         phases=phases,
+        agent=agent,
+        issues=args.issues or [],
         dry_run=args.dry_run,
+        no_advise=args.no_advise,
         allow_unsafe_phase_order=args.allow_unsafe_phase_order,
         planner_model=args.planner_model,
         reviewer_model=args.reviewer_model,
@@ -1262,13 +1361,16 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
 
     LOG.info("Repos to process: %s", " ".join(repos))
     LOG.info(
-        "Loops: %d | Max workers: %d | Parallel repos: %d | Dry run: %s",
+        "Loops: %d | Max workers: %d | Parallel repos: %d | Agent: %s | Dry run: %s",
         cfg.loops,
         cfg.max_workers,
         cfg.parallel_repos,
+        cfg.agent,
         cfg.dry_run,
     )
     LOG.info("Phases: %s", ",".join(cfg.phases))
+    if cfg.issues:
+        LOG.info("Issues: %s", ",".join(str(n) for n in cfg.issues))
     LOG.info(
         "Models: planner=%s reviewer=%s implementer=%s",
         cfg.planner_model or "<default>",

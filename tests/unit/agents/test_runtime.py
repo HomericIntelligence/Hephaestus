@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from hephaestus.agents import runtime as agent_runtime
 
 
@@ -183,3 +185,45 @@ def test_run_claude_text_read_only_omits_write_permissions(tmp_path: Path) -> No
 
     assert "--permission-mode" not in captured_cmd
     assert "--allowedTools" not in captured_cmd
+
+
+def test_resolve_agent_prefers_claude_when_both_exist() -> None:
+    """Omitted --agent auto-detects, preferring Claude when both CLIs exist."""
+    with patch("hephaestus.agents.runtime.shutil.which") as mock_which:
+        mock_which.side_effect = lambda name: (
+            f"/bin/{name}" if name in {"claude", "codex"} else None
+        )
+
+        assert agent_runtime.resolve_agent(None) == "claude"
+
+
+def test_resolve_agent_uses_codex_when_claude_absent() -> None:
+    """Codex is the fallback when Claude is not installed."""
+    with patch("hephaestus.agents.runtime.shutil.which") as mock_which:
+        mock_which.side_effect = lambda name: "/bin/codex" if name == "codex" else None
+
+        assert agent_runtime.resolve_agent(None) == "codex"
+
+
+def test_resolve_agent_explicit_codex_overrides_claude() -> None:
+    """An explicit --agent value wins over auto-detection."""
+    with patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/claude"):
+        assert agent_runtime.resolve_agent("codex") == "codex"
+
+
+def test_resolve_agent_errors_when_no_provider_exists() -> None:
+    """Auto-detection should fail clearly when no supported provider is installed."""
+    with patch("hephaestus.agents.runtime.shutil.which", return_value=None):
+        with pytest.raises(RuntimeError, match="No supported agent backend"):
+            agent_runtime.resolve_agent(None)
+
+
+def test_add_agent_argument_defaults_to_auto_detect() -> None:
+    """The parser should not hardcode Claude before runtime resolution."""
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    agent_runtime.add_agent_argument(parser)
+
+    assert parser.parse_args([]).agent is None
+    assert parser.parse_args(["--agent", "codex"]).agent == "codex"

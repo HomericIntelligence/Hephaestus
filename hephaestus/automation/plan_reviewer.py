@@ -19,7 +19,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_text
+from hephaestus.agents.runtime import add_agent_argument, is_codex, resolve_agent, run_codex_text
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.github.rate_limit import wait_until
 
@@ -689,6 +689,7 @@ def main() -> int:
     """
     args = _parse_args()
     _setup_logging(args.verbose)
+    agent = resolve_agent(args.agent)
 
     log = logging.getLogger(__name__)
 
@@ -701,7 +702,7 @@ def main() -> int:
     try:
         options = PlanReviewerOptions(
             issues=args.issues,
-            agent=args.agent,
+            agent=agent,
             max_workers=args.max_workers,
             dry_run=args.dry_run,
             enable_ui=not args.no_ui and not args.json,

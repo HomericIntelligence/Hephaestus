@@ -907,7 +907,8 @@ class TestGhIssueRemoveLabels:
         mock_gh_call.assert_not_called()
 
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_single_label_remove(self, mock_gh_call: Any) -> None:
+    @patch("hephaestus.automation.github_api.gh_list_labels", return_value={"state:plan-no-go"})
+    def test_single_label_remove(self, _mock_list: Any, mock_gh_call: Any) -> None:
         gh_issue_remove_labels(42, ["state:plan-no-go"])
         assert mock_gh_call.call_count == 1
         args = mock_gh_call.call_args[0][0]
@@ -916,11 +917,33 @@ class TestGhIssueRemoveLabels:
         assert "state:plan-no-go" in args
 
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_multiple_labels_share_one_call(self, mock_gh_call: Any) -> None:
+    @patch(
+        "hephaestus.automation.github_api.gh_list_labels",
+        return_value={"state:plan-no-go", "state:needs-plan"},
+    )
+    def test_multiple_labels_share_one_call(self, _mock_list: Any, mock_gh_call: Any) -> None:
         gh_issue_remove_labels(42, ["state:plan-no-go", "state:needs-plan"])
         assert mock_gh_call.call_count == 1
         args = mock_gh_call.call_args[0][0]
         assert args.count("--remove-label") == 2
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.gh_list_labels", return_value={"state:plan-no-go"})
+    def test_missing_repo_labels_are_ignored(self, _mock_list: Any, mock_gh_call: Any) -> None:
+        gh_issue_remove_labels(42, ["state:plan-go", "state:needs-plan"])
+        mock_gh_call.assert_not_called()
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.gh_list_labels", side_effect=RuntimeError("boom"))
+    def test_label_list_failure_attempts_requested_removals(
+        self, _mock_list: Any, mock_gh_call: Any
+    ) -> None:
+        gh_issue_remove_labels(42, ["state:plan-go", "state:needs-plan"])
+        args = mock_gh_call.call_args[0][0]
+        assert args[:3] == ["issue", "edit", "42"]
+        assert args.count("--remove-label") == 2
+        assert "state:plan-go" in args
+        assert "state:needs-plan" in args
 
 
 class TestGhListOpenIssues:

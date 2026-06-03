@@ -1,14 +1,15 @@
-"""Address unresolved PR review threads using Claude Code.
+"""Address unresolved PR review threads using the selected coding agent.
 
 Provides:
 - Parallel processing of issues with unresolved review threads
-- Session resume for the original implementer's Claude session
-- Selective thread resolution based on Claude's reported fixes
+- Session resume for the original implementer's agent session when supported
+- Selective thread resolution based on the agent's reported fixes
 - State persistence and UI monitoring
 
 This module finds PRs with unresolved review threads, resumes the original
-implementer's Claude session (or starts a fresh one), runs Claude to fix the
-code, then resolves only the threads Claude explicitly reports as addressed.
+implementer's session when supported (or starts a fresh one), runs the selected
+agent to fix the code, then resolves only the threads the agent explicitly
+reports as addressed.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from typing import Any
 
 from hephaestus.agents.runtime import (
     is_codex,
+    resolve_agent,
     resume_codex_session,
     run_codex_session,
     session_agent_matches,
@@ -101,7 +103,7 @@ def run_address_fix_session(
     log_file: Path,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Run the address-review fix session and return Claude's parsed result.
+    """Run the address-review fix session and return the agent's parsed result.
 
     Shared core of :meth:`AddressReviewer._run_fix_session` and the in-loop
     implementer address step (Stage 2, #28). Builds the address-review prompt
@@ -120,7 +122,7 @@ def run_address_fix_session(
         threads: Unresolved thread dicts (``id``/``path``/``line``/``body``).
         agent: Selected implementation agent (``"claude"`` / ``"codex"``).
         repo_root: Repo root used for session-naming githash + slug.
-        parse_fn: Callable ``(text) -> dict`` used to parse Claude's output.
+        parse_fn: Callable ``(text) -> dict`` used to parse the agent's output.
             The standalone path passes its trace-writing method; the in-loop
             path passes :func:`_parse_addressed_block`.
         log_file: Path to write the raw session log to.
@@ -239,14 +241,14 @@ def resolve_addressed_threads(
     *,
     dry_run: bool = False,
 ) -> None:
-    """Resolve the review threads Claude explicitly fixed (with hallucination guard).
+    """Resolve the review threads the agent explicitly fixed (with hallucination guard).
 
     Shared core of :meth:`AddressReviewer._resolve_addressed_threads` and the
     in-loop address step (#28). Only resolves threads listed in ``addressed``
-    AND present in ``presented_thread_ids`` — Claude's response is untrusted
+    AND present in ``presented_thread_ids`` — the agent response is untrusted
     input, so a hallucinated or cross-PR thread ID must never reach
     :func:`gh_pr_resolve_thread`. Membership against the set actually presented
-    to Claude is the trust boundary (#661).
+    to the agent is the trust boundary (#661).
 
     Args:
         addressed: Thread-id strings Claude reported as fixed.
@@ -272,12 +274,12 @@ def resolve_addressed_threads(
 
 
 class AddressReviewer(BaseReviewer):
-    """Addresses unresolved PR review threads using Claude Code.
+    """Addresses unresolved PR review threads using Claude Code or Codex.
 
     Features:
     - Parallel processing across multiple issues
-    - Session resume from implementer's saved Claude session
-    - Selective thread resolution (only resolves threads Claude explicitly fixed)
+    - Session resume from implementer's saved agent session when supported
+    - Selective thread resolution (only resolves threads the agent explicitly fixed)
     - State persistence for observability
     - Real-time curses UI for status monitoring
 
@@ -653,7 +655,7 @@ class AddressReviewer(BaseReviewer):
         )
 
     def _load_impl_session_id(self, issue_number: int) -> str | None:
-        """Load the implementer's Claude session ID from state file.
+        """Load the implementer's agent session ID from state file.
 
         Args:
             issue_number: GitHub issue number
@@ -841,10 +843,10 @@ class AddressReviewer(BaseReviewer):
         )
 
     def _parse_json_block(self, text: str, issue_number: int | None = None) -> dict[str, Any]:
-        """Extract the last ```json ... ``` block from Claude's response.
+        """Extract the last ```json ... ``` block from an agent response.
 
         On parse failure or missing block, writes a trace file under the state
-        dir so an empty ``addressed`` list is distinguishable from "Claude
+        dir so an empty ``addressed`` list is distinguishable from "the agent
         reviewed and decided no fixes were warranted". Without this the two
         cases looked identical in logs and it was hard to know whether to
         retry, escalate, or trust the result.
@@ -920,10 +922,10 @@ class AddressReviewer(BaseReviewer):
         replies: dict[str, str],
         presented_thread_ids: set[str],
     ) -> None:
-        """Resolve the review threads that Claude explicitly fixed.
+        """Resolve the review threads that the agent explicitly fixed.
 
         Only resolves threads listed in ``addressed`` AND present in
-        ``presented_thread_ids``. Why: Claude's response is untrusted input —
+        ``presented_thread_ids``. Why: the agent response is untrusted input —
         a hallucinated or cross-PR thread ID would otherwise be passed straight
         to ``gh api graphql resolveReviewThread``. Membership against the set
         we actually presented to Claude is the trust boundary.
@@ -964,7 +966,7 @@ class AddressReviewer(BaseReviewer):
         try:
             from .pr_manager import commit_changes
 
-            commit_changes(issue_number, worktree_path)
+            commit_changes(issue_number, worktree_path, self.options.agent)
             logger.info("Committed fix changes for issue #%s", issue_number)
         except RuntimeError as e:
             # commit_changes raises RuntimeError if nothing to commit; already checked above
@@ -1019,8 +1021,8 @@ def _parse_args() -> argparse.Namespace:
     """Parse command line arguments for the address review CLI."""
     parser = build_review_parser(
         description=(
-            "Find PRs with unresolved review threads and use Claude Code to fix the code, "
-            "then resolve only the threads Claude explicitly addresses."
+            "Find PRs with unresolved review threads and use Claude Code or Codex to fix the "
+            "code, then resolve only the threads the selected agent explicitly addresses."
         ),
         epilog="""
 Examples:
@@ -1049,6 +1051,7 @@ def main() -> int:
     """
     args = _parse_args()
     setup_review_logging(args.verbose)
+    agent = resolve_agent(args.agent)
 
     log = logging.getLogger(__name__)
     log.info("Starting address review for issues: %s", args.issues)
@@ -1057,7 +1060,7 @@ def main() -> int:
 
     options = AddressReviewOptions(
         issues=args.issues,
-        agent=args.agent,
+        agent=agent,
         max_workers=args.max_workers,
         dry_run=args.dry_run,
         enable_ui=not args.no_ui and not args.json,

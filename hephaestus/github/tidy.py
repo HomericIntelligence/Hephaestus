@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Single-repo gh-tidy wrapper with Myrmidon swarm for conflict resolution.
+"""Single-repo gh-tidy wrapper with agent conflict resolution.
 
 Runs `gh tidy --rebase-all --trunk <default_branch>` interactively (stdin
 passes through so the user can answer gh-tidy's own y/N delete prompts), then
-spawns one Sonnet agent per branch that gh-tidy failed to rebase.
+spawns the selected coding agent per branch that gh-tidy failed to rebase.
 
 The swarm is constrained: it MUST NOT delete any branch or any worktree that
 existed before the run.
@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_text
+from hephaestus.agents.runtime import add_agent_argument, is_codex, resolve_agent, run_codex_text
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.github.pr_merge import detect_repo_from_remote
 from hephaestus.logging.utils import get_logger
@@ -325,7 +325,7 @@ async def _dispatch_swarm(
     dry_run: bool,
     agent: str,
 ) -> dict[str, str]:
-    """Spawn one Sonnet agent per branch (capped at max_concurrent).
+    """Spawn the selected coding agent per branch (capped at max_concurrent).
 
     Returns a dict of branch -> status string.
     """
@@ -492,6 +492,7 @@ def _print_summary(results: dict[str, str]) -> int:
 def main() -> int:  # noqa: C901
     """Entry point for hephaestus-tidy."""
     args = _build_arg_parser().parse_args()
+    agent = resolve_agent(args.agent)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -547,7 +548,7 @@ def main() -> int:  # noqa: C901
 
     if args.dry_run:
         for b in problem_branches:
-            logger.info("[dry-run] Would spawn Sonnet agent for branch: %s", b)
+            logger.info("[dry-run] Would spawn selected agent for branch: %s", b)
         if args.json:
             emit_json_status(0, dry_run=True, problem_branches=problem_branches)
         return 0
@@ -560,7 +561,7 @@ def main() -> int:  # noqa: C901
             repo_slug,
             args.max_concurrent,
             dry_run=args.dry_run,
-            agent=args.agent,
+            agent=agent,
         )
     )
 

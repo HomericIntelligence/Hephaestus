@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -30,8 +31,31 @@ def add_agent_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--agent",
         choices=AGENT_CHOICES,
-        default=DEFAULT_AGENT,
-        help="Agent backend to invoke for model-driven steps (default: claude)",
+        default=None,
+        help=(
+            "Agent backend to invoke for model-driven steps "
+            "(default: auto-detect, preferring claude when available)"
+        ),
+    )
+
+
+def resolve_agent(agent: str | None) -> AgentName:
+    """Resolve an optional provider selection into a concrete backend.
+
+    When the operator omits ``--agent``, prefer Claude if both provider CLIs
+    are present. Codex is the fallback when Claude is absent.
+    """
+    if agent is not None:
+        if agent not in AGENT_CHOICES:
+            raise ValueError(f"Unsupported agent: {agent}")
+        return agent
+    if shutil.which("claude"):
+        return "claude"
+    if shutil.which("codex"):
+        return "codex"
+    raise RuntimeError(
+        "No supported agent backend found on PATH. Install `claude` or `codex`, "
+        "or pass --agent after installing the selected backend."
     )
 
 

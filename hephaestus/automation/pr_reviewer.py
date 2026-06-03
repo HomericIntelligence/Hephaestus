@@ -1,4 +1,4 @@
-"""Read-only PR review automation using Claude Code in parallel worktrees.
+"""Read-only PR review automation using the selected coding agent.
 
 Provides:
 - Parallel PR analysis across multiple issues
@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.runtime import is_codex, run_codex_text
+from hephaestus.agents.runtime import is_codex, resolve_agent, run_codex_text
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 
 from ._review_utils import (
@@ -127,13 +127,13 @@ def _fetch_signing_state(pr_number: int) -> list[dict[str, Any]]:
 
 
 def _parse_json_block(text: str) -> dict[str, Any]:
-    """Extract the last ```json ... ``` block from Claude's response.
+    """Extract the last ```json ... ``` block from an agent response.
 
     Thin wrapper around :func:`_review_utils.parse_json_block` kept for
     backward compatibility with existing callers and tests.
 
     Args:
-        text: Claude's full response text
+        text: Agent response text
 
     Returns:
         Parsed dict with keys "comments" and "summary", or defaults if not found
@@ -920,7 +920,7 @@ def _parse_args() -> argparse.Namespace:
     """Parse command line arguments for the reviewer CLI."""
     parser = build_review_parser(
         description=(
-            "Analyze open PRs linked to GitHub issues using Claude Code "
+            "Analyze open PRs linked to GitHub issues using Claude Code or Codex "
             "and post inline review comments (read-only — does not fix code)"
         ),
         epilog="""
@@ -950,6 +950,7 @@ def main() -> int:
     """
     args = _parse_args()
     setup_review_logging(args.verbose)
+    agent = resolve_agent(args.agent)
 
     log = logging.getLogger(__name__)
     log.info("Starting PR review for issues: %s", args.issues)
@@ -959,7 +960,7 @@ def main() -> int:
 
     options = ReviewerOptions(
         issues=args.issues,
-        agent=args.agent,
+        agent=agent,
         max_workers=args.max_workers,
         dry_run=args.dry_run,
         enable_ui=not args.no_ui and not args.json,

@@ -653,7 +653,8 @@ class TestMain:
         from hephaestus.automation.models import WorkerResult
 
         monkeypatch.setattr(
-            "sys.argv", ["plan-reviewer", "--issues", "1", "2", "--no-ui", "--dry-run"]
+            "sys.argv",
+            ["plan-reviewer", "--issues", "1", "2", "--no-ui", "--dry-run", "--agent", "claude"],
         )
 
         def fake_run(self: object) -> dict[int, WorkerResult]:
@@ -676,7 +677,16 @@ class TestMain:
 
         monkeypatch.setattr(
             "sys.argv",
-            ["plan-reviewer", "--issues", "1", "--no-ui", "--dry-run", "--json"],
+            [
+                "plan-reviewer",
+                "--issues",
+                "1",
+                "--no-ui",
+                "--dry-run",
+                "--json",
+                "--agent",
+                "claude",
+            ],
         )
 
         def fake_run(self: object) -> dict[int, WorkerResult]:
@@ -700,7 +710,17 @@ class TestMain:
 
         monkeypatch.setattr(
             "sys.argv",
-            ["plan-reviewer", "--issues", "1", "2", "--no-ui", "--dry-run", "--json"],
+            [
+                "plan-reviewer",
+                "--issues",
+                "1",
+                "2",
+                "--no-ui",
+                "--dry-run",
+                "--json",
+                "--agent",
+                "claude",
+            ],
         )
 
         def fake_run(self: object) -> dict[int, WorkerResult]:
@@ -725,7 +745,16 @@ class TestMain:
 
         monkeypatch.setattr(
             "sys.argv",
-            ["plan-reviewer", "--issues", "1", "--no-ui", "--dry-run", "--json"],
+            [
+                "plan-reviewer",
+                "--issues",
+                "1",
+                "--no-ui",
+                "--dry-run",
+                "--json",
+                "--agent",
+                "claude",
+            ],
         )
 
         def fake_run(self: object) -> None:
@@ -744,7 +773,17 @@ class TestMain:
 
         monkeypatch.setattr(
             "sys.argv",
-            ["plan-reviewer", "--issues", "5", "5", "5", "--no-ui", "--dry-run"],
+            [
+                "plan-reviewer",
+                "--issues",
+                "5",
+                "5",
+                "5",
+                "--no-ui",
+                "--dry-run",
+                "--agent",
+                "claude",
+            ],
         )
 
         seen_issues: list[list[int]] = []

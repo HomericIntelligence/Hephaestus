@@ -4,7 +4,7 @@
 For every open PR in every configured repo:
   - Ready (CI green, no conflicts) → merge via merge commit (GitHub signs it)
   - Outdated (behind base) → rebase on main, re-sign, push
-  - Conflicted → spawn a Claude agent to resolve conflicts semantically,
+  - Conflicted → spawn the selected coding agent to resolve conflicts semantically,
                   then re-sign and push
 
 Signing uses the local GPG key configured in git's ``user.signingkey``.
@@ -16,7 +16,7 @@ Usage:
 Options:
     --dry-run                    Print actions without executing
     --repos REPO [REPO ...]      Restrict to specific repos (default: all 15)
-    --skip-conflict-resolution   Skip the agent swarm for conflicted PRs
+    --skip-conflict-resolution   Skip agent conflict resolution for conflicted PRs
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.runtime import add_agent_argument, is_codex, run_codex_text
+from hephaestus.agents.runtime import add_agent_argument, is_codex, resolve_agent, run_codex_text
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.github.rate_limit import detect_rate_limit, wait_until
 from hephaestus.logging.utils import get_logger
@@ -580,12 +580,14 @@ def main() -> int:
     parser.add_argument(
         "--skip-conflict-resolution",
         action="store_true",
-        help="Skip Claude agent swarm for conflicted PRs",
+        help="Skip agent conflict resolution for conflicted PRs",
     )
     add_agent_argument(parser)
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
     add_json_arg(parser)
     args = parser.parse_args()
+    agent = resolve_agent(args.agent)
+    args.agent = agent
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,

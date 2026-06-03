@@ -48,7 +48,7 @@ class TestPatchRoutingThroughImplementer:
         Patching ``implementer.gh_list_open_issues`` / ``get_repo_root`` /
         ``IssueImplementer`` must reach the lookups inside ``main``.
         """
-        monkeypatch.setattr(sys, "argv", ["impl", "--dry-run", "--no-ui"])
+        monkeypatch.setattr(sys, "argv", ["impl", "--dry-run", "--no-ui", "--agent", "claude"])
 
         with (
             patch.object(implementer, "gh_list_open_issues", return_value=[]) as mock_list,
@@ -71,6 +71,12 @@ class TestParseArgs:
         assert args.epic is None
         assert args.issues is None
         assert args.dry_run is False
+        assert args.no_advise is False
+
+    def test_no_advise_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["impl", "--no-advise"])
+        args = implementer_cli._parse_args()
+        assert args.no_advise is True
 
     def test_epic_and_issues_mutually_exclusive(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(sys, "argv", ["impl", "--epic", "1", "--issues", "2"])

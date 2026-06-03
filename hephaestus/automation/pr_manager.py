@@ -13,6 +13,8 @@ import logging
 from pathlib import Path
 from typing import cast
 
+from hephaestus.agents.runtime import is_codex
+
 from ._secret_patterns import SECRET_FILE_EXTENSIONS, SECRET_FILE_NAMES
 from .claude_models import implementer_model
 from .git_utils import issue_ref, run
@@ -23,12 +25,26 @@ from .status_tracker import StatusTracker
 logger = logging.getLogger(__name__)
 
 
-def commit_changes(issue_number: int, worktree_path: Path) -> None:
+def _agent_display_name(agent: str) -> str:
+    """Return a short human-facing name for generated commits/PR bodies."""
+    return "Codex" if is_codex(agent) else "Claude Code"
+
+
+def _coauthor_for_agent(agent: str) -> tuple[str, str]:
+    """Return the co-author identity for fallback commits made by automation."""
+    if is_codex(agent):
+        return ("Codex", "noreply@openai.com")
+    return (implementer_model(), "noreply@anthropic.com")
+
+
+def commit_changes(issue_number: int, worktree_path: Path, agent: str = "claude") -> None:
     """Commit changes in worktree, filtering out secret files.
 
     Args:
         issue_number: Issue number (used in commit message and error text)
         worktree_path: Path to git worktree
+        agent: Selected implementation agent. Defaults to Claude for backwards
+            compatibility with existing direct callers.
 
     Raises:
         RuntimeError: If there are no changes, or all changes are secret files.
@@ -94,13 +110,14 @@ def commit_changes(issue_number: int, worktree_path: Path) -> None:
 
     # Generate commit message
     issue = fetch_issue_info(issue_number)
+    coauthor_name, coauthor_email = _coauthor_for_agent(agent)
     commit_msg = f"""feat: Implement #{issue_number}
 
 {issue.title}
 
 Closes #{issue_number}
 
-Co-Authored-By: {implementer_model()} <noreply@anthropic.com>
+Co-Authored-By: {coauthor_name} <{coauthor_email}>
 """
 
     # Commit
@@ -117,6 +134,7 @@ def ensure_pr_created(
     auto_merge: bool = False,
     status_tracker: StatusTracker | None = None,
     slot_id: int | None = None,
+    agent: str = "claude",
 ) -> int:
     """Ensure commit is pushed and PR is created (fallback if Claude didn't do it).
 
@@ -127,6 +145,7 @@ def ensure_pr_created(
         auto_merge: Whether to enable auto-merge on the PR
         status_tracker: StatusTracker instance for slot updates (optional)
         slot_id: Worker slot ID for status updates
+        agent: Selected implementation agent for generated PR metadata.
 
     Returns:
         PR number
@@ -185,18 +204,24 @@ def ensure_pr_created(
 
     # PR doesn't exist, create it
     logger.warning("No PR found for branch %s, creating one...", branch_name)
-    pr_number = create_pr(issue_number, branch_name, auto_merge)
+    pr_number = create_pr(issue_number, branch_name, auto_merge, agent=agent)
     logger.info("Created PR #%s", pr_number)
     return pr_number
 
 
-def create_pr(issue_number: int, branch_name: str, auto_merge: bool = False) -> int:
+def create_pr(
+    issue_number: int,
+    branch_name: str,
+    auto_merge: bool = False,
+    agent: str = "claude",
+) -> int:
     """Create pull request for issue.
 
     Args:
         issue_number: Issue number
         branch_name: Git branch name
         auto_merge: Whether to enable auto-merge on the PR
+        agent: Selected implementation agent for generated PR metadata.
 
     Returns:
         PR number
@@ -208,8 +233,9 @@ def create_pr(issue_number: int, branch_name: str, auto_merge: bool = False) -> 
     pr_body = get_pr_description(
         issue_number=issue_number,
         summary=f"Implements #{issue_number}",
-        changes="- Automated implementation via Claude Code",
+        changes=f"- Automated implementation via {_agent_display_name(agent)}",
         testing="- Automated tests included",
+        generated_by=f"{_agent_display_name(agent)} via ProjectHephaestus automation.",
     )
 
     return gh_pr_create(

@@ -20,7 +20,9 @@ def _patched_run(return_value: dict[int, WorkerResult]):
 
 def test_main_returns_0_when_no_unresolved_threads(monkeypatch) -> None:
     """When run() returns an empty dict, main() exits 0."""
-    monkeypatch.setattr("sys.argv", ["address_review", "--issues", "1", "--no-ui", "--dry-run"])
+    monkeypatch.setattr(
+        "sys.argv", ["address_review", "--issues", "1", "--no-ui", "--dry-run", "--agent", "claude"]
+    )
     with (
         patch.object(address_review.AddressReviewer, "__init__", return_value=None),
         _patched_run({}),
@@ -30,7 +32,9 @@ def test_main_returns_0_when_no_unresolved_threads(monkeypatch) -> None:
 
 def test_main_returns_0_on_all_success(monkeypatch) -> None:
     """When every WorkerResult.success is True, main() exits 0."""
-    monkeypatch.setattr("sys.argv", ["address_review", "--issues", "1", "--no-ui", "--dry-run"])
+    monkeypatch.setattr(
+        "sys.argv", ["address_review", "--issues", "1", "--no-ui", "--dry-run", "--agent", "claude"]
+    )
     results = {1: WorkerResult(issue_number=1, success=True, pr_number=42)}
     with (
         patch.object(address_review.AddressReviewer, "__init__", return_value=None),
@@ -41,7 +45,9 @@ def test_main_returns_0_on_all_success(monkeypatch) -> None:
 
 def test_main_returns_1_on_any_failure(monkeypatch) -> None:
     """When any WorkerResult.success is False, main() exits 1."""
-    monkeypatch.setattr("sys.argv", ["address_review", "--issues", "1", "--no-ui", "--dry-run"])
+    monkeypatch.setattr(
+        "sys.argv", ["address_review", "--issues", "1", "--no-ui", "--dry-run", "--agent", "claude"]
+    )
     results = {1: WorkerResult(issue_number=1, success=False, error="boom")}
     with (
         patch.object(address_review.AddressReviewer, "__init__", return_value=None),
@@ -52,7 +58,9 @@ def test_main_returns_1_on_any_failure(monkeypatch) -> None:
 
 def test_main_returns_130_on_keyboard_interrupt(monkeypatch) -> None:
     """A KeyboardInterrupt during run() is caught and returns 130."""
-    monkeypatch.setattr("sys.argv", ["address_review", "--issues", "1", "--no-ui", "--dry-run"])
+    monkeypatch.setattr(
+        "sys.argv", ["address_review", "--issues", "1", "--no-ui", "--dry-run", "--agent", "claude"]
+    )
     boom = MagicMock(side_effect=KeyboardInterrupt())
     with (
         patch.object(address_review.AddressReviewer, "__init__", return_value=None),

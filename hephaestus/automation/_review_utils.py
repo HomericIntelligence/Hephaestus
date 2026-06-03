@@ -148,10 +148,10 @@ def instance_log(
 
 
 def parse_json_block(text: str) -> dict[str, Any]:
-    """Extract the last ```json ... ``` block from Claude's response.
+    """Extract the last ```json ... ``` block from an agent response.
 
     Args:
-        text: Claude's full response text.
+        text: Agent response text.
 
     Returns:
         Parsed dict, or a default dict with empty collections on failure.

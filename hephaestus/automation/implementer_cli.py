@@ -21,7 +21,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from hephaestus.agents.runtime import add_agent_argument
+from hephaestus.agents.runtime import add_agent_argument, resolve_agent
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 
 from .models import ImplementerOptions
@@ -51,7 +51,7 @@ def _setup_logging(verbose: bool = False, log_dir: Path | None = None) -> None:
 def _parse_args() -> argparse.Namespace:
     """Parse command line arguments for the implementer CLI."""
     parser = argparse.ArgumentParser(
-        description="Bulk implement GitHub issues using Claude Code",
+        description="Bulk implement GitHub issues using Claude Code or Codex",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -139,6 +139,11 @@ Examples:
         help="Disable automatic filing of follow-up issues (enabled by default)",
     )
     parser.add_argument(
+        "--no-advise",
+        action="store_true",
+        help="Skip the advise step before implementation",
+    )
+    parser.add_argument(
         "--no-ui",
         action="store_true",
         help="Disable curses UI (use plain logging instead)",
@@ -173,6 +178,7 @@ def main() -> int:
     from . import implementer as _impl
 
     args = _parse_args()
+    agent = resolve_agent(args.agent)
 
     state_dir = _impl.get_repo_root() / "build" / ".issue_implementer"
     _setup_logging(args.verbose, log_dir=state_dir)
@@ -190,7 +196,7 @@ def main() -> int:
     options = ImplementerOptions(
         epic_number=args.epic or 0,
         issues=args.issues or [],
-        agent=args.agent,
+        agent=agent,
         analyze_only=args.analyze,
         health_check=args.health_check,
         resume=args.resume,
@@ -198,6 +204,7 @@ def main() -> int:
         skip_closed=not args.no_skip_closed,
         auto_merge=not args.no_auto_merge,
         dry_run=args.dry_run,
+        enable_advise=not args.no_advise,
         enable_learn=not args.no_learn,
         enable_follow_up=not args.no_follow_up,
         enable_ui=not args.no_ui and not args.json,

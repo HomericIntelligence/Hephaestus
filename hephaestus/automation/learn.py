@@ -31,7 +31,7 @@ def run_learn(
     """Resume agent session to run /learn.
 
     Args:
-        session_id: Claude session ID
+        session_id: Agent session ID
         worktree_path: Path to worktree
         issue_number: Issue number
         state_dir: Directory for state/log files
