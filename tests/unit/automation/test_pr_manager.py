@@ -77,10 +77,34 @@ class TestEnsurePRCreated:
             with pytest.raises(RuntimeError, match="No commit found"):
                 pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
 
+    def test_empty_diff_vs_base_raises_before_pr_create(self) -> None:
+        """A commit exists but the branch has no commits vs base → no PR created.
+
+        Regression for the opaque, retried "No commits between main and
+        <branch>" failure: detect the empty-diff branch up front and raise a
+        clear message instead of letting `gh pr create` fail.
+        """
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),  # git log (a commit exists)
+                _status("origin/master"),  # default base branch (guard)
+                _status("0"),  # rev-list count vs base → no net change
+            ]
+        )
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "create_pr") as create_mock,
+        ):
+            with pytest.raises(RuntimeError, match="No changes produced"):
+                pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
+        create_mock.assert_not_called()
+
     def test_returns_existing_pr(self) -> None:
         run_mock = MagicMock(
             side_effect=[
                 _status("abc1234 commit msg"),  # git log
+                _status("origin/master"),  # default base branch (guard)
+                _status("2"),  # rev-list count vs base (has commits)
                 _status("refs/heads/branch"),  # ls-remote (already pushed)
             ]
         )
@@ -95,9 +119,10 @@ class TestEnsurePRCreated:
         run_mock = MagicMock(
             side_effect=[
                 _status("abc1234 commit msg"),  # git log
+                _status("origin/master"),  # default base branch (guard)
+                _status("3"),  # rev-list count vs base (has commits)
                 _status(""),  # ls-remote (not pushed)
                 _status(""),  # git push
-                _status("origin/master"),  # default base branch
             ]
         )
         gh_mock = _status("[]")
@@ -114,9 +139,10 @@ class TestEnsurePRCreated:
     def test_creates_pr_with_selected_agent_metadata(self) -> None:
         run_mock = MagicMock(
             side_effect=[
-                _status("abc1234 commit msg"),
-                _status("refs/heads/branch"),
-                _status("origin/master"),
+                _status("abc1234 commit msg"),  # git log
+                _status("origin/master"),  # default base branch (guard)
+                _status("1"),  # rev-list count vs base (has commits)
+                _status("refs/heads/branch"),  # ls-remote (already pushed)
             ]
         )
         gh_mock = _status("[]")
