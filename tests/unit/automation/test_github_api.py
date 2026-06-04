@@ -25,6 +25,7 @@ from hephaestus.automation.github_api import (
     gh_list_open_issues,
     gh_pr_checks,
     gh_pr_create,
+    gh_pr_review_post,
     is_issue_closed,
     parse_issue_dependencies,
     prefetch_issue_states,
@@ -1591,3 +1592,99 @@ class TestUpsertAndDeleteComment:
         (args,) = mock_gh_call.call_args.args
         assert "DELETE" in args
         assert "/repos/o/r/issues/comments/42" in args
+
+
+class TestGhPrReviewPost:
+    """gh_pr_review_post: post a review and return *this* review's thread IDs."""
+
+    @staticmethod
+    def _gh_call_side_effect(review_id: str, threads: list[dict[str, Any]]) -> Any:
+        """Build a side_effect covering the three _gh_call invocations.
+
+        1. REST fetch of the PR node id (``--jq .node_id``)
+        2. ``addPullRequestReview`` mutation → ``pullRequestReview { id }``
+        3. ``reviewThreads`` follow-up query
+        """
+
+        def _side_effect(args: list[str], *_: Any, **__: Any) -> Any:
+            joined = " ".join(args)
+            result = Mock()
+            if "--jq" in args:
+                result.stdout = "PR_node_123"
+            elif "addPullRequestReview" in joined:
+                result.stdout = json.dumps(
+                    {"data": {"addPullRequestReview": {"pullRequestReview": {"id": review_id}}}}
+                )
+            elif "reviewThreads" in joined:
+                result.stdout = json.dumps(
+                    {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": threads}}}}}
+                )
+            else:  # pragma: no cover - defensive
+                result.stdout = "{}"
+            return result
+
+        return _side_effect
+
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_mutation_does_not_reference_nonexistent_field(
+        self, mock_gh_call: Any, _mock_repo: Any
+    ) -> None:
+        """No GraphQL query sent must select the invalid field.
+
+        Regression: ``Field 'pullRequestReviewThread' doesn't exist on type
+        'PullRequestReviewComment'`` failed every review post.
+        """
+        mock_gh_call.side_effect = self._gh_call_side_effect("REVIEW_1", [])
+
+        gh_pr_review_post(
+            pr_number=7,
+            comments=[{"path": "a.py", "line": 1, "side": "RIGHT", "body": "fix"}],
+            summary="Findings",
+        )
+
+        for call in mock_gh_call.call_args_list:
+            sent_args = call.args[0] if call.args else call.kwargs.get("args", [])
+            assert "pullRequestReviewThread" not in " ".join(sent_args)
+
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_returns_only_this_reviews_unresolved_threads(
+        self, mock_gh_call: Any, _mock_repo: Any
+    ) -> None:
+        """Threads from this review (unresolved) are returned; others are excluded."""
+        threads = [
+            # Belongs to our review, unresolved → kept.
+            {
+                "id": "T_mine_open",
+                "isResolved": False,
+                "comments": {"nodes": [{"pullRequestReview": {"id": "REVIEW_1"}}]},
+            },
+            # Our review but already resolved → excluded.
+            {
+                "id": "T_mine_resolved",
+                "isResolved": True,
+                "comments": {"nodes": [{"pullRequestReview": {"id": "REVIEW_1"}}]},
+            },
+            # Pre-existing human-reviewer thread (#375) → excluded.
+            {
+                "id": "T_foreign",
+                "isResolved": False,
+                "comments": {"nodes": [{"pullRequestReview": {"id": "REVIEW_OTHER"}}]},
+            },
+        ]
+        mock_gh_call.side_effect = self._gh_call_side_effect("REVIEW_1", threads)
+
+        thread_ids = gh_pr_review_post(
+            pr_number=7,
+            comments=[{"path": "a.py", "line": 1, "side": "RIGHT", "body": "fix"}],
+            summary="Findings",
+        )
+
+        assert thread_ids == ["T_mine_open"]
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_dry_run_posts_nothing(self, mock_gh_call: Any) -> None:
+        thread_ids = gh_pr_review_post(pr_number=7, comments=[], summary="x", dry_run=True)
+        assert thread_ids == []
+        mock_gh_call.assert_not_called()

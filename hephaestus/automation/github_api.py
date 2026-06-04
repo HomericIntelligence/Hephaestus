@@ -1246,13 +1246,16 @@ def gh_pr_review_post(
         for c in comments
     ]
 
-    # The mutation returns only the review-level comment nodes.  Each
-    # inline comment belongs to exactly one review thread; we ask for the
-    # ``pullRequestReviewThread`` on every comment so we can collect the
-    # thread IDs created by *this* review only — not every unresolved thread
-    # on the PR.  This fixes the "foreign thread" bug (#375) where the old
-    # approach fetched ``pullRequest { reviewThreads(last: 50) }`` and
-    # returned pre-existing threads from human reviewers.
+    # The mutation only returns the new review's node id. We deliberately do
+    # NOT try to read the review's threads off the comment nodes: a
+    # ``PullRequestReviewComment`` has no ``pullRequestReviewThread`` field, so
+    # the old query (added for the #375 "foreign thread" fix) failed at the
+    # GraphQL layer on *every* call ("Field 'pullRequestReviewThread' doesn't
+    # exist on type 'PullRequestReviewComment'"), meaning no review ever
+    # posted. Instead we capture the review id here and resolve *this* review's
+    # threads in a follow-up ``pullRequest.reviewThreads`` query
+    # (:func:`_review_threads_for_review`), matching on the review id so we
+    # still exclude pre-existing human-reviewer threads.
     mutation = """
 mutation AddReview(
   $prId: ID!, $body: String!,
@@ -1264,14 +1267,6 @@ mutation AddReview(
   ) {
     pullRequestReview {
       id
-      comments(first: 50) {
-        nodes {
-          pullRequestReviewThread {
-            id
-            isResolved
-          }
-        }
-      }
     }
   }
 }
@@ -1298,23 +1293,87 @@ mutation AddReview(
     data = json.loads(result.stdout)
     _check_graphql_errors(data, f"gh_pr_review_post(pr={pr_number})")
     review_data = data.get("data", {}).get("addPullRequestReview", {}).get("pullRequestReview", {})
-    comment_nodes = review_data.get("comments", {}).get("nodes", [])
+    review_id = review_data.get("id")
+    if not review_id:
+        logger.warning("Posted PR review on #%s but no review id returned", pr_number)
+        return []
 
-    # Deduplicate: multiple comments may belong to the same thread (e.g.
-    # multi-line comments), so collect unique thread IDs using a dict to
-    # preserve insertion order.
-    seen: dict[str, None] = {}
-    for comment_node in comment_nodes:
-        thread_info = comment_node.get("pullRequestReviewThread")
-        if thread_info is None:
-            continue
-        tid = thread_info.get("id")
-        if tid and not thread_info.get("isResolved", False):
-            seen[tid] = None
-
-    thread_ids: list[str] = list(seen)
+    thread_ids = _review_threads_for_review(pr_number, review_id)
     logger.info("Posted PR review on #%s; created %s thread(s)", pr_number, len(thread_ids))
     return thread_ids
+
+
+def _review_threads_for_review(pr_number: int, review_id: str) -> list[str]:
+    """Return unresolved review-thread IDs belonging to review ``review_id``.
+
+    A ``PullRequestReviewComment`` does not expose its parent thread, so we
+    cannot derive thread IDs from the ``addPullRequestReview`` payload. Instead
+    we list ``pullRequest.reviewThreads`` and keep the threads whose *first*
+    comment was authored by this review (``comments.nodes[0].pullRequestReview.id
+    == review_id``). This preserves the #375 guarantee — only threads created by
+    *this* review are returned, not pre-existing human-reviewer threads — while
+    using fields that actually exist in the GitHub GraphQL schema.
+
+    Returns an empty list on any failure (the caller treats no-threads as
+    "nothing to resolve later", which is safe).
+    """
+    owner, repo = get_repo_info()
+    if not re.match(r"^[a-zA-Z0-9_-]+$", owner) or not re.match(r"^[a-zA-Z0-9_-]+$", repo):
+        logger.error("Invalid owner/repo format: %s/%s", owner, repo)
+        return []
+
+    query = f"""
+query GetReviewThreads {{
+  repository(owner: "{owner}", name: "{repo}") {{
+    pullRequest(number: {pr_number}) {{
+      reviewThreads(first: 100) {{
+        nodes {{
+          id
+          isResolved
+          comments(first: 1) {{
+            nodes {{
+              pullRequestReview {{ id }}
+            }}
+          }}
+        }}
+      }}
+    }}
+  }}
+}}
+"""
+    try:
+        result = _gh_call(["api", "graphql", "-f", f"query={query}"])
+        data = json.loads(result.stdout)
+        _check_graphql_errors(data, f"_review_threads_for_review(pr={pr_number})")
+    except (subprocess.CalledProcessError, json.JSONDecodeError, RuntimeError) as exc:
+        logger.warning("Could not fetch review threads for PR #%s: %s", pr_number, exc)
+        return []
+
+    nodes = (
+        data.get("data", {})
+        .get("repository", {})
+        .get("pullRequest", {})
+        .get("reviewThreads", {})
+        .get("nodes", [])
+    )
+
+    # Preserve insertion order; a thread can hold multiple comments but its id
+    # is unique, so a dict keyed on id dedupes naturally.
+    seen: dict[str, None] = {}
+    for node in nodes:
+        if node.get("isResolved"):
+            continue
+        first_comments = node.get("comments", {}).get("nodes", [])
+        if not first_comments:
+            continue
+        review = first_comments[0].get("pullRequestReview") or {}
+        if review.get("id") != review_id:
+            continue
+        tid = node.get("id")
+        if tid:
+            seen[tid] = None
+
+    return list(seen)
 
 
 def gh_pr_list_unresolved_threads(
