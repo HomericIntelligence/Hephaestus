@@ -187,6 +187,53 @@ class TestSessionExpiredFallback:
         assert m.call_count == 2
         assert "--session-id" in _argv(m.call_args_list[1])
 
+    def test_resume_then_recreate_collision_falls_back_to_fresh_session(
+        self, fake_home: Path
+    ) -> None:
+        """Resume fails, recreate collides 'already in use' → fresh uuid4 session.
+
+        Regression: the resume path recreated with the SAME deterministic sid,
+        so under concurrency a sibling worker holding that session made the
+        recreate collide too, and the error propagated as "Session ID … is
+        already in use" (observed: planner ProjectHermes). It must instead fall
+        back to a brand-new unique session, like the no-transcript path.
+        """
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        sid = session_uuid("R", 1, AGENT_PLANNER)
+        _make_existing_jsonl(fake_home, cwd, sid)
+
+        resume_fail = subprocess.CalledProcessError(
+            returncode=1, cmd=["claude"], output="", stderr="transient resume error"
+        )
+        recreate_collision = subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["claude"],
+            output="",
+            stderr="Error: Session ID is already in use.",
+        )
+        ok = MagicMock(stdout="fresh-ok", stderr="", returncode=0)
+        with patch(
+            "hephaestus.automation.claude_invoke.subprocess.run",
+            side_effect=[resume_fail, recreate_collision, ok],
+        ) as m:
+            out, returned_sid = invoke_claude_with_session(
+                repo="R",
+                issue=1,
+                agent=AGENT_PLANNER,
+                prompt="hi",
+                model="sonnet",
+                cwd=cwd,
+            )
+        assert out == "fresh-ok"
+        # A brand-new uuid4 session, not the contended deterministic one.
+        assert returned_sid != sid
+        assert m.call_count == 3
+        # The final call creates the fresh session with that new id.
+        final_argv = _argv(m.call_args_list[2])
+        assert "--session-id" in final_argv
+        assert returned_sid in final_argv
+
     def test_create_failure_propagates(self, fake_home: Path) -> None:
         """A first-call (--session-id) failure for an unrelated reason is not retried."""
         cwd = fake_home / "work"
