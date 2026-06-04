@@ -6,6 +6,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCAN_PATHS = (
     ".github",
@@ -29,14 +31,35 @@ FORBIDDEN_PATTERNS = {
         re.IGNORECASE,
     ),
     "sets-git-dir-env": re.compile(
-        r"(?:^|[;&|]\s*|\benv\s+)(?:export\s+)?GIT_DIR=",
+        r"(?:^[ \t]*|[;&|][ \t]*|\benv[ \t]+)(?:export[ \t]+)?GIT_DIR[ \t]*=",
         re.MULTILINE,
     ),
     "sets-git-work-tree-env": re.compile(
-        r"(?:^|[;&|]\s*|\benv\s+)(?:export\s+)?GIT_WORK_TREE=",
+        r"(?:^[ \t]*|[;&|][ \t]*|\benv[ \t]+)(?:export[ \t]+)?GIT_WORK_TREE[ \t]*=",
         re.MULTILINE,
     ),
 }
+
+
+@pytest.mark.parametrize(
+    ("rule", "snippet"),
+    [
+        ("sets-git-dir-env", "GIT_DIR=.git command"),
+        ("sets-git-dir-env", "    export GIT_DIR=.git"),
+        ("sets-git-dir-env", "command && GIT_DIR=.git next"),
+        ("sets-git-dir-env", "env GIT_DIR=.git command"),
+        ("sets-git-work-tree-env", "GIT_WORK_TREE=. command"),
+        ("sets-git-work-tree-env", "    export GIT_WORK_TREE=."),
+        ("sets-git-work-tree-env", "command; GIT_WORK_TREE=. next"),
+        ("sets-git-work-tree-env", "env GIT_WORK_TREE=. command"),
+    ],
+)
+def test_git_metadata_env_patterns_match_indented_assignments(
+    rule: str,
+    snippet: str,
+) -> None:
+    """Forbidden Git metadata env assignments are caught in common shell forms."""
+    assert FORBIDDEN_PATTERNS[rule].search(snippet) is not None
 
 
 def _tracked_files() -> list[Path]:
