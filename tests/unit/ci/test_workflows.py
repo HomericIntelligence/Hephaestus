@@ -17,6 +17,12 @@ from hephaestus.ci.workflows import (
     validate_workflow,
 )
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+AUTO_MERGE_ON_GO_WORKFLOW = (
+    REPO_ROOT / ".github" / "workflows" / "enable-auto-merge-on-implementation-go.yml"
+)
+REQUIRED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "_required.yml"
+
 
 class TestCollectYmlFiles:
     """Tests for collect_yml_files()."""
@@ -183,6 +189,47 @@ jobs:
         wf = tmp_path / "big.yml"
         wf.write_bytes(b"x" * (1_048_576 + 1))
         assert validate_workflow(wf) == []
+
+
+class TestEnableAutoMergeOnImplementationGoWorkflow:
+    """Regression tests for the implementation-GO auto-merge workflow."""
+
+    def _workflow_text(self) -> str:
+        return AUTO_MERGE_ON_GO_WORKFLOW.read_text(encoding="utf-8")
+
+    def test_runs_only_on_pull_request_target_label_events(self) -> None:
+        """Privileged workflow is limited to PR label events."""
+        text = self._workflow_text()
+        assert "pull_request_target:" in text
+        assert "types: [labeled]" in text
+        assert "state:implementation-go" in text
+
+    def test_does_not_checkout_pr_controlled_code(self) -> None:
+        """pull_request_target workflow must not execute code from the PR."""
+        text = self._workflow_text()
+        assert "actions/checkout" not in text
+        assert "github.event.pull_request.head" not in text
+        assert validate_workflow(AUTO_MERGE_ON_GO_WORKFLOW) == []
+
+    def test_enables_squash_auto_merge_with_numeric_pr_guard(self) -> None:
+        """The workflow validates PR_NUMBER and uses repo-required squash auto-merge."""
+        text = self._workflow_text()
+        assert "''|*[!0-9]*)" in text
+        assert 'gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash' in text
+
+    def test_skips_if_auto_merge_is_already_armed(self) -> None:
+        """Re-labeling an already armed PR is a no-op."""
+        text = self._workflow_text()
+        assert "autoMergeRequest" in text
+        assert 'if [ "$auto_merge" != "null" ] && [ -n "$auto_merge" ]; then' in text
+        assert "already has auto-merge enabled" in text
+
+    def test_pr_policy_waits_for_label_workflow_to_converge(self) -> None:
+        """pr-policy must not race the label-triggered auto-merge workflow."""
+        text = REQUIRED_WORKFLOW.read_text(encoding="utf-8")
+        assert "Waiting for label-triggered auto-merge workflow" in text
+        assert 'gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"' in text
+        assert "sleep 10" in text
 
 
 class TestCollectWorkflowFiles:

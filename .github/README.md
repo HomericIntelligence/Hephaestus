@@ -49,6 +49,13 @@ version-sync. It also re-runs on `auto_merge_enabled` / `auto_merge_disabled`
 and `labeled` / `unlabeled` events so the `pr-policy` auto-merge check
 converges without timing races.
 
+### Enable Auto-Merge on Implementation GO Workflow (`workflows/enable-auto-merge-on-implementation-go.yml`)
+
+Privileged label-event workflow that runs when `state:implementation-go` is
+added to an open pull request. It does not checkout PR code; it only reads PR
+metadata, verifies the GO label is still present, and enables squash auto-merge
+with `gh pr merge --auto --squash` when auto-merge is not already armed.
+
 ### Auto-Tag Workflow (`workflows/auto-tag.yml`)
 
 Manually dispatched (`workflow_dispatch`) release-tagging helper. Computes the
