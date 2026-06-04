@@ -62,6 +62,31 @@ def _detect_default_base_branch(worktree_path: Path) -> str:
     return "main"
 
 
+def _branch_has_commits_vs_base(branch_name: str, base: str, worktree_path: Path) -> bool:
+    """Return True if *branch_name* has at least one commit not on *base*.
+
+    ``git log -1`` only proves a commit exists somewhere on the branch; it stays
+    green when the agent's commits are identical to (or already merged into)
+    base, in which case ``gh pr create`` fails with the opaque
+    ``No commits between main and <branch>`` GraphQL error — six times, since the
+    caller retries. Counting ``origin/<base>..<branch>`` (falling back to a local
+    ``<base>..<branch>`` range when ``origin/<base>`` is unknown) lets us detect
+    the empty-diff case up front and report it cleanly instead.
+    """
+    for ref in (f"origin/{base}..{branch_name}", f"{base}..{branch_name}"):
+        result = run(
+            ["git", "rev-list", "--count", ref],
+            cwd=worktree_path,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return int((result.stdout or "0").strip() or "0") > 0
+    # Could not evaluate either range (e.g. base ref missing locally). Be
+    # permissive: let PR creation proceed rather than block on a check failure.
+    return True
+
+
 def _pr_auto_merge_enabled(pr_number: int) -> bool:
     """Return whether GitHub currently has auto-merge armed for a PR."""
     result = _gh_call(["pr", "view", str(pr_number), "--json", "autoMergeRequest"])
@@ -252,6 +277,19 @@ def ensure_pr_created(
 
     logger.info("Commit exists: %s", result.stdout.strip()[:80])
 
+    # Guard against an empty diff vs base. A commit existing on the branch does
+    # not mean it differs from base (the agent may have produced no net change,
+    # or its work already landed). Opening a PR in that case fails with
+    # "No commits between <base> and <branch>" and the caller retries six times.
+    # Detect it here and fail with an actionable message instead.
+    base_branch = _detect_default_base_branch(worktree_path)
+    if not _branch_has_commits_vs_base(branch_name, base_branch, worktree_path):
+        raise RuntimeError(
+            f"No changes produced for issue {issue_ref(issue_number)}: branch "
+            f"{branch_name!r} has no commits vs {base_branch!r}. Skipping PR "
+            "creation (the implementation session made no net change)."
+        )
+
     # Check if branch was pushed, if not push it
     _update_slot(f"{issue_ref(issue_number)}: Pushing branch")
     result = run(
@@ -287,7 +325,6 @@ def ensure_pr_created(
             "Deferring auto-merge for branch %s until implementation review marks the PR GO",
             branch_name,
         )
-    base_branch = _detect_default_base_branch(worktree_path)
     pr_number = create_pr(
         issue_number,
         branch_name,
