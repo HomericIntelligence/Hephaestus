@@ -24,6 +24,7 @@ import re
 import subprocess
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,6 +52,40 @@ def _session_expired(stderr: str, stdout: str) -> bool:
     """Return True if either stream indicates the resume target is gone."""
     blob = (stderr + "\n" + stdout).lower()
     return any(phrase in blob for phrase in SESSION_EXPIRED_PHRASES)
+
+
+def _run_fresh_session(
+    run_session: Callable[..., subprocess.CompletedProcess[str]],
+    display_name: str,
+    contended_sid: str,
+) -> tuple[str, str]:
+    """Create and run a brand-new uuid4 session, decoupled from a contended id.
+
+    Both the create path and the resume path fall back here when the
+    deterministic uuid5 session id is unrecoverable (another worker holds it).
+    uuid4 guarantees no collision with the deterministic id or another worker's
+    fresh one, so the call proceeds instead of aborting.
+
+    Args:
+        run_session: The ``_run`` closure from :func:`invoke_claude_with_session`.
+        display_name: Base session name; the fresh id's prefix is appended.
+        contended_sid: The deterministic id that could not be used (for logs).
+
+    Returns:
+        ``(stdout, fresh_sid)`` from the fresh session.
+
+    """
+    fresh_sid = str(uuid.uuid4())
+    fresh_name = f"{display_name}-{fresh_sid[:8]}"
+    logger.warning(
+        "claude session %s unrecoverable; creating fresh session %s",
+        contended_sid,
+        fresh_sid,
+    )
+    return (
+        run_session(create=True, sid_override=fresh_sid, name_override=fresh_name).stdout,
+        fresh_sid,
+    )
 
 
 def invoke_claude_with_session(  # noqa: C901  # state machine: argv assembly + create vs resume + expired fallback toggle
@@ -219,19 +254,8 @@ def invoke_claude_with_session(  # noqa: C901  # state machine: argv assembly + 
                     )
                     time.sleep(2 * (resume_attempt + 1))
             # Resume never succeeded — derive a fresh, unique session so this
-            # worker is not coupled to the contended id. uuid4 guarantees no
-            # collision with the deterministic id or another worker's fresh one.
-            fresh_sid = str(uuid.uuid4())
-            fresh_name = f"{display_name}-{fresh_sid[:8]}"
-            logger.warning(
-                "claude session %s unrecoverable; creating fresh session %s",
-                sid,
-                fresh_sid,
-            )
-            return (
-                _run(create=True, sid_override=fresh_sid, name_override=fresh_name).stdout,
-                fresh_sid,
-            )
+            # worker is not coupled to the contended id.
+            return _run_fresh_session(_run, display_name, sid)
 
     try:
         return _run(create=False).stdout, sid
@@ -251,7 +275,19 @@ def invoke_claude_with_session(  # noqa: C901  # state machine: argv assembly + 
             exc.returncode,
             expired,
         )
-        return _run(create=True).stdout, sid
+        try:
+            return _run(create=True).stdout, sid
+        except subprocess.CalledProcessError as recreate_exc:
+            # The recreate reuses the deterministic sid, so under concurrency a
+            # sibling worker that just created this session makes the recreate
+            # collide with "already in use" too (observed: planner ProjectHermes).
+            # Without this guard the error propagated as "Session ID … is already
+            # in use" and aborted the call. Fall back to a fresh unique session,
+            # mirroring the should_resume=False path above.
+            recreate_err = (recreate_exc.stderr or "") + (recreate_exc.stdout or "")
+            if "already in use" not in recreate_err.lower():
+                raise
+            return _run_fresh_session(_run, display_name, sid)
 
 
 def scan_quota_reset(*texts: str) -> int | None:
