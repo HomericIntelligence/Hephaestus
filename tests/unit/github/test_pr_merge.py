@@ -410,7 +410,7 @@ class TestMain:
 
                         main()
 
-        pr.merge.assert_called_once_with(merge_method="rebase")
+        pr.merge.assert_called_once_with(merge_method="squash")
 
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
@@ -510,7 +510,7 @@ class TestMain:
 
                         main()
 
-        pr.merge.assert_called_once_with(merge_method="rebase")
+        pr.merge.assert_called_once_with(merge_method="squash")
 
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
@@ -689,3 +689,21 @@ class TestMainJson:
                         assert main() == 1
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "error"
+
+
+class TestSquashOnlyInvariant:
+    """The HomericIntelligence repos disable rebase merges in branch protection.
+
+    `pr.merge(merge_method="rebase")` fails with "Rebase merges are not allowed
+    on this repository". Lock the squash-only contract at the source level so a
+    future edit cannot silently reintroduce a rebase merge path.
+    """
+
+    def test_no_rebase_merge_method_in_source(self) -> None:
+        import inspect
+
+        from hephaestus.github import pr_merge
+
+        source = inspect.getsource(pr_merge)
+        assert 'merge_method="rebase"' not in source
+        assert 'merge_method="squash"' in source
