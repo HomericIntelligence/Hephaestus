@@ -194,7 +194,7 @@ def handle_merge_result(result: Any, pr_number: int, base_branch: str) -> None:
         message = str(result)
 
     if merged:
-        logger.info("  PR #%d merged into %s via rebase. sha=%s", pr_number, base_branch, sha)
+        logger.info("  PR #%d merged into %s via squash. sha=%s", pr_number, base_branch, sha)
     else:
         logger.error("  Failed to merge PR #%d. API message: %s", pr_number, message)
 
@@ -202,7 +202,7 @@ def handle_merge_result(result: Any, pr_number: int, base_branch: str) -> None:
 def main() -> int:  # noqa: C901
     """Serve as the main entry point for PR merge automation."""
     parser = argparse.ArgumentParser(
-        description="Merge open PRs with successful CI/CD into main (rebase via PR API)"
+        description="Merge open PRs with successful CI/CD into main (squash via PR API)"
     )
     parser.add_argument(
         "--dry-run",
@@ -303,10 +303,14 @@ def main() -> int:  # noqa: C901
                 try_push_head_branch(head_branch, args.dry_run)
 
             if args.dry_run:
-                logger.info("[DRY-RUN] Would merge PR #%d via rebase", pr.number)
+                logger.info("[DRY-RUN] Would merge PR #%d via squash", pr.number)
             else:
                 try:
-                    result = pr.merge(merge_method="rebase")
+                    # Squash-only: the HomericIntelligence repos disable rebase
+                    # merges in branch protection (a rebase merge fails with
+                    # "Rebase merges are not allowed on this repository").
+                    # Matches `gh pr merge --auto --squash`.
+                    result = pr.merge(merge_method="squash")
                     handle_merge_result(result, pr.number, base_branch)
                 # broad catch intentional: PyGithub raises many exception subtypes
                 except Exception as e:
