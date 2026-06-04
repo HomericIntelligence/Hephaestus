@@ -22,10 +22,28 @@ PLAN_COMMENT_MARKER: str = "# Implementation Plan"
 
 
 class IssueState(str, Enum):
-    """GitHub issue state."""
+    """GitHub issue/PR state.
+
+    ``MERGED`` only ever applies to pull requests, but PRs share the issues
+    number-space, so a dependency reference (e.g. ``Depends on #123``) can point
+    at a merged PR. The GitHub API then reports ``"MERGED"`` for that node, which
+    must be a valid member or ``IssueState("MERGED")`` raises ``ValueError`` and
+    the dependency fails to load.
+    """
 
     OPEN = "OPEN"
     CLOSED = "CLOSED"
+    MERGED = "MERGED"
+
+    @property
+    def is_done(self) -> bool:
+        """True if the issue/PR is in a terminal state (closed or merged).
+
+        Skip-logic that previously gated on ``== IssueState.CLOSED`` should use
+        this so a merged-PR dependency is treated as complete rather than
+        re-queued for work.
+        """
+        return self in (IssueState.CLOSED, IssueState.MERGED)
 
 
 class IssueInfo(BaseModel):

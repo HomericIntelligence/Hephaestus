@@ -204,6 +204,27 @@ class TestLoadDependenciesIterative:
         # fetch_issue_info must NOT have been called for dep 1 (already in graph)
         mock_fetch.assert_not_called()
 
+    def test_merged_pr_dependency_is_skipped(self) -> None:
+        """A dependency that is a merged PR (state MERGED) is treated as done.
+
+        Regression: before MERGED was a valid IssueState, such a dependency was
+        fetched and crashed with ``'MERGED' is not a valid IssueState``. With
+        skip_closed=True it should be marked complete and never fetched.
+        """
+        from unittest.mock import patch
+
+        from hephaestus.automation.models import IssueState
+
+        resolver = DependencyResolver(skip_closed=True)
+        root = IssueInfo(number=10, title="Root", dependencies=[9])
+
+        with patch("hephaestus.automation.dependency_resolver.fetch_issue_info") as mock_fetch:
+            resolver._load_dependencies(root, {9: IssueState.MERGED})
+
+        mock_fetch.assert_not_called()
+        assert 9 in resolver.completed
+        assert 9 not in resolver.graph.issues
+
     def test_depth_cap_raises_runtime_error(self) -> None:
         """Exceeding _MAX_DEPENDENCY_DEPTH raises RuntimeError (A5-03)."""
         from unittest.mock import patch

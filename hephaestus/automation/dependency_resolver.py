@@ -92,7 +92,8 @@ class DependencyResolver:
 
         # Fetch each sub-issue and its dependencies
         for issue_num in sub_issues:
-            if self.skip_closed and cached_states.get(issue_num) == IssueState.CLOSED:
+            sub_state = cached_states.get(issue_num)
+            if self.skip_closed and sub_state is not None and sub_state.is_done:
                 logger.info("Skipping closed issue #%s", issue_num)
                 self.completed.add(issue_num)
                 continue
@@ -197,7 +198,8 @@ class DependencyResolver:
             if dep_num in self.graph.issues or dep_num in self.completed:
                 continue
 
-            if self.skip_closed and cached_states.get(dep_num) == IssueState.CLOSED:
+            dep_state = cached_states.get(dep_num)
+            if self.skip_closed and dep_state is not None and dep_state.is_done:
                 logger.info("Dependency #%s is closed, marking complete", dep_num)
                 self.completed.add(dep_num)
                 continue

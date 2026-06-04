@@ -1111,11 +1111,13 @@ def is_issue_closed(issue_number: int, cached_states: dict[int, IssueState] | No
 
     """
     if cached_states and issue_number in cached_states:
-        return cached_states[issue_number] == IssueState.CLOSED
+        # A merged PR referenced as a dependency is terminal too, so treat
+        # MERGED as "closed" for skip purposes.
+        return cached_states[issue_number].is_done
 
     try:
         issue_data = gh_issue_json(issue_number)
-        return cast(bool, issue_data["state"] == "CLOSED")
+        return issue_data["state"] in ("CLOSED", "MERGED")
     except Exception as e:
         logger.warning("Failed to check if issue #%s is closed: %s", issue_number, e)
         return False

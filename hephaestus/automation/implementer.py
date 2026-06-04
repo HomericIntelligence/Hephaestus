@@ -84,7 +84,6 @@ from .implementer_summary import ImplementationSummaryPrinter
 from .models import (
     ImplementationState,
     ImplementerOptions,
-    IssueState,
     WorkerResult,
 )
 from .pr_manager import commit_changes, create_pr
@@ -261,7 +260,8 @@ class IssueImplementer:
         cached_states = prefetch_issue_states(issue_numbers)
 
         for issue_num in issue_numbers:
-            if self.options.skip_closed and cached_states.get(issue_num) == IssueState.CLOSED:
+            issue_state = cached_states.get(issue_num)
+            if self.options.skip_closed and issue_state is not None and issue_state.is_done:
                 logger.info("Skipping closed issue #%s", issue_num)
                 self.resolver.completed.add(issue_num)
                 continue

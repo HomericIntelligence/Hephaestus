@@ -15,6 +15,24 @@ from hephaestus.automation.models import (
 )
 
 
+class TestIssueState:
+    """Tests for the IssueState enum."""
+
+    def test_merged_is_a_valid_member(self) -> None:
+        """A merged-PR dependency yields ``"MERGED"``; it must parse without error.
+
+        Regression: ``dependency_resolver`` crashed with
+        ``'MERGED' is not a valid IssueState`` when a ``Depends on #N`` reference
+        pointed at a merged PR.
+        """
+        assert IssueState("MERGED") is IssueState.MERGED
+
+    def test_is_done_terminal_states(self) -> None:
+        assert IssueState.CLOSED.is_done is True
+        assert IssueState.MERGED.is_done is True
+        assert IssueState.OPEN.is_done is False
+
+
 class TestIssueInfo:
     """Tests for IssueInfo model."""
 
