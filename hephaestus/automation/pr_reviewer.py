@@ -230,6 +230,11 @@ def run_pr_review_analysis(
             output_format="json",
             permission_mode="dontAsk",
             allowed_tools="Read,Glob,Grep",
+            # Pipe the prompt via stdin, not argv: the PR-review prompt embeds the
+            # full diff and can be tens of KB, which overflows ARG_MAX and raises
+            # `[Errno 7] Argument list too long` when passed as a positional arg.
+            # Matches the plan reviewer / address-review / ci_driver invocations.
+            input_via_stdin=True,
         )
         log_file.write_text(stdout or "")
 

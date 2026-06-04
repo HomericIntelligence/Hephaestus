@@ -548,6 +548,42 @@ class TestRunPrReviewAnalysis:
             )
         assert captured["agent"] == "pr-reviewer-r1"
 
+    def test_prompt_passed_via_stdin_not_argv(self, tmp_path: Path) -> None:
+        """The reviewer prompt is piped via stdin, never embedded in argv.
+
+        Regression for `[Errno 7] Argument list too long: 'claude'`: the
+        PR-review prompt embeds the full diff and overflows ARG_MAX when passed
+        as a positional argument, so the wrapper must be called with
+        ``input_via_stdin=True``.
+        """
+        captured: dict[str, object] = {}
+
+        def _fake_invoke(**kwargs: object) -> tuple[str, str]:
+            captured.update(kwargs)
+            return (
+                '{"result": "```json\\n{\\"comments\\": [], \\"summary\\": \\"ok\\"}\\n```"}',
+                "",
+            )
+
+        with (
+            patch("hephaestus.automation.pr_reviewer.get_repo_root", return_value=tmp_path),
+            patch("hephaestus.automation.pr_reviewer.get_repo_slug", return_value="Repo"),
+            patch(
+                "hephaestus.automation.pr_reviewer.invoke_claude_with_session",
+                side_effect=_fake_invoke,
+            ),
+        ):
+            run_pr_review_analysis(
+                pr_number=1,
+                issue_number=1,
+                worktree_path=tmp_path,
+                context={"pr_diff": "x" * 200_000},
+                agent="claude",
+                state_dir=tmp_path,
+                dry_run=False,
+            )
+        assert captured["input_via_stdin"] is True
+
 
 class TestReviewPrInline:
     """review_pr_inline runs a FRESH per-iteration reviewer and posts inline threads."""
