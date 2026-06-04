@@ -229,7 +229,15 @@ class TestEnableAutoMergeOnImplementationGoWorkflow:
         text = REQUIRED_WORKFLOW.read_text(encoding="utf-8")
         assert "Waiting for label-triggered auto-merge workflow" in text
         assert 'gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"' in text
+        assert "--json autoMergeRequest,labels,state" in text
         assert "sleep 10" in text
+
+    def test_pr_policy_treats_merged_prs_as_terminal(self) -> None:
+        """GitHub clears autoMergeRequest after merge, so merged PRs must pass."""
+        text = REQUIRED_WORKFLOW.read_text(encoding="utf-8")
+        assert "--json body,autoMergeRequest,labels,state" in text
+        assert "pr_state=$(jq -r '.state // \"\"' pr.json)" in text
+        assert "auto-merge policy is terminal" in text
 
 
 class TestCollectWorkflowFiles:

@@ -297,7 +297,7 @@ jobs:
           # separate queries are fine here — the workflow runs at most once per
           # PR event and the policy gate must be cheap to read and debug.
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-            --json body,autoMergeRequest,labels \
+            --json body,autoMergeRequest,labels,state \
             > pr.json
           gh api graphql \
             -f query='query($owner:String!,$name:String!,$pr:Int!) {
@@ -339,6 +339,12 @@ jobs:
         if: always() && steps.fetch.outcome == 'success'
         run: |
           set -euo pipefail
+          pr_state=$(jq -r '.state // ""' pr.json)
+          if [ "$pr_state" != "OPEN" ]; then
+            echo "OK: PR state is $pr_state; auto-merge policy is terminal"
+            exit 0
+          fi
+
           state=$(jq -r '.autoMergeRequest' pr.json)
           implementation_go=$(jq -r '[(.labels // [])[].name] | index("state:implementation-go") != null' pr.json)
           if [ "$implementation_go" = "true" ]; then
@@ -351,8 +357,13 @@ jobs:
                 echo "Waiting for label-triggered auto-merge workflow to arm PR #$PR_NUMBER..."
                 sleep 10
                 gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-                  --json autoMergeRequest,labels \
+                  --json autoMergeRequest,labels,state \
                   > pr.json
+                pr_state=$(jq -r '.state // ""' pr.json)
+                if [ "$pr_state" != "OPEN" ]; then
+                  echo "OK: PR state is $pr_state; auto-merge policy is terminal"
+                  exit 0
+                fi
                 state=$(jq -r '.autoMergeRequest' pr.json)
                 implementation_go=$(jq -r '[(.labels // [])[].name] | index("state:implementation-go") != null' pr.json)
                 if [ "$implementation_go" != "true" ]; then
