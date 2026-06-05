@@ -12,6 +12,7 @@ from hephaestus.agents.loader import AgentInfo
 from hephaestus.agents.stats import (
     _extract_delegation_targets,
     _extract_skill_refs,
+    _serializable_stats,
     collect_agent_stats,
     format_stats_json,
     format_stats_text,
@@ -242,6 +243,22 @@ class TestFormatStatsJson:
         result = format_stats_json(stats)
         parsed = json.loads(result)
         assert "test-agent" in parsed["agents_without_level"]
+
+    def test_format_stats_json_matches_cli_json_shape(self, tmp_path: Path) -> None:
+        """format_stats_json() and main()'s --json path must produce the same dict shape."""
+        agents = [_make_agent(tmp_path / "a.md", _VALID_FM, {"name": "a", "tools": "Read"})]
+        stats = collect_agent_stats(agents)
+        from_format = json.loads(format_stats_json(stats))
+        from_helper = _serializable_stats(stats)
+        # Round-trip helper through json to normalise types for comparison
+        assert from_format == json.loads(json.dumps(from_helper))
+        assert set(from_format.keys()) == {
+            "total_agents",
+            "by_level",
+            "tool_frequency",
+            "skill_frequency",
+            "agents_without_level",
+        }
 
 
 def _write_valid_agent(dirpath: Path, name: str = "agent-a") -> Path:

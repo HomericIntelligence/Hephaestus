@@ -128,6 +128,29 @@ def collect_agent_stats(agents: list[AgentInfo]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _serializable_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    """Convert a stats dict to a JSON-serializable plain dict.
+
+    Strips ``defaultdict`` wrappers and coerces non-string keys to strings
+    so the result round-trips through :func:`json.dumps` and matches what
+    downstream JSON consumers (CLI ``--json``, ``format_stats_json``) emit.
+
+    Args:
+        stats: Dict produced by :func:`collect_agent_stats`.
+
+    Returns:
+        Plain dict with the canonical JSON shape.
+
+    """
+    return {
+        "total_agents": stats["total_agents"],
+        "by_level": {str(k): v for k, v in stats["by_level"].items()},
+        "tool_frequency": dict(stats["tool_frequency"]),
+        "skill_frequency": dict(stats["skill_frequency"]),
+        "agents_without_level": stats["agents_without_level"],
+    }
+
+
 def format_stats_text(stats: dict[str, Any]) -> str:
     """Render stats as a plain text report.
 
@@ -182,15 +205,7 @@ def format_stats_json(stats: dict[str, Any]) -> str:
     """
     import json
 
-    # Convert defaultdicts to plain dicts for serialisation
-    serialisable: dict[str, Any] = {
-        "total_agents": stats["total_agents"],
-        "by_level": {str(k): v for k, v in stats["by_level"].items()},
-        "tool_frequency": dict(stats["tool_frequency"]),
-        "skill_frequency": dict(stats["skill_frequency"]),
-        "agents_without_level": stats["agents_without_level"],
-    }
-    return json.dumps(serialisable, indent=2)
+    return json.dumps(_serializable_stats(stats), indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -251,14 +266,7 @@ def main() -> int:
 
     if args.json or args.format == "json":
         # Emit JSON via shared helper for consistent structure across CLIs.
-        serialisable: dict[str, Any] = {
-            "total_agents": stats["total_agents"],
-            "by_level": {str(k): v for k, v in stats["by_level"].items()},
-            "tool_frequency": dict(stats["tool_frequency"]),
-            "skill_frequency": dict(stats["skill_frequency"]),
-            "agents_without_level": stats["agents_without_level"],
-        }
-        output = format_output(serialisable, "json")
+        output = format_output(_serializable_stats(stats), "json")
     else:
         output = format_stats_text(stats)
 
