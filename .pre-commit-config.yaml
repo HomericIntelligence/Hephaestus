@@ -171,6 +171,19 @@ repos:
         pass_filenames: false
         files: ^(pyproject\.toml|pixi\.toml)$
 
+  # SECURITY.md hard-coded date check: prevents doc-rot from "As of YYYY-MM-DD"
+  # stamps in the supported-versions header. See issue #730.
+  - repo: local
+    hooks:
+      - id: check-security-policy-no-hardcoded-date
+        name: Check SECURITY.md has no hard-coded date
+        description: Reject 'As of YYYY-MM-DD' stamps in SECURITY.md
+        entry: python3 scripts/check_security_policy_no_hardcoded_date.py
+        language: system
+        pass_filenames: false
+        files: ^SECURITY\.md$
+
+
   # Dependency-sync check: requirements*.txt entries must exist in pixi.toml
   # and fall within the declared range. See hephaestus.config.dep_sync.
   - repo: local

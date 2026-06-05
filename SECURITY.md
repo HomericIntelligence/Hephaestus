@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-As of 2026-05-24. Python >= 3.10 required.
+As of the 0.9.x release line. Python >= 3.10 required.
 
 | Version | Supported       |
 |---------|-----------------|
