@@ -66,32 +66,24 @@ _MISMATCH_RE = re.compile(
 )
 
 # ---------------------------------------------------------------------------
-# Legacy BAD_PATTERNS constant (kept for backwards-compatibility)
+# BAD_PATTERNS — fully derived from CANONICAL_TIERS
 # ---------------------------------------------------------------------------
-
+#
+# One (regex, reason) entry per (tier, wrong_name) pair where wrong_name is
+# the canonical name of some OTHER tier.  Adding a tier to CANONICAL_TIERS
+# expands BAD_PATTERNS automatically — no parallel structure to maintain.
+#
+# Regex: tier ID, then up to 15 chars, then the wrong canonical name.  The
+# 15-char window matches the bounded form used by the previous hand-written
+# table (".{0,10}" plus slack for separators like "/", " is ", "(").
 BAD_PATTERNS: list[tuple[str, str]] = [
-    # Original set
-    (r"T3.*Tool", "T3 is Delegation, not Tooling"),
-    (r"T4.*Deleg", "T4 is Hierarchy, not Delegation"),
-    (r"T5.*Hier", "T5 is Hybrid, not Hierarchy"),
-    (r"T2.*Skill", "T2 is Tooling, not Skills"),
-    # Reverse/symmetric set (bounded to 10 chars to avoid cross-tier false positives)
-    (r"T2.{0,10}Deleg", "T2 is Tooling, not Delegation"),
-    (r"T3.{0,10}Hier", "T3 is Delegation, not Hierarchy"),
-    (r"T4.{0,10}Hybrid", "T4 is Hierarchy, not Hybrid"),
-    (r"T1.{0,10}Tool", "T1 is Skills, not Tooling"),
-    (r"T0.{0,10}Skill", "T0 is Prompts, not Skills"),
-    (r"T1.{0,10}Prompt", "T1 is Skills, not Prompts"),
-    (r"T2.{0,10}Prompt", "T2 is Tooling, not Prompts"),
-    (r"T3.{0,10}Skill", "T3 is Delegation, not Skills"),
-    (r"T4.{0,10}Tool", "T4 is Hierarchy, not Tooling"),
-    (r"T5.{0,10}Deleg", "T5 is Hybrid, not Delegation"),
-    (r"T6.{0,10}Hier", "T6 is Super, not Hierarchy"),
-    (r"T6.{0,10}Hybrid", "T6 is Super, not Hybrid"),
-    (r"T0.{0,10}Tool", "T0 is Prompts, not Tooling"),
-    (r"T0.{0,10}Deleg", "T0 is Prompts, not Delegation"),
-    (r"T5.{0,10}Skill", "T5 is Hybrid, not Skills"),
-    (r"T6.{0,10}Deleg", "T6 is Super, not Delegation"),
+    (
+        rf"\b{tier}\b.{{0,15}}{re.escape(wrong_name)}",
+        f"{tier} is {correct_name}, not {wrong_name}",
+    )
+    for tier, correct_name in CANONICAL_TIERS.items()
+    for wrong_name in CANONICAL_TIERS.values()
+    if wrong_name != correct_name
 ]
 
 # ---------------------------------------------------------------------------

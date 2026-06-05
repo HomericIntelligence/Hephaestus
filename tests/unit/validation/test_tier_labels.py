@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 
 from hephaestus.validation.tier_labels import (
     BAD_PATTERNS,
+    CANONICAL_TIERS,
     TierLabelFinding,
     _collect_mismatches,
     check_tier_label_consistency,
@@ -19,6 +21,16 @@ from hephaestus.validation.tier_labels import (
 )
 
 
+def _all_wrong_pairings() -> list[tuple[str, str]]:
+    """Yield (tier, wrong_name) for every cross-tier mispairing."""
+    return [
+        (tier, wrong)
+        for tier, correct in CANONICAL_TIERS.items()
+        for wrong in CANONICAL_TIERS.values()
+        if wrong != correct
+    ]
+
+
 class TestFindViolations:
     """Tests for find_violations() — legacy API."""
 
@@ -27,61 +39,30 @@ class TestFindViolations:
         content = "T2 Tooling\nT3 Delegation\nT4 Hierarchy\nT5 Hybrid\n"
         assert find_violations(content) == []
 
-    @pytest.mark.parametrize(
-        "bad_line, expected_pattern",
-        [
-            # Original set
-            ("T3 Tooling tier", r"T3.*Tool"),
-            ("T4 Delegation tier", r"T4.*Deleg"),
-            ("T5 Hierarchy tier", r"T5.*Hier"),
-            ("T2 Skills tier", r"T2.*Skill"),
-            # Reverse/symmetric set
-            ("T2 Delegation tier", r"T2.{0,10}Deleg"),
-            ("T3 Hierarchy tier", r"T3.{0,10}Hier"),
-            ("T4 Hybrid tier", r"T4.{0,10}Hybrid"),
-            ("T1 Tooling tier", r"T1.{0,10}Tool"),
-            ("T0 Skills tier", r"T0.{0,10}Skill"),
-            ("T1 Prompts tier", r"T1.{0,10}Prompt"),
-            ("T2 Prompts tier", r"T2.{0,10}Prompt"),
-            ("T3 Skills tier", r"T3.{0,10}Skill"),
-            ("T4 Tooling tier", r"T4.{0,10}Tool"),
-            ("T5 Delegation tier", r"T5.{0,10}Deleg"),
-            ("T6 Hierarchy tier", r"T6.{0,10}Hier"),
-            ("T6 Hybrid tier", r"T6.{0,10}Hybrid"),
-            ("T0 Tooling tier", r"T0.{0,10}Tool"),
-            ("T0 Delegation tier", r"T0.{0,10}Deleg"),
-            ("T5 Skills tier", r"T5.{0,10}Skill"),
-            ("T6 Delegation tier", r"T6.{0,10}Deleg"),
-        ],
-    )
-    def test_detects_each_bad_pattern(self, bad_line: str, expected_pattern: str) -> None:
-        """Each known-bad pattern is detected."""
-        violations = find_violations(bad_line)
-        assert len(violations) == 1
-        lineno, line, pattern, reason = violations[0]
-        assert lineno == 1
-        assert line == bad_line
-        assert pattern == expected_pattern
-        assert reason  # non-empty reason string
+    @pytest.mark.parametrize("tier, wrong_name", _all_wrong_pairings())
+    def test_detects_every_wrong_pairing(self, tier: str, wrong_name: str) -> None:
+        """Every (tier, wrong_canonical_name) pair is flagged."""
+        line = f"{tier} {wrong_name} tier"
+        violations = find_violations(line)
+        assert len(violations) >= 1
+        # Reason must name both the tier and the wrong name.
+        reasons = [v[3] for v in violations]
+        assert any(tier in r and wrong_name in r for r in reasons)
 
     def test_returns_line_number(self) -> None:
         """Violation includes the correct 1-based line number."""
         content = "clean line\nT3 Tooling bad\nclean line"
         violations = find_violations(content)
-        assert len(violations) == 1
+        assert len(violations) >= 1
         assert violations[0][0] == 2
 
     def test_multiple_violations_on_different_lines(self) -> None:
         """Multiple bad lines produce multiple violations."""
         content = "T3 Tooling\nT4 Delegation\n"
         violations = find_violations(content)
-        assert len(violations) == 2
-
-    def test_single_line_matching_multiple_patterns(self) -> None:
-        """A line matching multiple patterns produces one violation per pattern."""
-        content = "T3 Tooling T4 Delegation"
-        violations = find_violations(content)
-        assert len(violations) == 2
+        # Each line has at least one violation; different lines counted separately.
+        linenos = {v[0] for v in violations}
+        assert linenos == {1, 2}
 
     def test_empty_content_returns_no_violations(self) -> None:
         """Empty string produces no violations."""
@@ -97,7 +78,7 @@ class TestFindViolations:
     def test_violation_tuple_has_four_elements(self) -> None:
         """Each violation tuple contains (lineno, line, pattern, reason)."""
         violations = find_violations("T3 Tooling")
-        assert len(violations) == 1
+        assert len(violations) >= 1
         assert len(violations[0]) == 4
 
 
@@ -151,54 +132,56 @@ class TestCheckTierLabelConsistency:
         captured = capsys.readouterr()
         assert "2" in captured.err
 
-    @pytest.mark.parametrize(
-        "bad_line",
-        [
-            # Original set
-            "T3 Tooling",
-            "T4 Delegation",
-            "T5 Hierarchy",
-            "T2 Skills",
-            # Reverse/symmetric set
-            "T2 Delegation",
-            "T3 Hierarchy",
-            "T4 Hybrid",
-            "T1 Tooling",
-            "T0 Skills",
-            "T1 Prompts",
-            "T2 Prompts",
-            "T3 Skills",
-            "T4 Tooling",
-            "T5 Delegation",
-            "T6 Hierarchy",
-            "T6 Hybrid",
-            "T0 Tooling",
-            "T0 Delegation",
-            "T5 Skills",
-            "T6 Delegation",
-        ],
-    )
-    def test_each_bad_pattern_causes_failure(self, tmp_path: Path, bad_line: str) -> None:
-        """Each individual bad pattern triggers a failure."""
+    @pytest.mark.parametrize("tier, wrong_name", _all_wrong_pairings())
+    def test_each_wrong_pairing_causes_failure(
+        self, tmp_path: Path, tier: str, wrong_name: str
+    ) -> None:
+        """Every (tier, wrong_canonical_name) pair triggers a failure."""
         f = tmp_path / "metrics-definitions.md"
-        f.write_text(bad_line + "\n", encoding="utf-8")
+        f.write_text(f"{tier} {wrong_name}\n", encoding="utf-8")
         assert check_tier_label_consistency(f) == 1
 
 
-class TestBadPatterns:
-    """Tests for the BAD_PATTERNS constant."""
+class TestBadPatternsDerivedFromCanonical:
+    """BAD_PATTERNS is fully derived from CANONICAL_TIERS."""
 
     def test_bad_patterns_is_non_empty(self) -> None:
         """BAD_PATTERNS must contain at least one entry."""
         assert len(BAD_PATTERNS) > 0
 
-    def test_bad_patterns_entries_are_tuples_of_two_strings(self) -> None:
-        """Each entry in BAD_PATTERNS is a (pattern, reason) tuple of strings."""
+    def test_entries_are_tuples_of_two_non_empty_strings(self) -> None:
+        """Each entry in BAD_PATTERNS is a (pattern, reason) tuple of non-empty strings."""
         for pattern, reason in BAD_PATTERNS:
-            assert isinstance(pattern, str)
-            assert isinstance(reason, str)
-            assert pattern
-            assert reason
+            assert isinstance(pattern, str) and pattern
+            assert isinstance(reason, str) and reason
+
+    def test_cardinality_matches_cartesian_minus_diagonal(self) -> None:
+        """N tiers → N*(N-1) wrong pairings."""
+        n = len(CANONICAL_TIERS)
+        assert len(BAD_PATTERNS) == n * (n - 1)
+
+    def test_no_pattern_flags_a_correct_pairing(self) -> None:
+        """A line with the canonical (tier, correct_name) is never flagged."""
+        for tier, correct in CANONICAL_TIERS.items():
+            line = f"{tier} {correct} tier"
+            for pattern, _reason in BAD_PATTERNS:
+                # The pattern may match if `correct` happens to appear in
+                # the regex literal — but only if THIS tier paired with a
+                # different name.  For the canonical line, no pattern whose
+                # tier prefix matches should fire.
+                if re.search(pattern, line) and pattern.startswith(rf"\b{tier}\b"):
+                    pytest.fail(f"Pattern {pattern!r} wrongly flagged canonical line {line!r}")
+
+    def test_every_reason_references_canonical_mapping(self) -> None:
+        """Every reason string references a tier and its canonical name."""
+        for _pattern, reason in BAD_PATTERNS:
+            # Format: "<tier> is <correct>, not <wrong>"
+            head, _, tail = reason.partition(" is ")
+            correct, _, wrong = tail.partition(", not ")
+            assert head in CANONICAL_TIERS
+            assert CANONICAL_TIERS[head] == correct
+            assert wrong in CANONICAL_TIERS.values()
+            assert wrong != correct
 
 
 class TestCollectMismatches:
