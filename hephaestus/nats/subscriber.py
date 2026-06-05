@@ -38,14 +38,6 @@ from typing import Any
 from hephaestus.nats.config import NATSConfig
 from hephaestus.nats.events import NATSEvent
 
-# Suppress nats-py DeprecationWarning for asyncio.iscoroutinefunction (Python 3.11+)
-warnings.filterwarnings(
-    "ignore",
-    message=".*asyncio.iscoroutinefunction.*",
-    category=DeprecationWarning,
-    module="nats",
-)
-
 logger = logging.getLogger(__name__)
 
 _INITIAL_BACKOFF_SECONDS = 1.0
@@ -276,7 +268,18 @@ class NATSSubscriberThread(threading.Thread):
     async def _subscribe_loop(self) -> None:
         """Connect to NATS JetStream and process messages until stop is requested."""
         try:
-            import nats as nats_client
+            # nats-py calls asyncio.iscoroutinefunction, which raises a
+            # DeprecationWarning on Python 3.12+. Scope the suppression to just
+            # the import so we do not mutate the process-wide warnings filter
+            # chain (issue #798).
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=".*asyncio.iscoroutinefunction.*",
+                    category=DeprecationWarning,
+                    module="nats",
+                )
+                import nats as nats_client
         except ImportError:
             logger.error(
                 "nats-py is not installed. "
