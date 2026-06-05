@@ -230,29 +230,35 @@ else
     check_fail "just — NOT FOUND"
     if $INSTALL; then
         echo -e "    ${BLUE}→${NC} Installing just..."
-        platform="$(detect_platform)" || { check_fail "just — unsupported platform"; continue; }
-        case "$platform" in
-            linux-x86_64)   sha="$JUST_SHA256_LINUX_X86_64"
-                            tgt="just-${JUST_VERSION}-x86_64-unknown-linux-musl.tar.gz" ;;
-            linux-aarch64)  sha="$JUST_SHA256_LINUX_AARCH64"
-                            tgt="just-${JUST_VERSION}-aarch64-unknown-linux-musl.tar.gz" ;;
-            darwin-x86_64)  sha="$JUST_SHA256_DARWIN_X86_64"
-                            tgt="just-${JUST_VERSION}-x86_64-apple-darwin.tar.gz" ;;
-            darwin-aarch64) sha="$JUST_SHA256_DARWIN_AARCH64"
-                            tgt="just-${JUST_VERSION}-aarch64-apple-darwin.tar.gz" ;;
-            *) check_fail "just — no pinned build for $platform"; continue ;;
-        esac
-        url="https://github.com/casey/just/releases/download/${JUST_VERSION}/${tgt}"
-        tmp="$(mktemp -d)"
-        mkdir -p ~/.local/bin
-        if download_and_verify "$sha" "$url" "$tmp/just.tar.gz" \
-            && tar -xzf "$tmp/just.tar.gz" -C "$tmp" just \
-            && install -m 0755 "$tmp/just" ~/.local/bin/just; then
-            check_pass "just ${JUST_VERSION} installed (SHA-256 verified)"
+        sha=""; tgt=""
+        if ! platform="$(detect_platform)"; then
+            check_fail "just — unsupported platform"
         else
-            check_fail "just — pinned install failed"
+            case "$platform" in
+                linux-x86_64)   sha="$JUST_SHA256_LINUX_X86_64"
+                                tgt="just-${JUST_VERSION}-x86_64-unknown-linux-musl.tar.gz" ;;
+                linux-aarch64)  sha="$JUST_SHA256_LINUX_AARCH64"
+                                tgt="just-${JUST_VERSION}-aarch64-unknown-linux-musl.tar.gz" ;;
+                darwin-x86_64)  sha="$JUST_SHA256_DARWIN_X86_64"
+                                tgt="just-${JUST_VERSION}-x86_64-apple-darwin.tar.gz" ;;
+                darwin-aarch64) sha="$JUST_SHA256_DARWIN_AARCH64"
+                                tgt="just-${JUST_VERSION}-aarch64-apple-darwin.tar.gz" ;;
+                *) check_fail "just — no pinned build for $platform" ;;
+            esac
         fi
-        rm -rf "$tmp"
+        if [ -n "$tgt" ]; then
+            url="https://github.com/casey/just/releases/download/${JUST_VERSION}/${tgt}"
+            tmp="$(mktemp -d)"
+            mkdir -p ~/.local/bin
+            if download_and_verify "$sha" "$url" "$tmp/just.tar.gz" \
+                && tar -xzf "$tmp/just.tar.gz" -C "$tmp" just \
+                && install -m 0755 "$tmp/just" ~/.local/bin/just; then
+                check_pass "just ${JUST_VERSION} installed (SHA-256 verified)"
+            else
+                check_fail "just — pinned install failed"
+            fi
+            rm -rf "$tmp"
+        fi
     fi
 fi
 
@@ -328,22 +334,22 @@ else
         fi
         if [ "$os_id" != "ubuntu" ] && [ "$os_id" != "debian" ]; then
             check_fail "tailscale — pinned install requires Ubuntu or Debian (found ID='$os_id'); install manually from https://tailscale.com/download"
-            continue
-        fi
-        codename="$(. /etc/os-release && echo "${VERSION_CODENAME:-noble}")"
-        keyring="/usr/share/keyrings/tailscale-archive-keyring.gpg"
-        listfile="/etc/apt/sources.list.d/tailscale.list"
-        if curl --proto '=https' --tlsv1.2 -fsSL \
-                "https://pkgs.tailscale.com/stable/${os_id}/${codename}.noarmor.gpg" \
-                | sudo tee "$keyring" >/dev/null \
-            && curl --proto '=https' --tlsv1.2 -fsSL \
-                "https://pkgs.tailscale.com/stable/${os_id}/${codename}.tailscale-keyring.list" \
-                | sudo tee "$listfile" >/dev/null \
-            && sudo apt-get update -qq \
-            && sudo apt-get install -y tailscale; then
-            check_pass "tailscale installed via GPG-pinned apt repo"
         else
-            check_fail "tailscale — apt install failed"
+            codename="$(. /etc/os-release && echo "${VERSION_CODENAME:-noble}")"
+            keyring="/usr/share/keyrings/tailscale-archive-keyring.gpg"
+            listfile="/etc/apt/sources.list.d/tailscale.list"
+            if curl --proto '=https' --tlsv1.2 -fsSL \
+                    "https://pkgs.tailscale.com/stable/${os_id}/${codename}.noarmor.gpg" \
+                    | sudo tee "$keyring" >/dev/null \
+                && curl --proto '=https' --tlsv1.2 -fsSL \
+                    "https://pkgs.tailscale.com/stable/${os_id}/${codename}.tailscale-keyring.list" \
+                    | sudo tee "$listfile" >/dev/null \
+                && sudo apt-get update -qq \
+                && sudo apt-get install -y tailscale; then
+                check_pass "tailscale installed via GPG-pinned apt repo"
+            else
+                check_fail "tailscale — apt install failed"
+            fi
         fi
     fi
 fi
@@ -436,29 +442,35 @@ else
     check_fail "pixi — NOT FOUND (required by Hermes bridge and ProjectHephaestus)"
     if $INSTALL; then
         echo -e "    ${BLUE}→${NC} Installing pixi..."
-        platform="$(detect_platform)" || { check_fail "pixi — unsupported platform"; continue; }
-        case "$platform" in
-            linux-x86_64)   sha="$PIXI_SHA256_LINUX_X86_64"
-                            tgt="pixi-x86_64-unknown-linux-musl.tar.gz" ;;
-            linux-aarch64)  sha="$PIXI_SHA256_LINUX_AARCH64"
-                            tgt="pixi-aarch64-unknown-linux-musl.tar.gz" ;;
-            darwin-x86_64)  sha="$PIXI_SHA256_DARWIN_X86_64"
-                            tgt="pixi-x86_64-apple-darwin.tar.gz" ;;
-            darwin-aarch64) sha="$PIXI_SHA256_DARWIN_AARCH64"
-                            tgt="pixi-aarch64-apple-darwin.tar.gz" ;;
-            *) check_fail "pixi — no pinned build for $platform"; continue ;;
-        esac
-        url="https://github.com/prefix-dev/pixi/releases/download/v${PIXI_VERSION}/${tgt}"
-        tmp="$(mktemp -d)"
-        mkdir -p ~/.local/bin
-        if download_and_verify "$sha" "$url" "$tmp/pixi.tar.gz" \
-            && tar -xzf "$tmp/pixi.tar.gz" -C "$tmp" \
-            && install -m 0755 "$tmp/pixi" ~/.local/bin/pixi; then
-            check_pass "pixi v${PIXI_VERSION} installed (SHA-256 verified)"
+        sha=""; tgt=""
+        if ! platform="$(detect_platform)"; then
+            check_fail "pixi — unsupported platform"
         else
-            check_fail "pixi — pinned install failed"
+            case "$platform" in
+                linux-x86_64)   sha="$PIXI_SHA256_LINUX_X86_64"
+                                tgt="pixi-x86_64-unknown-linux-musl.tar.gz" ;;
+                linux-aarch64)  sha="$PIXI_SHA256_LINUX_AARCH64"
+                                tgt="pixi-aarch64-unknown-linux-musl.tar.gz" ;;
+                darwin-x86_64)  sha="$PIXI_SHA256_DARWIN_X86_64"
+                                tgt="pixi-x86_64-apple-darwin.tar.gz" ;;
+                darwin-aarch64) sha="$PIXI_SHA256_DARWIN_AARCH64"
+                                tgt="pixi-aarch64-apple-darwin.tar.gz" ;;
+                *) check_fail "pixi — no pinned build for $platform" ;;
+            esac
         fi
-        rm -rf "$tmp"
+        if [ -n "$tgt" ]; then
+            url="https://github.com/prefix-dev/pixi/releases/download/v${PIXI_VERSION}/${tgt}"
+            tmp="$(mktemp -d)"
+            mkdir -p ~/.local/bin
+            if download_and_verify "$sha" "$url" "$tmp/pixi.tar.gz" \
+                && tar -xzf "$tmp/pixi.tar.gz" -C "$tmp" \
+                && install -m 0755 "$tmp/pixi" ~/.local/bin/pixi; then
+                check_pass "pixi v${PIXI_VERSION} installed (SHA-256 verified)"
+            else
+                check_fail "pixi — pinned install failed"
+            fi
+            rm -rf "$tmp"
+        fi
     fi
 fi
 
@@ -827,26 +839,32 @@ else
     check_warn "dagger — NOT FOUND (required by ProjectProteus)"
     if $INSTALL; then
         echo -e "    ${BLUE}→${NC} Installing Dagger CLI..."
-        platform="$(detect_platform)" || { check_fail "dagger — unsupported platform"; continue; }
-        case "$platform" in
-            linux-x86_64)   sha="$DAGGER_SHA256_LINUX_X86_64"   ; goos="linux"  ; goarch="amd64" ;;
-            linux-aarch64)  sha="$DAGGER_SHA256_LINUX_AARCH64"  ; goos="linux"  ; goarch="arm64" ;;
-            darwin-x86_64)  sha="$DAGGER_SHA256_DARWIN_X86_64"  ; goos="darwin" ; goarch="amd64" ;;
-            darwin-aarch64) sha="$DAGGER_SHA256_DARWIN_AARCH64" ; goos="darwin" ; goarch="arm64" ;;
-            *) check_fail "dagger — no pinned build for $platform"; continue ;;
-        esac
-        tgt="dagger_v${DAGGER_VERSION}_${goos}_${goarch}.tar.gz"
-        url="https://github.com/dagger/dagger/releases/download/v${DAGGER_VERSION}/${tgt}"
-        tmp="$(mktemp -d)"
-        mkdir -p ~/.local/bin
-        if download_and_verify "$sha" "$url" "$tmp/dagger.tar.gz" \
-            && tar -xzf "$tmp/dagger.tar.gz" -C "$tmp" \
-            && install -m 0755 "$tmp/dagger" ~/.local/bin/dagger; then
-            check_pass "dagger v${DAGGER_VERSION} installed (SHA-256 verified)"
+        sha=""; goos=""; goarch=""
+        if ! platform="$(detect_platform)"; then
+            check_fail "dagger — unsupported platform"
         else
-            check_fail "dagger — pinned install failed"
+            case "$platform" in
+                linux-x86_64)   sha="$DAGGER_SHA256_LINUX_X86_64"   ; goos="linux"  ; goarch="amd64" ;;
+                linux-aarch64)  sha="$DAGGER_SHA256_LINUX_AARCH64"  ; goos="linux"  ; goarch="arm64" ;;
+                darwin-x86_64)  sha="$DAGGER_SHA256_DARWIN_X86_64"  ; goos="darwin" ; goarch="amd64" ;;
+                darwin-aarch64) sha="$DAGGER_SHA256_DARWIN_AARCH64" ; goos="darwin" ; goarch="arm64" ;;
+                *) check_fail "dagger — no pinned build for $platform" ;;
+            esac
         fi
-        rm -rf "$tmp"
+        if [ -n "$goos" ]; then
+            tgt="dagger_v${DAGGER_VERSION}_${goos}_${goarch}.tar.gz"
+            url="https://github.com/dagger/dagger/releases/download/v${DAGGER_VERSION}/${tgt}"
+            tmp="$(mktemp -d)"
+            mkdir -p ~/.local/bin
+            if download_and_verify "$sha" "$url" "$tmp/dagger.tar.gz" \
+                && tar -xzf "$tmp/dagger.tar.gz" -C "$tmp" \
+                && install -m 0755 "$tmp/dagger" ~/.local/bin/dagger; then
+                check_pass "dagger v${DAGGER_VERSION} installed (SHA-256 verified)"
+            else
+                check_fail "dagger — pinned install failed"
+            fi
+            rm -rf "$tmp"
+        fi
     fi
 fi
 
