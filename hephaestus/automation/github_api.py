@@ -1233,12 +1233,20 @@ def gh_pr_review_post(
 
     owner, repo = get_repo_info()
 
-    # Fetch the PR node ID via REST
-    pr_info = _gh_call(["api", f"repos/{owner}/{repo}/pulls/{pr_number}", "--jq", ".node_id"])
-    pr_node_id = pr_info.stdout.strip()
-
-    # Build threads list for the mutation
-    thread_items = [
+    # Build the inline-comment list. The REST reviews endpoint natively accepts
+    # ``{path, line, side, body}`` — unlike the GraphQL
+    # ``DraftPullRequestReviewComment`` input type, which only exposes
+    # ``path``/``position``/``body`` and has NO ``line``/``side`` fields. The
+    # previous GraphQL mutation therefore failed twice over:
+    #   1. ``-f comments=<json-string>`` sent the array as a STRING, so GitHub
+    #      rejected every post ("Variable $comments ... was provided invalid
+    #      value"; even ``[]`` failed with 'Expected "[]" to be a key-value
+    #      object'), and the loop treated every PR as a spurious NOGO.
+    #   2. Even passed as a typed array, ``line``/``side`` are undefined on
+    #      ``DraftPullRequestReviewComment``.
+    # POST /pulls/{n}/reviews is the correct surface for ``line``/``side``
+    # comments and for summary-only (empty ``comments``) reviews alike.
+    review_comments = [
         {
             "path": c["path"],
             "line": c["line"],
@@ -1248,59 +1256,36 @@ def gh_pr_review_post(
         for c in comments
     ]
 
-    # The mutation only returns the new review's node id. We deliberately do
-    # NOT try to read the review's threads off the comment nodes: a
-    # ``PullRequestReviewComment`` has no ``pullRequestReviewThread`` field, so
-    # the old query (added for the #375 "foreign thread" fix) failed at the
-    # GraphQL layer on *every* call ("Field 'pullRequestReviewThread' doesn't
-    # exist on type 'PullRequestReviewComment'"), meaning no review ever
-    # posted. Instead we capture the review id here and resolve *this* review's
-    # threads in a follow-up ``pullRequest.reviewThreads`` query
-    # (:func:`_review_threads_for_review`), matching on the review id so we
-    # still exclude pre-existing human-reviewer threads.
-    mutation = """
-mutation AddReview(
-  $prId: ID!, $body: String!,
-  $event: PullRequestReviewEvent!,
-  $comments: [DraftPullRequestReviewComment!]
-) {
-  addPullRequestReview(
-    input: {pullRequestId: $prId, body: $body, event: $event, comments: $comments}
-  ) {
-    pullRequestReview {
-      id
-    }
-  }
-}
-"""
+    request_body = json.dumps({"body": summary, "event": event, "comments": review_comments})
+    fd, input_path = tempfile.mkstemp(prefix="gh-review-", suffix=".json")
+    try:
+        os.close(fd)
+        io_write_secure(Path(input_path), request_body)
+        result = _gh_call(
+            [
+                "api",
+                "-X",
+                "POST",
+                f"repos/{owner}/{repo}/pulls/{pr_number}/reviews",
+                "--input",
+                input_path,
+            ]
+        )
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(input_path)
 
-    threads_json = json.dumps(thread_items)
-    result = _gh_call(
-        [
-            "api",
-            "graphql",
-            "-f",
-            f"query={mutation}",
-            "-f",
-            f"prId={pr_node_id}",
-            "-f",
-            f"body={summary}",
-            "-f",
-            f"event={event}",
-            "-f",
-            f"comments={threads_json}",
-        ]
-    )
-
-    data = json.loads(result.stdout)
-    _check_graphql_errors(data, f"gh_pr_review_post(pr={pr_number})")
-    review_data = data.get("data", {}).get("addPullRequestReview", {}).get("pullRequestReview", {})
-    review_id = review_data.get("id")
-    if not review_id:
-        logger.warning("Posted PR review on #%s but no review id returned", pr_number)
+    review = json.loads(result.stdout)
+    # The REST payload returns both the numeric ``id`` and the GraphQL global
+    # ``node_id``. The thread-resolution follow-up matches on the GraphQL review
+    # node id, so pass that through (preserving the #375 guarantee that only
+    # threads created by *this* review are returned).
+    review_node_id = review.get("node_id")
+    if not review_node_id:
+        logger.warning("Posted PR review on #%s but no review node id returned", pr_number)
         return []
 
-    thread_ids = _review_threads_for_review(pr_number, review_id)
+    thread_ids = _review_threads_for_review(pr_number, review_node_id)
     logger.info("Posted PR review on #%s; created %s thread(s)", pr_number, len(thread_ids))
     return thread_ids
 

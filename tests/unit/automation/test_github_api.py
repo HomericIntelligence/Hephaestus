@@ -1599,22 +1599,21 @@ class TestGhPrReviewPost:
 
     @staticmethod
     def _gh_call_side_effect(review_id: str, threads: list[dict[str, Any]]) -> Any:
-        """Build a side_effect covering the three _gh_call invocations.
+        """Build a side_effect covering the two _gh_call invocations.
 
-        1. REST fetch of the PR node id (``--jq .node_id``)
-        2. ``addPullRequestReview`` mutation → ``pullRequestReview { id }``
-        3. ``reviewThreads`` follow-up query
+        1. ``POST /pulls/{n}/reviews`` (REST) → ``{id, node_id}``. The review
+           body is delivered via ``--input <file>`` and natively supports
+           ``line``/``side`` inline comments and empty comment lists.
+        2. ``reviewThreads`` follow-up GraphQL query, matched on the returned
+           review node id.
         """
 
         def _side_effect(args: list[str], *_: Any, **__: Any) -> Any:
             joined = " ".join(args)
             result = Mock()
-            if "--jq" in args:
-                result.stdout = "PR_node_123"
-            elif "addPullRequestReview" in joined:
-                result.stdout = json.dumps(
-                    {"data": {"addPullRequestReview": {"pullRequestReview": {"id": review_id}}}}
-                )
+            if "/reviews" in joined:
+                # REST review POST returns numeric id + GraphQL node_id.
+                result.stdout = json.dumps({"id": 999, "node_id": review_id})
             elif "reviewThreads" in joined:
                 result.stdout = json.dumps(
                     {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": threads}}}}}
@@ -1688,3 +1687,69 @@ class TestGhPrReviewPost:
         thread_ids = gh_pr_review_post(pr_number=7, comments=[], summary="x", dry_run=True)
         assert thread_ids == []
         mock_gh_call.assert_not_called()
+
+    @staticmethod
+    def _review_post_call(mock_gh_call: Any) -> Any:
+        """Return the _gh_call invocation that POSTed the review via REST.
+
+        The review body is delivered via ``gh api -X POST .../reviews --input
+        <file>``; ``--input`` files are unlinked after the call, so the body must
+        be inspected from inside the side_effect, not here.
+        """
+        for call in mock_gh_call.call_args_list:
+            sent_args = call.args[0] if call.args else call.kwargs.get("args", [])
+            if any(isinstance(a, str) and a.endswith("/reviews") for a in sent_args):
+                return call
+        raise AssertionError("review POST was never sent")
+
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_comments_sent_as_typed_json_body_not_stringified_field(
+        self, mock_gh_call: Any, _mock_repo: Any
+    ) -> None:
+        """Inline comments must reach gh as a typed JSON body, never as a stringified ``-f`` field.
+
+        Regression: ``gh api graphql -f comments='[{...}]'`` sent the array as a
+        *string*, so GitHub rejected every review post ("Variable $comments ...
+        was provided invalid value") and the loop saw a spurious NOGO. The review
+        is now POSTed to ``/pulls/{n}/reviews`` with the body delivered via
+        ``--input`` (a typed JSON body), and ``line``/``side`` are sent verbatim.
+        """
+        mock_gh_call.side_effect = self._gh_call_side_effect("REVIEW_1", [])
+
+        gh_pr_review_post(
+            pr_number=7,
+            comments=[{"path": "a.py", "line": 1, "side": "RIGHT", "body": "fix"}],
+            summary="Findings",
+        )
+
+        sent_args = self._review_post_call(mock_gh_call).args[0]
+        # No stringified comments field anywhere in argv.
+        assert not any(isinstance(a, str) and a.startswith("comments=") for a in sent_args), (
+            "comments must not be passed as a stringified field"
+        )
+        assert not any(
+            isinstance(a, str) and a.startswith("-f") and "comments" in a for a in sent_args
+        )
+        # The typed body is delivered via --input to the REST reviews endpoint.
+        assert "--input" in sent_args, "review body must be sent via --input"
+        assert any(isinstance(a, str) and a.endswith("/reviews") for a in sent_args)
+
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_empty_comments_still_posts_summary_review(
+        self, mock_gh_call: Any, _mock_repo: Any
+    ) -> None:
+        """An empty ``comments`` list must post a summary-only review, not crash.
+
+        Regression: even ``comments=[]`` failed under the stringified GraphQL form
+        (``Expected "[]" to be a key-value object``), so summary-only NOGO reviews
+        could never post and the loop always saw a spurious failure.
+        """
+        mock_gh_call.side_effect = self._gh_call_side_effect("REVIEW_1", [])
+
+        # Must not raise.
+        gh_pr_review_post(pr_number=7, comments=[], summary="Summary only")
+
+        # The review POST was still sent.
+        self._review_post_call(mock_gh_call)
