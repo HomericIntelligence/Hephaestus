@@ -20,12 +20,31 @@ from hephaestus.utils.helpers import run_subprocess
 def run_command(cmd: list[str], timeout: int = 5) -> tuple[bool, str]:
     """Run a shell command and return success status and output.
 
+    Wraps :func:`hephaestus.utils.helpers.run_subprocess` with defensive
+    error handling suitable for system-inspection callers that need to
+    degrade gracefully when a tool is missing or hangs.
+
     Args:
         cmd: Command as list of strings
         timeout: Timeout in seconds
 
     Returns:
-        Tuple of (success: bool, output: str).
+        Tuple of ``(success: bool, output: str)``. ``success`` is ``True`` only
+        when the process exited with returncode ``0``; ``output`` is the
+        stripped stdout. On any swallowed exception (see Note), the return
+        value is ``(False, "")``.
+
+    Note:
+        This function intentionally swallows ``subprocess.TimeoutExpired``,
+        ``FileNotFoundError``, and ``OSError``, returning ``(False, "")``
+        instead of propagating. This is the correct contract for callers
+        such as :func:`get_command_path`, :func:`get_tool_info`, and
+        :func:`get_git_info`, which inspect optional tools that may
+        legitimately be absent or unresponsive. Callers MUST branch on the
+        ``success`` flag — they will never see an exception from these
+        three error classes. Non-zero exit codes are NOT swallowed in the
+        same way: they return ``(False, <stripped stdout>)`` so callers
+        can still inspect partial output.
 
     """
     import subprocess as _subprocess
