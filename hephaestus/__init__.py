@@ -3,16 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as _pkg_version
 from typing import Any
 
-try:
-    # The PyPI distribution name is "HomericIntelligence-Hephaestus", which
-    # importlib.metadata does NOT normalize to the import name "hephaestus".
-    __version__ = _pkg_version("HomericIntelligence-Hephaestus")
-except PackageNotFoundError:
-    __version__ = "unknown"
+from hephaestus._version_lookup import get_version
+
+__version__ = get_version()
 
 __author__ = "Micah Villmow"
 
