@@ -36,7 +36,12 @@ from ._review_utils import find_pr_for_issue
 from .advise_runner import run_advise
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import advise_model, implementer_model, learn_model
-from .claude_timeouts import advise_claude_timeout, ci_driver_claude_timeout, learn_claude_timeout
+from .claude_timeouts import (
+    advise_claude_timeout,
+    ci_driver_claude_timeout,
+    ci_poll_max_wait,
+    learn_claude_timeout,
+)
 from .git_utils import (
     get_repo_info,
     get_repo_root,
@@ -523,7 +528,7 @@ class CIDriver:
             )
 
         # Maximum wall-clock seconds to poll for pending CI checks before giving up.
-        _ci_poll_max_wait: int = int(os.environ.get("HEPH_CI_POLL_MAX_WAIT", "600"))
+        _ci_poll_max_wait: int = ci_poll_max_wait()
 
         try:
             # Detected-merge / armed-state short-circuit (#840). If a prior
@@ -928,7 +933,7 @@ class CIDriver:
 
         # Bounded poll for the freshly-pushed run to conclude. Reuse the same
         # backoff/cap pattern as the main poll loop.
-        max_wait = int(os.environ.get("HEPH_CI_POLL_MAX_WAIT", "600"))
+        max_wait = ci_poll_max_wait()
         elapsed = 0
         attempt = 0
         while True:

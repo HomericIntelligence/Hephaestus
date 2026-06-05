@@ -130,3 +130,30 @@ def test_advise_timeout_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HEPH_ADVISE_AGENT_TIMEOUT", "600")
 
     assert claude_timeouts.advise_claude_timeout() == 600
+
+
+def test_ci_poll_max_wait_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI poll max wait uses the documented 600s default when unset."""
+    monkeypatch.delenv("HEPH_CI_POLL_MAX_WAIT", raising=False)
+
+    assert claude_timeouts.ci_poll_max_wait() == 600
+
+
+def test_ci_poll_max_wait_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HEPH_CI_POLL_MAX_WAIT overrides the default per call (re-read each time)."""
+    monkeypatch.setenv("HEPH_CI_POLL_MAX_WAIT", "1800")
+
+    assert claude_timeouts.ci_poll_max_wait() == 1800
+
+
+def test_ci_poll_max_wait_invalid_env_logs_and_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Malformed HEPH_CI_POLL_MAX_WAIT warns and falls back to 600s."""
+    monkeypatch.setenv("HEPH_CI_POLL_MAX_WAIT", "soon")
+
+    with caplog.at_level(logging.WARNING, logger="hephaestus.automation.claude_timeouts"):
+        assert claude_timeouts.ci_poll_max_wait() == 600
+
+    assert any("HEPH_CI_POLL_MAX_WAIT" in record.message for record in caplog.records)

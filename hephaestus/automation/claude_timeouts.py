@@ -79,3 +79,13 @@ def follow_up_claude_timeout() -> int:
 def gh_cli_timeout() -> int:
     """Timeout for individual ``gh`` CLI calls in :mod:`github_api` (default 120s)."""
     return _read_int_env("HEPH_GH_TIMEOUT", 120)
+
+
+def ci_poll_max_wait() -> int:
+    """Wall-clock seconds for the CI-driver poll loops (default 600s).
+
+    Bounds the exponential-backoff wait in :mod:`ci_driver` while CI checks
+    are still pending. Re-read on each invocation so tests and operators can
+    tune it at runtime via ``HEPH_CI_POLL_MAX_WAIT``.
+    """
+    return _read_int_env("HEPH_CI_POLL_MAX_WAIT", 600)
