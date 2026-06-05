@@ -15,6 +15,8 @@ if sys.version_info >= (3, 11):
 else:
     import tomli as tomllib
 
+from packaging.version import Version
+
 
 def _floor(spec: str) -> str:
     """Extract the floor version (>=X.Y.Z) from a PEP 508 / pixi constraint string.
@@ -229,4 +231,107 @@ class TestMypyUpperCapConsistency:
             f"pyproject.toml dev={pyproject_floor} vs "
             f"pixi.toml [feature.dev]={pixi_dev_floor} vs "
             f"[feature.lint]={pixi_lint_floor}."
+        )
+
+
+class TestPytestConsistency:
+    """Tests for pytest and pytest-cov floor/cap consistency across manifests.
+
+    pytest 9.x and pytest-cov 7.x are bleeding-edge majors; the pixi-driven
+    CI (`pixi run pytest`) resolves the cap declared in pixi.toml, so a
+    pip-install user on `.[dev]` must see the same cap or they land on an
+    untested major. Tracks issue #785.
+
+    Comparisons use packaging.version.Version (PEP 440) so that "9.0"
+    (pyproject style) and "9.0.0" (pixi style) compare equal semantically
+    — raw string equality would fail despite the manifests being aligned.
+    """
+
+    @staticmethod
+    def _find_dep(dev_deps: list[str], name: str) -> str | None:
+        """Return the first dep in dev_deps whose package name is exactly `name`.
+
+        Uses PEP 508 specifier punctuation to avoid matching prefix collisions
+        (e.g., "pytest" must not match "pytest-cov").
+        """
+        for dep in dev_deps:
+            head = dep.split(";", 1)[0].strip()
+            for sep in ("<=", ">=", "==", "!=", "~=", "<", ">", "="):
+                if sep in head:
+                    pkg = head.split(sep, 1)[0].strip()
+                    break
+            else:
+                pkg = head.strip()
+            if pkg == name:
+                return dep
+        return None
+
+    def test_pytest_floor_and_cap_match_across_manifests(self, repo_root: Path) -> None:
+        """Pytest floor and cap must match [feature.dev]."""
+        pyproject_path = repo_root / "pyproject.toml"
+        with open(pyproject_path, "rb") as f:
+            pyproject = tomllib.load(f)
+
+        dev_deps = pyproject["project"]["optional-dependencies"]["dev"]
+        pyproject_spec = self._find_dep(dev_deps, "pytest")
+        assert pyproject_spec is not None, "pytest not found in [project.optional-dependencies.dev]"
+
+        pixi_path = repo_root / "pixi.toml"
+        with open(pixi_path, "rb") as f:
+            pixi = tomllib.load(f)
+
+        pixi_dev_spec = pixi["feature"]["dev"]["dependencies"]["pytest"]
+
+        pyproject_floor = Version(_floor(pyproject_spec))
+        pixi_dev_floor = Version(_floor(pixi_dev_spec))
+        assert pyproject_floor == pixi_dev_floor, (
+            "pytest floor skew (semantic): "
+            f"pyproject.toml dev={pyproject_floor} vs "
+            f"pixi.toml [feature.dev]={pixi_dev_floor}. "
+            "Update both together — see issue #785."
+        )
+
+        pyproject_cap = Version(_upper_cap(pyproject_spec))
+        pixi_dev_cap = Version(_upper_cap(pixi_dev_spec))
+        assert pyproject_cap == pixi_dev_cap, (
+            "pytest upper-cap skew (semantic): "
+            f"pyproject.toml dev={pyproject_cap} vs "
+            f"pixi.toml [feature.dev]={pixi_dev_cap}. "
+            "Update both together — see issue #785."
+        )
+
+    def test_pytest_cov_floor_and_cap_match_across_manifests(self, repo_root: Path) -> None:
+        """pytest-cov floor and cap must match [feature.dev]."""
+        pyproject_path = repo_root / "pyproject.toml"
+        with open(pyproject_path, "rb") as f:
+            pyproject = tomllib.load(f)
+
+        dev_deps = pyproject["project"]["optional-dependencies"]["dev"]
+        pyproject_spec = self._find_dep(dev_deps, "pytest-cov")
+        assert pyproject_spec is not None, (
+            "pytest-cov not found in [project.optional-dependencies.dev]"
+        )
+
+        pixi_path = repo_root / "pixi.toml"
+        with open(pixi_path, "rb") as f:
+            pixi = tomllib.load(f)
+
+        pixi_dev_spec = pixi["feature"]["dev"]["dependencies"]["pytest-cov"]
+
+        pyproject_floor = Version(_floor(pyproject_spec))
+        pixi_dev_floor = Version(_floor(pixi_dev_spec))
+        assert pyproject_floor == pixi_dev_floor, (
+            "pytest-cov floor skew (semantic): "
+            f"pyproject.toml dev={pyproject_floor} vs "
+            f"pixi.toml [feature.dev]={pixi_dev_floor}. "
+            "Update both together — see issue #785."
+        )
+
+        pyproject_cap = Version(_upper_cap(pyproject_spec))
+        pixi_dev_cap = Version(_upper_cap(pixi_dev_spec))
+        assert pyproject_cap == pixi_dev_cap, (
+            "pytest-cov upper-cap skew (semantic): "
+            f"pyproject.toml dev={pyproject_cap} vs "
+            f"pixi.toml [feature.dev]={pixi_dev_cap}. "
+            "Update both together — see issue #785."
         )

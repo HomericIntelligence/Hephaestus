@@ -36,6 +36,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    # pytest 9.x and pytest-cov 7.x are the latest majors; tight floors are
+    # intentional so CI tests against the same majors the install contract
+    # advertises. Upper-cap kept in lockstep with pixi.toml [feature.dev] —
+    # silently widening would let pip-install users land on a major that is
+    # never resolved in CI. Enforced by
+    # tests/unit/scripts/test_dependency_floor_consistency.py::TestPytestConsistency.
     "pytest>=9.0,<10",
     "pytest-cov>=7.0,<8",
     "pre-commit>=3.0,<5",
