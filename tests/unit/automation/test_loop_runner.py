@@ -38,6 +38,7 @@ from hephaestus.automation.loop_runner import (
     run_loop,
     run_phase,
 )
+from hephaestus.constants import scripts_dir as _scripts_dir
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
 # ---------------------------------------------------------------------------
@@ -77,8 +78,7 @@ def test_retired_loop_dispatch_shims_are_deleted(shim: str) -> None:
     manual ``hephaestus-review-prs`` CLI are deliberately kept — only these
     loop shims were removed.)
     """
-    scripts_dir = Path(loop_runner.__file__).resolve().parents[2] / "scripts"
-    assert not (scripts_dir / shim).exists()
+    assert not (_scripts_dir() / shim).exists()
 
 
 # ---------------------------------------------------------------------------

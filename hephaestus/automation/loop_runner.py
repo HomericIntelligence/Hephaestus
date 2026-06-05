@@ -40,6 +40,7 @@ from hephaestus.agents.runtime import add_agent_argument, resolve_agent
 from hephaestus.automation.claude_timeouts import gh_cli_timeout
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.config.paths import DEFAULT_PROJECTS_DIR, resolve_projects_dir
+from hephaestus.constants import scripts_dir as _scripts_dir
 from hephaestus.resilience.subprocess_resilience import resilient_call
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
@@ -760,7 +761,7 @@ def _resolve_phase_bin(phase: str) -> tuple[str, list[str]] | None:
     Known phases fall back to this source checkout when console scripts are
     not installed on PATH. Unknown phases still return ``None``.
     """
-    script_dir = Path(__file__).resolve().parents[2] / "scripts"
+    script_dir = _scripts_dir()
     if phase == "plan":
         bin_path = shutil.which("hephaestus-plan-issues")
         if bin_path:

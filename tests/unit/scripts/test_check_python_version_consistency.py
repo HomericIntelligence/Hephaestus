@@ -9,8 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from hephaestus.constants import scripts_dir
+
 # Add the scripts directory to the path so we can import the module directly.
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
+sys.path.insert(0, str(scripts_dir()))
 
 from check_python_version_consistency import (
     check_ci_matrix_coverage,
