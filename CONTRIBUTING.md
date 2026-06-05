@@ -45,6 +45,38 @@ This project follows the [HomericIntelligence Code of Conduct](CODE_OF_CONDUCT.m
 5. Before pushing, run the fast quality gate: `just check`
    (lint + format-check + typecheck). Run `just --list` to see every recipe.
 
+### Platform Support
+
+The pixi developer environment and the published wheel intentionally cover
+different platform sets. Contributors and downstream users should know which
+they are using:
+
+| Install path                        | Platforms supported                    | Python      |
+| ----------------------------------- | -------------------------------------- | ----------- |
+| `pixi install` (development)        | `linux-64` only                        | 3.10 (pinned by `pixi.toml`) |
+| `pip install HomericIntelligence-Hephaestus` (wheel) | Linux, macOS, Windows (any OS) | 3.10+ (see `requires-python` in `pyproject.toml`) |
+
+Why the asymmetry:
+
+- **Pixi is Linux-64 only by design.** `pixi.toml` declares
+  `platforms = ["linux-64"]` with an explicit `# Do not re-enable` comment
+  next to the other entries. Full local reproduction of the development
+  environment (lint, mypy, test, pre-commit) is only supported on Linux.
+- **The wheel supports the broader matrix advertised in `pyproject.toml`.**
+  `requires-python` and the `Programming Language :: Python :: 3.X` classifiers
+  describe what `pip install` will accept. No platform-restriction classifier
+  is published, so the wheel is installable on macOS and Windows.
+- **Windows wheels pull in `tzdata` automatically.** The
+  `"tzdata; platform_system == 'Windows'"` marker in `[project.dependencies]`
+  exists because `hephaestus.github.rate_limit` uses `zoneinfo.ZoneInfo`,
+  which has no IANA database bundled on Windows. POSIX installs skip this
+  dependency.
+
+If you need to develop or run the test suite on macOS or Windows, install the
+wheel into a plain virtualenv (`pip install -e '.[dev]'`) — pixi tooling is
+not available there, and any subpackage with POSIX-only assumptions is out
+of scope for cross-platform fixes under this issue (track those separately).
+
 ## Code Style
 
 We follow these style guidelines:
