@@ -168,12 +168,11 @@ class TestYamlSyntaxFalsePositives:
         linter: ConfigLinter,
         yaml_file: Any,
     ) -> None:
-        """A genuinely suspicious line should still produce a warning."""
-        # A line like "  @weird:stuff" has a colon but doesn't match any valid pattern
+        """A line PyYAML cannot tokenize is reported as a syntax error."""
         path = yaml_file("key: value\n@weird:stuff\n")
-        linter.lint_file(path)
-        malformed_warnings = [w for w in linter.warnings if "malformed key" in w.lower()]
-        assert len(malformed_warnings) == 1
+        result = linter.lint_file(path)
+        assert result is False
+        assert any("YAML syntax error" in e for e in linter.errors)
 
     def test_block_scalar_skips_inner_lines(
         self,
@@ -234,7 +233,7 @@ class TestBlockScalarBraceCounting:
         yaml_content = f"key: value\ndescription: {scalar_type}\n  {content}\nnext_key: value\n"
         path = yaml_file(yaml_content)
         result = linter.lint_file(path)
-        brace_errors = [e for e in linter.errors if "Unmatched braces" in e]
+        brace_errors = [e for e in linter.errors if "YAML syntax error" in e]
         assert brace_errors == [], f"False brace error for {scalar_type} with '{content}'"
         assert result is True
 
@@ -272,7 +271,7 @@ class TestBlockScalarBraceCounting:
         yaml_content = f"key: value\nitems: {scalar_type}\n  {content}\nnext_key: value\n"
         path = yaml_file(yaml_content)
         result = linter.lint_file(path)
-        bracket_errors = [e for e in linter.errors if "Unmatched brackets" in e]
+        bracket_errors = [e for e in linter.errors if "YAML syntax error" in e]
         assert bracket_errors == [], f"False bracket error for {scalar_type} with '{content}'"
         assert result is True
 
@@ -293,8 +292,8 @@ class TestBlockScalarBraceCounting:
         )
         path = yaml_file(content)
         result = linter.lint_file(path)
-        brace_errors = [e for e in linter.errors if "Unmatched braces" in e]
-        bracket_errors = [e for e in linter.errors if "Unmatched brackets" in e]
+        brace_errors = [e for e in linter.errors if "YAML syntax error" in e]
+        bracket_errors = [e for e in linter.errors if "YAML syntax error" in e]
         assert brace_errors == []
         assert bracket_errors == []
         assert result is True
@@ -308,7 +307,7 @@ class TestBlockScalarBraceCounting:
         path = yaml_file("key: { unclosed\n")
         result = linter.lint_file(path)
         assert result is False
-        assert any("Unmatched braces" in e for e in linter.errors)
+        assert any("YAML syntax error" in e for e in linter.errors)
 
     def test_brackets_outside_block_scalar_still_detected(
         self,
@@ -319,7 +318,7 @@ class TestBlockScalarBraceCounting:
         path = yaml_file("key: [ unclosed\n")
         result = linter.lint_file(path)
         assert result is False
-        assert any("Unmatched brackets" in e for e in linter.errors)
+        assert any("YAML syntax error" in e for e in linter.errors)
 
     def test_braces_after_block_scalar_ends_still_counted(
         self,
@@ -331,47 +330,7 @@ class TestBlockScalarBraceCounting:
         path = yaml_file(content)
         result = linter.lint_file(path)
         assert result is False
-        assert any("Unmatched braces" in e for e in linter.errors)
-
-
-class TestStripInlineComment:
-    """Tests for ConfigLinter._strip_inline_comment."""
-
-    @pytest.mark.parametrize(
-        ("line", "expected"),
-        [
-            ('color: "#FF0000"', 'color: "#FF0000"'),
-            ("color: '#FF0000'", "color: '#FF0000'"),
-            ('desc: "text with # in middle"', 'desc: "text with # in middle"'),
-            ("value: plain text # comment", "value: plain text "),
-            (
-                'value: "quoted # not comment" # real',
-                'value: "quoted # not comment" ',
-            ),
-            ("# full line comment", ""),
-            ("value: plain text", "value: plain text"),
-            ("value: no#space", "value: no#space"),
-            ("", ""),
-            ("  # indented comment", "  "),
-            ("key: 'single # hash' # comment", "key: 'single # hash' "),
-        ],
-        ids=[
-            "hex-color-double-quotes",
-            "hex-color-single-quotes",
-            "hash-mid-double-string",
-            "legitimate-inline-comment",
-            "quoted-hash-and-real-comment",
-            "full-line-comment",
-            "no-hash",
-            "hash-without-preceding-space",
-            "empty-line",
-            "indented-comment",
-            "single-quoted-hash-and-comment",
-        ],
-    )
-    def test_strip_inline_comment(self, line: str, expected: str) -> None:
-        """_strip_inline_comment handles various quote/comment scenarios."""
-        assert ConfigLinter._strip_inline_comment(line) == expected
+        assert any("YAML syntax error" in e for e in linter.errors)
 
 
 class TestLintFileQuotedHash:

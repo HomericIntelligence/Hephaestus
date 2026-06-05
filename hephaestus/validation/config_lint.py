@@ -4,7 +4,6 @@
 Validates YAML configuration files for syntax, formatting, and common issues.
 """
 
-import re
 from pathlib import Path
 from typing import Any
 
@@ -74,15 +73,12 @@ class ConfigLinter:
             self.errors.append(f"Failed to read file: {e}")
             return False
 
-        # Check YAML syntax
-        if not self._check_yaml_syntax(content, filepath):
-            return False
-
-        # Check formatting
+        # Pure-text formatting checks (tabs / trailing whitespace / odd indent).
         self._check_formatting(content, filepath)
 
-        # Parse configuration
-        config = self._parse_yaml(content)
+        # Parse YAML. _parse_yaml records any syntax error in self.errors
+        # (with filepath:line from PyYAML's problem_mark) and returns None.
+        config = self._parse_yaml(content, filepath)
         if config is None:
             return False
 
@@ -93,196 +89,6 @@ class ConfigLinter:
         self._check_performance(config, filepath)
 
         return len(self.errors) == 0
-
-    @staticmethod
-    def _strip_inline_comment(line: str) -> str:
-        r"""Strip inline YAML comments while preserving # inside quoted strings.
-
-        Per YAML spec, # is a comment delimiter only when:
-        - It is preceded by whitespace (or is the first character)
-        - It is NOT inside a single-quoted or double-quoted scalar
-
-        Double-quoted scalars support backslash escapes (e.g. ``\"`` is a
-        literal quote, not a closing delimiter).  Single-quoted scalars do not
-        support backslash escapes (``''`` is the only escape sequence).
-
-        Args:
-            line: A single line of YAML text
-
-        Returns:
-            The line with any inline comment removed
-
-        """
-        in_single_quote = False
-        in_double_quote = False
-        i = 0
-
-        while i < len(line):
-            char = line[i]
-            # Skip over backslash escapes inside double-quoted scalars.
-            if in_double_quote and char == "\\":
-                i += 2  # skip the escaped character
-                continue
-            if char == "'" and not in_double_quote:
-                in_single_quote = not in_single_quote
-            elif char == '"' and not in_single_quote:
-                in_double_quote = not in_double_quote
-            elif (
-                char == "#"
-                and not in_single_quote
-                and not in_double_quote
-                and (i == 0 or line[i - 1] in (" ", "\t"))
-            ):
-                return line[:i]
-            i += 1
-
-        return line
-
-    @staticmethod
-    def _count_unquoted(text: str, open_char: str, close_char: str) -> int:
-        """Count net occurrences of open_char/close_char outside quoted regions.
-
-        Skips characters inside single-quoted or double-quoted scalars.
-        Handles backslash escapes inside double-quoted scalars.
-
-        Args:
-            text: Text to scan (comment already stripped).
-            open_char: The opening delimiter to count (e.g. ``{``).
-            close_char: The closing delimiter to count (e.g. ``}``).
-
-        Returns:
-            Net count: number of open_char minus number of close_char found
-            outside any quoted region.
-
-        """
-        count = 0
-        in_single_quote = False
-        in_double_quote = False
-        i = 0
-        while i < len(text):
-            char = text[i]
-            if in_double_quote and char == "\\":
-                i += 2
-                continue
-            if char == "'" and not in_double_quote:
-                in_single_quote = not in_single_quote
-            elif char == '"' and not in_single_quote:
-                in_double_quote = not in_double_quote
-            elif not in_single_quote and not in_double_quote:
-                if char == open_char:
-                    count += 1
-                elif char == close_char:
-                    count -= 1
-            i += 1
-        return count
-
-    @staticmethod
-    def _is_valid_yaml_key_line(line: str) -> bool:
-        """Check whether a line with a colon matches a valid YAML construct.
-
-        Args:
-            line: The line (after stripping inline comments).
-
-        Returns:
-            True if the line looks like a valid YAML key or construct.
-
-        """
-        s = line.strip()
-        return bool(
-            not s
-            or "://" in line
-            or re.match(r"^\s*[\w\-]+:", line)
-            or re.match(r'^\s*["\'][^"\']+["\']:', line)
-            or re.match(r"^\s*\{", line)
-            or re.match(r"^\s*-\s", line)
-            or re.match(r"^\s*---", line)
-            or re.match(r"^\s*\.\.\.", line)
-        )
-
-    @staticmethod
-    def _is_block_scalar_continuation(line: str, stripped: str, block_scalar_indent: int) -> bool:
-        """Check if a line is a continuation of a block scalar.
-
-        Args:
-            line: Raw line (for indentation measurement).
-            stripped: The stripped line content.
-            block_scalar_indent: Indent level of the block scalar's parent key.
-
-        Returns:
-            True if the line continues the block scalar.
-
-        """
-        if stripped == "":
-            return True
-        current_indent = len(line) - len(line.lstrip())
-        return current_indent > block_scalar_indent
-
-    def _check_yaml_syntax(self, content: str, filepath: Path) -> bool:
-        """Check if YAML syntax is valid.
-
-        Args:
-            content: File content
-            filepath: Path to file
-
-        Returns:
-            True if syntax is valid
-
-        """
-        try:
-            lines = content.split("\n")
-            brace_count = 0
-            bracket_count = 0
-            in_block_scalar = False
-            block_scalar_indent = 0
-
-            for i, line in enumerate(lines):
-                stripped = line.strip()
-
-                # Track block scalar context (| and > multi-line strings)
-                if in_block_scalar:
-                    if self._is_block_scalar_continuation(line, stripped, block_scalar_indent):
-                        continue
-                    in_block_scalar = False
-
-                # Skip comment-only lines
-                if stripped.startswith("#"):
-                    continue
-
-                # Strip inline comments, preserving # inside quoted strings
-                comment_stripped = self._strip_inline_comment(line)
-
-                # Count braces and brackets outside of quoted regions.
-                # Using the same quote-tracking approach as _strip_inline_comment
-                # avoids false positives for braces/brackets in string values
-                # (e.g. ``key: "{not a brace}"``).
-                brace_count += self._count_unquoted(comment_stripped, "{", "}")
-                bracket_count += self._count_unquoted(comment_stripped, "[", "]")
-
-                # Detect block scalar start: key: |  key: >  key: |+  key: |-
-                # key: |2  key: >+  key: >-2  etc.  (YAML chomping/indent indicators)
-                if re.match(r"^\s*[\w\"\'\-][^:]*:\s*[|>][-+]?\d*\s*$", stripped):
-                    in_block_scalar = True
-                    block_scalar_indent = len(line) - len(line.lstrip())
-                    continue
-
-                # Malformed key check — only warn when a colon is present
-                # but the line doesn't match any valid YAML construct
-                if ":" in comment_stripped and not self._is_valid_yaml_key_line(comment_stripped):
-                    self.warnings.append(f"{filepath}:{i + 1} - Possible malformed key")
-
-            if brace_count != 0:
-                self.errors.append(f"{filepath} - Unmatched braces")
-                return False
-
-            if bracket_count != 0:
-                self.errors.append(f"{filepath} - Unmatched brackets")
-                return False
-
-            return True
-
-        except (ValueError, TypeError) as e:
-            self.errors.append(f"Syntax check failed: {e}")
-            return False
 
     def _check_formatting(self, content: str, filepath: Path) -> None:
         """Check formatting issues.
@@ -311,27 +117,37 @@ class ConfigLinter:
                         f"{filepath}:{i + 1} - Inconsistent indentation (use 2 spaces)"
                     )
 
-    def _parse_yaml(self, content: str) -> dict[str, Any] | None:
-        """Parse YAML content.
+    def _parse_yaml(self, content: str, filepath: Path) -> dict[str, Any] | None:
+        """Parse YAML content via :func:`yaml.safe_load`.
+
+        On a YAML syntax error, appends ``"{filepath}:{line} - YAML syntax
+        error: {problem}"`` to ``self.errors`` and returns ``None``. When
+        PyYAML does not provide a ``problem_mark`` the filepath is reported
+        without a line number.
 
         Args:
-            content: YAML content string
+            content: YAML content string.
+            filepath: Source file path (used in error messages only).
 
         Returns:
-            Parsed configuration dict or None if parsing fails
+            Parsed configuration dict, an empty dict for non-mapping documents,
+            or ``None`` if parsing failed.
 
         """
-        try:
-            import yaml
+        import yaml
 
+        try:
             result = yaml.safe_load(content)
-            return result if isinstance(result, dict) else {}
-        except ImportError:
-            logger.warning("PyYAML not installed, skipping YAML parsing checks")
-            return {}
-        except Exception as e:  # broad catch intentional: yaml has undocumented exception subtypes
-            self.errors.append(f"YAML parsing failed: {e}")
+        except yaml.YAMLError as e:
+            problem = getattr(e, "problem", None) or str(e)
+            mark = getattr(e, "problem_mark", None)
+            if mark is not None:
+                self.errors.append(f"{filepath}:{mark.line + 1} - YAML syntax error: {problem}")
+            else:
+                self.errors.append(f"{filepath} - YAML syntax error: {problem}")
             return None
+
+        return result if isinstance(result, dict) else {}
 
     def _check_deprecated_keys(self, config: dict[str, Any], filepath: Path) -> None:
         """Check for deprecated configuration keys.
