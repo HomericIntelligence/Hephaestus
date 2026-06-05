@@ -11,8 +11,10 @@ from pathlib import Path
 
 import pytest
 
+from hephaestus.constants import scripts_dir
+
 # Add scripts directory to path so we can import the module directly.
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
+sys.path.insert(0, str(scripts_dir()))
 
 from check_version_single_source import (
     check_pixi_no_version,

@@ -17,9 +17,11 @@ from pathlib import Path
 
 import pytest
 
+from hephaestus.constants import scripts_dir
+
 # Add scripts/ to sys.path so we can import the checker directly, mirroring the
 # pattern used by tests/unit/scripts/test_check_version_single_source.py.
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
+sys.path.insert(0, str(scripts_dir()))
 
 from check_cli_table_sync import check_prose_counts
 
