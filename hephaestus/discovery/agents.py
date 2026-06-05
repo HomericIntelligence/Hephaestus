@@ -13,30 +13,33 @@ Usage::
 
 from __future__ import annotations
 
-import re
 import shutil
 from pathlib import Path
 
+from hephaestus.agents.loader import load_agent
+
 
 def parse_agent_level(file_path: Path) -> int | None:
-    """Extract the level from an agent markdown file's YAML frontmatter.
+    """Extract the explicit ``level:`` value from an agent's frontmatter.
 
-    Reads only the ``level:`` key from the frontmatter; does not invoke a full
-    YAML parser so no extra dependency is required.
+    Thin wrapper over :func:`hephaestus.agents.loader.load_agent` (canonical
+    YAML parser).  Returns the integer level only when the frontmatter
+    explicitly declared a ``level:`` key; otherwise returns ``None``.
 
     Args:
         file_path: Path to agent markdown file.
 
     Returns:
-        Integer level (0–5) if found, ``None`` otherwise.
+        Integer level if the frontmatter explicitly declared ``level:``,
+        ``None`` for unreadable files, missing/invalid frontmatter, or
+        frontmatter without a ``level`` key.  Range gating (0–5) is the
+        caller's responsibility.
 
     """
-    try:
-        content = file_path.read_text(encoding="utf-8")
-    except OSError:
+    info = load_agent(file_path)
+    if info is None or "level" not in info.raw_frontmatter:
         return None
-    match = re.search(r"^level:\s*(\d+)", content, re.MULTILINE)
-    return int(match.group(1)) if match else None
+    return info.level
 
 
 def discover_agents(source_dir: Path) -> dict[int, list[Path]]:

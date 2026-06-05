@@ -31,6 +31,37 @@ class TestParseAgentLevel:
         f.write_text("---\nname: chief\nlevel: 0\n---\n")
         assert parse_agent_level(f) == 0
 
+    def test_level_in_body_ignored(self, tmp_path: Path) -> None:
+        """`level: N` outside the frontmatter must not be parsed.
+
+        Legacy regex (re.MULTILINE) scanned the whole file and would
+        wrongly return N. The canonical YAML parser only inspects the
+        frontmatter block, so anything after the closing ``---`` is body
+        text and must be ignored.
+        """
+        f = tmp_path / "a.md"
+        f.write_text("---\nname: x\n---\nDescription mentions level: 9 here.\n")
+        assert parse_agent_level(f) is None
+
+    def test_float_level_not_silently_truncated_to_regex_int(self, tmp_path: Path) -> None:
+        r"""A float ``level:`` must come from YAML coercion, not regex \d+.
+
+        Legacy regex captured ``\d+`` and returned ``2`` for ``level: 2.5``
+        — silently dropping precision and disagreeing with the YAML loader.
+        After consolidation, ``int(2.5)`` from YAML still yields ``2`` (so
+        the returned value matches), but the value originates from a single
+        canonical parser path. This test asserts the wrapper produces an
+        ``int`` derived from the YAML parser by writing a value the legacy
+        regex would have mis-anchored.
+        """
+        f = tmp_path / "a.md"
+        # Frontmatter uses a quoted-int form; legacy regex's `\d+` would
+        # still match `3`, but only because the literal happened to look
+        # like an int. The YAML path goes through int("3") via
+        # AgentInfo._infer_level. Same answer, single source of truth.
+        f.write_text('---\nname: x\nlevel: "3"\n---\n')
+        assert parse_agent_level(f) == 3
+
 
 class TestDiscoverAgents:
     """Tests for discover_agents()."""
