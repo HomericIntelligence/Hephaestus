@@ -20,7 +20,9 @@ Environment variables:
 * ``RUN_UNDER_GDB=0`` — skip gdb entirely and exec the command directly
   (local-dev escape hatch; gdb adds overhead).
 * ``GDB_CMD_PREFIX`` — optional command prefix inserted before ``gdb``, e.g.
-  ``"pixi run --"``, so gdb and its inferior inherit an activated environment.
+  ``"pixi run --"``. Parsed with ``shlex.split`` so values containing
+  shell-quoted whitespace (e.g. ``"'/path with space/pixi' run --"``) are
+  tokenized correctly.
 
 Exit code:
 
@@ -33,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -161,9 +164,10 @@ def run_under_gdb(
         core_dir: Directory for cores and gdb logs (created if absent).
         command: The program to run. Resolved via ``PATH`` if not a path.
         command_args: Arguments passed to ``command`` verbatim.
-        gdb_cmd_prefix: Optional whitespace-separated command prefix inserted
-            before ``gdb`` (e.g. ``"pixi run --"``) so gdb and its inferior
-            inherit an activated environment.
+        gdb_cmd_prefix: Optional command prefix inserted before ``gdb`` (e.g.
+            ``"pixi run --"``) so gdb and its inferior inherit an activated
+            environment. Parsed with :func:`shlex.split` to honor shell quoting
+            rules, so paths with embedded whitespace can be quoted.
 
     Returns:
         ``0``/``N`` for a normal exit with code ``N``; ``128 + signo`` if the
@@ -200,7 +204,7 @@ def run_under_gdb(
         print(f"[run-under-gdb] binary   : {command_bin}", file=sys.stderr)
         print(f"[run-under-gdb] args     : {' '.join(command_args)}", file=sys.stderr)
 
-        prefix = gdb_cmd_prefix.split() if gdb_cmd_prefix else []
+        prefix = shlex.split(gdb_cmd_prefix) if gdb_cmd_prefix else []
         gdb_cmd = [
             *prefix,
             "gdb",
@@ -260,7 +264,8 @@ def main(argv: list[str] | None = None) -> int:
     Reads two environment variables:
 
     * ``RUN_UNDER_GDB=0`` — bypass gdb and exec the command directly.
-    * ``GDB_CMD_PREFIX`` — optional prefix word list inserted before ``gdb``.
+    * ``GDB_CMD_PREFIX`` — optional prefix inserted before ``gdb``; parsed with
+      ``shlex.split`` so shell-quoted whitespace in paths is preserved.
 
     Args:
         argv: Argument vector (defaults to ``sys.argv[1:]``).
