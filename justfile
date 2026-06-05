@@ -38,7 +38,7 @@ test-integration:
 test-shell:
     pixi run test-shell
 
-# Re-run unit tests on file change (uses pytest-watch). Cancel with Ctrl-C.
+# Re-run unit tests on file change (uses pytest-watcher). Cancel with Ctrl-C.
 watch:
     pixi run --environment default ptw {{ unit_test_dir }} -- --no-cov -q
 

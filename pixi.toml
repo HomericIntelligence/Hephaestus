@@ -68,9 +68,11 @@ bats-core = ">=1.11.0,<2"
 pip-audit = ">=2.7,<3"
 build = ">=1.0,<2"
 pdoc = ">=14.0,<15"
-# pytest-watch (ptw) powers `just watch` — runs unit tests on file change for
-# fast feedback during local development. Not on conda-forge; ships from PyPI.
-pytest-watch = ">=4.2,<5"
+# pytest-watcher (ptw) powers `just watch` — runs unit tests on file change for
+# fast feedback during local development. Actively maintained fork of the
+# unmaintained pytest-watch (last 2018 release; see issue #746). Not on
+# conda-forge; ships from PyPI.
+pytest-watcher = ">=0.4,<1"
 
 [feature.lint.dependencies]
 ruff = ">=0.1.0,<1"
