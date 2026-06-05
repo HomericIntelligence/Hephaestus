@@ -76,6 +76,13 @@ ProjectHephaestus/
 
 This project uses [Pixi](https://pixi.sh) for environment management, which automatically handles dependencies and creates isolated environments.
 
+> **Platform note:** The pixi developer environment is **Linux-64 only** (see
+> `platforms` in [`pixi.toml`](pixi.toml)). On macOS or Windows, install the
+> published wheel into a plain virtualenv instead — see
+> [From PyPI](#from-pypi) above. The
+> full comparison table (install paths, supported platforms, Python versions)
+> lives in [CONTRIBUTING.md#platform-support](CONTRIBUTING.md#platform-support).
+
 ### Prerequisites
 
 Install Pixi by following the [official installation guide](https://pixi.sh/install/).
