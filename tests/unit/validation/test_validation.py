@@ -445,6 +445,49 @@ class TestLinkValidationPipeline:
         assert results["passed"] == []
         assert results["failed"] == []
 
+    def test_validate_internal_link_rejects_traversal(self, tmp_path):
+        """Path-traversal targets are rejected before any filesystem probe."""
+        md_file = tmp_path / "docs" / "index.md"
+        md_file.parent.mkdir()
+        md_file.write_text("# Index")
+        valid, error = validate_internal_link("../../etc/passwd", md_file, tmp_path)
+        assert valid is False
+        assert "outside repository" in error.lower()
+
+    def test_validate_internal_link_rejects_absolute_traversal(self, tmp_path):
+        """Absolute-from-root links cannot escape via leading '/...'."""
+        md_file = tmp_path / "docs" / "index.md"
+        md_file.parent.mkdir()
+        md_file.write_text("# Index")
+        valid, error = validate_internal_link("/../../etc/passwd", md_file, tmp_path)
+        assert valid is False
+        assert "outside repository" in error.lower()
+
+    def test_validate_relative_link_rejects_traversal(self, tmp_path):
+        """validate_relative_link refuses targets outside repo_root."""
+        from hephaestus.validation.markdown import validate_relative_link
+
+        md_file = tmp_path / "docs" / "index.md"
+        md_file.parent.mkdir()
+        md_file.write_text("# Index")
+        valid, error = validate_relative_link("../../etc/passwd", md_file, tmp_path)
+        assert valid is False
+        assert error is not None
+        assert "outside repository" in error.lower()
+
+    def test_validate_relative_link_within_repo_still_passes(self, tmp_path):
+        """Legitimate relative links inside repo_root continue to validate."""
+        from hephaestus.validation.markdown import validate_relative_link
+
+        md_file = tmp_path / "docs" / "a" / "index.md"
+        md_file.parent.mkdir(parents=True)
+        md_file.write_text("# Index")
+        target = tmp_path / "docs" / "b.md"
+        target.write_text("# B")
+        valid, error = validate_relative_link("../b.md", md_file, tmp_path)
+        assert valid is True
+        assert error is None
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -128,6 +128,28 @@ def extract_markdown_links(content: str) -> list[tuple[str, int]]:
     return links
 
 
+def _is_within_repo(candidate: Path, repo_root: Path) -> bool:
+    """Return True iff candidate is within repo_root after resolving both paths.
+
+    Both paths are compared after .resolve() so symlinks and .. segments
+    cannot escape the boundary. Used to prevent user-supplied markdown link
+    targets from probing arbitrary host paths.
+
+    Args:
+        candidate: Path to check for containment.
+        repo_root: Repository root boundary.
+
+    Returns:
+        True if candidate is the same as or nested under repo_root.
+
+    """
+    try:
+        candidate.resolve().relative_to(repo_root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
 def validate_relative_link(
     link: str, source_file: Path, repo_root: Path
 ) -> tuple[bool, str | None]:
@@ -160,8 +182,10 @@ def validate_relative_link(
     if not file_part:
         return True, None
 
-    # Resolve relative path
+    # Resolve relative path and confine to repo_root
     link_path = (source_file.parent / file_part).resolve()
+    if not _is_within_repo(link_path, repo_root):
+        return False, f"Link target outside repository: {link}"
 
     # Check if file exists
     if not link_path.exists():
@@ -549,9 +573,12 @@ def validate_internal_link(link: str, source_file: Path, repo_root: Path) -> tup
         return True, ""
 
     if link_path.startswith("/"):
-        target_path = repo_root / link_path.lstrip("/")
+        target_path = (repo_root / link_path.lstrip("/")).resolve()
     else:
         target_path = (source_file.parent / link_path).resolve()
+
+    if not _is_within_repo(target_path, repo_root):
+        return False, f"Link target outside repository: {link_path}"
 
     if not target_path.exists():
         return False, f"File not found: {link_path}"
