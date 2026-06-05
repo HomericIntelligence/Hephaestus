@@ -5,6 +5,8 @@ import importlib
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 # All top-level symbols from hephaestus.__all__
 TOP_LEVEL_SYMBOLS = [
     "COMMAND_REGISTRY",

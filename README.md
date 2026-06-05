@@ -67,12 +67,24 @@ pixi shell
 ### Running Tests
 
 ```bash
-# Run tests using the test feature
-pixi run test
-
-# Or run tests directly with pytest
+# Run all tests (unit + integration)
+just test
 pixi run pytest
+
+# Run only unit tests (coverage-gated in CI)
+just test-unit
+pytest -m unit
+
+# Run only integration tests
+just test-integration
+pytest -m integration
+
+# Run all tests except integration
+pytest -m "not integration"
 ```
+
+All integration tests carry `pytest.mark.integration` (module-level `pytestmark`),
+so marker-based selection is reliable.
 
 ### Development Commands
 

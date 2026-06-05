@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.integration
+
 from hephaestus.logging.utils import correlation_id_scope, get_current_correlation_id
 from hephaestus.utils.helpers import run_subprocess
 
