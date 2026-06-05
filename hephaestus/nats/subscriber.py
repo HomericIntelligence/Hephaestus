@@ -315,11 +315,8 @@ class NATSSubscriberThread(threading.Thread):
             while not self._stop_event.is_set():
                 for sub in subscriptions:
                     try:
-                        msg = await asyncio.wait_for(
-                            sub.next_msg(timeout=0.5),
-                            timeout=1.0,
-                        )
-                    except (asyncio.TimeoutError, TimeoutError):
+                        msg = await sub.next_msg(timeout=0.5)
+                    except TimeoutError:
                         continue
 
                     try:
