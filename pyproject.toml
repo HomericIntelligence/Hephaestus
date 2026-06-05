@@ -180,6 +180,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
     "unit: marks tests as unit tests",
+    "requires_posix: requires POSIX coreutils (echo, false, ls) and/or git on PATH; skipped on win32",
 ]
 
 [tool.mypy]

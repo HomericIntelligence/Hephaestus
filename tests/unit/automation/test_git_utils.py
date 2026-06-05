@@ -1,6 +1,7 @@
 """Tests for git utility functions."""
 
 import subprocess
+import sys
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,11 @@ def _clear_caches() -> Generator[None, None, None]:
     clear_repo_caches()
 
 
+@pytest.mark.requires_posix
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="TestRun shells out to echo/false/ls; POSIX coreutils not guaranteed on win32 (#742)",
+)
 class TestRun:
     """Tests for run function."""
 

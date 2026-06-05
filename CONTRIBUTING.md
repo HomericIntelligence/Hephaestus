@@ -75,6 +75,28 @@ Run tests with:
 pixi run test
 ```
 
+### Test environment requirements
+
+The unit-test suite executes a small number of real subprocesses and therefore
+assumes a POSIX-like development environment. Specifically:
+
+- **`echo`, `false`, `ls`** on `PATH` — used by `tests/unit/automation/test_git_utils.py::TestRun`
+  to exercise the `run()` wrapper end-to-end (four cases).
+- **`git`** on `PATH` — used by `tests/unit/automation/test_session_naming.py`
+  (`TestShortGithash::test_real_repo` and
+  `TestCurrentTrunkGithash::test_falls_back_to_short_githash`) to create a
+  throwaway repo inside `tmp_path` with `git init -q` and `git commit
+  --allow-empty --no-gpg-sign`. Git environment variables (`GIT_DIR`,
+  `GIT_WORK_TREE`, etc.) are scrubbed and author/committer identity is forced
+  via `_git_test_env()` so the tests do not depend on the contributor's
+  `~/.gitconfig`.
+
+These cases are tagged with the `requires_posix` pytest marker and are skipped
+automatically on `sys.platform == "win32"`. They run under macOS, Linux, and
+WSL with no extra setup beyond `pixi install`. Windows contributors using Git
+Bash / MSYS2 will execute them; pure-Windows-Python runs will skip them.
+Tracking: #742.
+
 ## Documentation
 
 - Update docstrings for code changes

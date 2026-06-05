@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -172,6 +173,11 @@ class TestSessionUUID:
             session_name("R", 1, AGENT_PLANNER, **bad_kwargs)
 
 
+@pytest.mark.requires_posix
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Creates a throwaway git repo via real `git init`/`git commit`; skipped on win32 (#742)",
+)
 class TestShortGithash:
     """``git rev-parse --short=7 HEAD`` wrapper with graceful failure."""
 
@@ -265,6 +271,11 @@ class TestSessionJsonlPath:
         assert "v1.2.3" not in p.parent.name
 
 
+@pytest.mark.requires_posix
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Creates a throwaway git repo via real `git init`/`git commit`; skipped on win32 (#742)",
+)
 class TestCurrentTrunkGithash:
     """``current_trunk_githash`` reads env or falls back to live rev-parse."""
 
