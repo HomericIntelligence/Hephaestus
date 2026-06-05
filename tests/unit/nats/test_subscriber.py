@@ -315,3 +315,80 @@ class TestConfigurableJoinTimeout:
         thread._stop_event.set()
         # Thread was never started — stop() should not raise.
         thread.stop()
+
+
+def test_importing_subscriber_does_not_mutate_global_warnings_filters() -> None:
+    """Regression for #798: module-level warnings.filterwarnings was global mutation.
+
+    Spawns a fresh Python process so test-collection import state cannot mask
+    the leak. The subprocess snapshots warnings.filters, imports the module,
+    and asserts no row was added.
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import warnings, json, sys;"
+        "before = list(warnings.filters);"
+        "import hephaestus.nats.subscriber;"  # triggers module body
+        "after = list(warnings.filters);"
+        "sys.exit(0 if after == before else 1)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        "Importing hephaestus.nats.subscriber added a row to warnings.filters; "
+        "suppression should be scoped via warnings.catch_warnings() inside "
+        "_subscribe_loop instead of running at module scope. "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+def test_subscribe_loop_lazy_import_suppresses_deprecation_warning() -> None:
+    """Regression for #798: catch_warnings() suppresses nats-py DeprecationWarning.
+
+    The catch_warnings() block must actually suppress the nats-py
+    DeprecationWarning when _subscribe_loop runs its lazy import.
+
+    Runs in a subprocess with -W error::DeprecationWarning so that if the
+    suppression block fails to scope correctly, the import re-raises as an
+    error and the subprocess exits non-zero. The NATS connect that follows
+    the import is expected to fail (no broker); we only care that the import
+    inside the catch_warnings block completed cleanly.
+    """
+    import subprocess
+    import sys
+
+    code = """
+import asyncio
+from hephaestus.nats.config import NATSConfig
+from hephaestus.nats.subscriber import NATSSubscriberThread
+
+cfg = NATSConfig(enabled=True, url='nats://127.0.0.1:1', subjects=['x.>'])
+t = NATSSubscriberThread(config=cfg, handler=lambda e: None)
+
+try:
+    asyncio.run(t._subscribe_loop())
+except DeprecationWarning:
+    raise SystemExit(2)
+except Exception:
+    pass
+
+raise SystemExit(0)
+"""
+    result = subprocess.run(
+        [sys.executable, "-W", "error::DeprecationWarning", "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        "Lazy import of nats-py inside _subscribe_loop leaked a "
+        "DeprecationWarning past the catch_warnings() block. "
+        f"returncode={result.returncode} stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
