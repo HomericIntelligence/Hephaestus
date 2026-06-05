@@ -28,7 +28,6 @@ from hephaestus.nats.events import NATSEvent as NATSEvent
 from hephaestus.nats.events import SubjectParts as SubjectParts
 from hephaestus.nats.events import parse_subject as parse_subject
 from hephaestus.nats.handlers import EventRouter as EventRouter
-from hephaestus.nats.handlers import create_default_router as create_default_router
 from hephaestus.nats.subscriber import DEFAULT_JOIN_TIMEOUT as DEFAULT_JOIN_TIMEOUT
 from hephaestus.nats.subscriber import NATSSubscriberThread as NATSSubscriberThread
 from hephaestus.nats.subscriber import SubscriberState as SubscriberState
@@ -41,7 +40,6 @@ __all__ = [
     "NATSSubscriberThread",
     "SubjectParts",
     "SubscriberState",
-    "create_default_router",
     "load_nats_config",
     "parse_subject",
 ]

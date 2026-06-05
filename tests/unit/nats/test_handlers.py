@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from hephaestus.nats.events import NATSEvent
-from hephaestus.nats.handlers import EventRouter, create_default_router
+from hephaestus.nats.handlers import EventRouter
 
 
 def _event(subject: str) -> NATSEvent:
@@ -51,24 +51,3 @@ class TestEventRouter:
         router.dispatch(_event("hi.tasks.team.123.created"))
         first.assert_not_called()
         second.assert_called_once()
-
-
-class TestCreateDefaultRouter:
-    """Tests for create_default_router()."""
-
-    def test_returns_event_router(self) -> None:
-        router = create_default_router()
-        assert isinstance(router, EventRouter)
-
-    def test_has_created_handler(self) -> None:
-        router = create_default_router()
-        # Should dispatch without error
-        router.dispatch(_event("hi.tasks.team.123.created"))
-
-    def test_has_updated_handler(self) -> None:
-        router = create_default_router()
-        router.dispatch(_event("hi.tasks.team.123.updated"))
-
-    def test_has_completed_handler(self) -> None:
-        router = create_default_router()
-        router.dispatch(_event("hi.tasks.team.123.completed"))

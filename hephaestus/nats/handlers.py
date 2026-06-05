@@ -77,35 +77,3 @@ class EventRouter:
                 parts.verb,
                 event.sequence,
             )
-
-
-def _handle_task_created(event: NATSEvent) -> None:
-    """Log a task creation event."""
-    logger.info("Task created: %s (seq=%d)", event.subject, event.sequence)
-
-
-def _handle_task_updated(event: NATSEvent) -> None:
-    """Log a task update event."""
-    logger.info("Task updated: %s (seq=%d)", event.subject, event.sequence)
-
-
-def _handle_task_completed(event: NATSEvent) -> None:
-    """Log a task completion event."""
-    logger.info("Task completed: %s (seq=%d)", event.subject, event.sequence)
-
-
-def create_default_router() -> EventRouter:
-    """Create an :class:`EventRouter` pre-loaded with default stub handlers.
-
-    The default handlers log creation, update, and completion events.
-    Register your own handlers to override them.
-
-    Returns:
-        :class:`EventRouter` with created/updated/completed handlers registered.
-
-    """
-    router = EventRouter()
-    router.register("created", _handle_task_created)
-    router.register("updated", _handle_task_updated)
-    router.register("completed", _handle_task_completed)
-    return router
