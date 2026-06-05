@@ -167,7 +167,7 @@ max-complexity = 10
 "scripts/**" = ["C901", "S101", "D102", "D107", "D401"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests/unit"]
+testpaths = ["tests/unit", "tests/integration"]
 pythonpath = [".", "scripts"]
 addopts = [
     "-v",

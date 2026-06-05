@@ -9,6 +9,8 @@ import pytest
 from hephaestus.logging.utils import correlation_id_scope, get_current_correlation_id
 from hephaestus.utils.helpers import run_subprocess
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture(autouse=True)
 def _fake_binary_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
