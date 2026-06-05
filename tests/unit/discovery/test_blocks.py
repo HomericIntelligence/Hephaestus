@@ -25,12 +25,6 @@ class TestDiscoverBlocks:
         with pytest.raises(FileNotFoundError):
             discover_blocks(tmp_path / "nonexistent.md", _BLOCK_DEFS)
 
-    def test_no_defs_raises_value_error(self, tmp_path: Path) -> None:
-        f = tmp_path / "CLAUDE.md"
-        f.write_text(_SAMPLE_MD)
-        with pytest.raises(ValueError, match="block_defs must be provided"):
-            discover_blocks(f, None)
-
 
 class TestExtractBlocks:
     """Tests for extract_blocks()."""
@@ -67,9 +61,3 @@ class TestExtractBlocks:
         out = tmp_path / "blocks"
         result = extract_blocks(src, out, _BLOCK_DEFS)
         assert all(isinstance(p, Path) for p in result)
-
-    def test_no_defs_raises(self, tmp_path: Path) -> None:
-        src = tmp_path / "CLAUDE.md"
-        src.write_text(_SAMPLE_MD)
-        with pytest.raises(ValueError):
-            extract_blocks(src, tmp_path / "out", None)

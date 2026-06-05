@@ -26,14 +26,11 @@ BlockDef = tuple[str, int, int, str]
 
 def discover_blocks(
     claude_md_path: Path,
-    block_defs: list[BlockDef] | None = None,
+    block_defs: list[BlockDef],
 ) -> list[BlockDef]:
     """Return block definitions for a CLAUDE.md file.
 
-    If *block_defs* is provided it is returned as-is after validating that
-    *claude_md_path* exists.  When no definitions are supplied the function
-    raises :exc:`ValueError` — automatic section detection is intentionally
-    not implemented because markdown headings vary too much across projects.
+    Validates that *claude_md_path* exists and returns *block_defs* as-is.
 
     Args:
         claude_md_path: Path to the CLAUDE.md file.
@@ -45,23 +42,17 @@ def discover_blocks(
 
     Raises:
         FileNotFoundError: If *claude_md_path* does not exist.
-        ValueError: If *block_defs* is ``None`` (no automatic detection).
 
     """
     if not claude_md_path.exists():
         raise FileNotFoundError(f"CLAUDE.md not found: {claude_md_path}")
-    if block_defs is None:
-        raise ValueError(
-            "block_defs must be provided; automatic section detection is not implemented. "
-            "Pass an explicit list of (id, start_line, end_line, filename) tuples."
-        )
     return block_defs
 
 
 def extract_blocks(
     source_file: Path,
     output_dir: Path,
-    block_defs: list[BlockDef] | None = None,
+    block_defs: list[BlockDef],
 ) -> list[Path]:
     """Extract sections of *source_file* into separate files.
 
@@ -70,14 +61,13 @@ def extract_blocks(
         output_dir: Directory where extracted block files are written.
             Created if it does not exist.
         block_defs: Block definitions ``(id, start, end, filename)``.
-            Lines are 1-indexed.  Passed through to :func:`discover_blocks`.
+            Lines are 1-indexed.
 
     Returns:
         List of paths to the created block files.
 
     Raises:
         FileNotFoundError: If *source_file* does not exist.
-        ValueError: If *block_defs* is ``None``.
 
     """
     output_dir.mkdir(parents=True, exist_ok=True)
