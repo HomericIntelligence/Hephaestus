@@ -128,10 +128,10 @@ def main() -> int:
 
     # Exit with error if critical regressions and flag is set
     if args.fail_on_regression and critical_count > 0:
-        print(f"\n❌ FAILED: {critical_count} critical regressions detected", file=sys.stderr)
+        print(f"\nFAIL: {critical_count} critical regressions detected", file=sys.stderr)
         return 1
 
-    print("\n✅ No critical regressions detected", file=sys.stderr)
+    print("\nPASS: No critical regressions detected", file=sys.stderr)
     return 0
 
 
