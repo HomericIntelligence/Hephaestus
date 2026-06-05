@@ -228,31 +228,27 @@ class TestPrefetchIssueStates:
     @patch("hephaestus.automation.github_api._gh_call")
     @patch("hephaestus.automation.github_api.get_repo_info")
     def test_int_validation_in_graphql_query(self, mock_repo_info: Any, mock_gh_call: Any) -> None:
-        """Test that issue numbers are cast to int in GraphQL query to prevent injection."""
+        """Issue numbers must flow through `-F nN=<int>` flags, not interpolation (#738)."""
         mock_repo_info.return_value = ("owner", "repo")
-
         mock_result = Mock()
         mock_result.stdout = json.dumps(
-            {
-                "data": {
-                    "repository": {
-                        "issue0": {"number": 123, "state": "OPEN"},
-                    }
-                }
-            }
+            {"data": {"repository": {"issue0": {"number": 123, "state": "OPEN"}}}}
         )
         mock_gh_call.return_value = mock_result
 
-        # Call with issue numbers
         states = prefetch_issue_states([123])
 
-        # Verify the GraphQL query was called with int-casted numbers
         mock_gh_call.assert_called()
-        call_args = mock_gh_call.call_args
-        # The query should contain the int-casted number
-        query_arg = call_args[0][0]
-        assert any("issue(number: 123)" in arg for arg in query_arg)
-
+        argv = mock_gh_call.call_args[0][0]
+        query = next(a for a in argv if a.startswith("query="))
+        assert "$n0:Int!" in query
+        assert "issue(number:$n0)" in query
+        assert "issue(number: 123)" not in query  # regression guard for #738
+        assert "n0=123" in argv
+        # owner/repo also parameterised (no f-string interpolation)
+        assert "repository(owner:$owner,name:$name)" in query
+        assert 'owner: "owner"' not in query
+        assert "owner=owner" in argv and "name=repo" in argv
         assert states[123] == IssueState.OPEN
 
     @patch("hephaestus.automation.github_api._gh_call")
@@ -268,6 +264,56 @@ class TestPrefetchIssueStates:
         with pytest.raises(ValueError):
             # Using "abc" as string will fail the int() cast
             prefetch_issue_states(["abc"])  # type: ignore
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info")
+    def test_batch_uses_one_variable_per_issue(
+        self, mock_repo_info: Any, mock_gh_call: Any
+    ) -> None:
+        """Each batch element gets its own $nN scalar + -F nN flag (#738)."""
+        mock_repo_info.return_value = ("owner", "repo")
+        mock_result = Mock()
+        mock_result.stdout = json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "issue0": {"number": 11, "state": "OPEN"},
+                        "issue1": {"number": 22, "state": "CLOSED"},
+                        "issue2": {"number": 33, "state": "OPEN"},
+                    }
+                }
+            }
+        )
+        mock_gh_call.return_value = mock_result
+
+        prefetch_issue_states([11, 22, 33])
+
+        argv = mock_gh_call.call_args[0][0]
+        query = next(a for a in argv if a.startswith("query="))
+        for idx, num in enumerate([11, 22, 33]):
+            assert f"$n{idx}:Int!" in query
+            assert f"issue{idx}: issue(number:$n{idx})" in query
+            assert f"n{idx}={num}" in argv
+
+    @patch("hephaestus.automation.github_api.gh_issue_json")
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info")
+    def test_batch_failure_falls_back_to_individual_fetch(
+        self, mock_repo_info: Any, mock_gh_call: Any, mock_issue_json: Any
+    ) -> None:
+        """When batch GraphQL fails, _fetch_batch_states falls back to gh_issue_json."""
+        mock_repo_info.return_value = ("owner", "repo")
+        mock_gh_call.side_effect = subprocess.CalledProcessError(1, "gh")
+        mock_issue_json.side_effect = [
+            {"number": 11, "state": "OPEN"},
+            {"number": 22, "state": "CLOSED"},
+        ]
+
+        states = prefetch_issue_states([11, 22])
+
+        assert mock_issue_json.call_count == 2
+        assert states[11] == IssueState.OPEN
+        assert states[22] == IssueState.CLOSED
 
 
 class TestGhCall:
