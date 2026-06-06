@@ -30,14 +30,11 @@ jobs:
           pixi-version: v0.69.0
           environments: lint
           locked: true
-
-      - name: Cache pixi environments
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
-        with:
-          path: |
-            .pixi
-            ~/.cache/rattler/cache
-          key: pixi-lint-${{ runner.os }}-${{ hashFiles('pixi.lock') }}
+          # setup-pixi already caches `.pixi` keyed exactly on the pixi.lock
+          # hash. A second actions/cache step over `.pixi` restored a STALE env
+          # (saved by an earlier poisoned run under the same exact key) on top
+          # of this --locked install, downgrading urllib3 2.7.0 -> 2.6.3 so
+          # pip-audit failed against an already-patched lock. Do not add one.
 
       - name: Run pip-audit
         id: pip-audit
@@ -72,14 +69,11 @@ jobs:
           pixi-version: v0.69.0
           environments: lint
           locked: true
-
-      - name: Cache pixi environments
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
-        with:
-          path: |
-            .pixi
-            ~/.cache/rattler/cache
-          key: pixi-lint-${{ runner.os }}-${{ hashFiles('pixi.lock') }}
+          # setup-pixi already caches `.pixi` keyed exactly on the pixi.lock
+          # hash. A second actions/cache step over `.pixi` restored a STALE env
+          # (saved by an earlier poisoned run under the same exact key) on top
+          # of this --locked install, downgrading urllib3 2.7.0 -> 2.6.3 so
+          # pip-audit failed against an already-patched lock. Do not add one.
 
       - name: Run bandit (SAST)
         id: bandit

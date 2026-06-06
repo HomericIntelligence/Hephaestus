@@ -173,12 +173,18 @@ class TestPRInfo:
 
 
 class TestGetResignEmail:
-    """Regression tests for #497: resign email is configurable, not hardcoded."""
+    """Regression tests for #497: resign email is configurable, not hardcoded.
+
+    These exercise email *resolution*; the GPG-key-match guard (#1025) is
+    bypassed with FLEET_SKIP_EMAIL_KEY_CHECK so resolution is tested in
+    isolation. The guard itself is covered by TestResignEmailKeyGuard.
+    """
 
     def test_env_var_takes_precedence(self, monkeypatch) -> None:
         """FLEET_GIT_EMAIL is used when set."""
         from hephaestus.github.fleet_sync import get_resign_email
 
+        monkeypatch.setenv("FLEET_SKIP_EMAIL_KEY_CHECK", "1")
         monkeypatch.setenv("FLEET_GIT_EMAIL", "alice@example.com")
         assert get_resign_email() == "alice@example.com"
 
@@ -186,6 +192,7 @@ class TestGetResignEmail:
         """An empty FLEET_GIT_EMAIL falls back to git config."""
         from hephaestus.github import fleet_sync
 
+        monkeypatch.setenv("FLEET_SKIP_EMAIL_KEY_CHECK", "1")
         monkeypatch.setenv("FLEET_GIT_EMAIL", "")
 
         # Stub subprocess.run so the test does not depend on the operator's
@@ -226,10 +233,95 @@ class TestGetResignEmail:
         """get_resign_exec() inlines the resolved email into the git command."""
         from hephaestus.github.fleet_sync import get_resign_exec
 
+        monkeypatch.setenv("FLEET_SKIP_EMAIL_KEY_CHECK", "1")
         monkeypatch.setenv("FLEET_GIT_EMAIL", "carol@example.com")
         cmd = get_resign_exec()
         assert "user.email=carol@example.com" in cmd
         assert "commit --amend --no-edit -S --reset-author" in cmd
+
+
+class TestResignEmailKeyGuard:
+    """Regression tests for #1025: re-sign email must match the GPG signing key.
+
+    A commit re-signed with an email that is not on the configured signing key
+    signs locally but GitHub reports verified=false/reason=no_user, so pr-policy
+    rejects the PR at merge. get_resign_email() must catch this and fail fast.
+    """
+
+    def _stub_signing_key(self, monkeypatch, *, signingkey: str, uids: list[str]) -> None:
+        """Stub git+gpg so the signing key reports ``uids`` as its UID emails."""
+
+        def fake_run(cmd, *args, **kwargs):
+            result = MagicMock()
+            if cmd[:3] == ["git", "config", "--get"] and cmd[3] == "user.signingkey":
+                result.returncode = 0 if signingkey else 1
+                result.stdout = f"{signingkey}\n" if signingkey else ""
+            elif cmd[:2] == ["gpg", "--list-keys"]:
+                result.returncode = 0
+                result.stdout = "".join(
+                    f"uid:-::::1700000000::HASH::Name <{e}>::::::::::0:\n" for e in uids
+                )
+            else:
+                result.returncode = 1
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr("hephaestus.github.fleet_sync.subprocess.run", fake_run)
+
+    def test_email_on_key_is_accepted(self, monkeypatch) -> None:
+        """Resolution succeeds when the email is a UID on the signing key."""
+        from hephaestus.github import fleet_sync
+
+        monkeypatch.delenv("FLEET_SKIP_EMAIL_KEY_CHECK", raising=False)
+        monkeypatch.setenv("FLEET_GIT_EMAIL", "Dev@Example.com")  # case-insensitive
+        self._stub_signing_key(monkeypatch, signingkey="ABC123", uids=["dev@example.com"])
+        assert fleet_sync.get_resign_email() == "Dev@Example.com"
+
+    def test_email_not_on_key_raises(self, monkeypatch) -> None:
+        """A mismatch fails fast with an actionable pr-policy message."""
+        from hephaestus.github import fleet_sync
+
+        monkeypatch.delenv("FLEET_SKIP_EMAIL_KEY_CHECK", raising=False)
+        monkeypatch.setenv("FLEET_GIT_EMAIL", "bot@users.noreply.github.com")
+        self._stub_signing_key(monkeypatch, signingkey="ABC123", uids=["dev@example.com"])
+        with pytest.raises(RuntimeError, match="not a UID on the configured"):
+            fleet_sync.get_resign_email()
+
+    def test_skip_env_bypasses_check(self, monkeypatch) -> None:
+        """FLEET_SKIP_EMAIL_KEY_CHECK lets a mismatched email through."""
+        from hephaestus.github import fleet_sync
+
+        monkeypatch.setenv("FLEET_SKIP_EMAIL_KEY_CHECK", "1")
+        monkeypatch.setenv("FLEET_GIT_EMAIL", "bot@users.noreply.github.com")
+        self._stub_signing_key(monkeypatch, signingkey="ABC123", uids=["dev@example.com"])
+        assert fleet_sync.get_resign_email() == "bot@users.noreply.github.com"
+
+    def test_no_signing_key_skips_check(self, monkeypatch) -> None:
+        """When no signingkey is configured, the check is skipped (cannot verify)."""
+        from hephaestus.github import fleet_sync
+
+        monkeypatch.delenv("FLEET_SKIP_EMAIL_KEY_CHECK", raising=False)
+        monkeypatch.setenv("FLEET_GIT_EMAIL", "anything@example.com")
+        self._stub_signing_key(monkeypatch, signingkey="", uids=[])
+        assert fleet_sync.get_resign_email() == "anything@example.com"
+
+    def test_gpg_missing_skips_check(self, monkeypatch) -> None:
+        """When gpg is not installed, the check is skipped rather than blocking."""
+        from hephaestus.github import fleet_sync
+
+        monkeypatch.delenv("FLEET_SKIP_EMAIL_KEY_CHECK", raising=False)
+        monkeypatch.setenv("FLEET_GIT_EMAIL", "anything@example.com")
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[:2] == ["gpg", "--list-keys"]:
+                raise FileNotFoundError("gpg")
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "ABC123\n"
+            return result
+
+        monkeypatch.setattr("hephaestus.github.fleet_sync.subprocess.run", fake_run)
+        assert fleet_sync.get_resign_email() == "anything@example.com"
 
 
 class TestMain:
@@ -317,6 +409,8 @@ class TestTimeoutHandling:
     def test_get_resign_email_with_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """get_resign_email handles TimeoutExpired by trying next config source."""
         monkeypatch.delenv("FLEET_GIT_EMAIL", raising=False)
+        # Isolate resolution from the #1025 GPG-key-match guard.
+        monkeypatch.setenv("FLEET_SKIP_EMAIL_KEY_CHECK", "1")
 
         call_count = [0]
 
@@ -337,6 +431,8 @@ class TestTimeoutHandling:
     def test_get_resign_email_uses_metadata_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """get_resign_email uses METADATA_TIMEOUT."""
         monkeypatch.delenv("FLEET_GIT_EMAIL", raising=False)
+        # Isolate resolution from the #1025 GPG-key-match guard.
+        monkeypatch.setenv("FLEET_SKIP_EMAIL_KEY_CHECK", "1")
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="test@example.com\n")

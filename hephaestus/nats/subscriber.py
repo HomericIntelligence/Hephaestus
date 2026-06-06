@@ -280,6 +280,7 @@ class NATSSubscriberThread(threading.Thread):
                     module="nats",
                 )
                 import nats as nats_client
+                from nats.js.api import DeliverPolicy
         except ImportError:
             logger.error(
                 "nats-py is not installed. "
@@ -293,6 +294,11 @@ class NATSSubscriberThread(threading.Thread):
         try:
             js = nc.jetstream()
             subjects = self._config.subjects or ["hi.tasks.>"]
+            # The config carries deliver_policy as a plain string (e.g. "new")
+            # for YAML/env ergonomics; js.subscribe expects the DeliverPolicy
+            # enum. DeliverPolicy is a str-valued enum whose values match the
+            # config strings, so construct it directly.
+            deliver_policy = DeliverPolicy(self._config.deliver_policy)
             subscriptions = []
             for i, subject in enumerate(subjects):
                 durable = (
@@ -304,7 +310,7 @@ class NATSSubscriberThread(threading.Thread):
                     subject=subject,
                     durable=durable,
                     stream=self._config.stream,
-                    deliver_policy=self._config.deliver_policy,
+                    deliver_policy=deliver_policy,
                 )
                 subscriptions.append(sub)
 

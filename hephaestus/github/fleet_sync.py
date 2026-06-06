@@ -46,6 +46,98 @@ logger = get_logger(__name__)
 ORG = "HomericIntelligence"
 
 
+def _signing_key_uid_emails() -> list[str] | None:
+    """Return the email addresses on the configured GPG signing key, lowercased.
+
+    Reads ``git config user.signingkey`` and lists the UID emails on that key
+    via ``gpg --list-keys --with-colons``. Returns ``None`` (meaning "cannot
+    determine — skip the check") when:
+
+    - no ``user.signingkey`` is configured,
+    - ``gpg`` is not installed / not on PATH,
+    - the key cannot be read, or
+    - the lookup times out.
+
+    Returns an empty list only when the key exists but exposes no UID emails.
+    """
+    try:
+        key_result = subprocess.run(
+            ["git", "config", "--get", "user.signingkey"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=METADATA_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    signing_key = key_result.stdout.strip()
+    if key_result.returncode != 0 or not signing_key:
+        return None
+
+    try:
+        gpg_result = subprocess.run(
+            ["gpg", "--list-keys", "--with-colons", signing_key],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=METADATA_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    if gpg_result.returncode != 0:
+        return None
+
+    emails: list[str] = []
+    # ``uid`` records put the user-id string in field 10 (1-indexed); the email
+    # is the part inside angle brackets, e.g. "Name <addr@example.com>".
+    for line in gpg_result.stdout.splitlines():
+        fields = line.split(":")
+        if not fields or fields[0] != "uid" or len(fields) < 10:
+            continue
+        uid = fields[9]
+        start = uid.find("<")
+        end = uid.find(">", start + 1)
+        if start != -1 and end != -1:
+            emails.append(uid[start + 1 : end].strip().lower())
+    return emails
+
+
+def _validate_resign_email(email: str) -> str:
+    """Validate ``email`` matches the GPG signing key, then return it.
+
+    fleet_sync re-signs every rebased commit with ``git commit -S`` using the
+    local GPG key. GitHub only marks a signature ``verified`` when the commit's
+    committer email is one of the *verified emails on the account that owns the
+    signing key* — in practice, one of the key's UID emails. If we re-sign with
+    an email that is not on the key (e.g. an operator's bot/no-reply alias that
+    was never added to the key), the commit signs fine locally yet GitHub reports
+    ``{verified: false, reason: "no_user"}`` and the ``pr-policy`` "every commit
+    is signed" check rejects the PR at merge. Catch that here so fleet_sync fails
+    fast with an actionable message instead of producing commits that pr-policy
+    will silently reject across the whole fleet.
+
+    Set ``FLEET_SKIP_EMAIL_KEY_CHECK=1`` to bypass (e.g. signing format other than
+    OpenPGP, or a deliberately unusual setup).
+    """
+    if os.environ.get("FLEET_SKIP_EMAIL_KEY_CHECK", "").strip():
+        return email
+    key_emails = _signing_key_uid_emails()
+    if key_emails is None:
+        # Cannot determine the key's identities (no signingkey, gpg absent,
+        # unreadable key); don't block — the operator may sign by other means.
+        return email
+    if email.lower() not in key_emails:
+        raise RuntimeError(
+            f"fleet_sync: resign email {email!r} is not a UID on the configured "
+            f"GPG signing key (key UIDs: {key_emails or 'none'}). Re-signing with "
+            "this email would produce commits GitHub marks unverified, failing the "
+            "pr-policy 'every commit is signed' check at merge. Set FLEET_GIT_EMAIL "
+            "(or git config user.email) to an address on the signing key, or set "
+            "FLEET_SKIP_EMAIL_KEY_CHECK=1 to bypass."
+        )
+    return email
+
+
 def get_resign_email() -> str:
     """Return the email address used to re-sign rebased commits.
 
@@ -55,13 +147,18 @@ def get_resign_email() -> str:
     2. ``git config --global --get user.email``.
     3. ``git config --get user.email`` (any scope).
 
+    The resolved email is validated against the configured GPG signing key's
+    UID emails (see :func:`_validate_resign_email`); a mismatch raises
+    :class:`RuntimeError` because re-signing with it would produce commits
+    GitHub marks unverified, failing ``pr-policy`` at merge.
+
     Raises :class:`RuntimeError` if none is configured — fleet_sync must never
     silently re-sign with a fallback identity that doesn't belong to the
     operator.
     """
     env = os.environ.get("FLEET_GIT_EMAIL", "").strip()
     if env:
-        return env
+        return _validate_resign_email(env)
     for args in (["--global"], []):
         try:
             result = subprocess.run(
@@ -73,7 +170,7 @@ def get_resign_email() -> str:
             )
             email = result.stdout.strip()
             if result.returncode == 0 and email:
-                return email
+                return _validate_resign_email(email)
         except subprocess.TimeoutExpired:
             continue
     raise RuntimeError(

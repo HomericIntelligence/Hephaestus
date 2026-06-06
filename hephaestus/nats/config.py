@@ -15,9 +15,16 @@ Usage::
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+# Valid JetStream first-subscription deliver policies. These string values match
+# nats.js.api.DeliverPolicy's enum values, so the subscriber can build the enum
+# directly from the configured string (see hephaestus/nats/subscriber.py).
+DeliverPolicyStr = Literal[
+    "all", "last", "new", "by_start_sequence", "by_start_time", "last_per_subject"
+]
 
 
 class NATSConfig(BaseModel):
@@ -44,7 +51,7 @@ class NATSConfig(BaseModel):
         default="hephaestus-subscriber",
         description="Durable consumer name for at-least-once delivery",
     )
-    deliver_policy: str = Field(
+    deliver_policy: DeliverPolicyStr = Field(
         default="new",
         description="JetStream deliver policy (new, all, last, etc.)",
     )
