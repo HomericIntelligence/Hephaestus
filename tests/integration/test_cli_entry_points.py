@@ -143,9 +143,7 @@ class TestCLIVersionFlag:
             pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
         assert binary is not None
 
-        result = subprocess.run(
-            [binary, "--version"], capture_output=True, text=True, timeout=30
-        )
+        result = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, (
             f"{command} --version exited {result.returncode}\n"
             f"stdout: {result.stdout[:500]}\n"
@@ -167,9 +165,7 @@ class TestCLIVersionFlag:
             pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
         assert binary is not None
 
-        result = subprocess.run(
-            [binary, "-V"], capture_output=True, text=True, timeout=30
-        )
+        result = subprocess.run([binary, "-V"], capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, (
             f"{command} -V exited {result.returncode}\n"
             f"stdout: {result.stdout[:500]}\n"

@@ -258,7 +258,14 @@ class TestCliBarrelExports:
         """hephaestus.cli.__all__ lists the framework symbols, not just Colors."""
         import hephaestus.cli as cli
 
-        for symbol in ("create_parser", "COMMAND_REGISTRY", "format_table", "Colors", "add_version_arg"):
+        symbols = (
+            "create_parser",
+            "COMMAND_REGISTRY",
+            "format_table",
+            "Colors",
+            "add_version_arg",
+        )
+        for symbol in symbols:
             assert symbol in cli.__all__
             assert hasattr(cli, symbol)
 
