@@ -60,6 +60,12 @@ class TestImplementationPrompt:
         # Later iterations address inline PR-review threads in the same session.
         assert "PR-review thread" in out or "PR-review threads" in out
 
+    def test_implementation_prompt_instructs_reuse_existing_pr(self) -> None:
+        """The implementer must reuse an existing open PR, not duplicate it (#1018)."""
+        out = prompts.get_implementation_prompt(issue_number=42)
+        assert "gh pr list --head" in out
+        assert "DO NOT open a second PR" in out
+
 
 class TestPRReviewAnalysisPrompt:
     """Tests for the policy-aware PR review analysis prompt."""

@@ -931,6 +931,36 @@ def _assert_branch_commits_signed(branch: str, base: str = "main") -> None:
         )
 
 
+def _find_open_pr_for_head(branch: str) -> int | None:
+    """Return the number of an OPEN PR on ``branch``'s head, or None.
+
+    Used by :func:`gh_pr_create` as an idempotency guard so a re-run on a
+    branch that already has an open PR reuses it rather than creating a
+    duplicate (issue #1018). Any failure to query or parse (no PRs, malformed
+    output, transient error) is treated as "no open PR" so PR creation can
+    proceed normally.
+
+    Args:
+        branch: Head branch name to look up.
+
+    Returns:
+        The PR number of the first OPEN PR on the head, or None.
+
+    """
+    try:
+        result = _gh_call(
+            ["pr", "list", "--head", branch, "--json", "number,state", "--limit", "10"]
+        )
+        prs = json.loads(result.stdout or "[]")
+    except (subprocess.CalledProcessError, json.JSONDecodeError, TypeError) as e:
+        logger.debug("Open-PR lookup failed for head %s (treating as none): %s", branch, e)
+        return None
+    for pr in prs:
+        if str(pr.get("state", "")).upper() == "OPEN":
+            return cast(int, pr["number"])
+    return None
+
+
 def gh_pr_create(
     branch: str,
     title: str,
@@ -974,6 +1004,17 @@ def gh_pr_create(
 
     # Policy gate #2: every commit on the branch must be signed.
     _assert_branch_commits_signed(branch, base=base)
+
+    # Idempotency guard: if an OPEN PR already exists on this head, reuse it
+    # instead of opening a duplicate. This is the single chokepoint that all
+    # PR-creation callers funnel through, so it prevents the duplicate-PR
+    # failure observed on issue #768 (issue #1018). A closed/merged-only head
+    # still gets a fresh PR — the issue may legitimately need new work, and the
+    # worktree manager already extends the remote branch's history.
+    existing_open_pr = _find_open_pr_for_head(branch)
+    if existing_open_pr is not None:
+        logger.info("Reusing existing open PR #%s on head %s", existing_open_pr, branch)
+        return existing_open_pr
 
     try:
         # Create PR
