@@ -22,53 +22,99 @@ from hephaestus.agents.runtime import (
     is_codex,
 )
 
-# NOTE: Several symbols below are re-imported here purely so existing tests
-# can keep patching them at the ``hephaestus.automation.implementer.X`` path
-# (e.g. ``patch("hephaestus.automation.implementer.is_plan_review_go")``).
-# :mod:`.implementer_phase_runner` deliberately routes its call sites through
-# this module — see :meth:`.implementer_phase_runner.ImplementationPhaseRunner._impl_module`
-# — so a patch here intercepts both call sites.
-from . import (  # noqa: F401  # re-export for test-patch compatibility
+# ---------------------------------------------------------------------------
+# Test-patch contract (load-bearing — DO NOT remove a shim without checking
+# the call site AND every test it intercepts; see #710 for the refactor plan
+# that will eventually replace this with dependency injection).
+#
+# Why these re-exports exist:
+#   - ``implementer_phase_runner`` (the runtime call site) deliberately does
+#     NOT import these symbols directly. Instead, it dynamically looks them
+#     up via ``ImplementationPhaseRunner._impl_module`` (see
+#     ``implementer_phase_runner.py:188-199``), which returns *this* module.
+#   - That indirection means a test calling
+#     ``patch("hephaestus.automation.implementer.X", ...)`` intercepts the
+#     runtime call inside the phase runner too — without the runner needing
+#     a constructor-injected collaborator.
+#   - When the shim is removed or renamed, the patch silently no-ops and
+#     tests that depended on it will start exercising real network / disk.
+#
+# Maintenance rule: each shim below lists (1) the runtime call site that
+# reaches it via ``_impl_module``, and (2) the tests that patch it. Update
+# both columns when you add, remove, or rename a shim. Line citations are
+# correct as of the commit that introduced them; if they have drifted,
+# re-run ``grep -rn 'patch.*implementer\.<symbol>' tests/``.
+# ---------------------------------------------------------------------------
+# Patched by: tests via patch("hephaestus.automation.implementer.review_state")
+# Runtime call site: ``implementer_phase_runner.py:1194``
+from . import (  # noqa: F401  # test-patch shim — see contract above
     review_state,
 )
-from ._review_utils import find_pr_for_issue  # noqa: F401
-from .claude_invoke import invoke_claude_with_session  # noqa: F401
+
+# Patched by: tests/unit/automation/test_implementer.py:{274,354,390,435,460};
+#             tests/unit/automation/test_implementer_loop.py:559
+# Runtime call site: ``implementer_phase_runner.py:262`` (via ``_impl_module``)
+from ._review_utils import find_pr_for_issue  # noqa: F401  # test-patch shim
+
+# Patched by: tests/unit/automation/test_implementer_loop.py:{324,346,366,388}
+# Runtime call site: phase runner's claude-invocation code path (via ``_impl_module``)
+from .claude_invoke import invoke_claude_with_session  # noqa: F401  # test-patch shim
 from .curses_ui import CursesUI, ThreadLogManager
 from .dependency_resolver import CyclicDependencyError, DependencyResolver
 
 # ``get_repo_root`` is re-exported with an explicit ``as`` alias so that
 # ``implementer_cli.main`` (which resolves it via this module) and tests
 # patching ``implementer.get_repo_root`` share one lookup site.
-from .git_utils import (  # get_repo_slug/run kept for test-patch compat
+#
+# Patched by: tests/unit/automation/test_implementer.py:{91,161,197,250,427,518,539,563};
+#             tests/unit/automation/test_implementer_loop.py:30
+# Runtime call site: ``implementer.py:134`` (``IssueImplementer.__init__``)
+#                    + ``implementer_cli.main``
+from .git_utils import (
     get_repo_root as get_repo_root,
 )
+
+# Patched by: tests/unit/automation/test_implementer_loop.py:316
+# Runtime call site: ``implementer_phase_runner`` via ``_impl_module``
+# ``run`` is a real call site (not just a shim) for ``IssueImplementer._health_check``
+# (see ``implementer.py:294,301``); it does double duty as a patch surface.
 from .git_utils import (
-    get_repo_slug,  # noqa: F401
+    get_repo_slug,  # noqa: F401  # test-patch shim
     run,
 )
 
-# ``gh_list_open_issues`` is re-exported with an explicit ``as`` alias (not
-# called in this module's body any more — ``main`` lives in ``implementer_cli``)
-# so tests can keep patching it at
-# ``hephaestus.automation.implementer.gh_list_open_issues`` and have
-# ``implementer_cli.main`` (which looks it up here) observe the patch.
+# ``fetch_issue_info`` is a real call site (``IssueImplementer._load_issues``
+# at ``implementer.py:270``), not a shim.
 from .github_api import fetch_issue_info
+
+# ``gh_list_open_issues`` is re-exported with an explicit ``as`` alias so
+# ``implementer_cli.main`` (which looks it up here) and tests patching
+# ``implementer.gh_list_open_issues`` share one lookup site.
+#
+# Patched by: indirectly via ``implementer_cli.main``'s auto-discovery path
+# Runtime call site: ``implementer_cli.main`` (lazy lookup through this module)
 from .github_api import (
     gh_list_open_issues as gh_list_open_issues,
 )
 
-# MAX_REVIEW_ITERATIONS is re-exported so tests that import it via
+# ``MAX_REVIEW_ITERATIONS`` is re-exported so tests that import it via
 # ``hephaestus.automation.implementer`` see the same value the runtime loop
-# in :class:`ImplementationPhaseRunner` uses. There is a single source of
-# truth in implementer_phase_runner.
+# in :class:`ImplementationPhaseRunner` uses. Single source of truth lives
+# in ``implementer_phase_runner``.
 #
-# The CLI entry point (argument parsing, logging setup, and ``main``) lives in
-# ``implementer_cli`` (extracted for SRP — see #468). Re-exported here with
-# explicit ``as`` aliases (required by mypy) so the ``hephaestus-implement-issues``
-# console script (``hephaestus.automation.implementer:main``) keeps resolving and
-# existing tests calling ``implementer.main()`` / ``implementer._parse_args()``
-# and patching ``implementer.<dep>`` continue to work unchanged. ``main`` imports
-# this module lazily (inside its body), so this top-level import is cycle-safe.
+# The CLI entry point (argument parsing, logging setup, and ``main``) lives
+# in ``implementer_cli`` (extracted for SRP — see #468). Re-exported here
+# with explicit ``as`` aliases (required by mypy) for two reasons:
+#   1. Console script: ``hephaestus-implement-issues`` is wired to
+#      ``hephaestus.automation.implementer:main`` in ``pyproject.toml``
+#      (verified at tests/integration/test_orchestration_smoke.py:37).
+#   2. Test compatibility: existing tests call ``implementer.main()`` /
+#      ``implementer._parse_args()`` and patch dependencies at
+#      ``implementer.<dep>`` paths.
+# ``main`` imports this module lazily (inside its body) so this top-level
+# import is cycle-safe.
+# Patched by: tests/unit/automation/test_implementer.py (various)
+# Runtime call site: console script entry point ``hephaestus-implement-issues``
 from .implementer_cli import (
     _parse_args as _parse_args,
 )
@@ -87,7 +133,16 @@ from .models import (
     WorkerResult,
 )
 from .pr_manager import commit_changes, create_pr
-from .review_state import is_plan_review_go  # noqa: F401
+
+# Patched by: tests/unit/automation/test_implementer.py:{278,358,394,467};
+#             tests/unit/automation/test_implementer_loop.py:560
+# Runtime call site: ``implementer_phase_runner`` via ``_impl_module``
+from .review_state import is_plan_review_go  # noqa: F401  # test-patch shim
+
+# Patched by: tests/unit/automation/test_implementer_loop.py:{316,318};
+#             see comment at tests/unit/automation/test_phase_agent_wiring.py:51
+# Runtime call site: phase runner agent dispatch + session naming, both via
+# ``_impl_module``
 from .session_naming import AGENT_ADVISE, AGENT_IMPLEMENTER, current_trunk_githash  # noqa: F401
 from .status_tracker import StatusTracker
 from .worktree_manager import WorktreeManager
