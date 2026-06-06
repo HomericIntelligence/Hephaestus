@@ -25,11 +25,13 @@ def _load() -> dict:
 
 
 def test_shared_feature_exists() -> None:
+    """The [feature.shared] table must be defined in pixi.toml."""
     data = _load()
     assert "shared" in data["feature"], "[feature.shared] must exist"
 
 
 def test_shared_conda_deps_only_in_shared() -> None:
+    """Shared conda tools live in [feature.shared] and nowhere else."""
     data = _load()
     shared = data["feature"]["shared"]["dependencies"]
     for tool in SHARED_CONDA:
@@ -41,6 +43,7 @@ def test_shared_conda_deps_only_in_shared() -> None:
 
 
 def test_pip_audit_only_in_shared_pypi() -> None:
+    """pip-audit is declared only in [feature.shared.pypi-dependencies]."""
     data = _load()
     shared_pypi = data["feature"]["shared"]["pypi-dependencies"]
     assert "pip-audit" in shared_pypi
@@ -50,6 +53,7 @@ def test_pip_audit_only_in_shared_pypi() -> None:
 
 
 def test_environments_compose_shared() -> None:
+    """The default and lint environments must include the 'shared' feature."""
     data = _load()
     for env_name in ("default", "lint"):
         feats = data["environments"][env_name]["features"]
