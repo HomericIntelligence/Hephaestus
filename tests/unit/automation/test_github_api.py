@@ -1719,13 +1719,17 @@ class TestGhPrReviewPost:
     """gh_pr_review_post: post a review and return *this* review's thread IDs."""
 
     @staticmethod
-    def _gh_call_side_effect(review_id: str, threads: list[dict[str, Any]]) -> Any:
-        """Build a side_effect covering the two _gh_call invocations.
+    def _gh_call_side_effect(
+        review_id: str, threads: list[dict[str, Any]], diff_text: str = ""
+    ) -> Any:
+        """Build a side_effect covering the _gh_call invocations.
 
-        1. ``POST /pulls/{n}/reviews`` (REST) → ``{id, node_id}``. The review
+        1. ``gh pr diff {n}`` → unified diff text used for hunk validation
+           (empty by default, so validation fails open and posts unchanged).
+        2. ``POST /pulls/{n}/reviews`` (REST) → ``{id, node_id}``. The review
            body is delivered via ``--input <file>`` and natively supports
            ``line``/``side`` inline comments and empty comment lists.
-        2. ``reviewThreads`` follow-up GraphQL query, matched on the returned
+        3. ``reviewThreads`` follow-up GraphQL query, matched on the returned
            review node id.
         """
 
@@ -1739,6 +1743,10 @@ class TestGhPrReviewPost:
                 result.stdout = json.dumps(
                     {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": threads}}}}}
                 )
+            elif "diff" in args:
+                # No diff text by default → diff-hunk validation fails open
+                # (comments are posted unchanged), preserving prior behaviour.
+                result.stdout = diff_text
             else:  # pragma: no cover - defensive
                 result.stdout = "{}"
             return result
@@ -1874,3 +1882,157 @@ class TestGhPrReviewPost:
 
         # The review POST was still sent.
         self._review_post_call(mock_gh_call)
+
+    # ------------------------------------------------------------------
+    # #1039: filter inline comments to lines present in the diff hunks.
+    # ------------------------------------------------------------------
+
+    # A minimal unified diff: a.py gains lines 1-3 on the RIGHT side.
+    _SAMPLE_DIFF = (
+        "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1,3 @@\n+one\n+two\n+three\n"
+    )
+
+    @staticmethod
+    def _posted_comments(mock_write: Any) -> list[dict[str, Any]]:
+        """Extract the ``comments`` array from the review body io_write_secure saw."""
+        for call in mock_write.call_args_list:
+            # io_write_secure(path, body) — body is the JSON review payload.
+            body = call.args[1] if len(call.args) > 1 else call.kwargs.get("content", "")
+            if isinstance(body, str) and '"comments"' in body:
+                comments = json.loads(body)["comments"]
+                assert isinstance(comments, list)
+                return comments
+        raise AssertionError("no review body was written")
+
+    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_out_of_hunk_comment_is_filtered_summary_still_posts(
+        self, mock_gh_call: Any, _mock_repo: Any, mock_write: Any
+    ) -> None:
+        """A comment on a line outside the diff hunk must be dropped, not posted.
+
+        Regression (#1039): unvalidated out-of-hunk comments made GitHub reject
+        the whole review with HTTP 422, which the loop saw as a spurious NOGO. The
+        in-hunk comment must survive and the review must still post.
+        """
+        mock_gh_call.side_effect = self._gh_call_side_effect(
+            "REVIEW_1", [], diff_text=self._SAMPLE_DIFF
+        )
+
+        gh_pr_review_post(
+            pr_number=7,
+            comments=[
+                {"path": "a.py", "line": 2, "side": "RIGHT", "body": "valid"},
+                {"path": "a.py", "line": 999, "side": "RIGHT", "body": "out of hunk"},
+                {"path": "missing.py", "line": 1, "side": "RIGHT", "body": "wrong file"},
+            ],
+            summary="Findings",
+        )
+
+        posted = self._posted_comments(mock_write)
+        bodies = {c["body"] for c in posted}
+        assert bodies == {"valid"}
+
+    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_all_comments_out_of_hunk_posts_summary_only(
+        self, mock_gh_call: Any, _mock_repo: Any, mock_write: Any
+    ) -> None:
+        """If every comment is out of hunk, the review still posts (summary only)."""
+        mock_gh_call.side_effect = self._gh_call_side_effect(
+            "REVIEW_1", [], diff_text=self._SAMPLE_DIFF
+        )
+
+        gh_pr_review_post(
+            pr_number=7,
+            comments=[{"path": "a.py", "line": 999, "side": "RIGHT", "body": "nope"}],
+            summary="Findings",
+        )
+
+        posted = self._posted_comments(mock_write)
+        assert posted == []
+        # The review POST was still sent.
+        self._review_post_call(mock_gh_call)
+
+    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_empty_diff_fails_open_posts_all_comments(
+        self, mock_gh_call: Any, _mock_repo: Any, mock_write: Any
+    ) -> None:
+        """When the diff cannot be fetched, validation fails open (posts unchanged).
+
+        Dropping comments because the diff was unavailable would be worse than a
+        possible 422 — so an empty/failed diff must leave comments untouched.
+        """
+        mock_gh_call.side_effect = self._gh_call_side_effect("REVIEW_1", [], diff_text="")
+
+        gh_pr_review_post(
+            pr_number=7,
+            comments=[{"path": "a.py", "line": 42, "side": "RIGHT", "body": "keep me"}],
+            summary="Findings",
+        )
+
+        posted = self._posted_comments(mock_write)
+        assert {c["body"] for c in posted} == {"keep me"}
+
+
+class TestValidReviewPositions:
+    """_valid_review_positions / _filter_comments_to_diff: diff-hunk parsing (#1039)."""
+
+    _DIFF = (
+        "diff --git a/mod.py b/mod.py\n"
+        "--- a/mod.py\n"
+        "+++ b/mod.py\n"
+        "@@ -10,3 +10,4 @@ def f():\n"
+        " context_a\n"
+        "-removed_old\n"
+        "+added_new\n"
+        "+added_new2\n"
+        " context_b\n"
+    )
+
+    def test_right_side_includes_added_and_context_lines(self) -> None:
+        from hephaestus.automation.github_api import _valid_review_positions
+
+        positions = _valid_review_positions(self._DIFF)
+        right = {line for (line, side) in positions["mod.py"] if side == "RIGHT"}
+        # New-file numbering starts at 10: context_a=10, added_new=11,
+        # added_new2=12, context_b=13.
+        assert right == {10, 11, 12, 13}
+
+    def test_left_side_includes_removed_and_context_lines(self) -> None:
+        from hephaestus.automation.github_api import _valid_review_positions
+
+        positions = _valid_review_positions(self._DIFF)
+        left = {line for (line, side) in positions["mod.py"] if side == "LEFT"}
+        # Old-file numbering starts at 10: context_a=10, removed_old=11,
+        # context_b=12.
+        assert left == {10, 11, 12}
+
+    def test_filter_drops_unknown_path_and_line(self) -> None:
+        from hephaestus.automation.github_api import _filter_comments_to_diff
+
+        comments = [
+            {"path": "mod.py", "line": 11, "side": "RIGHT", "body": "ok"},
+            {"path": "mod.py", "line": 500, "side": "RIGHT", "body": "bad line"},
+            {"path": "other.py", "line": 11, "side": "RIGHT", "body": "bad path"},
+        ]
+        kept = _filter_comments_to_diff(comments, self._DIFF)
+        assert [c["body"] for c in kept] == ["ok"]
+
+    def test_filter_defaults_side_to_right(self) -> None:
+        from hephaestus.automation.github_api import _filter_comments_to_diff
+
+        # No explicit side → treated as RIGHT (the gh_pr_review_post default).
+        comments = [{"path": "mod.py", "line": 11, "body": "ok"}]
+        kept = _filter_comments_to_diff(comments, self._DIFF)
+        assert len(kept) == 1
+
+    def test_empty_diff_returns_comments_unchanged(self) -> None:
+        from hephaestus.automation.github_api import _filter_comments_to_diff
+
+        comments = [{"path": "mod.py", "line": 11, "side": "RIGHT", "body": "ok"}]
+        assert _filter_comments_to_diff(comments, "") == comments
