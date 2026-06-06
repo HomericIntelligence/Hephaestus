@@ -1513,10 +1513,13 @@ def gh_pr_resolve_thread(
         logger.info("[dry_run] Would resolve thread %r with reply: %r", thread_id, reply_body)
         return
 
-    # Step 1: post a reply to the thread via GraphQL addPullRequestReviewComment
+    # Step 1: post a reply to the thread via GraphQL addPullRequestReviewThreadReply.
+    # NOT addPullRequestReviewComment — its input type (AddPullRequestReviewCommentInput)
+    # has no pullRequestReviewThreadId field, so that mutation fails on every call
+    # (verified against the live GitHub schema via introspection).
     reply_mutation = """
 mutation AddReply($threadId: ID!, $body: String!) {
-  addPullRequestReviewComment(input: {pullRequestReviewThreadId: $threadId, body: $body}) {
+  addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $threadId, body: $body}) {
     comment { id }
   }
 }

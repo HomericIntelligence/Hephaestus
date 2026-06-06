@@ -25,6 +25,7 @@ from hephaestus.automation.github_api import (
     gh_list_open_issues,
     gh_pr_checks,
     gh_pr_create,
+    gh_pr_resolve_thread,
     gh_pr_review_post,
     is_issue_closed,
     parse_issue_dependencies,
@@ -1874,3 +1875,65 @@ class TestGhPrReviewPost:
 
         # The review POST was still sent.
         self._review_post_call(mock_gh_call)
+
+
+class TestGhPrResolveThread:
+    """Direct tests for ``gh_pr_resolve_thread``.
+
+    Higher-level callers (``address_review``) mock this function out, so the
+    raw GraphQL it builds had no direct coverage — which let a broken mutation
+    (``addPullRequestReviewComment``, whose input type has no
+    ``pullRequestReviewThreadId`` field) ship and fail on every call. These
+    tests pin the mutation names and call args so the regression cannot recur.
+    """
+
+    @staticmethod
+    def _ok_call() -> Any:
+        """Return a ``_gh_call`` Mock whose stdout is empty (no GraphQL errors)."""
+        result = Mock()
+        result.stdout = "{}"
+        return result
+
+    @staticmethod
+    def _query_arg(call_args: list[str]) -> str:
+        """Return the GraphQL ``query=...`` argument from a ``_gh_call`` argv."""
+        return next(a for a in call_args if isinstance(a, str) and a.startswith("query="))
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_reply_uses_thread_reply_mutation(self, mock_gh_call: Any) -> None:
+        """Step 1 must call ``addPullRequestReviewThreadReply`` with the thread id.
+
+        Regression guard: ``addPullRequestReviewComment`` does NOT accept
+        ``pullRequestReviewThreadId`` and fails on every call.
+        """
+        mock_gh_call.return_value = self._ok_call()
+
+        gh_pr_resolve_thread("THREAD_ID_1", "Done — addressed.")
+
+        reply_args = mock_gh_call.call_args_list[0][0][0]
+        query = self._query_arg(reply_args)
+        assert "addPullRequestReviewThreadReply" in query
+        assert "addPullRequestReviewComment" not in query
+        # The thread id and body are forwarded as GraphQL variables.
+        assert "threadId=THREAD_ID_1" in reply_args
+        assert "body=Done — addressed." in reply_args
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_second_call_resolves_thread(self, mock_gh_call: Any) -> None:
+        """Step 2 must call ``resolveReviewThread`` for the same thread id."""
+        mock_gh_call.return_value = self._ok_call()
+
+        gh_pr_resolve_thread("THREAD_ID_2", "Reply body")
+
+        assert mock_gh_call.call_count == 2
+        resolve_args = mock_gh_call.call_args_list[1][0][0]
+        query = self._query_arg(resolve_args)
+        assert "resolveReviewThread" in query
+        assert "threadId=THREAD_ID_2" in resolve_args
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_dry_run_makes_no_calls(self, mock_gh_call: Any) -> None:
+        """``dry_run=True`` must not invoke ``_gh_call`` at all."""
+        gh_pr_resolve_thread("THREAD_ID_3", "Reply body", dry_run=True)
+
+        mock_gh_call.assert_not_called()
