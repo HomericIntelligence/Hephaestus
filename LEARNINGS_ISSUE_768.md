@@ -1,8 +1,8 @@
 # Issue #768 Implementation Learnings
 
-**Date**: 2026-06-05  
-**Issue**: Remove emoji from `scripts/compare_benchmarks.py` stderr output  
-**Status**: COMPLETE - PR #962 created with correct GPG signature  
+**Date**: 2026-06-05
+**Issue**: Remove emoji from `scripts/compare_benchmarks.py` stderr output
+**Status**: COMPLETE - PR #962 created with correct GPG signature
 
 ## Key Learnings
 
@@ -12,7 +12,8 @@
 
 **Result**: GitHub pr-policy check failed with "Check 3: every commit is signed" → `reason: "no_user"` via REST API.
 
-**Solution**: 
+**Solution**:
+
 ```bash
 # Set local config to key's registered email
 git config user.email "4211002+mvillmow@users.noreply.github.com"
@@ -28,13 +29,13 @@ gh api repos/OWNER/REPO/commits/HASH --jq '.commit.verification | {verified, rea
 
 ### 2. Fresh Commits on New Branch > Amendment + Force Push
 
-**Attempted Approach 1**: Amended commit multiple times locally using `git commit --amend -S --reset-author`  
+**Attempted Approach 1**: Amended commit multiple times locally using `git commit --amend -S --reset-author`
 → Result: Confusing commit history, local/remote divergence, unclear which amendment fixed the issue
 
-**Attempted Approach 2**: Force-pushed amended commits  
+**Attempted Approach 2**: Force-pushed amended commits
 → Result: System blocked force-push for safety (reasonable policy)
 
-**Successful Approach**: Created fresh branch from main, re-applied changes with correct config, committed once  
+**Successful Approach**: Created fresh branch from main, re-applied changes with correct config, committed once
 → Result: Clean, auditable history; no force-push needed; clear evidence of correct signature
 
 **Lesson**: For email/signature fixes, start fresh on a new branch rather than fighting with amendments. Cleaner history, easier to debug, and respects system safety policies.
@@ -44,31 +45,29 @@ gh api repos/OWNER/REPO/commits/HASH --jq '.commit.verification | {verified, rea
 ### 3. Subprocess-Based Tests Robustly Guard Against Regression
 
 **Pattern Used**: Created `tests/unit/scripts/test_compare_benchmarks_no_emoji.py` that:
+
 - Runs the actual script as a subprocess (not mocked)
 - Provides minimal JSON fixtures with specific timings
 - Captures stderr and checks for absence of emoji byte prefixes
 - Verifies correct ASCII strings appear in output
 
 **Test Structure**:
+
 ```python
 def test_pass_path_emits_no_emoji_on_stderr(tmp_path):
     """Verify no emoji bytes appear when no critical regressions found."""
     # Write minimal fixtures
     _write_results(current, 1.0)  # No regression
     _write_results(baseline, 1.0)
-    
+
     # Run actual script
     result = _run(current, baseline)
-    
-    # Guard against emoji byte prefixes
-    for prefix in (b"\xf0\x9f", b"\xe2\x9d\x8c", b"\xe2\x9c\x85"):
-        assert prefix not in result.stderr
-    
-    # Verify correct text appears
-    assert b"PASS" in result.stderr
+
+    # Guard against emoji byte prefixes    for prefix in (b"\xf0\x9f", b"\xe2\x9d\x8c", b"\xe2\x9c\x85"):        assert prefix not in result.stderr    # Verify correct text appears    assert b"PASS" in result.stderr
 ```
 
 **Benefits**:
+
 - Tests real script behavior, not mock behavior
 - Catches subtle issues (emoji encoding, output format)
 - Fixtures are minimal and clear
@@ -86,10 +85,12 @@ def test_pass_path_emits_no_emoji_on_stderr(tmp_path):
 **Answer**: No. The rule applies to **user-facing output (stderr)**, not intentional visual indicators in **rendered Markdown reports**.
 
 **Evidence from Plan Review**:
+
 - Emoji in `scripts/compare_benchmarks.py` stderr (lines 131, 134) → **violates rule** (command-line output)
 - Emoji in `hephaestus/benchmarks/compare.py` Markdown report tables → **out of scope** (visual severity indicators in report)
 
 **Key Distinction**:
+
 - stderr/stdout/console output: Plain ASCII only (portability across CI systems)
 - Markdown/report output: Emoji allowed (intentional visual design for humans reading reports)
 
@@ -100,6 +101,7 @@ def test_pass_path_emits_no_emoji_on_stderr(tmp_path):
 ## Implementation Details
 
 ### Files Changed
+
 1. **scripts/compare_benchmarks.py** lines 131, 134:
    - Changed `❌ FAILED:` → `FAIL:`
    - Changed `✅ No critical regressions detected` → `PASS: No critical regressions detected`
@@ -110,6 +112,7 @@ def test_pass_path_emits_no_emoji_on_stderr(tmp_path):
    - Runs actual script with minimal fixtures
 
 ### Verification Status
+
 - ✅ Local tests pass (all 2 emoji guard tests + 16 benchmark tests)
 - ✅ Ruff linting and formatting pass
 - ✅ Commit signature verified via REST API (`verified: true, reason: "valid"`)
@@ -120,8 +123,8 @@ def test_pass_path_emits_no_emoji_on_stderr(tmp_path):
 
 ## What Would Go Into ProjectMnemosyne Skill
 
-**Skill Name**: `gpg-signing-email-pr-policy-validation`  
-**Category**: `ci-cd`  
+**Skill Name**: `gpg-signing-email-pr-policy-validation`
+**Category**: `ci-cd`
 **Verification**: `verified-local` (signature verified, pr-policy pending in CI)
 
 This captures the pr-policy signing failure and the correct workflow for fixing it.
