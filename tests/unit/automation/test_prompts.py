@@ -739,3 +739,29 @@ class TestAddressReviewPrompt:
             threads_json='[{"thread_id": "T1", "path": "a.py", "line": 1, "body": "use {x: 1}"}]',
         )
         assert "use {x: 1}" in out
+
+    def test_no_bootstrap_context_by_default(self) -> None:
+        """Without the optional context args, no TASK/DIFF fenced sections appear."""
+        out = self._build()
+        assert "_TASK\n" not in out
+        assert "_DIFF\n" not in out
+        assert "Current implementation diff" not in out
+
+    def test_bootstrap_context_included_when_supplied(self) -> None:
+        """Existing-PR path: task + task-review + diff render as fenced sections."""
+        out = prompts.get_address_review_prompt(
+            pr_number=42,
+            issue_number=7,
+            worktree_path="/tmp/wt",
+            threads_json='[{"thread_id": "T1", "path": "a.py", "line": 1, "body": "fix"}]',
+            task_block="#7 Title\n\nDo the thing",
+            task_review_block="Plan review: GO",
+            diff_text="diff --git a/a.py b/a.py",
+        )
+        assert "Do the thing" in out
+        assert "Plan review: GO" in out
+        assert "diff --git a/a.py b/a.py" in out
+        # Each bootstrap section is fenced as untrusted (BEGIN_<nonce>_<LABEL>).
+        assert "_TASK\n" in out
+        assert "_TASK_REVIEW\n" in out
+        assert "_DIFF\n" in out

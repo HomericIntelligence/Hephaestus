@@ -51,7 +51,7 @@ from .claude_invoke import (
 from .claude_models import advise_model, implementer_model, reviewer_model
 from .claude_timeouts import advise_claude_timeout, implementer_claude_timeout
 from .follow_up import parse_follow_up_items, run_follow_up_issues
-from .git_utils import issue_ref, pr_ref, run
+from .git_utils import issue_ref, pr_ref, run, sync_worktree_to_remote_branch
 from .github_api import gh_pr_list_unresolved_threads
 from .learn import learn_needs_rerun, run_learn
 from .models import (
@@ -66,6 +66,7 @@ from .pr_manager import (
     ensure_pr_created,
     mark_pr_implementation_go,
     mark_pr_implementation_no_go,
+    pr_has_implementation_state_label,
 )
 from .pr_reviewer import gather_impl_review_context, review_pr_inline
 from .prompts import (
@@ -250,32 +251,27 @@ class ImplementationPhaseRunner:
                     worktree_path=None,
                 )
 
-            # Skip implementation entirely when an open PR already exists for
-            # this issue. Re-running the agent would clobber in-flight work;
-            # an open PR from a prior loop is carried to green by the later
-            # drive-green stage. Checked BEFORE create_worktree() so the skip
-            # path costs nothing. Looked up via _impl_module so tests can patch
+            # When an open PR already exists for this issue, skip the
+            # plan/implement steps (the PR is already opened) but STILL drive it
+            # through the in-loop review → address cycle so a green PR earns the
+            # ``state:implementation-go`` label that drive-green requires to arm
+            # auto-merge. A pre-existing PR that never gets reviewed here would
+            # otherwise deadlock: implementer skips it, drive-green only reads
+            # the label and refuses to merge without it. Looked up via
+            # _impl_module so tests can patch
             # ``hephaestus.automation.implementer.find_pr_for_issue``.
             self.status_tracker.update_slot(
                 slot_id, f"{issue_ref(issue_number)}: Checking for existing PR"
             )
             existing_pr = self._impl_module.find_pr_for_issue(issue_number)
             if existing_pr is not None:
-                impl._log(
-                    "info",
-                    f"Issue #{issue_number}: open PR {pr_ref(existing_pr)} already exists — "
-                    f"skipping implementation (handled by later phases)",
-                    thread_id,
-                )
-                with self.state_lock:
-                    state.phase = ImplementationPhase.CREATING_PR
-                impl._save_state(state)
-                return WorkerResult(
+                return self._review_existing_pr(
                     issue_number=issue_number,
-                    success=True,
-                    pr_number=existing_pr,
+                    existing_pr=existing_pr,
                     branch_name=branch_name,
-                    already_has_pr=True,
+                    state=state,
+                    slot_id=slot_id,
+                    thread_id=thread_id,
                 )
 
             # Create worktree (only in non-dry-run mode)
@@ -410,22 +406,13 @@ class ImplementationPhaseRunner:
                 state.last_review_grade = last_grade
             impl._save_state(state)
 
-            if last_verdict == "GO":
-                mark_pr_implementation_go(pr_number)
-                if self.options.auto_merge:
-                    if slot_id is not None:
-                        self.status_tracker.update_slot(
-                            slot_id, f"{issue_ref(issue_number)}: enabling auto-merge"
-                        )
-                    enable_auto_merge_after_implementation_go(pr_number)
-            else:
-                mark_pr_implementation_no_go(pr_number)
-                impl._log(
-                    "warning",
-                    f"{issue_ref(issue_number)}: implementation review did not reach GO; "
-                    f"auto-merge remains disabled for {pr_ref(pr_number)}",
-                    thread_id,
-                )
+            self._apply_impl_review_verdict(
+                issue_number=issue_number,
+                pr_number=pr_number,
+                last_verdict=last_verdict,
+                slot_id=slot_id,
+                thread_id=thread_id,
+            )
 
             # impl-learnings + follow-up filing stay in Session 2 (#28 §B),
             # resuming AGENT_IMPLEMENTER AFTER the loop converges.
@@ -872,11 +859,153 @@ class ImplementationPhaseRunner:
             build_prompt=get_advise_prompt_builder(self.options.agent),
         )
 
+    def _apply_impl_review_verdict(
+        self,
+        *,
+        issue_number: int,
+        pr_number: int,
+        last_verdict: str | None,
+        slot_id: int | None,
+        thread_id: int | None,
+    ) -> None:
+        """Label a PR from the review loop's final verdict and arm auto-merge.
+
+        Shared by both the fresh-implementation path and the existing-PR review
+        path so the GO → ``mark_pr_implementation_go`` (+ auto-merge) /
+        non-GO → ``mark_pr_implementation_no_go`` mapping cannot drift between
+        them.
+        """
+        impl = self.impl
+        if last_verdict == "GO":
+            mark_pr_implementation_go(pr_number)
+            if self.options.auto_merge:
+                if slot_id is not None:
+                    self.status_tracker.update_slot(
+                        slot_id, f"{issue_ref(issue_number)}: enabling auto-merge"
+                    )
+                enable_auto_merge_after_implementation_go(pr_number)
+        else:
+            mark_pr_implementation_no_go(pr_number)
+            impl._log(
+                "warning",
+                f"{issue_ref(issue_number)}: implementation review did not reach GO; "
+                f"auto-merge remains disabled for {pr_ref(pr_number)}",
+                thread_id,
+            )
+
+    def _review_existing_pr(
+        self,
+        *,
+        issue_number: int,
+        existing_pr: int,
+        branch_name: str,
+        state: ImplementationState,
+        slot_id: int | None,
+        thread_id: int | None,
+    ) -> WorkerResult:
+        """Drive an already-open PR through the in-loop review → address cycle.
+
+        Replaces the old "skip existing PRs entirely" shortcut. A pre-existing
+        PR is reviewed (and, on NOGO, fixed by the resumed implementer session)
+        so it earns the ``state:implementation-go`` label drive-green needs to
+        arm auto-merge — without this it would deadlock green-but-unmergeable.
+
+        Idempotency: a PR already carrying a terminal implementation-review
+        label (GO or NO-GO) was settled on a prior loop, so it short-circuits
+        without re-reviewing. Anti-clobber: the worktree is hard-reset to
+        ``origin/<branch>`` before the review loop so re-running never discards
+        commits that were pushed to the PR head, and the loop runs with
+        ``session_id=None`` (no agent edit session is started here — the address
+        step inside the loop resumes the implementer's own session by
+        deterministic id only when there are threads to fix).
+        """
+        impl = self.impl
+
+        self.status_tracker.update_slot(
+            slot_id, f"{issue_ref(issue_number)}: Checking implementation-review label"
+        )
+        has_go, has_no_go = pr_has_implementation_state_label(existing_pr)
+        if has_go or has_no_go:
+            impl._log(
+                "info",
+                f"Issue #{issue_number}: open PR {pr_ref(existing_pr)} already "
+                f"implementation-review {'GO' if has_go else 'NO-GO'} — skipping re-review "
+                "(handled by later phases)",
+                thread_id,
+            )
+            with self.state_lock:
+                state.phase = ImplementationPhase.CREATING_PR
+            impl._save_state(state)
+            return WorkerResult(
+                issue_number=issue_number,
+                success=True,
+                pr_number=existing_pr,
+                branch_name=branch_name,
+                already_has_pr=True,
+            )
+
+        # Reuse-or-create the worktree, then hard-reset it to the PR head so the
+        # reviewer sees the real PR state and any in-loop fix lands on top of it.
+        self.status_tracker.update_slot(
+            slot_id, f"{issue_ref(issue_number)}: Preparing worktree for existing PR"
+        )
+        worktree_path = self.worktree_manager.create_worktree(issue_number, branch_name)
+        sync_worktree_to_remote_branch(worktree_path, branch_name)
+
+        with self.state_lock:
+            state.worktree_path = str(worktree_path)
+            state.branch_name = branch_name
+            state.pr_number = existing_pr
+            state.phase = ImplementationPhase.REVIEWING
+        impl._save_state(state)
+
+        issue = self._impl_module.fetch_issue_info(issue_number)
+        iterations, last_verdict, last_grade = impl._run_impl_review_loop(
+            issue_number=issue_number,
+            worktree_path=worktree_path,
+            branch_name=branch_name,
+            issue_title=issue.title,
+            issue_body=issue.body,
+            session_id=None,
+            slot_id=slot_id,
+            thread_id=thread_id,
+            state=state,
+            pr_number=existing_pr,
+        )
+        with self.state_lock:
+            state.review_iterations = iterations
+            state.last_review_verdict = last_verdict
+            state.last_review_grade = last_grade
+        impl._save_state(state)
+
+        self._apply_impl_review_verdict(
+            issue_number=issue_number,
+            pr_number=existing_pr,
+            last_verdict=last_verdict,
+            slot_id=slot_id,
+            thread_id=thread_id,
+        )
+
+        impl._log(
+            "info",
+            f"Issue #{issue_number}: existing PR {pr_ref(existing_pr)} review complete "
+            f"(verdict={last_verdict or '?'})",
+            thread_id,
+        )
+        return WorkerResult(
+            issue_number=issue_number,
+            success=True,
+            pr_number=existing_pr,
+            branch_name=branch_name,
+            worktree_path=str(worktree_path),
+            already_has_pr=True,
+        )
+
     # ------------------------------------------------------------------
     # Strict review loop for implementer sessions
     # ------------------------------------------------------------------
 
-    def _run_impl_review_loop(  # noqa: C901  # in-loop review + address has several outcome paths
+    def _run_impl_review_loop(
         self,
         *,
         issue_number: int,
@@ -978,20 +1107,15 @@ class ImplementationPhaseRunner:
                 break
 
             # Address step: resume Session 2 to fix the posted threads, commit,
-            # push, and resolve the threads it actually addressed. Skipped when
-            # there is no PR (no inline threads to address) or no session to
-            # resume.
+            # push, and resolve the threads it actually addressed. Skipped only
+            # when there is no PR (no inline threads to address). ``session_id``
+            # is informational — the address step resumes ``AGENT_IMPLEMENTER``
+            # by its deterministic per-(repo,issue,agent) id (or starts a fresh
+            # implementer session when no transcript exists), so the existing-PR
+            # path (which has no initial session_id) can still fix review
+            # threads rather than dead-ending here.
             if pr_number is None:
                 continue
-            if session_id is None:
-                ref = issue_ref(issue_number)
-                impl._log(
-                    "warning",
-                    f"{ref}: cannot address review (no session_id from initial run); "
-                    "stopping review loop",
-                    thread_id,
-                )
-                break
             if slot_id is not None:
                 self.status_tracker.update_slot(
                     slot_id, f"{issue_ref(issue_number)}: addressing review [R{iteration}]"
@@ -1002,6 +1126,14 @@ class ImplementationPhaseRunner:
                 branch_name=branch_name,
                 worktree_path=worktree_path,
                 iteration=iteration,
+                # When the loop started without an initial implementer session
+                # (existing-PR review path), the address session may run fresh
+                # with no transcript to resume — give it the task + task-review
+                # + diff so it can read the work and continue. The fresh-impl
+                # path already carries this in its long-lived transcript.
+                include_bootstrap_context=session_id is None,
+                issue_title=issue_title,
+                issue_body=issue_body,
             )
             if not addressed:
                 ref = issue_ref(issue_number)
@@ -1114,6 +1246,9 @@ class ImplementationPhaseRunner:
         branch_name: str,
         worktree_path: Path,
         iteration: int,
+        include_bootstrap_context: bool = False,
+        issue_title: str = "",
+        issue_body: str = "",
     ) -> bool:
         """Address the posted PR threads in-loop, resuming Session 2.
 
@@ -1139,6 +1274,19 @@ class ImplementationPhaseRunner:
             )
             return False
 
+        # On the existing-PR path the address session may run fresh (no
+        # implementer transcript to resume), so it has no memory of the task or
+        # the implementation. Bootstrap it with the task, the plan-review, and
+        # the current diff. The fresh-impl path already carries this in its
+        # long-lived transcript, so the blocks stay empty there (no extra cost).
+        task_block = ""
+        task_review_block = ""
+        diff_text = ""
+        if include_bootstrap_context:
+            task_block = f"#{issue_number} {issue_title}\n\n{issue_body}".strip()
+            _, task_review_block = self._fetch_plan_and_review(issue_number)
+            diff_text = self.impl._collect_diff(worktree_path, branch_name)
+
         log_file = self.state_dir / f"address-review-{issue_number}-r{iteration}.log"
         fix_result = run_address_fix_session(
             issue_number=issue_number,
@@ -1150,6 +1298,9 @@ class ImplementationPhaseRunner:
             parse_fn=lambda text: self._parse_address_result(text, issue_number, iteration),
             log_file=log_file,
             dry_run=False,
+            task_block=task_block,
+            task_review_block=task_review_block,
+            diff_text=diff_text,
         )
         addressed: list[str] = fix_result.get("addressed", [])
         replies: dict[str, str] = fix_result.get("replies", {})

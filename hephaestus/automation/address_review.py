@@ -102,6 +102,9 @@ def run_address_fix_session(
     parse_fn: Callable[[str], dict[str, Any]],
     log_file: Path,
     dry_run: bool = False,
+    task_block: str = "",
+    task_review_block: str = "",
+    diff_text: str = "",
 ) -> dict[str, Any]:
     """Run the address-review fix session and return the agent's parsed result.
 
@@ -127,6 +130,11 @@ def run_address_fix_session(
             path passes :func:`_parse_addressed_block`.
         log_file: Path to write the raw session log to.
         dry_run: When True, skip the agent call and return empty result.
+        task_block: Optional task (issue) text for the prompt's context section.
+            Supplied on the existing-PR review path so a fresh (non-resumed)
+            session can read the task and continue the work.
+        task_review_block: Optional plan-review verdict text for the context.
+        diff_text: Optional current implementation diff for the context.
 
     Returns:
         Parsed dict with ``"addressed"`` and ``"replies"`` keys.
@@ -153,6 +161,9 @@ def run_address_fix_session(
         issue_number=issue_number,
         worktree_path=str(worktree_path),
         threads_json=threads_json,
+        task_block=task_block,
+        task_review_block=task_review_block,
+        diff_text=diff_text,
     )
 
     prompt_file = worktree_path / f".claude-address-review-{issue_number}.md"

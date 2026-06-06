@@ -29,6 +29,7 @@ from .prompts import get_pr_description
 from .state_labels import (
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
+    has_label,
     is_implementation_go,
 )
 from .status_tracker import StatusTracker
@@ -131,6 +132,46 @@ def pr_has_implementation_go_label(pr: dict[str, object]) -> bool:
             if isinstance(name, str):
                 names.append(name)
     return is_implementation_go(names)
+
+
+def _pr_label_names(pr_number: int) -> list[str]:
+    """Return the label names on a PR by number, best-effort.
+
+    Fetches ``gh pr view <n> --json labels`` and normalizes the ``labels``
+    array (each entry is a ``{"name": ...}`` dict) to a flat list of names.
+    Any subprocess or JSON failure yields an empty list so callers can treat a
+    fetch error as "no labels" without raising.
+    """
+    try:
+        result = _gh_call(["pr", "view", str(pr_number), "--json", "labels"], check=False)
+        pr = cast(dict[str, object], json.loads(result.stdout or "{}"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Could not fetch PR #%s labels: %s", pr_number, exc)
+        return []
+    labels = pr.get("labels")
+    if not isinstance(labels, list):
+        return []
+    names: list[str] = []
+    for label in labels:
+        if isinstance(label, str):
+            names.append(label)
+        elif isinstance(label, dict):
+            name = label.get("name")
+            if isinstance(name, str):
+                names.append(name)
+    return names
+
+
+def pr_has_implementation_state_label(pr_number: int) -> tuple[bool, bool]:
+    """Return ``(has_go, has_no_go)`` for a PR's implementation-review labels.
+
+    Used to decide whether an existing PR has already been settled by a prior
+    implementation-review pass (either terminal label) so the in-loop review is
+    not re-run every loop. Best-effort: a fetch failure yields ``(False, False)``
+    so the caller treats it as "not yet reviewed" and proceeds.
+    """
+    names = _pr_label_names(pr_number)
+    return is_implementation_go(names), has_label(names, STATE_IMPLEMENTATION_NO_GO)
 
 
 def enable_auto_merge_after_implementation_go(pr_number: int) -> None:
