@@ -6,6 +6,21 @@ Thank you for considering contributing to ProjectHephaestus! We welcome contribu
 
 This project follows the [HomericIntelligence Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code.
 
+## Planning artifacts
+
+Before opening a PR, locate the work in:
+
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — current and planned releases.
+- [`docs/DEFINITION_OF_DONE.md`](docs/DEFINITION_OF_DONE.md) — the
+  completion bar every PR is reviewed against.
+- [`docs/TECH_DEBT.md`](docs/TECH_DEBT.md) — debt-tracking convention
+  and `wontfix` gate.
+- [`.github/ISSUE_TEMPLATE/`](.github/ISSUE_TEMPLATE/) — bug and
+  feature templates.
+- [`.github/pull_request_template.md`](.github/pull_request_template.md)
+  — the PR scaffolding (`Closes #N` line is enforced by the
+  `pr-policy` CI gate).
+
 ## How to Contribute
 
 ### Reporting Bugs
