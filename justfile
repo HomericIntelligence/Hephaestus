@@ -87,3 +87,12 @@ install ROLE="all":
 # Remove dev-run log files (run*.log are gitignored clutter)
 clean:
     rm -f run*.log
+
+# Deep clean: remove dev logs + all gitignored caches and build artifacts
+# (safe — only removes regenerable artifacts; does NOT touch .pixi/ envs)
+clean-all: clean
+    rm -rf .ruff_cache .mypy_cache .pytest_cache htmlcov .coverage
+    rm -rf build dist docs/api
+    find . -type d -name __pycache__ -not -path './.pixi/*' -exec rm -rf {} +
+    find . -type d -name '*.egg-info' -not -path './.pixi/*' -exec rm -rf {} +
+    find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -not -path './.pixi/*' -delete
