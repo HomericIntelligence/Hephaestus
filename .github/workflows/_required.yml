@@ -320,8 +320,19 @@ jobs:
 
       - name: "Check 1: PR body contains 'Closes #N'"
         if: always() && steps.fetch.outcome == 'success'
+        env:
+          # PR author login (github.event.pull_request.user.login), passed via
+          # env so the untrusted value never interpolates into the run script.
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
+          # Dependabot PR bodies are auto-generated and structurally never carry
+          # a `Closes #N` line. Exempt ONLY this body check for dependabot[bot]
+          # (#1070) — Check 2 (auto-merge) and Check 3 (signing) still apply.
+          if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
+            echo "OK: Dependabot PR — 'Closes #N' body check is not applicable"
+            exit 0
+          fi
           # jq -r reads the untrusted body into a shell variable; downstream
           # use is `printf '%s\n' "$body" | grep`, which never word-splits or
           # interprets the body as a command, so injection is not possible.
