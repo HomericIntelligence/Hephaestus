@@ -24,8 +24,8 @@ Tidy local branches and fix failed rebases with a Myrmidon swarm.
 3. Parses gh-tidy's output for `"WARNING: Unable to auto-rebase the following branches"`.
 4. Spawns one Sonnet Myrmidon agent per failing branch (max 5 concurrent) to complete
    the rebase using semantic conflict resolution.
-5. After each agent succeeds, re-arms `gh pr merge --auto --merge` on the branch's PR
-   if one exists.
+5. After each agent succeeds, re-arms auto-merge on the branch's PR using
+   `choose_merge_flag` (preference rebase → squash → merge, per target repo settings).
 6. Prints a final summary: rebased / subsumed / still failing.
 
 ## What the Swarm Does NOT Do

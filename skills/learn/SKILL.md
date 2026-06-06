@@ -419,7 +419,20 @@ Agent(description="Create skill C", prompt="...skill C content...")
     # Enable auto-merge so the PR merges automatically once CI passes
     # Note: gh pr merge requires a PR number when using --repo
     PR_NUMBER=$(gh pr list --repo HomericIntelligence/ProjectMnemosyne --head "skill/<name>" --json number --jq '.[0].number')
-    gh pr merge "$PR_NUMBER" --auto --squash --repo HomericIntelligence/ProjectMnemosyne
+    HELPER=""
+    for cand in \
+        "${HEPHAESTUS_REPO_ROOT:-}/scripts/choose_merge_flag.sh" \
+        "$(git rev-parse --show-toplevel 2>/dev/null)/scripts/choose_merge_flag.sh" \
+        "$HOME/Projects/ProjectHephaestus/scripts/choose_merge_flag.sh"; do
+        if [ -r "$cand" ]; then HELPER="$cand"; break; fi
+    done
+    if [ -n "$HELPER" ]; then
+        . "$HELPER"
+        MERGE_FLAG=$(choose_merge_flag HomericIntelligence/ProjectMnemosyne) || MERGE_FLAG="--squash"
+    else
+        MERGE_FLAG="--squash"
+    fi
+    gh pr merge "$PR_NUMBER" --auto "$MERGE_FLAG" --repo HomericIntelligence/ProjectMnemosyne
     ```
 
 10. **Cleanup worktree** (always clean up after PR creation):

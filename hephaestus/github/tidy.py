@@ -261,7 +261,20 @@ git -C {worktree_path} push --force-with-lease --force-if-includes origin {branc
 ```bash
 PR=$(gh pr list --repo {repo_slug} --head {branch} --json number --jq '.[0].number // empty')
 if [ -n "$PR" ]; then
-  gh pr merge --auto --merge "$PR"
+  HELPER=""
+  for cand in \
+      "${{HEPHAESTUS_REPO_ROOT:-}}/scripts/choose_merge_flag.sh" \
+      "$(git rev-parse --show-toplevel 2>/dev/null)/scripts/choose_merge_flag.sh" \
+      "$HOME/Projects/ProjectHephaestus/scripts/choose_merge_flag.sh"; do
+    if [ -r "$cand" ]; then HELPER="$cand"; break; fi
+  done
+  if [ -n "$HELPER" ]; then
+    . "$HELPER"
+    MERGE_FLAG=$(choose_merge_flag {repo_slug}) || MERGE_FLAG="--squash"
+  else
+    MERGE_FLAG="--squash"
+  fi
+  gh pr merge --auto "$MERGE_FLAG" "$PR"
 fi
 ```
 

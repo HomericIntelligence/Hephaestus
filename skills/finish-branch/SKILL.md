@@ -99,8 +99,23 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 EOF
 )"
 
-# Enable auto-merge (mandatory under repo PR policy)
-gh pr merge --auto --rebase
+# Enable auto-merge (mandatory under repo PR policy).
+# Pick the method this repo actually allows (rebase -> squash -> merge).
+HELPER=""
+for cand in \
+    "${HEPHAESTUS_REPO_ROOT:-}/scripts/choose_merge_flag.sh" \
+    "$(git rev-parse --show-toplevel 2>/dev/null)/scripts/choose_merge_flag.sh" \
+    "$HOME/Projects/ProjectHephaestus/scripts/choose_merge_flag.sh"; do
+    if [ -r "$cand" ]; then HELPER="$cand"; break; fi
+done
+if [ -n "$HELPER" ]; then
+    . "$HELPER"
+    MERGE_FLAG=$(choose_merge_flag "$(gh repo view --json nameWithOwner --jq .nameWithOwner)") \
+        || MERGE_FLAG="--squash"   # safe org-wide default per HomericIntelligence policy
+else
+    MERGE_FLAG="--squash"
+fi
+gh pr merge --auto "$MERGE_FLAG"
 ```
 
 Then: Cleanup worktree (Step 5)
