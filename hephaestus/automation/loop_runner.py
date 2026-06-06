@@ -641,7 +641,7 @@ def _ensure_clone(org: str, repo: str, dest: Path) -> None:
         timeout=NETWORK_TIMEOUT,
         circuit_breaker_name="gh-repo-clone",
     )
-    rc = completed.returncode  # type: ignore[attr-defined]
+    rc = completed.returncode
     if rc != 0:
         raise RuntimeError(f"gh repo clone {org}/{repo} failed (rc={rc})")
 

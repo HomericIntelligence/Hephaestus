@@ -10,11 +10,15 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from hephaestus.resilience.circuit_breaker import CircuitBreaker, get_circuit_breaker
 from hephaestus.utils.retry import retry_with_backoff
 
 logger = logging.getLogger(__name__)
+
+R = TypeVar("R")
 
 # Transient subprocess error types that should be retried
 TRANSIENT_SUBPROCESS_ERRORS: tuple[type[Exception], ...] = (
@@ -86,14 +90,14 @@ def is_transient_subprocess_error(error: BaseException) -> bool:
 
 
 def resilient_call(
-    func: object,
-    *args: object,
+    func: Callable[..., R],
+    *args: Any,
     circuit_breaker_name: str | None = None,
     max_retries: int = 3,
     initial_delay: float = 1.0,
     max_delay: float = 30.0,
-    **kwargs: object,
-) -> object:
+    **kwargs: Any,
+) -> R:
     """Execute a function with retry and optional circuit breaker.
 
     Combines retry-with-backoff and circuit breaker for external calls.
@@ -137,10 +141,9 @@ def resilient_call(
         logger=logger.warning,
         jitter=True,
     )
-    def _inner() -> object:
+    def _inner() -> R:
         if cb:
-            return cb.call(func, *args, **kwargs)  # type: ignore[arg-type]
-        callable_func = func
-        return callable_func(*args, **kwargs)  # type: ignore[operator]
+            return cb.call(func, *args, **kwargs)
+        return func(*args, **kwargs)
 
     return _inner()
