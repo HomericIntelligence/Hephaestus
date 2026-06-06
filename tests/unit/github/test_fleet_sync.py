@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -329,8 +330,6 @@ class TestMain:
 
     def test_main_success_json(self, monkeypatch, capsys) -> None:
         """main() with --json emits ok envelope when no failures occur."""
-        import json
-
         from hephaestus.github import fleet_sync
 
         def fake_process(repo, args, clone_dir):
@@ -355,8 +354,6 @@ class TestMain:
 
     def test_main_failure_json(self, monkeypatch, capsys) -> None:
         """main() with failures returns 1 and JSON envelope shows error."""
-        import json
-
         from hephaestus.github import fleet_sync
 
         def fake_process(repo, args, clone_dir):
@@ -462,3 +459,124 @@ class TestTimeoutHandling:
             call_kwargs = mock_run.call_args[1]
             assert "timeout" in call_kwargs
             assert call_kwargs["timeout"] == fleet_sync_module.NETWORK_TIMEOUT
+
+
+class TestListPrs:
+    """Regression tests for #1027: statusCheckRollup must not be bulk-fetched.
+
+    Requesting statusCheckRollup for every open PR in one `gh pr list` call 504s
+    at scale. The bulk list omits it; CI state is fetched per-PR. A genuine list
+    failure must raise, never be swallowed into an empty list.
+    """
+
+    def test_bulk_list_omits_statuscheckrollup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The bulk `gh pr list --json` must NOT request statusCheckRollup."""
+        captured: dict[str, list[str]] = {}
+
+        def fake_gh(args, repo=None, **kwargs):
+            if args[:2] == ["pr", "list"]:
+                captured["list_args"] = args
+                return MagicMock(
+                    stdout=json.dumps(
+                        [
+                            {
+                                "number": 1,
+                                "title": "t",
+                                "headRefName": "h",
+                                "baseRefName": "main",
+                                "headRefOid": "sha",
+                                "mergeable": "MERGEABLE",
+                                "mergeStateStatus": "BEHIND",
+                            }
+                        ]
+                    )
+                )
+            # pr view (per-PR CI fetch)
+            return MagicMock(stdout=json.dumps({"statusCheckRollup": []}))
+
+        monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
+        prs = fleet_sync_module.list_prs("ProjectHephaestus")
+        json_idx = captured["list_args"].index("--json")
+        json_fields = captured["list_args"][json_idx + 1]
+        assert "statusCheckRollup" not in json_fields
+        assert len(prs) == 1
+        assert prs[0].number == 1
+
+    def test_ci_state_fetched_per_pr(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CI state (statusCheckRollup) is fetched via a per-PR `gh pr view`."""
+        view_calls: list[list[str]] = []
+
+        def fake_gh(args, repo=None, **kwargs):
+            if args[:2] == ["pr", "list"]:
+                return MagicMock(
+                    stdout=json.dumps(
+                        [
+                            {
+                                "number": 7,
+                                "title": "t",
+                                "headRefName": "h",
+                                "baseRefName": "main",
+                                "headRefOid": "sha",
+                                "mergeable": "MERGEABLE",
+                                "mergeStateStatus": "CLEAN",
+                            }
+                        ]
+                    )
+                )
+            view_calls.append(args)
+            return MagicMock(
+                stdout=json.dumps(
+                    {"statusCheckRollup": [{"conclusion": "SUCCESS", "state": "SUCCESS"}]}
+                )
+            )
+
+        monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
+        prs = fleet_sync_module.list_prs("ProjectHephaestus")
+        assert view_calls and view_calls[0][:3] == ["pr", "view", "7"]
+        assert prs[0].ci_state == "SUCCESS"
+        assert prs[0].status == PRStatus.READY
+
+    def test_per_pr_ci_failure_returns_unknown(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A flaky per-PR CI fetch downgrades to UNKNOWN, not a whole-run abort."""
+
+        def fake_gh(args, repo=None, **kwargs):
+            if args[:2] == ["pr", "list"]:
+                return MagicMock(
+                    stdout=json.dumps(
+                        [
+                            {
+                                "number": 9,
+                                "title": "t",
+                                "headRefName": "h",
+                                "baseRefName": "main",
+                                "headRefOid": "sha",
+                                "mergeable": "MERGEABLE",
+                                "mergeStateStatus": "BEHIND",
+                            }
+                        ]
+                    )
+                )
+            raise RuntimeError("504 on pr view")
+
+        monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
+        prs = fleet_sync_module.list_prs("ProjectHephaestus")
+        assert prs[0].ci_state == "UNKNOWN"
+
+    def test_list_failure_raises_not_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A genuine bulk-list failure raises rather than returning []."""
+
+        def fake_gh(args, repo=None, **kwargs):
+            raise subprocess.CalledProcessError(1, ["gh"], stderr="HTTP 504")
+
+        monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
+        with pytest.raises(RuntimeError, match="could not list PRs"):
+            fleet_sync_module.list_prs("ProjectHephaestus")
+
+    def test_empty_list_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An actually-empty repo returns [] (distinct from a list failure)."""
+
+        def fake_gh(args, repo=None, **kwargs):
+            return MagicMock(stdout="[]")
+
+        monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
+        assert fleet_sync_module.list_prs("ProjectHephaestus") == []

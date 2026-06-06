@@ -309,8 +309,37 @@ def _ci_state(checks: list[dict[str, Any]]) -> str:
     return "SUCCESS"
 
 
+def _fetch_pr_ci_state(repo: str, number: int) -> str:
+    """Fetch a single PR's statusCheckRollup and reduce it to a CI state.
+
+    Fetched per-PR rather than in the bulk list: requesting statusCheckRollup for
+    every open PR in one ``gh pr list`` call makes GitHub GraphQL return HTTP 504
+    at scale (~50+ PRs), because that field aggregates every check on every PR.
+    One PR per call stays well within limits. On any failure we return
+    "UNKNOWN" so a single flaky check fetch downgrades that PR's readiness
+    (it falls through to a rebase) rather than aborting the whole run.
+    """
+    try:
+        result = _gh(
+            ["pr", "view", str(number), "--json", "statusCheckRollup"],
+            repo=repo,
+        )
+        data = json.loads(result.stdout)
+    except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as e:
+        logger.warning("Could not fetch CI state for %s#%s: %s", repo, number, e)
+        return "UNKNOWN"
+    return _ci_state(data.get("statusCheckRollup") or [])
+
+
 def list_prs(repo: str) -> list[PRInfo]:
-    """List all open PRs in a repo with their readiness status."""
+    """List all open PRs in a repo with their readiness status.
+
+    The bulk ``gh pr list`` deliberately omits ``statusCheckRollup`` — requesting
+    it for every PR 504s at scale (see #1027). CI state is fetched per-PR via
+    :func:`_fetch_pr_ci_state`. A genuine list failure is raised, never swallowed
+    into an empty list (which would masquerade as "no open PRs" and silently skip
+    the entire queue).
+    """
     try:
         result = _gh(
             [
@@ -319,24 +348,23 @@ def list_prs(repo: str) -> list[PRInfo]:
                 "--state",
                 "open",
                 "--json",
-                (
-                    "number,title,headRefName,baseRefName,headRefOid,"
-                    "mergeable,mergeStateStatus,statusCheckRollup"
-                ),
+                ("number,title,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus"),
                 "--limit",
                 "100",
             ],
             repo=repo,
         )
-    except subprocess.CalledProcessError as e:
-        logger.warning("Could not list PRs for %s: %s", repo, e)
-        return []
+        prs_raw: list[dict[str, Any]] = json.loads(result.stdout)
+    except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as e:
+        # Do NOT return [] here: an empty list is indistinguishable from "this
+        # repo has no open PRs", which would make fleet_sync report success
+        # while silently skipping every PR. Fail loudly instead.
+        raise RuntimeError(f"fleet_sync: could not list PRs for {repo}: {e}") from e
 
-    prs_raw: list[dict[str, Any]] = json.loads(result.stdout)
     out: list[PRInfo] = []
 
     for p in prs_raw:
-        ci = _ci_state(p.get("statusCheckRollup") or [])
+        ci = _fetch_pr_ci_state(repo, p["number"])
         mergeable = p.get("mergeable", "UNKNOWN")
         merge_state = p.get("mergeStateStatus", "UNKNOWN")
 
@@ -604,7 +632,16 @@ def process_repo(
     }
 
     logger.info("\n══ %s ══", repo)
-    prs = list_prs(repo)
+    try:
+        prs = list_prs(repo)
+    except RuntimeError as e:
+        # A list failure must NOT be silently treated as "no PRs" — that would
+        # skip the whole repo while reporting success. Count it as a failure so
+        # the run's exit status reflects the unprocessed queue, and continue to
+        # the next repo.
+        logger.error("  %s", e)
+        counts["failed"] += 1
+        return counts
 
     if not prs:
         logger.info("  No open PRs")
