@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from hephaestus.forensics.gdb_runner import (
+    _validate_gdb_cmd_prefix,
     build_gdb_script,
     main,
     resolve_command,
@@ -164,3 +165,111 @@ class TestMain:
         monkeypatch.setattr(gdb_runner, "run_under_gdb", lambda **kw: 42)
         rc = main([str(tmp_path), "sh"])
         assert rc == 42
+
+
+class TestValidateGdbCmdPrefix:
+    """Tests for GDB_CMD_PREFIX whitelist validation."""
+
+    @pytest.mark.parametrize("raw", [None, "", "   ", "\t\n  "])
+    def test_empty_input_returns_empty_list(self, raw: str | None) -> None:
+        """Empty, None, or whitespace-only input returns an empty list."""
+        assert _validate_gdb_cmd_prefix(raw) == []
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("pixi run --", ["pixi", "run", "--"]),
+            ("/usr/bin/env", ["/usr/bin/env"]),
+            ("env FOO=bar baz", ["env", "FOO=bar", "baz"]),
+            ("nice", ["nice"]),
+            ("direnv exec . --", ["direnv", "exec", ".", "--"]),
+        ],
+    )
+    def test_accepts_safe_prefixes(self, raw: str, expected: list[str]) -> None:
+        """Safe prefixes are validated and returned as token lists."""
+        assert _validate_gdb_cmd_prefix(raw) == expected
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "--init-eval-command=run",
+            "-ex",
+            "pixi --bad",
+            "rm; rm -rf /",
+            "foo|bar",
+            "foo&bar",
+            "foo&&bar",
+            "$(echo hi)",
+            "`id`",
+            "foo>out",
+            "foo<in",
+            "foo*",
+            "foo?",
+            "foo'bar",
+            'foo"bar',
+            "foo\\bar",
+        ],
+    )
+    def test_rejects_unsafe_prefixes(self, raw: str) -> None:
+        """Unsafe prefixes raise ValueError with a descriptive message."""
+        with pytest.raises(ValueError, match="GDB_CMD_PREFIX"):
+            _validate_gdb_cmd_prefix(raw)
+
+
+class TestRunUnderGdbPrefixValidation:
+    """run_under_gdb surfaces the prefix-validation error to callers."""
+
+    def test_unsafe_prefix_raises_before_subprocess(self, tmp_path: Path) -> None:
+        """Hoisted validation fires before resolve_command for unsafe prefix."""
+        with pytest.raises(ValueError, match="GDB_CMD_PREFIX"):
+            run_under_gdb(
+                str(tmp_path / "cores"),
+                _UNRESOLVABLE_CMD,
+                [],
+                gdb_cmd_prefix="--init-eval-command=run",
+            )
+
+    def test_safe_prefix_does_not_raise(self, tmp_path: Path) -> None:
+        """Safe prefix passes validation; unresolvable command still returns 127."""
+        rc = run_under_gdb(
+            str(tmp_path / "cores"),
+            _UNRESOLVABLE_CMD,
+            [],
+            gdb_cmd_prefix="pixi run --",
+        )
+        assert rc == 127
+
+
+class TestMainPrefixValidation:
+    """main() converts validation errors into a clean CLI error + exit 2."""
+
+    def test_main_returns_2_on_unsafe_env_var(self, monkeypatch, capsys, tmp_path: Path) -> None:
+        """main() returns 2 and prints ERROR to stderr for invalid GDB_CMD_PREFIX."""
+        monkeypatch.delenv("RUN_UNDER_GDB", raising=False)
+        monkeypatch.setenv("GDB_CMD_PREFIX", "--init-eval-command=run")
+        rc = main([str(tmp_path / "cores"), _UNRESOLVABLE_CMD])
+        captured = capsys.readouterr()
+        assert rc == 2
+        assert "[run-under-gdb] ERROR:" in captured.err
+        assert "GDB_CMD_PREFIX" in captured.err
+
+    def test_main_json_envelope_on_unsafe_env_var(
+        self, monkeypatch, capsys, tmp_path: Path
+    ) -> None:
+        """main() emits a JSON status envelope with status != ok on invalid prefix."""
+        import json
+
+        monkeypatch.delenv("RUN_UNDER_GDB", raising=False)
+        monkeypatch.setenv("GDB_CMD_PREFIX", "--init-eval-command=run")
+        rc = main(["--json", str(tmp_path / "cores"), _UNRESOLVABLE_CMD])
+        assert rc == 2
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] != "ok"
+        assert "GDB_CMD_PREFIX" in payload["message"]
+
+    def test_main_safe_env_var_unchanged(self, monkeypatch, tmp_path: Path) -> None:
+        """Safe prefix + unresolvable command: validation passes, returns 127."""
+        monkeypatch.delenv("RUN_UNDER_GDB", raising=False)
+        monkeypatch.setenv("GDB_CMD_PREFIX", "pixi run --")
+        rc = main([str(tmp_path / "cores"), _UNRESOLVABLE_CMD])
+        assert rc == 127

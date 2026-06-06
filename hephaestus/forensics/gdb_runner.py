@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run any command under ``gdb`` to capture crashes a runtime would swallow.
+r"""Run any command under ``gdb`` to capture crashes a runtime would swallow.
 
 Some runtimes — JIT compilers, sanitizer runtimes, language VMs — install
 their own ``SIGABRT``/``SIGSEGV``/``SIGILL`` handlers that catch a fatal
@@ -22,6 +22,17 @@ Environment variables:
 * ``GDB_CMD_PREFIX`` — optional command prefix inserted before ``gdb``, e.g.
   ``"pixi run --"``, so gdb and its inferior inherit an activated environment.
 
+Security:
+
+* ``GDB_CMD_PREFIX`` is an intentional escape hatch and its tokens are spliced
+  into the ``gdb`` argv, so unvalidated input would allow argv injection (e.g.
+  ``--init-eval-command``). Each whitespace-separated token MUST either be the
+  bare argv terminator ``--`` or fully match ``[A-Za-z0-9_./:=,@+~\\-]+`` AND
+  NOT start with ``-``. Anything else is rejected: the library entry point
+  raises ``ValueError`` and the CLI prints ``[run-under-gdb] ERROR: …`` to
+  stderr and exits with code ``2``. The supported shape is a sub-runner like
+  ``"pixi run --"`` that ends in its own argument terminator.
+
 Exit code:
 
 * ``0`` / ``N`` — normal exit with the inferior's own exit code ``N``.
@@ -33,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -41,6 +53,50 @@ import time
 from pathlib import Path
 
 from hephaestus.cli.utils import add_json_arg, emit_json_status
+
+_GDB_PREFIX_TOKEN_RE = re.compile(r"[A-Za-z0-9_./:=,@+~\-]+")
+
+
+def _validate_gdb_cmd_prefix(raw: str | None) -> list[str]:
+    """Whitelist-validate ``GDB_CMD_PREFIX`` into argv tokens.
+
+    Returns ``[]`` for ``None``/empty/whitespace-only input. Otherwise splits
+    on whitespace; each token must either be the bare argv terminator ``--``
+    or fully match the safe character class AND not begin with ``-`` (which
+    would let a caller inject gdb flags such as ``--init-eval-command``).
+
+    Args:
+        raw: The raw env-var / kwarg value.
+
+    Returns:
+        The validated argv tokens, ready to splice before ``gdb``.
+
+    Raises:
+        ValueError: If any token contains disallowed characters or is a
+            ``-``-leading flag-like token other than the bare ``--``. The
+            message names the offending token.
+
+    """
+    if not raw or not raw.strip():
+        return []
+    tokens = raw.split()
+    for tok in tokens:
+        if tok == "--":
+            continue
+        if tok.startswith("-"):
+            raise ValueError(
+                f"GDB_CMD_PREFIX token {tok!r} is a flag-like token; only the "
+                "bare argv terminator '--' is permitted among '-'-leading "
+                "tokens, to prevent gdb argv injection"
+            )
+        if not _GDB_PREFIX_TOKEN_RE.fullmatch(tok):
+            raise ValueError(
+                f"GDB_CMD_PREFIX token {tok!r} contains characters outside the "
+                r"allowed set [A-Za-z0-9_./:=,@+~\-]; refusing to splice into "
+                "gdb argv"
+            )
+    return tokens
+
 
 #: gdb batch script template. Uses Python event hooks rather than a plain
 #: gdb-script ``if`` because ``handle SIG* stop`` + a ``hook-stop`` block
@@ -162,15 +218,24 @@ def run_under_gdb(
         command: The program to run. Resolved via ``PATH`` if not a path.
         command_args: Arguments passed to ``command`` verbatim.
         gdb_cmd_prefix: Optional whitespace-separated command prefix inserted
-            before ``gdb`` (e.g. ``"pixi run --"``) so gdb and its inferior
-            inherit an activated environment.
+            before ``gdb`` (e.g. ``"pixi run --"``). Each token must either
+            be the bare ``--`` terminator or match
+            ``[A-Za-z0-9_./:=,@+~-]+`` and not start with ``-``; otherwise a
+            ``ValueError`` is raised (see module ``Security:`` note).
 
     Returns:
         ``0``/``N`` for a normal exit with code ``N``; ``128 + signo`` if the
         inferior was stopped by a caught signal; ``127`` if ``command`` cannot
         be resolved on ``PATH`` (the POSIX "command not found" convention).
 
+    Raises:
+        ValueError: If ``gdb_cmd_prefix`` (or the ``GDB_CMD_PREFIX`` env var
+            that feeds it) contains an unsafe token. See the module
+            ``Security:`` note for the whitelist.
+
     """
+    prefix = _validate_gdb_cmd_prefix(gdb_cmd_prefix)  # fail fast
+
     core_path = Path(core_dir)
     core_path.mkdir(parents=True, exist_ok=True)
 
@@ -200,7 +265,6 @@ def run_under_gdb(
         print(f"[run-under-gdb] binary   : {command_bin}", file=sys.stderr)
         print(f"[run-under-gdb] args     : {' '.join(command_args)}", file=sys.stderr)
 
-        prefix = gdb_cmd_prefix.split() if gdb_cmd_prefix else []
         gdb_cmd = [
             *prefix,
             "gdb",
@@ -278,12 +342,18 @@ def main(argv: list[str] | None = None) -> int:
             emit_json_status(rc, message="ran command directly (RUN_UNDER_GDB=0)")
         return rc
 
-    rc = run_under_gdb(
-        core_dir=args.core_dir,
-        command=args.command,
-        command_args=args.command_args,
-        gdb_cmd_prefix=os.environ.get("GDB_CMD_PREFIX"),
-    )
+    try:
+        rc = run_under_gdb(
+            core_dir=args.core_dir,
+            command=args.command,
+            command_args=args.command_args,
+            gdb_cmd_prefix=os.environ.get("GDB_CMD_PREFIX"),
+        )
+    except ValueError as exc:
+        print(f"[run-under-gdb] ERROR: {exc}", file=sys.stderr)
+        if args.json:
+            emit_json_status(2, message=f"invalid GDB_CMD_PREFIX: {exc}")
+        return 2
     if args.json:
         emit_json_status(rc, message="ran command under gdb")
     return rc
