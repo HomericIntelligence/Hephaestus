@@ -1,5 +1,10 @@
 # ProjectHephaestus
 
+[![Test](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/test.yml)
+[![PyPI](https://img.shields.io/pypi/v/HomericIntelligence-Hephaestus.svg)](https://pypi.org/project/HomericIntelligence-Hephaestus/)
+[![Python](https://img.shields.io/pypi/pyversions/HomericIntelligence-Hephaestus.svg)](https://pypi.org/project/HomericIntelligence-Hephaestus/)
+[![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
+
 Shared utilities and tooling for the HomericIntelligence ecosystem, powered by [Pixi](https://pixi.sh) for environment management.
 
 ## Overview
