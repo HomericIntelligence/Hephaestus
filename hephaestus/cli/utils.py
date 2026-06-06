@@ -205,26 +205,23 @@ def format_table(
     if not all_rows:
         return ""
 
-    # Calculate column widths
-    col_widths = [
-        max(len(str(row[i])) for row in all_rows if i < len(row))
-        for i in range(max(len(row) for row in all_rows))
-    ]
-
-    # Handle case where there are no columns
-    if not col_widths:
+    # Normalize ragged rows: pad short rows with "" to the max column count.
+    num_cols = max((len(row) for row in all_rows), default=0)
+    if num_cols == 0:
         return ""
+    normalized = [[str(cell) for cell in row] + [""] * (num_cols - len(row)) for row in all_rows]
+
+    # Calculate column widths from the normalized matrix.
+    col_widths = [max(len(row[i]) for row in normalized) for i in range(num_cols)]
 
     # Format rows
     result = []
-    for row_idx, row in enumerate(all_rows):
-        formatted_row = separator.join(
-            str(cell).ljust(col_widths[i]) for i, cell in enumerate(row) if i < len(col_widths)
-        )
+    for row_idx, row in enumerate(normalized):
+        formatted_row = separator.join(cell.ljust(col_widths[i]) for i, cell in enumerate(row))
         result.append(formatted_row)
 
         # Add separator line after headers
-        if headers and row_idx == 0 and col_widths:
+        if headers and row_idx == 0:
             separator_line = separator.join("-" * width for width in col_widths)
             result.append(separator_line)
 

@@ -164,6 +164,46 @@ class TestFormatTable:
         """Empty rows with headers returns empty string (no headers, no rows)."""
         assert format_table([], headers=[]) == ""
 
+    def test_ragged_rows_pad_to_max_columns(self) -> None:
+        """Short rows are padded so every line has the same rendered width."""
+        rows = [["a"], ["bb", "cc"], ["d", "e"]]
+        output = format_table(rows)
+        lines = output.split("\n")
+        assert len({len(line) for line in lines}) == 1, lines
+
+    def test_ragged_rows_column_widths_use_widest_cell(self) -> None:
+        """Column widths come from the widest cell in each column across all rows."""
+        rows = [["a"], ["bbbb", "cc"]]
+        output = format_table(rows)
+        lines = output.split("\n")
+        # col_widths=[4,2], separator="  " → row 0: "a   " + "  " + "  " = "a       "
+        # row 1: "bbbb" + "  " + "cc" = "bbbb  cc". Both 8 chars; col 1 of row 0 is "  ".
+        assert lines[0] == "a   " + "  " + "  "
+        assert lines[1] == "bbbb" + "  " + "cc"
+
+    def test_headers_shorter_than_rows(self) -> None:
+        """Headers with fewer columns than rows still produce equal-width lines."""
+        rows = [["alice", "30", "eng"]]
+        output = format_table(rows, headers=["Name"])
+        lines = output.split("\n")
+        # Header line, separator line, one data row.
+        assert len(lines) == 3
+        assert len({len(line) for line in lines}) == 1, lines
+
+    def test_separator_dash_spans_full_data_width(self) -> None:
+        """Dash separator widens to data column count when headers are shorter."""
+        rows = [["alice", "30", "eng"]]
+        output = format_table(rows, headers=["Name"])
+        lines = output.split("\n")
+        # Dash row must contain three dash-runs joined by the separator, not one.
+        # Count dash-runs by splitting on the column separator "  ".
+        dash_groups = [g for g in lines[1].split("  ") if set(g) == {"-"}]
+        assert len(dash_groups) == 3, lines[1]
+
+    def test_rows_with_only_empty_inner_list(self) -> None:
+        """A single empty-list row returns empty string (no columns to render)."""
+        assert format_table([[]]) == ""
+
 
 class TestFormatOutput:
     """Tests for format_output."""
