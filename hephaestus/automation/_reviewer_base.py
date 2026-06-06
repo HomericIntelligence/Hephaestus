@@ -34,17 +34,15 @@ _MISSING = object()
 def _resolve_from_subclass_module(cls: type, name: str) -> Any:
     """Look up ``name`` from the module that defines ``cls``.
 
-    The reviewer subclasses re-export ``WorktreeManager``, ``StatusTracker``,
-    and ``ThreadLogManager`` from their own modules so tests can patch them
-    with ``patch("hephaestus.automation.<module>.<Name>")``. Looking these
-    up dynamically here preserves that test seam — patching the subclass
-    module still wins.
+    Implements the test-seam contract documented on
+    :class:`BaseReviewer` (see :attr:`BaseReviewer._PATCHABLE_DEPENDENCIES`).
+    Tracked for removal under issue #710 (constructor-injection refactor).
 
     Raises:
         TypeError: If the subclass module does not re-export ``name``. The
-            error names the offending subclass and module so a future author
-            of a third ``BaseReviewer`` subclass gets an actionable message
-            instead of a bare ``AttributeError``.
+            error names the offending subclass, module, and the test-seam
+            contract so a future author of a third ``BaseReviewer`` subclass
+            gets an actionable message instead of a bare ``AttributeError``.
 
     """
     module = importlib.import_module(cls.__module__)
@@ -52,15 +50,28 @@ def _resolve_from_subclass_module(cls: type, name: str) -> Any:
     if obj is _MISSING:
         raise TypeError(
             f"{cls.__qualname__} must re-export {name!r} in its own module "
-            f"({cls.__module__}) for BaseReviewer test-patch compatibility. "
-            f"Add `from .{name.lower()}_module import {name}  # noqa: F401` "
-            f"or equivalent to {cls.__module__}."
+            f"({cls.__module__}) for BaseReviewer's test-seam contract "
+            f"(see BaseReviewer._PATCHABLE_DEPENDENCIES, issue #710). "
+            f"Add `from .<source_module> import {name}  # noqa: F401` "
+            f"to {cls.__module__}."
         )
     return obj
 
 
 class BaseReviewer:
     """Shared scaffolding for the reviewer CLIs.
+
+    Test-seam contract (see issues #806, #710):
+        Concrete subclasses MUST re-export every symbol in
+        :attr:`_PATCHABLE_DEPENDENCIES` from their own module so unit tests
+        can patch them via ``patch("hephaestus.automation.<subclass>.<Name>")``.
+        ``__init__`` resolves these symbols dynamically from the subclass
+        module to honor that patch surface.
+
+        This inverts the natural ``base → subclass`` import direction; it is
+        accepted as a deliberate test-seam until the dependency-injection
+        refactor in #710 lands. Adding a fourth subclass? Re-export the four
+        names below and you are done.
 
     Owns:
         - ``options``: subclass-specific options model (duck-typed; must expose
@@ -76,6 +87,14 @@ class BaseReviewer:
     Concrete subclasses override the work-specific methods only.
     """
 
+    # TODO(#710): replace this dynamic test-seam with constructor injection.
+    _PATCHABLE_DEPENDENCIES: tuple[str, ...] = (
+        "get_repo_root",
+        "WorktreeManager",
+        "StatusTracker",
+        "ThreadLogManager",
+    )
+
     def __init__(self, options: Any) -> None:
         """Initialize the shared reviewer scaffolding.
 
@@ -85,20 +104,17 @@ class BaseReviewer:
 
         """
         self.options = options
-        # Resolve from the subclass's module so tests can patch them via
-        # ``patch("hephaestus.automation.<module>.<Name>")``.
-        get_repo_root_fn = _resolve_from_subclass_module(type(self), "get_repo_root")
-        self.repo_root: Path = Path(get_repo_root_fn())
+        resolved = {
+            name: _resolve_from_subclass_module(type(self), name)
+            for name in self._PATCHABLE_DEPENDENCIES
+        }
+        self.repo_root: Path = Path(resolved["get_repo_root"]())
         self.state_dir: Path = self.repo_root / "build" / ".issue_implementer"
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
-        worktree_manager_cls = _resolve_from_subclass_module(type(self), "WorktreeManager")
-        status_tracker_cls = _resolve_from_subclass_module(type(self), "StatusTracker")
-        thread_log_manager_cls = _resolve_from_subclass_module(type(self), "ThreadLogManager")
-
-        self.worktree_manager: WorktreeManager = worktree_manager_cls()
-        self.status_tracker: StatusTracker = status_tracker_cls(options.max_workers)
-        self.log_manager: ThreadLogManager = thread_log_manager_cls()
+        self.worktree_manager: WorktreeManager = resolved["WorktreeManager"]()
+        self.status_tracker: StatusTracker = resolved["StatusTracker"](options.max_workers)
+        self.log_manager: ThreadLogManager = resolved["ThreadLogManager"]()
 
         self.states: dict[int, ReviewState] = {}
         self.state_lock = threading.Lock()

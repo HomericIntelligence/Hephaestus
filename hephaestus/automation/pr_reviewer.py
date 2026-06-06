@@ -41,14 +41,17 @@ from ._reviewer_base import BaseReviewer
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import reviewer_model
 from .claude_timeouts import pr_reviewer_claude_timeout
-from .curses_ui import CursesUI, ThreadLogManager  # noqa: F401  (ThreadLogManager re-exported)
+
+# Re-exports honor BaseReviewer's test-seam contract (#710); see
+# BaseReviewer._PATCHABLE_DEPENDENCIES.
+from .curses_ui import CursesUI, ThreadLogManager  # noqa: F401
 from .git_utils import get_repo_info, get_repo_root, get_repo_slug, issue_ref, pr_ref
 from .github_api import _gh_call, fetch_issue_info, gh_pr_review_post
 from .models import ReviewerOptions, ReviewPhase, ReviewState, WorkerResult
 from .prompts import get_pr_review_analysis_prompt
 from .session_naming import AGENT_PR_REVIEWER, reviewer_agent
-from .status_tracker import StatusTracker  # noqa: F401 — re-exported for test patching
-from .worktree_manager import WorktreeManager  # noqa: F401 — re-exported for test patching
+from .status_tracker import StatusTracker  # noqa: F401
+from .worktree_manager import WorktreeManager  # noqa: F401
 
 logger = logging.getLogger(__name__)
 

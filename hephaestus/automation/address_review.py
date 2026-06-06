@@ -47,8 +47,11 @@ from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
 from .claude_timeouts import address_review_claude_timeout
 from .comment_difficulty import classify_comments, format_todo_line
-from .curses_ui import CursesUI, ThreadLogManager  # noqa: F401  (ThreadLogManager re-exported)
-from .git_utils import (  # noqa: F401  (get_repo_root re-exported)
+
+# Re-exports honor BaseReviewer's test-seam contract (#710); see
+# BaseReviewer._PATCHABLE_DEPENDENCIES.
+from .curses_ui import CursesUI, ThreadLogManager  # noqa: F401
+from .git_utils import (  # noqa: F401
     get_repo_root,
     get_repo_slug,
     issue_ref,
@@ -62,8 +65,8 @@ from .github_api import (
 from .models import AddressReviewOptions, ReviewPhase, ReviewState, WorkerResult
 from .prompts import get_address_review_prompt
 from .session_naming import AGENT_IMPLEMENTER
-from .status_tracker import StatusTracker  # noqa: F401 — re-exported for test patching
-from .worktree_manager import WorktreeManager  # noqa: F401 — re-exported for test patching
+from .status_tracker import StatusTracker  # noqa: F401
+from .worktree_manager import WorktreeManager  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
