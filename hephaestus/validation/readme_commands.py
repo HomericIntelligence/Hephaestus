@@ -11,6 +11,7 @@ Validation Levels:
 """
 
 import re
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -27,19 +28,29 @@ EXECUTE_LANGUAGES = {"bash", "shell", "sh"}
 # Skip markers - commands with these comments are not executed
 SKIP_MARKERS = ["# SKIP-VALIDATION", "# OPTIONAL", "# EXAMPLE"]
 
-# Safety: blocked patterns (never execute)
+# Safety: blocked binary/command patterns (defense-in-depth behind the allowlist).
+# Redirection operators (>, >>) are intentionally NOT here — they are handled by
+# SHELL_METACHARS below, since validate_execution no longer invokes a shell and
+# those characters can never have their redirect semantics anyway.
 BLOCKED_PATTERNS = [
     r"\brm\s",
     r"\bmv\s",
     r"\bcp\s",
-    r">",
-    r">>",
     r"\bgit\s+(commit|push|checkout|reset)",
     r"\bsudo\b",
     r"\bpip\s+install",
     r"\bnpm\s+install",
     r"\bcurl\s+.*\|\s*(bash|sh)",  # Pipe to shell
 ]
+
+# Safety: shell-metacharacter / obfuscation primitives that must never appear
+# in a README-extracted command. validate_execution does NOT invoke a shell,
+# so these characters have no legitimate function; rejecting them up front
+# blocks bypass attempts the line-anchored BLOCKED_PATTERNS regexes can miss
+# (e.g. ${SHELL} -c rm, $(rm -rf /), `rm -rf /`, foo | bash, cmd > out).
+# This is the single authoritative gate for redirection (>, <) and command
+# substitution ($(...), `...`, ${VAR}).
+SHELL_METACHARS = ("$(", "`", "${", "|", ";", "&", ">", "<", "\n")
 
 
 @dataclass
@@ -160,7 +171,7 @@ class ReadmeValidator:
         return blocks
 
     def is_blocked_command(self, command: str) -> bool:
-        """Check if command matches blocked patterns.
+        """Check if command matches blocked patterns or contains shell metacharacters.
 
         Args:
             command: Command string to check
@@ -169,6 +180,8 @@ class ReadmeValidator:
             True if command is blocked
 
         """
+        if any(metachar in command for metachar in SHELL_METACHARS):
+            return True
         return any(re.search(pattern, command) for pattern in BLOCKED_PATTERNS)
 
     def is_allowed_command(self, command: str) -> bool:
@@ -217,7 +230,15 @@ class ReadmeValidator:
         return parts[0]
 
     def validate_syntax(self, command: str) -> ValidationResult:
-        """Validate bash syntax of a command.
+        """Validate that a command can be tokenized into a safe argv.
+
+        Uses shlex (POSIX mode) rather than `bash -n -c`: the validator never
+        invokes a shell on README-extracted strings, so bash-specific syntax
+        is not relevant. shlex.split raises ValueError on unterminated quotes,
+        which is the realistic failure mode for argv commands.
+
+        A failed result carries exit_code=-1 (sentinel) so consumers reading
+        ValidationResult.exit_code never see exit_code=0 alongside passed=False.
 
         Args:
             command: Command string to validate
@@ -227,34 +248,21 @@ class ReadmeValidator:
 
         """
         try:
-            result = subprocess.run(
-                ["bash", "-n", "-c", command],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            return ValidationResult(
-                command=command,
-                passed=result.returncode == 0,
-                check_type="syntax",
-                error_message=result.stderr if result.returncode != 0 else None,
-                exit_code=result.returncode,
-                stderr=result.stderr,
-            )
-        except subprocess.TimeoutExpired:
-            return ValidationResult(
-                command=command,
-                passed=False,
-                check_type="syntax",
-                error_message="Syntax check timed out",
-            )
-        except (OSError, ValueError) as e:
+            shlex.split(command, posix=True)
+        except ValueError as e:
             return ValidationResult(
                 command=command,
                 passed=False,
                 check_type="syntax",
                 error_message=str(e),
+                exit_code=-1,
             )
+        return ValidationResult(
+            command=command,
+            passed=True,
+            check_type="syntax",
+            exit_code=0,
+        )
 
     def validate_availability(self, command: str) -> ValidationResult:
         """Check if command binary is available.
@@ -284,7 +292,16 @@ class ReadmeValidator:
         )
 
     def validate_execution(self, command: str, timeout: int = 60) -> ValidationResult:
-        """Execute command and validate it succeeds.
+        """Execute command (no shell) and validate it succeeds.
+
+        The command is tokenized with shlex and run with shell=False, so
+        pipes, redirection, command substitution, and env-var interpolation
+        in the README string have no effect. Callers must already have
+        passed is_safe_command(); SHELL_METACHARS is rejected there.
+
+        A failed tokenization or empty command returns exit_code=-1 (sentinel)
+        so consumers reading ValidationResult.exit_code never see exit_code=0
+        alongside passed=False.
 
         Args:
             command: Command string to execute
@@ -295,12 +312,32 @@ class ReadmeValidator:
 
         """
         try:
+            argv = shlex.split(command, posix=True)
+        except ValueError as e:
+            return ValidationResult(
+                command=command,
+                passed=False,
+                check_type="execution",
+                error_message=f"Could not tokenize command: {e}",
+                exit_code=-1,
+            )
+        if not argv:
+            return ValidationResult(
+                command=command,
+                passed=False,
+                check_type="execution",
+                error_message="Empty command",
+                exit_code=-1,
+            )
+        try:
             result = subprocess.run(
-                ["bash", "-c", command],
+                argv,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                cwd=get_repo_root(),  # Run from repo root
+                cwd=get_repo_root(),
+                shell=False,
+                check=False,
             )
             return ValidationResult(
                 command=command,
@@ -317,6 +354,7 @@ class ReadmeValidator:
                 passed=False,
                 check_type="execution",
                 error_message=f"Command timed out after {timeout}s",
+                exit_code=-1,
             )
         except (OSError, ValueError) as e:
             return ValidationResult(
@@ -324,6 +362,7 @@ class ReadmeValidator:
                 passed=False,
                 check_type="execution",
                 error_message=str(e),
+                exit_code=-1,
             )
 
     def validate_quick(self, blocks: list[CodeBlock]) -> ValidationReport:

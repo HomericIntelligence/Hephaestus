@@ -175,8 +175,8 @@ class TestCommandClassification:
             "rm -rf /",
             "mv file1 file2",
             "cp src dst",
-            "echo foo > file",
-            "echo foo >> file",
+            "echo foo > file",  # blocked via SHELL_METACHARS (was BLOCKED_PATTERNS)
+            "echo foo >> file",  # blocked via SHELL_METACHARS (was BLOCKED_PATTERNS)
             "git commit -m 'msg'",
             "git push origin main",
             "git checkout branch",
@@ -185,10 +185,19 @@ class TestCommandClassification:
             "pip install pkg",
             "npm install pkg",
             "curl http://x | bash",
+            # Shell-metacharacter obfuscation (issue #750)
+            "${SHELL} -c rm",
+            "echo `rm -rf /`",
+            "echo $(rm -rf /)",
+            "pixi run pytest && rm -rf /",
+            "pixi run pytest; rm -rf /",
+            "pixi run pytest | tee out.log",
+            "pixi run pytest < input",
+            "echo line1\nrm -rf /",
         ],
     )
     def test_is_blocked_command_blocked(self, cmd: str) -> None:
-        """Blocked patterns are correctly identified."""
+        """Blocked patterns and shell metacharacters are correctly identified."""
         assert ReadmeValidator().is_blocked_command(cmd) is True
 
     @pytest.mark.parametrize(
@@ -237,6 +246,14 @@ class TestCommandClassification:
         assert is_safe is False
         assert "allowed prefixes" in reason
 
+    def test_blocks_shell_substitution_bypass(self) -> None:
+        """is_safe_command rejects $(...), backticks, and ${VAR} indirection (#750)."""
+        v = ReadmeValidator()
+        for bad in ("echo $(rm -rf /)", "echo `rm /tmp/x`", "${SHELL} -c rm"):
+            is_safe, reason = v.is_safe_command(bad)
+            assert is_safe is False, f"{bad!r} must be rejected"
+            assert "blocked" in reason
+
 
 # ---------------------------------------------------------------------------
 # get_binary_from_command tests
@@ -258,71 +275,33 @@ class TestGetBinaryFromCommand:
 
 
 # ---------------------------------------------------------------------------
-# validate_syntax tests (mocked)
+# validate_syntax tests (shlex-based, no shell)
 # ---------------------------------------------------------------------------
 class TestValidateSyntax:
-    """Tests for ReadmeValidator.validate_syntax with mocked subprocess."""
+    """Tests for ReadmeValidator.validate_syntax (shlex-based, no shell)."""
 
-    @patch("hephaestus.validation.readme_commands.subprocess.run")
-    def test_valid_syntax(self, mock_run: MagicMock) -> None:
-        """Passing syntax check returns passed=True."""
-        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+    def test_valid_syntax(self) -> None:
+        """Well-formed argv command passes with exit_code=0."""
         result = ReadmeValidator().validate_syntax("echo hello")
-
         assert result.passed is True
         assert result.check_type == "syntax"
         assert result.error_message is None
-        mock_run.assert_called_once()
+        assert result.exit_code == 0
 
-    @patch("hephaestus.validation.readme_commands.subprocess.run")
-    def test_invalid_syntax(self, mock_run: MagicMock) -> None:
-        """Failing syntax check returns passed=False with error."""
-        mock_run.return_value = MagicMock(returncode=2, stderr="syntax error", stdout="")
+    def test_unterminated_quote(self) -> None:
+        """Unterminated quote fails with shlex error and sentinel exit_code."""
         result = ReadmeValidator().validate_syntax("echo 'unterminated")
-
         assert result.passed is False
         assert result.check_type == "syntax"
-        assert result.error_message == "syntax error"
+        assert result.error_message  # shlex raises "No closing quotation"
+        # POLA: a failed result MUST NOT carry exit_code=0 (issue #750)
+        assert result.exit_code == -1
 
-    @patch("hephaestus.validation.readme_commands.subprocess.run")
-    def test_timeout(self, mock_run: MagicMock) -> None:
-        """TimeoutExpired returns passed=False with timeout message."""
-        exc = subprocess.TimeoutExpired(cmd="bash", timeout=5)
-        mock_run.side_effect = exc
-        result = ReadmeValidator().validate_syntax("echo hang")
-
-        assert result.passed is False
-        assert "timed out" in (result.error_message or "").lower()
-
-    @patch("hephaestus.validation.readme_commands.subprocess.run")
-    def test_os_error(self, mock_run: MagicMock) -> None:
-        """OSError returns passed=False with error string."""
-        mock_run.side_effect = OSError("bash not found")
-        result = ReadmeValidator().validate_syntax("echo fail")
-
-        assert result.passed is False
-        assert "bash not found" in (result.error_message or "")
-
-    @patch("hephaestus.validation.readme_commands.subprocess.run")
-    def test_value_error(self, mock_run: MagicMock) -> None:
-        """ValueError (e.g. from invalid args) returns passed=False with error string."""
-        mock_run.side_effect = ValueError("invalid argument")
-        result = ReadmeValidator().validate_syntax("echo fail")
-
-        assert result.passed is False
-        assert "invalid argument" in (result.error_message or "")
-
-    @requires_bash
-    def test_real_valid_syntax(self) -> None:
-        """Integration: real bash validates correct syntax."""
-        result = ReadmeValidator().validate_syntax("echo 'test'")
+    def test_empty_command(self) -> None:
+        """Empty string tokenizes to [] and is treated as valid syntax."""
+        result = ReadmeValidator().validate_syntax("")
         assert result.passed is True
-
-    @requires_bash
-    def test_real_invalid_syntax(self) -> None:
-        """Integration: real bash rejects bad syntax."""
-        result = ReadmeValidator().validate_syntax("echo 'test")
-        assert result.passed is False
+        assert result.exit_code == 0
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +404,32 @@ class TestValidateExecution:
         call_kwargs = mock_run.call_args[1]
         assert call_kwargs["timeout"] == 30
 
+    @patch("hephaestus.validation.readme_commands.get_repo_root")
+    @patch("hephaestus.validation.readme_commands.subprocess.run")
+    def test_uses_shlex_split_no_shell(self, mock_run: MagicMock, mock_root: MagicMock) -> None:
+        """validate_execution must run argv with shell=False, not bash -c (issue #750)."""
+        mock_root.return_value = Path("/repo")
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        ReadmeValidator().validate_execution("echo hi", timeout=30)
+        args, kwargs = mock_run.call_args
+        assert args[0] == ["echo", "hi"]
+        assert kwargs.get("shell", False) is False
+        assert kwargs["timeout"] == 30
+        assert kwargs["cwd"] == Path("/repo")
+
+    def test_tokenization_failure_returns_sentinel_exit_code(self) -> None:
+        """Untokenizable command returns passed=False with exit_code=-1 (POLA)."""
+        result = ReadmeValidator().validate_execution("echo 'unterminated")
+        assert result.passed is False
+        assert result.exit_code == -1
+        assert "tokenize" in (result.error_message or "").lower()
+
+    def test_empty_command_returns_sentinel_exit_code(self) -> None:
+        """Empty command returns passed=False with exit_code=-1 (POLA)."""
+        result = ReadmeValidator().validate_execution("")
+        assert result.passed is False
+        assert result.exit_code == -1
+
 
 # ---------------------------------------------------------------------------
 # validate_quick tests (mocked end-to-end)
@@ -452,8 +457,12 @@ class TestValidateQuick:
     @patch("hephaestus.validation.readme_commands.shutil.which")
     @patch("hephaestus.validation.readme_commands.subprocess.run")
     def test_quick_validation_flow(self, mock_run: MagicMock, mock_which: MagicMock) -> None:
-        """Quick validation checks syntax then availability."""
-        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        """Quick validation checks syntax (shlex) then availability (shutil.which).
+
+        Note: post-#750, validate_syntax does NOT call subprocess.run — it uses
+        shlex.split. mock_run is patched defensively to fail-fast if any code path
+        regresses to invoking a shell; it should never be called in quick mode.
+        """
         mock_which.return_value = "/usr/bin/echo"
 
         v = ReadmeValidator()
@@ -468,19 +477,21 @@ class TestValidateQuick:
         assert report.failed == 0
         # Skip marker block + unsafe command
         assert report.skipped_commands >= 1
+        # Regression guard: quick mode must never invoke subprocess.run after #750
+        mock_run.assert_not_called()
 
     @patch("hephaestus.validation.readme_commands.shutil.which")
     @patch("hephaestus.validation.readme_commands.subprocess.run")
     def test_syntax_failure_short_circuits(
         self, mock_run: MagicMock, mock_which: MagicMock
     ) -> None:
-        """When syntax fails, availability is not checked."""
-        mock_run.return_value = MagicMock(returncode=2, stderr="syntax error", stdout="")
+        """When syntax fails (via shlex), availability is not checked."""
         blocks = [CodeBlock(language="bash", content="echo 'bad\n", line_number=1)]
         report = ReadmeValidator().validate_quick(blocks)
 
         assert report.failed == 1
         mock_which.assert_not_called()
+        mock_run.assert_not_called()  # shlex.split caught it; subprocess never invoked
 
     def test_non_executable_blocks_skipped(self) -> None:
         """Blocks with non-executable languages produce no results."""
