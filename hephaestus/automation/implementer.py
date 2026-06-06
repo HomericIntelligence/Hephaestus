@@ -45,8 +45,8 @@ from hephaestus.agents.runtime import (
 # correct as of the commit that introduced them; if they have drifted,
 # re-run ``grep -rn 'patch.*implementer\.<symbol>' tests/``.
 # ---------------------------------------------------------------------------
-# Patched by: tests via patch("hephaestus.automation.implementer.review_state")
-# Runtime call site: ``implementer_phase_runner.py:1194``
+# Patched by: tests/unit/automation/test_implementer_loop.py:{865,879}
+# Runtime call site: ``implementer_phase_runner.py:1199`` (via ``_impl_module``)
 from . import (  # noqa: F401  # test-patch shim — see contract above
     review_state,
 )
@@ -75,7 +75,7 @@ from .git_utils import (
 )
 
 # Patched by: tests/unit/automation/test_implementer_loop.py:316
-# Runtime call site: ``implementer_phase_runner`` via ``_impl_module``
+# Runtime call site: ``implementer_phase_runner.py:{854,1303,1577}`` (via ``_impl_module``)
 # ``run`` is a real call site (not just a shim) for ``IssueImplementer._health_check``
 # (see ``implementer.py:294,301``); it does double duty as a patch surface.
 from .git_utils import (
