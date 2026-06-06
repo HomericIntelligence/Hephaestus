@@ -92,6 +92,17 @@ setup() {
     [ "$_PASS" -eq 1 ]; [ "$_FAIL" -eq 0 ]
 }
 
+@test "nats-py: both pip paths fail → 1 fail" {
+    pip3() { return 1; }
+    if pip3 install --break-system-packages nats-py \
+        || pip3 install --user nats-py; then
+        check_pass "nats-py installed"
+    else
+        check_fail "nats-py — install failed"
+    fi
+    [ "$_PASS" -eq 0 ]; [ "$_FAIL" -eq 1 ]
+}
+
 # ── pytool loop fallback (install.sh:647-652 rewrite) ─────────────────────────
 @test "pytool loop: fallback path succeeds → 1 pass" {
     _n=0
