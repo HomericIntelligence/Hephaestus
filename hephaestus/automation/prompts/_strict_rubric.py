@@ -105,6 +105,10 @@ D2 — Diff review of CHANGED lines only.
     it has issues — that is scope-bleed and a finding against the
     reviewer, not the PR. If a changed line depends on unchanged code,
     cite the changed line and reference (not critique) the dependency.
+    Lint/formatter/pre-commit-driven incidental edits inside the diff
+    (toolchain-forced normalization required to land the change) are
+    in-scope and must NOT be flagged as the author's scope creep — see
+    the P2/YAGNI carve-out.
 
 D3 — Inline-comment quality.
     Every inline comment MUST be actionable and specific. Reject filler
@@ -155,6 +159,15 @@ P2 — YAGNI — You Ain't Gonna Need It.
     in THIS issue. Flag scope creep, opportunistic refactors mixed in,
     or "while we're here" additions. Features built for hypothetical
     future requirements are findings.
+    CARVE-OUT — toolchain-forced incidental churn is ACCEPTABLE and
+    must NOT be flagged as YAGNI/scope-creep: edits the linter,
+    formatter, or pre-commit hooks FORCE in order to land the change
+    (whitespace/formatting normalization, import sorting, trailing-
+    newline fixes, type annotations required to pass mypy, lint
+    auto-fixes). The test is intent, not size: churn the toolchain
+    requires is fine; churn the author CHOSE (opportunistic refactors,
+    unrelated rewrites, "while we're here" feature work) is still a
+    finding.
 
 P3 — TDD — Test Driven Development.
     Do tests drive the implementation? Look for test-first evidence:
@@ -322,9 +335,13 @@ _IMPL_LOOP_STRICT_RUBRIC = (
    silencers). Flag credentials in env-var defaults, hard-coded
    API keys, or signing-key material.
 6. Diff scope — every hunk maps to a stated requirement in the issue
-   (YAGNI applied at the diff level). Flag opportunistic refactors,
-   formatting churn in untouched files, dependency bumps that weren't
-   asked for, or new config knobs without a current consumer.
+   (YAGNI applied at the diff level). Flag opportunistic refactors the
+   author chose, gratuitous formatting churn in files the change did not
+   otherwise touch, dependency bumps that weren't asked for, or new
+   config knobs without a current consumer. EXCLUDE toolchain-forced
+   incidental churn (formatter/linter/pre-commit normalization, import
+   sorting, mypy-required annotations) on files the change already
+   touches — that is required to pass CI/hooks and is not scope creep.
 
 **On R1+ (re-review iterations)**: verify previous-iteration's findings
 were actually addressed in THIS diff, not just acknowledged in commit

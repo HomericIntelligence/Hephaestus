@@ -454,6 +454,35 @@ class TestSharedRubricConstants:
         """The anti-inflation block must restate the DEFAULT IS F rule."""
         assert "DEFAULT IS F" in prompts._STRICT_GRADING_AND_ANTI_INFLATION
 
+    def test_seven_principles_yagni_carves_out_toolchain_churn(self) -> None:
+        """P2/YAGNI exempts toolchain churn but still flags scope creep (#1017)."""
+        block = prompts._SEVEN_PRINCIPLES_DIMENSIONS
+        # Carve-out for lint/formatter/pre-commit-driven incidental edits.
+        assert "pre-commit" in block
+        assert "toolchain" in block.lower()
+        # Genuine scope-creep detection must be retained.
+        assert "opportunistic" in block
+
+
+class TestRubricToolchainCarveOut:
+    """Scope/YAGNI rubric exempts toolchain churn but flags chosen work (#1017)."""
+
+    def test_pr_rubric_d2_allows_toolchain_incidental_changes(self) -> None:
+        """The rendered PR-review prompt must permit lint/formatter-driven edits."""
+        out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
+        assert "pre-commit" in out
+        assert "toolchain" in out.lower()
+
+    def test_impl_loop_dimension6_distinguishes_forced_from_chosen_churn(self) -> None:
+        """Impl-loop diff-scope flags chosen churn, exempts toolchain churn."""
+        rubric = prompts._IMPL_LOOP_STRICT_RUBRIC
+        # Carve-out present.
+        assert "pre-commit" in rubric
+        assert "toolchain" in rubric.lower()
+        # Author-chosen scope creep still flagged.
+        assert "opportunistic" in rubric
+        assert "dependency bumps that weren't asked for" in rubric
+
 
 class TestPlanReviewStrictRubric:
     """Tests for the strict rubric injected into PLAN_REVIEW_PROMPT (#578)."""
