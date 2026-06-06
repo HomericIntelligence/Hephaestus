@@ -60,6 +60,51 @@ class TestParseFollowUpResponse:
         response = parse_follow_up_response("{not valid")
         assert response.follow_ups == []
 
+    def test_parses_fenced_json_with_nested_object(self) -> None:
+        r"""Regression: the fenced regex must not truncate on inner ``}``.
+
+        Locks in that ``r"```(?:json)?\s*(\{.*?\})\s*```"`` correctly
+        spans nested objects because ``.*?`` is anchored by the trailing
+        fence literal.
+        """
+        text = (
+            "```json\n"
+            '{"follow_ups": [{"category": "core", "title": "T",'
+            ' "body": "B", "extra": {"nested": "val"}}],'
+            ' "rejected": []}\n'
+            "```"
+        )
+        response = parse_follow_up_response(text)
+        assert len(response.follow_ups) == 1
+        assert response.follow_ups[0].title == "T"
+
+    def test_parses_bare_json_with_trailing_text(self) -> None:
+        """``raw_decode`` must stop at the closing ``}`` of the first object.
+
+        Mirrors the prior balancer's behavior of returning early once
+        the outer brace closes, ignoring any garbage that follows.
+        """
+        text = (
+            '{"follow_ups": [{"category": "core", "title": "T",'
+            ' "body": "B"}], "rejected": []}'
+            "\nsome trailing log line that is not JSON"
+        )
+        response = parse_follow_up_response(text)
+        assert len(response.follow_ups) == 1
+        assert response.follow_ups[0].title == "T"
+
+    def test_parses_bare_json_with_leading_whitespace_before_brace(self) -> None:
+        """Prose followed by blank lines before the JSON must still parse."""
+        text = (
+            "Some prose explaining the response.\n"
+            "\n   \n"
+            '{"follow_ups": [{"category": "security", "title": "T",'
+            ' "body": "B"}], "rejected": []}'
+        )
+        response = parse_follow_up_response(text)
+        assert len(response.follow_ups) == 1
+        assert response.follow_ups[0].category == "security"
+
     def test_caps_at_three_items(self) -> None:
         items = [{"category": "core", "title": f"T{i}", "body": f"B{i}"} for i in range(10)]
         text = json.dumps({"follow_ups": items, "rejected": []})

@@ -81,57 +81,24 @@ class FollowUpResponse:
     rejected: list[RejectedItem] = field(default_factory=list)
 
 
-def _extract_outer_json_object(text: str) -> str | None:
-    """Find and return the outermost JSON object ``{...}`` in *text*.
-
-    Uses a balanced-brace scan so prose containing additional ``{`` or
-    nested objects does not confuse the boundary detection. Carries the
-    A5-07 lesson (originally applied to the array variant in the prior
-    schema): a greedy regex over-consumes, a non-greedy regex stops too
-    early inside nested structures.
-    """
-    start = text.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    in_string = False
-    escape_next = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if escape_next:
-            escape_next = False
-            continue
-        if ch == "\\" and in_string:
-            escape_next = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-    return None
-
-
 def _extract_json_object(text: str) -> dict[str, Any] | None:
     """Extract the first JSON object from ``text``.
 
-    Looks for a fenced ```json ... ``` block first, then falls back to a
-    balanced-brace scan over the bare text. Returns ``None`` if nothing
-    parseable is found.
+    Looks for a fenced ```json ... ``` block first, then falls back to
+    ``json.JSONDecoder.raw_decode`` over the bare text starting at the
+    first ``{``. Returns ``None`` if nothing parseable is found.
     """
     fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    candidate = fenced.group(1) if fenced else _extract_outer_json_object(text)
-    if candidate is None:
-        return None
+    if fenced is not None:
+        candidate = fenced.group(1)
+    else:
+        start = text.find("{")
+        if start == -1:
+            return None
+        candidate = text[start:]
 
     try:
-        parsed = json.loads(candidate)
+        parsed, _ = json.JSONDecoder().raw_decode(candidate)
     except json.JSONDecodeError:
         return None
     if not isinstance(parsed, dict):
