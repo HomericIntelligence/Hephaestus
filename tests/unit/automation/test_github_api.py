@@ -391,6 +391,50 @@ class TestGhCall:
         assert mock_run.call_count == 1
 
     @patch("hephaestus.automation.github_api.run")
+    def test_fail_fast_on_unprocessable_entity(self, mock_run: Any) -> None:
+        """422 Unprocessable Entity must fail fast without retry.
+
+        Regression (#1040): a malformed review POST (e.g. an inline comment on a
+        line outside the diff hunk) returns ``gh: Unprocessable Entity (HTTP 422)``,
+        a deterministic validation error. It was retried 5x with exponential
+        backoff (~31s wasted) before raising and being mis-reported as a NOGO.
+        """
+        _github_api_module._GH_BREAKER.reset()
+        mock_run.side_effect = subprocess.CalledProcessError(
+            1, "gh", stderr="gh: Unprocessable Entity (HTTP 422)"
+        )
+
+        with pytest.raises(subprocess.CalledProcessError):
+            _gh_call(["api", "-X", "POST", "repos/o/r/pulls/1/reviews", "--input", "x.json"])
+
+        assert mock_run.call_count == 1
+
+    @patch("hephaestus.automation.github_api.run")
+    def test_fail_fast_on_graphql_schema_error(self, mock_run: Any) -> None:
+        """GraphQL schema errors (bad argument / unused variable) must fail fast.
+
+        Regression (#1040): a wrong mutation field produced
+        ``gh: InputObject '...' doesn't accept argument '...'`` /
+        ``Variable $x is declared by ... but not used`` — permanent schema errors
+        that were nonetheless retried 5x before raising.
+        """
+        _github_api_module._GH_BREAKER.reset()
+        mock_run.side_effect = subprocess.CalledProcessError(
+            1,
+            "gh",
+            stderr=(
+                "gh: InputObject 'AddPullRequestReviewCommentInput' doesn't accept "
+                "argument 'pullRequestReviewThreadId'\n"
+                "Variable $threadId is declared by AddReply but not used"
+            ),
+        )
+
+        with pytest.raises(subprocess.CalledProcessError):
+            _gh_call(["api", "graphql", "-f", "query=mutation {...}"])
+
+        assert mock_run.call_count == 1
+
+    @patch("hephaestus.automation.github_api.run")
     @patch("hephaestus.automation.github_api.time.sleep")
     def test_retry_on_transient_error(self, mock_sleep: Any, mock_run: Any) -> None:
         """Test retry on transient errors with jitter.

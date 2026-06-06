@@ -272,8 +272,13 @@ _NON_TRANSIENT_PATTERNS = [
         r"(?:^|\s)404(?:\s|$)|not found",
         r"(?:^|\s)400(?:\s|$)|bad request",
         r"(?:^|\s)401(?:\s|$)|unauthorized",
+        r"(?:^|\s)422(?:\s|$)|unprocessable entity",
         r"invalid argument",
         r"unknown json field",
+        # GraphQL schema errors are deterministic — a bad mutation/field or an
+        # unused variable can never succeed on retry (#1040).
+        r"doesn't accept argument",
+        r"is declared by .* but not used",
     )
 ]
 _NON_TRANSIENT_PATTERNS.append(_TOKEN_SCOPE_PATTERN)
