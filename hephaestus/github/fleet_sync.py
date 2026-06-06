@@ -370,7 +370,15 @@ def list_prs(repo: str) -> list[PRInfo]:
 
         if mergeable == "CONFLICTING":
             status = PRStatus.CONFLICTED
-        elif ci == "FAILURE":
+        elif ci == "FAILURE" and merge_state == "CLEAN":
+            # FAILING means a genuine, PR-specific failure: the branch is already
+            # up to date with its base (CLEAN) yet CI is red. Skip — a rebase
+            # wouldn't change the outcome. We require CLEAN here so that a PR
+            # which is merely BEHIND/BLOCKED with a STALE red result (its checks
+            # ran against an old base, commonly a failure already fixed on main)
+            # is NOT skipped — it falls through to OUTDATED and gets rebased,
+            # which re-runs CI fresh. Without the CLEAN guard, a fix landing on
+            # main strands the entire queue as "FAILING".
             status = PRStatus.FAILING
         elif merge_state == "BEHIND":
             status = PRStatus.OUTDATED

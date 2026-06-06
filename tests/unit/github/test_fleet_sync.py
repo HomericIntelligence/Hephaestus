@@ -580,3 +580,80 @@ class TestListPrs:
 
         monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
         assert fleet_sync_module.list_prs("ProjectHephaestus") == []
+
+
+class TestPrClassification:
+    """Regression tests for #1029: stale-failing PRs must be rebased, not skipped.
+
+    A FAILING classification (skip) must require the branch to be up to date with
+    its base (mergeStateStatus CLEAN). A PR that is BEHIND or BLOCKED with a red
+    CI result has stale checks (ran against an old base, often a failure already
+    fixed on main) and must classify as OUTDATED so it gets rebased and re-run —
+    otherwise a fix landing on main strands the entire queue as FAILING.
+    """
+
+    def _classify(self, monkeypatch, *, mergeable: str, state: str, ci: str):
+        """Run list_prs with a single stubbed PR and return its PRStatus."""
+
+        def fake_gh(args, repo=None, **kwargs):
+            if args[:2] == ["pr", "list"]:
+                return MagicMock(
+                    stdout=json.dumps(
+                        [
+                            {
+                                "number": 1,
+                                "title": "t",
+                                "headRefName": "h",
+                                "baseRefName": "main",
+                                "headRefOid": "sha",
+                                "mergeable": mergeable,
+                                "mergeStateStatus": state,
+                            }
+                        ]
+                    )
+                )
+            # per-PR CI fetch: map desired ci_state to a rollup
+            rollup = []
+            if ci == "FAILURE":
+                rollup = [{"conclusion": "FAILURE", "state": "FAILURE"}]
+            elif ci == "SUCCESS":
+                rollup = [{"conclusion": "SUCCESS", "state": "SUCCESS"}]
+            return MagicMock(stdout=json.dumps({"statusCheckRollup": rollup}))
+
+        monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
+        return fleet_sync_module.list_prs("ProjectHephaestus")[0].status
+
+    def test_blocked_mergeable_failing_is_outdated(self, monkeypatch) -> None:
+        """BLOCKED+MERGEABLE with red CI = stale failure → rebase (OUTDATED)."""
+        assert (
+            self._classify(monkeypatch, mergeable="MERGEABLE", state="BLOCKED", ci="FAILURE")
+            == PRStatus.OUTDATED
+        )
+
+    def test_behind_failing_is_outdated(self, monkeypatch) -> None:
+        """BEHIND with red CI = stale failure → rebase (OUTDATED)."""
+        assert (
+            self._classify(monkeypatch, mergeable="MERGEABLE", state="BEHIND", ci="FAILURE")
+            == PRStatus.OUTDATED
+        )
+
+    def test_clean_failing_is_failing(self, monkeypatch) -> None:
+        """CLEAN (up to date) with red CI = genuine PR failure → skip (FAILING)."""
+        assert (
+            self._classify(monkeypatch, mergeable="MERGEABLE", state="CLEAN", ci="FAILURE")
+            == PRStatus.FAILING
+        )
+
+    def test_conflicting_is_conflicted(self, monkeypatch) -> None:
+        """CONFLICTING always classifies as CONFLICTED regardless of CI."""
+        assert (
+            self._classify(monkeypatch, mergeable="CONFLICTING", state="DIRTY", ci="FAILURE")
+            == PRStatus.CONFLICTED
+        )
+
+    def test_clean_success_is_ready(self, monkeypatch) -> None:
+        """CLEAN + green CI = READY."""
+        assert (
+            self._classify(monkeypatch, mergeable="MERGEABLE", state="CLEAN", ci="SUCCESS")
+            == PRStatus.READY
+        )
