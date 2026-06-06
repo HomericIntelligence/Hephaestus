@@ -573,8 +573,11 @@ def test_build_phase_argv_plan_uses_parallel_worker_flag() -> None:
     assert argv[argv.index("--parallel") + 1] == "4"
 
 
-def test_phase_env_loop_index_only_for_drive_green() -> None:
+def test_phase_env_loop_index_only_for_drive_green(monkeypatch: pytest.MonkeyPatch) -> None:
     """Regression: HEPH_LOOP_INDEX/HEPH_TOTAL_LOOPS scoped to drive-green only."""
+    # Clean pre-existing vars from the actual environment that _phase_env will copy
+    monkeypatch.delenv("HEPH_LOOP_INDEX", raising=False)
+    monkeypatch.delenv("HEPH_TOTAL_LOOPS", raising=False)
     cfg = LoopConfig(loops=5)
     for phase in ("plan", "implement"):
         env = loop_runner._phase_env(cfg, loop_idx=3, trunk_sha="abc", phase=phase)
