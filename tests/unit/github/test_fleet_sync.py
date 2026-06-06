@@ -461,6 +461,142 @@ class TestTimeoutHandling:
             assert call_kwargs["timeout"] == fleet_sync_module.NETWORK_TIMEOUT
 
 
+def _pr(number: int, status: PRStatus, head: str = "feat") -> PRInfo:
+    """Build a minimal PRInfo for the given number/status."""
+    return PRInfo(
+        repo="RepoA",
+        number=number,
+        title="t",
+        head_ref=head,
+        base_ref="main",
+        head_sha="deadbeef",
+        mergeable="MERGEABLE",
+        merge_state="CLEAN",
+        ci_state="SUCCESS",
+        status=status,
+    )
+
+
+class TestCloneReuseAndWorktrees:
+    """#1044: clone each repo once, use worktrees per PR instead of re-cloning."""
+
+    def test_ensure_repo_clone_clones_when_absent(self, tmp_path: Path) -> None:
+        calls: list[list[str]] = []
+
+        def fake_git(args, cwd, dry_run=False, check=True):
+            calls.append(args)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch.object(fleet_sync_module, "_git", side_effect=fake_git):
+            path = fleet_sync_module.ensure_repo_clone("RepoA", tmp_path)
+
+        assert path == tmp_path / "RepoA"
+        assert calls[0][0] == "clone"
+        assert not any(a[0] == "fetch" for a in calls)
+
+    def test_ensure_repo_clone_reuses_existing(self, tmp_path: Path) -> None:
+        # Simulate an already-present clone.
+        (tmp_path / "RepoA" / ".git").mkdir(parents=True)
+        calls: list[list[str]] = []
+
+        def fake_git(args, cwd, dry_run=False, check=True):
+            calls.append(args)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch.object(fleet_sync_module, "_git", side_effect=fake_git):
+            path = fleet_sync_module.ensure_repo_clone("RepoA", tmp_path)
+
+        assert path == tmp_path / "RepoA"
+        # Reuse path fetches, never clones.
+        assert not any(a[0] == "clone" for a in calls)
+        assert calls[0][:2] == ["fetch", "--prune"]
+
+    def test_add_pr_worktree_adds_off_clone(self, tmp_path: Path) -> None:
+        repo_clone = tmp_path / "RepoA"
+        work = tmp_path / "RepoA-7"
+        calls: list[list[str]] = []
+
+        def fake_git(args, cwd, dry_run=False, check=True):
+            calls.append(args)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch.object(fleet_sync_module, "_git", side_effect=fake_git):
+            fleet_sync_module.add_pr_worktree(repo_clone, work, "feat", "main")
+
+        assert ["fetch", "origin", "feat"] in calls
+        assert ["fetch", "origin", "main"] in calls
+        worktree_add = [a for a in calls if a[:2] == ["worktree", "add"]]
+        assert len(worktree_add) == 1
+        assert str(work) in worktree_add[0]
+        assert "origin/feat" in worktree_add[0]
+
+    def test_rebase_and_resign_uses_worktree_not_clone(self, tmp_path: Path) -> None:
+        repo_clone = tmp_path / "RepoA"
+        pr = _pr(7, PRStatus.OUTDATED)
+        # Pre-create the per-PR work dir so the cleanup removal actually fires
+        # (remove_worktree is a no-op when the path is absent).
+        (tmp_path / "RepoA-7").mkdir(parents=True)
+        calls: list[list[str]] = []
+
+        def fake_git(args, cwd, dry_run=False, check=True):
+            calls.append(args)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch.object(fleet_sync_module, "_git", side_effect=fake_git),
+            patch.object(fleet_sync_module, "get_resign_exec", return_value="true"),
+        ):
+            ok = fleet_sync_module.rebase_and_resign(pr, repo_clone)
+
+        assert ok is True
+        # Never clones; uses a worktree and cleans it up.
+        assert not any(a[0] == "clone" for a in calls)
+        assert any(a[:2] == ["worktree", "add"] for a in calls)
+        assert any(a[:2] == ["worktree", "remove"] for a in calls)
+
+    def test_process_repo_clones_once_for_multiple_prs(self, tmp_path: Path) -> None:
+        """Two OUTDATED PRs in one repo must trigger exactly one clone."""
+        prs = [_pr(n, PRStatus.OUTDATED, head=f"feat{n}") for n in (1, 2, 3)]
+        clone_count = [0]
+
+        def fake_ensure(repo, clone_dir, dry_run=False):
+            clone_count[0] += 1
+            return clone_dir / repo
+
+        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="claude")
+
+        with (
+            patch.object(fleet_sync_module, "list_prs", return_value=prs),
+            patch.object(fleet_sync_module, "ensure_repo_clone", side_effect=fake_ensure),
+            patch.object(fleet_sync_module, "rebase_and_resign", return_value=True),
+        ):
+            counts = fleet_sync_module.process_repo("RepoA", args, tmp_path)
+
+        assert clone_count[0] == 1
+        assert counts["rebased"] == 3
+
+    def test_process_repo_skips_clone_when_no_checkout_needed(self, tmp_path: Path) -> None:
+        """READY-only PRs merge via gh and never trigger a clone."""
+        prs = [_pr(1, PRStatus.READY, head="feat1")]
+        clone_count = [0]
+
+        def fake_ensure(repo, clone_dir, dry_run=False):
+            clone_count[0] += 1
+            return clone_dir / repo
+
+        args = MagicMock(dry_run=False, skip_conflict_resolution=False, agent="claude")
+
+        with (
+            patch.object(fleet_sync_module, "list_prs", return_value=prs),
+            patch.object(fleet_sync_module, "ensure_repo_clone", side_effect=fake_ensure),
+            patch.object(fleet_sync_module, "merge_pr", return_value=True),
+        ):
+            counts = fleet_sync_module.process_repo("RepoA", args, tmp_path)
+
+        assert clone_count[0] == 0
+        assert counts["merged"] == 1
+
+
 class TestListPrs:
     """Regression tests for #1027: statusCheckRollup must not be bulk-fetched.
 

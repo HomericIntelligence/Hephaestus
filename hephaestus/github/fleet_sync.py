@@ -407,6 +407,91 @@ def list_prs(repo: str) -> list[PRInfo]:
     return out
 
 
+def ensure_repo_clone(repo: str, clone_dir: Path, dry_run: bool = False) -> Path:
+    """Return a single reusable clone of ``repo``, cloning once or fetching if present.
+
+    fleet_sync used to ``git clone`` the whole repo afresh for every PR (#1044).
+    Instead, keep one clone per repo under ``clone_dir/<repo>`` and reuse it for
+    all of that repo's PRs: clone on first use, ``git fetch`` (prune) on reuse.
+    Per-PR work then happens in cheap ``git worktree`` checkouts off this clone.
+
+    Args:
+        repo: Repository name (under ``ORG``).
+        clone_dir: Directory that holds per-repo clones for this run.
+        dry_run: If True, log intent without running git.
+
+    Returns:
+        Path to the reusable repo clone (``clone_dir/<repo>``).
+
+    """
+    repo_url = f"https://github.com/{ORG}/{repo}.git"
+    clone_path = clone_dir / repo
+    git_dir = clone_path / ".git"
+
+    if git_dir.exists():
+        logger.info("  Reusing existing clone of %s; fetching latest...", repo)
+        _git(["fetch", "--prune", "origin"], cwd=clone_path, dry_run=dry_run, check=False)
+        return clone_path
+
+    logger.info("  Cloning %s (once, reused for all its PRs)...", repo)
+    _git(["clone", "--filter=blob:none", repo_url, str(clone_path)], cwd=clone_dir, dry_run=dry_run)
+    return clone_path
+
+
+def add_pr_worktree(
+    repo_clone: Path,
+    work: Path,
+    branch: str,
+    base: str,
+    dry_run: bool = False,
+) -> None:
+    """Create a worktree for ``branch`` off the shared repo clone.
+
+    Fetches the PR head and base refs into the shared clone, then adds a
+    worktree at ``work`` checked out to ``branch`` tracking ``origin/branch``.
+    Any stale worktree at ``work`` is removed first so reruns are idempotent.
+
+    Args:
+        repo_clone: Path to the reusable repo clone (from :func:`ensure_repo_clone`).
+        work: Destination worktree path (per-PR, outside the clone).
+        branch: PR head branch name.
+        base: PR base branch name.
+        dry_run: If True, log intent without running git.
+
+    """
+    _git(["fetch", "origin", branch], cwd=repo_clone, dry_run=dry_run)
+    _git(["fetch", "origin", base], cwd=repo_clone, dry_run=dry_run)
+
+    # Idempotent: drop any leftover worktree at this path before re-adding.
+    remove_worktree(repo_clone, work, dry_run=dry_run)
+    _git(
+        ["worktree", "add", "--force", "-B", branch, str(work), f"origin/{branch}"],
+        cwd=repo_clone,
+        dry_run=dry_run,
+    )
+
+
+def remove_worktree(repo_clone: Path, work: Path, dry_run: bool = False) -> None:
+    """Remove a per-PR worktree, leaving the shared clone intact.
+
+    Best-effort: a missing or already-removed worktree is not an error.
+
+    Args:
+        repo_clone: Path to the reusable repo clone.
+        work: Worktree path to remove.
+        dry_run: If True, log intent without running git.
+
+    """
+    if not work.exists():
+        return
+    _git(
+        ["worktree", "remove", "--force", str(work)],
+        cwd=repo_clone,
+        dry_run=dry_run,
+        check=False,
+    )
+
+
 def merge_pr(pr: PRInfo, dry_run: bool = False) -> bool:
     """Merge a ready PR via merge commit (GitHub signs the merge commit)."""
     logger.info("  Merging PR #%d via merge commit...", pr.number)
@@ -422,21 +507,18 @@ def merge_pr(pr: PRInfo, dry_run: bool = False) -> bool:
         return False
 
 
-def rebase_and_resign(pr: PRInfo, clone_dir: Path, dry_run: bool = False) -> bool:
-    """Fetch PR branch, rebase it on origin/base, re-sign all commits, push."""
-    repo_url = f"https://github.com/{ORG}/{pr.repo}.git"
+def rebase_and_resign(pr: PRInfo, repo_clone: Path, dry_run: bool = False) -> bool:
+    """Fetch PR branch, rebase it on origin/base, re-sign all commits, push.
+
+    Operates in a per-PR worktree off the shared ``repo_clone`` (#1044) rather
+    than cloning the whole repo again.
+    """
     branch = pr.head_ref
     base = pr.base_ref
+    work = repo_clone.parent / f"{pr.repo}-{pr.number}"
 
-    work = clone_dir / f"{pr.repo}-{pr.number}"
-    work.mkdir(parents=True, exist_ok=True)
-
-    logger.info("  Cloning %s into temp dir...", pr.repo)
     try:
-        _git(["clone", "--filter=blob:none", repo_url, str(work)], cwd=clone_dir, dry_run=dry_run)
-        _git(["fetch", "origin", branch], cwd=work, dry_run=dry_run)
-        _git(["checkout", branch], cwd=work, dry_run=dry_run)
-        _git(["fetch", "origin", base], cwd=work, dry_run=dry_run)
+        add_pr_worktree(repo_clone, work, branch, base, dry_run=dry_run)
 
         result = _git(
             ["rebase", f"origin/{base}", "--exec", get_resign_exec()],
@@ -457,6 +539,8 @@ def rebase_and_resign(pr: PRInfo, clone_dir: Path, dry_run: bool = False) -> boo
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         logger.error("  Rebase/push failed for PR #%d: %s", pr.number, e.stderr or str(e))
         return False
+    finally:
+        remove_worktree(repo_clone, work, dry_run=dry_run)
 
 
 def _run_conflict_agent(agent: str, prompt: str, work: Path, pr_number: int) -> bool:
@@ -498,24 +582,26 @@ def _run_conflict_agent(agent: str, prompt: str, work: Path, pr_number: int) -> 
 
 def resolve_conflict_with_agent(
     pr: PRInfo,
-    clone_dir: Path,
+    repo_clone: Path,
     dry_run: bool = False,
     agent: str = "claude",
 ) -> bool:
-    """Spawn the selected agent to semantically resolve merge conflicts, then re-sign."""
-    repo_url = f"https://github.com/{ORG}/{pr.repo}.git"
+    """Spawn the selected agent to semantically resolve merge conflicts, then re-sign.
+
+    Operates in a per-PR worktree off the shared ``repo_clone`` (#1044) rather
+    than cloning the whole repo again.
+    """
     branch = pr.head_ref
     base = pr.base_ref
+    work = repo_clone.parent / f"{pr.repo}-{pr.number}-conflict"
 
-    work = clone_dir / f"{pr.repo}-{pr.number}-conflict"
-    work.mkdir(parents=True, exist_ok=True)
-
-    logger.info("  Cloning %s for conflict resolution...", pr.repo)
     try:
-        _git(["clone", "--filter=blob:none", repo_url, str(work)], cwd=clone_dir, dry_run=False)
-        _git(["fetch", "origin", branch], cwd=work, dry_run=False)
-        _git(["checkout", branch], cwd=work, dry_run=False)
-        _git(["fetch", "origin", base], cwd=work, dry_run=False)
+        # Conflict inspection needs a real checkout even under --dry-run (the
+        # agent spawn is what's gated, not the rebase that surfaces conflicts).
+        # ensure_repo_clone is idempotent, so this reuses the shared clone if
+        # already present and only forces a real clone when dry-run skipped it.
+        repo_clone = ensure_repo_clone(pr.repo, repo_clone.parent, dry_run=False)
+        add_pr_worktree(repo_clone, work, branch, base, dry_run=False)
 
         # Start rebase — will stop at conflicts
         subprocess.run(
@@ -623,6 +709,8 @@ Rules:
         with contextlib.suppress(Exception):
             _git(["rebase", "--abort"], cwd=work, dry_run=False, check=False)
         return False
+    finally:
+        remove_worktree(repo_clone, work, dry_run=dry_run)
 
 
 def process_repo(
@@ -657,6 +745,17 @@ def process_repo(
 
     logger.info("  %d open PR(s)", len(prs))
 
+    # Clone the repo at most once per run; PR handlers use worktrees off it (#1044).
+    # Only repos with PRs that actually need a checkout pay the clone cost — lazily
+    # created on first OUTDATED/CONFLICTED PR below.
+    repo_clone: Path | None = None
+
+    def _repo_clone() -> Path:
+        nonlocal repo_clone
+        if repo_clone is None:
+            repo_clone = ensure_repo_clone(repo, clone_dir, dry_run=args.dry_run)
+        return repo_clone
+
     status_labels = {
         PRStatus.READY: "READY",
         PRStatus.OUTDATED: "OUTDATED",
@@ -682,7 +781,7 @@ def process_repo(
             counts["merged" if ok else "failed"] += 1
 
         elif pr.status == PRStatus.OUTDATED:
-            ok = rebase_and_resign(pr, clone_dir, dry_run=args.dry_run)
+            ok = rebase_and_resign(pr, _repo_clone(), dry_run=args.dry_run)
             counts["rebased" if ok else "failed"] += 1
 
         elif pr.status == PRStatus.CONFLICTED:
@@ -692,7 +791,7 @@ def process_repo(
             else:
                 ok = resolve_conflict_with_agent(
                     pr,
-                    clone_dir,
+                    _repo_clone(),
                     dry_run=args.dry_run,
                     agent=args.agent,
                 )
