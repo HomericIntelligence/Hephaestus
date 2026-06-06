@@ -58,8 +58,9 @@ class TestWorktreeManager:
         assert worktree_path == manager.base_dir / "issue-123"
         assert manager.worktrees[123] == worktree_path
 
-        # Verify git calls: 1) base branch detection 2) rev-parse check 3) worktree add
-        assert mock_run.call_count == 3
+        # Verify git calls: 1) base branch detection 2) local rev-parse check
+        # 3) ls-remote check (branch absent locally) 4) worktree add from base
+        assert mock_run.call_count == 4
         # Check the worktree add call
         call_args = mock_run.call_args[0][0]
         assert call_args[0:2] == ["git", "worktree"]
@@ -98,9 +99,9 @@ class TestWorktreeManager:
         path2 = manager.create_worktree(123, "123-feature")
 
         assert path1 == path2
-        # Should call git 3 times: base branch detection, rev-parse check, worktree add
-        # Second creation returns early without calling git
-        assert mock_run.call_count == 3
+        # First creation: base detection, local rev-parse, ls-remote (branch
+        # absent locally), worktree add. Second creation returns early.
+        assert mock_run.call_count == 4
 
     @patch("hephaestus.automation.worktree_manager.shutil.rmtree")
     @patch("hephaestus.automation.worktree_manager.run")
@@ -125,6 +126,84 @@ class TestWorktreeManager:
         # Should call prune after
         prune_calls = [c for c in mock_run.call_args_list if "prune" in c[0][0]]
         assert len(prune_calls) >= 1
+
+    @patch("hephaestus.automation.worktree_manager.run")
+    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    def test_create_worktree_extends_remote_branch(
+        self, mock_get_root: Any, mock_run: Any, tmp_path: Any
+    ) -> None:
+        """Branch absent locally but on origin → extend origin/<branch> (#1018)."""
+        mock_get_root.return_value = tmp_path
+
+        # base_branch is never accessed on the remote-extend path, so no
+        # symbolic-ref detection call fires: order is rev-parse, ls-remote,
+        # fetch, worktree-add.
+        rev_parse = MagicMock(returncode=1)  # branch NOT present locally
+        ls_remote = MagicMock(
+            returncode=0,
+            stdout="deadbeef\trefs/heads/768-auto-impl\n",  # present on origin
+        )
+        fetch = MagicMock(returncode=0)
+        add = MagicMock(returncode=0)
+        mock_run.side_effect = [rev_parse, ls_remote, fetch, add]
+
+        manager = WorktreeManager()
+        manager.create_worktree(768, "768-auto-impl")
+
+        argvs = [c[0][0] for c in mock_run.call_args_list]
+        # A fetch of the remote branch must occur.
+        assert any(a[:2] == ["git", "fetch"] and "768-auto-impl" in a for a in argvs)
+        # The worktree-add must use origin/<branch>, NOT the base branch.
+        add_argv = next(a for a in argvs if a[:3] == ["git", "worktree", "add"])
+        assert "origin/768-auto-impl" in add_argv
+        assert "origin/main" not in add_argv
+
+    @patch("hephaestus.automation.worktree_manager.run")
+    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    def test_create_worktree_falls_back_to_base_when_no_remote_branch(
+        self, mock_get_root: Any, mock_run: Any, tmp_path: Any
+    ) -> None:
+        """Branch absent locally AND on origin → new branch from base (#1018)."""
+        mock_get_root.return_value = tmp_path
+
+        # The base path accesses self.base_branch, which lazily triggers
+        # symbolic-ref detection AFTER the rev-parse and ls-remote checks.
+        rev_parse = MagicMock(returncode=1)  # not local
+        ls_remote = MagicMock(returncode=0, stdout="")  # not on origin
+        detect = MagicMock(stdout="origin/main")
+        add = MagicMock(returncode=0)
+        mock_run.side_effect = [rev_parse, ls_remote, detect, add]
+
+        manager = WorktreeManager()
+        manager.create_worktree(999, "999-auto-impl")
+
+        add_argv = next(
+            c[0][0] for c in mock_run.call_args_list if c[0][0][:3] == ["git", "worktree", "add"]
+        )
+        # New-branch-from-base path preserved.
+        assert "-b" in add_argv
+        assert "999-auto-impl" in add_argv
+        assert "origin/main" in add_argv
+
+    @patch("hephaestus.automation.worktree_manager.run")
+    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    def test_create_worktree_prefers_local_branch_over_remote(
+        self, mock_get_root: Any, mock_run: Any, tmp_path: Any
+    ) -> None:
+        """A locally-present branch is reused without any ls-remote call (#1018)."""
+        mock_get_root.return_value = tmp_path
+
+        # Local branch present → reuse path; base_branch is never accessed, so
+        # there is no detection call and no ls-remote: order is rev-parse, add.
+        rev_parse = MagicMock(returncode=0)  # branch present locally
+        add = MagicMock(returncode=0)
+        mock_run.side_effect = [rev_parse, add]
+
+        manager = WorktreeManager()
+        manager.create_worktree(123, "123-feature")
+
+        argvs = [c[0][0] for c in mock_run.call_args_list]
+        assert not any("ls-remote" in a for a in argvs)
 
     @patch("hephaestus.automation.worktree_manager.run")
     @patch("hephaestus.automation.worktree_manager.get_repo_root")

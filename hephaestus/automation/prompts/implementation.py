@@ -84,7 +84,11 @@ After implementation is complete and tests pass:
      signature is missing or shows "BAD signature".
    - Use a descriptive commit message following conventional commits format.
 2. Push the changes to origin (`git push -u origin <branch>`).
-3. Create a pull request. The PR body MUST contain the EXACT line:
+3. Create a pull request — but FIRST check for an existing one. Run
+   `gh pr list --head <branch> --json number,state`. If an OPEN PR already
+   exists for this branch, DO NOT open a second PR: your push in step 2 has
+   already extended it. Reference that PR number and stop here. Only when no
+   open PR exists do you create one. The PR body MUST contain the EXACT line:
        Closes #{issue_number}
    on its own line, with the literal keyword `Closes` (capital C). The
    variants `Fixes #N`, `Resolves #N`, `Closes: #N`, `closes #n` are NOT

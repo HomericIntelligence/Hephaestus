@@ -1037,9 +1037,11 @@ class TestGhPrCreate:
         self, mock_gh_call: Any, _mock_signed: Any
     ) -> None:
         """Test successful PR creation."""
+        list_result = Mock()
+        list_result.stdout = "[]"  # no existing PR on the head
         mock_create_result = Mock()
         mock_create_result.stdout = "https://github.com/owner/repo/pull/456"
-        mock_gh_call.return_value = mock_create_result
+        mock_gh_call.side_effect = [list_result, mock_create_result]
 
         pr_number = gh_pr_create(
             branch="feature-branch",
@@ -1048,16 +1050,19 @@ class TestGhPrCreate:
         )
 
         assert pr_number == 456
-        assert mock_gh_call.call_count == 1
+        # Pre-flight `pr list` (dedup) + the create call.
+        assert mock_gh_call.call_count == 2
         assert "--base" in mock_gh_call.call_args.args[0]
 
     @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
     def test_pr_creation_without_auto_merge(self, mock_gh_call: Any, _mock_signed: Any) -> None:
         """Test PR creation without auto-merge."""
+        list_result = Mock()
+        list_result.stdout = "[]"  # no existing PR on the head
         mock_result = Mock()
         mock_result.stdout = "https://github.com/owner/repo/pull/789"
-        mock_gh_call.return_value = mock_result
+        mock_gh_call.side_effect = [list_result, mock_result]
 
         pr_number = gh_pr_create(
             branch="feature-branch",
@@ -1067,7 +1072,8 @@ class TestGhPrCreate:
         )
 
         assert pr_number == 789
-        assert mock_gh_call.call_count == 1  # Only create, no auto-merge
+        # Pre-flight dedup list + create; no auto-merge call.
+        assert mock_gh_call.call_count == 2
 
     @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
@@ -1089,14 +1095,82 @@ class TestGhPrCreate:
 
     @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
     @patch("hephaestus.automation.github_api._gh_call")
+    def test_gh_pr_create_returns_existing_open_pr_without_creating(
+        self, mock_gh_call: Any, _mock_signed: Any
+    ) -> None:
+        """An OPEN PR already on the head is reused, not duplicated (issue #1018)."""
+        list_result = Mock()
+        list_result.stdout = json.dumps([{"number": 962, "state": "OPEN"}])
+        mock_gh_call.return_value = list_result
+
+        pr_number = gh_pr_create(
+            branch="768-auto-impl",
+            title="Test PR",
+            body=_POLICY_BODY,
+        )
+
+        assert pr_number == 962
+        # Only the pre-flight `pr list` ran; no `pr create`.
+        assert mock_gh_call.call_count == 1
+        for call in mock_gh_call.call_args_list:
+            assert "create" not in call.args[0]
+
+    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_gh_pr_create_proceeds_when_only_closed_pr_exists(
+        self, mock_gh_call: Any, _mock_signed: Any
+    ) -> None:
+        """A closed-only head still gets a fresh PR (issue #1018)."""
+        list_result = Mock()
+        list_result.stdout = json.dumps([{"number": 942, "state": "CLOSED"}])
+        create_result = Mock()
+        create_result.stdout = "https://github.com/owner/repo/pull/967"
+        mock_gh_call.side_effect = [list_result, create_result]
+
+        pr_number = gh_pr_create(
+            branch="768-auto-impl",
+            title="Test PR",
+            body=_POLICY_BODY,
+        )
+
+        assert pr_number == 967
+        # The create call WAS made.
+        assert any("create" in c.args[0] for c in mock_gh_call.call_args_list)
+
+    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_gh_pr_create_proceeds_when_no_existing_pr(
+        self, mock_gh_call: Any, _mock_signed: Any
+    ) -> None:
+        """No PR on the head → create as usual (issue #1018)."""
+        list_result = Mock()
+        list_result.stdout = "[]"
+        create_result = Mock()
+        create_result.stdout = "https://github.com/owner/repo/pull/100"
+        mock_gh_call.side_effect = [list_result, create_result]
+
+        pr_number = gh_pr_create(
+            branch="feature-branch",
+            title="Test PR",
+            body=_POLICY_BODY,
+        )
+
+        assert pr_number == 100
+        assert any("create" in c.args[0] for c in mock_gh_call.call_args_list)
+
+    @patch("hephaestus.automation.github_api._assert_branch_commits_signed")
+    @patch("hephaestus.automation.github_api._gh_call")
     def test_pr_creation_auto_merge_failure_raises(
         self, mock_gh_call: Any, _mock_signed: Any
     ) -> None:
         """Immediate auto-merge remains available for non-implementation callers."""
+        list_result = Mock()
+        list_result.stdout = "[]"  # no existing PR on the head
         mock_create_result = Mock()
         mock_create_result.stdout = "https://github.com/owner/repo/pull/456"
 
         mock_gh_call.side_effect = [
+            list_result,
             mock_create_result,
             subprocess.CalledProcessError(1, "gh"),
         ]
@@ -1189,9 +1263,9 @@ class TestGhPrCreate:
         log_result = Mock(returncode=0, stdout="aaa111bbb U\nccc222ddd G\n", stderr="")
         mock_run.side_effect = [fetch_result, log_result]
 
+        list_result = Mock(stdout="[]")  # no existing PR on the head
         mock_create_result = Mock(stdout="https://github.com/owner/repo/pull/42")
-        mock_merge_result = Mock()
-        mock_gh_call.side_effect = [mock_create_result, mock_merge_result]
+        mock_gh_call.side_effect = [list_result, mock_create_result]
 
         pr_number = gh_pr_create(
             branch="feature-branch",
@@ -1199,7 +1273,8 @@ class TestGhPrCreate:
             body=_POLICY_BODY,
         )
         assert pr_number == 42
-        assert mock_gh_call.call_count == 1
+        # Pre-flight dedup list + create (auto_merge defaults False).
+        assert mock_gh_call.call_count == 2
 
 
 class TestWriteSecure:

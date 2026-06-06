@@ -168,53 +168,117 @@ class WorktreeManager:
                     logger.debug("git worktree prune failed: %s", e)
 
             try:
-                # Check if branch already exists
-                branch_exists = False
-                try:
-                    result = run(
-                        ["git", "rev-parse", "--verify", branch_name],
-                        cwd=self.repo_root,
-                        capture_output=True,
-                        check=False,
-                    )
-                    branch_exists = result.returncode == 0
-                except Exception:
-                    branch_exists = False
-
-                if branch_exists:
-                    logger.info("Branch %s already exists, reusing it", branch_name)
-                    # Create worktree from existing branch
-                    run(
-                        [
-                            "git",
-                            "worktree",
-                            "add",
-                            str(worktree_path),
-                            branch_name,
-                        ],
-                        cwd=self.repo_root,
-                    )
-                else:
-                    # Create worktree with new branch from base branch
-                    run(
-                        [
-                            "git",
-                            "worktree",
-                            "add",
-                            "-b",
-                            branch_name,
-                            str(worktree_path),
-                            self.base_branch,
-                        ],
-                        cwd=self.repo_root,
-                    )
-
+                self._add_worktree_for_branch(worktree_path, branch_name)
                 self.worktrees[issue_number] = worktree_path
                 logger.info("Created worktree for issue #%s at %s", issue_number, worktree_path)
                 return worktree_path
 
             except Exception as e:
                 raise RuntimeError(f"Failed to create worktree: {e}") from e
+
+    def _add_worktree_for_branch(self, worktree_path: Path, branch_name: str) -> None:
+        """Add a git worktree, choosing the right source for ``branch_name``.
+
+        Resolution order:
+
+        1. Branch exists locally → reuse it.
+        2. Branch exists on origin only → fetch and extend ``origin/<branch>``,
+           so a remote branch from a prior loop is not discarded and re-created
+           from base (which would produce a divergent duplicate PR — #1018).
+        3. Branch is new → create it from the base branch.
+
+        Args:
+            worktree_path: Destination path for the worktree.
+            branch_name: Branch the worktree should track.
+
+        """
+        if self._local_branch_exists(branch_name):
+            logger.info("Branch %s already exists, reusing it", branch_name)
+            run(
+                ["git", "worktree", "add", str(worktree_path), branch_name],
+                cwd=self.repo_root,
+            )
+        elif self._remote_branch_exists(branch_name):
+            logger.info(
+                "Branch %s exists on origin, extending it from origin/%s",
+                branch_name,
+                branch_name,
+            )
+            run(["git", "fetch", "origin", branch_name], cwd=self.repo_root)
+            run(
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    str(worktree_path),
+                    "-b",
+                    branch_name,
+                    f"origin/{branch_name}",
+                ],
+                cwd=self.repo_root,
+            )
+        else:
+            run(
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch_name,
+                    str(worktree_path),
+                    self.base_branch,
+                ],
+                cwd=self.repo_root,
+            )
+
+    def _local_branch_exists(self, branch_name: str) -> bool:
+        """Return True if ``branch_name`` exists in the local repository.
+
+        Args:
+            branch_name: Branch name to verify locally.
+
+        Returns:
+            True if the branch resolves locally, False otherwise.
+
+        """
+        try:
+            result = run(
+                ["git", "rev-parse", "--verify", branch_name],
+                cwd=self.repo_root,
+                capture_output=True,
+                check=False,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def _remote_branch_exists(self, branch_name: str) -> bool:
+        """Return True if ``branch_name`` exists on origin.
+
+        Uses ``git ls-remote --heads origin <branch>`` and checks for the
+        ``refs/heads/<branch>`` ref in the output. Any failure (no network,
+        unexpected output) is treated as "not present" so worktree creation
+        falls back to the base-branch path rather than crashing.
+
+        Args:
+            branch_name: Branch name to look up on origin.
+
+        Returns:
+            True if the branch exists on origin, False otherwise.
+
+        """
+        try:
+            result = run(
+                ["git", "ls-remote", "--heads", "origin", branch_name],
+                cwd=self.repo_root,
+                capture_output=True,
+                check=False,
+                log_errors=False,
+            )
+            return f"refs/heads/{branch_name}" in (result.stdout or "")
+        except Exception as e:
+            logger.debug("ls-remote check failed for %s (treating as absent): %s", branch_name, e)
+            return False
 
     def remove_worktree(self, issue_number: int, force: bool = False) -> None:
         """Remove a worktree.
