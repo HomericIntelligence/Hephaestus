@@ -1250,6 +1250,114 @@ def write_secure(path: Path, content: str) -> None:
     logger.debug("Wrote %s bytes to %s", len(content), path)
 
 
+# Matches a unified-diff hunk header: ``@@ -oldStart,oldLen +newStart,newLen @@``.
+# The ``,len`` groups are optional (git omits them when the length is 1).
+_HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def _valid_review_positions(diff_text: str) -> dict[str, set[tuple[int, str]]]:
+    """Map each changed file to the ``(line, side)`` positions GitHub will accept.
+
+    GitHub's review API rejects (HTTP 422) any inline comment whose ``line``/
+    ``side`` does not fall on a line present in the PR diff. A ``RIGHT`` comment
+    must target an added (``+``) or context (`` ``) line in the new file; a
+    ``LEFT`` comment must target a removed (``-``) or context line in the old
+    file. This parses the unified diff once into the set of accepted positions.
+
+    Args:
+        diff_text: Unified diff (``gh pr diff <n>`` output).
+
+    Returns:
+        ``{path: {(line_number, side), ...}}`` for every changed file.
+
+    """
+    positions: dict[str, set[tuple[int, str]]] = {}
+    current_path: str | None = None
+    old_line = 0
+    new_line = 0
+
+    for raw in diff_text.splitlines():
+        if raw.startswith("+++ "):
+            # ``+++ b/path`` (or ``+++ /dev/null``); strip the ``b/`` prefix.
+            target = raw[4:].strip()
+            if target == "/dev/null":
+                current_path = None
+            else:
+                current_path = target[2:] if target.startswith("b/") else target
+                positions.setdefault(current_path, set())
+            continue
+        if raw.startswith("--- "):
+            # Old-file header; new-file header (+++) sets the path.
+            continue
+
+        header = _HUNK_HEADER_RE.match(raw)
+        if header:
+            old_line = int(header.group(1))
+            new_line = int(header.group(2))
+            continue
+
+        if current_path is None or not raw:
+            continue
+
+        marker = raw[0]
+        if marker == "+":
+            positions[current_path].add((new_line, "RIGHT"))
+            new_line += 1
+        elif marker == "-":
+            positions[current_path].add((old_line, "LEFT"))
+            old_line += 1
+        elif marker == " ":
+            # Context line is valid on both sides.
+            positions[current_path].add((new_line, "RIGHT"))
+            positions[current_path].add((old_line, "LEFT"))
+            old_line += 1
+            new_line += 1
+        # Any other marker (e.g. ``\`` for "No newline") is ignored.
+
+    return positions
+
+
+def _filter_comments_to_diff(
+    comments: list[dict[str, Any]], diff_text: str
+) -> list[dict[str, Any]]:
+    """Drop inline comments whose ``(path, line, side)`` is not in the diff.
+
+    Prevents an out-of-hunk comment from making GitHub reject the *entire*
+    review with HTTP 422 (#1039). Dropped comments are logged at WARNING.
+
+    Fails open: if ``diff_text`` is empty (the diff could not be fetched), the
+    comments are returned unchanged — losing a comment because the diff was
+    unavailable would be worse than a possible 422.
+
+    Args:
+        comments: Inline comment dicts with ``path``/``line``/``side``/``body``.
+        diff_text: Unified diff to validate against.
+
+    Returns:
+        The subset of ``comments`` that target a line present in the diff.
+
+    """
+    if not diff_text.strip():
+        return comments
+
+    valid = _valid_review_positions(diff_text)
+    kept: list[dict[str, Any]] = []
+    for c in comments:
+        path = c.get("path", "")
+        line = c.get("line")
+        side = c.get("side", "RIGHT")
+        if path in valid and (line, side) in valid[path]:
+            kept.append(c)
+        else:
+            logger.warning(
+                "Dropping out-of-hunk review comment on %s:%s (%s) — not in PR diff",
+                path,
+                line,
+                side,
+            )
+    return kept
+
+
 def gh_pr_review_post(
     pr_number: int,
     comments: list[dict[str, Any]],
@@ -1293,6 +1401,16 @@ def gh_pr_review_post(
     #      ``DraftPullRequestReviewComment``.
     # POST /pulls/{n}/reviews is the correct surface for ``line``/``side``
     # comments and for summary-only (empty ``comments``) reviews alike.
+    #
+    # #1039: GitHub returns HTTP 422 and rejects the WHOLE review if any inline
+    # comment targets a line outside the PR diff hunks. The reviewer model can
+    # cite such lines (especially since its diff context is truncated upstream),
+    # so validate each comment against the live diff and drop the strays — a
+    # logged degradation instead of a hard failure that the loop reads as a NOGO.
+    if comments:
+        diff_result = _gh_call(["pr", "diff", str(pr_number)], check=False)
+        comments = _filter_comments_to_diff(comments, diff_result.stdout or "")
+
     review_comments = [
         {
             "path": c["path"],
