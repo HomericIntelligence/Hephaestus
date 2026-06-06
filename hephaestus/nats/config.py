@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # Valid JetStream first-subscription deliver policies. These string values match
 # nats.js.api.DeliverPolicy's enum values, so the subscriber can build the enum
@@ -37,6 +37,9 @@ class NATSConfig(BaseModel):
         subjects: Subject patterns to subscribe to.
         durable_name: Durable consumer name for at-least-once delivery.
         deliver_policy: JetStream deliver policy for first-time subscription.
+        initial_backoff_seconds: Initial wait before the first reconnect attempt.
+        max_backoff_seconds: Upper bound for exponential reconnect backoff.
+        backoff_multiplier: Multiplier applied to backoff after each reconnect.
 
     """
 
@@ -55,6 +58,30 @@ class NATSConfig(BaseModel):
         default="new",
         description="JetStream deliver policy (new, all, last, etc.)",
     )
+    initial_backoff_seconds: float = Field(
+        default=1.0,
+        gt=0.0,
+        description="Initial wait (seconds) before the first reconnect attempt.",
+    )
+    max_backoff_seconds: float = Field(
+        default=60.0,
+        gt=0.0,
+        description="Upper bound (seconds) for exponential reconnect backoff.",
+    )
+    backoff_multiplier: float = Field(
+        default=2.0,
+        gt=1.0,
+        description="Multiplier applied to the current backoff after each failed reconnect.",
+    )
+
+    @model_validator(mode="after")
+    def _check_backoff_bounds(self) -> NATSConfig:
+        if self.max_backoff_seconds < self.initial_backoff_seconds:
+            raise ValueError(
+                "max_backoff_seconds must be >= initial_backoff_seconds "
+                f"(got max={self.max_backoff_seconds}, initial={self.initial_backoff_seconds})"
+            )
+        return self
 
 
 def load_nats_config(
@@ -69,6 +96,9 @@ def load_nats_config(
     - ``NATS_URL`` overrides ``url``
     - ``NATS_STREAM`` overrides ``stream``
     - ``NATS_DURABLE_NAME`` overrides ``durable_name``
+    - ``NATS_INITIAL_BACKOFF_SECONDS`` overrides ``initial_backoff_seconds``
+    - ``NATS_MAX_BACKOFF_SECONDS`` overrides ``max_backoff_seconds``
+    - ``NATS_BACKOFF_MULTIPLIER`` overrides ``backoff_multiplier``
 
     Args:
         yaml_config: Parsed YAML section for the NATS block.
@@ -92,5 +122,17 @@ def load_nats_config(
         env_durable = os.environ.get("NATS_DURABLE_NAME")
         if env_durable:
             data["durable_name"] = env_durable
+
+        env_initial = os.environ.get("NATS_INITIAL_BACKOFF_SECONDS")
+        if env_initial:
+            data["initial_backoff_seconds"] = float(env_initial)
+
+        env_max = os.environ.get("NATS_MAX_BACKOFF_SECONDS")
+        if env_max:
+            data["max_backoff_seconds"] = float(env_max)
+
+        env_mult = os.environ.get("NATS_BACKOFF_MULTIPLIER")
+        if env_mult:
+            data["backoff_multiplier"] = float(env_mult)
 
     return NATSConfig(**data)
