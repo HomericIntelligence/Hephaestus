@@ -20,7 +20,7 @@
 # composite action from _required.yml".
 
 name: Setup pixi env
-description: Install pixi + cache its environments. Wraps prefix-dev/setup-pixi + actions/cache.
+description: Install pixi + cache its environments via prefix-dev/setup-pixi's exact-keyed cache.
 
 inputs:
   environments:
@@ -33,12 +33,12 @@ inputs:
     default: ""
   cache-key-prefix:
     description: >-
-      Prefix for the cache key. Use "pixi-lint" when only the lint env is
-      installed (smaller cache, lint jobs share it). Use "pixi-shell" or
-      similar when the default env is installed (larger cache, test jobs
-      share it). The full key is composed as
-      <prefix>-<runner.os>-<hashFiles(pixi.lock)>.
-    required: true
+      Retained for backward compatibility with existing callers; no longer
+      used. Environment caching is now handled entirely by prefix-dev/setup-pixi
+      (see the note in the Install pixi step). Callers may still pass this; it
+      is ignored.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -49,13 +49,10 @@ runs:
         pixi-version: v0.69.0
         environments: ${{ inputs.environments }}
         locked: true
-
-    - name: Cache pixi environments
-      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
-      with:
-        path: |
-          .pixi
-          ~/.cache/rattler/cache
-        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ hashFiles('pixi.lock') }}
-        restore-keys: |
-          ${{ inputs.cache-key-prefix }}-${{ runner.os }}-
+        # setup-pixi caches the resolved `.pixi` env itself, keyed EXACTLY on
+        # the pixi.lock hash. We deliberately do NOT add a second
+        # `actions/cache` step over `.pixi`: a second cache with a
+        # lock-agnostic `restore-keys:` prefix would restore a STALE env on top
+        # of this `--locked` install, silently downgrading packages (e.g.
+        # urllib3 2.7.0 -> 2.6.3) so pip-audit fails against a lock that is
+        # actually patched. setup-pixi's exact-keyed cache cannot do that.

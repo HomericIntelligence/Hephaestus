@@ -31,16 +31,10 @@ jobs:
         with:
           pixi-version: v0.69.0
           locked: true
-
-      - name: Cache pixi environments
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
-        with:
-          path: |
-            .pixi
-            ~/.cache/rattler/cache
-          key: ${{ runner.os }}-pixi-${{ hashFiles('pixi.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-pixi-
+          # setup-pixi already caches `.pixi` keyed exactly on the pixi.lock
+          # hash. A second actions/cache over `.pixi` with a lock-agnostic
+          # restore-keys prefix would restore a stale env on top of this
+          # --locked install, silently downgrading packages — do not add one.
 
       - name: Editable install (scripts/ smoke tests spawn subprocesses that import hephaestus)
         run: pixi run dev-install
@@ -63,16 +57,10 @@ jobs:
         with:
           pixi-version: v0.69.0
           locked: true
-
-      - name: Cache pixi environments
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
-        with:
-          path: |
-            .pixi
-            ~/.cache/rattler/cache
-          key: ${{ runner.os }}-pixi-${{ hashFiles('pixi.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-pixi-
+          # setup-pixi already caches `.pixi` keyed exactly on the pixi.lock
+          # hash. A second actions/cache over `.pixi` with a lock-agnostic
+          # restore-keys prefix would restore a stale env on top of this
+          # --locked install, silently downgrading packages — do not add one.
 
       - name: Run mypy type checking
         run: pixi run mypy
@@ -112,16 +100,10 @@ jobs:
         with:
           pixi-version: v0.69.0
           locked: true
-
-      - name: Cache pixi environments
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
-        with:
-          path: |
-            .pixi
-            ~/.cache/rattler/cache
-          key: ${{ runner.os }}-pixi-${{ hashFiles('pixi.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-pixi-
+          # setup-pixi already caches `.pixi` keyed exactly on the pixi.lock
+          # hash. A second actions/cache over `.pixi` with a lock-agnostic
+          # restore-keys prefix would restore a stale env on top of this
+          # --locked install, silently downgrading packages — do not add one.
 
       - name: Verify tag matches package version
         shell: bash

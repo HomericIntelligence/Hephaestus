@@ -22,16 +22,10 @@ jobs:
           pixi-version: v0.69.0
           environments: lint
           locked: true
-
-      - name: Cache pixi environments
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
-        with:
-          path: |
-            .pixi
-            ~/.cache/rattler/cache
-          key: pixi-${{ runner.os }}-${{ hashFiles('pixi.lock') }}
-          restore-keys: |
-            pixi-${{ runner.os }}-
+          # setup-pixi already caches `.pixi` keyed exactly on the pixi.lock
+          # hash. A second actions/cache over `.pixi` with a lock-agnostic
+          # restore-keys prefix would restore a stale env on top of this
+          # --locked install, silently downgrading packages — do not add one.
 
       - name: Cache pre-commit environments
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
