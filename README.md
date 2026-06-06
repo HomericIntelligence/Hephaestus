@@ -13,6 +13,32 @@ ProjectHephaestus provides standardized utility functions and tools that can be 
 
 **Project Status:** See [docs/ROADMAP.md](docs/ROADMAP.md) for the public roadmap and current focus areas.
 
+## Installation
+
+### From PyPI
+
+ProjectHephaestus is published to PyPI under the ecosystem-branded distribution name **`HomericIntelligence-Hephaestus`**. The import name, however, is the short lowercase `hephaestus`:
+
+```bash
+pip install HomericIntelligence-Hephaestus
+```
+
+```python
+import hephaestus
+print(hephaestus.__version__)
+```
+
+> **Note on naming.** `pip install hephaestus` and `pip install project-hephaestus` will **not** find this package — both names are unowned on PyPI. The `HomericIntelligence-<Project>` prefix is the deliberate naming convention shared across the HomericIntelligence ecosystem (ProjectKeystone, ProjectOdyssey, etc.) to avoid PyPI namespace collisions. Wheel filenames are PEP 625 normalized to lowercase, so you will see `homericintelligence_hephaestus-<version>-py3-none-any.whl` on disk and in release assets.
+
+### Development setup
+
+For local development, use [Pixi](https://pixi.sh) to manage the environment:
+
+```bash
+pixi install
+pre-commit install
+```
+
 ## Directory Structure
 
 ```
@@ -144,45 +170,6 @@ codex plugin add hephaestus@project-hephaestus
 ```
 
 The Codex manifest lives in [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json), and the marketplace entry lives in [`.agents/plugins/marketplace.json`](.agents/plugins/marketplace.json).
-
-### Installing in Another Project
-
-ProjectHephaestus is published to PyPI as `homericintelligence-hephaestus`.
-
-**Using pip:**
-
-```bash
-pip install homericintelligence-hephaestus
-```
-
-**Using Pixi:**
-
-Add to `pyproject.toml`:
-
-```toml
-[project]
-dependencies = [
-    "homericintelligence-hephaestus>=0.9,<1",
-]
-```
-
-Or add a PyPI entry to `pixi.toml`:
-
-```toml
-[pypi-dependencies]
-homericintelligence-hephaestus = ">=0.9,<1"
-```
-
-Then run `pixi install` to resolve the dependency.
-
-After 1.0 ships, bump these constraints to `>=1.0,<2`.
-
-**For local development (path dependency):**
-
-```toml
-[pypi-dependencies]
-homericintelligence-hephaestus = { path = "../ProjectHephaestus", editable = true }
-```
 
 ## Key Features
 
