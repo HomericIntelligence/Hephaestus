@@ -30,22 +30,52 @@ class CircuitBreakerState(enum.Enum):
     HALF_OPEN = "half_open"
 
 
+class CircuitBreakerOpenReason(str, enum.Enum):
+    """Why a CircuitBreakerOpenError was raised.
+
+    Lets callers pick a retry strategy without parsing the message:
+
+    - RECOVERY_TIMEOUT: circuit is OPEN; ``time_until_recovery`` is the
+      remaining wait until HALF_OPEN probing resumes.
+    - HALF_OPEN_EXHAUSTED: circuit is HALF_OPEN with no free slots; another
+      in-flight probe is running. ``time_until_recovery`` is 0.0 — retry
+      as soon as a slot frees rather than after a timer.
+    """
+
+    RECOVERY_TIMEOUT = "recovery_timeout"
+    HALF_OPEN_EXHAUSTED = "half_open_exhausted"
+
+
 class CircuitBreakerOpenError(Exception):
     """Raised when circuit breaker is open and requests are rejected."""
 
-    def __init__(self, name: str, time_until_recovery: float) -> None:
-        """Initialize with circuit breaker name and recovery time.
+    def __init__(
+        self,
+        name: str,
+        time_until_recovery: float,
+        reason: CircuitBreakerOpenReason = CircuitBreakerOpenReason.RECOVERY_TIMEOUT,
+    ) -> None:
+        """Initialize with circuit breaker name, recovery time, and reason.
 
         Args:
-            name: Circuit breaker identifier
-            time_until_recovery: Seconds until recovery attempt
+            name: Circuit breaker identifier.
+            time_until_recovery: Seconds until recovery attempt. For
+                ``reason=HALF_OPEN_EXHAUSTED`` this is 0.0 — the wait is
+                for another in-flight probe to finish, not a timer.
+            reason: Discriminator for the two raise paths; see
+                :class:`CircuitBreakerOpenReason`. Defaults to
+                ``RECOVERY_TIMEOUT`` for backward compatibility with
+                positional callers.
 
         """
         self.name = name
         self.time_until_recovery = time_until_recovery
-        super().__init__(
-            f"Circuit breaker '{name}' is open. Recovery in {time_until_recovery:.1f}s"
-        )
+        self.reason = reason
+        if reason is CircuitBreakerOpenReason.HALF_OPEN_EXHAUSTED:
+            detail = "half-open slot exhausted; another probe in flight"
+        else:
+            detail = f"Recovery in {time_until_recovery:.1f}s"
+        super().__init__(f"Circuit breaker '{name}' is open. {detail}")
 
 
 class CircuitBreaker:
@@ -147,11 +177,19 @@ class CircuitBreaker:
 
             if state == CircuitBreakerState.OPEN:
                 time_until = self.recovery_timeout - (time.monotonic() - self._last_failure_time)
-                raise CircuitBreakerOpenError(self.name, max(0.0, time_until))
+                raise CircuitBreakerOpenError(
+                    self.name,
+                    max(0.0, time_until),
+                    reason=CircuitBreakerOpenReason.RECOVERY_TIMEOUT,
+                )
 
             if state == CircuitBreakerState.HALF_OPEN:
                 if self._half_open_calls >= self.half_open_max_calls:
-                    raise CircuitBreakerOpenError(self.name, self.recovery_timeout)
+                    raise CircuitBreakerOpenError(
+                        self.name,
+                        0.0,
+                        reason=CircuitBreakerOpenReason.HALF_OPEN_EXHAUSTED,
+                    )
                 self._half_open_calls += 1
 
         # Execute outside the lock to avoid blocking other threads
