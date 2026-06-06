@@ -1636,10 +1636,14 @@ def gh_pr_resolve_thread(
         logger.info("[dry_run] Would resolve thread %r with reply: %r", thread_id, reply_body)
         return
 
-    # Step 1: post a reply to the thread via GraphQL addPullRequestReviewComment
+    # Step 1: post a reply to the thread via GraphQL addPullRequestReviewThreadReply.
+    # NOTE (#999): the deprecated ``addPullRequestReviewComment`` input type has no
+    # ``pullRequestReviewThreadId`` field, so it failed on every call. The reply-to-
+    # thread surface is ``addPullRequestReviewThreadReply``, whose input accepts
+    # ``pullRequestReviewThreadId`` + ``body``.
     reply_mutation = """
 mutation AddReply($threadId: ID!, $body: String!) {
-  addPullRequestReviewComment(input: {pullRequestReviewThreadId: $threadId, body: $body}) {
+  addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $threadId, body: $body}) {
     comment { id }
   }
 }

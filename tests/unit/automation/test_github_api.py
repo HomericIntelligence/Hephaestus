@@ -25,6 +25,7 @@ from hephaestus.automation.github_api import (
     gh_list_open_issues,
     gh_pr_checks,
     gh_pr_create,
+    gh_pr_resolve_thread,
     gh_pr_review_post,
     is_issue_closed,
     parse_issue_dependencies,
@@ -2080,3 +2081,69 @@ class TestValidReviewPositions:
 
         comments = [{"path": "mod.py", "line": 11, "side": "RIGHT", "body": "ok"}]
         assert _filter_comments_to_diff(comments, "") == comments
+
+
+class TestGhPrResolveThread:
+    """gh_pr_resolve_thread: reply to and resolve a PR review thread."""
+
+    @staticmethod
+    def _graphql_queries(mock_gh_call: Any) -> list[str]:
+        """Return the ``query=`` payload of every ``gh api graphql`` invocation."""
+        queries: list[str] = []
+        for call in mock_gh_call.call_args_list:
+            sent_args = call.args[0] if call.args else call.kwargs.get("args", [])
+            for arg in sent_args:
+                if isinstance(arg, str) and arg.startswith("query="):
+                    queries.append(arg)
+        return queries
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_reply_uses_thread_reply_mutation_not_deprecated_comment(
+        self, mock_gh_call: Any
+    ) -> None:
+        """The reply step must use ``addPullRequestReviewThreadReply``.
+
+        Regression (#999): the reply mutation used the deprecated
+        ``addPullRequestReviewComment(input: {pullRequestReviewThreadId: ...})``,
+        whose input type has no ``pullRequestReviewThreadId`` field. GitHub
+        rejected it on every call (``InputObject 'AddPullRequestReviewCommentInput'
+        doesn't accept argument 'pullRequestReviewThreadId'``), so threads were
+        never replied-to or resolved.
+        """
+        mock_gh_call.return_value = Mock(stdout="{}")
+
+        gh_pr_resolve_thread("PRRT_abc123", "Addressed in code.")
+
+        queries = self._graphql_queries(mock_gh_call)
+        joined = "\n".join(queries)
+        # The correct, non-deprecated mutation must be used for the reply.
+        assert "addPullRequestReviewThreadReply" in joined
+        # The deprecated mutation must never be sent.
+        assert "addPullRequestReviewComment" not in joined
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_reply_then_resolve_pass_thread_id(self, mock_gh_call: Any) -> None:
+        """Both the reply and resolve steps run, passing the thread id through."""
+        mock_gh_call.return_value = Mock(stdout="{}")
+
+        gh_pr_resolve_thread("PRRT_xyz", "Fixed.")
+
+        queries = self._graphql_queries(mock_gh_call)
+        joined = "\n".join(queries)
+        assert "addPullRequestReviewThreadReply" in joined
+        assert "resolveReviewThread" in joined
+        # threadId is forwarded as a -f field on both calls.
+        thread_id_fields = [
+            call
+            for call in mock_gh_call.call_args_list
+            if any(
+                isinstance(a, str) and a == "threadId=PRRT_xyz"
+                for a in (call.args[0] if call.args else call.kwargs.get("args", []))
+            )
+        ]
+        assert len(thread_id_fields) == 2
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_dry_run_sends_nothing(self, mock_gh_call: Any) -> None:
+        gh_pr_resolve_thread("PRRT_abc", "reply", dry_run=True)
+        mock_gh_call.assert_not_called()
