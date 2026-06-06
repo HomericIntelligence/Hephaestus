@@ -13,10 +13,10 @@ This file describes the typical development workflow for ProjectHephaestus.
 
 ## Code Review Process
 
-1. **Automated Checks**: All PRs must pass pre-commit hooks
-2. **Peer Review**: At least one other developer review required
-3. **Security Review**: Security-sensitive changes require special attention
-4. **Merge**: Use squash merge strategy with auto-merge enabled (`gh pr merge --auto --squash`)
+1. **Automated Checks**: All PRs must pass pre-commit hooks and the required CI status checks (`test (ubuntu-latest, 3.12, unit)` and `test (ubuntu-latest, 3.12, integration)`).
+2. **PR Policy Gate**: The `pr-policy` CI gate enforces three invariants — the PR body contains `Closes #<issue-number>`, auto-merge is enabled, and every commit is cryptographically signed (`git commit -S`). See `CLAUDE.md` §"Working with GitHub" for the canonical policy.
+3. **Optional Human Review**: This repo has no `required_pull_request_reviews` branch protection rule, so human review is optional. Security-sensitive changes should still be reviewed by a maintainer before auto-merge fires.
+4. **Merge**: Use squash merge strategy with auto-merge enabled (`gh pr merge --auto --squash`). Rebase merges are disabled at the repo level.
 
 ## Testing Workflow
 
