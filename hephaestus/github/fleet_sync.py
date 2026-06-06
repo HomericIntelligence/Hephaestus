@@ -339,6 +339,16 @@ def list_prs(repo: str) -> list[PRInfo]:
     :func:`_fetch_pr_ci_state`. A genuine list failure is raised, never swallowed
     into an empty list (which would masquerade as "no open PRs" and silently skip
     the entire queue).
+
+    Discovery is scoped to ``--author @me`` (#1070): fleet_sync rebases and
+    re-signs every PR it returns (:func:`rebase_and_resign` runs
+    ``commit --amend --reset-author -S`` then force-pushes). Run against a PR the
+    current user did NOT author — most notably a Dependabot bump — that rewrite
+    strips the native GitHub web-flow signature and stamps the local identity,
+    and when the amend runs in a shell where gpg-agent was not warmed it silently
+    produces an UNSIGNED commit that blocks merge. ``@me`` is resolved
+    server-side by gh, so only the current user's PRs are ever surfaced and
+    re-signed; bot and other contributors' PRs are left untouched.
     """
     try:
         result = _gh(
@@ -347,6 +357,8 @@ def list_prs(repo: str) -> list[PRInfo]:
                 "list",
                 "--state",
                 "open",
+                "--author",
+                "@me",
                 "--json",
                 ("number,title,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus"),
                 "--limit",

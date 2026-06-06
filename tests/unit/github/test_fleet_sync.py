@@ -793,3 +793,67 @@ class TestPrClassification:
             self._classify(monkeypatch, mergeable="MERGEABLE", state="CLEAN", ci="SUCCESS")
             == PRStatus.READY
         )
+
+
+class TestListPrsAuthorScope:
+    """list_prs must only ever surface PRs authored by the current user.
+
+    Regression guard for #1070: fleet_sync rebases and re-signs every PR it
+    lists, which on a Dependabot (or any other author's) PR strips the native
+    signature and stamps the local identity — silently producing an UNSIGNED
+    commit that blocks merge. Scoping discovery to ``--author @me`` means the
+    automation never touches a PR the current user did not author.
+    """
+
+    def test_list_prs_filters_to_current_user(self, monkeypatch) -> None:
+        """The ``gh pr list`` argv must include ``--author @me``."""
+        captured_argv: list[list[str]] = []
+
+        def fake_gh(args, repo):
+            captured_argv.append(args)
+            return MagicMock(stdout="[]")
+
+        monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
+
+        fleet_sync_module.list_prs("RepoA")
+
+        assert captured_argv, "_gh was never called"
+        pr_list_argv = captured_argv[0]
+        assert "--author" in pr_list_argv, pr_list_argv
+        author_value = pr_list_argv[pr_list_argv.index("--author") + 1]
+        assert author_value == "@me", pr_list_argv
+
+    def test_non_self_authored_pr_is_never_returned(self, monkeypatch) -> None:
+        """A PR returned by gh is still surfaced (gh applies the @me filter).
+
+        gh resolves ``--author @me`` server-side, so by the time the JSON comes
+        back it already excludes other authors. This asserts the wiring: the
+        author filter rides on the same call that returns the list, so no
+        separate client-side filtering can drift out of sync.
+        """
+        monkeypatch.setattr(
+            fleet_sync_module,
+            "_fetch_pr_ci_state",
+            lambda repo, number: "SUCCESS",
+        )
+
+        def fake_gh(args, repo):
+            assert "--author" in args and args[args.index("--author") + 1] == "@me"
+            payload = [
+                {
+                    "number": 1,
+                    "title": "mine",
+                    "headRefName": "feat",
+                    "baseRefName": "main",
+                    "headRefOid": "deadbeef",
+                    "mergeable": "MERGEABLE",
+                    "mergeStateStatus": "CLEAN",
+                }
+            ]
+            return MagicMock(stdout=json.dumps(payload))
+
+        monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
+
+        prs = fleet_sync_module.list_prs("RepoA")
+
+        assert [p.number for p in prs] == [1]
