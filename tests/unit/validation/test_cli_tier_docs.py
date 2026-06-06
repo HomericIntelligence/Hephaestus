@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from hephaestus.utils.helpers import get_repo_root
 from hephaestus.validation.cli_tier_docs import (
     find_violations,
@@ -45,6 +47,23 @@ class TestParsing:
         p = tmp_path / "pyproject.toml"
         p.write_text('[project.scripts]\nhephaestus-foo = "pkg.mod:main"\n')
         assert load_pyproject_scripts(p) == {"hephaestus-foo": "pkg.mod:main"}
+
+    def test_load_scripts_raises_on_missing_tomllib(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Guard from Decision 5: RuntimeError when tomli/tomllib is missing."""
+        from hephaestus.validation import cli_tier_docs
+
+        monkeypatch.setattr(cli_tier_docs, "import_tomllib", lambda: None)
+
+        p = tmp_path / "pyproject.toml"
+        p.write_text('[project.scripts]\nhephaestus-foo = "pkg.mod:main"\n')
+
+        with pytest.raises(
+            RuntimeError,
+            match="tomllib.*tomli.*required",
+        ):
+            load_pyproject_scripts(p)
 
     def test_load_tiers_skips_separator_rows(self, tmp_path: Path) -> None:
         md = tmp_path / "COMPATIBILITY.md"
