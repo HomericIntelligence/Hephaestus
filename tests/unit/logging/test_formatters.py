@@ -133,6 +133,19 @@ class TestJsonFormatterExtras:
         parsed = json.loads(formatter.format(record))
         assert parsed["obj"] == "custom-repr"
 
+    def test_context_extras_attribute_is_not_special(
+        self, formatter: JsonFormatter, make_record: Callable[..., logging.LogRecord]
+    ) -> None:
+        """``_context_extras`` is not a reserved sentinel.
+
+        If a caller sets it as a plain attribute it appears in the JSON output
+        like any other extra. Regression test for issue #795 (dead-branch
+        removal).
+        """
+        record = make_record(extra={"_context_extras": {"nested": "value"}})
+        parsed = json.loads(formatter.format(record))
+        assert parsed["_context_extras"] == {"nested": "value"}
+
 
 class TestJsonFormatterExceptions:
     """Tests for exception and stack info serialisation."""

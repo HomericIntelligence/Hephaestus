@@ -66,16 +66,10 @@ class JsonFormatter(logging.Formatter):
         }
 
         # Merge extra/context fields, prefixing collisions with ``ctx_``.
-        if hasattr(record, "_context_extras"):
-            extras: dict[str, Any] = record._context_extras
-        else:
-            # Fall back to detecting manually-set extra keys by comparing
-            # against the default LogRecord attributes.
-            extras = {
-                k: v
-                for k, v in record.__dict__.items()
-                if k not in _DEFAULT_RECORD_ATTRS and k != "_context_extras"
-            }
+        # ``LoggerAdapter`` (used by ``ContextLogger``) flattens its ``extra``
+        # dict onto the record as individual attributes; we recover them by
+        # set-differencing against the default ``LogRecord`` attribute names.
+        extras = {k: v for k, v in record.__dict__.items() if k not in _DEFAULT_RECORD_ATTRS}
 
         for key, value in extras.items():
             if key in RESERVED_FIELDS:
