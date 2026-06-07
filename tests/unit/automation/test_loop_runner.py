@@ -146,6 +146,22 @@ def test_parse_args_accepts_no_advise() -> None:
     assert args.no_advise is True
 
 
+def test_parse_args_accepts_nitpick() -> None:
+    """The loop runner can enable nitpick comments across review phases."""
+    assert loop_runner._parse_args(["--nitpick"]).nitpick is True
+    assert loop_runner._parse_args([]).nitpick is False
+
+
+def test_build_phase_argv_implement_forwards_nitpick() -> None:
+    """#1083: --nitpick threads into the implement phase argv when set."""
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/impl", [])):
+        on = loop_runner._build_phase_argv("implement", LoopConfig(nitpick=True), open_issues=[1])
+        off = loop_runner._build_phase_argv("implement", LoopConfig(nitpick=False), open_issues=[1])
+    assert on is not None and off is not None
+    assert "--nitpick" in on
+    assert "--nitpick" not in off
+
+
 def test_parse_args_accepts_issue_scope() -> None:
     """The loop runner can scope child phases to a comma-separated issue list."""
     args = loop_runner._parse_args(["--issues", "8, 13"])

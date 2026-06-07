@@ -15,9 +15,11 @@ from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
+    STATE_SKIP,
     has_label,
     is_plan_go,
     is_plan_no_go,
+    is_skipped,
     needs_plan,
 )
 
@@ -41,14 +43,30 @@ class TestLabelVocabulary:
             assert label.startswith("state:")
 
     def test_label_specs_cover_every_label(self) -> None:
-        """The provisioning script needs a colour+description for each label."""
-        assert set(STATE_LABEL_SPECS.keys()) == set(ALL_STATE_LABELS)
+        """The provisioning script needs a colour+description for each label.
+
+        Specs must cover every plan-state label (``ALL_STATE_LABELS``) plus the
+        independent ``state:skip`` override (#1083) — i.e. specs is a superset
+        of the plan-state tuple.
+        """
+        assert set(ALL_STATE_LABELS) <= set(STATE_LABEL_SPECS.keys())
+        assert STATE_SKIP in STATE_LABEL_SPECS
         for spec in STATE_LABEL_SPECS.values():
             assert "color" in spec
             assert "description" in spec
             # Hex colour without leading '#'.
             assert len(spec["color"]) == 6
             int(spec["color"], 16)
+
+    def test_skip_label_is_independent_of_plan_state(self) -> None:
+        """``state:skip`` is an override, not a plan-state label."""
+        assert STATE_SKIP not in ALL_STATE_LABELS
+        assert STATE_SKIP.startswith("state:")
+
+    def test_is_skipped(self) -> None:
+        assert is_skipped(["bug", STATE_SKIP]) is True
+        assert is_skipped([STATE_PLAN_GO]) is False
+        assert is_skipped([]) is False
 
 
 class TestHasLabel:

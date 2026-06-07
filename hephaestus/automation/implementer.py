@@ -89,6 +89,7 @@ from .models import (
 from .pr_manager import commit_changes, create_pr
 from .review_state import is_plan_review_go  # noqa: F401
 from .session_naming import AGENT_ADVISE, AGENT_IMPLEMENTER, current_trunk_githash  # noqa: F401
+from .state_labels import is_skipped
 from .status_tracker import StatusTracker
 from .worktree_manager import WorktreeManager
 
@@ -268,6 +269,15 @@ class IssueImplementer:
 
             try:
                 issue = fetch_issue_info(issue_num)
+
+                # Manual override (#1083): a ``state:skip`` label removes the
+                # issue from all phases. Treat it as completed so dependents are
+                # not blocked, and never add it to the work graph.
+                if is_skipped(issue.labels):
+                    logger.info("Skipping #%s (state:skip)", issue_num)
+                    self.resolver.completed.add(issue_num)
+                    continue
+
                 self.resolver.add_issue(issue)
 
                 # Load dependencies recursively

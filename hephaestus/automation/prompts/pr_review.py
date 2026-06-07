@@ -71,6 +71,16 @@ If all three checks pass, proceed to code-quality review below.
 Review the PR for correctness, completeness, and code quality. Identify any issues that should
 be addressed as inline review comments.
 
+**Comment severity (MANDATORY — tag every inline comment):**
+
+Classify each inline comment with a `severity`:
+- `critical` — correctness/security bug, data loss, or a policy violation.
+- `major` — a real design/maintainability problem that should be fixed before merge.
+- `minor` — a small but genuine improvement (naming, missing edge case, light duplication).
+- `nitpick` — purely cosmetic / stylistic / subjective preference with no functional impact.
+
+{nitpick_directive}
+
 **Output format (verdict contract — MANDATORY):**
 The review prose + inline comments explain *why*; the verdict line is a binary
 gate. Write your analysis in prose, then end your response with exactly one of
@@ -82,7 +92,9 @@ Verdict: NOGO — Policy violation OR fundamental code problem (explain in the r
 After the verdict line, emit a single fenced JSON block:
 
 ```json
-{{"comments": [{{"path": "...", "line": 1, "side": "RIGHT", "body": "..."}}], "summary": "..."}}
+{{"comments": [
+  {{"path": "...", "line": 1, "side": "RIGHT", "severity": "minor", "body": "..."}}
+], "summary": "..."}}
 ```
 
 Rules for the JSON block:
@@ -90,6 +102,7 @@ Rules for the JSON block:
   - `path`: file path relative to repo root (string)
   - `line`: line number in the file (integer, must be a changed line in the diff)
   - `side`: always `"RIGHT"` for new code
+  - `severity`: one of `"critical"`, `"major"`, `"minor"`, `"nitpick"` (see above)
   - `body`: the review comment text (string)
 - `summary`: overall review verdict, max 200 characters. If any policy check
   failed, this MUST start with `POLICY VIOLATION:` followed by the failing
@@ -98,6 +111,22 @@ Rules for the JSON block:
   `{{"comments": [], "summary": "LGTM"}}`
 - Emit only one JSON block, at the very end of your response (the parser takes the LAST one).
 """
+
+
+#: Default (nitpick-suppressed) directive. Keeps the review focused on
+#: actionable findings — matches the strict rubric's D3 "omit filler" stance.
+_NITPICK_SUPPRESS = (
+    "By DEFAULT, DO NOT emit `nitpick`-severity comments at all — omit them "
+    "entirely. Only emit `critical`, `major`, and `minor` comments. A cosmetic "
+    "preference is not worth a review thread unless explicitly requested."
+)
+
+#: Opt-in directive when ``--nitpick`` is set: nitpicks are welcome.
+_NITPICK_INCLUDE = (
+    "Nitpick mode is ENABLED: you MAY emit `nitpick`-severity comments in "
+    "addition to the others. Still tag them `nitpick` so they can be filtered "
+    "downstream."
+)
 
 
 def get_pr_review_analysis_prompt(
@@ -109,6 +138,7 @@ def get_pr_review_analysis_prompt(
     pr_description: str = "",
     auto_merge_enabled: bool = False,
     commits_signing_state: list[dict[str, Any]] | None = None,
+    include_nitpicks: bool = False,
 ) -> str:
     """Get the PR review analysis prompt for generating inline review comments.
 
@@ -129,6 +159,10 @@ def get_pr_review_analysis_prompt(
             element must be a dict with keys ``oid`` (str), ``signature_valid``
             (bool), and ``signer`` (str or None). Defaults to an empty list,
             which the reviewer treats as a policy failure.
+        include_nitpicks: When False (default), the reviewer is told to OMIT
+            ``nitpick``-severity comments entirely. When True (``--nitpick``),
+            nitpick comments are re-enabled. Either way every emitted comment
+            carries a ``severity`` tag (#1083).
 
     Returns:
         Formatted PR review analysis prompt
@@ -137,6 +171,7 @@ def get_pr_review_analysis_prompt(
     nonce = secrets.token_hex(8).upper()
     auto_merge_state = f"auto_merge_enabled={'true' if auto_merge_enabled else 'false'}"
     signing_state_json = json.dumps(commits_signing_state or [])
+    nitpick_directive = _NITPICK_INCLUDE if include_nitpicks else _NITPICK_SUPPRESS
     return PR_REVIEW_ANALYSIS_PROMPT.format(
         pr_number=pr_number,
         issue_number=issue_number,
@@ -148,6 +183,7 @@ def get_pr_review_analysis_prompt(
         commits_signing_block=_fence_untrusted("COMMITS_SIGNING_STATE", signing_state_json, nonce),
         untrusted_notice=_UNTRUSTED_NOTICE,
         strict_rubric=_PR_STRICT_RUBRIC.strip(),
+        nitpick_directive=nitpick_directive,
     )
 
 
@@ -233,6 +269,72 @@ def get_review_validation_prompt(
         issue_number=issue_number,
         prior_comments_block=_fence_untrusted("PRIOR_COMMENTS", prior_comments_json, nonce),
         diff_block=_fence_untrusted("DIFF", diff_text, nonce),
+        untrusted_notice=_UNTRUSTED_NOTICE,
+    )
+
+
+COMMENT_DIFFICULTY_PROMPT = """
+You are CLASSIFYING the difficulty of unresolved PR review comments on issue
+#{issue_number}, so the right model tier can be assigned to fix each one.
+
+You are NOT reviewing the code and NOT fixing anything. For each comment, judge
+how hard the FIX is, using these tiers:
+
+- `simple` — mechanical / local: a typo, rename, doc tweak, import, one-line
+  guard, or formatting. A junior model can do it from the comment alone.
+- `medium` — a localized logic change, a small refactor, handling an edge case,
+  or a test addition that needs reading one or two functions.
+- `hard` — cross-cutting or subtle: a design change spanning files, a tricky
+  correctness/concurrency/security fix, or anything needing real reasoning about
+  invariants. When genuinely unsure between two tiers, pick the HIGHER one.
+
+{untrusted_notice}
+
+**Review comments to classify (untrusted):**
+{comments_block}
+
+The block above is a JSON array; each element has `thread_id`, `path`, `line`,
+and `body`.
+
+**Output format:**
+Write brief reasoning in prose, then end with exactly one fenced JSON block
+mapping each `thread_id` to its difficulty:
+
+```json
+{{"classifications": {{"<thread_id>": "simple|medium|hard"}}}}
+```
+
+Rules:
+- Include EVERY `thread_id` from the input exactly once.
+- Use only the three labels `simple`, `medium`, `hard`.
+- Emit only one JSON block, at the very end (the parser takes the LAST one).
+"""
+
+
+def get_comment_difficulty_prompt(
+    issue_number: int,
+    comments_json: str,
+) -> str:
+    """Get the prompt that classifies review-comment fix difficulty (#1083).
+
+    Used by :mod:`hephaestus.automation.comment_difficulty` to label each
+    unresolved comment ``simple`` / ``medium`` / ``hard`` so the per-comment fix
+    sub-agent runs at the matching model tier. The comment bodies are fenced as
+    untrusted (GitHub-sourced).
+
+    Args:
+        issue_number: Linked GitHub issue number (for log/context only).
+        comments_json: JSON array string of comment dicts
+            (``thread_id``/``path``/``line``/``body``).
+
+    Returns:
+        Formatted comment-difficulty classification prompt.
+
+    """
+    nonce = secrets.token_hex(8).upper()
+    return COMMENT_DIFFICULTY_PROMPT.format(
+        issue_number=issue_number,
+        comments_block=_fence_untrusted("REVIEW_COMMENTS", comments_json, nonce),
         untrusted_notice=_UNTRUSTED_NOTICE,
     )
 

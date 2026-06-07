@@ -69,6 +69,7 @@ from .planning import (
 )
 from .pr_review import (
     PR_REVIEW_ANALYSIS_PROMPT,
+    get_comment_difficulty_prompt,
     get_pr_description,
     get_pr_review_analysis_prompt,
     get_review_validation_prompt,
@@ -90,6 +91,7 @@ __all__ = [
     "get_advise_prompt",
     "get_advise_prompt_builder",
     "get_codex_advise_prompt",
+    "get_comment_difficulty_prompt",
     "get_follow_up_prompt",
     "get_impl_loop_review_prompt",
     "get_impl_resume_feedback_prompt",

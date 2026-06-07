@@ -698,3 +698,76 @@ class TestRunWithNothingToImplement:
             impl.run()
 
         mock_load_epic.assert_called_once_with(123)
+
+
+# ---------------------------------------------------------------------------
+# Issue #1083 — `state:skip` label gates an issue out of all phases
+# ---------------------------------------------------------------------------
+
+
+class TestStateSkipLabel:
+    """``state:skip`` on an issue makes _load_issues skip it entirely.
+
+    Mirrors the existing ``skip_closed`` gate: a skipped issue is marked
+    completed in the resolver (so dependents are not blocked) and is never
+    added to the work graph.
+    """
+
+    @pytest.fixture
+    def impl(self, tmp_path: Path) -> IssueImplementer:
+        options = ImplementerOptions(
+            epic_number=0,
+            issues=[1],
+            max_workers=1,
+            skip_closed=True,
+            auto_merge=False,
+            dry_run=True,
+            enable_learn=False,
+            enable_follow_up=False,
+            enable_ui=False,
+        )
+        with patch("hephaestus.automation.implementer.get_repo_root", return_value=tmp_path):
+            return IssueImplementer(options)
+
+    def test_issue_with_state_skip_label_is_skipped(self, impl: IssueImplementer) -> None:
+        from hephaestus.automation.models import IssueInfo
+
+        skipped = IssueInfo(number=42, title="t", labels=["state:skip"])
+        with (
+            patch(
+                "hephaestus.automation.github_api.prefetch_issue_states",
+                return_value={},
+            ),
+            patch(
+                "hephaestus.automation.implementer.fetch_issue_info",
+                return_value=skipped,
+            ) as mock_fetch,
+            patch.object(impl.resolver, "add_issue") as mock_add,
+        ):
+            impl._load_issues([42])
+
+        # Skipped issue must not enter the work graph but must count as done.
+        mock_fetch.assert_called_once_with(42)
+        mock_add.assert_not_called()
+        assert 42 in impl.resolver.completed
+
+    def test_issue_without_state_skip_label_is_loaded(self, impl: IssueImplementer) -> None:
+        from hephaestus.automation.models import IssueInfo
+
+        normal = IssueInfo(number=43, title="t", labels=["state:plan-go"])
+        with (
+            patch(
+                "hephaestus.automation.github_api.prefetch_issue_states",
+                return_value={},
+            ),
+            patch(
+                "hephaestus.automation.implementer.fetch_issue_info",
+                return_value=normal,
+            ),
+            patch.object(impl.resolver, "_load_dependencies"),
+            patch.object(impl.resolver, "add_issue") as mock_add,
+        ):
+            impl._load_issues([43])
+
+        mock_add.assert_called_once_with(normal)
+        assert 43 not in impl.resolver.completed

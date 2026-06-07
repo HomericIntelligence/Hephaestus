@@ -87,6 +87,9 @@ class TestRunImplReviewLoop:
                 "hephaestus.automation.implementer_phase_runner.validate_prior_comments_addressed",
                 return_value=([], True),
             ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_issue_add_labels",
+            ),
         ):
             yield
 
@@ -177,6 +180,132 @@ class TestRunImplReviewLoop:
         assert iters == 1  # only the iter-0 review executed before the loop stopped
         assert verdict == "NOGO"
         assert mock_rev.call_count == 1
+
+    def test_exhaustion_without_go_applies_state_skip(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """Exhausting MAX_REVIEW_ITERATIONS without GO applies ``state:skip``.
+
+        #1083 Bug 2: a sustained NOGO run that never reaches GO must label the
+        issue ``state:skip`` so the next loop skips it.
+        """
+        from hephaestus.automation.state_labels import STATE_SKIP
+
+        with (
+            patch.object(
+                implementer,
+                "_run_impl_review_step",
+                side_effect=[
+                    (_nogo("D"), ["t0"]),
+                    (_nogo("C"), ["t1"]),
+                    (_nogo("B"), ["t2"]),
+                ],
+            ),
+            patch.object(implementer, "_run_address_review_step", return_value=True),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_issue_add_labels"
+            ) as mock_label,
+        ):
+            _, verdict, _ = implementer._run_impl_review_loop(
+                issue_number=7,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=42,
+            )
+
+        assert verdict == "NOGO"
+        mock_label.assert_called_once_with(7, [STATE_SKIP])
+
+    def test_zero_threads_without_go_applies_state_skip(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """Zero threads but no GO applies ``state:skip``.
+
+        #1083 Bug 2: a reviewer that posts zero threads but never says GO is the
+        'stuck AMBIGUOUS' case — apply ``state:skip`` rather than reporting a
+        clean termination.
+        """
+        from hephaestus.automation.state_labels import STATE_SKIP
+
+        with (
+            patch.object(implementer, "_run_impl_review_step", return_value=(_nogo("C"), [])),
+            patch.object(implementer, "_run_address_review_step"),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_issue_add_labels"
+            ) as mock_label,
+        ):
+            _, verdict, _ = implementer._run_impl_review_loop(
+                issue_number=8,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=42,
+            )
+
+        assert verdict == "NOGO"
+        mock_label.assert_called_once_with(8, [STATE_SKIP])
+
+    def test_go_does_not_apply_state_skip(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """A GO verdict must never apply ``state:skip``."""
+        with (
+            patch.object(implementer, "_run_impl_review_step", return_value=(_go(), [])),
+            patch.object(implementer, "_run_address_review_step"),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_issue_add_labels"
+            ) as mock_label,
+        ):
+            implementer._run_impl_review_loop(
+                issue_number=9,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=42,
+            )
+
+        mock_label.assert_not_called()
+
+    def test_dry_run_does_not_apply_state_skip(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """Dry-run must not mutate labels even on a non-GO outcome."""
+        implementer.options.dry_run = True
+        try:
+            with (
+                patch.object(implementer, "_run_impl_review_step", return_value=(_nogo("C"), [])),
+                patch.object(implementer, "_run_address_review_step"),
+                patch(
+                    "hephaestus.automation.implementer_phase_runner.gh_issue_add_labels"
+                ) as mock_label,
+            ):
+                implementer._run_impl_review_loop(
+                    issue_number=10,
+                    worktree_path=tmp_path,
+                    branch_name="b",
+                    issue_title="t",
+                    issue_body="ib",
+                    session_id="sess",
+                    slot_id=0,
+                    thread_id=None,
+                    pr_number=42,
+                )
+            mock_label.assert_not_called()
+        finally:
+            implementer.options.dry_run = False
 
     def test_no_blocking_threads_terminates_loop(
         self, implementer: IssueImplementer, tmp_path: Path
@@ -839,10 +968,13 @@ class TestRunImplReviewStep:
 class TestRunAddressReviewStep:
     """Stage 2 (#28): _run_address_review_step folds in address-review in-loop."""
 
-    def test_addresses_commits_pushes_and_resolves(
+    def test_addresses_commits_and_pushes_but_does_not_resolve(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
-        """The step lists threads, runs the fix session, commits, pushes, resolves."""
+        """The step fixes + commits + pushes but no longer resolves threads.
+
+        #1083: resolution is now the validator's job (evidence-based).
+        """
         threads = [
             {"id": "t1", "path": "a.py", "line": 1, "body": "fix a"},
             {"id": "t2", "path": "b.py", "line": 2, "body": "fix b"},
@@ -856,11 +988,9 @@ class TestRunAddressReviewStep:
                 "hephaestus.automation.implementer_phase_runner.run_address_fix_session",
                 return_value={"addressed": ["t1"], "replies": {"t1": "fixed a"}},
             ) as mock_fix,
-            patch.object(implementer.phase_runner, "_commit_if_changes") as mock_commit,
+            # A real commit was produced.
+            patch.object(implementer.phase_runner, "_commit_if_changes", return_value=True),
             patch.object(implementer.phase_runner, "_push_branch") as mock_push,
-            patch(
-                "hephaestus.automation.implementer_phase_runner.resolve_addressed_threads"
-            ) as mock_resolve,
         ):
             addressed = implementer._run_address_review_step(
                 issue_number=1,
@@ -871,14 +1001,50 @@ class TestRunAddressReviewStep:
             )
 
         assert addressed is True
-        # The fix session resumes Session 2 (AGENT_IMPLEMENTER) via the shared core.
         assert mock_fix.call_args.kwargs["agent"] == implementer.options.agent
-        mock_commit.assert_called_once()
         mock_push.assert_called_once()
-        # Hallucination guard: presented set is exactly the threads we listed.
-        resolve_args = mock_resolve.call_args
-        assert resolve_args.args[0] == ["t1"]
-        assert resolve_args.args[2] == {"t1", "t2"}
+        # Resolution must NOT be imported/used here anymore.
+        assert not hasattr(
+            __import__(
+                "hephaestus.automation.implementer_phase_runner",
+                fromlist=["resolve_addressed_threads"],
+            ),
+            "resolve_addressed_threads",
+        )
+
+    def test_no_commit_means_not_addressed(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """A self-reported fix with no commit must not count as addressed.
+
+        #1083 Bug 1: a clean worktree means nothing changed, so the loop must
+        not treat the session's self-report as progress.
+        """
+        threads = [{"id": "t1", "path": "a.py", "line": 1, "body": "fix a"}]
+        with (
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_pr_list_unresolved_threads",
+                return_value=threads,
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.run_address_fix_session",
+                return_value={"addressed": ["t1"], "replies": {"t1": "claimed"}},
+            ),
+            # Worktree was clean — no commit produced.
+            patch.object(implementer.phase_runner, "_commit_if_changes", return_value=False),
+            patch.object(implementer.phase_runner, "_push_branch") as mock_push,
+        ):
+            addressed = implementer._run_address_review_step(
+                issue_number=1,
+                pr_number=42,
+                branch_name="b",
+                worktree_path=tmp_path,
+                iteration=0,
+            )
+
+        # No real change → the loop must not treat this as progress.
+        assert addressed is False
+        mock_push.assert_not_called()
 
     def test_no_unresolved_threads_returns_false(
         self, implementer: IssueImplementer, tmp_path: Path
@@ -918,9 +1084,8 @@ class TestRunAddressReviewStep:
                 "hephaestus.automation.implementer_phase_runner.run_address_fix_session",
                 return_value={"addressed": [], "replies": {}},
             ),
-            patch.object(implementer.phase_runner, "_commit_if_changes"),
+            patch.object(implementer.phase_runner, "_commit_if_changes", return_value=False),
             patch.object(implementer.phase_runner, "_push_branch"),
-            patch("hephaestus.automation.implementer_phase_runner.resolve_addressed_threads"),
         ):
             addressed = implementer._run_address_review_step(
                 issue_number=1,

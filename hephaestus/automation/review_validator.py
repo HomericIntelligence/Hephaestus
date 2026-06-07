@@ -2,19 +2,28 @@
 
 The in-loop review → address cycle (see
 :meth:`hephaestus.automation.implementer_phase_runner.ImplementationPhaseRunner._run_impl_review_loop`)
-resolves review threads on the implementer's *self-report*. This module adds an
-independent check: after the implementer claims it addressed the previous
-iteration's comments, a FRESH read-only sub-agent compares each prior comment
-against the current diff and re-opens any the diff does not actually resolve.
+used to resolve review threads on the implementer's *self-report* — the
+implementer claimed it addressed a thread and the orchestrator resolved it,
+even when no commit was produced (#1083). This module is now the single owner
+of thread resolution, and it is evidence-based: a FRESH read-only sub-agent
+compares each prior comment against the current diff and partitions them:
 
-Re-opening is done by posting a NEW inline review thread (GitHub has no
-"unresolve" mutation, and the unresolved-thread lister filters resolved threads
-out — so an already-resolved thread cannot be reopened in place). The new thread
-cites the original comment and explains what is still missing, then the loop
-treats the validation as NOGO so the address step runs again.
+- **Addressed** — the diff genuinely resolves the comment. The validator
+  resolves the thread in place (:func:`gh_pr_resolve_thread`).
+- **Not addressed** — re-opened by posting a NEW inline review thread (GitHub
+  has no "unresolve" mutation, and the unresolved-thread lister filters
+  resolved threads out — so an already-resolved thread cannot be reopened in
+  place). The new thread cites the original comment and explains what is still
+  missing, then the loop treats the validation as NOGO so the address step runs
+  again.
 
-This respects the #375 own-threads-only guarantee (the validator posts its own
-threads via :func:`gh_pr_review_post`) and never mutates human threads.
+The implementer's address step no longer resolves anything; it only applies the
+fix, commits, and pushes. A clean worktree (no real fix) therefore leaves the
+diff unchanged, the validator judges the thread NOT addressed, and it stays
+open — closing the "resolved without implementing" hole.
+
+This respects the #375 own-threads-only guarantee (the validator posts and
+resolves only its own / the bot's threads) and never mutates human threads.
 """
 
 from __future__ import annotations
@@ -32,7 +41,7 @@ from .claude_invoke import invoke_claude_with_session
 from .claude_models import reviewer_model
 from .claude_timeouts import pr_reviewer_claude_timeout
 from .git_utils import get_repo_root, get_repo_slug, pr_ref
-from .github_api import gh_pr_review_post
+from .github_api import gh_pr_resolve_thread, gh_pr_review_post
 from .prompts import get_review_validation_prompt
 from .session_naming import AGENT_PR_REVIEWER, reviewer_agent
 
@@ -146,7 +155,9 @@ def validate_prior_comments_addressed(
     Returns:
         ``(reopened_thread_ids, is_clean)``. ``is_clean`` is True when nothing
         was re-opened (every prior comment is addressed, or there was nothing to
-        validate); False when at least one comment was re-opened.
+        validate); False when at least one comment was re-opened. As a side
+        effect, every prior thread the validator confirms addressed is resolved
+        in place (#1083).
 
     """
     if not prior_threads:
@@ -176,6 +187,17 @@ def validate_prior_comments_addressed(
         review_agent=reviewer_agent(AGENT_PR_REVIEWER, iteration),
         state_dir=state_dir,
     )
+
+    # Resolve the threads the validator confirms addressed (#1083). A prior
+    # thread is "addressed" when its (path, line) is NOT among the unaddressed
+    # items the sub-agent flagged. This is the evidence-based resolution that
+    # replaces the implementer's self-report: a clean worktree leaves the diff
+    # unchanged, so nothing is judged addressed and nothing is resolved.
+    unaddressed_keys = {
+        (item.get("path") or "", item.get("line")) for item in unaddressed if isinstance(item, dict)
+    }
+    _resolve_addressed_prior_threads(prior_threads, unaddressed_keys)
+
     if not unaddressed:
         return [], True
 
@@ -208,6 +230,9 @@ def validate_prior_comments_addressed(
             f"Re-opening {len(comments)} prior review comment(s) the current diff does not address."
         ),
         dry_run=False,
+        # #1083: if the line already carries a bot comment, edit it in place
+        # rather than stacking a duplicate re-open thread.
+        dedupe_existing=True,
     )
     logger.info(
         "PR %s R%s: re-opened %s unaddressed review comment(s)",
@@ -216,3 +241,36 @@ def validate_prior_comments_addressed(
         len(thread_ids),
     )
     return thread_ids, False
+
+
+def _resolve_addressed_prior_threads(
+    prior_threads: list[dict[str, Any]],
+    unaddressed_keys: set[tuple[str, Any]],
+) -> list[str]:
+    """Resolve every prior thread the validator did not flag as unaddressed.
+
+    A thread is considered addressed when its ``(path, line)`` is absent from
+    *unaddressed_keys* (the set the validation sub-agent flagged). Only threads
+    carrying a real ``id`` are resolved — this is the #375 own-threads guard,
+    since ``prior_threads`` is always the set the loop itself posted/snapshotted.
+
+    Returns the list of resolved thread IDs (useful for logging/tests).
+    """
+    resolved: list[str] = []
+    for thread in prior_threads:
+        thread_id = thread.get("id")
+        if not thread_id:
+            continue
+        key = (thread.get("path") or "", thread.get("line"))
+        if key in unaddressed_keys:
+            continue  # still open — re-opened above
+        try:
+            gh_pr_resolve_thread(
+                thread_id,
+                "Verified addressed by the current diff; resolving.",
+                dry_run=False,
+            )
+            resolved.append(thread_id)
+        except (subprocess.CalledProcessError, OSError) as exc:
+            logger.warning("Failed to resolve addressed thread %s: %s", thread_id, exc)
+    return resolved

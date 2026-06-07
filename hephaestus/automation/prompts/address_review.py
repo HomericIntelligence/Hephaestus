@@ -26,45 +26,58 @@ The block above is a JSON array where each element has:
 - `line`: line number (integer or null)
 - `body`: the reviewer's comment text
 
+**Your TODO list — one line per review comment (already classified by difficulty):**
+
+{todo_block}
+
+Each todo line has the form `@ <file> Line <#> - <difficulty> - <description>`.
+Every one of these comments MUST be resolved before you finish.
+
 ---
 
 **Your task (coordinator):**
 
-1. Parse the review-threads JSON above and **group the threads by `path`** (one group
-   per distinct file). Threads with a null/empty `path` (PR-level / general comments)
-   form one extra group keyed as `__general__`.
+1. Treat the TODO list as the unit of work: there is ONE sub-agent per review
+   comment (NOT one per file). For each todo line, dispatch a sub-agent with the
+   Task tool (`subagent_type: "general-purpose"`) to fix exactly that one comment.
 
-2. For EACH file group, dispatch ONE sub-agent using the Task tool
-   (`subagent_type: "general-purpose"`). Dispatch all groups, one sub-agent per file.
-   Each sub-agent OWNS exactly one file and must not touch any other file — this
-   prevents two agents editing the same file and causing merge/commit contention.
+2. **Model tier by difficulty** — set each sub-agent's model from the todo line's
+   difficulty:
+   - `simple` → `haiku` (claude-haiku-4-5): mechanical/local fix.
+   - `medium` → `sonnet` (claude-sonnet-4-6): localized logic / small refactor.
+   - `hard`   → `opus` (claude-opus-4-7): cross-cutting or subtle correctness fix.
+
+3. **Serialize same-file comments.** Two sub-agents must NEVER edit the same file
+   at the same time. Group the todo lines by `<file>`: dispatch DIFFERENT files in
+   parallel, but run the comments that share a file SEQUENTIALLY (one finishes and
+   returns before the next on that file starts). This prevents concurrent writes
+   to one file from clobbering each other.
 
    Give each sub-agent a self-contained prompt that instructs it to:
    a. FIRST run the team-knowledge skill to pull prior learnings relevant to this fix:
       `Skill(skill: "hephaestus:advise", args: "<short description of the review feedback>")`.
       Use whatever it surfaces to inform the fix; do not skip this step.
-   b. Read the owned file at `path` in the working directory `{worktree_path}` and apply
-      the code fix for ALL of that file's review threads (you will pass it the thread
-      bodies + line numbers + thread_ids for its file only).
-   c. Report back, for each `thread_id` it handled, a one-line reply describing the fix —
-      or, if a thread is not addressable in code, say so and leave it out of the fixed set.
+   b. Read the cited file/line in the working directory `{worktree_path}` and apply the
+      code fix for its ONE assigned review comment (you pass it the thread body, line, and
+      thread_id).
+   c. Report back the `thread_id` and a one-line reply describing the fix — or, if the
+      comment is not addressable in code, say so and leave it out of the fixed set.
 
    **Each sub-agent prompt MUST include these guardrails (critical):**
    - "Do NOT background your work, do NOT exit early, and do NOT defer. Complete the fix
-     synchronously and return only when the file is fully edited."
-   - "You own ONLY the file `<path>`. Do not read-modify any other file. Do not commit,
-     push, or run git — the coordinator handles that."
-   - "Return your result as a compact list mapping each thread_id to a one-line reply."
+     synchronously and return only when the edit is done."
+   - "Do not commit, push, or run git — the coordinator handles that."
+   - "Return your result as `thread_id -> one-line reply`."
 
-3. After ALL sub-agents have returned, you (the coordinator) integrate their results and
+4. After ALL sub-agents have returned, you (the coordinator) integrate their results and
    run the gates from the working directory:
    - Run tests: `pixi run python -m pytest tests/ -v`
    - Run pre-commit: `pre-commit run --all-files`
    - Fix any issues found (you may edit files directly at this stage).
    - Commit all changes (do NOT push).
 
-4. Trust but verify: only mark a thread `addressed` if the owning sub-agent actually
-   edited the file for it. If a sub-agent claimed a fix but the file is unchanged for that
+5. Trust but verify: only mark a thread `addressed` if the assigned sub-agent actually
+   edited the code for it. If a sub-agent claimed a fix but the file is unchanged for that
    thread, drop it from `addressed`.
 
 **Output format:**
@@ -127,6 +140,7 @@ def get_address_review_prompt(
     worktree_path: str,
     threads_json: str,
     *,
+    todo_block: str = "",
     task_block: str = "",
     task_review_block: str = "",
     diff_text: str = "",
@@ -141,6 +155,11 @@ def get_address_review_prompt(
         issue_number: Linked GitHub issue number
         worktree_path: Path to the git worktree containing the PR branch
         threads_json: JSON string of unresolved review threads (array of thread dicts)
+        todo_block: Pre-rendered, difficulty-classified todo list — one line per
+            comment in the form ``@ <file> Line <#> - <difficulty> - <desc>``
+            (built by :mod:`hephaestus.automation.comment_difficulty`, #1083).
+            Drives the one-sub-agent-per-comment dispatch and per-comment model
+            tier. Trusted (we generate it ourselves from the threads).
         task_block: Optional task (issue title + body) text, rendered as an
             untrusted context section. Supply when the address session may run
             without a prior implementer transcript (existing-PR review path).
@@ -159,6 +178,7 @@ def get_address_review_prompt(
         issue_number=issue_number,
         worktree_path=worktree_path,
         threads_json_block=_fence_untrusted("THREADS_JSON", threads_json, nonce),
+        todo_block=todo_block or "_(no todo lines)_",
         untrusted_notice=_UNTRUSTED_NOTICE,
         context_block=_build_context_block(task_block, task_review_block, diff_text, nonce),
     )

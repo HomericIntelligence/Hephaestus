@@ -548,3 +548,44 @@ class TestRunAddressFixSessionModuleLevel:
         assert out["addressed"] == ["t1"]
         # Fixes land in the long-lived implementer session, not a fresh one.
         assert captured["agent"] == AGENT_IMPLEMENTER
+
+    def test_classifies_and_embeds_todo_list(self, tmp_path: Path) -> None:
+        """The fix session classifies each comment and embeds a todo line.
+
+        #1083: the difficulty-annotated todo line lands in the coordinator
+        prompt.
+        """
+        prompts: dict[str, str] = {}
+
+        def _fake_invoke(*, agent: str, prompt: str, **_: object) -> tuple[str, str]:
+            prompts[agent] = prompt
+            return ('{"result": "```json\\n{\\"addressed\\": [], \\"replies\\": {}}\\n```"}', "")
+
+        with (
+            patch("hephaestus.automation.address_review.get_repo_slug", return_value="Repo"),
+            patch(
+                "hephaestus.automation.address_review.invoke_claude_with_session",
+                side_effect=_fake_invoke,
+            ),
+            # Force the classifier result so the todo line's difficulty is known.
+            patch(
+                "hephaestus.automation.comment_difficulty._run_classifier_session",
+                return_value={"t1": "hard"},
+            ),
+        ):
+            run_address_fix_session(
+                issue_number=1,
+                pr_number=42,
+                worktree_path=tmp_path,
+                threads=[{"id": "t1", "path": "a.py", "line": 7, "body": "rework locking"}],
+                agent="claude",
+                repo_root=tmp_path,
+                parse_fn=_parse_addressed_block,
+                log_file=tmp_path / "log.txt",
+                dry_run=False,
+            )
+
+        from hephaestus.automation.session_naming import AGENT_IMPLEMENTER
+
+        coordinator_prompt = prompts[AGENT_IMPLEMENTER]
+        assert "@ a.py Line 7 - hard - rework locking" in coordinator_prompt

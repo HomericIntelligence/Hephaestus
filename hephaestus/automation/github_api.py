@@ -1363,12 +1363,146 @@ def _filter_comments_to_diff(
     return kept
 
 
+def gh_pr_inline_comment_index(pr_number: int) -> dict[tuple[str, Any], str]:
+    """Map ``(path, line)`` → review-comment node id for unresolved bot threads.
+
+    Returns the GraphQL node id of the FIRST comment of each unresolved review
+    thread, keyed by its ``(path, line)``. Used by :func:`gh_pr_review_post` to
+    detect a line that already has a comment so the new content can be appended
+    in place rather than posted as a duplicate (#1083). Fails open: returns
+    ``{}`` on any API/parse error so the caller posts everything as before.
+    """
+    owner, repo = get_repo_info()
+    if not re.match(r"^[a-zA-Z0-9_-]+$", owner) or not re.match(r"^[a-zA-Z0-9_-]+$", repo):
+        logger.error("Invalid owner/repo format: %s/%s", owner, repo)
+        return {}
+    query = (
+        "query($owner:String!,$name:String!,$number:Int!){"
+        "  repository(owner:$owner,name:$name){"
+        "    pullRequest(number:$number){"
+        "      reviewThreads(first:100){"
+        "        nodes{ isResolved path line comments(first:1){ nodes{ id } } }"
+        "      }"
+        "    }"
+        "  }"
+        "}"
+    )
+    try:
+        result = _gh_call(
+            [
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"name={repo}",
+                "-F",
+                f"number={int(pr_number)}",
+            ],
+            check=False,
+        )
+        data = json.loads(result.stdout or "{}")
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        logger.warning("PR #%s: could not fetch inline-comment index (%s)", pr_number, exc)
+        return {}
+
+    nodes = (
+        data.get("data", {})
+        .get("repository", {})
+        .get("pullRequest", {})
+        .get("reviewThreads", {})
+        .get("nodes", [])
+    )
+    index: dict[tuple[str, Any], str] = {}
+    for node in nodes:
+        if node.get("isResolved"):
+            continue
+        comment_nodes = node.get("comments", {}).get("nodes", [])
+        if not comment_nodes:
+            continue
+        comment_id = comment_nodes[0].get("id")
+        if not comment_id:
+            continue
+        index[(node.get("path") or "", node.get("line"))] = comment_id
+    return index
+
+
+def gh_pr_update_review_comment(comment_node_id: str, body: str) -> None:
+    """Replace a PR review comment's body via ``updatePullRequestReviewComment``.
+
+    Used to edit an existing inline comment in place (#1083) instead of posting
+    a duplicate on the same line.
+    """
+    mutation = (
+        "mutation($id:ID!,$body:String!){"
+        "  updatePullRequestReviewComment(input:{pullRequestReviewCommentId:$id,body:$body}){"
+        "    pullRequestReviewComment{ id }"
+        "  }"
+        "}"
+    )
+    _gh_call(
+        [
+            "api",
+            "graphql",
+            "-f",
+            f"query={mutation}",
+            "-f",
+            f"id={comment_node_id}",
+            "-f",
+            f"body={body}",
+        ]
+    )
+
+
+def _edit_or_keep_comments(pr_number: int, comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Edit comments whose line already has a bot comment; return the rest.
+
+    For each comment whose ``(path, line)`` is in the existing-comment index,
+    append its body to the existing comment (a single edit) and drop it from the
+    returned list. Comments on fresh lines are returned unchanged for posting.
+    Fails open: an empty index returns *comments* unchanged.
+    """
+    index = gh_pr_inline_comment_index(pr_number)
+    if not index:
+        return comments
+    fresh: list[dict[str, Any]] = []
+    for c in comments:
+        key = (c.get("path") or "", c.get("line"))
+        existing_id = index.get(key)
+        if existing_id is None:
+            fresh.append(c)
+            continue
+        appended = "\n\n---\n_Additional review note (same line):_\n\n" + (c.get("body") or "")
+        try:
+            gh_pr_update_review_comment(existing_id, appended)
+            logger.info(
+                "PR #%s: edited existing comment on %s:%s instead of duplicating",
+                pr_number,
+                key[0],
+                key[1],
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            # If the edit fails, fall back to posting the comment fresh.
+            logger.warning(
+                "PR #%s: edit-in-place failed for %s:%s (%s); posting fresh",
+                pr_number,
+                key[0],
+                key[1],
+                exc,
+            )
+            fresh.append(c)
+    return fresh
+
+
 def gh_pr_review_post(
     pr_number: int,
     comments: list[dict[str, Any]],
     summary: str,
     event: str = "COMMENT",
     dry_run: bool = False,
+    dedupe_existing: bool = False,
 ) -> list[str]:
     """Post a PR review with inline comments via GitHub GraphQL API.
 
@@ -1378,6 +1512,12 @@ def gh_pr_review_post(
         summary: Overall review summary body
         event: Review event type: COMMENT, APPROVE, or REQUEST_CHANGES
         dry_run: If True, log intent and return empty list without posting
+        dedupe_existing: When True (#1083), a comment whose ``(path, line)``
+            already has an unresolved bot review comment is EDITED in place
+            (the new body is appended) rather than posted as a duplicate thread.
+            Only the genuinely new comments are posted as fresh threads. Fails
+            open: if the existing-comment index cannot be fetched, every comment
+            is posted as before.
 
     Returns:
         List of created review thread IDs (empty on dry_run or if no comments)
@@ -1415,6 +1555,13 @@ def gh_pr_review_post(
     if comments:
         diff_result = _gh_call(["pr", "diff", str(pr_number)], check=False)
         comments = _filter_comments_to_diff(comments, diff_result.stdout or "")
+
+    # #1083: edit-in-place instead of duplicating. If a comment targets a line
+    # that already has an unresolved bot comment, append the new body to that
+    # comment and drop it from the to-post set. Fails open (posts everything) if
+    # the existing-comment index can't be fetched.
+    if comments and dedupe_existing:
+        comments = _edit_or_keep_comments(pr_number, comments)
 
     review_comments = [
         {

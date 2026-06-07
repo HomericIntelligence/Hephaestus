@@ -40,6 +40,9 @@ AGENT_IMPLEMENTER = "implementer"
 AGENT_PR_REVIEWER = "pr-reviewer"
 AGENT_ADDRESS_REVIEW = "address-review"
 AGENT_CI_DRIVER = "ci-driver"
+# #1083: cheap read-only sub-agent that labels each review comment's fix
+# difficulty (simple/medium/hard) to pick the per-comment fixer's model tier.
+AGENT_COMMENT_CLASSIFIER = "comment-classifier"
 
 _ALL_AGENTS = frozenset(
     {
@@ -51,6 +54,7 @@ _ALL_AGENTS = frozenset(
         AGENT_PR_REVIEWER,
         AGENT_ADDRESS_REVIEW,
         AGENT_CI_DRIVER,
+        AGENT_COMMENT_CLASSIFIER,
     }
 )
 

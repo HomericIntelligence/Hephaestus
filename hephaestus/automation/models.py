@@ -172,6 +172,9 @@ class ImplementerOptions(BaseModel):
     enable_ui: bool = True
     # A2-004: opt-in pre-PR test gate; defaults to False for rollout safety.
     run_pre_pr_tests: bool = False
+    # #1083: when False (default) the reviewer omits nitpick-severity comments;
+    # --nitpick re-enables them.
+    include_nitpicks: bool = False
 
 
 class ReviewPhase(str, Enum):

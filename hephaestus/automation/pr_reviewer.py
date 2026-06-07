@@ -193,6 +193,9 @@ def run_pr_review_analysis(
         pr_description=context.get("pr_description", ""),
         auto_merge_enabled=bool(context.get("auto_merge_enabled", False)),
         commits_signing_state=context.get("commits_signing_state") or [],
+        # #1083: nitpicks are suppressed unless --nitpick threaded the flag into
+        # the review context.
+        include_nitpicks=bool(context.get("include_nitpicks", False)),
     )
 
     prompt_file = worktree_path / f".claude-pr-review-{issue_number}.md"
@@ -278,6 +281,7 @@ def gather_impl_review_context(
     plan_text: str,
     plan_review_text: str,
     diff_text: str,
+    include_nitpicks: bool = False,
 ) -> dict[str, Any]:
     """Assemble the PR-review context for an in-loop implementer review.
 
@@ -295,6 +299,9 @@ def gather_impl_review_context(
         plan_text: The implementation PLAN comment body (or "" if absent).
         plan_review_text: The PLAN_REVIEW comment body (or "" if absent).
         diff_text: ``gh pr diff`` / cumulative branch diff for the impl.
+        include_nitpicks: Forwarded into the context so the reviewer prompt
+            emits nitpick-severity comments only when ``--nitpick`` is set
+            (#1083).
 
     Returns:
         Context dict consumable by :func:`run_pr_review_analysis`.
@@ -316,6 +323,7 @@ def gather_impl_review_context(
         "pr_description": "",
         "auto_merge_enabled": True,
         "commits_signing_state": [],
+        "include_nitpicks": include_nitpicks,
     }
 
 
@@ -382,6 +390,9 @@ def review_pr_inline(
         comments=comments,
         summary=summary,
         dry_run=False,
+        # #1083: a later review iteration commenting on a line an earlier
+        # iteration already flagged edits that comment instead of duplicating.
+        dedupe_existing=True,
     )
     logger.info(
         "In-loop review R%s posted %s thread(s) on PR %s",
@@ -798,6 +809,9 @@ class PRReviewer(BaseReviewer):
                     comments=comments,
                     summary=summary,
                     dry_run=False,
+                    # #1083: edit an existing comment on a line instead of
+                    # duplicating it on re-review.
+                    dedupe_existing=True,
                 )
                 self._log(
                     "info",

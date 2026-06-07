@@ -144,6 +144,11 @@ Examples:
         help="Skip the advise step before implementation",
     )
     parser.add_argument(
+        "--nitpick",
+        action="store_true",
+        help="Let the reviewer emit nitpick-severity comments (suppressed by default)",
+    )
+    parser.add_argument(
         "--no-ui",
         action="store_true",
         help="Disable curses UI (use plain logging instead)",
@@ -208,6 +213,7 @@ def main() -> int:
         enable_learn=not args.no_learn,
         enable_follow_up=not args.no_follow_up,
         enable_ui=not args.no_ui and not args.json,
+        include_nitpicks=args.nitpick,
     )
 
     if args.health_check:

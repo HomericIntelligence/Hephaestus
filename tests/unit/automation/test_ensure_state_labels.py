@@ -57,8 +57,8 @@ class TestEnsureLabelsOnRepo:
     def test_issues_one_create_per_label(self, mock_run: MagicMock) -> None:
         mock_run.return_value = _ok_proc()
         issued = ensure_labels_on_repo("owner/name")
-        assert issued == len(STATE_LABEL_SPECS) == 3
-        assert mock_run.call_count == 3
+        assert issued == len(STATE_LABEL_SPECS)
+        assert mock_run.call_count == len(STATE_LABEL_SPECS)
 
     def test_passes_label_name_color_description_and_force(self, mock_run: MagicMock) -> None:
         mock_run.return_value = _ok_proc()
@@ -73,8 +73,9 @@ class TestEnsureLabelsOnRepo:
             assert "--description" in args
             assert "--force" in args
             seen_labels.add(args[3])
-        # All three state labels were exercised.
-        assert seen_labels == {STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO}
+        # Every spec'd label was exercised (includes state:skip, #1083).
+        assert seen_labels == set(STATE_LABEL_SPECS.keys())
+        assert {STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO} <= seen_labels
 
     def test_dry_run_issues_zero_calls(self, mock_run: MagicMock) -> None:
         issued = ensure_labels_on_repo("owner/name", dry_run=True)
@@ -84,14 +85,14 @@ class TestEnsureLabelsOnRepo:
     def test_label_create_failure_does_not_abort(self, mock_run: MagicMock) -> None:
         """A single failed label-create is logged but the others are still attempted."""
         # First call fails, remaining succeed.
+        n = len(STATE_LABEL_SPECS)
         mock_run.side_effect = [
             _fail_proc(rc=2, stderr="not authorized"),
-            _ok_proc(),
-            _ok_proc(),
+            *(_ok_proc() for _ in range(n - 1)),
         ]
         issued = ensure_labels_on_repo("owner/name")
-        assert issued == 2
-        assert mock_run.call_count == 3
+        assert issued == n - 1
+        assert mock_run.call_count == n
 
 
 class TestGhListOrgRepos:
@@ -128,17 +129,16 @@ class TestMain:
     """End-to-end CLI smoke tests."""
 
     def test_main_default_uses_detected_repo(self, mock_run: MagicMock) -> None:
-        # ``gh repo view`` discovers the repo; then 3 label creates run.
+        # ``gh repo view`` discovers the repo; then one create per label runs.
+        n = len(STATE_LABEL_SPECS)
         mock_run.side_effect = [
             _ok_proc(stdout="HomericIntelligence/ProjectScylla"),  # gh repo view
-            _ok_proc(),  # label 1
-            _ok_proc(),  # label 2
-            _ok_proc(),  # label 3
+            *(_ok_proc() for _ in range(n)),  # one create per label
         ]
         rc = main([])
         assert rc == 0
-        # 1 detect + 3 label creates = 4 total subprocess calls.
-        assert mock_run.call_count == 4
+        # 1 detect + n label creates total subprocess calls.
+        assert mock_run.call_count == 1 + n
 
     def test_main_org_enumerates_and_applies_to_each(self, mock_run: MagicMock) -> None:
         mock_run.side_effect = [
@@ -151,12 +151,12 @@ class TestMain:
                     ]
                 )
             ),
-            # 3 labels x 2 repos = 6 label creates
-            *(_ok_proc() for _ in range(6)),
+            # n labels x 2 repos label creates
+            *(_ok_proc() for _ in range(len(STATE_LABEL_SPECS) * 2)),
         ]
         rc = main(["--org", "AnOrg"])
         assert rc == 0
-        assert mock_run.call_count == 1 + 6
+        assert mock_run.call_count == 1 + len(STATE_LABEL_SPECS) * 2
 
     def test_main_dry_run_calls_no_label_create(self, mock_run: MagicMock) -> None:
         mock_run.side_effect = [
@@ -171,11 +171,11 @@ class TestMain:
         assert mock_run.call_count == 1
 
     def test_main_specific_repo_skips_org_enumeration(self, mock_run: MagicMock) -> None:
-        mock_run.side_effect = [_ok_proc() for _ in range(3)]
+        mock_run.side_effect = [_ok_proc() for _ in range(len(STATE_LABEL_SPECS))]
         rc = main(["--repo", "owner/name"])
         assert rc == 0
-        # No 'gh repo list' call — exactly 3 label creates.
-        assert mock_run.call_count == 3
+        # No 'gh repo list' call — exactly one create per label.
+        assert mock_run.call_count == len(STATE_LABEL_SPECS)
         for call in mock_run.call_args_list:
             args = call[0][0]
             assert args[:3] == ["gh", "label", "create"]

@@ -261,6 +261,7 @@ class LoopConfig:
     issues: list[int] = field(default_factory=list)
     dry_run: bool = False
     no_advise: bool = False
+    nitpick: bool = False
     allow_unsafe_phase_order: bool = False
     planner_model: str = ""
     reviewer_model: str = ""
@@ -362,6 +363,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--no-advise",
         action="store_true",
         help="Pass --no-advise to phases that support the advise preflight",
+    )
+    p.add_argument(
+        "--nitpick",
+        action="store_true",
+        help="Pass --nitpick to review phases (reviewer emits nitpick comments)",
     )
     p.add_argument(
         "--allow-unsafe-phase-order",
@@ -797,6 +803,7 @@ _PHASE_FLAGS: dict[str, dict[str, object]] = {
         "no_ui": True,
         "issues": "explicit",
         "advise": True,
+        "nitpick": True,
         "follow_up_loop_threshold": 3,
     },
     "drive-green": {
@@ -804,6 +811,7 @@ _PHASE_FLAGS: dict[str, dict[str, object]] = {
         "no_ui": True,
         "issues": "open",
         "advise": True,
+        "nitpick": True,
     },
 }
 
@@ -830,6 +838,8 @@ def _build_phase_argv(
         argv.append("--dry-run")
     if cfg.no_advise and flags.get("advise"):
         argv.append("--no-advise")
+    if cfg.nitpick and flags.get("nitpick"):
+        argv.append("--nitpick")
 
     issue_mode = flags.get("issues")
     issue_numbers = cfg.issues if issue_mode == "explicit" else open_issues
@@ -1339,6 +1349,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         issues=args.issues or [],
         dry_run=args.dry_run,
         no_advise=args.no_advise,
+        nitpick=args.nitpick,
         allow_unsafe_phase_order=args.allow_unsafe_phase_order,
         planner_model=args.planner_model,
         reviewer_model=args.reviewer_model,

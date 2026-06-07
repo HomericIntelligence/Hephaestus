@@ -78,6 +78,16 @@ class TestParseArgs:
         args = implementer_cli._parse_args()
         assert args.no_advise is True
 
+    def test_nitpick_defaults_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["impl"])
+        args = implementer_cli._parse_args()
+        assert args.nitpick is False
+
+    def test_nitpick_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["impl", "--nitpick"])
+        args = implementer_cli._parse_args()
+        assert args.nitpick is True
+
     def test_epic_and_issues_mutually_exclusive(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(sys, "argv", ["impl", "--epic", "1", "--issues", "2"])
         with pytest.raises(SystemExit):

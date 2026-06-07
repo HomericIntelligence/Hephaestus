@@ -46,6 +46,7 @@ from ._reviewer_base import BaseReviewer
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
 from .claude_timeouts import address_review_claude_timeout
+from .comment_difficulty import classify_comments, format_todo_line
 from .curses_ui import CursesUI, ThreadLogManager  # noqa: F401  (ThreadLogManager re-exported)
 from .git_utils import (  # noqa: F401  (get_repo_root re-exported)
     get_repo_root,
@@ -109,9 +110,11 @@ def run_address_fix_session(
     """Run the address-review fix session and return the agent's parsed result.
 
     Shared core of :meth:`AddressReviewer._run_fix_session` and the in-loop
-    implementer address step (Stage 2, #28). Builds the address-review prompt
-    (which fans out one sub-agent per file, #661), runs the implementer agent,
-    and returns the parsed ``{"addressed", "replies"}`` dict.
+    implementer address step (Stage 2, #28). Classifies each comment's fix
+    difficulty (#1083), builds the address-review prompt (which fans out one
+    sub-agent per COMMENT at the model tier matching its difficulty, with
+    same-file comments serialized), runs the implementer agent, and returns the
+    parsed ``{"addressed", "replies"}`` dict.
 
     The Claude path resumes the implementer's deterministic
     :data:`AGENT_IMPLEMENTER` session so fixes land in the same long-lived
@@ -156,11 +159,28 @@ def run_address_fix_session(
         ]
     )
 
+    # #1083: classify each comment's fix difficulty (separate cheap sub-agent),
+    # then render the difficulty-annotated todo list that drives one-sub-agent-
+    # per-comment dispatch at the matching model tier. Classification degrades to
+    # "medium" on any failure, so this never blocks the fix session.
+    difficulties = classify_comments(
+        threads=threads,
+        agent=agent,
+        issue_number=issue_number,
+        worktree_path=worktree_path,
+        repo_root=repo_root,
+        state_dir=log_file.parent,
+    )
+    todo_block = "\n".join(
+        format_todo_line(t, difficulties.get(t["id"], "medium")) for t in threads
+    )
+
     prompt = get_address_review_prompt(
         pr_number=pr_number,
         issue_number=issue_number,
         worktree_path=str(worktree_path),
         threads_json=threads_json,
+        todo_block=todo_block,
         task_block=task_block,
         task_review_block=task_review_block,
         diff_text=diff_text,
@@ -201,8 +221,10 @@ def run_address_fix_session(
             output_format="json",
             permission_mode="dontAsk",
             # Task: the session acts as a coordinator that dispatches one
-            # sub-agent per file of review threads. Skill: each sub-agent
-            # runs /hephaestus:advise before fixing. See prompts/address_review.py.
+            # sub-agent per review COMMENT, at the model tier matching the
+            # comment's classified difficulty (#1083), serializing same-file
+            # comments. Skill: each sub-agent runs /hephaestus:advise before
+            # fixing. See prompts/address_review.py.
             allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
             input_via_stdin=True,
         )

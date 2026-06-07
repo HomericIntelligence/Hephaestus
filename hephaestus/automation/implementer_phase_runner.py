@@ -40,7 +40,6 @@ from hephaestus.agents.runtime import (
 from hephaestus.github.rate_limit import wait_until
 
 from .address_review import (
-    resolve_addressed_threads,
     run_address_fix_session,
 )
 from .advise_runner import run_advise
@@ -52,7 +51,7 @@ from .claude_models import advise_model, implementer_model, reviewer_model
 from .claude_timeouts import advise_claude_timeout, implementer_claude_timeout
 from .follow_up import parse_follow_up_items, run_follow_up_issues
 from .git_utils import issue_ref, pr_ref, run, sync_worktree_to_remote_branch
-from .github_api import gh_pr_list_unresolved_threads
+from .github_api import gh_issue_add_labels, gh_pr_list_unresolved_threads
 from .learn import learn_needs_rerun, run_learn
 from .models import (
     ImplementationPhase,
@@ -76,6 +75,7 @@ from .prompts import (
     get_implementation_prompt,
 )
 from .review_validator import validate_prior_comments_addressed
+from .state_labels import STATE_SKIP
 
 # NOTE: ``is_plan_review_go``, ``fetch_issue_info``,
 # ``invoke_claude_with_session``, ``get_repo_slug``, ``current_trunk_githash``,
@@ -1231,6 +1231,30 @@ class ImplementationPhaseRunner:
                 iterations_run,
             )
 
+        # #1083 Bug 2: the loop must reach an explicit GO to be considered
+        # converged. Any other terminal outcome — exhausting
+        # MAX_REVIEW_ITERATIONS without GO, or a reviewer that posts zero
+        # threads yet never says GO (the "stuck AMBIGUOUS" case in output.log) —
+        # means the automation could not drive this issue to a clean state on
+        # its own. Apply ``state:skip`` so the next loop does not re-attempt it
+        # (and an operator can remove the label to re-queue it). ``last_verdict``
+        # is None only when there was no PR to review (dry-run / no-PR path),
+        # which must not be skipped.
+        if (
+            pr_number is not None
+            and last_verdict is not None
+            and last_verdict != "GO"
+            and not self.options.dry_run
+        ):
+            logger.info(
+                "#%d: review loop ended non-GO (verdict=%r) — applying %s",
+                issue_number,
+                last_verdict,
+                STATE_SKIP,
+            )
+            with contextlib.suppress(Exception):
+                gh_issue_add_labels(issue_number, [STATE_SKIP])
+
         return iterations_run, last_verdict, last_grade
 
     def _run_impl_review_step(
@@ -1286,6 +1310,7 @@ class ImplementationPhaseRunner:
             plan_text=plan_text,
             plan_review_text=plan_review_text,
             diff_text=diff_text,
+            include_nitpicks=self.options.include_nitpicks,
         )
         try:
             return review_pr_inline(
@@ -1375,17 +1400,32 @@ class ImplementationPhaseRunner:
             diff_text=diff_text,
         )
         addressed: list[str] = fix_result.get("addressed", [])
-        replies: dict[str, str] = fix_result.get("replies", {})
 
-        # Commit + push the fixes the address session produced.
-        self._commit_if_changes(issue_number, worktree_path)
+        # #1083 Bug 1: gate "addressed" on a REAL commit. The fix session's
+        # self-reported ``addressed`` list is not trusted on its own — a session
+        # can claim it resolved a thread while leaving the worktree clean (e.g.
+        # replying "documented as a limitation" with no code change). Only when
+        # _commit_if_changes actually produced a commit do we push and report
+        # progress, so a no-op fix can never advance the loop.
+        committed = self._commit_if_changes(issue_number, worktree_path)
+        if not (addressed and committed):
+            logger.info(
+                "#%s R%s: address step produced no committed change "
+                "(addressed=%s, committed=%s) — not counted as progress",
+                issue_number,
+                iteration,
+                bool(addressed),
+                committed,
+            )
+            return False
         self._push_branch(branch_name, worktree_path)
 
-        # Resolve only the threads actually addressed, guarded against
-        # hallucinated/cross-PR thread IDs (#661).
-        presented_thread_ids = {t["id"] for t in threads}
-        resolve_addressed_threads(addressed, replies, presented_thread_ids, dry_run=False)
-        return bool(addressed)
+        # #1083 Bug 1/Move-to-reviewer: resolution is NO LONGER done here. The
+        # validator (review_validator.validate_prior_comments_addressed) resolves
+        # each prior thread only after a fresh read-only sub-agent confirms the
+        # current diff actually addresses it. This closes the "resolved without
+        # implementing" hole — a self-reported fix with no diff change stays open.
+        return True
 
     def _parse_address_result(self, text: str, issue_number: int, iteration: int) -> dict[str, Any]:
         """Parse the address-session JSON block, tracing parse failures.
@@ -1431,11 +1471,18 @@ class ImplementationPhaseRunner:
             logger.warning("#%s: failed to fetch PLAN/PLAN_REVIEW context: %s", issue_number, e)
         return plan_text, plan_review_text
 
-    def _commit_if_changes(self, issue_number: int, worktree_path: Path) -> None:
+    def _commit_if_changes(self, issue_number: int, worktree_path: Path) -> bool:
         """Commit any pending changes from the in-loop address step.
 
         Silently skips when the worktree is clean. Mirrors
         ``AddressReviewer._commit_if_changes``.
+
+        Returns:
+            ``True`` iff a commit was actually created. ``False`` when the
+            worktree was clean (nothing to commit) or the commit failed. The
+            caller (#1083) uses this to gate progress/resolution on a real
+            change rather than the model's self-report.
+
         """
         result = run(
             ["git", "status", "--porcelain"],
@@ -1444,12 +1491,14 @@ class ImplementationPhaseRunner:
         )
         if not result.stdout.strip():
             logger.info("No changes to commit for issue #%s", issue_number)
-            return
+            return False
         try:
             commit_changes(issue_number, worktree_path, self.options.agent)
             logger.info("Committed in-loop address changes for issue #%s", issue_number)
+            return True
         except RuntimeError as e:
             logger.warning("Commit skipped for issue #%s: %s", issue_number, e)
+            return False
 
     def _push_branch(self, branch_name: str, worktree_path: Path) -> None:
         """Push *branch_name* to origin after an in-loop address step.

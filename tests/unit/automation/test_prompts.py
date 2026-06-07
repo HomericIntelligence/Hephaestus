@@ -87,6 +87,33 @@ class TestPRReviewAnalysisPrompt:
         assert "POLICY VIOLATION" in out
         assert "Verdict: NOGO" in out
 
+    def test_nitpicks_suppressed_by_default(self) -> None:
+        """#1083: by default the reviewer must be told to OMIT nitpick comments."""
+        out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
+        assert "nitpick" in out.lower()
+        # Default mode instructs suppression.
+        assert "do not emit" in out.lower() or "omit" in out.lower()
+
+    def test_nitpicks_included_when_flag_set(self) -> None:
+        """#1083: include_nitpicks=True re-enables nitpick comments."""
+        on = prompts.get_pr_review_analysis_prompt(
+            pr_number=1, issue_number=1, include_nitpicks=True
+        )
+        off = prompts.get_pr_review_analysis_prompt(
+            pr_number=1, issue_number=1, include_nitpicks=False
+        )
+        # The two prompts must differ in how they instruct on nitpicks.
+        assert on != off
+        assert "nitpick" in on.lower()
+
+    def test_comment_schema_carries_severity(self) -> None:
+        """#1083: each inline comment object must include a severity field."""
+        out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
+        assert "severity" in out
+        # The allowed severities are documented for the reviewer.
+        assert "nitpick" in out
+        assert "major" in out
+
     def test_passes_auto_merge_state(self) -> None:
         on = prompts.get_pr_review_analysis_prompt(
             pr_number=1, issue_number=1, auto_merge_enabled=True
@@ -131,11 +158,13 @@ class TestPRReviewAnalysisPrompt:
         block — any change to the schema or fence ordering breaks parsing.
         """
         out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
-        # The schema example must appear verbatim.
+        # The schema example object must appear verbatim (now on its own line so
+        # the fenced block stays within the line-length limit).
         assert (
-            '{"comments": [{"path": "...", "line": 1, "side": "RIGHT", "body": "..."}], '
-            '"summary": "..."}'
+            '{"path": "...", "line": 1, "side": "RIGHT", "severity": "minor", "body": "..."}'
         ) in out
+        assert '"comments": [' in out
+        assert '"summary": "..."}' in out
         # The LGTM example must appear verbatim.
         assert '{"comments": [], "summary": "LGTM"}' in out
         # The last fenced code block in the prompt must be the JSON block — the
@@ -675,7 +704,13 @@ class TestImplLoopStrictRubric:
 
 
 class TestAddressReviewPrompt:
-    """The address-review prompt is a coordinator that fans out per-file sub-agents."""
+    """The address-review prompt is a coordinator that fans out per-COMMENT sub-agents.
+
+    #1083: dispatch is now one sub-agent per review comment (not per file), each
+    at the model tier matching the comment's classified difficulty, with
+    same-file comments serialized to avoid worktree write conflicts. Each comment
+    is presented as a todo line ``@ <file> Line <#> - <difficulty> - <desc>``.
+    """
 
     def _build(self) -> str:
         return prompts.get_address_review_prompt(
@@ -683,6 +718,7 @@ class TestAddressReviewPrompt:
             issue_number=7,
             worktree_path="/tmp/wt",
             threads_json='[{"thread_id": "T1", "path": "a.py", "line": 1, "body": "fix"}]',
+            todo_block="@ a.py Line 1 - simple - fix",
         )
 
     def test_substitutes_args(self) -> None:
@@ -691,12 +727,34 @@ class TestAddressReviewPrompt:
         assert "7" in out
         assert "/tmp/wt" in out
 
-    def test_instructs_per_file_subagent_fanout(self) -> None:
+    def test_renders_todo_list(self) -> None:
         out = self._build()
-        # Coordinator groups by file and dispatches one sub-agent per file via Task.
-        assert "group the threads by `path`" in out or "group the threads by `path`" in out.lower()
+        # The pre-classified todo line is embedded verbatim.
+        assert "@ a.py Line 1 - simple - fix" in out
+
+    def test_instructs_per_comment_subagent_dispatch(self) -> None:
+        out = self._build()
         assert "Task tool" in out
-        assert "ONE sub-agent" in out
+        # One sub-agent per comment (not per file).
+        assert "one sub-agent per" in out.lower()
+        assert "comment" in out.lower()
+
+    def test_instructs_model_tier_by_difficulty(self) -> None:
+        """simple→haiku, medium→sonnet, hard→opus mapping is stated."""
+        out = self._build()
+        assert "simple" in out and "haiku" in out.lower()
+        assert "medium" in out and "sonnet" in out.lower()
+        assert "hard" in out and "opus" in out.lower()
+
+    def test_instructs_serialize_same_file(self) -> None:
+        """Same-file comments must run serially to avoid write conflicts."""
+        out = self._build()
+        assert "same file" in out.lower() or "same `path`" in out.lower()
+        assert "serial" in out.lower() or "sequential" in out.lower()
+
+    def test_requires_all_comments_resolved(self) -> None:
+        out = self._build()
+        assert "ALL" in out and ("must be" in out.lower() or "resolve" in out.lower())
 
     def test_instructs_advise_skill(self) -> None:
         """Each sub-agent must consult /hephaestus:advise before fixing."""
@@ -711,12 +769,10 @@ class TestAddressReviewPrompt:
         # PR threads live on the PR, not the issue.
         assert "live on the PR" in out
 
-    def test_has_no_early_exit_and_file_ownership_guardrails(self) -> None:
+    def test_has_no_early_exit_guardrails(self) -> None:
         out = self._build()
         assert "do NOT exit early" in out
         assert "Do NOT background" in out
-        # File ownership: a sub-agent owns exactly one file.
-        assert "OWNS exactly one file" in out
 
     def test_preserves_json_block_contract(self) -> None:
         """The final JSON-block contract the pipeline parses must be intact."""
@@ -737,6 +793,7 @@ class TestAddressReviewPrompt:
             issue_number=1,
             worktree_path="/tmp/wt",
             threads_json='[{"thread_id": "T1", "path": "a.py", "line": 1, "body": "use {x: 1}"}]',
+            todo_block="@ a.py Line 1 - simple - use {x: 1}",
         )
         assert "use {x: 1}" in out
 
@@ -754,6 +811,7 @@ class TestAddressReviewPrompt:
             issue_number=7,
             worktree_path="/tmp/wt",
             threads_json='[{"thread_id": "T1", "path": "a.py", "line": 1, "body": "fix"}]',
+            todo_block="@ a.py Line 1 - simple - fix",
             task_block="#7 Title\n\nDo the thing",
             task_review_block="Plan review: GO",
             diff_text="diff --git a/a.py b/a.py",

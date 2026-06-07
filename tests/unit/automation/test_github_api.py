@@ -2023,6 +2023,78 @@ class TestGhPrReviewPost:
         posted = self._posted_comments(mock_write)
         assert {c["body"] for c in posted} == {"keep me"}
 
+    # ------------------------------------------------------------------
+    # #1083: a line that already has a (bot) review comment is EDITED, not
+    # duplicated.
+    # ------------------------------------------------------------------
+
+    @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
+    @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
+    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_existing_line_comment_is_edited_not_duplicated(
+        self,
+        mock_gh_call: Any,
+        _mock_repo: Any,
+        mock_write: Any,
+        mock_index: Any,
+        mock_update: Any,
+    ) -> None:
+        """A comment on a line that already has a bot comment edits it in place."""
+        mock_gh_call.side_effect = self._gh_call_side_effect(
+            "REVIEW_1", [], diff_text=self._SAMPLE_DIFF
+        )
+        # a.py:2 already has a bot comment; a.py:3 does not.
+        mock_index.return_value = {("a.py", 2): "COMMENT_NODE_A2"}
+
+        gh_pr_review_post(
+            pr_number=7,
+            comments=[
+                {"path": "a.py", "line": 2, "side": "RIGHT", "body": "more on line 2"},
+                {"path": "a.py", "line": 3, "side": "RIGHT", "body": "fresh on line 3"},
+            ],
+            summary="Findings",
+            dedupe_existing=True,
+        )
+
+        # Line 2 was edited in place (append), not re-posted.
+        mock_update.assert_called_once()
+        assert mock_update.call_args.args[0] == "COMMENT_NODE_A2"
+        assert "more on line 2" in mock_update.call_args.args[1]
+        # Only the genuinely new line-3 comment is posted as a fresh thread.
+        posted = self._posted_comments(mock_write)
+        assert {c["body"] for c in posted} == {"fresh on line 3"}
+
+    @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
+    @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
+    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_dedupe_disabled_posts_everything(
+        self,
+        mock_gh_call: Any,
+        _mock_repo: Any,
+        mock_write: Any,
+        mock_index: Any,
+        mock_update: Any,
+    ) -> None:
+        """dedupe_existing=False keeps the legacy post-everything behavior."""
+        mock_gh_call.side_effect = self._gh_call_side_effect(
+            "REVIEW_1", [], diff_text=self._SAMPLE_DIFF
+        )
+
+        gh_pr_review_post(
+            pr_number=7,
+            comments=[{"path": "a.py", "line": 2, "side": "RIGHT", "body": "x"}],
+            summary="Findings",
+            dedupe_existing=False,
+        )
+
+        mock_index.assert_not_called()
+        mock_update.assert_not_called()
+        assert {c["body"] for c in self._posted_comments(mock_write)} == {"x"}
+
 
 class TestValidReviewPositions:
     """_valid_review_positions / _filter_comments_to_diff: diff-hunk parsing (#1039)."""
