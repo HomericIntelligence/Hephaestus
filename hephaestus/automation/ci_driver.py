@@ -58,6 +58,7 @@ from .github_api import (
     gh_issue_json,
     gh_pr_checks,
     gh_pr_list_unresolved_threads,
+    gh_pr_resolve_thread,
 )
 from .models import CIDriverOptions, WorkerResult
 from .pr_manager import pr_has_implementation_go_label
@@ -1125,6 +1126,9 @@ class CIDriver:
                     issue_number,
                     iteration + 1,
                 )
+                # Acknowledge automated review comments the fix addressed by
+                # replying + resolving the bot threads (human threads untouched).
+                self._reply_and_resolve_bot_threads(pr_number)
                 return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
             logger.warning("Issue #%s: CI fix attempt %s failed", issue_number, iteration + 1)
@@ -1691,24 +1695,33 @@ class CIDriver:
             logger.warning("Could not load session_id for issue #%s: %s", issue_number, e)
             return None
 
+    def _list_unresolved_threads_safe(self, pr_number: int) -> list[dict[str, Any]]:
+        """Fetch unresolved review threads, swallowing lookup failures.
+
+        Shared by the prompt-context formatter and the post-fix bot-thread
+        reply/resolve step so both run off a single fetch contract. Network/JSON
+        errors are downgraded to an info log and yield an empty list — neither
+        caller is ever gated on review-thread availability (#846).
+        """
+        try:
+            return gh_pr_list_unresolved_threads(pr_number, dry_run=self.options.dry_run)
+        except Exception as exc:
+            logger.info(
+                "Issue PR #%s: failed to fetch unresolved review threads (%s); "
+                "skipping review-thread handling",
+                pr_number,
+                exc,
+            )
+            return []
+
     def _format_review_threads_block(self, pr_number: int) -> str:
         """Render unresolved PR review threads as a Markdown block for the prompt.
 
         Returns the empty string when there are no unresolved threads or when
         the lookup fails — the CI fix loop is never gated on review-thread
-        availability (#846). Network/JSON errors are downgraded to an info log
-        so a transient GitHub blip cannot block forward progress.
+        availability (#846).
         """
-        try:
-            threads = gh_pr_list_unresolved_threads(pr_number, dry_run=self.options.dry_run)
-        except Exception as exc:
-            logger.info(
-                "Issue PR #%s: failed to fetch unresolved review threads (%s); "
-                "skipping review-thread injection",
-                pr_number,
-                exc,
-            )
-            return ""
+        threads = self._list_unresolved_threads_safe(pr_number)
         if not threads:
             return ""
         lines = [
@@ -1734,6 +1747,61 @@ class CIDriver:
         lines.append("---")
         lines.append("")
         return "\n".join(lines)
+
+    @staticmethod
+    def _is_bot_author(login: str) -> bool:
+        """Return True for automated review authors (GitHub App / bot accounts).
+
+        GitHub App authors carry a ``[bot]`` suffix on their login
+        (``github-actions[bot]``, ``coderabbitai[bot]``, ``dependabot[bot]``).
+        Human review threads are never auto-resolved — only the bot's own reply
+        thread is closed after the CI fix addresses it.
+        """
+        return login.endswith("[bot]")
+
+    def _reply_and_resolve_bot_threads(self, pr_number: int) -> int:
+        """Reply to and resolve automated review threads after a successful CI fix.
+
+        ci_driver surfaces unresolved threads to the fix prompt but cannot rely
+        on GitHub auto-resolving a bot thread when its line moves. After a fix
+        lands, post a templated reply on each BOT-authored unresolved thread and
+        resolve it, so the PR's automated review comments are acknowledged
+        rather than left dangling. Human threads are left untouched. Best-effort:
+        a failure on one thread is logged and skipped (never blocks the fix).
+
+        Returns the number of threads resolved.
+        """
+        if self.options.dry_run:
+            return 0
+        threads = self._list_unresolved_threads_safe(pr_number)
+        resolved = 0
+        for t in threads:
+            if not self._is_bot_author(t.get("author") or ""):
+                continue
+            thread_id = t.get("id")
+            if not thread_id:
+                continue
+            try:
+                gh_pr_resolve_thread(
+                    thread_id,
+                    "Addressed by the automated CI fix on this PR.",
+                    dry_run=False,
+                )
+                resolved += 1
+            except Exception as exc:
+                logger.info(
+                    "PR #%s: could not reply/resolve bot thread %s (%s); skipping",
+                    pr_number,
+                    thread_id,
+                    exc,
+                )
+        if resolved:
+            logger.info(
+                "PR #%s: replied to and resolved %s automated review thread(s)",
+                pr_number,
+                resolved,
+            )
+        return resolved
 
     def _failing_required_check_names(self, pr_number: int) -> list[str]:
         """Return names of required checks that are currently failing.

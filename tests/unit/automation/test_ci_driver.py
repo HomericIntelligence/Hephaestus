@@ -143,6 +143,72 @@ class TestLoadImplSessionId:
 
 
 # ---------------------------------------------------------------------------
+# _reply_and_resolve_bot_threads
+# ---------------------------------------------------------------------------
+
+
+class TestReplyAndResolveBotThreads:
+    """After a CI fix, bot review threads are replied to + resolved; humans aren't."""
+
+    def test_resolves_only_bot_threads(self, driver: CIDriver) -> None:
+        threads = [
+            {"id": "T_bot", "path": "a.py", "line": 1, "body": "nit", "author": "x[bot]"},
+            {"id": "T_human", "path": "b.py", "line": 2, "body": "?", "author": "alice"},
+        ]
+        with (
+            patch.object(driver, "_list_unresolved_threads_safe", return_value=threads),
+            patch("hephaestus.automation.ci_driver.gh_pr_resolve_thread") as resolve,
+        ):
+            count = driver._reply_and_resolve_bot_threads(999)
+
+        assert count == 1
+        resolve.assert_called_once()
+        assert resolve.call_args.args[0] == "T_bot"
+
+    def test_no_threads_is_noop(self, driver: CIDriver) -> None:
+        with (
+            patch.object(driver, "_list_unresolved_threads_safe", return_value=[]),
+            patch("hephaestus.automation.ci_driver.gh_pr_resolve_thread") as resolve,
+        ):
+            assert driver._reply_and_resolve_bot_threads(999) == 0
+        resolve.assert_not_called()
+
+    def test_dry_run_is_noop(self, driver: CIDriver) -> None:
+        driver.options.dry_run = True
+        with (
+            patch.object(driver, "_list_unresolved_threads_safe") as lister,
+            patch("hephaestus.automation.ci_driver.gh_pr_resolve_thread") as resolve,
+        ):
+            assert driver._reply_and_resolve_bot_threads(999) == 0
+        lister.assert_not_called()
+        resolve.assert_not_called()
+
+    def test_per_thread_failure_is_skipped(self, driver: CIDriver) -> None:
+        threads = [
+            {"id": "T_bot1", "path": "a", "line": 1, "body": "x", "author": "b[bot]"},
+            {"id": "T_bot2", "path": "b", "line": 2, "body": "y", "author": "b[bot]"},
+        ]
+        with (
+            patch.object(driver, "_list_unresolved_threads_safe", return_value=threads),
+            patch(
+                "hephaestus.automation.ci_driver.gh_pr_resolve_thread",
+                side_effect=[RuntimeError("boom"), None],
+            ) as resolve,
+        ):
+            count = driver._reply_and_resolve_bot_threads(999)
+
+        # First raised, second succeeded — one resolved, no exception propagated.
+        assert count == 1
+        assert resolve.call_count == 2
+
+    def test_is_bot_author(self) -> None:
+        assert CIDriver._is_bot_author("github-actions[bot]") is True
+        assert CIDriver._is_bot_author("dependabot[bot]") is True
+        assert CIDriver._is_bot_author("alice") is False
+        assert CIDriver._is_bot_author("") is False
+
+
+# ---------------------------------------------------------------------------
 # _parse_json_block
 # ---------------------------------------------------------------------------
 
