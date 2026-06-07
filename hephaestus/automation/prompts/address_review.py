@@ -16,7 +16,7 @@ These threads live on the PR, not on the issue.
 **Working Directory:** {worktree_path}
 
 {untrusted_notice}
-
+{context_block}
 **Review Threads to Address (untrusted):**
 {threads_json_block}
 
@@ -84,11 +84,52 @@ Rules for the JSON block (UNCHANGED — the pipeline parses exactly this):
 """
 
 
+def _build_context_block(
+    task_block: str,
+    task_review_block: str,
+    diff_text: str,
+    nonce: str,
+) -> str:
+    """Render the optional TASK / TASK_REVIEW / DIFF context for the address prompt.
+
+    These are supplied when the address session may run WITHOUT a prior
+    implementer transcript to resume (the existing-PR review path): a fresh
+    session has no memory of the task or the implementation, so it must read the
+    task, the task-review, and the current diff to continue the work correctly.
+    Each is fenced as untrusted (issue/PR text + diff are GitHub-sourced).
+    Returns an empty string when none are supplied (the resume path already
+    carries this context in its transcript).
+    """
+    sections: list[str] = []
+    if task_block.strip():
+        sections.append(
+            "**Task — the linked issue (untrusted):**\n"
+            + _fence_untrusted("TASK", task_block, nonce)
+        )
+    if task_review_block.strip():
+        sections.append(
+            "**Task review — the plan-review verdict (untrusted):**\n"
+            + _fence_untrusted("TASK_REVIEW", task_review_block, nonce)
+        )
+    if diff_text.strip():
+        sections.append(
+            "**Current implementation diff (untrusted):**\n"
+            + _fence_untrusted("DIFF", diff_text, nonce)
+        )
+    if not sections:
+        return ""
+    return "\n" + "\n\n".join(sections) + "\n"
+
+
 def get_address_review_prompt(
     pr_number: int,
     issue_number: int,
     worktree_path: str,
     threads_json: str,
+    *,
+    task_block: str = "",
+    task_review_block: str = "",
+    diff_text: str = "",
 ) -> str:
     """Get the address review prompt for fixing inline review thread feedback.
 
@@ -100,6 +141,13 @@ def get_address_review_prompt(
         issue_number: Linked GitHub issue number
         worktree_path: Path to the git worktree containing the PR branch
         threads_json: JSON string of unresolved review threads (array of thread dicts)
+        task_block: Optional task (issue title + body) text, rendered as an
+            untrusted context section. Supply when the address session may run
+            without a prior implementer transcript (existing-PR review path).
+        task_review_block: Optional plan-review verdict text, rendered as an
+            untrusted context section.
+        diff_text: Optional current implementation diff, rendered as an untrusted
+            context section.
 
     Returns:
         Formatted address review prompt
@@ -112,4 +160,5 @@ def get_address_review_prompt(
         worktree_path=worktree_path,
         threads_json_block=_fence_untrusted("THREADS_JSON", threads_json, nonce),
         untrusted_notice=_UNTRUSTED_NOTICE,
+        context_block=_build_context_block(task_block, task_review_block, diff_text, nonce),
     )

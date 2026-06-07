@@ -608,6 +608,9 @@ class IssueImplementer:
         branch_name: str,
         worktree_path: Path,
         iteration: int,
+        include_bootstrap_context: bool = False,
+        issue_title: str = "",
+        issue_body: str = "",
     ) -> bool:
         """Address the posted PR threads in-loop, resuming Session 2."""
         return self.phase_runner._run_address_review_step(
@@ -616,6 +619,9 @@ class IssueImplementer:
             branch_name=branch_name,
             worktree_path=worktree_path,
             iteration=iteration,
+            include_bootstrap_context=include_bootstrap_context,
+            issue_title=issue_title,
+            issue_body=issue_body,
         )
 
     def _resume_impl_with_feedback(

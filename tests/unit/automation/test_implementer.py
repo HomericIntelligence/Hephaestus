@@ -406,13 +406,15 @@ class TestPlanReviewVerdictGate:
 # ---------------------------------------------------------------------------
 
 
-class TestExistingPrSkipsImplementation:
-    """``_implement_issue`` must short-circuit when an open PR already exists.
+class TestExistingPrEntersReviewLoop:
+    """``_implement_issue`` drives an already-open PR through the review loop.
 
-    The guard runs BEFORE worktree creation and the plan-review gate, so a
-    re-run of the loop never re-implements (and never clobbers) an issue that
-    already has an in-flight PR. The open PR is handled by the implementer's
-    in-loop PR-review + address-review steps and the later drive-green stage.
+    Replaces the old "skip existing PRs entirely" behavior: a pre-existing PR
+    is reviewed (and fixed on NOGO) so it can earn the ``state:implementation-go``
+    label that drive-green requires — otherwise it deadlocks green-but-unmergeable.
+    The plan/implement steps are still skipped (the PR is already open), and the
+    worktree is hard-reset to ``origin/<branch>`` first to avoid clobbering
+    pushed work. A PR already carrying a terminal label short-circuits.
     """
 
     @pytest.fixture
@@ -427,7 +429,68 @@ class TestExistingPrSkipsImplementation:
         with patch("hephaestus.automation.implementer.get_repo_root", return_value=tmp_path):
             return IssueImplementer(options)
 
-    def test_existing_pr_skips_before_worktree_and_agent(
+    def test_existing_pr_without_label_runs_review_and_labels_go(
+        self, impl: IssueImplementer, tmp_path: Path
+    ) -> None:
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir(exist_ok=True)
+
+        with (
+            patch(
+                "hephaestus.automation.implementer.find_pr_for_issue",
+                return_value=777,
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.pr_has_implementation_state_label",
+                return_value=(False, False),
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"
+            ) as sync,
+            patch.object(
+                impl.worktree_manager, "create_worktree", return_value=worktree_path
+            ) as create_wt,
+            patch.object(impl, "_save_state"),
+            patch.object(impl, "_has_plan") as has_plan,
+            patch.object(impl, "_run_claude_code") as run_agent,
+            patch.object(impl, "_finalize_pr") as finalize_pr,
+            patch.object(impl, "_run_impl_review_loop", return_value=(1, "GO", "A")) as review_loop,
+            patch(
+                "hephaestus.automation.implementer.fetch_issue_info",
+                return_value=MagicMock(title="t", body="b"),
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_go"
+            ) as mark_go,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_no_go"
+            ) as mark_no_go,
+            patch(
+                "hephaestus.automation.implementer_phase_runner."
+                "enable_auto_merge_after_implementation_go"
+            ),
+        ):
+            result = impl._implement_issue(1)
+
+        assert result.success is True
+        assert result.already_has_pr is True
+        assert result.pr_number == 777
+        # Worktree IS created and synced; the implement agent and PR creation
+        # are NOT (the PR already exists).
+        create_wt.assert_called_once()
+        sync.assert_called_once()
+        run_agent.assert_not_called()
+        has_plan.assert_not_called()
+        finalize_pr.assert_not_called()
+        # Review loop ran with no initial session_id against the existing PR.
+        review_loop.assert_called_once()
+        assert review_loop.call_args.kwargs["session_id"] is None
+        assert review_loop.call_args.kwargs["pr_number"] == 777
+        # GO verdict labels the PR implementation-GO.
+        mark_go.assert_called_once_with(777)
+        mark_no_go.assert_not_called()
+
+    def test_existing_pr_with_go_label_short_circuits(
         self, impl: IssueImplementer, tmp_path: Path
     ) -> None:
         with (
@@ -435,20 +498,84 @@ class TestExistingPrSkipsImplementation:
                 "hephaestus.automation.implementer.find_pr_for_issue",
                 return_value=777,
             ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.pr_has_implementation_state_label",
+                return_value=(True, False),
+            ),
             patch.object(impl.worktree_manager, "create_worktree") as create_wt,
             patch.object(impl, "_save_state"),
-            patch.object(impl, "_has_plan") as has_plan,
-            patch.object(impl, "_run_claude_code") as run_agent,
+            patch.object(impl, "_run_impl_review_loop") as review_loop,
         ):
             result = impl._implement_issue(1)
 
         assert result.success is True
         assert result.already_has_pr is True
         assert result.pr_number == 777
-        # No worktree, no plan check, no agent session on the skip path.
+        # Already settled — no worktree, no review.
         create_wt.assert_not_called()
-        has_plan.assert_not_called()
+        review_loop.assert_not_called()
+
+    def test_existing_pr_with_no_go_label_short_circuits(
+        self, impl: IssueImplementer, tmp_path: Path
+    ) -> None:
+        with (
+            patch(
+                "hephaestus.automation.implementer.find_pr_for_issue",
+                return_value=777,
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.pr_has_implementation_state_label",
+                return_value=(False, True),
+            ),
+            patch.object(impl.worktree_manager, "create_worktree") as create_wt,
+            patch.object(impl, "_save_state"),
+            patch.object(impl, "_run_impl_review_loop") as review_loop,
+        ):
+            result = impl._implement_issue(1)
+
+        assert result.success is True
+        assert result.already_has_pr is True
+        create_wt.assert_not_called()
+        review_loop.assert_not_called()
+
+    def test_existing_pr_review_no_go_marks_no_go(
+        self, impl: IssueImplementer, tmp_path: Path
+    ) -> None:
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir(exist_ok=True)
+
+        with (
+            patch(
+                "hephaestus.automation.implementer.find_pr_for_issue",
+                return_value=777,
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.pr_has_implementation_state_label",
+                return_value=(False, False),
+            ),
+            patch("hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"),
+            patch.object(impl.worktree_manager, "create_worktree", return_value=worktree_path),
+            patch.object(impl, "_save_state"),
+            patch.object(impl, "_run_claude_code") as run_agent,
+            patch.object(impl, "_run_impl_review_loop", return_value=(3, "NOGO", "D")),
+            patch(
+                "hephaestus.automation.implementer.fetch_issue_info",
+                return_value=MagicMock(title="t", body="b"),
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_go"
+            ) as mark_go,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_no_go"
+            ) as mark_no_go,
+        ):
+            result = impl._implement_issue(1)
+
+        assert result.success is True
+        assert result.already_has_pr is True
         run_agent.assert_not_called()
+        mark_no_go.assert_called_once_with(777)
+        mark_go.assert_not_called()
 
     def test_no_existing_pr_proceeds(self, impl: IssueImplementer, tmp_path: Path) -> None:
         """When no PR exists, the guard is transparent and work proceeds."""

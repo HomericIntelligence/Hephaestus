@@ -183,15 +183,23 @@ class TestRunImplReviewLoop:
         mock_addr.assert_not_called()
         assert mock_rev.call_count == 1
 
-    def test_no_session_id_stops_before_addressing(
+    def test_no_session_id_still_addresses(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
-        """Without a session_id we cannot resume Session 2, so we never address."""
+        """session_id=None (existing-PR path) still addresses review threads.
+
+        The address step resumes AGENT_IMPLEMENTER by its deterministic id, or
+        starts a fresh implementer session bootstrapped with the task/diff — so
+        a pre-existing PR with no initial session is fixed rather than
+        dead-ending. The loop runs to GO on the second iteration here.
+        """
         with (
             patch.object(
-                implementer, "_run_impl_review_step", return_value=(_nogo(), ["t0"])
+                implementer,
+                "_run_impl_review_step",
+                side_effect=[(_nogo(), ["t0"]), (_go(), [])],
             ) as mock_rev,
-            patch.object(implementer, "_run_address_review_step") as mock_addr,
+            patch.object(implementer, "_run_address_review_step", return_value=True) as mock_addr,
         ):
             iters, verdict, _ = implementer._run_impl_review_loop(
                 issue_number=1,
@@ -205,10 +213,13 @@ class TestRunImplReviewLoop:
                 pr_number=42,
             )
 
-        assert iters == 1
-        assert verdict == "NOGO"
-        mock_addr.assert_not_called()
-        assert mock_rev.call_count == 1
+        assert iters == 2
+        assert verdict == "GO"
+        # Addressing ran despite no initial session_id, and was told to include
+        # bootstrap context (no transcript guaranteed on this path).
+        mock_addr.assert_called_once()
+        assert mock_addr.call_args.kwargs["include_bootstrap_context"] is True
+        assert mock_rev.call_count == 2
 
     def test_prior_review_passed_to_next_reviewer(
         self, implementer: IssueImplementer, tmp_path: Path

@@ -259,3 +259,32 @@ class TestCoAuthorLine:
         commit_msg = commit_call[-1]
         assert "Co-Authored-By: Codex <noreply@openai.com>" in commit_msg
         mock_model.assert_not_called()
+
+
+class TestImplementationStateLabel:
+    """Tests for pr_has_implementation_state_label (existing-PR idempotency gate)."""
+
+    def test_go_label(self) -> None:
+        gh_mock = _status('{"labels": [{"name": "state:implementation-go"}]}')
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_has_implementation_state_label(7) == (True, False)
+
+    def test_no_go_label(self) -> None:
+        gh_mock = _status('{"labels": [{"name": "state:implementation-no-go"}]}')
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_has_implementation_state_label(7) == (False, True)
+
+    def test_no_label(self) -> None:
+        gh_mock = _status('{"labels": [{"name": "bug"}]}')
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_has_implementation_state_label(7) == (False, False)
+
+    def test_empty_labels(self) -> None:
+        gh_mock = _status('{"labels": []}')
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_has_implementation_state_label(7) == (False, False)
+
+    def test_malformed_json_returns_false_false(self) -> None:
+        gh_mock = _status("not json")
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_has_implementation_state_label(7) == (False, False)
