@@ -765,3 +765,48 @@ class TestAddressReviewPrompt:
         assert "_TASK\n" in out
         assert "_TASK_REVIEW\n" in out
         assert "_DIFF\n" in out
+
+
+class TestReviewValidationPrompt:
+    """The review-validation prompt re-checks prior comments against the diff."""
+
+    def _build(self) -> str:
+        return prompts.get_review_validation_prompt(
+            pr_number=42,
+            issue_number=7,
+            prior_comments_json='[{"path": "a.py", "line": 1, "body": "fix the leak"}]',
+            diff_text="diff --git a/a.py b/a.py",
+        )
+
+    def test_substitutes_args(self) -> None:
+        out = self._build()
+        assert "42" in out
+        assert "7" in out
+        assert "fix the leak" in out
+        assert "diff --git a/a.py b/a.py" in out
+
+    def test_states_validation_not_fresh_review(self) -> None:
+        out = self._build()
+        assert "VALIDATING" in out
+        assert "NOT performing a fresh review" in out
+
+    def test_preserves_unaddressed_json_contract(self) -> None:
+        out = self._build()
+        assert '"unaddressed"' in out
+        assert "original_body" in out
+        assert "detail" in out
+
+    def test_inputs_fenced_untrusted(self) -> None:
+        out = self._build()
+        assert "_PRIOR_COMMENTS\n" in out
+        assert "_DIFF\n" in out
+        assert "UNTRUSTED" in out
+
+    def test_renders_with_brace_containing_body(self) -> None:
+        out = prompts.get_review_validation_prompt(
+            pr_number=1,
+            issue_number=1,
+            prior_comments_json='[{"path": "a.py", "line": 1, "body": "use {x: 1}"}]',
+            diff_text="d",
+        )
+        assert "use {x: 1}" in out

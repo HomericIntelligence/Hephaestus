@@ -151,6 +151,92 @@ def get_pr_review_analysis_prompt(
     )
 
 
+REVIEW_VALIDATION_PROMPT = """
+You are VALIDATING whether prior review comments on PR #{pr_number}
+(issue #{issue_number}) were actually addressed by the current diff.
+
+You are NOT performing a fresh review. Do not raise new concerns. Your ONLY
+job is, for each PRIOR review comment below, to decide whether the CURRENT
+diff actually resolves it.
+
+{untrusted_notice}
+
+**Prior review comments to validate (untrusted):**
+{prior_comments_block}
+
+The block above is a JSON array where each element has:
+- `path`: file path the comment was made on (may be empty for PR-level)
+- `line`: line number the comment pointed at (integer or null)
+- `body`: the original reviewer comment text
+
+**Current diff (untrusted):**
+{diff_block}
+
+---
+
+For EACH prior comment, judge against the current diff:
+- ADDRESSED — the diff changes the cited code in a way that resolves the
+  comment's concern. When in doubt that a change truly resolves it, treat it as
+  NOT addressed (false "addressed" is worse than a redundant re-open).
+- NOT ADDRESSED — the cited code is unchanged, or the change does not actually
+  resolve the concern the comment raised.
+
+**Output format:**
+Write your reasoning in prose. At the very end, emit a single fenced JSON block
+listing ONLY the comments that are NOT addressed:
+
+```json
+{{"unaddressed": [
+  {{"path": "...", "line": 1, "original_body": "...", "detail": "why still unaddressed"}}
+]}}
+```
+
+Rules:
+- `unaddressed`: array of the prior comments the diff does NOT resolve. Use the
+  comment's original `path`/`line`; `original_body` is the original comment text
+  (verbatim or trimmed); `detail` states concretely what is still missing.
+- If every prior comment is addressed, emit `{{"unaddressed": []}}`.
+- Emit only one JSON block, at the very end (the parser takes the LAST one).
+"""
+
+
+def get_review_validation_prompt(
+    pr_number: int,
+    issue_number: int,
+    prior_comments_json: str,
+    diff_text: str = "",
+) -> str:
+    """Get the prompt that validates whether prior review comments were addressed.
+
+    Used by :mod:`hephaestus.automation.review_validator` to re-check, with a
+    fresh read-only sub-agent, that the implementer's fixes actually resolved
+    the previous iteration's review comments — re-opening (as new inline
+    threads) any the current diff leaves unaddressed.
+
+    Both inputs are fenced as untrusted (prior comment bodies + the diff are
+    GitHub-sourced).
+
+    Args:
+        pr_number: GitHub PR number under validation.
+        issue_number: Linked GitHub issue number.
+        prior_comments_json: JSON array string of prior comment dicts
+            (``path``/``line``/``body``).
+        diff_text: The current cumulative PR diff.
+
+    Returns:
+        Formatted review-validation prompt.
+
+    """
+    nonce = secrets.token_hex(8).upper()
+    return REVIEW_VALIDATION_PROMPT.format(
+        pr_number=pr_number,
+        issue_number=issue_number,
+        prior_comments_block=_fence_untrusted("PRIOR_COMMENTS", prior_comments_json, nonce),
+        diff_block=_fence_untrusted("DIFF", diff_text, nonce),
+        untrusted_notice=_UNTRUSTED_NOTICE,
+    )
+
+
 def get_pr_description(
     issue_number: int,
     summary: str,

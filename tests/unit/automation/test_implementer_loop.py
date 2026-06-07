@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch
 
@@ -59,6 +60,7 @@ class TestRunImplReviewLoop:
     """Integration tests for the Stage 2 in-loop review + address cycle (#28).
 
     The loop now drives, per iteration:
+      0. validation — re-open prior comments the diff did not address.
       1. ``_run_impl_review_step`` — a FRESH reviewer that posts inline PR
          threads and returns ``(verdict_text, posted_thread_ids)``.
       2. ``_run_address_review_step`` — resumes Session 2 to fix + resolve the
@@ -66,6 +68,27 @@ class TestRunImplReviewLoop:
     No separate ``review-prs`` / ``address-review`` OS process is spawned; both
     steps are in-process callables on the implementer.
     """
+
+    @pytest.fixture(autouse=True)
+    def _no_network(self) -> Iterator[None]:
+        """Stub the loop's two GitHub-touching collaborators by default.
+
+        The pre-address thread snapshot (``gh_pr_list_unresolved_threads``) and
+        the per-iteration validation pass (``validate_prior_comments_addressed``)
+        would otherwise hit the network. Tests that specifically exercise re-open
+        behavior patch ``validate_prior_comments_addressed`` themselves.
+        """
+        with (
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_pr_list_unresolved_threads",
+                return_value=[],
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.validate_prior_comments_addressed",
+                return_value=([], True),
+            ),
+        ):
+            yield
 
     def test_terminates_on_iter0_go(self, implementer: IssueImplementer, tmp_path: Path) -> None:
         with (
@@ -253,6 +276,56 @@ class TestRunImplReviewLoop:
         # R0 has iteration=0; R1 has iteration=1
         assert mock_rev.call_args_list[0].kwargs["iteration"] == 0
         assert mock_rev.call_args_list[1].kwargs["iteration"] == 1
+
+    def test_validator_reopen_forces_another_address_iteration(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """A GO review cannot terminate while the validator re-opened a comment.
+
+        R0 NOGO → address. R1 the validator re-opens a prior comment AND the
+        reviewer now says GO — but the re-open must override GO, forcing the loop
+        to address again rather than terminating with an unaddressed comment.
+        """
+        with (
+            patch.object(implementer, "_collect_diff", return_value="diff"),
+            patch.object(
+                implementer,
+                "_run_impl_review_step",
+                # R0 NOGO+threads, R1 GO (would terminate but for the re-open),
+                # R2 GO (clean — terminates).
+                side_effect=[(_nogo("D"), ["t0"]), (_go(), []), (_go(), [])],
+            ) as mock_rev,
+            patch.object(implementer, "_run_address_review_step", return_value=True) as mock_addr,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_pr_list_unresolved_threads",
+                return_value=[{"id": "T", "path": "a.py", "line": 1, "body": "fix"}],
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.validate_prior_comments_addressed",
+                # R1 validation re-opens; R2 validation is clean.
+                side_effect=[(["RE1"], False), ([], True)],
+            ) as mock_validate,
+        ):
+            iters, verdict, _ = implementer._run_impl_review_loop(
+                issue_number=1,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=42,
+            )
+
+        # R1's GO was overridden by the re-open → addressed again → R2 GO ends it.
+        assert iters == 3
+        assert verdict == "GO"
+        assert mock_rev.call_count == 3
+        # Address ran after R0 and after the overridden R1 (not after R2's clean GO).
+        assert mock_addr.call_count == 2
+        # Validation ran on iterations 1 and 2 (skipped on iteration 0 — no prior).
+        assert mock_validate.call_count == 2
 
     def test_no_pr_falls_back_to_diff_only_reviewer(
         self, implementer: IssueImplementer, tmp_path: Path

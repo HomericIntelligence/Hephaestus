@@ -71,6 +71,7 @@ from .pr_review import (
     PR_REVIEW_ANALYSIS_PROMPT,
     get_pr_description,
     get_pr_review_analysis_prompt,
+    get_review_validation_prompt,
 )
 
 __all__ = [
@@ -98,4 +99,5 @@ __all__ = [
     "get_plan_review_prompt",
     "get_pr_description",
     "get_pr_review_analysis_prompt",
+    "get_review_validation_prompt",
 ]

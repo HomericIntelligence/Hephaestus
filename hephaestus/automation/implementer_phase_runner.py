@@ -75,6 +75,7 @@ from .prompts import (
     get_impl_resume_feedback_prompt,
     get_implementation_prompt,
 )
+from .review_validator import validate_prior_comments_addressed
 
 # NOTE: ``is_plan_review_go``, ``fetch_issue_info``,
 # ``invoke_claude_with_session``, ``get_repo_slug``, ``current_trunk_githash``,
@@ -1001,11 +1002,53 @@ class ImplementationPhaseRunner:
             already_has_pr=True,
         )
 
+    def _validate_prior_threads(
+        self,
+        *,
+        issue_number: int,
+        pr_number: int | None,
+        branch_name: str,
+        worktree_path: Path,
+        prior_threads: list[dict[str, Any]],
+        iteration: int,
+        thread_id: int | None,
+    ) -> list[str]:
+        """Re-open prior review comments the current diff does not address.
+
+        Runs the read-only validation sub-agent
+        (:func:`review_validator.validate_prior_comments_addressed`) against the
+        previous iteration's threads. Returns the IDs of any threads it
+        re-opened (empty when there is no PR, no prior threads, on the first
+        iteration, in dry-run, or when everything was addressed).
+        """
+        if pr_number is None or not prior_threads or self.options.dry_run:
+            return []
+        diff_text = self.impl._collect_diff(worktree_path, branch_name)
+        reopened, is_clean = validate_prior_comments_addressed(
+            pr_number=pr_number,
+            issue_number=issue_number,
+            worktree_path=worktree_path,
+            prior_threads=prior_threads,
+            diff_text=diff_text,
+            agent=self.options.agent,
+            iteration=iteration,
+            state_dir=self.state_dir,
+            dry_run=False,
+        )
+        if not is_clean:
+            self.impl._log(
+                "warning",
+                f"{issue_ref(issue_number)} R{iteration}: validator re-opened "
+                f"{len(reopened)} prior review comment(s) the diff did not address",
+                thread_id,
+            )
+        return reopened
+
     # ------------------------------------------------------------------
     # Strict review loop for implementer sessions
     # ------------------------------------------------------------------
 
-    def _run_impl_review_loop(
+    def _run_impl_review_loop(  # noqa: C901  # validate + review + address has several outcome paths
         self,
         *,
         issue_number: int,
@@ -1039,8 +1082,26 @@ class ImplementationPhaseRunner:
         last_grade: str | None = None
         prior_review: str | None = None
         iterations_run = 0
+        # Threads the previous iteration's address step was asked to fix, kept so
+        # the next iteration can independently validate they were actually
+        # addressed (and re-open the ones that weren't).
+        prior_addressed_threads: list[dict[str, Any]] = []
 
         for iteration in range(MAX_REVIEW_ITERATIONS):
+            # Validation step (#28 follow-up): before the fresh review, verify a
+            # sub-agent that the prior iteration's comments were truly addressed
+            # by the current diff. Anything still unaddressed is re-opened as a
+            # new inline thread so it flows back into the address step below.
+            reopened = self._validate_prior_threads(
+                issue_number=issue_number,
+                pr_number=pr_number,
+                branch_name=branch_name,
+                worktree_path=worktree_path,
+                prior_threads=prior_addressed_threads,
+                iteration=iteration,
+                thread_id=thread_id,
+            )
+
             # Review step: a fresh reviewer session posts inline PR threads and
             # returns its verdict text. ``prior_review`` carries the previous
             # iteration's critique forward as reviewer context.
@@ -1067,7 +1128,8 @@ class ImplementationPhaseRunner:
             impl._log(
                 "info",
                 f"{issue_ref(issue_number)} R{iteration}: Verdict={verdict.verdict} "
-                f"Grade={verdict.grade or '?'} threads={len(posted_thread_ids)}",
+                f"Grade={verdict.grade or '?'} threads={len(posted_thread_ids)} "
+                f"reopened={len(reopened)}",
                 thread_id,
             )
 
@@ -1076,7 +1138,13 @@ class ImplementationPhaseRunner:
             # the final iteration's data is always on disk.
             impl._save_review_iteration_state(issue_number, iterations_run, review_text)
 
-            if verdict.is_go:
+            # A GO (or empty) review cannot terminate the loop while the
+            # validator just re-opened prior comments — those unresolved
+            # re-opened threads must still be addressed. Treat the iteration as
+            # NOGO so the address step below runs against them.
+            if reopened:
+                last_verdict = "NOGO"
+            elif verdict.is_go:
                 ref = issue_ref(issue_number)
                 impl._log(
                     "info",
@@ -1086,8 +1154,9 @@ class ImplementationPhaseRunner:
                 break
 
             # Convergence on "no blocking unresolved threads": the reviewer
-            # found nothing actionable to post, so there is nothing to address.
-            if pr_number is not None and not posted_thread_ids:
+            # found nothing actionable to post AND the validator re-opened
+            # nothing, so there is nothing to address.
+            if pr_number is not None and not posted_thread_ids and not reopened:
                 ref = issue_ref(issue_number)
                 impl._log(
                     "info",
@@ -1116,6 +1185,9 @@ class ImplementationPhaseRunner:
             # threads rather than dead-ending here.
             if pr_number is None:
                 continue
+            # Snapshot the unresolved threads the address step is about to fix so
+            # the NEXT iteration's validator can check they were truly addressed.
+            prior_addressed_threads = gh_pr_list_unresolved_threads(pr_number, dry_run=False)
             if slot_id is not None:
                 self.status_tracker.update_slot(
                     slot_id, f"{issue_ref(issue_number)}: addressing review [R{iteration}]"
