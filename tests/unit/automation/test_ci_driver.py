@@ -92,8 +92,8 @@ class TestLoadImplSessionId:
     """Tests for _load_impl_session_id."""
 
     def test_returns_session_id_when_present(self, driver: CIDriver, tmp_path: Path) -> None:
-        """Legacy state file with Claude session_id returns it for Claude."""
-        state_file = tmp_path / "state-123.json"
+        """State file (``issue-<n>.json``) with Claude session_id returns it for Claude."""
+        state_file = tmp_path / "issue-123.json"
         state_file.write_text(json.dumps({"session_id": "sess-xyz"}))
         driver.state_dir = tmp_path
 
@@ -102,8 +102,8 @@ class TestLoadImplSessionId:
         assert result == "sess-xyz"
 
     def test_skips_legacy_session_for_codex(self, driver: CIDriver, tmp_path: Path) -> None:
-        """Legacy state files contain Claude sessions and must not resume as Codex."""
-        state_file = tmp_path / "state-123.json"
+        """A Claude session must not resume as Codex."""
+        state_file = tmp_path / "issue-123.json"
         state_file.write_text(json.dumps({"session_id": "sess-xyz"}))
         driver.state_dir = tmp_path
         driver.options.agent = "codex"
@@ -114,7 +114,7 @@ class TestLoadImplSessionId:
 
     def test_returns_matching_codex_session(self, driver: CIDriver, tmp_path: Path) -> None:
         """Provider metadata allows Codex sessions to be resumed by Codex."""
-        state_file = tmp_path / "state-123.json"
+        state_file = tmp_path / "issue-123.json"
         state_file.write_text(json.dumps({"session_id": "codex-sess", "session_agent": "codex"}))
         driver.state_dir = tmp_path
         driver.options.agent = "codex"
@@ -133,13 +133,97 @@ class TestLoadImplSessionId:
 
     def test_returns_none_when_no_key(self, driver: CIDriver, tmp_path: Path) -> None:
         """State file missing session_id key → returns None."""
-        state_file = tmp_path / "state-123.json"
+        state_file = tmp_path / "issue-123.json"
         state_file.write_text(json.dumps({"phase": "completed"}))
         driver.state_dir = tmp_path
 
         result = driver._load_impl_session_id(123)
 
         assert result is None
+
+    def test_reads_implementer_filename_not_legacy_state_name(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """Regression: the implementer writes ``issue-<n>.json``, not ``state-<n>.json``.
+
+        ci_driver previously read the wrong name and always missed, silently
+        never resuming the implementer's session. A file at the OLD name must
+        NOT be picked up; the implementer-written name MUST be.
+        """
+        # Old (wrong) name is ignored.
+        (tmp_path / "state-123.json").write_text(json.dumps({"session_id": "legacy"}))
+        driver.state_dir = tmp_path
+        assert driver._load_impl_session_id(123) is None
+
+        # Implementer-written name is read.
+        (tmp_path / "issue-123.json").write_text(json.dumps({"session_id": "real"}))
+        assert driver._load_impl_session_id(123) == "real"
+
+
+# ---------------------------------------------------------------------------
+# _reply_and_resolve_bot_threads
+# ---------------------------------------------------------------------------
+
+
+class TestReplyAndResolveBotThreads:
+    """After a CI fix, bot review threads are replied to + resolved; humans aren't."""
+
+    def test_resolves_only_bot_threads(self, driver: CIDriver) -> None:
+        threads = [
+            {"id": "T_bot", "path": "a.py", "line": 1, "body": "nit", "author": "x[bot]"},
+            {"id": "T_human", "path": "b.py", "line": 2, "body": "?", "author": "alice"},
+        ]
+        with (
+            patch.object(driver, "_list_unresolved_threads_safe", return_value=threads),
+            patch("hephaestus.automation.ci_driver.gh_pr_resolve_thread") as resolve,
+        ):
+            count = driver._reply_and_resolve_bot_threads(999)
+
+        assert count == 1
+        resolve.assert_called_once()
+        assert resolve.call_args.args[0] == "T_bot"
+
+    def test_no_threads_is_noop(self, driver: CIDriver) -> None:
+        with (
+            patch.object(driver, "_list_unresolved_threads_safe", return_value=[]),
+            patch("hephaestus.automation.ci_driver.gh_pr_resolve_thread") as resolve,
+        ):
+            assert driver._reply_and_resolve_bot_threads(999) == 0
+        resolve.assert_not_called()
+
+    def test_dry_run_is_noop(self, driver: CIDriver) -> None:
+        driver.options.dry_run = True
+        with (
+            patch.object(driver, "_list_unresolved_threads_safe") as lister,
+            patch("hephaestus.automation.ci_driver.gh_pr_resolve_thread") as resolve,
+        ):
+            assert driver._reply_and_resolve_bot_threads(999) == 0
+        lister.assert_not_called()
+        resolve.assert_not_called()
+
+    def test_per_thread_failure_is_skipped(self, driver: CIDriver) -> None:
+        threads = [
+            {"id": "T_bot1", "path": "a", "line": 1, "body": "x", "author": "b[bot]"},
+            {"id": "T_bot2", "path": "b", "line": 2, "body": "y", "author": "b[bot]"},
+        ]
+        with (
+            patch.object(driver, "_list_unresolved_threads_safe", return_value=threads),
+            patch(
+                "hephaestus.automation.ci_driver.gh_pr_resolve_thread",
+                side_effect=[RuntimeError("boom"), None],
+            ) as resolve,
+        ):
+            count = driver._reply_and_resolve_bot_threads(999)
+
+        # First raised, second succeeded — one resolved, no exception propagated.
+        assert count == 1
+        assert resolve.call_count == 2
+
+    def test_is_bot_author(self) -> None:
+        assert CIDriver._is_bot_author("github-actions[bot]") is True
+        assert CIDriver._is_bot_author("dependabot[bot]") is True
+        assert CIDriver._is_bot_author("alice") is False
+        assert CIDriver._is_bot_author("") is False
 
 
 # ---------------------------------------------------------------------------

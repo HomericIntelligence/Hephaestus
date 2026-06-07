@@ -1549,7 +1549,9 @@ def gh_pr_list_unresolved_threads(
         dry_run: If True, return empty list
 
     Returns:
-        List of thread dicts with keys: id (str), path (str), line (int | None), body (str)
+        List of thread dicts with keys: id (str), path (str), line (int | None),
+        body (str), author (str — the first comment's author login, ``""`` if
+        unknown).
 
     """
     if dry_run:
@@ -1568,7 +1570,8 @@ def gh_pr_list_unresolved_threads(
         "  repository(owner:$owner,name:$name){"
         "    pullRequest(number:$number){"
         "      reviewThreads(first:100){"
-        "        nodes{ id isResolved path line comments(first:1){ nodes{ body } } }"
+        "        nodes{ id isResolved path line "
+        "comments(first:1){ nodes{ body author{ login } } } }"
         "      }"
         "    }"
         "  }"
@@ -1605,13 +1608,19 @@ def gh_pr_list_unresolved_threads(
         if node.get("isResolved"):
             continue
         first_comment_nodes = node.get("comments", {}).get("nodes", [])
-        body = first_comment_nodes[0]["body"] if first_comment_nodes else ""
+        first_comment = first_comment_nodes[0] if first_comment_nodes else {}
+        body = first_comment.get("body", "")
+        author = ""
+        author_node = first_comment.get("author")
+        if isinstance(author_node, dict):
+            author = author_node.get("login") or ""
         threads.append(
             {
                 "id": node["id"],
                 "path": node.get("path", ""),
                 "line": node.get("line"),
                 "body": body,
+                "author": author,
             }
         )
 

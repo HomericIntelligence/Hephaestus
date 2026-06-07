@@ -187,23 +187,20 @@ class TestMypyUpperCapConsistency:
         with open(pixi_path, "rb") as f:
             pixi = tomllib.load(f)
 
-        pixi_dev_spec = pixi["feature"]["dev"]["dependencies"]["mypy"]
-        pixi_lint_spec = pixi["feature"]["lint"]["dependencies"]["mypy"]
+        pixi_shared_spec = pixi["feature"]["shared"]["dependencies"]["mypy"]
 
         pyproject_cap = _upper_cap(pyproject_spec)
-        pixi_dev_cap = _upper_cap(pixi_dev_spec)
-        pixi_lint_cap = _upper_cap(pixi_lint_spec)
+        pixi_shared_cap = _upper_cap(pixi_shared_spec)
 
-        assert pyproject_cap == pixi_dev_cap == pixi_lint_cap, (
+        assert pyproject_cap == pixi_shared_cap, (
             "mypy upper-cap skew: "
             f"pyproject.toml dev={pyproject_cap} vs "
-            f"pixi.toml [feature.dev]={pixi_dev_cap} vs "
-            f"[feature.lint]={pixi_lint_cap}. "
-            "Update all three together — see issue #748."
+            f"pixi.toml [feature.shared]={pixi_shared_cap}. "
+            "Update both together — see issue #748."
         )
 
     def test_mypy_floor_matches_across_manifests(self, repo_root: Path) -> None:
-        """Mypy floor in pyproject.toml dev extra must equal both pixi features."""
+        """Mypy floor in pyproject.toml dev extra must equal pixi shared feature."""
         pyproject_path = repo_root / "pyproject.toml"
         with open(pyproject_path, "rb") as f:
             pyproject = tomllib.load(f)
@@ -219,18 +216,15 @@ class TestMypyUpperCapConsistency:
         with open(pixi_path, "rb") as f:
             pixi = tomllib.load(f)
 
-        pixi_dev_spec = pixi["feature"]["dev"]["dependencies"]["mypy"]
-        pixi_lint_spec = pixi["feature"]["lint"]["dependencies"]["mypy"]
+        pixi_shared_spec = pixi["feature"]["shared"]["dependencies"]["mypy"]
 
         pyproject_floor = _floor(pyproject_spec)
-        pixi_dev_floor = _floor(pixi_dev_spec)
-        pixi_lint_floor = _floor(pixi_lint_spec)
+        pixi_shared_floor = _floor(pixi_shared_spec)
 
-        assert pyproject_floor == pixi_dev_floor == pixi_lint_floor, (
+        assert pyproject_floor == pixi_shared_floor, (
             "mypy floor skew: "
             f"pyproject.toml dev={pyproject_floor} vs "
-            f"pixi.toml [feature.dev]={pixi_dev_floor} vs "
-            f"[feature.lint]={pixi_lint_floor}."
+            f"pixi.toml [feature.shared]={pixi_shared_floor}."
         )
 
 
