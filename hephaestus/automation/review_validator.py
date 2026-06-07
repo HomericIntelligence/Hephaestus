@@ -169,6 +169,7 @@ def validate_prior_comments_addressed(
     prior_comments_json = json.dumps(
         [
             {
+                "thread_id": t.get("id", ""),
                 "path": t.get("path", ""),
                 "line": t.get("line"),
                 "body": t.get("body", ""),
@@ -189,14 +190,17 @@ def validate_prior_comments_addressed(
     )
 
     # Resolve the threads the validator confirms addressed (#1083). A prior
-    # thread is "addressed" when its (path, line) is NOT among the unaddressed
-    # items the sub-agent flagged. This is the evidence-based resolution that
-    # replaces the implementer's self-report: a clean worktree leaves the diff
-    # unchanged, so nothing is judged addressed and nothing is resolved.
-    unaddressed_keys = {
-        (item.get("path") or "", item.get("line")) for item in unaddressed if isinstance(item, dict)
+    # thread is "addressed" when its thread_id is NOT among the unaddressed items
+    # the sub-agent flagged. Matching on the GraphQL thread_id (not (path, line))
+    # is required so two threads on the same line resolve independently and a
+    # path-normalization mismatch can't silently resolve an unaddressed thread
+    # (#1085). The sub-agent echoes back the thread_id we provided.
+    unaddressed_ids = {
+        str(item.get("thread_id"))
+        for item in unaddressed
+        if isinstance(item, dict) and item.get("thread_id")
     }
-    _resolve_addressed_prior_threads(prior_threads, unaddressed_keys)
+    _resolve_addressed_prior_threads(prior_threads, unaddressed_ids)
 
     if not unaddressed:
         return [], True
@@ -245,13 +249,15 @@ def validate_prior_comments_addressed(
 
 def _resolve_addressed_prior_threads(
     prior_threads: list[dict[str, Any]],
-    unaddressed_keys: set[tuple[str, Any]],
+    unaddressed_ids: set[str],
 ) -> list[str]:
     """Resolve every prior thread the validator did not flag as unaddressed.
 
-    A thread is considered addressed when its ``(path, line)`` is absent from
-    *unaddressed_keys* (the set the validation sub-agent flagged). Only threads
-    carrying a real ``id`` are resolved — this is the #375 own-threads guard,
+    A thread is considered addressed when its ``id`` is absent from
+    *unaddressed_ids* (the set of thread_ids the validation sub-agent flagged).
+    Matching on ``id`` rather than ``(path, line)`` means two threads on the same
+    line resolve independently and a path mismatch cannot misfire (#1085). Only
+    threads carrying a real ``id`` are resolved — the #375 own-threads guard,
     since ``prior_threads`` is always the set the loop itself posted/snapshotted.
 
     Returns the list of resolved thread IDs (useful for logging/tests).
@@ -261,8 +267,7 @@ def _resolve_addressed_prior_threads(
         thread_id = thread.get("id")
         if not thread_id:
             continue
-        key = (thread.get("path") or "", thread.get("line"))
-        if key in unaddressed_keys:
+        if str(thread_id) in unaddressed_ids:
             continue  # still open — re-opened above
         try:
             gh_pr_resolve_thread(

@@ -1231,25 +1231,28 @@ class ImplementationPhaseRunner:
                 iterations_run,
             )
 
-        # #1083 Bug 2: the loop must reach an explicit GO to be considered
-        # converged. Any other terminal outcome — exhausting
-        # MAX_REVIEW_ITERATIONS without GO, or a reviewer that posts zero
-        # threads yet never says GO (the "stuck AMBIGUOUS" case in output.log) —
-        # means the automation could not drive this issue to a clean state on
-        # its own. Apply ``state:skip`` so the next loop does not re-attempt it
-        # (and an operator can remove the label to re-queue it). ``last_verdict``
-        # is None only when there was no PR to review (dry-run / no-PR path),
-        # which must not be skipped.
+        # #1083 Bug 2 / #1085 C3: the loop must reach an explicit GO to be
+        # considered converged. Apply ``state:skip`` only when the automation has
+        # genuinely run out of road, NOT on every non-GO outcome:
+        #   * true exhaustion — ran all MAX_REVIEW_ITERATIONS without a GO, or
+        #   * AMBIGUOUS — the reviewer could not even render a verdict ("stuck").
+        # A plain NOGO that broke early (e.g. iteration-0 with zero actionable
+        # threads) stays retryable on the next loop, so a fixable issue is not
+        # permanently stranded after a single bad review. ``last_verdict`` is
+        # None only when there was no PR to review (dry-run / no-PR path).
+        exhausted = iterations_run >= MAX_REVIEW_ITERATIONS and last_verdict != "GO"
+        is_ambiguous = last_verdict == "AMBIGUOUS"
         if (
             pr_number is not None
             and last_verdict is not None
-            and last_verdict != "GO"
+            and (exhausted or is_ambiguous)
             and not self.options.dry_run
         ):
             logger.info(
-                "#%d: review loop ended non-GO (verdict=%r) — applying %s",
+                "#%d: review loop ended without GO (verdict=%r, iterations=%d) — applying %s",
                 issue_number,
                 last_verdict,
+                iterations_run,
                 STATE_SKIP,
             )
             with contextlib.suppress(Exception):
@@ -1351,10 +1354,11 @@ class ImplementationPhaseRunner:
 
         Folds in ``address_review``'s core: lists the unresolved threads on the
         PR, runs the fix session (resuming ``AGENT_IMPLEMENTER`` via
-        :func:`run_address_fix_session`, which fans out one sub-agent per file
-        per #661), commits + pushes the fixes, then resolves only the threads
-        Claude actually addressed — guarded against hallucinated/cross-PR thread
-        IDs against the set we presented (#661).
+        :func:`run_address_fix_session`, which fans out one sub-agent per COMMENT
+        at the model tier matching its classified difficulty, #1083), then
+        commits + pushes the fixes. Thread RESOLUTION is no longer done here — it
+        moved to the evidence-based validator (#1083); this step only counts as
+        progress when a real commit was produced (#1085).
 
         Returns:
             ``True`` if at least one thread was addressed (so the loop should

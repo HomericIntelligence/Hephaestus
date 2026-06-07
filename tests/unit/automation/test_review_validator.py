@@ -84,9 +84,8 @@ class TestValidatePriorCommentsAddressed:
         assert is_clean is True
         post.assert_not_called()
         # Both prior threads (T1, T2) were confirmed addressed → resolved.
-        resolved_ids = {
-            c.kwargs.get("thread_id", c.args[0] if c.args else None) for c in resolve.call_args_list
-        }
+        # gh_pr_resolve_thread(thread_id, reply) is called positionally.
+        resolved_ids = {c.args[0] for c in resolve.call_args_list}
         assert resolved_ids == {"T1", "T2"}
 
     def test_partial_resolves_only_addressed_threads(self, tmp_path: Path) -> None:
@@ -97,6 +96,7 @@ class TestValidatePriorCommentsAddressed:
         """
         unaddressed = [
             {
+                "thread_id": "T1",
                 "path": "a.py",
                 "line": 3,
                 "original_body": "guard the null case",
@@ -120,11 +120,48 @@ class TestValidatePriorCommentsAddressed:
             )
         assert reopened == ["NEW"]
         assert is_clean is False
-        resolved_ids = {
-            c.kwargs.get("thread_id", c.args[0] if c.args else None) for c in resolve.call_args_list
-        }
-        # Only the addressed thread (T2 / b.py) is resolved; T1 stays open.
+        # The resolve call is positional: gh_pr_resolve_thread(thread_id, reply).
+        resolved_ids = {c.args[0] for c in resolve.call_args_list}
+        # Only the addressed thread (T2) is resolved; T1 (unaddressed) stays open.
         assert resolved_ids == {"T2"}
+
+    def test_resolves_by_id_not_path_line(self, tmp_path: Path) -> None:
+        """#1085 C2: two threads on the SAME (path, line) resolve independently.
+
+        T1 and T3 both sit on a.py:3. The sub-agent flags only T1 as
+        unaddressed; T3 must still be resolved (a (path,line) match would have
+        wrongly kept both open).
+        """
+        threads = [
+            {"id": "T1", "path": "a.py", "line": 3, "body": "first note"},
+            {"id": "T3", "path": "a.py", "line": 3, "body": "second note, fixed"},
+        ]
+        unaddressed = [
+            {
+                "thread_id": "T1",
+                "path": "a.py",
+                "line": 3,
+                "original_body": "first note",
+                "detail": "x",
+            }
+        ]
+        with (
+            patch.object(review_validator, "_run_validation_session", return_value=unaddressed),
+            patch.object(review_validator, "gh_pr_review_post", return_value=["NEW"]),
+            patch.object(review_validator, "gh_pr_resolve_thread") as resolve,
+        ):
+            review_validator.validate_prior_comments_addressed(
+                pr_number=42,
+                issue_number=1,
+                worktree_path=tmp_path,
+                prior_threads=threads,
+                diff_text="diff",
+                agent="claude",
+                iteration=1,
+                state_dir=tmp_path,
+            )
+        resolved_ids = {c.args[0] for c in resolve.call_args_list}
+        assert resolved_ids == {"T3"}
 
     def test_dry_run_resolves_nothing(self, tmp_path: Path) -> None:
         with (
@@ -209,3 +246,32 @@ class TestValidatePriorCommentsAddressed:
         assert reopened == []
         assert is_clean is True
         post.assert_not_called()
+
+
+class TestResolveAddressedPriorThreads:
+    """#1085 C4: the resolver continues past a failing resolve call."""
+
+    def test_continues_after_one_resolve_failure(self) -> None:
+        import subprocess
+
+        threads = [
+            {"id": "T1", "path": "a.py", "line": 1, "body": "x"},
+            {"id": "T2", "path": "b.py", "line": 2, "body": "y"},
+        ]
+        # T1's resolve raises; T2 must still be attempted and resolved.
+        with patch.object(
+            review_validator,
+            "gh_pr_resolve_thread",
+            side_effect=[subprocess.CalledProcessError(1, "gh"), None],
+        ) as resolve:
+            resolved = review_validator._resolve_addressed_prior_threads(threads, set())
+        assert [c.args[0] for c in resolve.call_args_list] == ["T1", "T2"]
+        # Only the successful one is reported resolved.
+        assert resolved == ["T2"]
+
+    def test_skips_threads_without_id(self) -> None:
+        threads = [{"path": "a.py", "line": 1, "body": "no id"}]
+        with patch.object(review_validator, "gh_pr_resolve_thread") as resolve:
+            resolved = review_validator._resolve_addressed_prior_threads(threads, set())
+        resolve.assert_not_called()
+        assert resolved == []

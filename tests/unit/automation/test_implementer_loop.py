@@ -41,6 +41,11 @@ def _nogo(grade: str = "D") -> str:
     return f"Findings.\n\nGrade: {grade}\nVerdict: NOGO\n"
 
 
+def _ambiguous() -> str:
+    # No ``Verdict:`` line → parse_review_verdict returns AMBIGUOUS.
+    return "Some prose with no verdict line.\n"
+
+
 def test_codex_implementer_advise_uses_codex_prompt_builder(
     implementer: IssueImplementer,
 ) -> None:
@@ -221,19 +226,18 @@ class TestRunImplReviewLoop:
         assert verdict == "NOGO"
         mock_label.assert_called_once_with(7, [STATE_SKIP])
 
-    def test_zero_threads_without_go_applies_state_skip(
+    def test_ambiguous_zero_threads_applies_state_skip(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
-        """Zero threads but no GO applies ``state:skip``.
+        """An AMBIGUOUS (no verdict line), zero-thread review applies ``state:skip``.
 
-        #1083 Bug 2: a reviewer that posts zero threads but never says GO is the
-        'stuck AMBIGUOUS' case — apply ``state:skip`` rather than reporting a
-        clean termination.
+        #1085 C3: AMBIGUOUS is the genuine 'stuck' case — the reviewer could not
+        even render a verdict — so skip immediately rather than spinning.
         """
         from hephaestus.automation.state_labels import STATE_SKIP
 
         with (
-            patch.object(implementer, "_run_impl_review_step", return_value=(_nogo("C"), [])),
+            patch.object(implementer, "_run_impl_review_step", return_value=(_ambiguous(), [])),
             patch.object(implementer, "_run_address_review_step"),
             patch(
                 "hephaestus.automation.implementer_phase_runner.gh_issue_add_labels"
@@ -251,8 +255,40 @@ class TestRunImplReviewLoop:
                 pr_number=42,
             )
 
-        assert verdict == "NOGO"
+        assert verdict == "AMBIGUOUS"
         mock_label.assert_called_once_with(8, [STATE_SKIP])
+
+    def test_iter0_zero_thread_nogo_does_not_apply_skip(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """#1085 C3: a single iteration-0 NOGO with zero threads must NOT skip.
+
+        A plain NOGO that posts no actionable threads is retryable on the next
+        loop — only true exhaustion (or AMBIGUOUS) applies ``state:skip``, so a
+        fixable issue isn't permanently stranded after one bad review.
+        """
+        with (
+            patch.object(implementer, "_run_impl_review_step", return_value=(_nogo("C"), [])),
+            patch.object(implementer, "_run_address_review_step"),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_issue_add_labels"
+            ) as mock_label,
+        ):
+            iters, verdict, _ = implementer._run_impl_review_loop(
+                issue_number=8,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=42,
+            )
+
+        assert verdict == "NOGO"
+        assert iters == 1  # broke at iteration 0, not exhausted
+        mock_label.assert_not_called()
 
     def test_go_does_not_apply_state_skip(
         self, implementer: IssueImplementer, tmp_path: Path

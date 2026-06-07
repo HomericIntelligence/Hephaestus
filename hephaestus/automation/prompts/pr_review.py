@@ -201,6 +201,7 @@ diff actually resolves it.
 {prior_comments_block}
 
 The block above is a JSON array where each element has:
+- `thread_id`: opaque id of the review thread — echo it back verbatim
 - `path`: file path the comment was made on (may be empty for PR-level)
 - `line`: line number the comment pointed at (integer or null)
 - `body`: the original reviewer comment text
@@ -223,14 +224,17 @@ listing ONLY the comments that are NOT addressed:
 
 ```json
 {{"unaddressed": [
-  {{"path": "...", "line": 1, "original_body": "...", "detail": "why still unaddressed"}}
+  {{"thread_id": "...", "path": "...", "line": 1,
+    "original_body": "...", "detail": "why still unaddressed"}}
 ]}}
 ```
 
 Rules:
-- `unaddressed`: array of the prior comments the diff does NOT resolve. Use the
-  comment's original `path`/`line`; `original_body` is the original comment text
-  (verbatim or trimmed); `detail` states concretely what is still missing.
+- `unaddressed`: array of the prior comments the diff does NOT resolve. Echo the
+  comment's `thread_id` VERBATIM (this is how the thread is matched — it must be
+  exact); include the original `path`/`line`; `original_body` is the original
+  comment text (verbatim or trimmed); `detail` states concretely what is still
+  missing.
 - If every prior comment is addressed, emit `{{"unaddressed": []}}`.
 - Emit only one JSON block, at the very end (the parser takes the LAST one).
 """

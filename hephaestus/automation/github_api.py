@@ -1363,14 +1363,18 @@ def _filter_comments_to_diff(
     return kept
 
 
-def gh_pr_inline_comment_index(pr_number: int) -> dict[tuple[str, Any], str]:
-    """Map ``(path, line)`` → review-comment node id for unresolved bot threads.
+def gh_pr_inline_comment_index(pr_number: int) -> dict[tuple[str, Any], tuple[str, str]]:
+    """Map ``(path, line)`` → ``(comment_node_id, body)`` for unresolved bot threads.
 
-    Returns the GraphQL node id of the FIRST comment of each unresolved review
-    thread, keyed by its ``(path, line)``. Used by :func:`gh_pr_review_post` to
-    detect a line that already has a comment so the new content can be appended
-    in place rather than posted as a duplicate (#1083). Fails open: returns
-    ``{}`` on any API/parse error so the caller posts everything as before.
+    Returns the GraphQL node id AND current body of the FIRST comment of each
+    unresolved review thread, keyed by its ``(path, line)``. Used by
+    :func:`gh_pr_review_post` to detect a line that already has a comment so the
+    new content can be **appended** to the existing body in place rather than
+    posted as a duplicate (#1083). The body is required because the
+    ``updatePullRequestReviewComment`` mutation REPLACES the body — the caller
+    must concatenate ``existing + new`` or the original comment is lost (#1085).
+    Fails open: returns ``{}`` on any API/parse error so the caller posts
+    everything as before.
     """
     owner, repo = get_repo_info()
     if not re.match(r"^[a-zA-Z0-9_-]+$", owner) or not re.match(r"^[a-zA-Z0-9_-]+$", repo):
@@ -1381,7 +1385,7 @@ def gh_pr_inline_comment_index(pr_number: int) -> dict[tuple[str, Any], str]:
         "  repository(owner:$owner,name:$name){"
         "    pullRequest(number:$number){"
         "      reviewThreads(first:100){"
-        "        nodes{ isResolved path line comments(first:1){ nodes{ id } } }"
+        "        nodes{ isResolved path line comments(first:1){ nodes{ id body } } }"
         "      }"
         "    }"
         "  }"
@@ -1415,7 +1419,7 @@ def gh_pr_inline_comment_index(pr_number: int) -> dict[tuple[str, Any], str]:
         .get("reviewThreads", {})
         .get("nodes", [])
     )
-    index: dict[tuple[str, Any], str] = {}
+    index: dict[tuple[str, Any], tuple[str, str]] = {}
     for node in nodes:
         if node.get("isResolved"):
             continue
@@ -1425,7 +1429,8 @@ def gh_pr_inline_comment_index(pr_number: int) -> dict[tuple[str, Any], str]:
         comment_id = comment_nodes[0].get("id")
         if not comment_id:
             continue
-        index[(node.get("path") or "", node.get("line"))] = comment_id
+        body = comment_nodes[0].get("body") or ""
+        index[(node.get("path") or "", node.get("line"))] = (comment_id, body)
     return index
 
 
@@ -1460,9 +1465,11 @@ def _edit_or_keep_comments(pr_number: int, comments: list[dict[str, Any]]) -> li
     """Edit comments whose line already has a bot comment; return the rest.
 
     For each comment whose ``(path, line)`` is in the existing-comment index,
-    append its body to the existing comment (a single edit) and drop it from the
-    returned list. Comments on fresh lines are returned unchanged for posting.
-    Fails open: an empty index returns *comments* unchanged.
+    rewrite the existing comment to ``existing_body + new_body`` (a single edit
+    that preserves the original text, #1085) and drop it from the returned list.
+    Comments on fresh lines are returned unchanged for posting. Fails open: an
+    empty index returns *comments* unchanged, and an edit that raises falls back
+    to posting that comment fresh.
     """
     index = gh_pr_inline_comment_index(pr_number)
     if not index:
@@ -1470,13 +1477,19 @@ def _edit_or_keep_comments(pr_number: int, comments: list[dict[str, Any]]) -> li
     fresh: list[dict[str, Any]] = []
     for c in comments:
         key = (c.get("path") or "", c.get("line"))
-        existing_id = index.get(key)
-        if existing_id is None:
+        existing = index.get(key)
+        if existing is None:
             fresh.append(c)
             continue
-        appended = "\n\n---\n_Additional review note (same line):_\n\n" + (c.get("body") or "")
+        # #1085: updatePullRequestReviewComment REPLACES the body, so concatenate
+        # the existing body + the new note. Passing only the suffix would destroy
+        # the original comment.
+        existing_id, existing_body = existing
+        combined = f"{existing_body}\n\n---\n_Additional review note (same line):_\n\n" + (
+            c.get("body") or ""
+        )
         try:
-            gh_pr_update_review_comment(existing_id, appended)
+            gh_pr_update_review_comment(existing_id, combined)
             logger.info(
                 "PR #%s: edited existing comment on %s:%s instead of duplicating",
                 pr_number,

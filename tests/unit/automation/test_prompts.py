@@ -732,6 +732,15 @@ class TestAddressReviewPrompt:
         # The pre-classified todo line is embedded verbatim.
         assert "@ a.py Line 1 - simple - fix" in out
 
+    def test_todo_block_is_fenced_untrusted(self) -> None:
+        """The todo list is fenced as untrusted.
+
+        #1085 C4: the descriptions originate from GitHub comment bodies, so the
+        block must sit inside the untrusted fence.
+        """
+        out = self._build()
+        assert "BEGIN_" in out and "TODO" in out
+
     def test_instructs_per_comment_subagent_dispatch(self) -> None:
         out = self._build()
         assert "Task tool" in out
@@ -775,10 +784,15 @@ class TestAddressReviewPrompt:
         assert "Do NOT background" in out
 
     def test_preserves_json_block_contract(self) -> None:
-        """The final JSON-block contract the pipeline parses must be intact."""
+        """The final JSON-block contract the pipeline parses must be intact.
+
+        #1085 C4: ``replies`` was dropped — the address step no longer consumes
+        it (the reviewer resolves threads on its next pass), so the coordinator
+        must not be asked to generate per-thread replies.
+        """
         out = self._build()
         assert '"addressed"' in out
-        assert '"replies"' in out
+        assert '"replies"' not in out
 
     def test_threads_json_is_fenced_untrusted(self) -> None:
         """Reviewer bodies stay fenced as untrusted input."""
@@ -853,6 +867,8 @@ class TestReviewValidationPrompt:
         assert '"unaddressed"' in out
         assert "original_body" in out
         assert "detail" in out
+        # #1085 C2: the sub-agent must echo thread_id so resolution matches by id.
+        assert "thread_id" in out
 
     def test_inputs_fenced_untrusted(self) -> None:
         out = self._build()

@@ -58,18 +58,33 @@ def model_for_difficulty(difficulty: str) -> str:
     return _DIFFICULTY_MODEL.get(difficulty, SONNET)
 
 
+#: Max length of the (untrusted) description excerpt in a todo line.
+_DESC_MAX = 200
+
+
 def format_todo_line(thread: dict[str, Any], difficulty: str) -> str:
     """Render one thread as ``@ <file> Line <#> - <difficulty> - <description>``.
 
-    The description is the comment body's first line (review bodies are often
-    multi-line; the todo wants a one-glance summary). A null/absent line renders
-    as ``Line ?``.
+    The description is a sanitized one-line excerpt of the comment body. Because
+    the body is untrusted GitHub content, it is reduced to a single physical line
+    (no newlines/carriage returns can forge extra prompt instructions, #1085 C4)
+    and truncated to keep it from dominating the prompt. The full body is still
+    available to the coordinator inside the fenced threads JSON. A null/absent
+    line renders as ``Line ?``.
     """
     path = thread.get("path") or "__general__"
     line = thread.get("line")
     line_str = str(line) if isinstance(line, int) else "?"
     body = (thread.get("body") or "").strip()
-    description = body.splitlines()[0].strip() if body else "(no description)"
+    if body:
+        # First physical line only, with any stray CR and control chars stripped.
+        first = body.splitlines()[0]
+        description = "".join(ch for ch in first if ch == " " or ch.isprintable()).strip()
+        description = description or "(no description)"
+        if len(description) > _DESC_MAX:
+            description = description[:_DESC_MAX] + "…"
+    else:
+        description = "(no description)"
     return f"@ {path} Line {line_str} - {difficulty} - {description}"
 
 

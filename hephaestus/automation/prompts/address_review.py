@@ -85,15 +85,16 @@ Write your coordination notes in prose. At the very end of your response, emit a
 fenced JSON block:
 
 ```json
-{{"addressed": ["<thread_id>", ...], "replies": {{"<thread_id>": "one-line reply"}}}}
+{{"addressed": ["<thread_id>", ...]}}
 ```
 
-Rules for the JSON block (UNCHANGED — the pipeline parses exactly this):
+Rules for the JSON block:
 - `addressed`: array of thread_id strings for threads actually fixed in code
   (any thread_id not in the unresolved-set we presented is dropped silently)
-- `replies`: mapping of thread_id to a one-line reply describing what changed
 - Only include threads genuinely fixed. Leave unaddressable threads out of `addressed`.
 - Emit only one JSON block, at the very end of your response (the parser takes the LAST one).
+- Note: you do NOT need to write per-thread replies — the reviewer resolves the
+  threads on its next pass after verifying the fix against the diff (#1083).
 """
 
 
@@ -159,7 +160,9 @@ def get_address_review_prompt(
             comment in the form ``@ <file> Line <#> - <difficulty> - <desc>``
             (built by :mod:`hephaestus.automation.comment_difficulty`, #1083).
             Drives the one-sub-agent-per-comment dispatch and per-comment model
-            tier. Trusted (we generate it ourselves from the threads).
+            tier. The path/line/difficulty are trusted, but the ``<desc>``
+            excerpt is verbatim untrusted comment text, so the whole block is
+            fenced as untrusted (#1085 C4).
         task_block: Optional task (issue title + body) text, rendered as an
             untrusted context section. Supply when the address session may run
             without a prior implementer transcript (existing-PR review path).
@@ -178,7 +181,7 @@ def get_address_review_prompt(
         issue_number=issue_number,
         worktree_path=worktree_path,
         threads_json_block=_fence_untrusted("THREADS_JSON", threads_json, nonce),
-        todo_block=todo_block or "_(no todo lines)_",
+        todo_block=_fence_untrusted("TODO_LIST", todo_block or "_(no todo lines)_", nonce),
         untrusted_notice=_UNTRUSTED_NOTICE,
         context_block=_build_context_block(task_block, task_review_block, diff_text, nonce),
     )

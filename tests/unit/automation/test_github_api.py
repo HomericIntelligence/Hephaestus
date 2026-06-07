@@ -25,6 +25,7 @@ from hephaestus.automation.github_api import (
     gh_list_open_issues,
     gh_pr_checks,
     gh_pr_create,
+    gh_pr_inline_comment_index,
     gh_pr_resolve_thread,
     gh_pr_review_post,
     is_issue_closed,
@@ -2041,12 +2042,19 @@ class TestGhPrReviewPost:
         mock_index: Any,
         mock_update: Any,
     ) -> None:
-        """A comment on a line that already has a bot comment edits it in place."""
+        """A comment on a line that already has a bot comment edits it in place.
+
+        #1085 C1: the edit must PRESERVE the original body (the GraphQL update
+        mutation replaces the body, so the caller must concatenate
+        existing + new), not clobber it with only the new suffix.
+        """
         mock_gh_call.side_effect = self._gh_call_side_effect(
             "REVIEW_1", [], diff_text=self._SAMPLE_DIFF
         )
-        # a.py:2 already has a bot comment; a.py:3 does not.
-        mock_index.return_value = {("a.py", 2): "COMMENT_NODE_A2"}
+        # a.py:2 already has a bot comment (id + existing body); a.py:3 does not.
+        mock_index.return_value = {
+            ("a.py", 2): ("COMMENT_NODE_A2", "original note on line 2"),
+        }
 
         gh_pr_review_post(
             pr_number=7,
@@ -2058,10 +2066,13 @@ class TestGhPrReviewPost:
             dedupe_existing=True,
         )
 
-        # Line 2 was edited in place (append), not re-posted.
+        # Line 2 was edited in place targeting the right comment node.
         mock_update.assert_called_once()
         assert mock_update.call_args.args[0] == "COMMENT_NODE_A2"
-        assert "more on line 2" in mock_update.call_args.args[1]
+        edited_body = mock_update.call_args.args[1]
+        # The edit must contain BOTH the original and the new text (no clobber).
+        assert "original note on line 2" in edited_body
+        assert "more on line 2" in edited_body
         # Only the genuinely new line-3 comment is posted as a fresh thread.
         posted = self._posted_comments(mock_write)
         assert {c["body"] for c in posted} == {"fresh on line 3"}
@@ -2094,6 +2105,86 @@ class TestGhPrReviewPost:
         mock_index.assert_not_called()
         mock_update.assert_not_called()
         assert {c["body"] for c in self._posted_comments(mock_write)} == {"x"}
+
+    @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
+    @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
+    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_edit_in_place_falls_back_to_fresh_on_error(
+        self,
+        mock_gh_call: Any,
+        _mock_repo: Any,
+        mock_write: Any,
+        mock_index: Any,
+        mock_update: Any,
+    ) -> None:
+        """#1085: if the in-place edit raises, the comment is posted fresh instead."""
+        mock_gh_call.side_effect = self._gh_call_side_effect(
+            "REVIEW_1", [], diff_text=self._SAMPLE_DIFF
+        )
+        mock_index.return_value = {("a.py", 2): ("NODE", "old body")}
+        mock_update.side_effect = OSError("network down")
+
+        gh_pr_review_post(
+            pr_number=7,
+            comments=[{"path": "a.py", "line": 2, "side": "RIGHT", "body": "retry me"}],
+            summary="Findings",
+            dedupe_existing=True,
+        )
+
+        mock_update.assert_called_once()
+        # Edit failed → the comment is posted as a fresh inline comment.
+        assert {c["body"] for c in self._posted_comments(mock_write)} == {"retry me"}
+
+
+class TestGhPrInlineCommentIndex:
+    """gh_pr_inline_comment_index returns (path,line) → (node_id, body) (#1085)."""
+
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_indexes_unresolved_threads_with_body(self, mock_gh_call: Any, _mock_repo: Any) -> None:
+        result = Mock()
+        result.stdout = json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [
+                                    {
+                                        "isResolved": False,
+                                        "path": "a.py",
+                                        "line": 2,
+                                        "comments": {"nodes": [{"id": "N1", "body": "keep me"}]},
+                                    },
+                                    {
+                                        "isResolved": True,
+                                        "path": "b.py",
+                                        "line": 9,
+                                        "comments": {"nodes": [{"id": "N2", "body": "resolved"}]},
+                                    },
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        )
+        mock_gh_call.return_value = result
+
+        index = gh_pr_inline_comment_index(7)
+
+        # Unresolved thread is indexed with id + body; resolved one is excluded.
+        assert index == {("a.py", 2): ("N1", "keep me")}
+
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_fails_open_on_bad_json(self, mock_gh_call: Any, _mock_repo: Any) -> None:
+        result = Mock()
+        result.stdout = "not json{"
+        mock_gh_call.return_value = result
+        assert gh_pr_inline_comment_index(7) == {}
 
 
 class TestValidReviewPositions:
