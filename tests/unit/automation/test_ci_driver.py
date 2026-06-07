@@ -92,8 +92,8 @@ class TestLoadImplSessionId:
     """Tests for _load_impl_session_id."""
 
     def test_returns_session_id_when_present(self, driver: CIDriver, tmp_path: Path) -> None:
-        """Legacy state file with Claude session_id returns it for Claude."""
-        state_file = tmp_path / "state-123.json"
+        """State file (``issue-<n>.json``) with Claude session_id returns it for Claude."""
+        state_file = tmp_path / "issue-123.json"
         state_file.write_text(json.dumps({"session_id": "sess-xyz"}))
         driver.state_dir = tmp_path
 
@@ -102,8 +102,8 @@ class TestLoadImplSessionId:
         assert result == "sess-xyz"
 
     def test_skips_legacy_session_for_codex(self, driver: CIDriver, tmp_path: Path) -> None:
-        """Legacy state files contain Claude sessions and must not resume as Codex."""
-        state_file = tmp_path / "state-123.json"
+        """A Claude session must not resume as Codex."""
+        state_file = tmp_path / "issue-123.json"
         state_file.write_text(json.dumps({"session_id": "sess-xyz"}))
         driver.state_dir = tmp_path
         driver.options.agent = "codex"
@@ -114,7 +114,7 @@ class TestLoadImplSessionId:
 
     def test_returns_matching_codex_session(self, driver: CIDriver, tmp_path: Path) -> None:
         """Provider metadata allows Codex sessions to be resumed by Codex."""
-        state_file = tmp_path / "state-123.json"
+        state_file = tmp_path / "issue-123.json"
         state_file.write_text(json.dumps({"session_id": "codex-sess", "session_agent": "codex"}))
         driver.state_dir = tmp_path
         driver.options.agent = "codex"
@@ -133,13 +133,31 @@ class TestLoadImplSessionId:
 
     def test_returns_none_when_no_key(self, driver: CIDriver, tmp_path: Path) -> None:
         """State file missing session_id key → returns None."""
-        state_file = tmp_path / "state-123.json"
+        state_file = tmp_path / "issue-123.json"
         state_file.write_text(json.dumps({"phase": "completed"}))
         driver.state_dir = tmp_path
 
         result = driver._load_impl_session_id(123)
 
         assert result is None
+
+    def test_reads_implementer_filename_not_legacy_state_name(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """Regression: the implementer writes ``issue-<n>.json``, not ``state-<n>.json``.
+
+        ci_driver previously read the wrong name and always missed, silently
+        never resuming the implementer's session. A file at the OLD name must
+        NOT be picked up; the implementer-written name MUST be.
+        """
+        # Old (wrong) name is ignored.
+        (tmp_path / "state-123.json").write_text(json.dumps({"session_id": "legacy"}))
+        driver.state_dir = tmp_path
+        assert driver._load_impl_session_id(123) is None
+
+        # Implementer-written name is read.
+        (tmp_path / "issue-123.json").write_text(json.dumps({"session_id": "real"}))
+        assert driver._load_impl_session_id(123) == "real"
 
 
 # ---------------------------------------------------------------------------
