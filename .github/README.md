@@ -42,12 +42,15 @@ Builds and publishes the package to PyPI on version tag push (`v*`).
 
 The consolidated required-status-check gate that runs on every pull request to
 `main` (and on push to `main`). It aggregates lint, markdownlint, `pixi-check`,
-shellcheck, the `pr-policy` gate (enforces `Closes #N`, signed commits, and
-the auto-merge state machine), unit/integration/shell tests, wheel build,
-security scans (pip-audit, Gitleaks, bandit), workflow-schema validation, and
-version-sync. It also re-runs on `auto_merge_enabled` / `auto_merge_disabled`
-and `labeled` / `unlabeled` events so the `pr-policy` auto-merge check
-converges without timing races.
+shellcheck, the `pr-policy` gate (enforces `Closes #N` and signed commits),
+unit/integration/shell tests, wheel build, security scans (pip-audit, Gitleaks,
+bandit), workflow-schema validation, and version-sync. It also runs the
+advisory `auto-merge-policy` job (the auto-merge ↔ `state:implementation-go`
+state machine), which is intentionally **not** a required check so its
+timing-sensitive verdict never blocks merge — it fails its own job only on a
+mismatch as a visible signal. The workflow re-runs on `auto_merge_enabled` /
+`auto_merge_disabled` and `labeled` / `unlabeled` events so the
+`auto-merge-policy` job converges without timing races.
 
 ### Enable Auto-Merge on Implementation GO Workflow (`workflows/enable-auto-merge-on-implementation-go.yml`)
 

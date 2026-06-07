@@ -259,21 +259,19 @@ jobs:
 
   pr-policy:
     name: pr-policy
-    # Enforces repo PR policy on every PR. Three independent checks (each
-    # gated by `if: always()` so one failure still surfaces the others):
+    # Enforces the two HARD repo PR policies on every PR. Both checks are gated
+    # by `if: always()` so one failure still surfaces the other:
     #   1. PR body contains `Closes #N` on its own line.
-    #   2. Auto-merge matches implementation-review state:
-    #      disabled before `state:implementation-go`, enabled after it.
-    #   3. Every commit on the PR has a verified signature.
+    #   2. Every commit on the PR has a verified signature.
+    # The auto-merge ↔ implementation-review state machine moved to the separate
+    # `auto-merge-policy` job (#1080) so its timing-sensitive verdict no longer
+    # blocks merge — it is intentionally NOT in the required-checks ruleset.
     # Push events are skipped because there is no PR to inspect.
     #
-    # This gate intentionally has NO `needs:` — it runs immediately and
-    # re-runs whenever auto-merge is toggled or labels change (see the
-    # auto_merge_enabled / auto_merge_disabled and labeled / unlabeled trigger
-    # types in `on.pull_request` above), so the auto-merge check (#2) converges
-    # on the PR's true state without depending on another job's timing.
-    # The earlier `needs: lint` workaround (#680) only
-    # delayed the read and left a required-check-skipped-on-lint-failure wrinkle.
+    # This gate intentionally has NO `needs:` — it runs immediately so the body
+    # and signature checks report without depending on another job's timing.
+    # The earlier `needs: lint` workaround (#680) only delayed the read and left
+    # a required-check-skipped-on-lint-failure wrinkle.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -291,13 +289,13 @@ jobs:
           REPO_NAME: ${{ github.event.repository.name }}
         run: |
           set -euo pipefail
-          # `gh pr view --json body,autoMergeRequest,labels` exposes body,
-          # auto-merge state, and implementation-review labels but DOES NOT
-          # expose per-commit signatures; we use the GraphQL API for that. Two
-          # separate queries are fine here — the workflow runs at most once per
-          # PR event and the policy gate must be cheap to read and debug.
+          # `gh pr view --json body` exposes the PR body (for the Closes #N
+          # check) but DOES NOT expose per-commit signatures; we use the GraphQL
+          # API for that. Two separate queries are fine here — the workflow runs
+          # at most once per PR event and the policy gate must be cheap to read
+          # and debug. (The auto-merge/labels read moved to auto-merge-policy.)
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-            --json body,autoMergeRequest,labels,state \
+            --json body \
             > pr.json
           gh api graphql \
             -f query='query($owner:String!,$name:String!,$pr:Int!) {
@@ -328,7 +326,7 @@ jobs:
           set -euo pipefail
           # Dependabot PR bodies are auto-generated and structurally never carry
           # a `Closes #N` line. Exempt ONLY this body check for dependabot[bot]
-          # (#1070) — Check 2 (auto-merge) and Check 3 (signing) still apply.
+          # (#1070) — Check 2 (signing) and the auto-merge-policy job still apply.
           if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
             echo "OK: Dependabot PR — 'Closes #N' body check is not applicable"
             exit 0
@@ -346,10 +344,53 @@ jobs:
             exit 1
           fi
 
-      - name: "Check 2: auto-merge matches implementation-review state"
+      - name: "Check 2: every commit is signed"
         if: always() && steps.fetch.outcome == 'success'
         run: |
           set -euo pipefail
+          # Build "<oid> <isValid>" rows from the GraphQL response. A null
+          # signature object means an unsigned commit, which the // false
+          # default coerces to false (rather than dropping the row).
+          bad=$(jq -r '.data.repository.pullRequest.commits.nodes[]
+                       | "\(.commit.oid) \(.commit.signature.isValid // false)"' commits.json \
+                | awk '$2 != "true" { print $1 }')
+          if [ -n "$bad" ]; then
+            echo "::error::The following commits are unsigned or have invalid signatures:"
+            # shellcheck disable=SC2086  # word-splitting of $bad is intentional
+            printf '  %s\n' $bad
+            msg="::error::Every commit MUST be cryptographically signed."
+            msg+=" Re-sign with: git rebase --exec 'git commit --amend --no-edit -S' origin/main"
+            echo "$msg"
+            exit 1
+          fi
+          echo "OK: all commits have verified signatures"
+
+  auto-merge-policy:
+    name: auto-merge-policy
+    # Advisory (NOT a required check): verifies auto-merge matches the
+    # implementation-review state — disabled before `state:implementation-go`,
+    # enabled after it. Split out of `pr-policy` (#1080) so this timing-sensitive
+    # verdict no longer BLOCKS merge; it fails its OWN job only on a mismatch, as
+    # a visible signal. Keep this job OUT of the branch-protection required-checks
+    # ruleset. Like pr-policy it has no `needs:` and re-runs on auto_merge_enabled
+    # / auto_merge_disabled and labeled / unlabeled events so it converges on the
+    # PR's true state.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: "Auto-merge matches implementation-review state"
+        run: |
+          set -euo pipefail
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --json autoMergeRequest,labels,state \
+            > pr.json
           pr_state=$(jq -r '.state // ""' pr.json)
           if [ "$pr_state" != "OPEN" ]; then
             echo "OK: PR state is $pr_state; auto-merge policy is terminal"
@@ -400,27 +441,6 @@ jobs:
             fi
             echo "OK: auto-merge is deferred until implementation review GO"
           fi
-
-      - name: "Check 3: every commit is signed"
-        if: always() && steps.fetch.outcome == 'success'
-        run: |
-          set -euo pipefail
-          # Build "<oid> <isValid>" rows from the GraphQL response. A null
-          # signature object means an unsigned commit, which the // false
-          # default coerces to false (rather than dropping the row).
-          bad=$(jq -r '.data.repository.pullRequest.commits.nodes[]
-                       | "\(.commit.oid) \(.commit.signature.isValid // false)"' commits.json \
-                | awk '$2 != "true" { print $1 }')
-          if [ -n "$bad" ]; then
-            echo "::error::The following commits are unsigned or have invalid signatures:"
-            # shellcheck disable=SC2086  # word-splitting of $bad is intentional
-            printf '  %s\n' $bad
-            msg="::error::Every commit MUST be cryptographically signed."
-            msg+=" Re-sign with: git rebase --exec 'git commit --amend --no-edit -S' origin/main"
-            echo "$msg"
-            exit 1
-          fi
-          echo "OK: all commits have verified signatures"
 
   unit-tests:
     name: unit-tests

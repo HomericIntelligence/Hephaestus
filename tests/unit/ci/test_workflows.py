@@ -224,20 +224,38 @@ class TestEnableAutoMergeOnImplementationGoWorkflow:
         assert 'if [ "$auto_merge" != "null" ] && [ -n "$auto_merge" ]; then' in text
         assert "already has auto-merge enabled" in text
 
-    def test_pr_policy_waits_for_label_workflow_to_converge(self) -> None:
-        """pr-policy must not race the label-triggered auto-merge workflow."""
+    def test_auto_merge_policy_waits_for_label_workflow_to_converge(self) -> None:
+        """The auto-merge-policy job must not race the label-triggered workflow.
+
+        The auto-merge ↔ implementation-go state machine was split out of the
+        required ``pr-policy`` gate into the advisory ``auto-merge-policy`` job
+        (#1080); the convergence behavior moved with it.
+        """
         text = REQUIRED_WORKFLOW.read_text(encoding="utf-8")
+        assert "auto-merge-policy" in text
         assert "Waiting for label-triggered auto-merge workflow" in text
         assert 'gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"' in text
         assert "--json autoMergeRequest,labels,state" in text
         assert "sleep 10" in text
 
-    def test_pr_policy_treats_merged_prs_as_terminal(self) -> None:
+    def test_auto_merge_policy_treats_merged_prs_as_terminal(self) -> None:
         """GitHub clears autoMergeRequest after merge, so merged PRs must pass."""
         text = REQUIRED_WORKFLOW.read_text(encoding="utf-8")
-        assert "--json body,autoMergeRequest,labels,state" in text
+        assert "--json autoMergeRequest,labels,state" in text
         assert "pr_state=$(jq -r '.state // \"\"' pr.json)" in text
         assert "auto-merge policy is terminal" in text
+
+    def test_pr_policy_no_longer_blocks_on_auto_merge_state(self) -> None:
+        """pr-policy keeps only the hard gates; auto-merge moved to its own job.
+
+        The split (#1080) makes the auto-merge verdict non-blocking: pr-policy
+        fetches only the body it needs and no longer reads auto-merge/labels.
+        """
+        text = REQUIRED_WORKFLOW.read_text(encoding="utf-8")
+        # pr-policy's own metadata fetch is body-only now.
+        assert "--json body\n" in text or "--json body \\" in text
+        # The auto-merge error lives in the advisory job, which is present.
+        assert "Auto-merge is enabled before implementation review GO." in text
 
 
 class TestCollectWorkflowFiles:
