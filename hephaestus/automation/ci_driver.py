@@ -1670,7 +1670,12 @@ class CIDriver:
             Session ID string, or None if not found.
 
         """
-        state_file = self.state_dir / f"state-{issue_number}.json"
+        # The implementer persists its state to ``issue-<n>.json`` (see
+        # ImplementationStateManager.save), NOT ``state-<n>.json``. Reading the
+        # wrong name always missed, so this lookup silently never resumed the
+        # implementer's session — masked for Claude (deterministic-UUID resume)
+        # but breaking Codex session continuity on the CI-fix path.
+        state_file = self.state_dir / f"issue-{issue_number}.json"
         if not state_file.exists():
             logger.debug("No implementer state file for issue #%s", issue_number)
             return None
