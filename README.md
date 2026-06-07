@@ -30,6 +30,22 @@ print(hephaestus.__version__)
 
 > **Note on naming.** `pip install hephaestus` and `pip install project-hephaestus` will **not** find this package — both names are unowned on PyPI. The `HomericIntelligence-<Project>` prefix is the deliberate naming convention shared across the HomericIntelligence ecosystem (ProjectKeystone, ProjectOdyssey, etc.) to avoid PyPI namespace collisions. Wheel filenames are PEP 625 normalized to lowercase, so you will see `homericintelligence_hephaestus-<version>-py3-none-any.whl` on disk and in release assets.
 
+### Optional dependencies
+
+`pyproject.toml` defines several extras groups. `[all]` is a **runtime** aggregator
+and intentionally excludes `[dev]` (which carries test/lint tooling such as
+pytest, ruff, and mypy):
+
+- `pip install HomericIntelligence-Hephaestus[all]` — installs all runtime
+  extras: `github`, `nats`, `toml`, `xml`, `schema`.
+- `pip install HomericIntelligence-Hephaestus[dev]` — installs development and
+  testing dependencies. Use this for contributors and CI.
+- `pip install "HomericIntelligence-Hephaestus[all,dev]"` — both, for a full
+  development environment via pip (Pixi users get this automatically via
+  `pixi install`).
+- Individual extras (e.g. `[github]`, `[schema]`) are available for users who
+  only need one integration.
+
 ### Development setup
 
 For local development, use [Pixi](https://pixi.sh) to manage the environment:
