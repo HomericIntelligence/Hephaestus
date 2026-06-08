@@ -33,14 +33,17 @@ from typing import Any
 
 from .git_utils import get_repo_info, get_repo_root, issue_ref
 from .github_api import _gh_call, gh_issue_add_labels, gh_issue_json
+from .protocol import PLAN_REVIEW_PREFIX as PLAN_REVIEW_PREFIX
 from .state_labels import STATE_PLAN_GO, STATE_PLAN_NO_GO
 from .state_labels import is_plan_go as labels_are_plan_go
 
 logger = logging.getLogger(__name__)
 
 # Comment-body prefix used when posting plan-review comments. We identify
-# "plan review comments" by this prefix on ``body.startswith(...)``.
-PLAN_REVIEW_PREFIX = "## 🔍 Plan Review"
+# "plan review comments" by this prefix on ``body.startswith(...)``. The
+# canonical definition (alongside PLAN_COMMENT_MARKER) lives in
+# :mod:`hephaestus.automation.protocol`; re-exported here for backward
+# compatibility with the historical import path.
 
 # Verdict line in a *posted* plan-review comment. The gate scans for ALL
 # matching lines and takes the LAST one (see ``latest_verdict``): a stored

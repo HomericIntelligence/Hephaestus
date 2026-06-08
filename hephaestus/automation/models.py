@@ -14,11 +14,13 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-# The canonical heading the planner WRITES at the top of the single plan
-# comment. The pipeline upserts exactly one comment starting with this marker
-# (see github_api.gh_issue_upsert_comment). This is the only marker used to
-# *locate the plan to review*.
-PLAN_COMMENT_MARKER: str = "# Implementation Plan"
+# The canonical heading the planner writes at the top of the single plan
+# comment is now defined in :mod:`hephaestus.automation.protocol` together
+# with :data:`PLAN_REVIEW_PREFIX`. Re-exported here for backward compatibility
+# with the historical ``from .models import PLAN_COMMENT_MARKER`` import path.
+from .protocol import PLAN_COMMENT_MARKER as PLAN_COMMENT_MARKER
+
+__all__ = ["PLAN_COMMENT_MARKER"]
 
 
 class IssueState(str, Enum):
