@@ -37,6 +37,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from hephaestus.agents.runtime import add_agent_argument, resolve_agent
+from hephaestus.automation.ci_driver import _pr_is_failing
 from hephaestus.automation.claude_timeouts import gh_cli_timeout
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.config.paths import DEFAULT_PROJECTS_DIR, resolve_projects_dir
@@ -128,10 +129,11 @@ def _parse_issue_list(value: str) -> list[int]:
     return issues
 
 
-# drive-green declares --issues as required in its argparse; plan and
-# implement auto-discover. This set drives the "skip when no open issues"
-# branch in process_repo.
-PHASES_REQUIRING_ISSUES: frozenset[str] = frozenset({"drive-green"})
+# drive-green used to be issue-gated, but #819 inverted its discovery to
+# "any failing open PR" via a separate _count_failing_prs gate below. Set
+# is kept (currently empty) so any future phase that genuinely needs an
+# issue list has one place to opt in.
+PHASES_REQUIRING_ISSUES: frozenset[str] = frozenset()
 
 # Sentinel for cooperative shutdown on SIGINT/SIGTERM. Worker threads
 # check this between phases so an in-flight subprocess can still finish
@@ -619,6 +621,54 @@ def _count_open_issues(org: str, repo: str) -> int:
     return len(_list_open_issue_numbers(org, repo))
 
 
+def _count_failing_prs(org: str, repo: str) -> int:
+    """Return count of open PRs that need drive-green attention.
+
+    Uses the same gh pr list shape and the same _pr_is_failing predicate
+    that ci_driver._discover_failing_prs uses, so the loop runner's SKIP
+    gate cannot drift from the driver's work list. Bounded by gh's
+    --limit 1000; cap-hit is logged but still treated as "has work" since
+    the actual driver discovery handles the same cap consistently.
+
+    Returns 0 on any gh / parse / timeout failure so the SKIP gate is
+    fail-closed (we don't run the driver when we can't confirm work).
+    """
+    try:
+        out = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                f"{org}/{repo}",
+                "--state",
+                "open",
+                "--limit",
+                "1000",
+                "--json",
+                "number,isDraft,statusCheckRollup,mergeStateStatus",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=gh_cli_timeout(),
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return 0
+    if out.returncode != 0:
+        return 0
+    try:
+        pulls = json.loads(out.stdout or "[]")
+    except json.JSONDecodeError:
+        return 0
+    if len(pulls) >= 1000:
+        LOG.warning(
+            "[%s] _count_failing_prs hit gh's 1000-PR cap; gate may undercount",
+            repo,
+        )
+    return sum(1 for pr in pulls if _pr_is_failing(pr))
+
+
 def _sort_repos_by_open_count(org: str, repos: list[str]) -> list[str]:
     """Order repos ascending by open-issue count (smallest backlog first)."""
     counted: list[tuple[int, int, str]] = []
@@ -809,7 +859,7 @@ _PHASE_FLAGS: dict[str, dict[str, object]] = {
     "drive-green": {
         "worker_arg": "--max-workers",
         "no_ui": True,
-        "issues": "open",
+        "issues": "explicit",
         "advise": True,
         "nitpick": True,
     },
@@ -1047,6 +1097,16 @@ def _process_repo_inner(
                 PhaseResult(name=phase, skipped=True, skip_reason="no open issues")
             )
             continue
+
+        if phase == "drive-green" and not cfg.issues:
+            failing = _count_failing_prs(cfg.org, repo)
+            if failing == 0:
+                LOG.info("[%s] phase %s SKIP (no failing PRs)", repo, phase)
+                result.phases.append(
+                    PhaseResult(name=phase, skipped=True, skip_reason="no failing PRs")
+                )
+                continue
+            LOG.info("[%s] phase %s has %d failing PR(s) — running", repo, phase, failing)
 
         phase_result = run_phase(
             repo=repo,

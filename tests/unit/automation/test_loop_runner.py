@@ -338,6 +338,7 @@ def test_process_repo_continues_after_phase_failure(repo_inputs: tuple[Path, Loo
     with (
         patch.object(loop_runner, "_rebase_main", return_value="abc1234"),
         patch.object(loop_runner, "_list_open_issue_numbers", return_value=[1]),
+        patch.object(loop_runner, "_count_failing_prs", return_value=1),
         patch.object(loop_runner, "run_phase", side_effect=fake_run_phase),
     ):
         result = process_repo("r", loop_idx=1, cfg=cfg)
@@ -384,15 +385,15 @@ def test_process_repo_skips_issue_phases_when_no_issues(
     with (
         patch.object(loop_runner, "_rebase_main", return_value="abc1234"),
         patch.object(loop_runner, "_list_open_issue_numbers", return_value=[]),
+        patch.object(loop_runner, "_count_failing_prs", return_value=0),
         patch.object(loop_runner, "run_phase", side_effect=lambda **kw: _ok(kw["phase"])),
     ):
         result = process_repo("r", loop_idx=1, cfg=cfg)
     by_name = {p.name: p for p in result.phases}
-    # Only drive-green requires open issues (PHASES_REQUIRING_ISSUES). With
-    # loops=1 it also runs on the final loop, so the skip reason here is the
-    # "no open issues" gate rather than "not final loop".
+    # PHASES_REQUIRING_ISSUES is now empty; only drive-green has a
+    # work-gate, and it's the failing-PR gate. No phase should run.
     assert by_name["drive-green"].skipped
-    assert by_name["drive-green"].skip_reason == "no open issues"
+    assert by_name["drive-green"].skip_reason == "no failing PRs"
     # plan and implement auto-discover, so they still run
     assert not by_name["plan"].skipped
     assert not by_name["implement"].skipped
@@ -407,6 +408,7 @@ def test_process_repo_skips_drive_green_on_non_final_loop(
     with (
         patch.object(loop_runner, "_rebase_main", return_value="abc1234"),
         patch.object(loop_runner, "_list_open_issue_numbers", return_value=[1]),
+        patch.object(loop_runner, "_count_failing_prs", return_value=1),
         patch.object(loop_runner, "run_phase", side_effect=lambda **kw: _ok(kw["phase"])),
     ):
         result_loop1 = process_repo("r", loop_idx=1, cfg=cfg)
@@ -504,13 +506,27 @@ def test_build_phase_argv_forwards_resolved_agent() -> None:
 
 
 def test_build_phase_argv_drive_green_includes_issues() -> None:
-    """drive-green forwards the open-issue list via --issues (the only phase that does)."""
-    cfg = LoopConfig()
+    """drive-green passes explicit cfg.issues, but not open_issues (uses PR-discovery by default).
+
+    PR-discovery auto-discovers failing PRs; open_issues is only used by other phases.
+    """
+    cfg = LoopConfig(issues=[7, 8])
     with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/py", ["script.py"])):
-        argv = loop_runner._build_phase_argv("drive-green", cfg, open_issues=[7, 8])
+        argv = loop_runner._build_phase_argv("drive-green", cfg, open_issues=[1, 2])
     assert argv is not None
     assert "--issues" in argv
     assert "7" in argv and "8" in argv
+    # Important: the open_issues passed to _build_phase_argv are NOT used for drive-green
+    # when cfg.issues is empty; only explicit cfg.issues are forwarded.
+
+
+def test_build_phase_argv_drive_green_omits_issues_when_unscoped() -> None:
+    """drive-green omits --issues when cfg.issues is empty (uses PR-discovery mode)."""
+    cfg = LoopConfig(issues=[])
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/py", ["script.py"])):
+        argv = loop_runner._build_phase_argv("drive-green", cfg, open_issues=[7, 8])
+    assert argv is not None
+    assert "--issues" not in argv
 
 
 def test_build_phase_argv_passes_dry_run() -> None:

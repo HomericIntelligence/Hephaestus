@@ -70,6 +70,30 @@ from .worktree_manager import WorktreeManager
 
 logger = logging.getLogger(__name__)
 
+# Conclusion values that indicate a PR's check rollup is failing in a way
+# drive-green can act on. SUCCESS / SKIPPED / NEUTRAL / PENDING are
+# explicitly excluded. Shared with loop_runner._count_failing_prs so the
+# SKIP gate and the actual work list never drift (#819).
+FAILING_CHECK_CONCLUSIONS: frozenset[str] = frozenset({"FAILURE", "CANCELLED", "TIMED_OUT"})
+
+
+def _pr_is_failing(pr: dict[str, Any]) -> bool:
+    """Return True iff this PR row is one drive-green should pick up.
+
+    A PR is "failing" when it is open, non-draft, and either
+    mergeStateStatus is BLOCKED or any statusCheckRollup entry's
+    conclusion is in FAILING_CHECK_CONCLUSIONS. BLOCKED captures the
+    branch-protection/required-review-not-met case; the conclusion check
+    captures every CI red. PENDING is intentionally excluded — the driver
+    waits for terminal state elsewhere.
+    """
+    if pr.get("isDraft"):
+        return False
+    if pr.get("mergeStateStatus") == "BLOCKED":
+        return True
+    rollup = pr.get("statusCheckRollup") or []
+    return any(c.get("conclusion") in FAILING_CHECK_CONCLUSIONS for c in rollup)
+
 
 class CIDriver:
     """Drives open PRs toward green CI by fixing failures and enabling auto-merge.
@@ -128,9 +152,11 @@ class CIDriver:
         if not self.options.dry_run:
             self._sweep_orphaned_arming_records()
 
-        # Empty --issues is allowed: bot-PR discovery (#848) may still
-        # surface open Dependabot PRs to drive. Only abort if ALL input
-        # sources are off: no issues, no direct PRs, and no bot discovery.
+        # Empty --issues is allowed: bot-PR discovery (#848) and failing-PR
+        # discovery (#819) may still surface open PRs to drive. Only abort if
+        # ALL input sources are off: no issues, no direct PRs, and no bot
+        # discovery (failing-PR discovery auto-enables when --issues is empty,
+        # so it has no opt-out to check).
         if not self.options.issues and not self.options.prs and not self.options.include_bot_prs:
             logger.warning("No issues, no direct PRs, and bot-PR discovery disabled")
             return {}
@@ -406,6 +432,71 @@ class CIDriver:
             )
         return bot_prs
 
+    def _discover_failing_prs(self) -> dict[int, int]:
+        """Enumerate open non-draft PRs whose checks failed or merge is BLOCKED.
+
+        Symmetrical to ``_discover_bot_prs``: the issue→PR direction (Closes #N)
+        misses every PR with no Closes line and every PR linked to a closed
+        issue (issue body §1, §2). One CLI call, PR-keyed, synthetic-issue
+        invariant (pr_number == issue_number) so downstream ``_is_bot_pr_mode``
+        short-circuits ``gh issue view`` identically to the bot path.
+
+        Bounded by gh's --limit 1000 (its documented hard upper). A repo with
+        more than 1000 failing open PRs is pathological — we log a WARNING
+        so operators see the truncation rather than silently dropping work.
+
+        Returns:
+            Mapping pr_number -> pr_number for every failing open PR.
+            Empty dict on any lookup failure — discovery must never abort
+            the drive.
+
+        """
+        try:
+            owner, repo = get_repo_info(self.repo_root)
+        except RuntimeError as exc:
+            logger.info("Failing-PR discovery skipped: could not resolve owner/name (%s)", exc)
+            return {}
+        try:
+            result = _gh_call(
+                [
+                    "pr",
+                    "list",
+                    "--repo",
+                    f"{owner}/{repo}",
+                    "--state",
+                    "open",
+                    "--limit",
+                    "1000",
+                    "--json",
+                    "number,isDraft,statusCheckRollup,mergeStateStatus",
+                ],
+            )
+            pulls: list[dict[str, Any]] = json.loads(result.stdout or "[]")
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            logger.info("Failing-PR discovery skipped: gh pr list failed (%s)", exc)
+            return {}
+        if len(pulls) >= 1000:
+            logger.warning(
+                "Failing-PR discovery hit gh's 1000-PR cap on %s/%s — "
+                "additional failing PRs may exist and are not visible to this run.",
+                owner,
+                repo,
+            )
+        failing: dict[int, int] = {}
+        for pr in pulls:
+            number = pr.get("number")
+            if not isinstance(number, int):
+                continue
+            if _pr_is_failing(pr):
+                failing[number] = number
+        if failing:
+            logger.info(
+                "Discovered %s open failing PR(s): %s",
+                len(failing),
+                sorted(failing),
+            )
+        return failing
+
     def _is_bot_pr_mode(self, issue_number: int, pr_number: int) -> bool:
         """Return True iff this work item is a synthetic-issue bot PR (#848).
 
@@ -520,6 +611,20 @@ class CIDriver:
                 # Bot PRs are PR-scoped only; record the PR-as-issue mapping
                 # so the shared-PR fan-out machinery treats the bot PR as a
                 # solo work item without inventing nonexistent issue numbers.
+                self.shared_pr_issues.setdefault(pr_num, [pr_num])
+
+        # Union with failing-PR discovery ONLY when the operator did not pass
+        # --issues. The issue's POLA contract (#819) says: "when provided, keep
+        # today's issue-driven path." So scoped runs stay narrow; only the
+        # no-args path widens to "every failing PR on the repo."
+        if not self.options.issues:
+            already_known: set[int] = set(deduped.values())
+            failing_prs = self._discover_failing_prs()
+            for pr_num in failing_prs:
+                if pr_num in already_known:
+                    continue
+                deduped[pr_num] = pr_num
+                already_known.add(pr_num)
                 self.shared_pr_issues.setdefault(pr_num, [pr_num])
         return deduped
 

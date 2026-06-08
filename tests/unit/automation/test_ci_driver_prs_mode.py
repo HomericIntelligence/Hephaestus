@@ -8,7 +8,7 @@ import pytest
 
 from hephaestus.automation import ci_driver
 from hephaestus.automation.ci_driver import CIDriver
-from hephaestus.automation.models import CIDriverOptions
+from hephaestus.automation.models import CIDriverOptions, WorkerResult
 
 
 class TestParseArgsPrs:
@@ -46,8 +46,8 @@ class TestDiscoverPrsDirectMode:
 
     @pytest.fixture
     def driver(self, tmp_path) -> CIDriver:
-        """Create a CIDriver with default options."""
-        options = CIDriverOptions()
+        """Create a CIDriver with bot-PR discovery disabled to prevent _gh_call in tests."""
+        options = CIDriverOptions(include_bot_prs=False)
         return CIDriver(options)
 
     def test_direct_prs_alone_keyed_by_pr_number(self, driver: CIDriver) -> None:
@@ -55,9 +55,11 @@ class TestDiscoverPrsDirectMode:
         driver.options.prs = [661, 662]
 
         # Mock _validate_pr_open to return True for these PRs
+        # Also mock _discover_failing_prs: empty issues triggers the failing-PR path (#819)
         with patch.object(driver, "_validate_pr_open", return_value=True) as mock_validate:
             with patch.object(driver, "_find_pr_for_issue", return_value=None):
-                result = driver._discover_prs([])
+                with patch.object(driver, "_discover_failing_prs", return_value={}):
+                    result = driver._discover_prs([])
 
         assert 661 in result.values()
         assert 662 in result.values()
@@ -75,7 +77,8 @@ class TestDiscoverPrsDirectMode:
 
         with patch.object(driver, "_validate_pr_open", return_value=True):
             with patch.object(driver, "_find_pr_for_issue", return_value=None):
-                driver._discover_prs([])
+                with patch.object(driver, "_discover_failing_prs", return_value={}):
+                    driver._discover_prs([])
 
         assert driver.shared_pr_issues.get(661) == [661]
 
@@ -132,7 +135,8 @@ class TestDiscoverPrsDirectMode:
 
         with patch.object(driver, "_validate_pr_open", side_effect=validate_side_effect):
             with patch.object(driver, "_find_pr_for_issue", return_value=None):
-                result = driver._discover_prs([])
+                with patch.object(driver, "_discover_failing_prs", return_value={}):
+                    result = driver._discover_prs([])
 
         # Valid PRs included
         assert result.get(661) == 661
@@ -147,7 +151,8 @@ class TestDiscoverPrsDirectMode:
 
         with patch.object(driver, "_validate_pr_open", return_value=True):
             with patch.object(driver, "_find_pr_for_issue", return_value=None):
-                result = driver._discover_prs([])
+                with patch.object(driver, "_discover_failing_prs", return_value={}):
+                    result = driver._discover_prs([])
 
         assert result.get(661) == 661
 
@@ -158,7 +163,8 @@ class TestDiscoverPrsDirectMode:
 
         with patch.object(driver, "_validate_pr_open", return_value=True):
             with patch.object(driver, "_find_pr_for_issue", return_value=None):
-                result = driver._discover_prs([])
+                with patch.object(driver, "_discover_failing_prs", return_value={}):
+                    result = driver._discover_prs([])
 
         assert result.get(661) == 661
 
@@ -171,11 +177,14 @@ class TestRunGateWithPrs:
         options = CIDriverOptions(issues=[], prs=[661], include_bot_prs=False)
         driver = CIDriver(options)
 
-        # Mock _discover_prs to return {661: 661} and _sweep_orphaned_arming_records
-        # to avoid network I/O
+        # Mock _discover_prs, _sweep_orphaned_arming_records, and _drive_issue
+        # to avoid network I/O (circuit breaker would trip on real _gh_call).
+        # Return a proper WorkerResult so run() can call result.success without error.
+        fake_result = WorkerResult(issue_number=661, success=True)
         with patch.object(driver, "_discover_prs", return_value={661: 661}) as mock_discover:
             with patch.object(driver, "_sweep_orphaned_arming_records"):
-                driver.run()
+                with patch.object(driver, "_drive_issue", return_value=fake_result):
+                    driver.run()
 
         # Verify the gate did not abort by checking that _discover_prs was called
         mock_discover.assert_called_once()
