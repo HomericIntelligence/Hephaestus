@@ -16,6 +16,8 @@ from hephaestus.validation.cli_tier_docs import (
 
 
 class TestFindViolations:
+    """Tests for the find_violations() cross-check function."""
+
     def test_no_findings_when_aligned(self) -> None:
         assert (
             find_violations({"hephaestus-foo": "pkg.mod:main"}, {"hephaestus-foo": "Stable"}) == []
@@ -43,6 +45,8 @@ class TestFindViolations:
 
 
 class TestParsing:
+    """Tests for load_pyproject_scripts() and load_documented_tiers()."""
+
     def test_load_scripts_parses_pyproject(self, tmp_path: Path) -> None:
         p = tmp_path / "pyproject.toml"
         p.write_text('[project.scripts]\nhephaestus-foo = "pkg.mod:main"\n')
@@ -61,7 +65,7 @@ class TestParsing:
 
         with pytest.raises(
             RuntimeError,
-            match="tomllib.*tomli.*required",
+            match=r"tomllib.*tomli.*required",
         ):
             load_pyproject_scripts(p)
 

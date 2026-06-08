@@ -36,12 +36,23 @@ _TABLE_ROW_RE = re.compile(r"^\|\s*`?(hephaestus-[a-z0-9-]+)`?\s*\|\s*([A-Za-z]+
 
 @dataclass
 class TierDocFinding:
+    """A single violation found while cross-checking CLI tier documentation."""
+
     cli: str
-    kind: str  # "missing-from-docs" | "missing-from-pyproject" | "invalid-tier" | "parser-found-no-rows"
+    # kind values: "missing-from-docs" | "missing-from-pyproject"
+    #              | "invalid-tier" | "parser-found-no-rows"
+    kind: str
     detail: str
 
 
 def load_pyproject_scripts(pyproject_path: Path) -> dict[str, str]:
+    """Return the ``[project.scripts]`` mapping from *pyproject_path*.
+
+    Raises:
+        RuntimeError: When neither ``tomllib`` (Python 3.11+) nor the
+            ``tomli`` backport is available.
+
+    """
     tomllib = import_tomllib()
     if tomllib is None:
         raise RuntimeError(
@@ -84,6 +95,11 @@ def load_documented_tiers(compatibility_path: Path) -> dict[str, str]:
 
 
 def find_violations(scripts: dict[str, str], tiers: dict[str, str]) -> list[TierDocFinding]:
+    """Cross-check *scripts* (from pyproject.toml) against *tiers* (from COMPATIBILITY.md).
+
+    Returns a list of :class:`TierDocFinding` objects describing every
+    discrepancy. An empty list means full alignment.
+    """
     findings: list[TierDocFinding] = []
     # Guard against silent regex regression (Decision 4): if pyproject has
     # entries but the table parsed zero rows, fail loudly rather than reporting
@@ -114,7 +130,8 @@ def find_violations(scripts: dict[str, str], tiers: dict[str, str]) -> list[Tier
             TierDocFinding(
                 cli,
                 "missing-from-pyproject",
-                f"{cli} has a tier row in COMPATIBILITY.md but is not in pyproject.toml [project.scripts]",
+                f"{cli} has a tier row in COMPATIBILITY.md but is not in"
+                f" pyproject.toml [project.scripts]",
             )
         )
     for cli in sorted(set(tiers) & set(scripts)):
@@ -130,6 +147,7 @@ def find_violations(scripts: dict[str, str], tiers: dict[str, str]) -> list[Tier
 
 
 def format_report(findings: list[TierDocFinding]) -> str:
+    """Render *findings* as a human-readable text report."""
     if not findings:
         return "OK: every [project.scripts] entry has a documented tier in COMPATIBILITY.md."
     lines = [f"FAIL: {len(findings)} tier-doc violation(s):"]
@@ -139,10 +157,12 @@ def format_report(findings: list[TierDocFinding]) -> str:
 
 
 def format_json(findings: list[TierDocFinding]) -> str:
+    """Render *findings* as a JSON string."""
     return json.dumps({"violations": [asdict(f) for f in findings]}, indent=2)
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Entry point for ``hephaestus-check-cli-tier-docs``."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=None)
     add_json_arg(parser)
