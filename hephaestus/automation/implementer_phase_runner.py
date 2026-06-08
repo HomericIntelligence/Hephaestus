@@ -478,6 +478,28 @@ class ImplementationPhaseRunner:
             )
 
         except RuntimeError as e:
+            # "No changes produced" means the branch has 0 commits vs main —
+            # the implementation already landed via a prior merged PR. Treat
+            # this as success and apply state:skip so future loops don't
+            # re-attempt the issue.
+            msg = str(e)
+            if "no commits vs" in msg.lower() or "no changes produced" in msg.lower():
+                impl._log(
+                    "info",
+                    f"Issue #{issue_number}: no new commits vs main — "
+                    "work already merged; applying state:skip",
+                    thread_id,
+                )
+                self.status_tracker.update_slot(
+                    slot_id, f"{issue_ref(issue_number)}: already implemented — state:skip"
+                )
+                with contextlib.suppress(Exception):
+                    gh_issue_add_labels(issue_number, [STATE_SKIP])
+                return WorkerResult(
+                    issue_number=issue_number,
+                    success=True,
+                )
+
             impl._log("error", f"Runtime error: {e}", thread_id)
 
             # Show failure in UI before releasing slot
