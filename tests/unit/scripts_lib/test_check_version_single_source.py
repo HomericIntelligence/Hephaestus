@@ -6,17 +6,12 @@ version has exactly one authority (git tags via hatch-vcs): no static
 ``[tool.hatch.version].source == "vcs"``, and no pixi ``[workspace].version``.
 """
 
-import sys
 from pathlib import Path
 
 import pytest
 
-from hephaestus.constants import scripts_dir
-
-# Add scripts directory to path so we can import the module directly.
-sys.path.insert(0, str(scripts_dir()))
-
-from check_version_single_source import (
+from hephaestus.scripts_lib import check_version_single_source as mod
+from hephaestus.scripts_lib.check_version_single_source import (
     check_pixi_no_version,
     check_pyproject_dynamic_version,
 )
@@ -163,8 +158,6 @@ class TestMain:
         (tmp_path / "pyproject.toml").write_text(VALID_PYPROJECT)
         (tmp_path / "pixi.toml").write_text('[workspace]\nname = "myproject"\n')
 
-        import check_version_single_source as mod
-
         monkeypatch.setattr(mod, "get_repo_root", lambda: tmp_path)
         assert mod.main() == 0
 
@@ -172,8 +165,6 @@ class TestMain:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Returns 1 when pyproject.toml does not exist."""
-        import check_version_single_source as mod
-
         monkeypatch.setattr(mod, "get_repo_root", lambda: tmp_path)
         assert mod.main() == 1
 
@@ -190,8 +181,6 @@ class TestMain:
             'source = "vcs"\n'
         )
 
-        import check_version_single_source as mod
-
         monkeypatch.setattr(mod, "get_repo_root", lambda: tmp_path)
         assert mod.main() == 1
 
@@ -202,8 +191,6 @@ class TestMain:
         (tmp_path / "pyproject.toml").write_text(VALID_PYPROJECT)
         (tmp_path / "pixi.toml").write_text('[workspace]\nversion = "1.0.0"\n')
 
-        import check_version_single_source as mod
-
         monkeypatch.setattr(mod, "get_repo_root", lambda: tmp_path)
         assert mod.main() == 1
 
@@ -213,13 +200,9 @@ class TestMain:
         """Returns 0 when pixi.toml does not exist (only pyproject.toml)."""
         (tmp_path / "pyproject.toml").write_text(VALID_PYPROJECT)
 
-        import check_version_single_source as mod
-
         monkeypatch.setattr(mod, "get_repo_root", lambda: tmp_path)
         assert mod.main() == 0
 
     def test_passes_against_real_repo_pyproject(self) -> None:
         """The checker must PASS on the actual repository configuration."""
-        import check_version_single_source as mod
-
         assert mod.main() == 0

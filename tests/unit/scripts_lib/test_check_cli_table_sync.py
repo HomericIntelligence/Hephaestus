@@ -12,18 +12,11 @@ The script verifies two invariants:
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
-from hephaestus.constants import scripts_dir
-
-# Add scripts/ to sys.path so we can import the checker directly, mirroring the
-# pattern used by tests/unit/scripts/test_check_version_single_source.py.
-sys.path.insert(0, str(scripts_dir()))
-
-from check_cli_table_sync import check_prose_counts
+from hephaestus.scripts_lib.check_cli_table_sync import check_prose_counts
 
 
 class TestCheckProseCounts:
@@ -140,7 +133,7 @@ class TestMain:
         This catches drift the moment a contributor lands a new console script
         without bumping the README/docs prose.
         """
-        import check_cli_table_sync as mod
+        from hephaestus.scripts_lib import check_cli_table_sync as mod
 
         assert mod.main() == 0
         out = capsys.readouterr().out

@@ -4,17 +4,11 @@ Validates that version extraction regexes are bounded to their TOML sections
 and do not match keys from unrelated sections.
 """
 
-import sys
 from pathlib import Path
 
 import pytest
 
-from hephaestus.constants import scripts_dir
-
-# Add the scripts directory to the path so we can import the module directly.
-sys.path.insert(0, str(scripts_dir()))
-
-from check_python_version_consistency import (
+from hephaestus.scripts_lib.check_python_version_consistency import (
     check_ci_matrix_coverage,
     extract_ci_matrix_python_versions,
     extract_classifiers_python_versions,
