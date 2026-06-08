@@ -40,10 +40,6 @@ from hephaestus.nats.events import NATSEvent
 
 logger = logging.getLogger(__name__)
 
-_INITIAL_BACKOFF_SECONDS = 1.0
-_MAX_BACKOFF_SECONDS = 60.0
-_BACKOFF_MULTIPLIER = 2.0
-
 DEFAULT_JOIN_TIMEOUT: float = 5.0
 """Default join timeout (seconds) for :meth:`NATSSubscriberThread.stop`."""
 
@@ -234,7 +230,7 @@ class NATSSubscriberThread(threading.Thread):
             self._config.durable_name,
         )
 
-        backoff = _INITIAL_BACKOFF_SECONDS
+        backoff = self._config.initial_backoff_seconds
 
         try:
             while not self._stop_event.is_set():
@@ -244,7 +240,7 @@ class NATSSubscriberThread(threading.Thread):
                         loop.run_until_complete(self._subscribe_loop())
                     finally:
                         loop.close()
-                    backoff = _INITIAL_BACKOFF_SECONDS
+                    backoff = self._config.initial_backoff_seconds
                 except Exception as exc:
                     if self._stop_event.is_set():
                         break
@@ -254,7 +250,10 @@ class NATSSubscriberThread(threading.Thread):
                         backoff,
                     )
                     self._stop_event.wait(timeout=backoff)
-                    backoff = min(backoff * _BACKOFF_MULTIPLIER, _MAX_BACKOFF_SECONDS)
+                    backoff = min(
+                        backoff * self._config.backoff_multiplier,
+                        self._config.max_backoff_seconds,
+                    )
         except Exception as exc:
             with self._state_lock:
                 self._last_error = exc
