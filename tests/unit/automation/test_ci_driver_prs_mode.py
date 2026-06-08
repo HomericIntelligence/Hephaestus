@@ -8,7 +8,7 @@ import pytest
 
 from hephaestus.automation import ci_driver
 from hephaestus.automation.ci_driver import CIDriver
-from hephaestus.automation.models import CIDriverOptions
+from hephaestus.automation.models import CIDriverOptions, WorkerResult
 
 
 class TestParseArgsPrs:
@@ -46,8 +46,8 @@ class TestDiscoverPrsDirectMode:
 
     @pytest.fixture
     def driver(self, tmp_path) -> CIDriver:
-        """Create a CIDriver with default options."""
-        options = CIDriverOptions()
+        """Create a CIDriver with bot-PR discovery disabled to prevent _gh_call in tests."""
+        options = CIDriverOptions(include_bot_prs=False)
         return CIDriver(options)
 
     def test_direct_prs_alone_keyed_by_pr_number(self, driver: CIDriver) -> None:
@@ -172,10 +172,12 @@ class TestRunGateWithPrs:
         driver = CIDriver(options)
 
         # Mock _discover_prs, _sweep_orphaned_arming_records, and _drive_issue
-        # to avoid network I/O (circuit breaker would trip on real _gh_call)
+        # to avoid network I/O (circuit breaker would trip on real _gh_call).
+        # Return a proper WorkerResult so run() can call result.success without error.
+        fake_result = WorkerResult(issue_number=661, success=True)
         with patch.object(driver, "_discover_prs", return_value={661: 661}) as mock_discover:
             with patch.object(driver, "_sweep_orphaned_arming_records"):
-                with patch.object(driver, "_drive_issue", return_value=None):
+                with patch.object(driver, "_drive_issue", return_value=fake_result):
                     driver.run()
 
         # Verify the gate did not abort by checking that _discover_prs was called
