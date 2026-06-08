@@ -47,8 +47,15 @@ from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
 from .claude_timeouts import address_review_claude_timeout
 from .comment_difficulty import classify_comments, format_todo_line
-from .curses_ui import CursesUI, ThreadLogManager  # noqa: F401  (ThreadLogManager re-exported)
-from .git_utils import (  # noqa: F401  (get_repo_root re-exported)
+
+# Re-exports honor BaseReviewer's test-seam contract (#710); see
+# BaseReviewer._PATCHABLE_DEPENDENCIES.  Tests patch these via
+# ``patch("hephaestus.automation.address_review.<Name>")``;
+# __all__ declares the intent so static-analysis tools do not flag them unused.
+__all__ = ["StatusTracker", "ThreadLogManager", "WorktreeManager", "get_repo_root"]
+
+from .curses_ui import CursesUI, ThreadLogManager
+from .git_utils import (
     get_repo_root,
     get_repo_slug,
     issue_ref,
@@ -62,8 +69,8 @@ from .github_api import (
 from .models import AddressReviewOptions, ReviewPhase, ReviewState, WorkerResult
 from .prompts import get_address_review_prompt
 from .session_naming import AGENT_IMPLEMENTER
-from .status_tracker import StatusTracker  # noqa: F401 — re-exported for test patching
-from .worktree_manager import WorktreeManager  # noqa: F401 — re-exported for test patching
+from .status_tracker import StatusTracker
+from .worktree_manager import WorktreeManager
 
 logger = logging.getLogger(__name__)
 
