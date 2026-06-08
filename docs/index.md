@@ -44,6 +44,7 @@ full function signatures, docstrings, and type annotations for all 45 CLI entry 
 See the [README](../README.md) for installation and development setup instructions.
 
 - [Plugin Installation Guide](plugin-installation.md) — Install the Claude Code or Codex plugin and enable skills in your project
+- [Audit Reviewer](audit-reviewer.md) — `hephaestus-audit-prs`: coordinator-pattern auditor for ALL open PRs (issue #994)
 
 ## Contributing
 

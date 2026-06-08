@@ -82,6 +82,7 @@ hephaestus-automation-loop = "hephaestus.automation.loop_runner:main"
 hephaestus-plan-issues = "hephaestus.automation.planner:main"
 hephaestus-implement-issues = "hephaestus.automation.implementer:main"
 hephaestus-review-prs = "hephaestus.automation.pr_reviewer:main"
+hephaestus-audit-prs = "hephaestus.automation.audit_reviewer:main"
 hephaestus-agent-stage = "hephaestus.automation.agent_stage:main"
 hephaestus-ensure-state-labels = "hephaestus.automation.ensure_state_labels:main"
 hephaestus-merge-prs = "hephaestus.github.pr_merge:main"
@@ -247,6 +248,8 @@ omit = [
     "hephaestus/automation/github_api.py",
     # pr_reviewer.py drives a full Claude session against a live PR; integration-only
     "hephaestus/automation/pr_reviewer.py",
+    # audit_reviewer.py drives a live agent coordinator session; integration-only
+    "hephaestus/automation/audit_reviewer.py",
 ]
 
 [tool.coverage.report]

@@ -6,6 +6,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from hephaestus.automation.audit_reviewer import AuditReviewer
     from hephaestus.automation.dependency_resolver import DependencyResolver
     from hephaestus.automation.implementer import IssueImplementer
     from hephaestus.automation.models import (
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from hephaestus.automation.pr_reviewer import PRReviewer
 
 __all__ = [
+    "AuditReviewer",
     "DependencyResolver",
     "ImplementerOptions",
     "IssueImplementer",
@@ -29,6 +31,7 @@ __all__ = [
 ]
 
 _LAZY_EXPORTS: dict[str, str] = {
+    "AuditReviewer": "hephaestus.automation.audit_reviewer",
     "DependencyResolver": "hephaestus.automation.dependency_resolver",
     "ImplementerOptions": "hephaestus.automation.models",
     "IssueImplementer": "hephaestus.automation.implementer",

@@ -30,6 +30,7 @@ OMITTED_MODULES = [
     "hephaestus.automation.curses_ui",
     "hephaestus.automation.github_api",
     "hephaestus.automation.pr_reviewer",
+    "hephaestus.automation.audit_reviewer",
 ]
 
 # Modules with console scripts (run --help to verify entry point works)
@@ -38,6 +39,7 @@ CONSOLE_SCRIPTS = [
     ("hephaestus-plan-issues", "hephaestus.automation.planner"),
     ("hephaestus-automation-loop", "hephaestus.automation.loop_runner"),
     ("hephaestus-review-prs", "hephaestus.automation.pr_reviewer"),
+    ("hephaestus-audit-prs", "hephaestus.automation.audit_reviewer"),
 ]
 
 # Modules with main() but no console script of their own.

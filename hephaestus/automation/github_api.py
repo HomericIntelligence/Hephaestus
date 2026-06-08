@@ -1240,6 +1240,29 @@ def fetch_issue_info(issue_number: int) -> IssueInfo:
     )
 
 
+def fetch_open_prs() -> list[dict[str, Any]]:
+    """Return every open PR's metadata via ``gh pr list`` (no row limit).
+
+    Uses ``--limit 2147483647`` (INT_MAX) to honor the audit reviewer's
+    'ALL open PRs' contract on repos with >200 open PRs. The gh CLI
+    does not support a true no-cap sentinel; INT_MAX avoids pagination
+    overhead while accommodating any realistic repo size.
+    """
+    result = _gh_call(
+        [
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--json",
+            "number,title,headRefName,url,isDraft",
+            "--limit",
+            "2147483647",
+        ]
+    )
+    return cast(list[dict[str, Any]], json.loads(result.stdout or "[]"))
+
+
 def write_secure(path: Path, content: str) -> None:
     """Write content to a file atomically with restrictive permissions.
 
