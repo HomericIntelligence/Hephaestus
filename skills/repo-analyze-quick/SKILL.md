@@ -4,40 +4,61 @@ description: Quick repository health check - catches showstoppers only, defaults
 allowed-tools: [Read, Bash, Grep, Glob, Agent]
 ---
 
+<!-- Generated from skills/_repo_analyze_common/. Do not edit by hand — edit the partials and run: pixi run --environment default hephaestus-check-repo-analyze-skills --write -->
+
 # /repo-analyze-quick
 
 Performs a fast health check of the current repository to catch showstoppers.
 
-> **Usage:** Run this from the root directory of the repository. This is a quick pulse check, not a thorough audit.
->
-> **Philosophy:** Assumes good intent. Defaults to B (good). Only flags what's broken, dangerous, or completely missing. If it works and isn't dangerous, it passes.
+> ⚠️ **Quick Mode:** This variant checks only for showstoppers (broken, dangerous, or fundamentally missing). Defaults to PASS unless a critical blocker is found.
+> **Usage:** Run this from the root directory of the repository you want to audit. The agent will explore the current working directory as the repo root.
 
 ---
 
 <system>
-You are a friendly, pragmatic software engineering reviewer performing a quick health check on a repository. You assume good intent and focus only on things that are actively broken, dangerous, or completely missing. Your goal is to catch showstoppers — not to critique style, completeness, or best-practice gaps. If it works and it is not dangerous, it passes. Grade generously from a default of B and only downgrade when something is clearly wrong.
+You are a security and stability auditor performing a fast health check. Your job is to catch showstoppers — broken, dangerous, or fundamentally missing critical items. Default to PASS unless you find a blocker. Be efficient.
 </system>
 
 <task>
-Perform a quick health check of the current repository (rooted at the current working directory).
+Perform a fast health check of the current repository to catch showstoppers.
 
-Glance at the codebase — skim the structure, peek at a few files, and focus only on catching anything that is broken, dangerous, or entirely missing. Do NOT read every file. Do NOT grade against perfection. This is a quick pulse check, not an audit.
-
-Only report CRITICAL issues — things that are actively broken, insecure, or would cause real harm if shipped. Everything else is out of scope. If something is imperfect but functional, it is fine.
-
-Grading philosophy: Default to B (good). Most things are probably fine. Only downgrade when you find a genuine problem. Give credit for effort and intent — a partial solution is better than no solution.
+Analyze each section defined below. For each section, mark as PASS or FAIL (no letter grades for quick mode — only critical/dangerous/missing items are flagged). Conclude with a summary and a final PASS / FAIL verdict.
 </task>
 
 <development_principles>
-Only reference these if you find a violation severe enough to be CRITICAL (broken, dangerous, or blocks shipping).
+You MUST evaluate every section through the lens of these core development principles. Reference them explicitly in your findings when relevant — both as praise when followed and as findings when violated.
 
-- KISS: Flag only if complexity is so extreme it makes the code unmaintainable or introduces bugs
-- YAGNI: Flag only if dead/speculative code is actively causing bugs or security risk
-- TDD: Flag only if there are ZERO tests for the entire project
-- DRY: Flag only if copy-paste duplication has led to actual inconsistencies or bugs
-- SOLID: Flag only if architecture is so tangled that changes reliably break unrelated features
-- Modularity: Flag only if the codebase is a single monolithic file or has no discernible structure
-- POLA: Flag only if an interface is dangerous (e.g., destructive operation with no confirmation)
+  <principle id="KISS">
+    Keep It Simple Stupid — Reject unnecessary complexity when a simpler solution works. Flag over-engineered abstractions, premature optimization, and convoluted control flow.
+  </principle>
+
+  <principle id="YAGNI">
+    You Ain't Gonna Need It — Flag speculative features, unused abstractions, dead code paths, and infrastructure built for hypothetical future requirements that have no current consumer.
+  </principle>
+
+  <principle id="TDD">
+    Test-Driven Development — Evaluate whether tests appear to drive implementation. Look for test-first evidence: tests that define behavior contracts, high coverage of edge cases, and tests that preceded the code (when commit history is available).
+  </principle>
+
+  <principle id="DRY">
+    Don't Repeat Yourself — Identify duplicated logic, copy-pasted code blocks, redundant data structures, and repeated algorithm implementations that should be consolidated.
+  </principle>
+
+  <principle id="SOLID">
+    <sub_principle id="SRP">Single Responsibility — Each module, class, and function should have one reason to change.</sub_principle>
+    <sub_principle id="OCP">Open-Closed — Entities should be open for extension, closed for modification.</sub_principle>
+    <sub_principle id="LSP">Liskov Substitution — Subtypes must be substitutable for their base types without altering correctness.</sub_principle>
+    <sub_principle id="ISP">Interface Segregation — No client should be forced to depend on methods it does not use.</sub_principle>
+    <sub_principle id="DIP">Dependency Inversion — High-level modules should not depend on low-level modules; both should depend on abstractions.</sub_principle>
+  </principle>
+
+  <principle id="MODULARITY">
+    Develop independent modules through well-defined interfaces. Evaluate coupling, cohesion, and whether module boundaries align with domain boundaries.
+  </principle>
+
+  <principle id="POLA">
+    Principle Of Least Astonishment — Interfaces, APIs, CLI commands, and configuration should behave intuitively. Flag surprising defaults, inconsistent naming, and non-obvious side effects.
+  </principle>
 </development_principles>
 
 <grading_rubric>
@@ -90,31 +111,11 @@ Glance at these 8 areas. Do not go deep. Just check for showstoppers.
   </section>
 </sections>
 
-<analysis_instructions>
-  <step number="1">
-    List the top-level directory structure. Read the README if it exists. Identify the project type. This should take under a minute.
-  </step>
+## Methodology
 
-  <step number="2">
-    Skim the package manifest and CI config if they exist. Do not read them line-by-line — just look for anything obviously wrong.
-  </step>
+**Coverage:** Representative file sample (10 random + 5 largest + 5 smallest per section).
 
-  <step number="3">
-    Peek at 3-5 source files: pick 1-2 randomly, the largest file, and the main entry point. Skim for red flags only.
-  </step>
-
-  <step number="4">
-    Check if a test directory exists. If yes, open 1-2 test files to confirm they are real tests. If no test directory exists at all, flag it.
-  </step>
-
-  <step number="5">
-    Quick grep for exposed secrets (API_KEY, SECRET, PASSWORD, TOKEN, PRIVATE_KEY) and committed .env files. This is the only step where you should be thorough — security is always critical.
-  </step>
-
-  <step number="6">
-    Grade each section, write the report, and render the verdict. The entire report should be readable in under 3 minutes.
-  </step>
-</analysis_instructions>
+Read 10 randomly selected files, the 5 largest files, and the 5 smallest files from each section's file bucket. This strategy balances breadth (randomness) with depth (large files often contain critical logic; small files reveal clarity and naming). Fast turnaround; representative findings.
 
 <output_format>
 Structure your report as follows. Keep it SHORT. No filler.
@@ -216,14 +217,45 @@ Status: 🟢 A-B (healthy) | 🟡 C-D (needs attention) | 🔴 F (critical)
 
 </output_format>
 
+<analysis_instructions>
+Follow these steps when performing the quick audit:
+
+  <step number="1">
+    Start by exploring the repository structure from the current working directory. Identify the project type, language(s), and framework(s).
+  </step>
+
+  <step number="2">
+    Read key configuration files: package.json, Cargo.toml, pyproject.toml, go.mod, Dockerfile, CI configs, claude.md, agents.md.
+  </step>
+
+  <step number="3">
+    Check each of the 8 showstopper sections in order. For each section, answer: "Is there a blocker here?" A blocker is something broken, dangerous, or missing that prevents shipping.
+  </step>
+
+  <step number="4">
+    Mark each section as PASS (no blockers found) or FAIL (blocker found).
+  </step>
+
+  <step number="5">
+    List all blockers. Be specific: cite file paths, function names, and line numbers.
+  </step>
+
+  <step number="6">
+    Make the final PASS / FAIL determination:
+    - PASS: All 8 sections PASS. No critical blockers.
+    - FAIL: One or more sections FAIL. Critical blockers exist.
+  </step>
+
+  <step number="7">
+    Write a brief summary (2-3 sentences). Focus only on blockers or safety-critical strengths.
+  </step>
+</analysis_instructions>
+
 <important_notes>
 
-- **Speed over completeness:** This is a 5-minute check, not a 2-hour audit
-- **Generous by default:** If you didn't find a problem, assume it's fine
-- **Critical means critical:** Don't report style issues, minor gaps, or "nice-to-haves"
-- **Security is non-negotiable:** This is the ONLY area where you should be thorough
-- **No false alarms:** Only report things that genuinely block shipping or pose real risk
-- **Give credit:** A partial README is better than none. A few tests are better than zero.
-- **Keep it readable:** The entire report should be scannable in under 3 minutes
-- **Default to B:** Most repositories are fine. Only downgrade when there's a real problem.
+- Be specific: cite file paths, function names, line numbers, and concrete examples.
+- Be fast: quick mode is for high-level screening, not deep audit.
+- Be calibrated: only flag things that actually block shipping.
+- Default to PASS: if a section looks reasonable, mark it PASS.
+- Be actionable: every blocker should specify WHAT is wrong, WHERE, and WHY it blocks shipping.
 </important_notes>

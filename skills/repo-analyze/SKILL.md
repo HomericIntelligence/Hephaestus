@@ -4,6 +4,8 @@ description: Performs comprehensive repository completeness and quality audit wi
 allowed-tools: [Read, Bash, Grep, Glob, Agent]
 ---
 
+<!-- Generated from skills/_repo_analyze_common/. Do not edit by hand — edit the partials and run: pixi run --environment default hephaestus-check-repo-analyze-skills --write -->
+
 # /repo-analyze
 
 Performs a comprehensive completeness and quality audit of the current repository (rooted at the current working directory).
@@ -388,6 +390,12 @@ For each section, output:
   </section>
 
 </audit_sections>
+
+## Methodology
+
+**Coverage:** Representative file sample (10 random + 5 largest + 5 smallest per section).
+
+Read 10 randomly selected files, the 5 largest files, and the 5 smallest files from each section's file bucket. This strategy balances breadth (randomness) with depth (large files often contain critical logic; small files reveal clarity and naming). Fast turnaround; representative findings.
 
 <output_format>
 Structure your report EXACTLY as follows. Use markdown formatting throughout.

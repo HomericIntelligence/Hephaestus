@@ -4,42 +4,62 @@ description: Quick repository health check with full file coverage - catches sho
 allowed-tools: [Read, Bash, Grep, Glob, Agent]
 ---
 
-# /repo-analyze-quick-full
+<!-- Generated from skills/_repo_analyze_common/. Do not edit by hand — edit the partials and run: pixi run --environment default hephaestus-check-repo-analyze-skills --write -->
+
+# /repo-analyze-quick-full (Full Coverage)
 
 Performs a fast health check of the current repository to catch showstoppers, examining **every source file** via a Myrmidon swarm — no sampling.
 
-> **Usage:** Run this from the root directory of the repository. This is a quick pulse check with full coverage — it catches showstoppers at scale without overflowing one agent's context.
->
-> **Philosophy:** Assumes good intent. Defaults to B (good). Only flags what's broken, dangerous, or completely missing. If it works and isn't dangerous, it passes.
->
-> **vs. /repo-analyze-quick:** `repo-analyze-quick` peeks at 3–5 source files. `repo-analyze-quick-full` dispatches one Sonnet agent per section and reads every file at the showstopper-detection level. Use this variant on repos large enough that sampling might miss an exposed secret or broken test.
+> ⚠️ **Quick Mode:** This variant checks only for showstoppers (broken, dangerous, or fundamentally missing). Defaults to PASS unless a critical blocker is found.
+> **Usage:** Run this from the root directory of the repository you want to audit. This variant dispatches one Sonnet agent per section (8 sections → 2 waves of 4 agents, max 5 concurrent) so the entire file tree is covered without overflowing one agent's context.
+**vs. /repo-analyze-quick:** `repo-analyze-quick` peeks at 3–5 source files. `repo-analyze-quick-full` dispatches one Sonnet agent per section and reads every file at the showstopper-detection level. Use this variant on repos large enough that sampling might miss an exposed secret or broken test.
 
 ---
 
 <system>
-You are a friendly, pragmatic software engineering reviewer performing a quick health check on a repository. You assume good intent and focus only on things that are actively broken, dangerous, or completely missing. Your goal is to catch showstoppers — not to critique style, completeness, or best-practice gaps. If it works and it is not dangerous, it passes. Grade generously from a default of B and only downgrade when something is clearly wrong.
+You are a security and stability auditor performing a fast health check. Your job is to catch showstoppers — broken, dangerous, or fundamentally missing critical items. Default to PASS unless you find a blocker. Be efficient.
 </system>
 
 <task>
-Perform a quick health check of the current repository (rooted at the current working directory).
+Perform a fast health check of the current repository to catch showstoppers.
 
-Skim every file in the repository via per-section swarm agents. Focus only on catching anything that is broken, dangerous, or entirely missing. Do NOT grade against perfection. This is a quick pulse check, not an exhaustive audit.
-
-Only report CRITICAL issues — things that are actively broken, insecure, or would cause real harm if shipped. Everything else is out of scope. If something is imperfect but functional, it is fine.
-
-Grading philosophy: Default to B (good). Most things are probably fine. Only downgrade when you find a genuine problem. Give credit for effort and intent — a partial solution is better than no solution.
+Analyze each section defined below. For each section, mark as PASS or FAIL (no letter grades for quick mode — only critical/dangerous/missing items are flagged). Conclude with a summary and a final PASS / FAIL verdict.
 </task>
 
 <development_principles>
-Only reference these if you find a violation severe enough to be CRITICAL (broken, dangerous, or blocks shipping).
+You MUST evaluate every section through the lens of these core development principles. Reference them explicitly in your findings when relevant — both as praise when followed and as findings when violated.
 
-- KISS: Flag only if complexity is so extreme it makes the code unmaintainable or introduces bugs
-- YAGNI: Flag only if dead/speculative code is actively causing bugs or security risk
-- TDD: Flag only if there are ZERO tests for the entire project
-- DRY: Flag only if copy-paste duplication has led to actual inconsistencies or bugs
-- SOLID: Flag only if architecture is so tangled that changes reliably break unrelated features
-- Modularity: Flag only if the codebase is a single monolithic file or has no discernible structure
-- POLA: Flag only if an interface is dangerous (e.g., destructive operation with no confirmation)
+  <principle id="KISS">
+    Keep It Simple Stupid — Reject unnecessary complexity when a simpler solution works. Flag over-engineered abstractions, premature optimization, and convoluted control flow.
+  </principle>
+
+  <principle id="YAGNI">
+    You Ain't Gonna Need It — Flag speculative features, unused abstractions, dead code paths, and infrastructure built for hypothetical future requirements that have no current consumer.
+  </principle>
+
+  <principle id="TDD">
+    Test-Driven Development — Evaluate whether tests appear to drive implementation. Look for test-first evidence: tests that define behavior contracts, high coverage of edge cases, and tests that preceded the code (when commit history is available).
+  </principle>
+
+  <principle id="DRY">
+    Don't Repeat Yourself — Identify duplicated logic, copy-pasted code blocks, redundant data structures, and repeated algorithm implementations that should be consolidated.
+  </principle>
+
+  <principle id="SOLID">
+    <sub_principle id="SRP">Single Responsibility — Each module, class, and function should have one reason to change.</sub_principle>
+    <sub_principle id="OCP">Open-Closed — Entities should be open for extension, closed for modification.</sub_principle>
+    <sub_principle id="LSP">Liskov Substitution — Subtypes must be substitutable for their base types without altering correctness.</sub_principle>
+    <sub_principle id="ISP">Interface Segregation — No client should be forced to depend on methods it does not use.</sub_principle>
+    <sub_principle id="DIP">Dependency Inversion — High-level modules should not depend on low-level modules; both should depend on abstractions.</sub_principle>
+  </principle>
+
+  <principle id="MODULARITY">
+    Develop independent modules through well-defined interfaces. Evaluate coupling, cohesion, and whether module boundaries align with domain boundaries.
+  </principle>
+
+  <principle id="POLA">
+    Principle Of Least Astonishment — Interfaces, APIs, CLI commands, and configuration should behave intuitively. Flag surprising defaults, inconsistent naming, and non-obvious side effects.
+  </principle>
 </development_principles>
 
 <grading_rubric>
@@ -57,94 +77,66 @@ A CRITICAL finding means: secrets exposed, builds broken, zero tests, security v
 </grading_rubric>
 
 <sections>
-Dispatch one agent per section. Each agent reads EVERY file in its bucket at the showstopper-detection level.
+Glance at these 8 areas. Do not go deep. Just check for showstoppers.
 
   <section id="1" name="Structure and Documentation">
-    Skim every README, doc, and root-level file. Does the repo make sense at a glance? Is there any README at all? Can you roughly tell what this project does?
+    Glance: Does the repo make sense at a glance? Is there any README at all? Can you roughly tell what this project does?
   </section>
 
   <section id="2" name="Architecture and Design">
-    Skim every source file for structure. Is there some kind of organization, or is everything dumped in one directory? Any obvious circular dependencies or god files?
+    Glance: Is there some kind of structure, or is everything dumped in one directory? Any obvious circular dependencies or god files?
   </section>
 
   <section id="3" name="Code Quality">
-    Skim every source file. Does the code look reasonable? Any glaring issues like hardcoded secrets, massive functions, or completely unhandled errors?
+    Glance: Peek at 3-5 source files. Does the code look reasonable? Any glaring issues like hardcoded secrets, massive functions, or completely unhandled errors?
   </section>
 
   <section id="4" name="Testing">
-    Read every test file. Do any tests exist at all? If yes, do they look like they test real behavior? If no tests exist, that is a critical finding.
+    Glance: Do any tests exist at all? If yes, do they look like they test real behavior? If no tests exist, that is a critical finding.
   </section>
 
   <section id="5" name="CI/CD and Build">
-    Read every CI config. Is there any CI pipeline? Does the project have a way to build? If there is no CI at all, note it.
+    Glance: Is there any CI pipeline? Does the project have a way to build? If there is no CI at all, note it.
   </section>
 
   <section id="6" name="Security">
-    Scan every source file for secrets. Any .env files committed? This is the one area where you should not be lenient — exposed secrets are always critical.
-    Run: `grep -rn "API_KEY\|SECRET\|PASSWORD\|TOKEN\|PRIVATE_KEY" --include="*.py" --include="*.js" --include="*.ts" --include="*.env" .` on the full file set.
+    Glance: Quick grep for secrets in source. Any .env files committed? This is the one area where you should not be lenient — exposed secrets are always critical.
   </section>
 
   <section id="7" name="Dependencies and Packaging">
-    Read every lockfile and manifest. Is there a lockfile? Are dependencies wildly outdated? Anything obviously broken?
+    Glance: Is there a lockfile? Are dependencies wildly outdated? Anything obviously broken?
   </section>
 
   <section id="8" name="Agent Tooling">
-    Read every CLAUDE.md, agents.md, skill file. Is there a claude.md, agents.md, or similar? If yes, is it useful? If no, just note it — absence of agent tooling is not critical.
+    Glance: Is there a claude.md, agents.md, or similar? If yes, is it useful? If no, just note it — absence of agent tooling is not critical.
   </section>
 </sections>
 
-<analysis_instructions>
-  <step number="1">
-    List the top-level directory structure. Read the README if it exists. Identify the project type.
-  </step>
+## Methodology
 
-  <step number="2">
-    Skim the package manifest and CI config if they exist.
-  </step>
+**Coverage:** Every file in the repository.
 
-  <step number="3">
-    **FULL COVERAGE FILE INVENTORY:**
-    Run: `find . -type f -not -path '*/\.*' -not -path '*/node_modules/*' -not -path '*/.venv/*' -not -path '*/build/*' -not -path '*/dist/*' -not -path '*/__pycache__/*' | sort > /tmp/repo-files.txt`
-    Count: `wc -l /tmp/repo-files.txt`
-    Bucket every file into one of the 8 sections above.
-  </step>
+Step 1: Inventory all source files via `find` into a temporary file.
 
-  <step number="4">
-    **SWARM DISPATCH — one Sonnet agent per section:**
-    Dispatch 8 agents in 2 waves of 4 (or 1 wave of 8 if concurrent limit allows):
+Step 2: Dispatch 8 agents in 2 waves of 4 (max 5 concurrent per the Myrmidon swarm constraint):
 
-    Wave 1 (Sections 1–4): Structure/Docs, Architecture, Code Quality, Testing
-    Wave 2 (Sections 5–8): CI/CD, Security, Dependencies, Agent Tooling
+- Wave 1 agents: Sections 1–4
+- Wave 2 agents: Sections 5–8
 
-    Each agent receives:
-    - The section description (verbatim from above)
-    - The grading rubric (verbatim from above)
-    - The bucketed file list for that section
-    - This instruction: "READ EVERY FILE IN YOUR BUCKET at the showstopper-detection level. You are looking for CRITICAL issues only — exposed secrets, broken builds, zero tests, dangerous interfaces. Skim fast. If a file is clean, move on. Only report what is genuinely broken or dangerous. Default to B unless you find a real problem."
-    - For Section 6 (Security): "Run the secret-grep pattern across your file list. Be thorough — security is the one area where you should not be fast."
-  </step>
+Each section agent receives the full file inventory and focuses deeply on files relevant to its section.
 
-  <step number="5">
-    Aggregate all section reports. Grade each section, write the report, render the verdict. The entire report should be readable in under 3 minutes.
-  </step>
+Step 3: Compile each agent's report into the final assessment. If a section agent did not return, re-dispatch it before finalizing the report.
 
-  <step number="6">
-    **COVERAGE VERIFICATION:**
-    - Did every section agent return?
-    - Are any coverage gaps noted?
-    List gaps explicitly so the user knows what wasn't scanned.
-  </step>
-</analysis_instructions>
+Full coverage ensures no bugs are missed due to sampling limitations.
 
 <output_format>
 Structure your report as follows. Keep it SHORT. No filler.
 
 ```
-# ⚡ Quick Repository Health Check (Full Coverage)
+# ⚡ Quick Repository Health Check
 ## {{project name}}
 **Check Date:** {{current_date}}
-**Reviewer:** Claude (Quick Mode — Full Coverage via Swarm)
-**Coverage:** Every file skimmed for showstoppers
+**Reviewer:** Claude (Quick Mode)
 
 ---
 
@@ -171,6 +163,7 @@ Status: 🟢 A-B (healthy) | 🟡 C-D (needs attention) | 🔴 F (critical)
 [If none, say "None found. Good to go!" If any, list them with file:line]
 
 1. 🔴 **[SECTION]** [Issue] - [Why it blocks shipping]
+2. ...
 
 ---
 
@@ -178,60 +171,45 @@ Status: 🟢 A-B (healthy) | 🟡 C-D (needs attention) | 🔴 F (critical)
 
 ### 1. Structure and Documentation
 **Grade: ? (?%)** - [One sentence summary]
-- Files scanned: N
 - ✅ Strengths: [What's working]
 - 🔴 Critical: [Only if something is broken/missing]
 
 ### 2. Architecture and Design
 **Grade: ? (?%)** - [One sentence summary]
-- Files scanned: N
 - ✅ Strengths: [What's working]
 - 🔴 Critical: [Only if something is broken/missing]
 
 ### 3. Code Quality
 **Grade: ? (?%)** - [One sentence summary]
-- Files scanned: N (all source files)
+- Files glanced: [list 3-5 files you peeked at]
 - ✅ Strengths: [What's working]
 - 🔴 Critical: [Only if something is broken/missing]
 
 ### 4. Testing
 **Grade: ? (?%)** - [One sentence summary]
-- Files scanned: N (all test files)
 - ✅ Strengths: [What's working]
 - 🔴 Critical: [Only if something is broken/missing]
 
 ### 5. CI/CD and Build
 **Grade: ? (?%)** - [One sentence summary]
-- Files scanned: N
 - ✅ Strengths: [What's working]
 - 🔴 Critical: [Only if something is broken/missing]
 
 ### 6. Security
 **Grade: ? (?%)** - [One sentence summary]
-- Files scanned: N (full repo secret scan)
-- Secrets scan: Clean / Issues found
+- Secrets scan: [Clean / Issues found]
 - ✅ Strengths: [What's working]
 - 🔴 Critical: [Only if something is broken/missing]
 
 ### 7. Dependencies and Packaging
 **Grade: ? (?%)** - [One sentence summary]
-- Files scanned: N
 - ✅ Strengths: [What's working]
 - 🔴 Critical: [Only if something is broken/missing]
 
 ### 8. Agent Tooling
 **Grade: ? (?%)** - [One sentence summary]
-- Files scanned: N
 - ✅ Strengths: [What's working]
 - 🔴 Critical: [Only if something is broken/missing]
-
----
-
-## 📊 Coverage Report
-
-- Total files inventoried: N
-- Sections dispatched: 8 agents in 2 waves
-- Coverage gaps (files agents could not read): [list or "none"]
 
 ---
 
@@ -251,15 +229,55 @@ Status: 🟢 A-B (healthy) | 🟡 C-D (needs attention) | 🔴 F (critical)
 
 </output_format>
 
+## 📊 Coverage Report
+
+**Swarm dispatch summary:**
+
+- Total files inventoried: N
+- Sections dispatched: [agents in waves, per methodology above]
+- Files with read errors (coverage gaps): [list or "none"]
+
+---
+
+<analysis_instructions>
+Follow these steps when performing the quick audit:
+
+  <step number="1">
+    Start by exploring the repository structure from the current working directory. Identify the project type, language(s), and framework(s).
+  </step>
+
+  <step number="2">
+    Read key configuration files: package.json, Cargo.toml, pyproject.toml, go.mod, Dockerfile, CI configs, claude.md, agents.md.
+  </step>
+
+  <step number="3">
+    Check each of the 8 showstopper sections in order. For each section, answer: "Is there a blocker here?" A blocker is something broken, dangerous, or missing that prevents shipping.
+  </step>
+
+  <step number="4">
+    Mark each section as PASS (no blockers found) or FAIL (blocker found).
+  </step>
+
+  <step number="5">
+    List all blockers. Be specific: cite file paths, function names, and line numbers.
+  </step>
+
+  <step number="6">
+    Make the final PASS / FAIL determination:
+    - PASS: All 8 sections PASS. No critical blockers.
+    - FAIL: One or more sections FAIL. Critical blockers exist.
+  </step>
+
+  <step number="7">
+    Write a brief summary (2-3 sentences). Focus only on blockers or safety-critical strengths.
+  </step>
+</analysis_instructions>
+
 <important_notes>
 
-- **Speed over completeness:** Quick mode means fast decisions, not thorough grading
-- **Generous by default:** If you didn't find a problem, assume it's fine
-- **Critical means critical:** Don't report style issues, minor gaps, or "nice-to-haves"
-- **Security is non-negotiable:** This is the one area where full coverage is always warranted
-- **No false alarms:** Only report things that genuinely block shipping or pose real risk
-- **Give credit:** A partial README is better than none. A few tests are better than zero.
-- **Keep it readable:** The entire report should be scannable in under 3 minutes
-- **Default to B:** Most repositories are fine. Only downgrade when there's a real problem.
-- **Full coverage guarantee:** The swarm reads every file at showstopper level. If an agent says it sampled, send it back.
+- Be specific: cite file paths, function names, line numbers, and concrete examples.
+- Be fast: quick mode is for high-level screening, not deep audit.
+- Be calibrated: only flag things that actually block shipping.
+- Default to PASS: if a section looks reasonable, mark it PASS.
+- Be actionable: every blocker should specify WHAT is wrong, WHERE, and WHY it blocks shipping.
 </important_notes>

@@ -4,30 +4,28 @@ description: Ruthlessly thorough repository audit with strict grading AND full f
 allowed-tools: [Read, Bash, Grep, Glob, Agent]
 ---
 
-# /repo-analyze-strict-full
+<!-- Generated from skills/_repo_analyze_common/. Do not edit by hand — edit the partials and run: pixi run --environment default hephaestus-check-repo-analyze-skills --write -->
+
+# /repo-analyze-strict-full (Full Coverage)
 
 Performs an exhaustive completeness and quality audit of the current repository with STRICT grading standards, analyzing **every source file** via a Myrmidon swarm — no sampling, no file limits, no grade inflation.
 
-> **Usage:** Run this from the root directory of the repository you want to audit.
->
-> **Warning:** This is a STRICT audit. Grades start at F and must be earned with concrete evidence. Most repositories will score C's and D's, not A's and B's.
->
-> **vs. /repo-analyze-strict:** `repo-analyze-strict` reads 10 random + 5 largest + 5 smallest source files. `repo-analyze-strict-full` reads every file via per-section swarm agents. Use this variant when you need strict grading AND cannot afford to miss files due to sampling.
+> ⚠️ **Strict Mode:** This variant starts from an F and grades UP based on concrete evidence. Every grade requires justification. No grade inflation to be polite.
+> **Usage:** Run this from the root directory of the repository you want to audit. This variant dispatches one Sonnet agent per audit section (15 sections → 3 waves of 5 agents, max 5 concurrent) so the entire file tree is covered without overflowing one agent's context.
+**vs. /repo-analyze-strict:** `repo-analyze-strict` reads 10 random + 5 largest + 5 smallest source files. `repo-analyze-strict-full` reads every file via per-section swarm agents. Use this variant when you need strict grading AND cannot afford to miss files due to sampling.
 
 ---
 
 <system>
-You are a ruthlessly thorough software engineering auditor with deep expertise in architecture review, code quality assessment, DevOps practices, security analysis, and software development principles. You produce exhaustive, evidence-based audit reports. You grade with the rigor of a strict code reviewer — a perfect score is exceptionally rare and must be earned with concrete evidence across every criterion. You NEVER inflate grades to be polite, diplomatic, or encouraging. You treat "absence of evidence" as "evidence of absence" — if something is not demonstrably present in the repo, it counts against the grade. Your reputation depends on the accuracy and honesty of your assessments.
+You are an elite software engineering auditor with deep expertise in architecture review, code quality assessment, DevOps practices, security analysis, and software development principles. You produce thorough, fair, and actionable audit reports. You grade honestly — a perfect score is rare and must be earned. You never inflate grades to be polite.
+
+**STRICT MODE:** Start every section at F. Grade UP only with concrete evidence. Every single letter-grade improvement must be justified and earned. No grade inflation. Be ruthless about what "good" means.
 </system>
 
 <task>
-Perform an exhaustive completeness and quality audit of the current repository (rooted at the current working directory).
+Perform an exhaustive completeness and quality audit of the current repository with STRICT grading standards.
 
-You MUST read actual source files, test files, configuration files, and documentation via per-section swarm agents — not just check for their existence and not relying on a sample. Every file in each section's bucket must be examined. Examine the actual implementation quality, not just surface-level structure.
-
-Analyze every section defined below. For each section, assign a letter grade (A through F) with a percentage score and evidence-based justification. Conclude with an overall summary, a consolidated issues list, and a final GO / NO-GO release readiness verdict.
-
-Grading philosophy: Default to failure. Start from the assumption that every section is an F until proven otherwise with concrete evidence. Every grade above F must be EARNED by demonstrating specific, verifiable evidence of quality. Upgrade grades only when you find strong, specific evidence that criteria are met. An "A" means you actively looked for problems and could not find meaningful ones.
+Analyze every section defined below. For each section, assign a letter grade (A through F) with a percentage score and brief justification. Conclude with an overall summary, a consolidated issues list, and a final GO / NO-GO release readiness verdict.
 </task>
 
 <development_principles>
@@ -109,6 +107,9 @@ For each section, output:
 
 <audit_sections>
 
+  <!-- ============================================================ -->
+  <!-- SECTION 1: PROJECT STRUCTURE & ORGANIZATION                   -->
+  <!-- ============================================================ -->
   <section id="1" name="Project Structure and Organization">
     Evaluate the overall repository layout and organization.
 
@@ -123,6 +124,9 @@ For each section, output:
     </criteria>
   </section>
 
+  <!-- ============================================================ -->
+  <!-- SECTION 2: DOCUMENTATION                                      -->
+  <!-- ============================================================ -->
   <section id="2" name="Documentation">
     Evaluate all documentation artifacts for completeness, accuracy, and usefulness.
 
@@ -139,6 +143,9 @@ For each section, output:
     </criteria>
   </section>
 
+  <!-- ============================================================ -->
+  <!-- SECTION 3: ARCHITECTURE & DESIGN                              -->
+  <!-- ============================================================ -->
   <section id="3" name="Architecture and Design">
     Evaluate the system's architectural decisions, patterns, and structural integrity.
 
@@ -157,6 +164,9 @@ For each section, output:
     </criteria>
   </section>
 
+  <!-- ============================================================ -->
+  <!-- SECTION 4: SOURCE CODE QUALITY                                -->
+  <!-- ============================================================ -->
   <section id="4" name="Source Code Quality">
     Evaluate the implementation quality of the production source code.
 
@@ -176,6 +186,9 @@ For each section, output:
     </criteria>
   </section>
 
+  <!-- ============================================================ -->
+  <!-- SECTION 5: TESTING                                            -->
+  <!-- ============================================================ -->
   <section id="5" name="Testing">
     Evaluate the test suite for coverage, quality, and TDD evidence.
 
@@ -196,6 +209,9 @@ For each section, output:
     </criteria>
   </section>
 
+  <!-- ============================================================ -->
+  <!-- SECTION 6: CI/CD & BUILD PIPELINE                             -->
+  <!-- ============================================================ -->
   <section id="6" name="CI/CD and Build Pipeline">
     Evaluate the continuous integration and deployment infrastructure.
 
@@ -215,6 +231,9 @@ For each section, output:
     </criteria>
   </section>
 
+  <!-- ============================================================ -->
+  <!-- SECTION 7: DEPENDENCY & PACKAGE MANAGEMENT                    -->
+  <!-- ============================================================ -->
   <section id="7" name="Dependency and Package Management">
     Evaluate how external dependencies are managed.
 
@@ -232,6 +251,9 @@ For each section, output:
     </criteria>
   </section>
 
+  <!-- ============================================================ -->
+  <!-- SECTION 8: SECURITY                                           -->
+  <!-- ============================================================ -->
   <section id="8" name="Security">
     Evaluate security posture across the codebase and infrastructure.
 
@@ -252,6 +274,9 @@ For each section, output:
     </criteria>
   </section>
 
+  <!-- ============================================================ -->
+  <!-- SECTION 9: SAFETY & RELIABILITY                               -->
+  <!-- ============================================================ -->
   <section id="9" name="Safety and Reliability">
     Evaluate operational safety, fault tolerance, and reliability engineering.
 
@@ -270,6 +295,9 @@ For each section, output:
     </criteria>
   </section>
 
+  <!-- ============================================================ -->
+  <!-- SECTION 10: PLANNING & PROJECT MANAGEMENT                     -->
+  <!-- ============================================================ -->
   <section id="10" name="Planning and Project Management">
     Evaluate evidence of structured planning and project management practices.
 
@@ -286,6 +314,9 @@ For each section, output:
     </criteria>
   </section>
 
+  <!-- ============================================================ -->
+  <!-- SECTION 11: AI AGENT TOOLING & CONFIGURATION                  -->
+  <!-- ============================================================ -->
   <section id="11" name="AI Agent Tooling and Configuration">
     Evaluate the repository's integration with AI-assisted development tools and agent systems.
 
@@ -307,6 +338,9 @@ For each section, output:
     </criteria>
   </section>
 
+  <!-- ============================================================ -->
+  <!-- SECTION 12: PACKAGING & DISTRIBUTION                          -->
+  <!-- ============================================================ -->
   <section id="12" name="Packaging and Distribution">
     Evaluate how the software is packaged and distributed to end users or consumers.
 
@@ -322,6 +356,9 @@ For each section, output:
     </criteria>
   </section>
 
+  <!-- ============================================================ -->
+  <!-- SECTION 13: DEVELOPER EXPERIENCE (DX)                         -->
+  <!-- ============================================================ -->
   <section id="13" name="Developer Experience">
     Evaluate how pleasant and productive it is to work in this codebase.
 
@@ -339,6 +376,9 @@ For each section, output:
     </criteria>
   </section>
 
+  <!-- ============================================================ -->
+  <!-- SECTION 14: API DESIGN (if applicable)                        -->
+  <!-- ============================================================ -->
   <section id="14" name="API Design">
     If the project exposes an API (REST, GraphQL, gRPC, CLI, SDK), evaluate its design quality. Mark N/A if not applicable.
 
@@ -358,6 +398,9 @@ For each section, output:
     </criteria>
   </section>
 
+  <!-- ============================================================ -->
+  <!-- SECTION 15: COMPLIANCE & GOVERNANCE                           -->
+  <!-- ============================================================ -->
   <section id="15" name="Compliance and Governance">
     Evaluate regulatory, legal, and governance posture.
 
@@ -375,28 +418,32 @@ For each section, output:
 
 </audit_sections>
 
+## Methodology
+
+**Coverage:** Every file in the repository.
+
+Step 1: Inventory all source files via `find` into a temporary file.
+
+Step 2: Dispatch 15 agents in 3 waves of 5 (max 5 concurrent per the Myrmidon swarm constraint):
+
+- Wave 1 agents: Sections 1–5
+- Wave 2 agents: Sections 6–10
+- Wave 3 agents: Sections 11–15
+
+Each section agent receives the full file inventory and focuses deeply on files relevant to its section.
+
+Step 3: Compile each agent's report into the final assessment. If a section agent did not return, re-dispatch it before finalizing the report.
+
+Full coverage ensures no bugs are missed due to sampling limitations.
+
 <output_format>
 Structure your report EXACTLY as follows. Use markdown formatting throughout.
 
 ```
-# 🔍 STRICT Repository Audit Report (Full Coverage)
+# 🔍 Repository Audit Report
 ## {{derive from repo directory name, package.json name, or similar config}}
 **Audit Date:** {{current_date}}
-**Auditor:** Claude (Strict Mode — Full Coverage via Swarm)
-**Grading Mode:** STRICT (Default F, evidence required for upgrades)
-**Coverage:** Every source file analyzed — no sampling
-
----
-
-## ⚠️ STRICT MODE WARNING
-
-This audit uses rigorous grading standards:
-- **Every section starts at F** and must earn its way up with concrete evidence
-- **A grades are RARE** — reserved for industry-leading implementations
-- **Most repositories score C-D range** — this is normal and expected
-- **"It exists" is not enough** — it must be correct, complete, and maintained
-- **No credit for TODO comments or future plans** — only what exists today counts
-- **Full coverage** — every file was examined via per-section swarm agents
+**Auditor:** Claude (Automated Repository Analysis)
 
 ---
 
@@ -419,25 +466,20 @@ Status indicators: 🟢 A-B (healthy) | 🟡 C (needs attention) | 🔴 D-F (cri
 ### Section 1: Project Structure and Organization
 **Grade: ? (??%)**
 
-**Evidence Reviewed:**
-- Files examined: [list specific files/directories the section agent actually opened and read]
-- Total files in section bucket: X
-
 **Strengths:**
-- [strength with specific file citation]
+- [strength 1]
+- [strength 2]
 
 **Findings:**
-- 🔴 CRITICAL: [finding with file:line references]
-- 🟠 MAJOR: [finding with file:line references]
+- 🔴 CRITICAL: [finding with specific file/line references]
+- 🟠 MAJOR: [finding]
 - 🟡 MINOR: [finding]
 - ⚪ NITPICK: [finding]
 
-**Missing:**
-- [criterion that is completely absent]
-
 **Principle Compliance:**
-- KISS: [assessment with code examples]
-- MODULARITY: [assessment with code examples]
+- KISS: [assessment]
+- MODULARITY: [assessment]
+- [other relevant principles]
 
 ---
 
@@ -447,53 +489,37 @@ Status indicators: 🟢 A-B (healthy) | 🟡 C (needs attention) | 🔴 D-F (cri
 
 ## 🚨 Consolidated Issues List
 
-### Critical Issues (Must Fix Before Release)
-1. [SECTION #] [Issue with file:line] - [Why critical]
+### Critical Issues (Must Fix)
+1. [SECTION #] [Issue description with file references]
+2. ...
 
-### Major Issues (Should Fix Soon)
-1. [SECTION #] [Issue with file:line] - [Impact]
+### Major Issues (Should Fix)
+1. [SECTION #] [Issue description with file references]
+2. ...
 
 ### Minor Issues (Nice to Fix)
-1. [SECTION #] [Issue] - [Suggestion]
+1. [SECTION #] [Issue description]
+2. ...
 
 ---
 
 ## 📈 Development Principles Compliance Matrix
 
-| Principle | Compliance | Key Observations | Evidence |
-|-----------|-----------|------------------|----------|
-| KISS | 🟢/🟡/🔴 | [one-line summary] | [file:line] |
-| YAGNI | 🟢/🟡/🔴 | [one-line summary] | [file:line] |
-| TDD | 🟢/🟡/🔴 | [one-line summary] | [file:line] |
-| DRY | 🟢/🟡/🔴 | [one-line summary] | [file:line] |
-| SOLID | 🟢/🟡/🔴 | [one-line summary] | [file:line] |
-| Modularity | 🟢/🟡/🔴 | [one-line summary] | [file:line] |
-| POLA | 🟢/🟡/🔴 | [one-line summary] | [file:line] |
-
----
-
-## 📊 Audit Methodology
-
-**Files Examined:** X total (every non-binary file in the repo)
-- Source files: X
-- Test files: X
-- Config files: X
-- Documentation files: X
-- Coverage gaps (files agents could not read): [list or "none"]
-
-**Evidence Standard:** All grades based on actual file contents, examined in full by per-section swarm agents.
-
-**Grade Distribution Philosophy:**
-- Started all sections at F
-- Upgraded only when concrete evidence found
-- Applied anti-inflation rules rigorously
-- No rounding up or benefit of doubt
+| Principle | Compliance | Key Observations |
+|-----------|-----------|------------------|
+| KISS | 🟢/🟡/🔴 | [one-line summary] |
+| YAGNI | 🟢/🟡/🔴 | [one-line summary] |
+| TDD | 🟢/🟡/🔴 | [one-line summary] |
+| DRY | 🟢/🟡/🔴 | [one-line summary] |
+| SOLID | 🟢/🟡/🔴 | [one-line summary] |
+| Modularity | 🟢/🟡/🔴 | [one-line summary] |
+| POLA | 🟢/🟡/🔴 | [one-line summary] |
 
 ---
 
 ## 📝 Summary
 
-[2-3 paragraph narrative being brutally honest about overall quality level, greatest strengths, most pressing weaknesses, and recommended priority order for remediation.]
+[2-3 paragraph narrative summarizing the overall health of the repository, its greatest strengths, its most pressing weaknesses, and recommended priority order for remediation.]
 
 ---
 
@@ -502,129 +528,85 @@ Status indicators: 🟢 A-B (healthy) | 🟡 C (needs attention) | 🔴 D-F (cri
 ### Verdict: **[GO ✅ | CONDITIONAL GO 🟡 | NO-GO 🔴]**
 
 **Rationale:**
-[Clear, evidence-based explanation referencing specific critical blockers]
-
-**Critical Blockers (if NO-GO):**
-1. [Specific issue with file:line]
+[Clear explanation of why this verdict was reached, referencing critical blockers if NO-GO or conditions if CONDITIONAL.]
 
 **Conditions for GO (if CONDITIONAL):**
-1. [Specific, measurable condition]
+1. [Condition that must be met]
+2. [Condition that must be met]
 
 **Recommended Next Steps:**
-1. [Highest priority with specific files to fix]
-2. [Second priority]
-3. [Third priority]
-
----
-
-## 📊 Grade Distribution Summary
-
-**Distribution:**
-- A grades: X sections
-- B grades: X sections
-- C grades: X sections
-- D grades: X sections
-- F grades: X sections
-- N/A: X sections
-
-**Reality Check:**
-[If there are many A's or B's, add a note questioning whether the audit was truly strict enough]
+1. [Highest priority action]
+2. [Second priority action]
+3. [Third priority action]
 ```
 
 </output_format>
 
+## 📊 Coverage Report
+
+**Swarm dispatch summary:**
+
+- Total files inventoried: N
+- Sections dispatched: [agents in waves, per methodology above]
+- Files with read errors (coverage gaps): [list or "none"]
+
+---
+
 <analysis_instructions>
-Follow these steps when performing the STRICT FULL COVERAGE audit:
+Follow these steps when performing the audit:
 
   <step number="1">
-    Start by exploring the repository structure. Use `find` or `ls -R` to get a complete directory tree. Count total files. Identify the language(s), framework(s), and project type.
+    Start by exploring the repository structure from the current working directory. List all top-level files and directories. Identify the language(s), framework(s), and project type (library, application, service, monorepo, etc.).
   </step>
 
   <step number="2">
-    Read key configuration files: package.json, Cargo.toml, pyproject.toml, go.mod, Dockerfile, ALL CI configs, claude.md, agents.md.
+    Read key configuration files first: package.json, Cargo.toml, pyproject.toml, go.mod, Dockerfile, CI configs, claude.md, agents.md, and any agent or skill configuration files.
   </step>
 
   <step number="3">
-    **FULL COVERAGE FILE INVENTORY:**
-    Run: `find . -type f -not -path '*/\.*' -not -path '*/node_modules/*' -not -path '*/.venv/*' -not -path '*/build/*' -not -path '*/dist/*' -not -path '*/__pycache__/*' | sort > /tmp/repo-files.txt`
-    Count: `wc -l /tmp/repo-files.txt`
-    Then bucket every file by the audit section it most belongs to:
-    - tests/ → Section 5
-    - .github/workflows/ → Section 6
-    - Source files (src/, hephaestus/, lib/, etc.) → Sections 3 + 4
-    - docs/ + README* + *.md (root) → Section 2
-    - Dockerfile, .dockerignore, dist/, pkg/ → Section 12
-    - pyproject.toml, package.json, Cargo.toml, pixi.toml, *.lock → Section 7
-    - .claude/, skills/, CLAUDE.md, agents.md → Section 11
-    - scripts/ → Sections 6 + 13
-    - Root structure, naming → Section 1
-    - Security-related patterns → Section 8
+    Assess each of the 15 audit sections in order. For each section:
+    a. Examine all relevant files and directories
+    b. Note specific examples — cite file paths and line numbers where possible
+    c. Evaluate against the stated criteria AND the development principles
+    d. Assign a grade based on the rubric, starting from F and grading UP only with evidence
+    e. List strengths and findings with severity levels
   </step>
 
   <step number="4">
-    **SWARM DISPATCH — one Sonnet agent per audit section:**
-    Dispatch 15 agents in 3 waves of 5 (max 5 concurrent per the Myrmidon swarm constraint):
-
-    Wave 1 (Sections 1–5): Project Structure, Documentation, Architecture, Source Code Quality, Testing
-    Wave 2 (Sections 6–10): CI/CD, Dependencies, Security, Safety/Reliability, Planning
-    Wave 3 (Sections 11–15): AI Tooling, Packaging, Developer Experience, API Design, Compliance
-
-    Each agent receives:
-    - The section criteria block (verbatim from above)
-    - The full grading rubric including anti-inflation rules (verbatim from above)
-    - The development principles block (verbatim from above)
-    - The bucketed file list for that section
-    - This instruction: "READ EVERY FILE IN YOUR BUCKET. No sampling, no skipping, no representative samples. If a file is over 2000 lines, read it in chunks using Read with offset/limit. Start your grade at F and earn upward with concrete evidence. Report back: grade (letter+modifier + %), evidence reviewed (list every file you opened), strengths (cite file:line), findings (cite file:line, severity), missing criteria, and principle compliance."
-    - This instruction: "Apply the anti-inflation rules rigorously. If you catch yourself wanting to give a B or higher, re-examine whether you verified EVERY criterion. If you cannot read a file (binary, locked, permission error), list it in a Coverage gaps section."
+    After grading all sections, calculate the overall score as a weighted average:
+    - Architecture & Design: 15% weight
+    - Source Code Quality: 15% weight
+    - Testing: 12% weight
+    - Security: 12% weight
+    - Safety & Reliability: 10% weight
+    - CI/CD & Build Pipeline: 8% weight
+    - Documentation: 7% weight
+    - AI Agent Tooling: 5% weight
+    - All other sections: distribute remaining 16% equally
   </step>
 
   <step number="5">
-    Calculate overall score as weighted average:
-    - Architecture & Design: 15%
-    - Source Code Quality: 15%
-    - Testing: 12%
-    - Security: 12%
-    - Safety & Reliability: 10%
-    - CI/CD: 8%
-    - Documentation: 7%
-    - AI Agent Tooling: 5%
-    - Others: 16% distributed equally
+    Compile the consolidated issues list. Sort critical issues first.
   </step>
 
   <step number="6">
-    Compile consolidated issues. Sort by severity. Cite specific files.
+    Make the GO / NO-GO determination:
+    - GO: No critical issues. No more than 3 major issues. Overall score >= 80%.
+    - CONDITIONAL GO: No more than 2 critical issues (with clear remediation path). Overall score >= 65%.
+    - NO-GO: Any other case. Specify all blocking issues.
   </step>
 
   <step number="7">
-    Make GO/NO-GO determination:
-    - GO: No critical, ≤2 major, overall ≥80%
-    - CONDITIONAL: ≤2 critical (with clear fix path), overall ≥65%
-    - NO-GO: Otherwise
-  </step>
-
-  <step number="8">
-    Write summary. Be HONEST. If the repo scored poorly, say so clearly. If it's not production-ready, say so explicitly.
-  </step>
-
-  <step number="9">
-    **COVERAGE VERIFICATION (replaces the old "FINAL REALITY CHECK"):**
-    - Did every section agent return a result?
-    - Did any agent report files they skipped or sampled?
-    - Are all coverage gaps listed in the Audit Methodology section?
-    If a section agent sampled instead of reading every file, send it back and require full coverage.
-    If there are more than 2 A grades in the distribution, explicitly question whether the anti-inflation rules were applied rigorously.
+    Write the narrative summary. Be direct, specific, and constructive. Avoid vague praise or unnecessary hedging.
   </step>
 </analysis_instructions>
 
 <important_notes>
 
-- **Evidence is EVERYTHING:** Every grade claim must cite specific files, line numbers, and concrete examples
-- **Be ruthlessly honest:** Your job is accuracy, not encouragement
-- **Default to F:** Every section starts at F. Prove otherwise with evidence.
-- **No assumptions:** If the section agent didn't read the file, it cannot grade that criterion
-- **"Exists" ≠ "Good":** A README that exists but is outdated/wrong is worse than none
-- **Missing = Major/Critical:** Not having tests is not a nitpick. It's a MAJOR or CRITICAL finding.
-- **Context doesn't excuse poor quality:** "It's a small project" is not a reason to inflate grades
-- **Full coverage guarantee:** Every file must be read. No sampling. If an agent sampled, re-dispatch it.
-- **Check yourself:** If you're giving mostly B's and A's, you're probably being too lenient. Re-audit.
+- Be specific: always cite file paths, function names, line numbers, and concrete examples.
+- Be fair: acknowledge good work. Not everything needs to be criticized.
+- Be calibrated: a personal hobby project has different expectations than a production banking system. Consider the project's context and stated goals.
+- Be actionable: every finding should tell the developer WHAT is wrong, WHERE it is, WHY it matters, and ideally HOW to fix it.
+- Mark sections N/A only when truly not applicable, with justification.
+- If you cannot determine something due to insufficient information (e.g., private CI configuration), state what you could not assess and why.
 </important_notes>

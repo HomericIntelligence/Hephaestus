@@ -124,6 +124,17 @@ repos:
         files: '^(docs/plugin-installation\.md|skills/)'
         pass_filenames: false
 
+  # repo-analyze* skill generator drift check
+  - repo: local
+    hooks:
+      - id: hephaestus-check-repo-analyze-skills
+        name: hephaestus check repo-analyze skill generation
+        description: Ensure skills/repo-analyze*/SKILL.md are regenerated from skills/_repo_analyze_common/ partials
+        entry: pixi run --environment default hephaestus-check-repo-analyze-skills
+        language: system
+        files: '^skills/(repo-analyze[^/]*|_repo_analyze_common)/.*$'
+        pass_filenames: false
+
   # Test structure enforcement
   - repo: local
     hooks:
