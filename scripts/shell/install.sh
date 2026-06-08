@@ -15,7 +15,6 @@
 #   0 — all checks passed (or installed successfully)
 #   1 — one or more checks failed
 #
-# shellcheck disable=SC2015  # A && B || C patterns are intentional best-effort installs
 set -uo pipefail
 
 # ─── Shared helpers (colors, counters, has_cmd, apt_install, etc.) ────────────
@@ -286,6 +285,7 @@ else
                 sudo apt-get install -y gh >/dev/null 2>&1
             ) && _gh_installed=true
         fi
+        # shellcheck disable=SC2015  # ternary on $_gh_installed; check_pass never fails
         $_gh_installed && check_pass "gh installed" || check_fail "gh — install failed (see https://cli.github.com)"
     fi
 fi
@@ -305,6 +305,7 @@ else
             echo -e "    ${BLUE}→${NC} Installing Node.js via apt..."
             apt_install nodejs && apt_install npm && _npm_installed=true
         fi
+        # shellcheck disable=SC2015  # ternary on $_npm_installed; check_pass never fails
         $_npm_installed && check_pass "npm installed" || check_fail "npm — install failed"
     fi
 fi
@@ -369,6 +370,7 @@ if has_cmd python3; then
         check_fail "python3 $PY_VER — need >= 3.10"
         if $INSTALL; then
             echo -e "    ${BLUE}→${NC} Installing python3.10..."
+            # shellcheck disable=SC2015  # A && B && C || D — failure of A or B → check_fail (correct)
             apt_install python3.10 \
                 && sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 10 >/dev/null 2>&1 \
                 && check_pass "python3.10 installed" || check_fail "python3.10 — install failed"
@@ -399,10 +401,11 @@ if python3 -c "import venv" 2>/dev/null; then
 else
     check_fail "python3-venv — NOT FOUND"
     if $INSTALL; then
-        apt_install python3.12-venv \
-            || apt_install python3-venv \
-            && check_pass "python3-venv installed" \
-            || check_fail "python3-venv — install failed"
+        if apt_install python3.12-venv || apt_install python3-venv; then
+            check_pass "python3-venv installed"
+        else
+            check_fail "python3-venv — install failed"
+        fi
     fi
 fi
 
@@ -413,10 +416,12 @@ else
     check_fail "huggingface-cli — NOT FOUND"
     if $INSTALL && has_cmd pip3; then
         echo -e "    ${BLUE}→${NC} Installing huggingface_hub[cli]..."
-        pip3 install --break-system-packages "huggingface_hub[cli]" >/dev/null 2>&1 \
-            || pip3 install --user "huggingface_hub[cli]" >/dev/null 2>&1 \
-            && check_pass "huggingface-cli installed" \
-            || check_fail "huggingface-cli — install failed"
+        if pip3 install --break-system-packages "huggingface_hub[cli]" >/dev/null 2>&1 \
+            || pip3 install --user "huggingface_hub[cli]" >/dev/null 2>&1; then
+            check_pass "huggingface-cli installed"
+        else
+            check_fail "huggingface-cli — install failed"
+        fi
     fi
 fi
 
@@ -428,10 +433,12 @@ else
     check_fail "nats-py — NOT FOUND (required by myrmidon workers)"
     if $INSTALL; then
         echo -e "    ${BLUE}→${NC} Installing nats-py..."
-        pip3 install --break-system-packages nats-py >/dev/null 2>&1 \
-            || pip3 install --user nats-py >/dev/null 2>&1 \
-            && check_pass "nats-py installed" \
-            || check_fail "nats-py — install failed (try: pip3 install nats-py)"
+        if pip3 install --break-system-packages nats-py >/dev/null 2>&1 \
+            || pip3 install --user nats-py >/dev/null 2>&1; then
+            check_pass "nats-py installed"
+        else
+            check_fail "nats-py — install failed (try: pip3 install nats-py)"
+        fi
     fi
 fi
 
@@ -485,6 +492,7 @@ elif [[ -d "$ODYSSEY_DIR" ]]; then
     check_warn "mojo — pixi env not initialized in $ODYSSEY_DIR"
     if $INSTALL && has_cmd pixi; then
         echo -e "    ${BLUE}→${NC} Running pixi install in $ODYSSEY_DIR..."
+        # shellcheck disable=SC2015  # B is check_pass (never fails); ternary is safe
         pixi install -q --manifest-path "$ODYSSEY_DIR/pixi.toml" >/dev/null 2>&1 \
             && check_pass "mojo installed via pixi" \
             || check_warn "mojo — pixi install failed (check $ODYSSEY_DIR/pixi.toml)"
@@ -520,6 +528,7 @@ if should_check_worker; then
     }
 
     if has_cmd go || [[ -x /usr/local/go/bin/go ]]; then
+        # shellcheck disable=SC2015  # echo never fails inside $(); ternary is safe
         GO_BIN=$(has_cmd go && echo "go" || echo "/usr/local/go/bin/go")
         GO_VER=$(get_version "$GO_BIN" version)
         if version_gte "$GO_VER" "$GO_MIN"; then
@@ -535,6 +544,7 @@ if should_check_worker; then
 
     # templ (Go HTML template generator used by Atlas)
     # Use /usr/local/go/bin/go directly in case Go was just installed and PATH not yet refreshed
+    # shellcheck disable=SC2015  # echo never fails inside $(); ternary is safe
     GO_BIN_FOR_TEMPL=$(has_cmd go && echo "go" || echo "/usr/local/go/bin/go")
     if has_cmd templ; then
         check_pass "templ $(get_version templ version)"
@@ -542,6 +552,7 @@ if should_check_worker; then
         check_fail "templ — NOT FOUND (required by Atlas dashboard)"
         if $INSTALL && [[ -x "$GO_BIN_FOR_TEMPL" ]]; then
             echo -e "    ${BLUE}→${NC} Installing templ..."
+            # shellcheck disable=SC2015  # B is check_pass (never fails); ternary is safe
             GOBIN=$HOME/.local/bin "$GO_BIN_FOR_TEMPL" install github.com/a-h/templ/cmd/templ@latest >/dev/null 2>&1 \
                 && check_pass "templ installed to ~/.local/bin" \
                 || check_fail "templ — install failed"
@@ -561,6 +572,7 @@ NATS_MIN="2.10"
 NATS_BIN="${NATS_SERVER_BIN:-${HOME}/.local/bin/nats-server}"
 
 if has_cmd nats-server || [[ -x "$NATS_BIN" ]]; then
+    # shellcheck disable=SC2015  # echo never fails inside $(); ternary is safe
     NATS_EXEC=$(has_cmd nats-server && echo "nats-server" || echo "$NATS_BIN")
     NATS_VER=$(get_version "$NATS_EXEC" --version 2>/dev/null || "$NATS_EXEC" -v 2>&1 | grep -oP '\d+\.\d+[\.\d]*' | head -1)
     if version_gte "$NATS_VER" "$NATS_MIN"; then
@@ -576,6 +588,7 @@ else
         NATS_PKG="nats-server-v2.10.24-linux-${GOARCH}.tar.gz"
         NATS_URL="https://github.com/nats-io/nats-server/releases/download/v2.10.24/$NATS_PKG"
         mkdir -p ~/.local/bin
+        # shellcheck disable=SC2015  # B is check_pass (never fails); ternary is safe
         curl -fsSL "$NATS_URL" -o "/tmp/$NATS_PKG" \
             && tar -xzf "/tmp/$NATS_PKG" -C /tmp \
             && mv "/tmp/nats-server-v2.10.24-linux-${GOARCH}/nats-server" ~/.local/bin/nats-server \
@@ -598,6 +611,7 @@ else
         NATS_CLI_PKG="nats-0.1.5-linux-${GOARCH}.zip"
         NATS_CLI_URL="https://github.com/nats-io/natscli/releases/download/v0.1.5/$NATS_CLI_PKG"
         mkdir -p ~/.local/bin
+        # shellcheck disable=SC2015  # B is check_pass (never fails); ternary is safe
         curl -fsSL "$NATS_CLI_URL" -o "/tmp/$NATS_CLI_PKG" \
             && unzip -q "/tmp/$NATS_CLI_PKG" -d /tmp/nats-cli \
             && mv /tmp/nats-cli/nats-*/nats ~/.local/bin/nats \
@@ -636,6 +650,7 @@ if should_check_worker; then
     else
         check_warn "podman socket not active — run: systemctl --user enable --now podman.socket"
         if $INSTALL; then
+            # shellcheck disable=SC2015  # B is check_pass (never fails); ternary is safe
             systemctl --user enable --now podman.socket 2>/dev/null \
                 && check_pass "podman socket enabled" \
                 || check_warn "podman socket — could not enable (may need desktop session)"
@@ -687,6 +702,7 @@ if should_check_control; then
         else
             check_fail "conan default profile missing"
             if $INSTALL; then
+                # shellcheck disable=SC2015  # B is check_pass (never fails); ternary is safe
                 "$conan_bin" profile detect --force >/dev/null 2>&1 \
                     && check_pass "conan profile created" \
                     || check_fail "conan profile detect failed"
@@ -762,6 +778,7 @@ if has_cmd claude; then
         else
             check_fail "marketplace $mkt_name — NOT REGISTERED"
             if $INSTALL; then
+                # shellcheck disable=SC2015  # B is check_pass (never fails); ternary is safe
                 claude plugin marketplace add "https://github.com/$mkt_source" --name "$mkt_name" 2>/dev/null \
                     && check_pass "marketplace $mkt_name added" \
                     || check_fail "marketplace $mkt_name — add failed"
@@ -786,6 +803,7 @@ if has_cmd claude; then
         else
             check_fail "plugin $plugin_name — NOT INSTALLED"
             if $INSTALL; then
+                # shellcheck disable=SC2015  # B is check_pass (never fails); ternary is safe
                 claude plugin install "${plugin_name}@${mkt}" --scope user 2>/dev/null \
                     && check_pass "plugin $plugin_name installed" \
                     || check_fail "plugin $plugin_name — install failed"
@@ -804,6 +822,7 @@ if has_cmd claude; then
         else
             check_fail "plugin $plugin_name — NOT INSTALLED"
             if $INSTALL; then
+                # shellcheck disable=SC2015  # B is check_pass (never fails); ternary is safe
                 claude plugin install "${plugin_name}@${mkt}" --scope project 2>/dev/null \
                     && check_pass "plugin $plugin_name installed" \
                     || check_fail "plugin $plugin_name — install failed"
@@ -824,10 +843,12 @@ for pytool in pre-commit ruff mypy; do
     else
         check_fail "$pytool — NOT FOUND"
         if $INSTALL && has_cmd pip3; then
-            pip3 install --break-system-packages "$pytool" >/dev/null 2>&1 \
-                || pip3 install --user "$pytool" >/dev/null 2>&1 \
-                && check_pass "$pytool installed" \
-                || check_fail "$pytool — install failed"
+            if pip3 install --break-system-packages "$pytool" >/dev/null 2>&1 \
+                || pip3 install --user "$pytool" >/dev/null 2>&1; then
+                check_pass "$pytool installed"
+            else
+                check_fail "$pytool — install failed"
+            fi
         fi
     fi
 done
