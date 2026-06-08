@@ -224,7 +224,8 @@ class TestProcessRepoSkipLogic:
         with (
             patch.object(loop_runner, "_rebase_main", return_value="deadbeef"),
             patch.object(loop_runner, "_list_open_issue_numbers", return_value=[]),
-            patch.object(loop_runner, "_count_failing_prs", return_value=0),
+            # When cfg.issues is non-empty, the gate condition (phase == "drive-green" and not cfg.issues)
+            # is False, so _count_failing_prs is NOT called (operator scope bypasses the gate entirely).
             patch.object(loop_runner, "run_phase", side_effect=lambda **kw: _ok(kw["phase"])),
         ):
             result = process_repo("r", loop_idx=1, cfg=cfg)

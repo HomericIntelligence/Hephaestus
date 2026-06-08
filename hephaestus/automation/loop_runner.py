@@ -129,12 +129,6 @@ def _parse_issue_list(value: str) -> list[int]:
     return issues
 
 
-# drive-green used to be issue-gated, but #819 inverted its discovery to
-# "any failing open PR" via a separate _count_failing_prs gate below. Set
-# is kept (currently empty) so any future phase that genuinely needs an
-# issue list has one place to opt in.
-PHASES_REQUIRING_ISSUES: frozenset[str] = frozenset()
-
 # Sentinel for cooperative shutdown on SIGINT/SIGTERM. Worker threads
 # check this between phases so an in-flight subprocess can still finish
 # but the next phase is skipped.
@@ -1088,13 +1082,6 @@ def _process_repo_inner(
             LOG.info("[%s] phase %s SKIP (not final loop)", repo, phase)
             result.phases.append(
                 PhaseResult(name=phase, skipped=True, skip_reason="not final loop")
-            )
-            continue
-
-        if phase in PHASES_REQUIRING_ISSUES and not open_issues:
-            LOG.info("[%s] phase %s SKIP (no open issues)", repo, phase)
-            result.phases.append(
-                PhaseResult(name=phase, skipped=True, skip_reason="no open issues")
             )
             continue
 
