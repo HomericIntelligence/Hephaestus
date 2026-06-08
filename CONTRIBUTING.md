@@ -63,9 +63,9 @@ Why the asymmetry:
   next to the other entries. Full local reproduction of the development
   environment (lint, mypy, test, pre-commit) is only supported on Linux.
 - **The wheel supports the broader matrix advertised in `pyproject.toml`.**
-  `requires-python` and the `Programming Language :: Python :: 3.X` classifiers
-  describe what `pip install` will accept. No platform-restriction classifier
-  is published, so the wheel is installable on macOS and Windows.
+  `requires-python` in `pyproject.toml` describes what `pip install` will accept.
+  No platform-restriction classifier is published, so the wheel is installable
+  on macOS and Windows.
 - **Windows wheels pull in `tzdata` automatically.** The
   `"tzdata; platform_system == 'Windows'"` marker in `[project.dependencies]`
   exists because `hephaestus.github.rate_limit` uses `zoneinfo.ZoneInfo`,
@@ -75,7 +75,7 @@ Why the asymmetry:
 If you need to develop or run the test suite on macOS or Windows, install the
 wheel into a plain virtualenv (`pip install -e '.[dev]'`) — pixi tooling is
 not available there, and any subpackage with POSIX-only assumptions is out
-of scope for cross-platform fixes under this issue (track those separately).
+of scope for this project's supported development environment (track those separately).
 
 ## Code Style
 
