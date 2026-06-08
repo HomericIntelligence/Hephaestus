@@ -771,3 +771,57 @@ class TestStateSkipLabel:
 
         mock_add.assert_called_once_with(normal)
         assert 43 not in impl.resolver.completed
+
+
+class TestNoChangesProducedAppliesStateSkip:
+    """When the agent produces no commits vs main, the work already landed.
+
+    ``_implement_issue`` must: (1) apply ``state:skip`` to the issue so future
+    loops don't re-attempt it, (2) return ``WorkerResult(success=True)`` so the
+    issue does NOT count as a failure and inflate the exit code.
+    """
+
+    @pytest.fixture
+    def impl(self, tmp_path: Path) -> IssueImplementer:
+        options = ImplementerOptions(
+            issues=[1],
+            dry_run=False,
+            enable_learn=False,
+            enable_follow_up=False,
+            enable_ui=False,
+        )
+        with patch("hephaestus.automation.implementer.get_repo_root", return_value=tmp_path):
+            return IssueImplementer(options)
+
+    def test_no_changes_returns_success_and_applies_state_skip(
+        self, impl: IssueImplementer, tmp_path: Path
+    ) -> None:
+        worktree_path = tmp_path / "wt"
+        worktree_path.mkdir()
+        no_changes_error = RuntimeError(
+            "No changes produced for issue HomericIntelligence/ProjectHephaestus#736: "
+            "branch '736-auto-impl' has no commits vs 'main'. "
+            "Skipping PR creation (the implementation session made no net change)."
+        )
+        with (
+            patch(
+                "hephaestus.automation.implementer.find_pr_for_issue",
+                return_value=None,
+            ),
+            patch.object(impl.worktree_manager, "create_worktree", return_value=worktree_path),
+            patch.object(impl, "_save_state"),
+            patch.object(impl, "_has_plan", return_value=True),
+            patch("hephaestus.automation.implementer.is_plan_review_go", return_value=True),
+            patch("hephaestus.automation.implementer.fetch_issue_info"),
+            patch.object(impl, "_run_advise", return_value=""),
+            patch.object(impl, "_run_claude_code", return_value="session-id"),
+            patch.object(impl, "_finalize_pr", side_effect=no_changes_error),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_issue_add_labels"
+            ) as mock_label,
+        ):
+            result = impl.phase_runner._implement_issue(736)
+
+        assert result.success is True
+        assert result.issue_number == 736
+        mock_label.assert_called_once_with(736, ["state:skip"])

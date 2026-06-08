@@ -694,6 +694,14 @@ class CIDriver:
                         )
                     if outcome == "DIRTY":
                         return self._resolve_dirty_pr(issue_number, pr_number, acquired_slot)
+                    if outcome == "BLOCKED":
+                        # Branch-protection gate (e.g. unresolved conversations).
+                        # Nothing for the bot to fix — leave armed and yield success.
+                        return WorkerResult(
+                            issue_number=issue_number,
+                            success=True,
+                            pr_number=pr_number,
+                        )
                 return WorkerResult(
                     issue_number=issue_number,
                     success=merge_ok,
@@ -1413,7 +1421,10 @@ class CIDriver:
         Returns:
             One of ``"MERGED"``, ``"CLOSED"``, ``"FAILING"``, ``"DIRTY"`` (the
             PR has a merge conflict and will never merge while armed — caller
-            should rebase/resolve), or ``"TIMEOUT"``.
+            should rebase/resolve), ``"BLOCKED"`` (branch-protection gate such
+            as unresolved conversations or a required human review blocks the
+            merge — nothing the bot can fix; caller should leave armed and
+            yield), or ``"TIMEOUT"``.
 
         """
         if self.options.dry_run:
@@ -1464,6 +1475,24 @@ class CIDriver:
                     merge_status,
                 )
                 return "DIRTY"
+
+            # A BLOCKED PR is gated by branch protection (e.g. required
+            # conversation resolution, required human review) rather than by
+            # CI checks. Exit early only when we can confirm the block is a
+            # branch-protection gate and not just in-flight checks: GitHub
+            # also reports BLOCKED while required checks are still running.
+            # Guard: no failing AND no pending required checks.
+            if merge_status == "BLOCKED" and not failing:
+                pending = self._pending_required_check_names(pr_number)
+                if not pending:
+                    logger.warning(
+                        "Issue #%s: PR #%s is BLOCKED by branch protection "
+                        "(unresolved conversations or required review) — "
+                        "cannot auto-merge; leaving armed and exiting poll early",
+                        issue_number,
+                        pr_number,
+                    )
+                    return "BLOCKED"
 
             sleep_secs = min(2**attempt, 60)
             if elapsed + sleep_secs > max_wait:
@@ -1657,7 +1686,7 @@ class CIDriver:
             # re-arms and routes to the fix / _resolve_dirty_pr handling.
             self._clear_arming_state(issue_number)
             return None
-        # TIMEOUT — still pending; leave armed for a later pass to resolve.
+        # TIMEOUT / BLOCKED — still pending; leave armed for a later pass to resolve.
         return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
     def _load_impl_session_id(self, issue_number: int) -> str | None:
@@ -1833,6 +1862,29 @@ class CIDriver:
             for c in required
             if c.get("status") == "completed" and c.get("conclusion") == "failure"
         ]
+
+    def _pending_required_check_names(self, pr_number: int) -> list[str]:
+        """Return names of required checks that are still in flight (not completed).
+
+        Used by the BLOCKED early-exit guard in ``_wait_for_pr_terminal`` to
+        distinguish branch-protection blocks (all checks green but conversations
+        unresolved) from pending-CI blocks (checks still running).  Returns an
+        empty list on lookup failure — the caller then conservatively assumes no
+        checks are pending and exits the poll.
+        """
+        try:
+            checks = gh_pr_checks(pr_number, dry_run=self.options.dry_run)
+        except Exception as exc:
+            logger.info(
+                "PR #%s: failed to fetch CI checks for BLOCKED pending guard (%s)",
+                pr_number,
+                exc,
+            )
+            return []
+        if not checks:
+            return []
+        required = [c for c in checks if c.get("required")] or checks
+        return [c.get("name", "") for c in required if c.get("status") != "completed"]
 
     def _force_engagement_prompt(
         self,

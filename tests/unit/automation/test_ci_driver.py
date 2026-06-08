@@ -2220,6 +2220,58 @@ class TestWaitForPrTerminal:
         # With a 0s budget the very first sleep would overrun → no sleep at all.
         mock_sleep.assert_not_called()
 
+    def test_open_blocked_no_failing_no_pending_returns_blocked(self, driver: CIDriver) -> None:
+        # OPEN, mergeStateStatus BLOCKED (e.g. unresolved conversations), no
+        # failing and no pending CI checks → branch-protection gate, exit immediately.
+        with (
+            patch.object(
+                driver,
+                "_gh_pr_state",
+                return_value={"state": "OPEN", "mergeStateStatus": "BLOCKED"},
+            ),
+            patch.object(driver, "_failing_required_check_names", return_value=[]),
+            patch.object(driver, "_pending_required_check_names", return_value=[]),
+            patch("hephaestus.automation.ci_driver.time.sleep") as mock_sleep,
+        ):
+            assert driver._wait_for_pr_terminal(1, 2) == "BLOCKED"
+        mock_sleep.assert_not_called()
+
+    def test_open_blocked_with_failing_checks_does_not_short_circuit(
+        self, driver: CIDriver, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # OPEN, mergeStateStatus BLOCKED, but a required check is ALSO failing.
+        # GitHub reports BLOCKED while checks are in flight; the failing check
+        # takes priority — return FAILING, not BLOCKED.
+        with (
+            patch.object(
+                driver,
+                "_gh_pr_state",
+                return_value={"state": "OPEN", "mergeStateStatus": "BLOCKED"},
+            ),
+            patch.object(driver, "_failing_required_check_names", return_value=["lint"]),
+        ):
+            assert driver._wait_for_pr_terminal(1, 2) == "FAILING"
+
+    def test_open_blocked_with_pending_checks_does_not_short_circuit(
+        self, driver: CIDriver, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # OPEN, mergeStateStatus BLOCKED, no failing checks but a required check
+        # is still in progress — GitHub reports BLOCKED while checks are still
+        # running. Must NOT exit early; should continue polling (TIMEOUT here
+        # because HEPH_PR_MERGE_MAX_WAIT=0).
+        monkeypatch.setenv("HEPH_PR_MERGE_MAX_WAIT", "0")
+        with (
+            patch.object(
+                driver,
+                "_gh_pr_state",
+                return_value={"state": "OPEN", "mergeStateStatus": "BLOCKED"},
+            ),
+            patch.object(driver, "_failing_required_check_names", return_value=[]),
+            patch.object(driver, "_pending_required_check_names", return_value=["ci/build"]),
+            patch("hephaestus.automation.ci_driver.time.sleep"),
+        ):
+            assert driver._wait_for_pr_terminal(1, 2) == "TIMEOUT"
+
     def test_dry_run_short_circuits_to_timeout(
         self, mock_options: CIDriverOptions, tmp_path: Path
     ) -> None:
