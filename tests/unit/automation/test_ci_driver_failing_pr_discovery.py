@@ -199,6 +199,28 @@ class TestDiscoverFailingPrs:
                 result = ci_driver._discover_failing_prs()
         assert result == {}
 
+    def test_discover_failing_prs_returns_empty_on_gh_timeout(self, ci_driver: CIDriver) -> None:
+        """Discovery returns empty dict when gh pr list times out (docstring contract)."""
+        import subprocess
+
+        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+            mock_repo_info.return_value = ("MyOrg", "MyRepo")
+            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+                mock_gh_call.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=30)
+                result = ci_driver._discover_failing_prs()
+        assert result == {}
+
+    def test_discover_failing_prs_returns_empty_on_missing_gh_binary(
+        self, ci_driver: CIDriver
+    ) -> None:
+        """Discovery returns empty dict when the gh binary is missing/unexecutable."""
+        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+            mock_repo_info.return_value = ("MyOrg", "MyRepo")
+            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+                mock_gh_call.side_effect = FileNotFoundError(2, "No such file or directory", "gh")
+                result = ci_driver._discover_failing_prs()
+        assert result == {}
+
     def test_discover_failing_prs_logs_warning_on_cap_hit(self, ci_driver: CIDriver) -> None:
         """A warning is logged when the 1000-PR cap is hit."""
         mock_output = [

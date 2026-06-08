@@ -477,7 +477,12 @@ class CIDriver:
                 ],
             )
             pulls: list[dict[str, Any]] = json.loads(result.stdout or "[]")
-        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            OSError,
+            json.JSONDecodeError,
+        ) as exc:
             logger.info("Failing-PR discovery skipped: gh pr list failed (%s)", exc)
             return {}
         if len(pulls) >= 1000:
