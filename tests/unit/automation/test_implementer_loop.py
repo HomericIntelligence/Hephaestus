@@ -1210,25 +1210,27 @@ class TestCompactImplementerSession:
     ) -> None:
         """Verify /compact is not called when /learn returns False.
 
-        The guard at implementer_phase_runner.py:608 is:
-            if retro_success and not is_codex(self.options.agent):
-                self._compact_implementer_session(...)
-
-        This test verifies that when _run_learn returns False, _compact_implementer_session
-        is NOT called due to the retro_success guard condition.
+        Drives _run_post_pr_followup with enable_learn=True so the real guard
+        at line 601 executes. The only reason compact is skipped is that
+        _run_learn returns False (retro_success=False).
         """
+        from hephaestus.automation.models import ImplementationState
+
+        # Enable learn so the guard at line 601 is reached.
+        impl.options.enable_learn = True
+        impl.options.enable_follow_up = False
+
+        state = ImplementationState(
+            issue_number=42,
+            session_id="test-session-abc",
+            session_agent="claude",  # matches default agent="claude"
+        )
+
         with patch.object(impl.phase_runner, "_run_learn", return_value=False):
             with patch.object(impl.phase_runner, "_compact_implementer_session") as mock_compact:
-                # Simulate the guard logic at the call site
-                retro_success = False  # _run_learn returned False
+                impl.phase_runner._run_post_pr_followup(42, tmp_path, state, slot_id=None)
 
-                # The actual guard condition
-                from hephaestus.agents.runtime import is_codex
-
-                if retro_success and not is_codex(impl.options.agent):
-                    impl.phase_runner._compact_implementer_session(42, tmp_path)
-
-                # When retro_success is False, the guard prevents the call
+                # _run_learn returned False → retro_success=False → compact skipped
                 mock_compact.assert_not_called()
 
     def test_compact_skipped_for_codex_implementer(
@@ -1236,24 +1238,26 @@ class TestCompactImplementerSession:
     ) -> None:
         """Verify /compact is skipped for codex (no persisted session).
 
-        The guard at implementer_phase_runner.py:608 is:
-            if retro_success and not is_codex(self.options.agent):
-                self._compact_implementer_session(...)
-
-        This test verifies that when agent="codex", _compact_implementer_session
-        is NOT called due to the is_codex guard condition.
+        Drives _run_post_pr_followup with enable_learn=True and agent="codex"
+        so the real guard at line 601 executes. The only reason compact is
+        skipped is that is_codex(agent) returns True.
         """
-        # Set the agent to "codex"
+        from hephaestus.automation.models import ImplementationState
+
+        # Enable learn so the guard at line 601 is reached.
+        impl.options.enable_learn = True
+        impl.options.enable_follow_up = False
         impl.options.agent = "codex"
 
-        with patch.object(impl.phase_runner, "_compact_implementer_session") as mock_compact:
-            # Simulate the guard logic at the call site
-            retro_success = True  # Learn succeeded
-            from hephaestus.agents.runtime import is_codex
+        state = ImplementationState(
+            issue_number=42,
+            session_id="test-session-abc",
+            session_agent="codex",  # matches agent="codex" so session is resumable
+        )
 
-            # The actual guard condition
-            if retro_success and not is_codex(impl.options.agent):
-                impl.phase_runner._compact_implementer_session(42, tmp_path)
+        with patch.object(impl.phase_runner, "_run_learn", return_value=True):
+            with patch.object(impl.phase_runner, "_compact_implementer_session") as mock_compact:
+                impl.phase_runner._run_post_pr_followup(42, tmp_path, state, slot_id=None)
 
-            # When is_codex(agent) is True, the guard prevents the call
-            mock_compact.assert_not_called()
+                # _run_learn returned True but agent is codex → compact skipped
+                mock_compact.assert_not_called()
