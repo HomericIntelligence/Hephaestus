@@ -206,7 +206,7 @@ pytest --cov=hephaestus --cov-report=term-missing
 
 ```bash
 git add .
-git commit -m "feat: Add CI/CD pipeline"
+git commit -S -m "feat: Add CI/CD pipeline"
 git push origin main
 ```
 

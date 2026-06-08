@@ -263,9 +263,9 @@ Closes #{issue_number}
 Co-Authored-By: {coauthor_name} <{coauthor_email}>
 """
 
-    # Commit
+    # Commit (signed — required by repo policy)
     run(
-        ["git", "commit", "-m", commit_msg],
+        ["git", "commit", "-S", "-m", commit_msg],
         cwd=worktree_path,
     )
 

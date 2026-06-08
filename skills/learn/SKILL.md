@@ -343,7 +343,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
    ```bash
    # For new skills:
    git add skills/<name>.md skills/<name>.notes.md 2>/dev/null || true
-   git commit -m "feat: add <name> skill
+   git commit -S -m "feat: add <name> skill
 
    Documents <brief description of what was learned>.
 
@@ -360,7 +360,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
    # For amendments
 
    git add skills/<name>.md skills/<name>.history skills/<name>.notes.md 2>/dev/null || true
-   git commit -m "feat: amend <name> skill (v<X.0.0>)
+   git commit -S -m "feat: amend <name> skill (v<X.0.0>)
 
    <Brief description of what changed and why>.
 

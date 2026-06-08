@@ -312,7 +312,7 @@ Sub-agents that create PRs must follow:
 
 1. `git checkout -b <issue-number>-<slug>` (or descriptive branch name)
 2. Make changes, stage specific files
-3. `git commit -m "type(scope): description"`
+3. `git commit -S -m "type(scope): description"`
 4. `git push -u origin <branch>`
 5. `gh pr create --title "..." --body "..."`
 6. `gh pr merge --auto --squash`

@@ -10,10 +10,12 @@ from hephaestus.github.rate_limit import (
     ALLOWED_TIMEZONES,
     GRAPHQL_RATE_LIMIT_RE,
     RATE_LIMIT_RE,
+    SECONDARY_RATE_LIMIT_RE,
     _rate_limit_probe_cache,
     detect_claude_usage_cap,
     detect_claude_usage_limit,
     detect_rate_limit,
+    detect_secondary_rate_limit,
     gh_global_throttle_acquire,
     gh_rate_limit_reset_epoch,
     parse_reset_epoch,
@@ -42,6 +44,48 @@ class TestRateLimitRegex:
     def test_no_match_on_unrelated_text(self) -> None:
         """Returns None for text without rate limit message."""
         assert RATE_LIMIT_RE.search("Everything is fine") is None
+
+
+class TestSecondaryRateLimitRegex:
+    """Tests for SECONDARY_RATE_LIMIT_RE and detect_secondary_rate_limit."""
+
+    def test_matches_github_secondary_message(self) -> None:
+        """Matches the exact GitHub secondary rate-limit message."""
+        text = (
+            "gh: You have exceeded a secondary rate limit. "
+            "Please wait a few minutes before you try again."
+        )
+        assert SECONDARY_RATE_LIMIT_RE.search(text) is not None
+
+    def test_matches_case_insensitive(self) -> None:
+        """Match is case-insensitive."""
+        assert SECONDARY_RATE_LIMIT_RE.search("Exceeded A Secondary Rate Limit") is not None
+
+    def test_no_match_on_primary_rate_limit(self) -> None:
+        """Does not match primary rate-limit messages."""
+        assert SECONDARY_RATE_LIMIT_RE.search("API rate limit exceeded") is None
+
+    def test_no_match_on_unrelated_text(self) -> None:
+        """Returns None for unrelated text."""
+        assert SECONDARY_RATE_LIMIT_RE.search("Everything is fine") is None
+
+    def test_detect_secondary_rate_limit_true(self) -> None:
+        """detect_secondary_rate_limit returns True for the exact GH message."""
+        text = (
+            "gh: You have exceeded a secondary rate limit. "
+            "Please wait a few minutes before you try again. "
+            "For more on scraping GitHub and how it may affect your rights, "
+            "please review our Terms of Service"
+        )
+        assert detect_secondary_rate_limit(text) is True
+
+    def test_detect_secondary_rate_limit_false_for_primary(self) -> None:
+        """detect_secondary_rate_limit returns False for primary rate-limit text."""
+        assert detect_secondary_rate_limit("API rate limit exceeded for user ID 42") is False
+
+    def test_detect_secondary_rate_limit_false_for_empty(self) -> None:
+        """detect_secondary_rate_limit returns False for empty string."""
+        assert detect_secondary_rate_limit("") is False
 
 
 class TestParseResetEpoch:

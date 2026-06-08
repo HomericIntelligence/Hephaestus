@@ -49,6 +49,30 @@ GRAPHQL_RATE_LIMIT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Regex matching GitHub secondary rate-limit messages, e.g.:
+#   "You have exceeded a secondary rate limit. Please wait a few minutes before you try again."
+SECONDARY_RATE_LIMIT_RE = re.compile(
+    r"exceeded a secondary rate limit",
+    re.IGNORECASE,
+)
+
+
+def detect_secondary_rate_limit(text: str) -> bool:
+    """Return True if *text* contains a GitHub secondary rate-limit message.
+
+    Secondary rate limits differ from primary ones: they carry no reset epoch
+    and are triggered by request frequency or concurrency, not hourly quotas.
+
+    Args:
+        text: Text to search (typically ``gh`` CLI stderr or stdout).
+
+    Returns:
+        True if a secondary rate-limit message is detected.
+
+    """
+    return bool(SECONDARY_RATE_LIMIT_RE.search(text))
+
+
 # Regex matching Claude CLI usage-cap messages, e.g.:
 #   "You're out of extra usage · resets May 8, 5pm (America/Los_Angeles)"
 #   "Claude usage limit reached · resets 9pm (America/Los_Angeles)"
