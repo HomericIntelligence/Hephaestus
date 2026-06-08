@@ -128,10 +128,10 @@ class CIDriver:
             self._sweep_orphaned_arming_records()
 
         # Empty --issues is allowed: bot-PR discovery (#848) may still
-        # surface open Dependabot PRs to drive. Only abort if BOTH input
-        # issues and bot discovery are off.
-        if not self.options.issues and not self.options.include_bot_prs:
-            logger.warning("No issues to process and bot-PR discovery disabled")
+        # surface open Dependabot PRs to drive. Only abort if ALL input
+        # sources are off: no issues, no direct PRs, and no bot discovery.
+        if not self.options.issues and not self.options.prs and not self.options.include_bot_prs:
+            logger.warning("No issues, no direct PRs, and bot-PR discovery disabled")
             return {}
 
         # Pre-discover PRs — only submit workers for issues that have an open PR.
@@ -416,7 +416,7 @@ class CIDriver:
         """
         return issue_number == pr_number
 
-    def _discover_prs(self, issue_numbers: list[int]) -> dict[int, int]:
+    def _discover_prs(self, issue_numbers: list[int]) -> dict[int, int]:  # noqa: C901
         """Pre-discover open PRs for all issues, deduped by PR.
 
         When a single PR closes multiple issues (a legitimate ``pr-policy``
@@ -484,6 +484,25 @@ class CIDriver:
                     canonical,
                     deferred,
                 )
+
+        # Direct PR mode (#918). Operator-supplied PR numbers bypass
+        # find_pr_for_issue entirely. Validate each PR exists and is OPEN
+        # via ``gh pr view`` before adding to the work set; invalid PRs are
+        # logged and skipped, not raised, so one typo doesn't kill the batch.
+        # Keyed by PR number as the synthetic issue, matching the bot-PR
+        # convention so ``_is_bot_pr_mode`` short-circuits downstream.
+        for pr_num in self.options.prs:
+            if pr_num in deduped.values():
+                logger.info(
+                    "Direct PR #%s already discovered via --issues; skipping duplicate",
+                    pr_num,
+                )
+                continue
+            if not self._validate_pr_open(pr_num):
+                logger.warning("Direct PR #%s is not OPEN or does not exist; skipping", pr_num)
+                continue
+            deduped[pr_num] = pr_num
+            self.shared_pr_issues.setdefault(pr_num, [pr_num])
 
         # Union with open bot-authored PRs (#848). Bot PRs are keyed by their
         # own number as the synthetic issue; ``_is_bot_pr_mode`` detects the
@@ -1159,6 +1178,31 @@ class CIDriver:
 
         """
         return find_pr_for_issue(issue_number)
+
+    def _validate_pr_open(self, pr_number: int) -> bool:
+        """Return True iff ``pr_number`` exists and is in OPEN state.
+
+        Used by direct --prs mode (#918) to filter out typo'd or closed PR
+        numbers before worker submission. Mirrors the strategy-2 check in
+        ``find_pr_for_issue``.
+
+        Args:
+            pr_number: GitHub PR number.
+
+        Returns:
+            True if the PR exists and is OPEN, False otherwise.
+
+        """
+        try:
+            result = _gh_call(
+                ["pr", "view", str(pr_number), "--json", "number,state"],
+                check=False,
+            )
+            data = json.loads(result.stdout or "{}")
+            return str(data.get("state", "")).upper() == "OPEN"
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            logger.debug("PR #%s validation failed: %s", pr_number, exc)
+            return False
 
     def _get_pr_branch(self, pr_number: int) -> str:
         """Get the head branch name of a PR.
@@ -2668,6 +2712,9 @@ Examples:
   # Drive CI for specific issues
   %(prog)s --issues 123 456 789
 
+  # Drive specific PRs directly
+  %(prog)s --prs 661 662 664 666
+
   # Dry run (no GitHub writes or git pushes)
   %(prog)s --issues 123 --dry-run
 
@@ -2688,6 +2735,19 @@ Examples:
             "Issue numbers whose PRs should be driven to green CI. Optional: "
             "when omitted, the driver still picks up open bot-authored PRs via "
             "--include-bot-prs (default on) (#848)."
+        ),
+    )
+    parser.add_argument(
+        "--prs",
+        type=int,
+        nargs="*",
+        default=[],
+        metavar="PR",
+        help=(
+            "PR numbers to drive directly, bypassing issue-to-PR discovery (#918). "
+            "Use when the PR body uses 'Refs #N' or the PR is otherwise not "
+            "reachable via the strict Closes-link lookup. May be combined with "
+            "--issues; duplicate PRs are deduped."
         ),
     )
     add_agent_argument(parser)
@@ -2881,11 +2941,12 @@ def main() -> int:
         return 2
     log.debug("ci_driver gate passed: %s", reason)
 
-    log.info("Starting CI driver for issues: %s", args.issues)
+    log.info("Starting CI driver for issues: %s, direct PRs: %s", args.issues, args.prs)
 
     try:
         options = CIDriverOptions(
             issues=args.issues,
+            prs=args.prs,
             agent=agent,
             max_workers=args.max_workers,
             dry_run=args.dry_run,

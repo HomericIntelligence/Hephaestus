@@ -247,6 +247,10 @@ class CIDriverOptions(BaseModel):
     """Options for the CIDriver workflow."""
 
     issues: list[int] = Field(default_factory=list)
+    # Direct PR numbers to drive. Bypasses issue-to-PR discovery entirely
+    # (#918). Used when the operator already knows the PR numbers and the
+    # PRs do not use a strict ``Closes #N`` link (e.g. ``Refs #N``).
+    prs: list[int] = Field(default_factory=list)
     agent: str = "claude"
     max_workers: int = 3
     dry_run: bool = False
