@@ -112,6 +112,7 @@ bypass a misfiring hook locally use
 | `hephaestus-plan-issues` | Provisional | Issue-planning stage of the automation pipeline |
 | `hephaestus-implement-issues` | Provisional | Issue-implementation stage |
 | `hephaestus-review-prs` | Provisional | PR-review stage |
+| `hephaestus-audit-prs` | Provisional | PR-audit stage; validates prior review comments were addressed |
 | `hephaestus-agent-stage` | Provisional | Single-stage agent runner |
 | `hephaestus-ensure-state-labels` | Internal | Used by this repo's CI label bootstrap |
 | `hephaestus-merge-prs` | Provisional | Wrapper around `gh pr merge` |
