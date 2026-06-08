@@ -27,19 +27,31 @@ from __future__ import annotations
 
 import re
 import sys
+import types
 from pathlib import Path
 
-try:
-    import tomllib  # Python 3.11+
-except ModuleNotFoundError:  # pragma: no cover — only on Python 3.10
+
+def _get_tomllib() -> types.ModuleType:
+    """Return the ``tomllib`` module, falling back to ``tomli`` on Python 3.10.
+
+    Raises:
+        RuntimeError: When neither ``tomllib`` nor ``tomli`` is importable.
+
+    """
     try:
-        import tomli as tomllib  # type: ignore[no-redef, unused-ignore]
-    except ModuleNotFoundError:
-        print(
-            "ERROR: tomllib (stdlib, Python 3.11+) or tomli (pip install tomli) required.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        import tomllib  # Python 3.11+
+
+        return tomllib
+    except ModuleNotFoundError:  # pragma: no cover — only on Python 3.10
+        try:
+            import tomli as tomllib  # type: ignore[no-redef, unused-ignore]
+
+            return tomllib  # type: ignore[return-value]
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "tomllib (stdlib, Python 3.11+) or tomli (pip install tomli) required."
+            ) from exc
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
@@ -61,6 +73,7 @@ _DOCS_INDEX_PROSE_RE = re.compile(r"(\d+)\+?\s+CLI entry points")
 
 def _load_scripts(repo_root: Path | None = None) -> set[str]:
     """Return the set of command names from pyproject.toml [project.scripts]."""
+    tomllib = _get_tomllib()
     pyproject = (repo_root / "pyproject.toml") if repo_root is not None else PYPROJECT
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     scripts: dict[str, str] = data.get("project", {}).get("scripts", {})
@@ -144,7 +157,12 @@ def main() -> int:
         0 if in sync, 1 if out of sync.
 
     """
-    declared = _load_scripts()
+    try:
+        declared = _load_scripts()
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
     documented = _readme_documented_commands()
 
     missing = sorted(declared - documented)
