@@ -459,6 +459,7 @@ class TestExistingPrEntersReviewLoop:
                 "hephaestus.automation.implementer.fetch_issue_info",
                 return_value=MagicMock(title="t", body="b"),
             ),
+            patch.object(impl, "_run_advise_as_implementer_turn"),
             patch(
                 "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_go"
             ) as mark_go,
@@ -562,6 +563,7 @@ class TestExistingPrEntersReviewLoop:
                 "hephaestus.automation.implementer.fetch_issue_info",
                 return_value=MagicMock(title="t", body="b"),
             ),
+            patch.object(impl, "_run_advise_as_implementer_turn"),
             patch(
                 "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_go"
             ) as mark_go,

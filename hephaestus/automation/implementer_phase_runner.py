@@ -1088,6 +1088,16 @@ class ImplementationPhaseRunner:
         impl._save_state(state)
 
         issue = self._impl_module.fetch_issue_info(issue_number)
+
+        # Advise-first (#30): same two-turn pattern as the fresh-implementation path.
+        # For Claude: advise as turn 1 of AGENT_IMPLEMENTER (cwd=worktree_path).
+        # For Codex: skip — no injection point in the review-loop path.
+        if self.options.enable_advise and not is_codex(self.options.agent):
+            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Advising")
+            impl._run_advise_as_implementer_turn(
+                issue_number, issue.title, issue.body, worktree_path
+            )
+
         iterations, last_verdict, last_grade = impl._run_impl_review_loop(
             issue_number=issue_number,
             worktree_path=worktree_path,
