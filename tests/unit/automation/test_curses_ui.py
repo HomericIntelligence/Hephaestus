@@ -1,7 +1,7 @@
 """Tests for the curses_ui module."""
 
 import threading
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from hephaestus.automation.curses_ui import CursesUI, LogBuffer, ThreadLogManager
 from hephaestus.automation.status_tracker import StatusTracker
@@ -165,3 +165,115 @@ class TestCursesUI:
             ui._run_ui()
 
         assert ui.running is False
+
+    def test_draw_workers_returns_next_row(self) -> None:
+        """Test _draw_workers returns the next free row."""
+        ui = self._make_ui(num_workers=2)
+        ui.stdscr = MagicMock()
+        ui.status_tracker.update_slot(0, "working")
+        ui.status_tracker.update_slot(1, "idle")
+
+        with (
+            patch("hephaestus.automation.curses_ui.curses.has_colors", return_value=False),
+            patch("hephaestus.automation.curses_ui.curses.color_pair"),
+        ):
+            next_row = ui._draw_workers(start_row=2, height=10, width=80)
+
+        # Should have rendered 2 workers starting at row 2, so next row is 4
+        assert next_row == 4
+
+    def test_draw_workers_stops_at_height_boundary(self) -> None:
+        """Test _draw_workers stops rendering when it hits the height boundary."""
+        ui = self._make_ui(num_workers=5)
+        ui.stdscr = MagicMock()
+        for i in range(5):
+            ui.status_tracker.update_slot(i, f"task {i}")
+
+        with (
+            patch("hephaestus.automation.curses_ui.curses.has_colors", return_value=False),
+            patch("hephaestus.automation.curses_ui.curses.color_pair"),
+        ):
+            next_row = ui._draw_workers(start_row=8, height=10, width=80)
+
+        # Only 1 worker can fit before height - 1 (9), so next row is 9
+        assert next_row == 9
+
+    def test_draw_workers_truncates_long_status(self) -> None:
+        """Test _draw_workers truncates long status text."""
+        ui = self._make_ui(num_workers=1)
+        ui.stdscr = MagicMock()
+        long_status = "x" * 100
+        ui.status_tracker.update_slot(0, long_status)
+
+        with (
+            patch("hephaestus.automation.curses_ui.curses.has_colors", return_value=False),
+            patch("hephaestus.automation.curses_ui.curses.color_pair"),
+        ):
+            ui._draw_workers(start_row=2, height=10, width=80)
+
+        # Check that addstr was called with truncated text
+        calls = ui.stdscr.addstr.call_args_list
+        assert len(calls) > 0
+        # Text should be truncated to width - 4 + "..."
+        text_arg = calls[0][0][2]
+        assert len(text_arg) <= 80 - 1
+
+    def test_draw_separator_returns_next_row(self) -> None:
+        """Test _draw_separator returns the next free row."""
+        ui = self._make_ui()
+        ui.stdscr = MagicMock()
+
+        next_row = ui._draw_separator(start_row=4, height=10, width=80)
+
+        assert next_row == 5
+
+    def test_draw_separator_stops_at_boundary(self) -> None:
+        """Test _draw_separator doesn't draw if at boundary."""
+        ui = self._make_ui()
+        ui.stdscr = MagicMock()
+
+        next_row = ui._draw_separator(start_row=9, height=10, width=80)
+
+        # Should return start_row unchanged since it's at height - 1
+        assert next_row == 9
+        ui.stdscr.addstr.assert_not_called()
+
+    def test_draw_logs_returns_next_row(self) -> None:
+        """Test _draw_logs returns the next free row."""
+        ui = self._make_ui()
+        ui.stdscr = MagicMock()
+        ui.log_manager.log(1, "test log")
+
+        with patch("hephaestus.automation.curses_ui.curses.A_BOLD", 1):
+            next_row = ui._draw_logs(start_row=5, height=10, width=80)
+
+        # Should have at least rendered the header
+        assert next_row >= 6
+
+    def test_draw_logs_stops_at_boundary(self) -> None:
+        """Test _draw_logs returns immediately if at boundary."""
+        ui = self._make_ui()
+        ui.stdscr = MagicMock()
+
+        next_row = ui._draw_logs(start_row=9, height=10, width=80)
+
+        # Should return start_row unchanged since it's at height - 1
+        assert next_row == 9
+        ui.stdscr.addstr.assert_not_called()
+
+    def test_draw_logs_truncates_long_messages(self) -> None:
+        """Test _draw_logs truncates long log messages."""
+        ui = self._make_ui()
+        ui.stdscr = MagicMock()
+        long_msg = "x" * 100
+        ui.log_manager.log(1, long_msg)
+
+        with patch("hephaestus.automation.curses_ui.curses.A_BOLD", 1):
+            ui._draw_logs(start_row=5, height=10, width=80)
+
+        # Check that messages are truncated
+        calls = ui.stdscr.addstr.call_args_list
+        # Second call (after header) should have truncated message
+        if len(calls) > 1:
+            text_arg = calls[1][0][2]
+            assert len(text_arg) <= 80 - 1

@@ -223,7 +223,7 @@ class CursesUI:
             except KeyboardInterrupt:
                 break
 
-    def _refresh_display(self) -> None:  # noqa: C901  # TUI rendering with many display states
+    def _refresh_display(self) -> None:
         """Refresh the curses display."""
         if not self.stdscr:
             return
@@ -236,9 +236,26 @@ class CursesUI:
         if len(title) < width:
             self.stdscr.addstr(0, 0, title, curses.A_BOLD)
 
-        # Display worker status slots
+        row = self._draw_workers(start_row=2, height=height, width=width)
+        row = self._draw_separator(start_row=row, height=height, width=width)
+        self._draw_logs(start_row=row, height=height, width=width)
+
+        self.stdscr.refresh()
+
+    def _draw_workers(self, start_row: int, height: int, width: int) -> int:
+        """Render worker status slots; return the next free row.
+
+        Args:
+            start_row: Row to start drawing at
+            height: Terminal height in rows
+            width: Terminal width in columns
+
+        Returns:
+            The next free row after the worker slots
+
+        """
         statuses = self.status_tracker.get_status()
-        row = 2
+        row = start_row
         for i, status in enumerate(statuses):
             if row >= height - 1:
                 break
@@ -258,37 +275,64 @@ class CursesUI:
                 self.stdscr.addstr(row, 0, status_text, attr)
 
             row += 1
+        return row
 
-        # Display separator
-        if row < height - 1:
+    def _draw_separator(self, start_row: int, height: int, width: int) -> int:
+        """Render the horizontal separator; return the next free row.
+
+        Args:
+            start_row: Row to start drawing at
+            height: Terminal height in rows
+            width: Terminal width in columns
+
+        Returns:
+            The next free row after the separator
+
+        """
+        if start_row >= height - 1:
+            return start_row
+        with contextlib.suppress(curses.error):
+            self.stdscr.addstr(start_row, 0, "-" * min(width - 1, 80))
+        return start_row + 1
+
+    def _draw_logs(self, start_row: int, height: int, width: int) -> int:
+        """Render the recent-activity log tail; return the next free row.
+
+        Args:
+            start_row: Row to start drawing at
+            height: Terminal height in rows
+            width: Terminal width in columns
+
+        Returns:
+            The next free row after the logs
+
+        """
+        row = start_row
+        if row >= height - 1:
+            return row
+
+        with contextlib.suppress(curses.error):
+            self.stdscr.addstr(row, 0, "Recent Activity:", curses.A_BOLD)
+        row += 1
+
+        # Gather recent logs from all threads
+        all_logs: list[str] = []
+        # Take snapshot to avoid RuntimeError if dict changes during iteration
+        for buffer in list(self.log_manager.buffers.values()):
+            all_logs.extend(buffer.get_recent(10))
+
+        # Display most recent logs
+        for log_msg in all_logs[-(height - row - 1) :]:
+            if row >= height - 1:
+                break
+
+            # Truncate to fit width
+            if len(log_msg) > width - 1:
+                log_msg = log_msg[: width - 4] + "..."
+
             with contextlib.suppress(curses.error):
-                self.stdscr.addstr(row, 0, "-" * min(width - 1, 80))
+                self.stdscr.addstr(row, 0, log_msg)
+
             row += 1
 
-        # Display recent logs
-        if row < height - 1:
-            with contextlib.suppress(curses.error):
-                self.stdscr.addstr(row, 0, "Recent Activity:", curses.A_BOLD)
-            row += 1
-
-            # Gather recent logs from all threads
-            all_logs: list[str] = []
-            # Take snapshot to avoid RuntimeError if dict changes during iteration
-            for buffer in list(self.log_manager.buffers.values()):
-                all_logs.extend(buffer.get_recent(10))
-
-            # Display most recent logs
-            for log_msg in all_logs[-(height - row - 1) :]:
-                if row >= height - 1:
-                    break
-
-                # Truncate to fit width
-                if len(log_msg) > width - 1:
-                    log_msg = log_msg[: width - 4] + "..."
-
-                with contextlib.suppress(curses.error):
-                    self.stdscr.addstr(row, 0, log_msg)
-
-                row += 1
-
-        self.stdscr.refresh()
+        return row
