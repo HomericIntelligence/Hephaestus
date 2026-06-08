@@ -8,6 +8,7 @@ Provides:
 from __future__ import annotations
 
 import logging
+import subprocess
 from pathlib import Path
 
 from hephaestus.agents.runtime import resume_codex_session, session_agent_matches
@@ -15,6 +16,7 @@ from hephaestus.agents.runtime import resume_codex_session, session_agent_matche
 from .claude_models import learn_model
 from .claude_timeouts import learn_claude_timeout
 from .git_utils import run
+from .session_naming import session_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -145,3 +147,73 @@ def learn_needs_rerun(issue_number: int, state_dir: Path) -> bool:
         return content.startswith("FAILED:")
     except OSError:
         return True
+
+
+def compact_session(
+    repo: str,
+    issue: int | str,
+    agent: str,
+    cwd: Path,
+    timeout: int = 60,
+) -> bool:
+    """Send ``/compact`` to the (repo, issue, agent) Claude session.
+
+    Best-effort transcript summarisation. Fires immediately after ``/learn``
+    on a durably-done stage so the next ``--resume`` reads a summary instead
+    of the full fix-iteration replay (#842).
+
+    Non-fatal: any failure (timeout, missing binary, non-zero exit) is logged
+    at WARNING and swallowed; the next resume just pays full-history cost.
+
+    Args:
+        repo: Repository slug
+        issue: Issue number
+        agent: Agent identifier
+        cwd: Working directory for session lookup
+        timeout: Subprocess timeout in seconds (default: 60)
+
+    Returns:
+        True on a zero-exit subprocess call, False on any failure including
+        a non-zero exit code (e.g. /compact skill not registered).
+
+    """
+    sid = session_uuid(repo, issue, agent)
+    try:
+        result = subprocess.run(
+            [
+                "claude",
+                "--resume",
+                sid,
+                "--output-format",
+                "text",
+                "--dangerously-skip-permissions",
+                "--print",
+                "/compact",
+            ],
+            cwd=str(cwd),
+            timeout=timeout,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.warning(
+            "Issue #%s: /compact failed for agent=%s (non-fatal): %s",
+            issue,
+            agent,
+            e,
+        )
+        return False
+
+    if result.returncode != 0:
+        logger.warning(
+            "Issue #%s: /compact for agent=%s exited %s (non-fatal); stderr=%s",
+            issue,
+            agent,
+            result.returncode,
+            (result.stderr or "")[:200],
+        )
+        return False
+
+    logger.info("Issue #%s: /compact completed for agent=%s (session %s)", issue, agent, sid)
+    return True

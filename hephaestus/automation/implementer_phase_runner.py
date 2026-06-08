@@ -50,9 +50,15 @@ from .claude_invoke import (
 from .claude_models import advise_model, implementer_model, reviewer_model
 from .claude_timeouts import advise_claude_timeout, implementer_claude_timeout
 from .follow_up import parse_follow_up_items, run_follow_up_issues
-from .git_utils import issue_ref, pr_ref, run, sync_worktree_to_remote_branch
+from .git_utils import (
+    get_repo_slug,
+    issue_ref,
+    pr_ref,
+    run,
+    sync_worktree_to_remote_branch,
+)
 from .github_api import gh_issue_add_labels, gh_pr_list_unresolved_threads
-from .learn import learn_needs_rerun, run_learn
+from .learn import compact_session, learn_needs_rerun, run_learn
 from .models import (
     ImplementationPhase,
     ImplementationState,
@@ -615,6 +621,8 @@ class ImplementationPhaseRunner:
             with self.state_lock:
                 state.learn_completed = retro_success
             impl._save_state(state)
+            if retro_success and not is_codex(self.options.agent):
+                self._compact_implementer_session(issue_number, worktree_path)
 
         # Follow-up issues phase (after LEARN, before COMPLETED)
         if self.options.enable_follow_up and can_resume_session and state.session_id:
@@ -838,6 +846,16 @@ class ImplementationPhaseRunner:
             slot_id,
             agent=self.options.agent,
             session_agent=session_agent,
+        )
+
+    def _compact_implementer_session(self, issue_number: int, worktree_path: Path) -> None:
+        """Compact the implementer session after /learn (#842). Non-fatal."""
+        repo_slug = get_repo_slug(self.repo_root)
+        compact_session(
+            repo=repo_slug,
+            issue=issue_number,
+            agent=self._impl_module.AGENT_IMPLEMENTER,
+            cwd=worktree_path,
         )
 
     def _run_advise(self, issue_number: int, issue_title: str, issue_body: str) -> str:

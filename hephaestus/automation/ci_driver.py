@@ -60,6 +60,7 @@ from .github_api import (
     gh_pr_list_unresolved_threads,
     gh_pr_resolve_thread,
 )
+from .learn import compact_session
 from .models import CIDriverOptions, WorkerResult
 from .pr_manager import pr_has_implementation_go_label
 from .prompts import get_advise_prompt_builder
@@ -1614,6 +1615,7 @@ class CIDriver:
                     pr_number,
                 )
                 self._run_drive_green_learnings(issue_number, pr_number)
+                self._run_drive_green_compact(issue_number, pr_number)
                 record["learn_captured_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                 self._save_arming_state(issue_number, record)
             elif state == "CLOSED":
@@ -1669,6 +1671,7 @@ class CIDriver:
                 0, f"{issue_ref(issue_number)}: capturing post-merge /learn"
             )
             self._run_drive_green_learnings(issue_number, pr_number)
+            self._run_drive_green_compact(issue_number, pr_number)
             # Mark captured even if /learn failed — it's best-effort and
             # retrying it on every subsequent run would churn API calls.
             record["learn_captured_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -1718,6 +1721,7 @@ class CIDriver:
                 0, f"{issue_ref(issue_number)}: capturing post-merge /learn"
             )
             self._run_drive_green_learnings(issue_number, pr_number)
+            self._run_drive_green_compact(issue_number, pr_number)
             record["learn_captured_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             self._save_arming_state(issue_number, record)
             return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
@@ -2633,6 +2637,38 @@ class CIDriver:
                 e,
             )
             return False
+
+    def _run_drive_green_compact(self, issue_number: int, pr_number: int) -> bool:
+        """Compact the AGENT_CI_DRIVER session transcript after /learn (#842).
+
+        Mirrors the cwd-derivation of ``_run_drive_green_learnings``: try the
+        worktree first so the deterministic JSONL probe in ``session_jsonl_path``
+        finds the transcript, fall back to ``repo_root`` when the branch is
+        already gone post-merge. Non-fatal.
+        """
+        if is_codex(self.options.agent):
+            logger.info(
+                "Issue #%s: skipping /compact (codex has no persisted "
+                "drive-green session to resume)",
+                issue_number,
+            )
+            return False
+        try:
+            cwd = self._get_worktree_path(issue_number, pr_number)
+        except Exception as wt_err:
+            logger.info(
+                "Issue #%s: no worktree available for /compact (%s); using repo root",
+                issue_number,
+                wt_err,
+            )
+            cwd = self.repo_root
+        repo_slug = get_repo_slug(self.repo_root)
+        return compact_session(
+            repo=repo_slug,
+            issue=issue_number,
+            agent=AGENT_CI_DRIVER,
+            cwd=cwd,
+        )
 
     def _parse_json_block(self, text: str) -> dict[str, Any]:
         """Extract and parse the first JSON block from a text string.
