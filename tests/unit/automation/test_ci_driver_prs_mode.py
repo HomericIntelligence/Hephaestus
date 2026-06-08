@@ -55,9 +55,11 @@ class TestDiscoverPrsDirectMode:
         driver.options.prs = [661, 662]
 
         # Mock _validate_pr_open to return True for these PRs
+        # Also mock _discover_failing_prs: empty issues triggers the failing-PR path (#819)
         with patch.object(driver, "_validate_pr_open", return_value=True) as mock_validate:
             with patch.object(driver, "_find_pr_for_issue", return_value=None):
-                result = driver._discover_prs([])
+                with patch.object(driver, "_discover_failing_prs", return_value={}):
+                    result = driver._discover_prs([])
 
         assert 661 in result.values()
         assert 662 in result.values()
@@ -75,7 +77,8 @@ class TestDiscoverPrsDirectMode:
 
         with patch.object(driver, "_validate_pr_open", return_value=True):
             with patch.object(driver, "_find_pr_for_issue", return_value=None):
-                driver._discover_prs([])
+                with patch.object(driver, "_discover_failing_prs", return_value={}):
+                    driver._discover_prs([])
 
         assert driver.shared_pr_issues.get(661) == [661]
 
@@ -132,7 +135,8 @@ class TestDiscoverPrsDirectMode:
 
         with patch.object(driver, "_validate_pr_open", side_effect=validate_side_effect):
             with patch.object(driver, "_find_pr_for_issue", return_value=None):
-                result = driver._discover_prs([])
+                with patch.object(driver, "_discover_failing_prs", return_value={}):
+                    result = driver._discover_prs([])
 
         # Valid PRs included
         assert result.get(661) == 661
@@ -147,7 +151,8 @@ class TestDiscoverPrsDirectMode:
 
         with patch.object(driver, "_validate_pr_open", return_value=True):
             with patch.object(driver, "_find_pr_for_issue", return_value=None):
-                result = driver._discover_prs([])
+                with patch.object(driver, "_discover_failing_prs", return_value={}):
+                    result = driver._discover_prs([])
 
         assert result.get(661) == 661
 
@@ -158,7 +163,8 @@ class TestDiscoverPrsDirectMode:
 
         with patch.object(driver, "_validate_pr_open", return_value=True):
             with patch.object(driver, "_find_pr_for_issue", return_value=None):
-                result = driver._discover_prs([])
+                with patch.object(driver, "_discover_failing_prs", return_value={}):
+                    result = driver._discover_prs([])
 
         assert result.get(661) == 661
 
