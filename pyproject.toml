@@ -122,6 +122,7 @@ hephaestus-validate-workflow-checkout = "hephaestus.ci.workflows:validate_workfl
 hephaestus-github-stats = "hephaestus.github.stats:main"
 hephaestus-agent-stats = "hephaestus.agents.stats:main"
 hephaestus-validate-agents = "hephaestus.agents.frontmatter:validate_agents_main"
+hephaestus-check-cli-tier-docs = "hephaestus.validation.cli_tier_docs:main"
 
 [project.urls]
 Homepage = "https://github.com/HomericIntelligence/ProjectHephaestus"

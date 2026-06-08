@@ -79,6 +79,81 @@ may change incompatibly in a minor release.
 | `hephaestus.resilience` | Implemented but not yet wired into production paths (#469) |
 | `hephaestus.validation` | Validation rules track CI policy and evolve with it |
 
+## Console-Script Stability Tiers
+
+ProjectHephaestus installs 45 console scripts via `[project.scripts]` in
+`pyproject.toml`. Each is classified into one of three tiers:
+
+- **Stable** — covered by the [deprecation policy](#deprecation-policy). CLI
+  name, flags, exit codes, and JSON output schema (when `--json` is passed)
+  are versioned API. Currently: none. Promotion criteria: dispatches to a
+  Stable subpackage AND has a documented JSON output schema AND has external
+  consumers outside this repo.
+- **Provisional** — useful from outside but may change incompatibly in a
+  minor release. Pin a specific version if you depend on one.
+- **Internal** — exists for this repo's own CI/automation. May be removed
+  without a deprecation notice. Listed for completeness only.
+
+Note: the **Internal** tier applies only to console scripts; the subpackage
+stability tier table above uses only Stable/Provisional. Internal CLIs may
+still dispatch to a Stable subpackage — the CLI tier reflects the CLI's
+own external-consumer contract, not the underlying library code.
+
+The mapping below is the source of truth; the
+`hephaestus-check-cli-tier-docs` validator (run in pre-commit and as a unit
+test) fails the build if `[project.scripts]` and this table drift apart. To
+bypass a misfiring hook locally use
+`SKIP=hephaestus-check-cli-tier-docs git commit -S ...` — never
+`--no-verify` (it skips signing too).
+
+| CLI | Tier | Notes |
+|-----|------|-------|
+| `hephaestus-automation-loop` | Provisional | Dispatches to `hephaestus.automation` (provisional subpackage) |
+| `hephaestus-plan-issues` | Provisional | Issue-planning stage of the automation pipeline |
+| `hephaestus-implement-issues` | Provisional | Issue-implementation stage |
+| `hephaestus-review-prs` | Provisional | PR-review stage |
+| `hephaestus-agent-stage` | Provisional | Single-stage agent runner |
+| `hephaestus-ensure-state-labels` | Internal | Used by this repo's CI label bootstrap |
+| `hephaestus-merge-prs` | Provisional | Wrapper around `gh pr merge` |
+| `hephaestus-fleet-sync` | Provisional | Fleet-wide repo sync helper |
+| `hephaestus-tidy` | Provisional | Local-branch rebase + cleanup helper |
+| `hephaestus-system-info` | Provisional | Dispatches to Stable `hephaestus.system` but CLI flags still evolving |
+| `hephaestus-download-dataset` | Provisional | Dataset URL/layout not contracted |
+| `hephaestus-check-python-version` | Internal | Repo CI pre-commit hook |
+| `hephaestus-check-test-structure` | Internal | Repo CI pre-commit hook |
+| `hephaestus-check-coverage` | Internal | Repo CI pre-commit hook |
+| `hephaestus-check-complexity` | Internal | Repo CI pre-commit hook |
+| `hephaestus-filter-audit` | Provisional | Audit-output filter; useful externally |
+| `hephaestus-validate-schemas` | Provisional | JSON-Schema validator |
+| `hephaestus-validate-links` | Internal | Repo CI markdown link check |
+| `hephaestus-check-readmes` | Internal | Repo CI README validator |
+| `hephaestus-check-skill-catalog` | Internal | Repo CI skill-catalog validator |
+| `hephaestus-check-type-aliases` | Internal | Repo CI type-alias validator |
+| `hephaestus-check-docstrings` | Internal | Repo CI docstring validator |
+| `hephaestus-check-tier-labels` | Internal | Repo CI tier-label validator |
+| `hephaestus-fix-markdown` | Provisional | Markdown fixer; useful externally |
+| `hephaestus-audit-doc-policy` | Internal | Repo CI doc-policy auditor |
+| `hephaestus-check-version-consistency` | Internal | Repo CI version-consistency check |
+| `hephaestus-coredump-handler` | Provisional | Coredump capture helper |
+| `hephaestus-run-under-gdb` | Provisional | gdb post-mortem helper |
+| `hephaestus-check-package-versions` | Internal | Repo CI package-version check |
+| `hephaestus-bump-version` | Internal | Repo release-management helper |
+| `hephaestus-check-doc-config` | Internal | Repo CI doc-config validator |
+| `hephaestus-check-stale-scripts` | Internal | Repo CI stale-script detector |
+| `hephaestus-mypy-each-file` | Internal | Repo CI per-file mypy runner |
+| `hephaestus-check-links` | Internal | Repo CI link checker |
+| `hephaestus-validate-anchors` | Internal | Repo CI anchor validator |
+| `hephaestus-check-dep-sync` | Internal | Repo CI dependency-sync check |
+| `hephaestus-sync-requirements` | Internal | Repo CI requirements sync |
+| `hephaestus-bench-precommit` | Internal | Repo CI pre-commit benchmark |
+| `hephaestus-check-precommit-versions` | Internal | Repo CI pre-commit version check |
+| `hephaestus-check-workflow-inventory` | Internal | Repo CI workflow inventory check |
+| `hephaestus-validate-workflow-checkout` | Internal | Repo CI workflow checkout validator |
+| `hephaestus-github-stats` | Provisional | GitHub repo-stats helper |
+| `hephaestus-agent-stats` | Provisional | Agent-stats helper |
+| `hephaestus-validate-agents` | Internal | Repo CI agent-frontmatter validator |
+| `hephaestus-check-cli-tier-docs` | Internal | Enforces this very table; added in #766 |
+
 ## Public API
 
 The following symbols are part of the stable public API and are covered by

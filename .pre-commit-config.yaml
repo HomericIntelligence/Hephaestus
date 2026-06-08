@@ -137,6 +137,19 @@ repos:
         pass_filenames: false
         files: ^(hephaestus|tests/unit)/
 
+  # CLI stability-tier documentation enforcement (#766)
+  - repo: local
+    hooks:
+      - id: hephaestus-check-cli-tier-docs
+        name: Every [project.scripts] entry must have a tier in COMPATIBILITY.md
+        description: Fails the build if pyproject.toml [project.scripts] and the Console-Script Stability Tiers table in COMPATIBILITY.md drift apart
+        # --environment default is explicit because the pre-commit CI job runs
+        # in the lint env; the hephaestus-* console scripts live in default.
+        entry: pixi run --environment default hephaestus-check-cli-tier-docs
+        language: system
+        pass_filenames: false
+        files: ^(pyproject\.toml|COMPATIBILITY\.md)$
+
   # Complexity check
   - repo: local
     hooks:
