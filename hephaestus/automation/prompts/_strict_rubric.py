@@ -7,16 +7,48 @@ the seven graded software-engineering principles. Per-stage rubrics
 shared blocks.
 """
 
-# Rubric block embedded into every loop-review prompt. Mirrors the philosophy
-# of the `review-pr-strict` skill at:
-#   ~/.claude/plugins/marketplaces/ProjectHephaestus/skills/review-pr-strict/SKILL.md
-# Embedded inline so the spawned reviewer process does not depend on the plugin
-# being autoloaded — works in any environment that has `claude --print`.
-_STRICT_REVIEW_RUBRIC = """
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+# Plugin-skill reference path is resolved at runtime — never hardcoded.
+# Override via HEPHAESTUS_PLUGIN_SKILLS_DIR for non-default deployments
+# (CI, containers, alternate $HOME). Falls back to the standard Claude
+# Code plugin layout under the current user's home directory.
+_DEFAULT_PLUGIN_SKILLS_SUBPATH = Path(".claude/plugins/marketplaces/ProjectHephaestus/skills")
+_STRICT_SKILL_NAME = "review-pr-strict"
+
+
+def _skill_reference() -> str:
+    """Resolve the absolute path to the review-pr-strict SKILL.md if it exists.
+
+    Returns the resolved path as a string when the file is present, or an empty
+    string when it is not (graceful degradation — the rubric is self-contained
+    and the path is only a reference). Honors the HEPHAESTUS_PLUGIN_SKILLS_DIR
+    env var; otherwise falls back to ``~/.claude/plugins/marketplaces/...``
+    resolved via :func:`pathlib.Path.home`.
+    """
+    override = os.environ.get("HEPHAESTUS_PLUGIN_SKILLS_DIR")
+    skills_dir = Path(override) if override else Path.home() / _DEFAULT_PLUGIN_SKILLS_SUBPATH
+    candidate = skills_dir / _STRICT_SKILL_NAME / "SKILL.md"
+    return str(candidate) if candidate.is_file() else ""
+
+
+def build_strict_review_rubric() -> str:
+    """Build the strict-review rubric prompt with a runtime-resolved skill reference."""
+    skill_ref = _skill_reference()
+    if skill_ref:
+        skill_line = (
+            f"`review-pr-strict` skill (rubric summarized below — refer to the full skill at\n"
+            f"`{skill_ref}`\n"
+            f"if available):"
+        )
+    else:
+        skill_line = "`review-pr-strict` skill (rubric summarized below):"
+    return f"""
 You are a ruthlessly thorough technical reviewer. Apply this rubric per the
-`review-pr-strict` skill (rubric summarized below — refer to the full skill at
-`~/.claude/plugins/marketplaces/ProjectHephaestus/skills/review-pr-strict/SKILL.md`
-if available):
+{skill_line}
 
 GRADING (every dimension starts at F; A must be EARNED with concrete evidence):
 - A  (93-100%) Exemplary, RARE
@@ -42,6 +74,13 @@ EVALUATE THESE DIMENSIONS:
 5. Scope discipline — KISS / YAGNI; no speculative work
 6. Verification plan — concrete steps the reviewer can run to confirm
 """
+
+
+# Module-level constant preserved for backward-compatibility with the
+# ``hephaestus.automation.prompts`` re-export. Resolved once at import time;
+# tests that need per-call resolution call ``build_strict_review_rubric()``
+# directly.
+_STRICT_REVIEW_RUBRIC = build_strict_review_rubric()
 
 # Verdict contract for the strict loop reviewers (plan-loop + impl-loop). The
 # fenced ``Grade:`` / ``Verdict: <GO|NOGO>`` block below is parsed by
