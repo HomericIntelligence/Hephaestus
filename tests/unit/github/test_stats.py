@@ -77,7 +77,7 @@ class TestGetIssuesStats:
 
 
 class TestGetPrsStats:
-    """Tests for get_prs_stats()."""
+    """Tests for get_prs_stats() — single GraphQL round-trip (#811)."""
 
     def _make_mock(self, returncode: int, stdout: str) -> MagicMock:
         m = MagicMock()
@@ -87,11 +87,7 @@ class TestGetPrsStats:
 
     def test_returns_counts(self) -> None:
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                self._make_mock(0, "8\n"),
-                self._make_mock(0, "5\n"),
-                self._make_mock(0, "1\n"),
-            ]
+            mock_run.return_value = self._make_mock(0, "[8,5,1]\n")
             result = get_prs_stats("2026-01-01", "2026-01-31", None, "owner/repo")
         assert result["total"] == 8
         assert result["merged"] == 5
@@ -103,6 +99,50 @@ class TestGetPrsStats:
             mock_run.return_value = self._make_mock(1, "")
             result = get_prs_stats("2026-01-01", "2026-01-31", None, "owner/repo")
         assert result == {"total": 0, "merged": 0, "open": 0, "closed": 0}
+
+    def test_malformed_json_returns_zeros(self) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = self._make_mock(0, "not-json\n")
+            result = get_prs_stats("2026-01-01", "2026-01-31", None, "owner/repo")
+        assert result == {"total": 0, "merged": 0, "open": 0, "closed": 0}
+
+    def test_short_array_returns_zeros(self) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = self._make_mock(0, "[1,2]\n")
+            result = get_prs_stats("2026-01-01", "2026-01-31", None, "owner/repo")
+        assert result == {"total": 0, "merged": 0, "open": 0, "closed": 0}
+
+    def test_uses_single_graphql_call(self) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = self._make_mock(0, "[0,0,0]\n")
+            get_prs_stats("2026-01-01", "2026-01-31", None, "owner/repo")
+        assert mock_run.call_count == 1
+        argv = mock_run.call_args[0][0]
+        assert argv[:3] == ["gh", "api", "graphql"]
+
+    def test_uses_graphql_with_correct_jq_filter(self) -> None:
+        """The jq filter is part of the parse contract — drift breaks parsing."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = self._make_mock(0, "[0,0,0]\n")
+            get_prs_stats("2026-01-01", "2026-01-31", None, "owner/repo")
+        argv = mock_run.call_args[0][0]
+        jq_idx = argv.index("--jq")
+        jq_filter = argv[jq_idx + 1]
+        assert ".data.total.issueCount" in jq_filter
+        assert ".data.merged.issueCount" in jq_filter
+        assert ".data.open.issueCount" in jq_filter
+        assert "// 0" in jq_filter
+
+    def test_author_included_in_aliased_queries(self) -> None:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = self._make_mock(0, "[0,0,0]\n")
+            get_prs_stats("2026-01-01", "2026-01-31", "mvillmow", "owner/repo")
+        argv = mock_run.call_args[0][0]
+        joined = " ".join(argv)
+        assert "author:mvillmow" in joined
+        assert "is:merged" in joined
+        assert "state:open" in joined
+        assert "type:pr" in joined
 
 
 class TestGetCommitsStats:
@@ -329,13 +369,12 @@ class TestStatsSubprocessTimeouts:
         for call in mock_run.call_args_list:
             assert call.kwargs["timeout"] == METADATA_TIMEOUT
 
-    def test_get_prs_stats_all_calls_pass_timeout(self) -> None:
+    def test_get_prs_stats_passes_timeout(self) -> None:
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [self._ok("8\n"), self._ok("5\n"), self._ok("1\n")]
+            mock_run.return_value = self._ok("[8,5,1]\n")
             get_prs_stats("2026-01-01", "2026-01-31", None, "owner/repo")
-        assert mock_run.call_count == 3
-        for call in mock_run.call_args_list:
-            assert call.kwargs["timeout"] == METADATA_TIMEOUT
+        assert mock_run.call_count == 1
+        assert mock_run.call_args.kwargs["timeout"] == METADATA_TIMEOUT
 
     def test_get_commits_stats_passes_timeout(self) -> None:
         with patch("subprocess.run") as mock_run:

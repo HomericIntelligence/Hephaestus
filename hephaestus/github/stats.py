@@ -14,6 +14,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from datetime import datetime
@@ -124,6 +125,12 @@ def get_issues_stats(
 def get_prs_stats(start_date: str, end_date: str, author: str | None, repo: str) -> dict[str, int]:
     """Return PR counts (total / merged / open / closed) for the given date range.
 
+    Issues a single ``gh api graphql`` call with aliased ``search`` fields so all
+    three counts (total, merged, open) come back in one round-trip instead of
+    three serial REST calls (#811). Null GraphQL fields are coerced to 0 by jq
+    before parsing, and any decode failure returns the all-zero dict to preserve
+    the prior degraded-mode contract.
+
     Args:
         start_date: Start date in ``YYYY-MM-DD`` format.
         end_date: End date in ``YYYY-MM-DD`` format.
@@ -139,8 +146,34 @@ def get_prs_stats(start_date: str, end_date: str, author: str | None, repo: str)
         base_parts.append(f"author:{author}")
     base_query = " ".join(base_parts)
 
+    graphql_query = (
+        "query($qTotal: String!, $qMerged: String!, $qOpen: String!) {"
+        "  total: search(query: $qTotal, type: ISSUE, first: 0) { issueCount }"
+        "  merged: search(query: $qMerged, type: ISSUE, first: 0) { issueCount }"
+        "  open: search(query: $qOpen, type: ISSUE, first: 0) { issueCount }"
+        "}"
+    )
+
     result = subprocess.run(
-        ["gh", "api", "search/issues", "-f", f"q={base_query}", "--jq", ".total_count"],
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={graphql_query}",
+            "-f",
+            f"qTotal={base_query}",
+            "-f",
+            f"qMerged={base_query} is:merged",
+            "-f",
+            f"qOpen={base_query} state:open",
+            "--jq",
+            (
+                "[.data.total.issueCount // 0,"
+                " .data.merged.issueCount // 0,"
+                " .data.open.issueCount // 0]"
+            ),
+        ],
         capture_output=True,
         text=True,
         timeout=METADATA_TIMEOUT,
@@ -148,39 +181,11 @@ def get_prs_stats(start_date: str, end_date: str, author: str | None, repo: str)
     if result.returncode != 0:
         return {"total": 0, "merged": 0, "open": 0, "closed": 0}
 
-    total = int(result.stdout.strip())
-
-    result_merged = subprocess.run(
-        [
-            "gh",
-            "api",
-            "search/issues",
-            "-f",
-            f"q={base_query} is:merged",
-            "--jq",
-            ".total_count",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=METADATA_TIMEOUT,
-    )
-    merged = int(result_merged.stdout.strip()) if result_merged.returncode == 0 else 0
-
-    result_open = subprocess.run(
-        [
-            "gh",
-            "api",
-            "search/issues",
-            "-f",
-            f"q={base_query} state:open",
-            "--jq",
-            ".total_count",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=METADATA_TIMEOUT,
-    )
-    open_count = int(result_open.stdout.strip()) if result_open.returncode == 0 else 0
+    try:
+        counts = json.loads(result.stdout.strip())
+        total, merged, open_count = (int(counts[0]), int(counts[1]), int(counts[2]))
+    except (ValueError, TypeError, IndexError, json.JSONDecodeError):
+        return {"total": 0, "merged": 0, "open": 0, "closed": 0}
 
     return {
         "total": total,
