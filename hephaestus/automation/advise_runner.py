@@ -9,10 +9,15 @@ live here once (DRY) rather than being copied into ``planner.py``,
 
 The only thing that differs per stage is *how* the selected agent is invoked.
 Callers therefore pass an ``invoke`` callable that takes the advise prompt and
-returns the agent's text output; this module owns everything around it. The
-advise call always runs under
-:data:`~hephaestus.automation.session_naming.AGENT_ADVISE` — a distinct, cheap,
-read-only session — so it never pollutes the stage's main transcript.
+returns the agent's text output; this module owns everything around it.
+
+For the planner and CI-driver, the ``invoke`` callable targets ``AGENT_ADVISE``
+(a distinct, cheap, read-only session) so the findings are returned as text and
+injected into the stage's own prompt context.  The implementer's Claude path
+instead targets ``AGENT_IMPLEMENTER`` with ``cwd=worktree_path`` so that the
+advise step is the *first turn* of the implementer's session — the findings
+live in the transcript and the implementation turn auto-resumes them via
+``--resume`` without any text injection.
 """
 
 from __future__ import annotations

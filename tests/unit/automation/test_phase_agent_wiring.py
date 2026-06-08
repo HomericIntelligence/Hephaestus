@@ -261,30 +261,56 @@ def test_per_iteration_reviewer_does_not_pin_foreign_agent(
     )
 
 
-# Advise-first (#30): each of the three stages opens its run with an /advise
-# step under AGENT_ADVISE, gated by ``enable_advise``. Each entry maps the
-# stage's source file(s) that must contain that wiring.
-ADVISE_FIRST_STAGES: list[tuple[str, tuple[str, ...]]] = [
+# Advise-first (#30): each stage opens its run with an /advise step gated by
+# ``enable_advise``.  The planner and CI driver always run advise under
+# AGENT_ADVISE (a cheap, separate read-only session).  The implementer has two
+# paths: Codex still uses AGENT_ADVISE, but Claude uses AGENT_IMPLEMENTER as
+# turn 1 so the findings live in the implementer's own transcript.
+ADVISE_FIRST_STAGES_ADVISE_AGENT: list[tuple[str, tuple[str, ...]]] = [
     # Stage 1: the planner runs advise once before the plan loop.
     ("planner.py", ("planner_review_loop.py",)),
-    # Stage 2: the implementer runs advise before the impl session.
-    ("implementer_phase_runner.py", ()),
     # Stage 3: the CI driver runs advise before the fix loop.
     ("ci_driver.py", ()),
 ]
 
 
-@pytest.mark.parametrize("module_file, companions", ADVISE_FIRST_STAGES)
+@pytest.mark.parametrize("module_file, companions", ADVISE_FIRST_STAGES_ADVISE_AGENT)
 def test_stage_runs_advise_under_advise_agent(
     module_file: str, companions: tuple[str, ...]
 ) -> None:
-    """Every stage runs /advise under AGENT_ADVISE, gated by enable_advise.
+    """Planner and CI driver run /advise under AGENT_ADVISE, gated by enable_advise.
 
     Advise-first (#30) is the mechanism that pulls prior learnings into each
-    stage before it acts. The cheap, read-only advise session always runs under
+    stage before it acts. For these stages the advise session always runs under
     ``AGENT_ADVISE`` (never the stage's own session), and every stage must let
     operators turn it off via ``enable_advise``.
     """
     src = _read_phase_sources(module_file, companions)
     assert "AGENT_ADVISE" in src, f"{module_file} must run its advise step under AGENT_ADVISE"
     assert "enable_advise" in src, f"{module_file} must gate advise behind enable_advise"
+
+
+def test_implementer_runs_advise_as_first_turn_of_implementer_session() -> None:
+    """The implementer runs /advise as turn 1 of the implementer's own session.
+
+    Unlike the planner/CI-driver, the Claude implementer does NOT use a separate
+    AGENT_ADVISE session.  Instead, _run_advise_as_implementer_turn sends the
+    advise prompt to AGENT_IMPLEMENTER with cwd=worktree_path so the findings
+    live in the same transcript that the implementation turn resumes from.
+
+    Codex falls back to AGENT_ADVISE via _run_advise (no multi-turn session
+    support), so AGENT_ADVISE must also remain present for that path.
+    """
+    src = _read_phase_sources("implementer_phase_runner.py", ())
+    assert "AGENT_IMPLEMENTER" in src, (
+        "implementer_phase_runner.py must route Claude advise under AGENT_IMPLEMENTER"
+    )
+    assert "_run_advise_as_implementer_turn" in src, (
+        "implementer_phase_runner.py must implement _run_advise_as_implementer_turn"
+    )
+    assert "AGENT_ADVISE" in src, (
+        "implementer_phase_runner.py must keep AGENT_ADVISE for the Codex fallback path"
+    )
+    assert "enable_advise" in src, (
+        "implementer_phase_runner.py must gate advise behind enable_advise"
+    )

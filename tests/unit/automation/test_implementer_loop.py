@@ -807,7 +807,7 @@ class TestImplementationAutoMergeGate:
             patch.object(implementer, "_save_state"),
             patch("hephaestus.automation.implementer.find_pr_for_issue", return_value=None),
             patch("hephaestus.automation.implementer.is_plan_review_go", return_value=True),
-            patch.object(implementer, "_run_advise", return_value=""),
+            patch.object(implementer, "_run_advise_as_implementer_turn"),
             patch.object(implementer, "_run_claude_code", return_value="session-1"),
             patch.object(implementer, "_finalize_pr", return_value=456),
             patch.object(

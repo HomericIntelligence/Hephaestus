@@ -345,23 +345,33 @@ class ImplementationPhaseRunner:
             issue = self._impl_module.fetch_issue_info(issue_number)
 
             # Advise-first (#30): pull prior learnings from ProjectMnemosyne
-            # before the implementation session. Runs under AGENT_ADVISE (its
-            # own cheap read-only session), gated by enable_advise; the findings
-            # are prepended to the implementation prompt context below.
-            advise_findings = ""
-            if self.options.enable_advise:
+            # before the implementation session.  For Claude agents the advise
+            # prompt is sent as the *first turn* of the implementer's own
+            # session (cwd=worktree_path) so the findings live in the transcript
+            # and are automatically visible to the implementation turn that
+            # follows via --resume.  For Codex agents the old separate-session
+            # path is retained because Codex has no multi-turn session model.
+            if self.options.enable_advise and not is_codex(self.options.agent):
                 self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Advising")
-                advise_findings = impl._run_advise(issue_number, issue.title, issue.body)
+                impl._run_advise_as_implementer_turn(
+                    issue_number, issue.title, issue.body, worktree_path
+                )
 
             # Run the selected implementation agent
             self.status_tracker.update_slot(
                 slot_id, f"{issue_ref(issue_number)}: Running {self.options.agent}"
             )
+            # Codex: run advise separately (returns findings text) then inject.
+            codex_advise_findings = ""
+            if self.options.enable_advise and is_codex(self.options.agent):
+                self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Advising")
+                codex_advise_findings = impl._run_advise(issue_number, issue.title, issue.body)
+
             session_id = impl._run_claude_code(
                 issue_number,
                 worktree_path,
                 _prepend_advise(
-                    advise_findings,
+                    codex_advise_findings,
                     get_implementation_prompt(
                         issue_number=issue_number,
                         issue_title=issue.title,
@@ -846,6 +856,7 @@ class ImplementationPhaseRunner:
             slot_id,
             agent=self.options.agent,
             session_agent=session_agent,
+            model=implementer_model(),
         )
 
     def _compact_implementer_session(self, issue_number: int, worktree_path: Path) -> None:
@@ -859,14 +870,14 @@ class ImplementationPhaseRunner:
         )
 
     def _run_advise(self, issue_number: int, issue_title: str, issue_body: str) -> str:
-        """Search ProjectMnemosyne for prior learnings before implementing.
+        """Search ProjectMnemosyne for prior learnings — planner's separate-session path.
 
-        Stage 2's advise-first step. Runs under ``AGENT_ADVISE`` (a distinct,
-        cheap, read-only session) — NOT the implementer's Session 2 — so it
-        mirrors the planner's advise behavior and never pollutes the impl
-        transcript. The findings are prepended to the implementation prompt
-        context by the caller. Delegates the Mnemosyne setup + prompt build to
-        the shared :mod:`advise_runner`; any failure degrades to a skip marker.
+        Used by the planner (and Codex) where advise runs under ``AGENT_ADVISE``
+        (a distinct, cheap, read-only session) and returns text findings for the
+        caller to inject into its own prompt context.  Claude implementer sessions
+        use :meth:`_run_advise_as_implementer_turn` instead, which makes advise
+        the *first turn* of the implementer's own session so the findings live in
+        the transcript and inform the implementation turn directly.
         """
         _impl_mod = self._impl_module
 
@@ -898,6 +909,82 @@ class ImplementationPhaseRunner:
             issue_body=issue_body,
             invoke=_invoke,
             build_prompt=get_advise_prompt_builder(self.options.agent),
+        )
+
+    def _run_advise_as_implementer_turn(
+        self,
+        issue_number: int,
+        issue_title: str,
+        issue_body: str,
+        worktree_path: Path,
+    ) -> None:
+        """Send the advise prompt as the first turn of the implementer's Claude session.
+
+        Unlike :meth:`_run_advise`, which creates a separate ``AGENT_ADVISE``
+        session and returns text, this method sends the advise prompt directly to
+        ``AGENT_IMPLEMENTER`` (using ``cwd=worktree_path`` so the session transcript
+        is co-located with the subsequent implementation turn).  The advise findings
+        live in the implementer's own transcript, so turn 2 (the implementation
+        prompt) automatically inherits them via ``--resume`` — no text injection
+        needed.
+
+        Codex does not support this two-turn flow; callers must guard with
+        ``is_codex`` and fall back to :meth:`_run_advise` + text injection for
+        Codex agents.
+
+        On first run ``invoke_claude_with_session`` auto-creates the session
+        (``transcript.exists()`` is False).  On subsequent loops the same
+        deterministic session UUID auto-resumes so the advise findings accumulate
+        across iterations.
+
+        Any failure degrades gracefully — the exception is logged and swallowed
+        so the caller can still proceed to the implementation turn.
+        """
+        _impl_mod = self._impl_module
+        repo_slug = _impl_mod.get_repo_slug(self.repo_root)
+
+        # Fetch plan and plan-review from GitHub comments to give advise the full
+        # context of what's been planned (same anchored selection as
+        # _fetch_plan_and_review so PLAN_REVIEW comments are distinguished from
+        # the PLAN comment).
+        plan_text, plan_review_text = self._fetch_plan_and_review(issue_number)
+
+        def _build_prompt_with_plan(**kw: object) -> str:
+            # Claude runs with cwd=worktree_path, so pass worktree_path as the
+            # relativization root.  marketplace.json lives under build/ in the main
+            # repo, not under the worktree, so _relativize_path will fall back to
+            # the absolute path — which is always readable regardless of cwd.
+            kw["repo_root"] = str(worktree_path)
+            base_prompt = get_advise_prompt_builder(self.options.agent)(**kw)
+            if not plan_text and not plan_review_text:
+                return base_prompt
+            parts = []
+            if plan_text:
+                parts.append(f"## Implementation Plan\n\n{plan_text}")
+            if plan_review_text:
+                parts.append(f"## Plan Review\n\n{plan_review_text}")
+            plan_block = "\n\n".join(parts)
+            return f"{plan_block}\n\n---\n\n{base_prompt}"
+
+        def _invoke(prompt: str) -> str:
+            stdout, _ = _impl_mod.invoke_claude_with_session(
+                repo=repo_slug,
+                issue=issue_number,
+                agent=_impl_mod.AGENT_IMPLEMENTER,
+                prompt=prompt,
+                model=implementer_model(),
+                cwd=worktree_path,
+                timeout=advise_claude_timeout(),
+                output_format="text",
+            )
+            return (stdout or "").strip()
+
+        run_advise(
+            issue_number=issue_number,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            invoke=_invoke,
+            build_prompt=_build_prompt_with_plan,
         )
 
     def _apply_impl_review_verdict(

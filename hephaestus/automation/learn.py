@@ -29,6 +29,7 @@ def run_learn(
     slot_id: int | None = None,
     agent: str = "claude",
     session_agent: str | None = None,
+    model: str | None = None,
 ) -> bool:
     """Resume agent session to run /learn.
 
@@ -38,6 +39,10 @@ def run_learn(
         issue_number: Issue number
         state_dir: Directory for state/log files
         slot_id: Worker slot ID (unused; kept for interface symmetry)
+        model: Override the model used for /learn. When ``None`` (default)
+            the configured ``HEPH_LEARN_MODEL`` / ``learn_model()`` is used.
+            Pass ``implementer_model()`` so the implementer's /learn turn runs
+            on the same model tier the session was created with.
 
     Returns:
         True if learn completed successfully, False otherwise
@@ -81,10 +86,11 @@ def run_learn(
 
     # /learn is a SIMPLE-complexity task (summarization + file writes), so we
     # use the configured learn model (default: Haiku) but accept operator
-    # overrides via HEPH_LEARN_MODEL. We can't route through `call_claude`
-    # here because we need `--resume` semantics with full Bash/Edit tools;
-    # instead we add the model flag directly.
-    # (The shared `call_claude` helper handles the loop-review paths.)
+    # overrides via HEPH_LEARN_MODEL. Callers may pass `model` explicitly to
+    # run /learn on the same model tier as the session (e.g. implementer_model()).
+    # We can't route through `call_claude` here because we need `--resume`
+    # semantics with full Bash/Edit tools; instead we add the model flag directly.
+    effective_model = model if model is not None else learn_model()
     try:
         result = run(
             [
@@ -99,7 +105,7 @@ def run_learn(
                 ),
                 "--print",
                 "--model",
-                learn_model(),
+                effective_model,
                 "--permission-mode",
                 "dontAsk",
                 "--allowedTools",

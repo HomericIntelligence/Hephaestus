@@ -619,6 +619,18 @@ class IssueImplementer:
         """Run the advise-first step before implementing (delegates to runner)."""
         return self.phase_runner._run_advise(issue_number, issue_title, issue_body)
 
+    def _run_advise_as_implementer_turn(
+        self,
+        issue_number: int,
+        issue_title: str,
+        issue_body: str,
+        worktree_path: Path,
+    ) -> None:
+        """Advise turn 1 of the implementer session (delegates to runner)."""
+        return self.phase_runner._run_advise_as_implementer_turn(
+            issue_number, issue_title, issue_body, worktree_path
+        )
+
     def _run_impl_review_loop(
         self,
         *,
