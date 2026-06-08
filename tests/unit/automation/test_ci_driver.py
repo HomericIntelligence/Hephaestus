@@ -1799,6 +1799,34 @@ class TestBotPrDiscovery:
         ):
             assert driver._discover_bot_prs() == {}
 
+    def test_gh_timeout_returns_empty(self, driver: CIDriver, tmp_path: Path) -> None:
+        """Discovery returns empty dict when gh api times out (docstring contract)."""
+        with (
+            patch(
+                "hephaestus.automation.ci_driver.get_repo_info",
+                return_value=("o", "r"),
+            ),
+            patch(
+                "hephaestus.automation.ci_driver._gh_call",
+                side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=30),
+            ),
+        ):
+            assert driver._discover_bot_prs() == {}
+
+    def test_missing_gh_binary_returns_empty(self, driver: CIDriver, tmp_path: Path) -> None:
+        """Discovery returns empty dict when the gh binary is missing/unexecutable."""
+        with (
+            patch(
+                "hephaestus.automation.ci_driver.get_repo_info",
+                return_value=("o", "r"),
+            ),
+            patch(
+                "hephaestus.automation.ci_driver._gh_call",
+                side_effect=FileNotFoundError(2, "No such file or directory", "gh"),
+            ),
+        ):
+            assert driver._discover_bot_prs() == {}
+
     def test_discover_prs_unions_bot_prs_when_enabled(
         self, driver: CIDriver, tmp_path: Path
     ) -> None:

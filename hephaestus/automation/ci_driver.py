@@ -411,7 +411,12 @@ class CIDriver:
                 check=False,
             )
             raw_pulls: list[dict[str, Any]] = json.loads(result.stdout or "[]")
-        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            OSError,
+            json.JSONDecodeError,
+        ) as exc:
             logger.info("Bot-PR discovery skipped: gh api failed (%s)", exc)
             return {}
 
