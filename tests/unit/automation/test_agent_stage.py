@@ -91,3 +91,148 @@ def test_run_agent_rejects_unsupported_direct_agent_value(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="Unsupported agent: bogus"):
         agent_stage.run_agent(args)
+
+
+def test_main_rejects_approval_flag_with_claude_agent(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--approval is Codex-only; passing it with --agent=claude must error (issue #773)."""
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("p", encoding="utf-8")
+    argv = [
+        "--prompt-file",
+        str(prompt_file),
+        "--repo-root",
+        str(tmp_path),
+        "--stage",
+        "x",
+        "--output",
+        str(tmp_path / "out.txt"),
+        "--agent",
+        "claude",
+        "--approval",
+        "on-request",
+    ]
+    with pytest.raises(SystemExit) as exc:
+        agent_stage.main(argv)
+    assert exc.value.code == 2
+    assert "--approval=on-request" in capsys.readouterr().err
+
+
+def test_main_rejects_danger_full_access_sandbox_with_claude_agent(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--sandbox=danger-full-access silently no-ops on claude; must error (issue #773)."""
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("p", encoding="utf-8")
+    argv = [
+        "--prompt-file",
+        str(prompt_file),
+        "--repo-root",
+        str(tmp_path),
+        "--stage",
+        "x",
+        "--output",
+        str(tmp_path / "out.txt"),
+        "--agent",
+        "claude",
+        "--sandbox",
+        "danger-full-access",
+    ]
+    with pytest.raises(SystemExit) as exc:
+        agent_stage.main(argv)
+    assert exc.value.code == 2
+    assert "--sandbox=danger-full-access" in capsys.readouterr().err
+
+
+def test_main_allows_read_only_sandbox_with_claude_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--sandbox=read-only IS honored by run_claude_text and must NOT be rejected.
+
+    Regression guard for the over-restriction caught in plan review of issue #773.
+    """
+
+    def fake_run_claude_text(*a: object, **kw: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(["claude"], 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(agent_stage, "run_claude_text", fake_run_claude_text)
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "claude")
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("p", encoding="utf-8")
+    argv = [
+        "--prompt-file",
+        str(prompt_file),
+        "--repo-root",
+        str(tmp_path),
+        "--stage",
+        "x",
+        "--output",
+        str(tmp_path / "out.txt"),
+        "--agent",
+        "claude",
+        "--sandbox",
+        "read-only",
+    ]
+    assert agent_stage.main(argv) == 0
+
+
+def test_main_allows_default_flags_with_claude_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defaults must pass validation; only explicit no-op values are rejected."""
+
+    def fake_run_claude_text(*a: object, **kw: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(["claude"], 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(agent_stage, "run_claude_text", fake_run_claude_text)
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "claude")
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("p", encoding="utf-8")
+    argv = [
+        "--prompt-file",
+        str(prompt_file),
+        "--repo-root",
+        str(tmp_path),
+        "--stage",
+        "x",
+        "--output",
+        str(tmp_path / "out.txt"),
+        "--agent",
+        "claude",
+    ]
+    assert agent_stage.main(argv) == 0
+
+
+def test_main_allows_approval_with_codex_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex honors --approval, so validation must not fire."""
+
+    def fake_run_codex_session(*a: object, **kw: object) -> AgentRunResult:
+        return AgentRunResult(stdout="ok", stderr="", session_id=None)
+
+    monkeypatch.setattr(agent_stage, "run_codex_session", fake_run_codex_session)
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "codex")
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("p", encoding="utf-8")
+    argv = [
+        "--prompt-file",
+        str(prompt_file),
+        "--repo-root",
+        str(tmp_path),
+        "--stage",
+        "x",
+        "--output",
+        str(tmp_path / "out.txt"),
+        "--agent",
+        "codex",
+        "--approval",
+        "on-request",
+    ]
+    assert agent_stage.main(argv) == 0

@@ -138,6 +138,40 @@ def run_codex(
     return 0
 
 
+# Flag values that silently no-op when --agent=claude is selected.
+# - `approval` is not a parameter of run_claude_text at all, so any
+#   non-default value (i.e. != "never") is a no-op.
+# - `sandbox="read-only"` IS honored (run_claude_text:125 gates
+#   --permission-mode on it), so only `danger-full-access` is a no-op.
+# See issue #773.
+_CLAUDE_NOOP_VALUES: tuple[tuple[str, str, frozenset[str]], ...] = (
+    ("approval", "--approval", frozenset({"untrusted", "on-request"})),
+    ("sandbox", "--sandbox", frozenset({"danger-full-access"})),
+)
+
+
+def validate_agent_flags(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Reject flag values that the selected agent does not honor.
+
+    Only fires when the operator EXPLICITLY passed ``--agent=claude``. When
+    ``--agent`` is omitted, ``resolve_agent`` will auto-detect at run time and
+    that path keeps its existing semantics. See issue #773.
+    """
+    if args.agent != "claude":
+        return
+    offending: list[str] = []
+    for attr, flag, noop_values in _CLAUDE_NOOP_VALUES:
+        value = getattr(args, attr)
+        if value in noop_values:
+            offending.append(f"{flag}={value}")
+    if offending:
+        parser.error(
+            "--agent=claude does not honor "
+            + ", ".join(offending)
+            + " (these flag values are not supported by the claude agent)"
+        )
+
+
 def run_agent(args: argparse.Namespace) -> int:
     """Run one provider-selected automation stage and persist its output/log files."""
     repo_root = Path(args.repo_root).expanduser().resolve()
@@ -163,7 +197,9 @@ def run_agent(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """Run the agent stage command-line interface."""
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    validate_agent_flags(parser, args)
     exit_code = run_agent(args)
     if args.json:
         emit_json_status(exit_code, stage=args.stage, agent=args.agent)
