@@ -692,6 +692,90 @@ class TestGhCall:
         # (range(2) = [0, 1], each iteration tries resilient_call with max_retries=2)
         assert mock_run.call_count >= 2  # At least the outer iterations
 
+    @patch("hephaestus.automation.github_api.time")
+    @patch("hephaestus.automation.github_api.run")
+    def test_secondary_rate_limit_retries_with_15s_base_backoff(
+        self, mock_run: Any, mock_time: Any
+    ) -> None:
+        """Secondary rate limit triggers 15s base backoff, not 1s generic retry.
+
+        When stderr contains 'exceeded a secondary rate limit', _gh_call_impl
+        must route through _handle_rate_limit_attempt(base_wait_seconds=15)
+        instead of the generic 2**attempt path, so the first wait is 15s.
+        """
+        secondary_msg = (
+            "gh: You have exceeded a secondary rate limit. "
+            "Please wait a few minutes before you try again."
+        )
+        success = Mock(spec=subprocess.CompletedProcess)
+        success.stdout = "ok"
+        mock_run.side_effect = [
+            subprocess.CalledProcessError(1, "gh", stderr=secondary_msg),
+            success,
+        ]
+        mock_time.sleep = Mock()
+        mock_time.monotonic = __import__("time").monotonic
+        mock_time.time = __import__("time").time
+
+        result = _gh_call(["issue", "view", "123"], max_retries=6)
+
+        assert result.stdout == "ok"
+        # Filter out sub-second throttle sleeps; only the secondary-rate-limit
+        # wait (>=1s) matters here.  First such sleep must be 15s (base), not 1s.
+        sleep_calls = [c[0][0] for c in mock_time.sleep.call_args_list if c[0][0] >= 1]
+        assert sleep_calls, "Expected at least one rate-limit sleep call"
+        first_wait = sleep_calls[0]
+        assert first_wait == 15, f"Expected 15s base wait, got {first_wait}s"
+
+    @patch("hephaestus.automation.github_api.time")
+    @patch("hephaestus.automation.github_api.run")
+    def test_secondary_rate_limit_raises_rate_limit_error_when_retry_disabled(
+        self, mock_run: Any, mock_time: Any
+    ) -> None:
+        """Secondary rate limit with retry_on_rate_limit=False raises GitHubRateLimitError."""
+        secondary_msg = (
+            "gh: You have exceeded a secondary rate limit. "
+            "Please wait a few minutes before you try again."
+        )
+        mock_run.side_effect = subprocess.CalledProcessError(1, "gh", stderr=secondary_msg)
+        mock_time.sleep = Mock()
+        mock_time.monotonic = __import__("time").monotonic
+        mock_time.time = __import__("time").time
+
+        with pytest.raises(GitHubRateLimitError):
+            _gh_call(["issue", "view", "123"], max_retries=6, retry_on_rate_limit=False)
+
+    @patch("hephaestus.automation.github_api.time")
+    @patch("hephaestus.automation.github_api.run")
+    def test_secondary_rate_limit_backoff_doubles_each_attempt(
+        self, mock_run: Any, mock_time: Any
+    ) -> None:
+        """Secondary rate limit backoff doubles: 15s, 30s, capped at 300s."""
+        secondary_msg = (
+            "gh: You have exceeded a secondary rate limit. "
+            "Please wait a few minutes before you try again."
+        )
+        success = Mock(spec=subprocess.CompletedProcess)
+        success.stdout = "ok"
+        mock_run.side_effect = [
+            subprocess.CalledProcessError(1, "gh", stderr=secondary_msg),
+            subprocess.CalledProcessError(1, "gh", stderr=secondary_msg),
+            success,
+        ]
+        mock_time.sleep = Mock()
+        mock_time.monotonic = __import__("time").monotonic
+        mock_time.time = __import__("time").time
+
+        result = _gh_call(["issue", "view", "123"], max_retries=6)
+
+        assert result.stdout == "ok"
+        # Filter out sub-second throttle sleeps; only the secondary-rate-limit
+        # waits (>=15s) matter for this assertion.
+        sleep_calls = [c[0][0] for c in mock_time.sleep.call_args_list if c[0][0] >= 1]
+        assert len(sleep_calls) >= 2, f"Expected >=2 rate-limit sleeps, got {sleep_calls}"
+        assert sleep_calls[0] == 15, f"Expected 15s (attempt 0), got {sleep_calls[0]}"
+        assert sleep_calls[1] == 30, f"Expected 30s (attempt 1), got {sleep_calls[1]}"
+
 
 # NOTE on patch targets: tests in TestGhCall patch "hephaestus.automation.github_api.run"
 # because _gh_call (defined in github_api) calls run() imported from .git_utils.

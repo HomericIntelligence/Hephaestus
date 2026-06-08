@@ -25,6 +25,7 @@ from hephaestus.github.rate_limit import (
     detect_claude_usage_cap,
     detect_claude_usage_limit,
     detect_rate_limit,
+    detect_secondary_rate_limit,
     gh_global_throttle_acquire,
     gh_rate_limit_reset_epoch,
     wait_until,
@@ -427,6 +428,24 @@ def _gh_call_impl(
                     _log_token_scope_remediation(args, stderr)
                 raise
 
+            # Secondary rate limit carries no reset epoch — check both stderr
+            # and stdout (GraphQL errors can land on stdout).
+            stdout = e.stdout if e.stdout else ""
+            if detect_secondary_rate_limit(stderr) or detect_secondary_rate_limit(stdout):
+                logger.warning(
+                    "GitHub secondary rate limit hit (attempt %s), waiting before retry",
+                    attempt + 1,
+                )
+                _handle_rate_limit_attempt(
+                    reset_epoch=0,
+                    attempt=attempt,
+                    max_retries=max_retries,
+                    retry_on_rate_limit=retry_on_rate_limit,
+                    cause=e,
+                    base_wait_seconds=15,
+                )
+                continue
+
             if attempt == max_retries - 1:
                 raise
 
@@ -518,6 +537,7 @@ def _handle_rate_limit_attempt(
     max_retries: int,
     retry_on_rate_limit: bool,
     cause: BaseException,
+    base_wait_seconds: int = 60,
 ) -> None:
     """Wait for a rate-limit reset, or raise :class:`GitHubRateLimitError`.
 
@@ -525,6 +545,19 @@ def _handle_rate_limit_attempt(
     two except-blocks in :func:`_gh_call` share identical behavior. Raises
     immediately if retries are disabled or exhausted; otherwise sleeps and
     returns so the caller can ``continue`` the retry loop.
+
+    Args:
+        reset_epoch: Unix timestamp when the rate limit resets, or ``0`` when
+            unknown (no epoch embedded in the error message).
+        attempt: Current attempt index (0-based).
+        max_retries: Total retry budget.
+        retry_on_rate_limit: If False, raise immediately instead of waiting.
+        cause: The exception that triggered this call.
+        base_wait_seconds: Initial wait duration (seconds) when ``reset_epoch``
+            is ``0`` (no epoch available).  Doubles each attempt, capped at
+            300s.  Defaults to 60; pass 15 for secondary rate limits which
+            carry no reset epoch but typically clear faster.
+
     """
     if not retry_on_rate_limit or attempt == max_retries - 1:
         raise GitHubRateLimitError(
@@ -534,7 +567,7 @@ def _handle_rate_limit_attempt(
     if reset_epoch > 0:
         wait_until(reset_epoch)
         return
-    wait_seconds = min(60 * (2**attempt), 300)  # cap at 5 minutes
+    wait_seconds = min(base_wait_seconds * (2**attempt), 300)  # cap at 5 minutes
     logger.warning("Rate limited but no reset time, waiting %ss", wait_seconds)
     time.sleep(wait_seconds)
 
