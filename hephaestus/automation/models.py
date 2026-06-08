@@ -20,6 +20,8 @@ from pydantic import BaseModel, Field
 # with the historical ``from .models import PLAN_COMMENT_MARKER`` import path.
 from .protocol import PLAN_COMMENT_MARKER as PLAN_COMMENT_MARKER
 
+__all__ = ["PLAN_COMMENT_MARKER"]
+
 
 class IssueState(str, Enum):
     """GitHub issue/PR state.

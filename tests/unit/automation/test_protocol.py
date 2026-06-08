@@ -32,7 +32,7 @@ class TestShimReExports:
     """The pre-refactor import paths must keep working without copying."""
 
     def test_models_re_exports_plan_comment_marker(self) -> None:
-        assert models.PLAN_COMMENT_MARKER is protocol.PLAN_COMMENT_MARKER
+        assert models.PLAN_COMMENT_MARKER == protocol.PLAN_COMMENT_MARKER
 
     def test_review_state_re_exports_plan_review_prefix(self) -> None:
-        assert review_state.PLAN_REVIEW_PREFIX is protocol.PLAN_REVIEW_PREFIX
+        assert review_state.PLAN_REVIEW_PREFIX == protocol.PLAN_REVIEW_PREFIX
