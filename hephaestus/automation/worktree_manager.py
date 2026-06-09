@@ -40,14 +40,6 @@ _AUTOMATION_PROMPT_PREFIXES = (
 )
 
 
-def _loop_trunk_githash() -> str | None:
-    """Return the loop-provided trunk commit-ish when available."""
-    trunk = os.environ.get("HEPH_TRUNK_GITHASH", "").strip()
-    if not trunk or trunk == "unknown":
-        return None
-    return trunk
-
-
 class WorktreeDirtyError(Exception):
     """Raised when a worktree cannot be removed because it contains uncommitted changes."""
 
@@ -540,15 +532,7 @@ class WorktreeManager:
         holds the branch.
         """
         target_ref = f"refs/heads/{branch_name}"
-        try:
-            worktrees = self.list_worktrees(raise_on_error=True)
-        except Exception as e:
-            raise RuntimeError(
-                f"Cannot safely determine whether branch {branch_name!r} is already "
-                "checked out in another worktree"
-            ) from e
-
-        for wt in worktrees:
+        for wt in self.list_worktrees(raise_on_error=True):
             if wt.get("branch") == target_ref:
                 return Path(wt["path"])
         return None
@@ -597,7 +581,7 @@ class WorktreeManager:
         except Exception as e:
             logger.error("Failed to list worktrees: %s", e)
             if raise_on_error:
-                raise RuntimeError("Failed to list git worktrees") from e
+                raise
             return []
 
     def ensure_branch_deleted(self, branch_name: str) -> None:

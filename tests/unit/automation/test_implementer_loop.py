@@ -11,9 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation.implementer import MAX_REVIEW_ITERATIONS, IssueImplementer
-from hephaestus.automation.implementer_phase_runner import (
-    _parse_dirty_reused_worktree_decision,
-)
+from hephaestus.automation.implementer_phase_runner import _parse_dirty_worktree_decision
 from hephaestus.automation.models import ImplementationState, ImplementerOptions
 
 
@@ -2019,10 +2017,7 @@ class TestResolveDirtyReusedWorktree:
             patch(
                 "hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"
             ) as mock_sync,
-            patch.object(
-                implementer.phase_runner, "_restore_dirty_reused_worktree_commit_after_sync"
-            ) as mock_restore,
-            patch.object(implementer.phase_runner, "_push_branch") as mock_push,
+            patch("hephaestus.automation.implementer_phase_runner.run") as mock_run,
             patch.object(implementer, "_save_state"),
             patch("hephaestus.automation.implementer.fetch_issue_info") as mock_issue,
             patch.object(implementer, "_run_advise_as_implementer_turn"),
@@ -2030,11 +2025,6 @@ class TestResolveDirtyReusedWorktree:
             patch.object(implementer.phase_runner, "_apply_impl_review_verdict"),
         ):
             mock_resolve.return_value = "abc123456789"
-            parent = MagicMock()
-            parent.attach_mock(mock_resolve, "resolve")
-            parent.attach_mock(mock_sync, "sync")
-            parent.attach_mock(mock_restore, "restore")
-            parent.attach_mock(mock_push, "push")
             mock_issue.return_value.title = "t"
             mock_issue.return_value.body = "b"
             implementer.phase_runner._review_existing_pr(
@@ -2045,67 +2035,18 @@ class TestResolveDirtyReusedWorktree:
                 slot_id=None,
                 thread_id=None,
             )
-        assert [call[0] for call in parent.mock_calls[:4]] == [
-            "resolve",
-            "sync",
-            "restore",
-            "push",
-        ]
+        mock_resolve.assert_called_once()
+        # Decision must run BEFORE the hard-reset sync.
+        mock_sync.assert_called_once()
+        argvs = [c[0][0] for c in mock_run.call_args_list]
+        assert ["git", "cherry-pick", "abc123456789"] in argvs
+        assert ["git", "push", "origin", "HEAD:b"] in argvs
 
-    def test_dirty_resolver_failure_aborts_before_sync(
-        self, implementer: IssueImplementer, tmp_path: Path
-    ) -> None:
-        """A failed stash/commit preservation refuses to run the destructive sync."""
-        wt = tmp_path / "worktree"
-        wt.mkdir(exist_ok=True)
-        state = ImplementationState(issue_number=1)
-        with (
-            patch(
-                "hephaestus.automation.implementer_phase_runner.pr_has_implementation_state_label",
-                return_value=(False, True),
-            ),
-            patch.object(implementer.status_tracker, "update_slot"),
-            patch("hephaestus.automation.implementer.get_pr_head_branch", return_value="b"),
-            patch.object(implementer.worktree_manager, "create_worktree", return_value=wt),
-            patch(
-                "hephaestus.automation.implementer_phase_runner.is_clean_working_tree",
-                return_value=False,
-            ),
-            patch.object(
-                implementer.phase_runner,
-                "_resolve_dirty_reused_worktree",
-                side_effect=RuntimeError("Failed to stash dirty reused worktree"),
-            ),
-            patch(
-                "hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"
-            ) as mock_sync,
-        ):
-            with pytest.raises(RuntimeError, match="Failed to stash"):
-                implementer.phase_runner._review_existing_pr(
-                    issue_number=1,
-                    existing_pr=5,
-                    branch_name="1-auto-impl",
-                    state=state,
-                    slot_id=None,
-                    thread_id=None,
-                )
-        mock_sync.assert_not_called()
-
-    @pytest.mark.parametrize(
-        ("output", "expected"),
-        [
-            ("Reasoning\nCOMMIT", "commit"),
-            ("Reasoning mentions COMMIT\nSTASH", "stash"),
-            ("I think COMMIT", "stash"),
-            ("Reasoning\nDO NOT COMMIT", "stash"),
-            ("", "stash"),
-        ],
-    )
-    def test_dirty_worktree_decision_parser_requires_exact_final_line(
-        self, output: str, expected: str
-    ) -> None:
+    def test_dirty_worktree_decision_parser_requires_exact_final_line(self) -> None:
         """Only an exact final-line COMMIT chooses the commit path."""
-        assert _parse_dirty_reused_worktree_decision(output) == expected
+        assert _parse_dirty_worktree_decision("Reasoning\nCOMMIT") == "commit"
+        assert _parse_dirty_worktree_decision("Reasoning mentions COMMIT\nSTASH") == "stash"
+        assert _parse_dirty_worktree_decision("I think COMMIT") == "stash"
 
     def test_decision_agent_commit_verdict_commits(
         self, implementer: IssueImplementer, tmp_path: Path

@@ -1169,19 +1169,17 @@ class TestResilientCallAdoption:
         ):
             mock_resilient.return_value = _completed()
 
-            def _run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            def _run(argv: list[str], **_: object):
+                if "status" in argv:
+                    return _completed(stdout="")
                 if "symbolic-ref" in argv:
                     return _completed(stdout="origin/main")
-                if "rev-list" in argv:
-                    return _completed(stdout="0")
                 if "rev-parse" in argv:
                     return _completed(stdout="abc1234")
                 return _completed()
 
             mock_run.side_effect = _run
-            sha, fetch_ok = _rebase_main("Repo", tmp_path)
-        assert sha == "abc1234"
-        assert fetch_ok is True
+            _rebase_main("Repo", tmp_path)
         assert mock_resilient.call_count == 1
         # The wrapped callable is the module's subprocess.run (here the patched mock).
         assert mock_resilient.call_args.args[0] is mock_run

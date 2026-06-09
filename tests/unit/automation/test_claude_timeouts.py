@@ -43,7 +43,7 @@ def test_planner_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
             "HEPH_IMPLEMENTER_AGENT_TIMEOUT",
             "HEPH_IMPLEMENTER_CLAUDE_TIMEOUT",
             claude_timeouts.implementer_claude_timeout,
-            TWO_HOURS_S,
+            7200,
         ),
         (
             "HEPH_ADVISE_AGENT_TIMEOUT",
@@ -61,13 +61,13 @@ def test_planner_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
             "HEPH_ADDRESS_REVIEW_AGENT_TIMEOUT",
             "HEPH_ADDRESS_REVIEW_CLAUDE_TIMEOUT",
             claude_timeouts.address_review_claude_timeout,
-            TWO_HOURS_S,
+            7200,
         ),
         (
             "HEPH_CI_DRIVER_AGENT_TIMEOUT",
             "HEPH_CI_DRIVER_CLAUDE_TIMEOUT",
             claude_timeouts.ci_driver_claude_timeout,
-            TWO_HOURS_S,
+            7200,
         ),
         (
             "HEPH_LEARN_AGENT_TIMEOUT",
