@@ -1038,9 +1038,12 @@ class ImplementationPhaseRunner:
         so it earns the ``state:implementation-go`` label drive-green needs to
         arm auto-merge — without this it would deadlock green-but-unmergeable.
 
-        Idempotency: a PR already carrying a terminal implementation-review
-        label (GO or NO-GO) was settled on a prior loop, so it short-circuits
-        without re-reviewing. Anti-clobber: the worktree is hard-reset to
+        Idempotency: a PR already carrying ``state:implementation-go`` was
+        settled on a prior loop, so it short-circuits without re-reviewing
+        (auto-merge arming is drive-green's job). ``state:implementation-no-go``
+        is NOT terminal — a NO-GO PR failed review and re-enters the
+        review→address→re-review cycle until it earns GO, so it does NOT
+        short-circuit. Anti-clobber: the worktree is hard-reset to
         ``origin/<branch>`` before the review loop so re-running never discards
         commits that were pushed to the PR head, and the loop runs with
         ``session_id=None`` (no agent edit session is started here — the address
@@ -1053,12 +1056,14 @@ class ImplementationPhaseRunner:
             slot_id, f"{issue_ref(issue_number)}: Checking implementation-review label"
         )
         has_go, has_no_go = pr_has_implementation_state_label(existing_pr)
-        if has_go or has_no_go:
+        if has_go:
+            # GO is terminal: the PR passed review on a prior loop. Auto-merge
+            # arming is drive-green's job, so re-reviewing here is wasted work.
             impl._log(
                 "info",
                 f"Issue #{issue_number}: open PR {pr_ref(existing_pr)} already "
-                f"implementation-review {'GO' if has_go else 'NO-GO'} — skipping re-review "
-                "(handled by later phases)",
+                "implementation-review GO — skipping re-review "
+                "(settled; auto-merge handled by drive-green)",
                 thread_id,
             )
             with self.state_lock:
@@ -1070,6 +1075,17 @@ class ImplementationPhaseRunner:
                 pr_number=existing_pr,
                 branch_name=branch_name,
                 already_has_pr=True,
+            )
+        if has_no_go:
+            # NO-GO is NOT terminal: the PR failed review and must be
+            # re-implemented + re-reviewed until it earns GO. Fall through into
+            # the review→address→re-review cycle below.
+            impl._log(
+                "info",
+                f"Issue #{issue_number}: open PR {pr_ref(existing_pr)} is "
+                "implementation-review NO-GO — re-running implement + review loop "
+                "to drive it toward GO",
+                thread_id,
             )
 
         # Reuse-or-create the worktree, then hard-reset it to the PR head so the

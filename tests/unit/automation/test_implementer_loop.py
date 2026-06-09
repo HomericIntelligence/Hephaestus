@@ -1261,3 +1261,95 @@ class TestCompactImplementerSession:
 
                 # _run_learn returned True but agent is codex → compact skipped
                 mock_compact.assert_not_called()
+
+
+class TestReviewExistingPrShortCircuit:
+    """``_review_existing_pr`` short-circuits on GO only; NO-GO re-enters the loop.
+
+    A pre-existing PR labeled ``state:implementation-go`` is settled (auto-merge
+    is drive-green's job) so re-review is skipped. A PR labeled
+    ``state:implementation-no-go`` is NOT settled — it failed review and must be
+    re-implemented + re-reviewed until it earns GO. Treating NO-GO as terminal
+    (the prior ``has_go or has_no_go`` guard) left NO-GO PRs untouched every loop.
+    """
+
+    def _call(
+        self,
+        implementer: IssueImplementer,
+        tmp_path: Path,
+        *,
+        has_go: bool,
+        has_no_go: bool,
+    ):
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir(exist_ok=True)
+        state = ImplementationState(issue_number=1)
+        with (
+            patch(
+                "hephaestus.automation.implementer_phase_runner.pr_has_implementation_state_label",
+                return_value=(has_go, has_no_go),
+            ),
+            patch.object(implementer.status_tracker, "update_slot"),
+            patch.object(
+                implementer.worktree_manager, "create_worktree", return_value=worktree_path
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"
+            ) as mock_sync,
+            patch.object(implementer, "_save_state"),
+            patch("hephaestus.automation.implementer.fetch_issue_info") as mock_issue,
+            patch.object(implementer, "_run_advise_as_implementer_turn"),
+            patch.object(
+                implementer, "_run_impl_review_loop", return_value=(1, "GO", "A")
+            ) as mock_loop,
+            patch.object(implementer.phase_runner, "_apply_impl_review_verdict") as mock_verdict,
+        ):
+            mock_issue.return_value.title = "title"
+            mock_issue.return_value.body = "body"
+            result = implementer.phase_runner._review_existing_pr(
+                issue_number=1,
+                existing_pr=555,
+                branch_name="1-branch",
+                state=state,
+                slot_id=None,
+                thread_id=None,
+            )
+        return result, mock_loop, mock_verdict, mock_sync
+
+    def test_go_pr_short_circuits_without_review(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """A GO-labeled PR returns success and does NOT re-run the review loop."""
+        result, mock_loop, mock_verdict, mock_sync = self._call(
+            implementer, tmp_path, has_go=True, has_no_go=False
+        )
+        assert result.success is True
+        assert result.already_has_pr is True
+        assert result.pr_number == 555
+        mock_loop.assert_not_called()
+        mock_verdict.assert_not_called()
+        mock_sync.assert_not_called()
+
+    def test_no_go_pr_re_enters_review_loop(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """A NO-GO-labeled PR re-runs implementation + review (the fix)."""
+        result, mock_loop, mock_verdict, mock_sync = self._call(
+            implementer, tmp_path, has_go=False, has_no_go=True
+        )
+        assert result.success is True
+        mock_loop.assert_called_once()
+        mock_verdict.assert_called_once()
+        # Worktree is hard-reset to the PR head before the loop runs.
+        mock_sync.assert_called_once()
+
+    def test_unlabeled_pr_runs_review_loop(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """An unlabeled existing PR runs the review loop (behavior preserved)."""
+        result, mock_loop, mock_verdict, _ = self._call(
+            implementer, tmp_path, has_go=False, has_no_go=False
+        )
+        assert result.success is True
+        mock_loop.assert_called_once()
+        mock_verdict.assert_called_once()

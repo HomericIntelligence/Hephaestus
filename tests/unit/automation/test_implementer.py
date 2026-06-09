@@ -516,9 +516,16 @@ class TestExistingPrEntersReviewLoop:
         create_wt.assert_not_called()
         review_loop.assert_not_called()
 
-    def test_existing_pr_with_no_go_label_short_circuits(
+    def test_existing_pr_with_no_go_label_re_enters_review_loop(
         self, impl: IssueImplementer, tmp_path: Path
     ) -> None:
+        """A NO-GO PR is NOT settled — it re-enters implement + review to earn GO.
+
+        Regression guard for the bug where ``has_go or has_no_go`` short-circuited
+        NO-GO PRs identically to GO, leaving them untouched every loop.
+        """
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir(exist_ok=True)
         with (
             patch(
                 "hephaestus.automation.implementer.find_pr_for_issue",
@@ -528,16 +535,35 @@ class TestExistingPrEntersReviewLoop:
                 "hephaestus.automation.implementer_phase_runner.pr_has_implementation_state_label",
                 return_value=(False, True),
             ),
-            patch.object(impl.worktree_manager, "create_worktree") as create_wt,
+            patch("hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"),
+            patch.object(
+                impl.worktree_manager, "create_worktree", return_value=worktree_path
+            ) as create_wt,
             patch.object(impl, "_save_state"),
-            patch.object(impl, "_run_impl_review_loop") as review_loop,
+            patch(
+                "hephaestus.automation.implementer.fetch_issue_info",
+                return_value=MagicMock(title="t", body="b"),
+            ),
+            patch.object(impl, "_run_advise_as_implementer_turn"),
+            patch.object(impl, "_run_impl_review_loop", return_value=(2, "GO", "A")) as review_loop,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_go"
+            ) as mark_go,
+            patch("hephaestus.automation.implementer_phase_runner.mark_pr_implementation_no_go"),
+            patch(
+                "hephaestus.automation.implementer_phase_runner."
+                "enable_auto_merge_after_implementation_go"
+            ),
         ):
             result = impl._implement_issue(1)
 
         assert result.success is True
         assert result.already_has_pr is True
-        create_wt.assert_not_called()
-        review_loop.assert_not_called()
+        # NO-GO re-enters the loop: worktree prepped + review loop run, and on a
+        # GO verdict from the re-review the PR is re-labeled GO (no longer skipped).
+        create_wt.assert_called_once()
+        review_loop.assert_called_once()
+        mark_go.assert_called_once_with(777)
 
     def test_existing_pr_review_no_go_marks_no_go(
         self, impl: IssueImplementer, tmp_path: Path

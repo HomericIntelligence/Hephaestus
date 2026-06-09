@@ -25,7 +25,6 @@ from hephaestus.automation.loop_runner import (
     RepoResult,
     _default_phase_timeout_s,
     _ensure_clone,
-    _gh_issue_numbers_for,
     _phase_order_warnings,
     _preflight_token_scopes,
     _rate_limit_remaining,
@@ -469,29 +468,58 @@ def test_run_loop_continues_when_one_repo_fails(repo_inputs: tuple[Path, LoopCon
 # ---------------------------------------------------------------------------
 
 
-def test_build_phase_argv_plan_omits_issues() -> None:
-    """Build phase argv plan omits issues."""
+def test_build_phase_argv_plan_forwards_open_issues_when_unscoped() -> None:
+    """Unscoped plan forwards the loop-discovered open-issue list via --issues.
+
+    This avoids the child phase re-running its own ``gh issue list`` — the
+    loop already discovered the issues once per loop and passes them down.
+    """
     cfg = LoopConfig()
     with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/plan", [])):
         argv = loop_runner._build_phase_argv("plan", cfg, open_issues=[1, 2])
     assert argv is not None
+    assert "--issues" in argv
+    assert argv[argv.index("--issues") + 1 : argv.index("--issues") + 3] == ["1", "2"]
+
+
+def test_build_phase_argv_plan_omits_issues_when_none_discovered() -> None:
+    """Plan omits --issues when there are no open issues to forward."""
+    cfg = LoopConfig()
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/plan", [])):
+        argv = loop_runner._build_phase_argv("plan", cfg, open_issues=[])
+    assert argv is not None
     assert "--issues" not in argv
 
 
+def test_build_phase_argv_implement_forwards_open_issues_when_unscoped() -> None:
+    """Unscoped implement forwards the loop-discovered open-issue list via --issues."""
+    cfg = LoopConfig()
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/impl", [])):
+        argv = loop_runner._build_phase_argv("implement", cfg, open_issues=[3, 5])
+    assert argv is not None
+    assert "--issues" in argv
+    assert argv[argv.index("--issues") + 1 : argv.index("--issues") + 3] == ["3", "5"]
+
+
 def test_build_phase_argv_plan_forwards_explicit_issues() -> None:
-    """Plan receives --issues only when the loop is explicitly scoped."""
+    """Plan receives the operator's explicit scope.
+
+    When the loop is scoped, ``process_repo`` sets ``open_issues = cfg.issues``
+    (loop_runner.py:1069), so the explicit scope flows through the open-issue
+    list — that is what the child phase receives.
+    """
     cfg = LoopConfig(issues=[8, 13])
     with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/plan", [])):
-        argv = loop_runner._build_phase_argv("plan", cfg, open_issues=[1, 2])
+        argv = loop_runner._build_phase_argv("plan", cfg, open_issues=[8, 13])
     assert argv is not None
     assert argv[argv.index("--issues") + 1 : argv.index("--issues") + 3] == ["8", "13"]
 
 
 def test_build_phase_argv_implement_forwards_explicit_issues() -> None:
-    """Implement receives the loop issue scope when set."""
+    """Implement receives the loop issue scope when set (via open_issues)."""
     cfg = LoopConfig(issues=[8])
     with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/impl", [])):
-        argv = loop_runner._build_phase_argv("implement", cfg, open_issues=[1, 2])
+        argv = loop_runner._build_phase_argv("implement", cfg, open_issues=[8])
     assert argv is not None
     assert argv[argv.index("--issues") + 1] == "8"
 
@@ -680,41 +708,37 @@ def test_gh_list_repos_filters_forks_and_archived() -> None:
     assert "name,isArchived,isFork" in invoked_argv
 
 
-def test_list_open_issue_numbers_unions_author_and_assignee() -> None:
-    """Author + assignee queries are unioned (OR semantics) and sorted."""
-    calls = {"author": "10\n12\n", "assignee": "12\n7\n"}
+def test_list_open_issue_numbers_returns_all_open_sorted() -> None:
+    """A single all-open query is parsed and sorted ascending."""
 
     def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        if "--author" in argv:
-            return subprocess.CompletedProcess(
-                args=argv, returncode=0, stdout=calls["author"], stderr=""
-            )
-        if "--assignee" in argv:
-            return subprocess.CompletedProcess(
-                args=argv, returncode=0, stdout=calls["assignee"], stderr=""
-            )
-        raise AssertionError(f"unexpected argv: {argv!r}")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="12\n7\n10\n", stderr="")
 
     with patch("hephaestus.automation.loop_runner.subprocess.run", side_effect=fake_run):
         nums = loop_runner._list_open_issue_numbers("MyOrg", "MyRepo")
     assert nums == [7, 10, 12]
 
 
-def test_list_open_issue_numbers_passes_at_me() -> None:
-    """``@me`` is passed for both ``--author`` and ``--assignee``."""
-    seen_filters: list[str] = []
+def test_list_open_issue_numbers_queries_all_open_no_me_filter() -> None:
+    """The canonical discovery is repo-wide open issues — NO @me filter.
+
+    Matching the child phases' ``gh_list_open_issues`` semantics keeps the
+    loop's convergence / failing-PR gates in agreement with the phases.
+    """
+    seen_argv: list[str] = []
 
     def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        for flag in ("--author", "--assignee"):
-            if flag in argv:
-                idx = argv.index(flag)
-                seen_filters.append(f"{flag}={argv[idx + 1]}")
+        seen_argv.extend(argv)
         return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
 
     with patch("hephaestus.automation.loop_runner.subprocess.run", side_effect=fake_run):
         loop_runner._list_open_issue_numbers("Org", "Repo")
-    assert "--author=@me" in seen_filters
-    assert "--assignee=@me" in seen_filters
+    assert "--author" not in seen_argv
+    assert "--assignee" not in seen_argv
+    assert "@me" not in seen_argv
+    assert "--repo" in seen_argv
+    assert "Org/Repo" in seen_argv
+    assert seen_argv[seen_argv.index("--state") + 1] == "open"
 
 
 def test_resolve_org_and_repos_cwd_default() -> None:
@@ -994,7 +1018,7 @@ class TestSubprocessTimeouts:
         """``gh issue list`` is bounded by gh_cli_timeout()."""
         with patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run:
             mock_run.return_value = _completed(stdout="1\n2\n")
-            _gh_issue_numbers_for("Org", "Repo", "--author")
+            loop_runner._list_open_issue_numbers("Org", "Repo")
         assert mock_run.call_args.kwargs["timeout"] == gh_cli_timeout()
 
     def test_preflight_token_scopes_passes_timeout(self) -> None:
@@ -1033,11 +1057,11 @@ class TestSubprocessTimeouts:
             with pytest.raises(SystemExit, match="timed out"):
                 loop_runner._gh_list_repos("MyOrg")
 
-    def test_gh_issue_numbers_timeout_returns_empty_set(self) -> None:
-        """A timed-out issue query degrades to an empty set, not a crash."""
+    def test_gh_issue_numbers_timeout_returns_empty_list(self) -> None:
+        """A timed-out issue query degrades to an empty list, not a crash."""
         with patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=120)
-            assert _gh_issue_numbers_for("Org", "Repo", "--author") == set()
+            assert loop_runner._list_open_issue_numbers("Org", "Repo") == []
 
 
 class TestResilientCallAdoption:

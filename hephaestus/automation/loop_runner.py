@@ -564,13 +564,19 @@ def _gh_list_repos(org: str) -> list[str]:
     ]
 
 
-def _gh_issue_numbers_for(org: str, repo: str, filter_flag: str) -> set[int]:
-    """Return open-issue numbers in ``org/repo`` matching one ``gh issue list`` filter.
+def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
+    """Return ALL open issue numbers in ``org/repo``, sorted ascending.
 
-    ``filter_flag`` is one of ``"--author"`` / ``"--assignee"``; the value is
-    always ``@me`` (current authenticated gh user). Returns an empty set on
-    any failure (rate limit, auth error, etc.) so callers can fall back
-    safely.
+    This is the loop's single canonical issue-discovery call: the result is
+    passed down to the plan/implement child phases via ``--issues`` so they do
+    NOT each re-run their own ``gh issue list``. The scope is ALL open issues
+    (no ``@me`` author/assignee filter) so it matches the child phases'
+    ``gh_list_open_issues`` semantics exactly — the loop's convergence and
+    failing-PR gates then agree with the work the phases actually do.
+
+    Sorted ascending so the implementer phase processes oldest-first. Returns
+    an empty list on any failure (rate limit, auth error, timeout) so callers
+    fall back safely.
     """
     try:
         out = subprocess.run(
@@ -582,10 +588,8 @@ def _gh_issue_numbers_for(org: str, repo: str, filter_flag: str) -> set[int]:
                 f"{org}/{repo}",
                 "--state",
                 "open",
-                filter_flag,
-                "@me",
                 "--limit",
-                "200",
+                "500",
                 "--json",
                 "number",
                 "--jq",
@@ -597,23 +601,10 @@ def _gh_issue_numbers_for(org: str, repo: str, filter_flag: str) -> set[int]:
             timeout=gh_cli_timeout(),
         )
     except subprocess.TimeoutExpired:
-        return set()
+        return []
     if out.returncode != 0:
-        return set()
-    return {int(x) for x in out.stdout.split() if x.strip().isdigit()}
-
-
-def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
-    """Return open issue numbers in ``org/repo`` authored by OR assigned to ``@me``.
-
-    GitHub treats ``--author`` and ``--assignee`` as AND, so we issue two
-    queries and union the results to get OR semantics. Sorted ascending
-    so the implementer phase processes oldest-first.
-    """
-    union = _gh_issue_numbers_for(org, repo, "--author") | _gh_issue_numbers_for(
-        org, repo, "--assignee"
-    )
-    return sorted(union)
+        return []
+    return sorted(int(x) for x in out.stdout.split() if x.strip().isdigit())
 
 
 def _count_open_issues(org: str, repo: str) -> int:
@@ -847,11 +838,15 @@ def _resolve_phase_bin(phase: str) -> tuple[str, list[str]] | None:
 #                  loop_idx >= threshold (bash equivalent: FOLLOW_UP_FLAG
 #                  set on loop ≥ 3, scripts/run_automation_loop.sh:415-418)
 _PHASE_FLAGS: dict[str, dict[str, object]] = {
-    "plan": {"worker_arg": "--parallel", "no_ui": False, "issues": "explicit", "advise": True},
+    # plan/implement use "open": forward the loop-discovered open-issue list so
+    # the child phase does NOT re-run its own ``gh issue list`` every phase /
+    # every loop. drive-green stays "explicit" — #819 made it discover failing
+    # PRs directly (not via the issue list), so it must NOT receive open_issues.
+    "plan": {"worker_arg": "--parallel", "no_ui": False, "issues": "open", "advise": True},
     "implement": {
         "worker_arg": "--max-workers",
         "no_ui": True,
-        "issues": "explicit",
+        "issues": "open",
         "advise": True,
         "nitpick": True,
         "follow_up_loop_threshold": 3,
