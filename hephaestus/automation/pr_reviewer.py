@@ -92,9 +92,10 @@ def run_pr_review_analysis(
     Shared core of the standalone ``PRReviewer._run_analysis_session`` and the
     in-loop implementer review step (Stage 2, #28). Builds the PR-review
     analysis prompt, invokes the selected reviewer agent (Claude or Codex), and
-    returns the parsed ``{"comments", "summary"}`` dict. The reviewer prompt's
-    strict rubric emits a ``Grade:`` / ``Verdict:`` line inside ``summary`` so
-    callers can derive a verdict via
+    returns a dict with ``comments`` (inline findings), ``summary`` (the JSON
+    summary, posted as the review body), and ``review_text`` (the full reviewer
+    PROSE). The ``Verdict:`` line lives in the PROSE, NOT the summary — so
+    callers derive the verdict from ``review_text`` via
     :func:`~hephaestus.automation.claude_invoke.parse_review_verdict`.
 
     Args:
@@ -111,12 +112,17 @@ def run_pr_review_analysis(
         dry_run: When True, skip the agent call and return a placeholder dict.
 
     Returns:
-        Parsed analysis dict with ``"comments"`` and ``"summary"`` keys.
+        Parsed analysis dict with ``"comments"``, ``"summary"``, and
+        ``"review_text"`` (verdict-bearing prose) keys.
 
     """
     if dry_run:
         logger.info("[DRY RUN] Would run analysis session for PR #%s", pr_number)
-        return {"comments": [], "summary": "[DRY RUN] analysis skipped"}
+        return {
+            "comments": [],
+            "summary": "[DRY RUN] analysis skipped",
+            "review_text": "Verdict: GO\n",
+        }
 
     prompt = get_pr_review_analysis_prompt(
         pr_number=pr_number,
@@ -145,6 +151,10 @@ def run_pr_review_analysis(
             )
             log_file.write_text(result.stdout or "")
             parsed = _parse_json_block(result.stdout or "")
+            # The Verdict:/Grade: line lives in the reviewer PROSE, not the JSON
+            # summary block. Surface the raw output so callers parse the real
+            # verdict (parse_review_verdict) instead of the verdict-free summary.
+            parsed["review_text"] = result.stdout or ""
             logger.info(
                 "Analysis complete for PR #%s; found %s inline comment(s)",
                 pr_number,
@@ -181,6 +191,11 @@ def run_pr_review_analysis(
             response_text = stdout or ""
 
         parsed = _parse_json_block(response_text)
+        # The Verdict:/Grade: line lives in the reviewer PROSE (response_text),
+        # NOT the JSON summary block. Surface it so callers parse the real
+        # verdict via parse_review_verdict rather than the verdict-free summary
+        # (else a well-formed `Verdict: NOGO` is misread as AMBIGUOUS).
+        parsed["review_text"] = response_text
         logger.info(
             "Analysis complete for PR #%s; found %s inline comment(s)",
             pr_number,
@@ -275,8 +290,15 @@ def review_pr_inline(
     iteration (``reviewer_agent(AGENT_PR_REVIEWER, iteration)``) so the reviewer
     never inherits its own prior verdict, posts the analysis findings as inline
     PR review threads via :func:`gh_pr_review_post`, and returns the reviewer's
-    summary text (carrying the ``Grade:`` / ``Verdict:`` line) plus the IDs of
-    the threads it created.
+    VERDICT-BEARING PROSE (carrying the ``Verdict:`` line) plus the IDs of the
+    threads it created.
+
+    The verdict (``Verdict: GO|NOGO``) lives in the reviewer prose, NOT in the
+    JSON ``summary`` field — so this returns ``review_text`` (the prose), which
+    the caller feeds to :func:`parse_review_verdict`. The (verdict-free) JSON
+    ``summary`` is still what gets POSTED to GitHub as the review body. Returning
+    ``summary`` here instead would make every well-formed ``Verdict: NOGO`` parse
+    as AMBIGUOUS.
 
     Args:
         pr_number: GitHub PR number to review.
@@ -289,8 +311,9 @@ def review_pr_inline(
         dry_run: When True, skip the agent call and posting.
 
     Returns:
-        ``(summary_text, posted_thread_ids)``. On dry-run, returns the
-        placeholder summary and an empty list.
+        ``(review_text, posted_thread_ids)`` where ``review_text`` is the
+        verdict-bearing reviewer prose. On dry-run, returns a verdict-bearing
+        placeholder and an empty list.
 
     """
     review_token = reviewer_agent(AGENT_PR_REVIEWER, iteration)
@@ -306,6 +329,9 @@ def review_pr_inline(
     )
     comments: list[dict[str, Any]] = analysis.get("comments", [])
     summary: str = analysis.get("summary", "")
+    # The verdict lives in the prose; fall back to summary only if review_text is
+    # somehow absent (keeps the loop functioning rather than KeyError-ing).
+    review_text: str = analysis.get("review_text") or summary
 
     if dry_run:
         logger.info(
@@ -313,7 +339,7 @@ def review_pr_inline(
             len(comments),
             pr_ref(pr_number),
         )
-        return summary, []
+        return review_text, []
 
     thread_ids = gh_pr_review_post(
         pr_number=pr_number,
@@ -330,7 +356,7 @@ def review_pr_inline(
         len(thread_ids),
         pr_ref(pr_number),
     )
-    return summary, thread_ids
+    return review_text, thread_ids
 
 
 class PRReviewer(BaseReviewer):

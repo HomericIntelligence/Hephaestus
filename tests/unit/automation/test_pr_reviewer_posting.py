@@ -527,3 +527,77 @@ class TestReviewPrInline:
             )
         assert thread_ids == []
         mock_post.assert_not_called()
+
+
+class TestVerdictFromProseNotSummary:
+    """The verdict (Verdict: GO/NOGO) lives in the review PROSE, not the JSON summary.
+
+    Regression for the AMBIGUOUS misread: review_pr_inline must return the
+    verdict-bearing prose so parse_review_verdict sees `Verdict: NOGO`, even
+    though the JSON `summary` field (posted to GitHub) carries no verdict line.
+    """
+
+    def test_run_analysis_surfaces_review_text_with_verdict(self, tmp_path: Path) -> None:
+        """run_pr_review_analysis returns the prose body (carrying Verdict:) as review_text."""
+        prose = (
+            "## Review\nFindings here.\n\n"
+            "Verdict: NOGO — two real defects.\n\n"
+            '```json\n{"comments": [], "summary": "two defects (no verdict here)"}\n```'
+        )
+        # Claude wraps the prose in a JSON result envelope.
+        envelope = json.dumps({"result": prose})
+
+        def _fake_invoke(**_: object) -> tuple[str, str]:
+            return (envelope, "")
+
+        with (
+            patch("hephaestus.automation.pr_reviewer.get_repo_root", return_value=tmp_path),
+            patch("hephaestus.automation.pr_reviewer.get_repo_slug", return_value="Repo"),
+            patch(
+                "hephaestus.automation.pr_reviewer.invoke_claude_with_session",
+                side_effect=_fake_invoke,
+            ),
+        ):
+            out = run_pr_review_analysis(
+                pr_number=1,
+                issue_number=1,
+                worktree_path=tmp_path,
+                context={"pr_diff": "d"},
+                agent="claude",
+                state_dir=tmp_path,
+                dry_run=False,
+            )
+        # summary is the JSON field (no verdict); review_text is the prose (has verdict).
+        assert out["summary"] == "two defects (no verdict here)"
+        assert "Verdict: NOGO" in out["review_text"]
+
+    def test_review_pr_inline_returns_verdict_text_not_summary(self, tmp_path: Path) -> None:
+        """review_pr_inline returns the verdict-bearing prose, so the loop parses NOGO."""
+        from hephaestus.automation.claude_invoke import parse_review_verdict
+
+        analysis = {
+            "comments": [
+                {"path": "a.py", "line": 1, "side": "RIGHT", "severity": "major", "body": "x"}
+            ],
+            "summary": "a defect (no verdict token here)",
+            "review_text": "## Review\nProse.\n\nVerdict: NOGO — a real defect.\n",
+        }
+        with (
+            patch(
+                "hephaestus.automation.pr_reviewer.run_pr_review_analysis", return_value=analysis
+            ),
+            patch("hephaestus.automation.pr_reviewer.gh_pr_review_post", return_value=["thread-1"]),
+        ):
+            review_text, thread_ids = review_pr_inline(
+                pr_number=1,
+                issue_number=1,
+                worktree_path=tmp_path,
+                context={},
+                agent="claude",
+                iteration=0,
+                state_dir=tmp_path,
+                dry_run=False,
+            )
+        # The returned text must carry the verdict so the loop reads NOGO, not AMBIGUOUS.
+        assert parse_review_verdict(review_text).verdict == "NOGO"
+        assert thread_ids == ["thread-1"]
