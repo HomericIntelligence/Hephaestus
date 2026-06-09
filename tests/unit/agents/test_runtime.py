@@ -43,20 +43,62 @@ def test_parse_codex_json_events_extracts_nested_agent_message() -> None:
     assert output == "nested"
 
 
+class _FakeCodexPopen:
+    def __init__(
+        self,
+        cmd: list[str],
+        *,
+        proc_stdout: str,
+        proc_stderr: str = "",
+        final_message: str = "",
+        hang: bool = False,
+        returncode: int = 0,
+        **_: Any,
+    ) -> None:
+        self.cmd = cmd
+        self.stdout = proc_stdout
+        self.stderr = proc_stderr
+        self.hang = hang
+        self.returncode = returncode
+        self.killed = False
+        self.terminated = False
+        output_path = Path(cmd[cmd.index("--output-last-message") + 1])
+        output_path.write_text(final_message, encoding="utf-8")
+
+    def communicate(
+        self, input: str | None = None, timeout: float | None = None
+    ) -> tuple[str, str]:
+        del input, timeout
+        if self.hang and not (self.killed or self.terminated):
+            raise subprocess.TimeoutExpired(self.cmd, 1)
+        return self.stdout, self.stderr
+
+    def poll(self) -> int | None:
+        if self.hang and not (self.killed or self.terminated):
+            return None
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+
 def test_run_codex_session_returns_session_id_and_last_message(tmp_path: Path) -> None:
     """The runtime should prefer --output-last-message and preserve session id."""
 
-    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        output_path = Path(cmd[cmd.index("--output-last-message") + 1])
-        output_path.write_text("final answer", encoding="utf-8")
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
         stdout = (
             '{"type":"session_meta","payload":{"id":"019e1e57-7652-7892-b1ca-c31c93d4b160"}}\n'
             '{"type":"agent_message","message":"fallback"}\n'
         )
-        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+        return _FakeCodexPopen(cmd, proc_stdout=stdout, final_message="final answer", **kwargs)
 
     with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
-        with patch("subprocess.run", side_effect=fake_run):
+        with patch("subprocess.Popen", side_effect=fake_popen):
             result = agent_runtime.run_codex_session(
                 "prompt",
                 cwd=tmp_path,
@@ -66,6 +108,56 @@ def test_run_codex_session_returns_session_id_and_last_message(tmp_path: Path) -
 
     assert result.session_id == "019e1e57-7652-7892-b1ca-c31c93d4b160"
     assert result.stdout == "final answer"
+
+
+def test_run_codex_session_recovers_last_message_on_wrapper_timeout(tmp_path: Path) -> None:
+    """If Codex writes the final answer but its wrapper hangs, keep the answer."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        stdout = (
+            '{"type":"session_meta","payload":{"id":"019e1e57-7652-7892-b1ca-c31c93d4b160"}}\n'
+            '{"type":"agent_message","message":"fallback"}\n'
+        )
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout=stdout,
+            final_message="final answer",
+            hang=True,
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch.dict("os.environ", {"HEPH_CODEX_FINAL_MESSAGE_GRACE": "0"}),
+        patch("subprocess.Popen", side_effect=fake_popen),
+    ):
+        result = agent_runtime.run_codex_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            sandbox="workspace-write",
+        )
+
+    assert result.session_id == "019e1e57-7652-7892-b1ca-c31c93d4b160"
+    assert result.stdout == "final answer"
+    assert "final message" in result.stderr
+
+
+def test_run_codex_session_timeout_without_last_message_still_raises(tmp_path: Path) -> None:
+    """A real Codex timeout with no completed message must still fail."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        return _FakeCodexPopen(cmd, proc_stdout="", final_message="", hang=True, **kwargs)
+
+    with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
+        with patch("subprocess.Popen", side_effect=fake_popen):
+            with pytest.raises(subprocess.TimeoutExpired):
+                agent_runtime.run_codex_session(
+                    "prompt",
+                    cwd=tmp_path,
+                    timeout=1,
+                    sandbox="workspace-write",
+                )
 
 
 def test_codex_approval_args_uses_config_override_for_current_cli() -> None:
@@ -104,19 +196,17 @@ def test_resume_codex_session_uses_exec_resume(tmp_path: Path) -> None:
     """Codex feedback loops must resume the captured non-interactive session."""
     captured_cmd: list[str] = []
 
-    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
         captured_cmd.extend(cmd)
-        output_path = Path(cmd[cmd.index("--output-last-message") + 1])
-        output_path.write_text("resumed", encoding="utf-8")
         stdout = '{"type":"session_meta","payload":{"id":"019e1e57-7652-7892-b1ca-c31c93d4b160"}}\n'
-        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+        return _FakeCodexPopen(cmd, proc_stdout=stdout, final_message="resumed", **kwargs)
 
-    with patch("subprocess.run", side_effect=fake_run):
+    with patch("subprocess.Popen", side_effect=fake_popen):
         result = agent_runtime.resume_codex_session(
             "019e1e57-7652-7892-b1ca-c31c93d4b160",
             "feedback",
             cwd=tmp_path,
-            timeout=30,
+            timeout=1,
         )
 
     assert captured_cmd[:4] == [

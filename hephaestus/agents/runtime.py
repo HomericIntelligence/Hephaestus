@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -16,6 +17,8 @@ AgentName = Literal["claude", "codex"]
 AGENT_CHOICES: tuple[AgentName, ...] = ("claude", "codex")
 DEFAULT_AGENT: AgentName = "claude"
 AGENT_AUTH_STATUS_TIMEOUT = 10
+CODEX_FINAL_MESSAGE_GRACE_ENV = "HEPH_CODEX_FINAL_MESSAGE_GRACE"
+CODEX_FINAL_MESSAGE_GRACE_SECONDS = 5.0
 AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
     "claude": (("claude", "auth", "status"),),
     "codex": (("codex", "login", "status"),),
@@ -307,21 +310,130 @@ def _run_codex_command(
         cmd.extend(["--output-last-message", output_file.name, "-"])
         env = os.environ.copy()
         env.setdefault("CODEX_HOME", str(Path.home() / ".codex"))
-        result = subprocess.run(
-            cmd,
-            input=prompt,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=timeout,
-            env=env,
-        )
+        try:
+            stdout_text, stderr_text = _communicate_codex_process(
+                cmd,
+                cwd=cwd,
+                prompt=prompt,
+                timeout=timeout,
+                env=env,
+                output_path=Path(output_file.name),
+            )
+        except subprocess.TimeoutExpired as e:
+            last_message = Path(output_file.name).read_text(encoding="utf-8").strip()
+            stdout_text = _coerce_timeout_output(e.stdout)
+            stderr_text = _coerce_timeout_output(e.stderr)
+            if not last_message:
+                raise
+            session_id, _ = _parse_codex_json_events(stdout_text)
+            return AgentRunResult(
+                stdout=last_message,
+                stderr=stderr_text or f"Codex wrapper timed out after {timeout}s",
+                session_id=session_id,
+            )
         last_message = Path(output_file.name).read_text(encoding="utf-8")
 
-    session_id, event_message = _parse_codex_json_events(result.stdout or "")
-    stdout = (last_message or event_message or result.stdout or "").strip()
-    return AgentRunResult(stdout=stdout, stderr=result.stderr or "", session_id=session_id)
+    session_id, event_message = _parse_codex_json_events(stdout_text)
+    stdout = (last_message or event_message or stdout_text or "").strip()
+    return AgentRunResult(stdout=stdout, stderr=stderr_text, session_id=session_id)
+
+
+def _communicate_codex_process(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    prompt: str,
+    timeout: int,
+    env: dict[str, str],
+    output_path: Path,
+) -> tuple[str, str]:
+    """Run Codex and recover when a completed final message leaves the wrapper alive."""
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        text=True,
+        env=env,
+    )
+    started_at = time.monotonic()
+    final_seen_at: float | None = None
+    input_text: str | None = prompt
+    grace_seconds = _codex_final_message_grace_seconds()
+
+    while True:
+        elapsed = time.monotonic() - started_at
+        remaining = timeout - elapsed
+        if remaining <= 0:
+            stdout_text, stderr_text = _terminate_codex_process(proc)
+            last_message = _read_text_file(output_path).strip()
+            if last_message:
+                return stdout_text, stderr_text or f"Codex wrapper timed out after {timeout}s"
+            raise subprocess.TimeoutExpired(cmd, timeout, output=stdout_text, stderr=stderr_text)
+
+        try:
+            stdout_text, stderr_text = proc.communicate(
+                input=input_text,
+                timeout=min(1.0, remaining),
+            )
+            if proc.returncode:
+                raise subprocess.CalledProcessError(
+                    proc.returncode,
+                    cmd,
+                    output=stdout_text,
+                    stderr=stderr_text,
+                )
+            return stdout_text or "", stderr_text or ""
+        except subprocess.TimeoutExpired:
+            input_text = None
+            if _read_text_file(output_path).strip():
+                final_seen_at = final_seen_at or time.monotonic()
+                if time.monotonic() - final_seen_at >= grace_seconds:
+                    stdout_text, stderr_text = _terminate_codex_process(proc)
+                    return (
+                        stdout_text,
+                        stderr_text or "Codex wrapper terminated after final message",
+                    )
+
+
+def _terminate_codex_process(proc: subprocess.Popen[str]) -> tuple[str, str]:
+    """Terminate a Codex process and collect any remaining stdout/stderr."""
+    if proc.poll() is None:
+        proc.terminate()
+    try:
+        stdout_text, stderr_text = proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout_text, stderr_text = proc.communicate()
+    return stdout_text or "", stderr_text or ""
+
+
+def _read_text_file(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _codex_final_message_grace_seconds() -> float:
+    raw = os.environ.get(CODEX_FINAL_MESSAGE_GRACE_ENV)
+    if raw is None:
+        return CODEX_FINAL_MESSAGE_GRACE_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return CODEX_FINAL_MESSAGE_GRACE_SECONDS
+    return max(0.0, value)
+
+
+def _coerce_timeout_output(output: str | bytes | None) -> str:
+    """Return text from ``TimeoutExpired`` stdout/stderr regardless of mode."""
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        return output.decode(errors="replace")
+    return output
 
 
 def codex_exec_resume_args(

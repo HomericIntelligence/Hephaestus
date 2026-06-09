@@ -42,8 +42,8 @@ def plan_reviewer_claude_timeout() -> int:
 
 
 def implementer_claude_timeout() -> int:
-    """Timeout for the implementer's agent invocation (default 1800s)."""
-    return _read_int_env("HEPH_IMPLEMENTER_AGENT_TIMEOUT", 1800)
+    """Timeout for the implementer's agent invocation (default 7200s)."""
+    return _read_int_env("HEPH_IMPLEMENTER_AGENT_TIMEOUT", 7200)
 
 
 def advise_claude_timeout() -> int:
@@ -57,13 +57,13 @@ def pr_reviewer_claude_timeout() -> int:
 
 
 def address_review_claude_timeout() -> int:
-    """Timeout for the address-review fix session (default 1800s)."""
-    return _read_int_env("HEPH_ADDRESS_REVIEW_AGENT_TIMEOUT", 1800)
+    """Timeout for the address-review fix session (default 7200s)."""
+    return _read_int_env("HEPH_ADDRESS_REVIEW_AGENT_TIMEOUT", 7200)
 
 
 def ci_driver_claude_timeout() -> int:
-    """Timeout for the CI-driver fix session (default 1800s)."""
-    return _read_int_env("HEPH_CI_DRIVER_AGENT_TIMEOUT", 1800)
+    """Timeout for the CI-driver fix session (default 7200s)."""
+    return _read_int_env("HEPH_CI_DRIVER_AGENT_TIMEOUT", 7200)
 
 
 def learn_claude_timeout() -> int:

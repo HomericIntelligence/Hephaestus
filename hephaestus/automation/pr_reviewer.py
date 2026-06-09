@@ -94,7 +94,7 @@ def run_pr_review_analysis(
     analysis prompt, invokes the selected reviewer agent (Claude or Codex), and
     returns a dict with ``comments`` (inline findings), ``summary`` (the JSON
     summary, posted as the review body), and ``review_text`` (the full reviewer
-    PROSE). The ``Verdict:`` line lives in the PROSE, NOT the summary — so
+    prose/stdout). The ``Verdict:`` line lives in the prose, not the summary, so
     callers derive the verdict from ``review_text`` via
     :func:`~hephaestus.automation.claude_invoke.parse_review_verdict`.
 
@@ -118,11 +118,8 @@ def run_pr_review_analysis(
     """
     if dry_run:
         logger.info("[DRY RUN] Would run analysis session for PR #%s", pr_number)
-        return {
-            "comments": [],
-            "summary": "[DRY RUN] analysis skipped",
-            "review_text": "Verdict: GO\n",
-        }
+        review_text = "[DRY RUN] analysis skipped"
+        return {"comments": [], "summary": review_text, "review_text": review_text}
 
     prompt = get_pr_review_analysis_prompt(
         pr_number=pr_number,
@@ -150,11 +147,12 @@ def run_pr_review_analysis(
                 sandbox="read-only",
             )
             log_file.write_text(result.stdout or "")
-            parsed = _parse_json_block(result.stdout or "")
-            # The Verdict:/Grade: line lives in the reviewer PROSE, not the JSON
+            review_text = result.stdout or ""
+            parsed = _parse_json_block(review_text)
+            # The Verdict:/Grade: line lives in the reviewer prose, not the JSON
             # summary block. Surface the raw output so callers parse the real
-            # verdict (parse_review_verdict) instead of the verdict-free summary.
-            parsed["review_text"] = result.stdout or ""
+            # verdict instead of the verdict-free summary.
+            parsed["review_text"] = review_text
             logger.info(
                 "Analysis complete for PR #%s; found %s inline comment(s)",
                 pr_number,
@@ -191,10 +189,8 @@ def run_pr_review_analysis(
             response_text = stdout or ""
 
         parsed = _parse_json_block(response_text)
-        # The Verdict:/Grade: line lives in the reviewer PROSE (response_text),
-        # NOT the JSON summary block. Surface it so callers parse the real
-        # verdict via parse_review_verdict rather than the verdict-free summary
-        # (else a well-formed `Verdict: NOGO` is misread as AMBIGUOUS).
+        # The Verdict:/Grade: line lives in the reviewer prose, not the JSON
+        # summary block. Surface it so callers parse the real verdict.
         parsed["review_text"] = response_text
         logger.info(
             "Analysis complete for PR #%s; found %s inline comment(s)",

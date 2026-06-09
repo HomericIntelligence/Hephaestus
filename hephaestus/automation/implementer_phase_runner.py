@@ -28,7 +28,7 @@ import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from hephaestus.agents.runtime import (
     is_codex,
@@ -58,7 +58,12 @@ from .git_utils import (
     run,
     sync_worktree_to_remote_branch,
 )
-from .github_api import gh_issue_add_labels, gh_pr_list_unresolved_threads
+from .github_api import (
+    gh_current_login,
+    gh_issue_add_labels,
+    gh_pr_list_unresolved_threads,
+    gh_pr_resolve_thread,
+)
 from .learn import compact_session, learn_needs_rerun, run_learn
 from .models import (
     ImplementationPhase,
@@ -77,6 +82,7 @@ from .pr_manager import (
 from .pr_reviewer import gather_impl_review_context, review_pr_inline
 from .prompts import (
     get_advise_prompt_builder,
+    get_dirty_reused_worktree_decision_prompt,
     get_impl_loop_review_prompt,
     get_impl_resume_feedback_prompt,
     get_implementation_prompt,
@@ -99,6 +105,21 @@ logger = logging.getLogger(__name__)
 
 MAX_REVIEW_ITERATIONS = 3
 
+DirtyWorktreeDecision = Literal["commit", "stash"]
+
+
+def _parse_dirty_reused_worktree_decision(text: str) -> DirtyWorktreeDecision:
+    """Parse an exact final-line COMMIT/STASH dirty-worktree decision."""
+    lines = [line.strip().upper() for line in (text or "").splitlines() if line.strip()]
+    if lines and lines[-1] == "COMMIT":
+        return "commit"
+    return "stash"
+
+
+def _parse_dirty_worktree_decision(text: str) -> DirtyWorktreeDecision:
+    """Backward-compatible wrapper for the dirty reused-worktree parser."""
+    return _parse_dirty_reused_worktree_decision(text)
+
 
 def _prepend_advise(advise_findings: str, prompt: str) -> str:
     """Prepend advise findings as a context block to an implementation prompt.
@@ -111,6 +132,14 @@ def _prepend_advise(advise_findings: str, prompt: str) -> str:
     if not findings or findings.startswith("<!-- advise step skipped"):
         return prompt
     return f"## Prior Learnings from Team Knowledge Base\n\n{findings}\n\n---\n\n{prompt}"
+
+
+def _is_automation_owned_thread(thread: dict[str, Any], current_login: str | None) -> bool:
+    """Return True for unresolved review threads the automation may resolve on GO."""
+    author = (thread.get("author") or "").strip()
+    if current_login and author == current_login:
+        return True
+    return author.endswith("[bot]")
 
 
 def _claude_quota_reset_epoch(*texts: str) -> int | None:
@@ -614,7 +643,12 @@ class ImplementationPhaseRunner:
         impl = self.impl
         # Learn phase (after CREATING_PR, before COMPLETED)
         can_resume_session = self._can_resume_state_session(state)
-        if self.options.enable_learn and can_resume_session and state.session_id:
+        if (
+            self.options.enable_learn
+            and not state.learn_completed
+            and can_resume_session
+            and state.session_id
+        ):
             if slot_id is not None:
                 self.status_tracker.update_slot(
                     slot_id, f"{issue_ref(issue_number)}: Running learn"
@@ -1120,14 +1154,24 @@ class ImplementationPhaseRunner:
         # would silently discard them. Only when dirty, let an agent decide
         # whether to commit (the work belongs to this branch) or stash it
         # (unrelated/uncertain) before we sync to the PR head.
+        salvage_sha: str | None = None
         if not is_clean_working_tree(worktree_path):
-            self._resolve_dirty_reused_worktree(
+            salvage_sha = self._resolve_dirty_reused_worktree(
                 issue_number=issue_number,
                 worktree_path=worktree_path,
                 branch_name=pr_branch,
                 thread_id=thread_id,
             )
         sync_worktree_to_remote_branch(worktree_path, pr_branch)
+        if salvage_sha:
+            self._restore_dirty_reused_worktree_commit_after_sync(
+                issue_number=issue_number,
+                worktree_path=worktree_path,
+                branch_name=pr_branch,
+                commit_sha=salvage_sha,
+                thread_id=thread_id,
+            )
+            self._push_branch(pr_branch, worktree_path)
 
         with self.state_lock:
             state.worktree_path = str(worktree_path)
@@ -1172,6 +1216,7 @@ class ImplementationPhaseRunner:
             slot_id=slot_id,
             thread_id=thread_id,
         )
+        impl._run_post_pr_followup(issue_number, worktree_path, state, slot_id)
 
         impl._log(
             "info",
@@ -1195,7 +1240,7 @@ class ImplementationPhaseRunner:
         worktree_path: Path,
         branch_name: str,
         thread_id: int | None,
-    ) -> None:
+    ) -> str | None:
         """Decide commit-vs-stash for a REUSED worktree's uncommitted changes.
 
         ``create_worktree`` can reuse a worktree another issue already had checked
@@ -1208,12 +1253,15 @@ class ImplementationPhaseRunner:
         - **stash** — the changes are unrelated or their ownership is unclear; stash
           them so they survive the reset without polluting the PR.
 
-        Best-effort: any failure falls back to ``git stash`` (the safe default —
-        preserves the work without committing it to the wrong branch) and is logged.
-        Codex has no two-turn injection point here, so it always stashes.
+        Any decision failure falls back to ``git stash`` (the safe default —
+        preserves the work without committing it to the wrong branch). A failed
+        stash raises so the caller never reaches the destructive reset.
+
+        Returns:
+            The SHA of a salvage commit to replay after remote sync, or ``None``
+            when changes were stashed.
+
         """
-        impl = self.impl
-        _impl_mod = self._impl_module
         status = run(
             ["git", "status", "--porcelain"],
             cwd=worktree_path,
@@ -1227,21 +1275,25 @@ class ImplementationPhaseRunner:
             check=False,
         )
 
-        decision = "stash"  # safe default
-        if not is_codex(self.options.agent):
-            try:
-                prompt = (
-                    "A reused git worktree on branch "
-                    f"`{branch_name}` has uncommitted changes that are about to be "
-                    "discarded by `git reset --hard origin/<branch>`. Decide whether "
-                    "these changes BELONG to this branch (answer COMMIT) or are "
-                    "unrelated / ownership unclear (answer STASH). Reply with a single "
-                    "word on the last line: COMMIT or STASH.\n\n"
-                    f"## git status --porcelain\n{(status.stdout or '').strip()}\n\n"
-                    f"## git diff HEAD (truncated)\n{(diff.stdout or '')[:6000]}"
+        decision: DirtyWorktreeDecision = "stash"
+        try:
+            prompt = get_dirty_reused_worktree_decision_prompt(
+                branch_name=branch_name,
+                status_text=status.stdout or "",
+                diff_text=diff.stdout or "",
+            )
+            if is_codex(self.options.agent):
+                result = run_codex_text(
+                    prompt,
+                    cwd=worktree_path,
+                    timeout=advise_claude_timeout(),
+                    sandbox="read-only",
                 )
+                output = result.stdout or ""
+            else:
+                _impl_mod = self._impl_module
                 repo_slug = _impl_mod.get_repo_slug(self.repo_root)
-                stdout, _ = _impl_mod.invoke_claude_with_session(
+                output, _ = _impl_mod.invoke_claude_with_session(
                     repo=repo_slug,
                     issue=issue_number,
                     agent=_impl_mod.AGENT_ADVISE,
@@ -1251,43 +1303,121 @@ class ImplementationPhaseRunner:
                     timeout=advise_claude_timeout(),
                     output_format="text",
                 )
-                last = (stdout or "").strip().splitlines()
-                verdict = last[-1].strip().upper() if last else ""
-                if "COMMIT" in verdict:
-                    decision = "commit"
+            decision = _parse_dirty_reused_worktree_decision(output)
+        except Exception as e:
+            self.impl._log(
+                "warning",
+                f"Issue #{issue_number}: dirty-worktree decision failed ({e}); defaulting to stash",
+                thread_id,
+            )
+
+        if decision == "commit":
+            try:
+                return self._commit_dirty_reused_worktree(
+                    issue_number=issue_number,
+                    worktree_path=worktree_path,
+                    branch_name=branch_name,
+                    thread_id=thread_id,
+                )
             except Exception as e:
-                impl._log(
+                self.impl._log(
                     "warning",
-                    f"Issue #{issue_number}: dirty-worktree decision agent failed "
-                    f"({e}); defaulting to stash",
+                    f"Issue #{issue_number}: dirty-worktree COMMIT preservation failed ({e}); "
+                    "defaulting to stash before reset",
                     thread_id,
                 )
 
-        if decision == "commit":
-            impl._log(
-                "info",
-                f"Issue #{issue_number}: committing reused-worktree changes onto "
-                f"{branch_name} before sync (agent decided COMMIT)",
-                thread_id,
-            )
-            run(["git", "add", "-A"], cwd=worktree_path, check=False)
-            run(
-                ["git", "commit", "-S", "-m", f"chore: salvage in-progress work on {branch_name}"],
-                cwd=worktree_path,
-                check=False,
-            )
-        else:
-            impl._log(
-                "info",
-                f"Issue #{issue_number}: stashing reused-worktree changes before sync "
-                "(agent decided STASH or defaulted)",
-                thread_id,
-            )
+        self._stash_dirty_reused_worktree(
+            issue_number=issue_number,
+            worktree_path=worktree_path,
+            thread_id=thread_id,
+        )
+        return None
+
+    def _commit_dirty_reused_worktree(
+        self,
+        *,
+        issue_number: int,
+        worktree_path: Path,
+        branch_name: str,
+        thread_id: int | None,
+    ) -> str:
+        """Commit dirty reused-worktree changes and return the salvage SHA."""
+        self.impl._log(
+            "info",
+            f"Issue #{issue_number}: committing reused-worktree changes on "
+            f"{branch_name} before sync",
+            thread_id,
+        )
+        run(["git", "add", "-A"], cwd=worktree_path, check=True)
+        run(
+            [
+                "git",
+                "commit",
+                "-S",
+                "-m",
+                f"chore: preserve reused worktree changes on {branch_name}",
+            ],
+            cwd=worktree_path,
+            check=True,
+        )
+        result = run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=worktree_path,
+            capture_output=True,
+            check=True,
+        )
+        commit_sha = (result.stdout or "").strip()
+        if not commit_sha:
+            raise RuntimeError("git rev-parse HEAD returned an empty commit SHA")
+        return commit_sha
+
+    def _stash_dirty_reused_worktree(
+        self,
+        *,
+        issue_number: int,
+        worktree_path: Path,
+        thread_id: int | None,
+    ) -> None:
+        """Stash dirty reused-worktree changes before a destructive sync."""
+        self.impl._log(
+            "info",
+            f"Issue #{issue_number}: stashing reused-worktree changes before sync",
+            thread_id,
+        )
+        try:
             run(
                 ["git", "stash", "push", "-u", "-m", f"reused-worktree-{issue_number}"],
                 cwd=worktree_path,
-                check=False,
+                check=True,
             )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to stash dirty reused worktree for issue #{issue_number}; "
+                "refusing to reset"
+            ) from e
+
+    def _restore_dirty_reused_worktree_commit_after_sync(
+        self,
+        *,
+        issue_number: int,
+        worktree_path: Path,
+        branch_name: str,
+        commit_sha: str,
+        thread_id: int | None,
+    ) -> None:
+        """Replay a salvage commit onto the freshly synced PR branch."""
+        self.impl._log(
+            "info",
+            f"Issue #{issue_number}: restoring preserved commit {commit_sha} onto "
+            f"{branch_name} after sync",
+            thread_id,
+        )
+        run(
+            ["git", "cherry-pick", "-S", commit_sha],
+            cwd=worktree_path,
+            check=True,
+        )
 
     def _validate_prior_threads(
         self,
@@ -1432,6 +1562,12 @@ class ImplementationPhaseRunner:
             if reopened:
                 last_verdict = "NOGO"
             elif verdict.is_go:
+                if pr_number is not None and not self.options.dry_run:
+                    self._resolve_automation_threads_after_go(
+                        issue_number=issue_number,
+                        pr_number=pr_number,
+                        thread_id=thread_id,
+                    )
                 ref = issue_ref(issue_number)
                 impl._log(
                     "info",
@@ -1545,6 +1681,65 @@ class ImplementationPhaseRunner:
                 gh_issue_add_labels(issue_number, [STATE_SKIP])
 
         return iterations_run, last_verdict, last_grade
+
+    def _resolve_automation_threads_after_go(
+        self,
+        *,
+        issue_number: int,
+        pr_number: int,
+        thread_id: int | None,
+    ) -> None:
+        """Resolve stale automation-owned review threads after a GO verdict.
+
+        A fresh reviewer session can legitimately conclude the PR is now GO
+        while older automation comments remain unresolved on GitHub. Resolve
+        only threads authored by the current automation identity or bot
+        accounts; never close human reviewer threads from this automatic GO
+        cleanup pass.
+        """
+        impl = self.impl
+        try:
+            threads = gh_pr_list_unresolved_threads(pr_number, dry_run=False)
+        except Exception as exc:
+            impl._log(
+                "warning",
+                f"{issue_ref(issue_number)}: could not list unresolved threads "
+                f"after GO for {pr_ref(pr_number)}: {exc}",
+                thread_id,
+            )
+            return
+        if not threads:
+            return
+
+        current_login = gh_current_login()
+        resolved = 0
+        for thread in threads:
+            if not _is_automation_owned_thread(thread, current_login):
+                continue
+            tid = thread.get("id")
+            if not tid:
+                continue
+            try:
+                gh_pr_resolve_thread(
+                    tid,
+                    "Resolved by the automation reviewer after a GO implementation review.",
+                    dry_run=False,
+                )
+                resolved += 1
+            except Exception as exc:
+                impl._log(
+                    "warning",
+                    f"{issue_ref(issue_number)}: could not resolve stale automation "
+                    f"review thread {tid!r} on {pr_ref(pr_number)}: {exc}",
+                    thread_id,
+                )
+        if resolved:
+            impl._log(
+                "info",
+                f"{issue_ref(issue_number)}: resolved {resolved} stale automation-owned "
+                f"review thread(s) after GO on {pr_ref(pr_number)}",
+                thread_id,
+            )
 
     def _run_impl_review_step(
         self,

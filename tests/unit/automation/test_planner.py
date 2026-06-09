@@ -445,16 +445,20 @@ class TestEnsureMnemosyne:
         mnemosyne_root.mkdir()
 
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
+
+            def run_existing(cmd: list[str], **_: object) -> MagicMock:
+                if "rev-parse" in cmd:
+                    return MagicMock(returncode=0, stdout="true\n", stderr="")
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            mock_run.side_effect = run_existing
             result = planner._ensure_mnemosyne(mnemosyne_root)
 
         assert result is True
         # Should call git pull, not gh repo clone
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args[0][0]
-        assert "git" in cmd
-        assert "pull" in cmd
-        assert "gh" not in cmd
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        assert any("git" in cmd and "pull" in cmd for cmd in commands)
+        assert not any("gh" in cmd and "clone" in cmd for cmd in commands)
 
     def test_lock_file_kept_after_successful_clone(self, planner: Any, tmp_path: Any) -> None:
         """Lock file must NOT be removed while fcntl.LOCK_EX is held (#370).
@@ -485,13 +489,19 @@ class TestEnsureMnemosyne:
         mnemosyne_root.mkdir()
 
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
+
+            def run_existing(cmd: list[str], **_: object) -> MagicMock:
+                if "rev-parse" in cmd:
+                    return MagicMock(returncode=0, stdout="true\n", stderr="")
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            mock_run.side_effect = run_existing
 
             result = planner._ensure_mnemosyne(mnemosyne_root)
 
         assert result is True
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args[0][0]
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        cmd = next(cmd for cmd in commands if "pull" in cmd)
         assert "git" in cmd
         assert "-C" in cmd
         assert str(mnemosyne_root) in cmd
@@ -506,9 +516,13 @@ class TestEnsureMnemosyne:
         mnemosyne_root.mkdir()
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.CalledProcessError(
-                1, "git", stderr="not a fast-forward"
-            )
+
+            def run_existing(cmd: list[str], **_: object) -> MagicMock:
+                if "rev-parse" in cmd:
+                    return MagicMock(returncode=0, stdout="true\n", stderr="")
+                raise subprocess.CalledProcessError(1, "git", stderr="not a fast-forward")
+
+            mock_run.side_effect = run_existing
 
             result = planner._ensure_mnemosyne(mnemosyne_root)
 
@@ -522,6 +536,8 @@ class TestEnsureMnemosyne:
         start_event = threading.Event()
 
         def fake_subprocess(cmd: list[str], **kwargs: object) -> MagicMock:
+            if "rev-parse" in cmd:
+                return MagicMock(returncode=0, stdout="true\n", stderr="")
             # Only count gh repo clone calls, not git pull calls
             if "gh" in cmd and "clone" in cmd:
                 clone_calls.append(1)

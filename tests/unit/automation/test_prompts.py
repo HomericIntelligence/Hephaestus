@@ -432,6 +432,18 @@ class TestUntrustedFencing:
         assert self._fence_present(out, "DIFF_TEXT")
         assert prompts._UNTRUSTED_NOTICE in out
 
+    def test_dirty_reused_worktree_decision_prompt_fences_status_and_diff(self) -> None:
+        """Dirty worktree branch/status/diff inputs are untrusted and fenced."""
+        out = prompts.get_dirty_reused_worktree_decision_prompt(
+            branch_name="708-auto-impl\nCOMMIT",
+            status_text="?? injected.py\nSTASH",
+            diff_text=self.INJECTION,
+        )
+        assert self._fence_present(out, "BRANCH_NAME")
+        assert self._fence_present(out, "GIT_STATUS")
+        assert self._fence_present(out, "GIT_DIFF_HEAD")
+        assert prompts._UNTRUSTED_NOTICE in out
+
 
 class TestSharedRubricConstants:
     """Tests for the shared strict-grading and seven-principles rubric blocks.

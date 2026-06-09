@@ -7,6 +7,7 @@ suite; here we exercise the shared logic with a stub invoker.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,6 +29,54 @@ class TestAdviseSkipped:
 
     def test_marker_format(self) -> None:
         assert advise_runner.advise_skipped("boom") == "<!-- advise step skipped: boom -->"
+
+
+# ---------------------------------------------------------------------------
+# ensure_mnemosyne
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureMnemosyne:
+    """ProjectMnemosyne checkout setup and recovery."""
+
+    def test_existing_valid_checkout_is_pulled(self, tmp_path: Path) -> None:
+        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        mnemosyne_root.mkdir()
+        calls: list[list[str]] = []
+
+        def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(argv)
+            if "rev-parse" in argv:
+                return subprocess.CompletedProcess(argv, 0, stdout="true\n", stderr="")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        with patch("hephaestus.automation.advise_runner.subprocess.run", side_effect=fake_run):
+            assert advise_runner.ensure_mnemosyne(mnemosyne_root) is True
+
+        assert ["git", "-C", str(mnemosyne_root), "pull", "--ff-only"] in calls
+        assert not any(call[:3] == ["gh", "repo", "clone"] for call in calls)
+
+    def test_existing_corrupt_checkout_is_removed_and_recloned(self, tmp_path: Path) -> None:
+        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        mnemosyne_root.mkdir()
+        (mnemosyne_root / ".git").mkdir()
+        calls: list[list[str]] = []
+
+        def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(argv)
+            if "rev-parse" in argv:
+                return subprocess.CompletedProcess(argv, 128, stdout="", stderr="not a repo")
+            if argv[:3] == ["gh", "repo", "clone"]:
+                mnemosyne_root.mkdir(exist_ok=True)
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        with patch("hephaestus.automation.advise_runner.subprocess.run", side_effect=fake_run):
+            assert advise_runner.ensure_mnemosyne(mnemosyne_root) is True
+
+        assert any("rev-parse" in call for call in calls)
+        assert any(call[:3] == ["gh", "repo", "clone"] for call in calls)
+        assert not any("pull" in call for call in calls)
 
 
 # ---------------------------------------------------------------------------

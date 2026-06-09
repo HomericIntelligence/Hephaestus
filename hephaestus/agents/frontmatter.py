@@ -25,10 +25,13 @@ from typing import Any
 
 from hephaestus.cli.utils import add_json_arg, format_output
 
+_yaml: Any | None = None
 try:
-    import yaml as _yaml
+    import yaml as _pyyaml
 except ModuleNotFoundError:
-    _yaml = None  # type: ignore[assignment]
+    pass
+else:
+    _yaml = _pyyaml
 
 #: Compiled regex that matches a ``---`` frontmatter block at the start of a file.
 FRONTMATTER_PATTERN: re.Pattern[str] = re.compile(r"^---\s*\n(.*?\n)---\s*\n", re.DOTALL)

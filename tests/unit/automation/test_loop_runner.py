@@ -1043,7 +1043,17 @@ class TestSubprocessTimeouts:
             patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run,
         ):
             mock_resilient.return_value = _completed()
-            mock_run.return_value = _completed(stdout="abc1234")
+
+            def _run(argv: list[str], **_: object):
+                if "status" in argv:
+                    return _completed(stdout="")
+                if "symbolic-ref" in argv:
+                    return _completed(stdout="origin/main")
+                if "rev-parse" in argv:
+                    return _completed(stdout="abc1234")
+                return _completed()
+
+            mock_run.side_effect = _run
             _rebase_main("Repo", tmp_path)
         # Every direct subprocess.run (rebase / rev-parse) is bounded.
         assert mock_run.call_count >= 2
@@ -1086,7 +1096,17 @@ class TestResilientCallAdoption:
             patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run,
         ):
             mock_resilient.return_value = _completed()
-            mock_run.return_value = _completed(stdout="abc1234")
+
+            def _run(argv: list[str], **_: object):
+                if "status" in argv:
+                    return _completed(stdout="")
+                if "symbolic-ref" in argv:
+                    return _completed(stdout="origin/main")
+                if "rev-parse" in argv:
+                    return _completed(stdout="abc1234")
+                return _completed()
+
+            mock_run.side_effect = _run
             _rebase_main("Repo", tmp_path)
         assert mock_resilient.call_count == 1
         # The wrapped callable is the module's subprocess.run (here the patched mock).
@@ -1158,6 +1178,34 @@ class TestResilientCallAdoption:
         ]
         assert unexpected_reset not in calls
 
+    def test_rebase_main_preserves_local_commits_when_rebase_fails(self, tmp_path: Path) -> None:
+        """A failed rebase must not hard-reset away local commits ahead of origin."""
+        calls: list[list[str]] = []
+
+        def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(argv)
+            if "symbolic-ref" in argv:
+                return _completed(stdout="origin/main\n")
+            if "rev-list" in argv:
+                return _completed(stdout="2\n")
+            if "rebase" in argv and "--quiet" in argv:
+                return _completed(returncode=1)
+            if "rev-parse" in argv:
+                return _completed(stdout="local12\n")
+            return _completed()
+
+        with (
+            patch("hephaestus.automation.loop_runner.resilient_call", return_value=_completed()),
+            patch("hephaestus.automation.loop_runner.subprocess.run", side_effect=fake_run),
+        ):
+            sha = _rebase_main("Repo", tmp_path)
+
+        assert sha == "local12"
+        assert ["git", "-C", str(tmp_path), "rebase", "--abort"] in calls
+        assert not any(
+            call[:5] == ["git", "-C", str(tmp_path), "reset", "--hard"] for call in calls
+        )
+
 
 class TestDefaultPhaseTimeout:
     """run_phase must apply a default timeout when --phase-timeout is absent (#684)."""
@@ -1200,7 +1248,7 @@ class TestDefaultPhaseTimeout:
     ) -> None:
         """A non-numeric override falls back to the default instead of crashing."""
         monkeypatch.setenv("HEPH_PHASE_TIMEOUT", "not-a-number")
-        assert _default_phase_timeout_s() == 3600.0
+        assert _default_phase_timeout_s() == 7800.0
 
     def test_main_applies_default_phase_timeout_when_flag_absent(self) -> None:
         """``main`` builds a LoopConfig with the default timeout when --phase-timeout is omitted."""

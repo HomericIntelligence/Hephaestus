@@ -29,10 +29,13 @@ from typing import Any, NamedTuple
 
 from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
 
+_yaml: Any | None = None
 try:
-    import yaml as _yaml
+    import yaml as _pyyaml
 except ModuleNotFoundError:
-    _yaml = None  # type: ignore[assignment]
+    pass
+else:
+    _yaml = _pyyaml
 
 # Security limit: skip workflow files larger than 1 MB
 _MAX_FILE_SIZE = 1_048_576

@@ -47,6 +47,8 @@ logger = logging.getLogger(__name__)
 # stage) serializes against the same lock — previously this lived on the
 # Planner class, which left the implementer/CI-driver advise paths unguarded.
 _MNEMOSYNE_LOCK = threading.Lock()
+_MNEMOSYNE_GIT_TIMEOUT = 30
+_MNEMOSYNE_CLONE_TIMEOUT = 120
 
 
 def advise_skipped(reason: str) -> str:
@@ -57,6 +59,59 @@ def advise_skipped(reason: str) -> str:
     inert wherever the findings get interpolated (plan body, prompt context).
     """
     return f"<!-- advise step skipped: {reason} -->"
+
+
+def _clone_mnemosyne(mnemosyne_root: Path) -> bool:
+    """Clone the ProjectMnemosyne repository into ``mnemosyne_root``."""
+    try:
+        logger.info("Cloning ProjectMnemosyne to %s...", mnemosyne_root)
+        subprocess.run(
+            [
+                "gh",
+                "repo",
+                "clone",
+                "HomericIntelligence/ProjectMnemosyne",
+                str(mnemosyne_root),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_MNEMOSYNE_CLONE_TIMEOUT,
+        )
+        logger.info("ProjectMnemosyne cloned successfully")
+        return True
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "gh repo clone timed out after %s s; ProjectMnemosyne unavailable this run",
+            _MNEMOSYNE_CLONE_TIMEOUT,
+        )
+        return False
+    except subprocess.CalledProcessError as e:
+        logger.warning("Failed to clone ProjectMnemosyne: %s", e.stderr or e)
+        return False
+
+
+def _is_valid_mnemosyne_checkout(mnemosyne_root: Path) -> bool:
+    """Return True when an existing ProjectMnemosyne path is a usable git checkout."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(mnemosyne_root), "rev-parse", "--is-inside-work-tree"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_MNEMOSYNE_GIT_TIMEOUT,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        logger.warning("Failed to validate ProjectMnemosyne checkout at %s: %s", mnemosyne_root, e)
+        return False
+    if result.returncode != 0 or result.stdout.strip() != "true":
+        logger.warning(
+            "ProjectMnemosyne checkout at %s is invalid; stderr=%s",
+            mnemosyne_root,
+            (result.stderr or "").strip(),
+        )
+        return False
+    return True
 
 
 def ensure_mnemosyne(mnemosyne_root: Path) -> bool:
@@ -73,21 +128,6 @@ def ensure_mnemosyne(mnemosyne_root: Path) -> bool:
 
     """
     with _MNEMOSYNE_LOCK:
-        # TOCTOU guard: re-check inside the lock.
-        if mnemosyne_root.exists():
-            try:
-                subprocess.run(
-                    ["git", "-C", str(mnemosyne_root), "pull", "--ff-only"],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                logger.debug("ProjectMnemosyne refreshed at %s", mnemosyne_root)
-            except Exception as e:
-                logger.warning("Failed to refresh ProjectMnemosyne (using existing clone): %s", e)
-            return True
-
         lock_path = mnemosyne_root.parent / ".mnemosyne.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -97,40 +137,39 @@ def ensure_mnemosyne(mnemosyne_root: Path) -> bool:
             if fcntl is not None:
                 fcntl.flock(lock_file, fcntl.LOCK_EX)
             try:
-                # Re-check after acquiring the file lock.
+                # Re-check after acquiring the file lock. A previous process may
+                # have completed or corrupted the checkout while we were waiting.
                 if mnemosyne_root.exists():
-                    return True
+                    if not _is_valid_mnemosyne_checkout(mnemosyne_root):
+                        logger.warning(
+                            "Removing invalid ProjectMnemosyne checkout at %s before re-clone",
+                            mnemosyne_root,
+                        )
+                        shutil.rmtree(mnemosyne_root, ignore_errors=True)
+                    else:
+                        try:
+                            subprocess.run(
+                                ["git", "-C", str(mnemosyne_root), "pull", "--ff-only"],
+                                check=True,
+                                capture_output=True,
+                                text=True,
+                                timeout=_MNEMOSYNE_GIT_TIMEOUT,
+                            )
+                            logger.debug("ProjectMnemosyne refreshed at %s", mnemosyne_root)
+                        except Exception as e:
+                            logger.warning(
+                                "Failed to refresh ProjectMnemosyne (using existing clone): %s",
+                                e,
+                            )
+                        return True
 
-                logger.info("Cloning ProjectMnemosyne to %s...", mnemosyne_root)
-                subprocess.run(
-                    [
-                        "gh",
-                        "repo",
-                        "clone",
-                        "HomericIntelligence/ProjectMnemosyne",
-                        str(mnemosyne_root),
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-                logger.info("ProjectMnemosyne cloned successfully")
+                cloned = _clone_mnemosyne(mnemosyne_root)
                 # Do NOT unlink lock_path here — the file-lock sentinel must
                 # remain on disk until the fd closes in the finally block.
                 # Unlinking while LOCK_EX is held lets a second process open a
                 # new inode at the same path and grab its own lock, breaking
                 # cross-process mutual exclusion (#370).
-                return True
-
-            except subprocess.TimeoutExpired:
-                logger.warning(
-                    "gh repo clone timed out after 120 s; ProjectMnemosyne unavailable this run"
-                )
-                return False
-            except subprocess.CalledProcessError as e:
-                logger.warning("Failed to clone ProjectMnemosyne: %s", e.stderr or e)
-                return False
+                return cloned
             finally:
                 if fcntl is not None:
                     fcntl.flock(lock_file, fcntl.LOCK_UN)

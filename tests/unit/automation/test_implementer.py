@@ -454,6 +454,10 @@ class TestExistingPrEntersReviewLoop:
             patch.object(
                 impl.worktree_manager, "create_worktree", return_value=worktree_path
             ) as create_wt,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.is_clean_working_tree",
+                return_value=True,
+            ),
             patch.object(impl, "_save_state"),
             patch.object(impl, "_has_plan") as has_plan,
             patch.object(impl, "_run_claude_code") as run_agent,
@@ -549,6 +553,10 @@ class TestExistingPrEntersReviewLoop:
             patch.object(
                 impl.worktree_manager, "create_worktree", return_value=worktree_path
             ) as create_wt,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.is_clean_working_tree",
+                return_value=True,
+            ),
             patch.object(impl, "_save_state"),
             patch(
                 "hephaestus.automation.implementer.fetch_issue_info",
@@ -601,6 +609,10 @@ class TestExistingPrEntersReviewLoop:
             ),
             patch("hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"),
             patch.object(impl.worktree_manager, "create_worktree", return_value=worktree_path),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.is_clean_working_tree",
+                return_value=True,
+            ),
             patch.object(impl, "_save_state"),
             patch.object(impl, "_run_claude_code") as run_agent,
             patch.object(impl, "_run_impl_review_loop", return_value=(3, "NOGO", "D")),

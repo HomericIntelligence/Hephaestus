@@ -36,10 +36,13 @@ from hephaestus.version.parsing import parse_version_tuple
 # ---------------------------------------------------------------------------
 _tomllib = import_tomllib()
 
+_yaml: Any | None = None
 try:
-    import yaml as _yaml
+    import yaml as _pyyaml
 except ModuleNotFoundError:
-    _yaml = None  # type: ignore[assignment]
+    pass
+else:
+    _yaml = _pyyaml
 
 # ---------------------------------------------------------------------------
 # Benchmark helpers

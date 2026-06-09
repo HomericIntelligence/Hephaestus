@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.automation.claude_invoke import parse_review_verdict
 from hephaestus.automation.models import ReviewerOptions
 from hephaestus.automation.pr_reviewer import (
     PRReviewer,
@@ -408,6 +409,7 @@ class TestRunPrReviewAnalysis:
         )
         assert out["comments"] == []
         assert "DRY RUN" in out["summary"]
+        assert out["review_text"] == out["summary"]
 
     def test_passes_review_agent_token_to_claude(self, tmp_path: Path) -> None:
         """The review_agent token is forwarded verbatim to invoke_claude_with_session."""
@@ -439,6 +441,60 @@ class TestRunPrReviewAnalysis:
                 dry_run=False,
             )
         assert captured["agent"] == "pr-reviewer-r1"
+
+    def test_claude_path_preserves_review_text_for_verdict(self, tmp_path: Path) -> None:
+        """Claude JSON summary may omit Verdict, but full prose must be returned."""
+        response_text = (
+            "Detailed review.\n\nGrade: A\nVerdict: GO\n\n"
+            "```json\n" + json.dumps({"comments": [], "summary": "No inline findings."}) + "\n```"
+        )
+
+        with (
+            patch("hephaestus.automation.pr_reviewer.get_repo_root", return_value=tmp_path),
+            patch("hephaestus.automation.pr_reviewer.get_repo_slug", return_value="Repo"),
+            patch(
+                "hephaestus.automation.pr_reviewer.invoke_claude_with_session",
+                return_value=(json.dumps({"result": response_text}), ""),
+            ),
+        ):
+            out = run_pr_review_analysis(
+                pr_number=1,
+                issue_number=1,
+                worktree_path=tmp_path,
+                context={"pr_diff": "diff"},
+                agent="claude",
+                state_dir=tmp_path,
+                dry_run=False,
+            )
+
+        assert out["summary"] == "No inline findings."
+        assert "Verdict: GO" in out["review_text"]
+        assert parse_review_verdict(out["review_text"]).verdict == "GO"
+
+    def test_codex_path_preserves_stdout_for_verdict(self, tmp_path: Path) -> None:
+        """Codex stdout prose must survive JSON parsing for verdict extraction."""
+        stdout = (
+            "Review complete.\n\nGrade: D\nVerdict: NOGO\n\n"
+            "```json\n" + json.dumps({"comments": [], "summary": "Needs fixes."}) + "\n```"
+        )
+
+        with patch(
+            "hephaestus.automation.pr_reviewer.run_codex_text",
+            return_value=MagicMock(stdout=stdout),
+        ):
+            out = run_pr_review_analysis(
+                pr_number=1,
+                issue_number=1,
+                worktree_path=tmp_path,
+                context={"pr_diff": "diff"},
+                agent="codex",
+                state_dir=tmp_path,
+                dry_run=False,
+            )
+
+        assert out["summary"] == "Needs fixes."
+        assert "Verdict: NOGO" in out["review_text"]
+        assert parse_review_verdict(out["review_text"]).verdict == "NOGO"
 
     def test_prompt_passed_via_stdin_not_argv(self, tmp_path: Path) -> None:
         """The reviewer prompt is piped via stdin, never embedded in argv.
@@ -483,7 +539,8 @@ class TestReviewPrInline:
     def test_posts_threads_and_returns_verdict(self, tmp_path: Path) -> None:
         analysis = {
             "comments": [{"path": "a.py", "line": 1, "body": "fix"}],
-            "summary": "Findings.\n\nGrade: C\nVerdict: NOGO\n",
+            "summary": "Findings for GitHub.",
+            "review_text": "Full reviewer prose.\n\nGrade: C\nVerdict: NOGO\n",
         }
         with (
             patch(
@@ -512,6 +569,7 @@ class TestReviewPrInline:
         assert mock_analysis.call_args.kwargs["review_agent"] == "pr-reviewer-r2"
         mock_post.assert_called_once()
         assert mock_post.call_args.kwargs["pr_number"] == 42
+        assert mock_post.call_args.kwargs["summary"] == "Findings for GitHub."
 
     def test_dry_run_skips_posting(self, tmp_path: Path) -> None:
         with patch("hephaestus.automation.pr_reviewer.gh_pr_review_post") as mock_post:

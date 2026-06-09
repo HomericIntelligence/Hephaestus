@@ -20,10 +20,13 @@ from typing import Any
 
 from hephaestus.agents.frontmatter import extract_frontmatter_raw
 
+_yaml: Any | None = None
 try:
-    import yaml as _yaml
+    import yaml as _pyyaml
 except ModuleNotFoundError:
-    _yaml = None  # type: ignore[assignment]
+    pass
+else:
+    _yaml = _pyyaml
 
 
 class AgentInfo:

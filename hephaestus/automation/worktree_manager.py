@@ -23,6 +23,7 @@ that runs the automation. Recovery procedure for a force-killed loop:
 """
 
 import logging
+import os
 import shutil
 import threading
 from pathlib import Path
@@ -30,6 +31,21 @@ from pathlib import Path
 from .git_utils import get_repo_root, is_clean_working_tree, run
 
 logger = logging.getLogger(__name__)
+
+_AUTOMATION_PROMPT_PREFIXES = (
+    ".claude-pr-review-",
+    ".claude-address-review-",
+    ".claude-prompt-",
+    ".claude-followup-",
+)
+
+
+def _loop_trunk_githash() -> str | None:
+    """Return the loop-provided trunk commit-ish when available."""
+    trunk = os.environ.get("HEPH_TRUNK_GITHASH", "").strip()
+    if not trunk or trunk == "unknown":
+        return None
+    return trunk
 
 
 class WorktreeDirtyError(Exception):
@@ -65,9 +81,12 @@ class WorktreeManager:
 
         # Base-branch detection is deferred to first use so that constructing
         # a WorktreeManager in test fixtures or environments without origin/*
-        # refs does not raise. The hard error from #382 / A4-05 still fires —
-        # it is just delayed until create_worktree() actually needs the value.
-        self._base_branch_override = base_branch
+        # refs does not raise. The automation loop passes HEPH_TRUNK_GITHASH so
+        # phase subprocesses create issue worktrees from the exact trunk commit
+        # they are validating, including local signed commits not yet on origin.
+        # The hard error from #382 / A4-05 still fires when neither explicit
+        # base nor loop trunk is available.
+        self._base_branch_override = base_branch or _loop_trunk_githash()
         self._base_branch_resolved: str | None = None
         self.worktrees: dict[int, Path] = {}
         self.preserved: list[tuple[int, Path]] = []
@@ -162,7 +181,12 @@ class WorktreeManager:
                 self.worktrees[issue_number] = existing
                 return existing
 
-            # Remove existing directory if present
+            if self._reuse_existing_dirty_worktree(issue_number, worktree_path):
+                return worktree_path
+
+            # Remove existing clean worktree directory if present. Dirty
+            # registered worktrees are reused above; non-worktree paths with
+            # unknown contents fail closed there instead of being removed.
             if worktree_path.exists():
                 logger.warning("Removing existing worktree directory: %s", worktree_path)
                 # Try git worktree remove first to clean up git metadata
@@ -211,6 +235,7 @@ class WorktreeManager:
 
         """
         if self._local_branch_exists(branch_name):
+            self._refresh_stale_local_branch_if_safe(branch_name)
             logger.info("Branch %s already exists, reusing it", branch_name)
             run(
                 ["git", "worktree", "add", str(worktree_path), branch_name],
@@ -248,6 +273,57 @@ class WorktreeManager:
                 ],
                 cwd=self.repo_root,
             )
+
+    def _refresh_stale_local_branch_if_safe(self, branch_name: str) -> None:
+        """Fast-forward a stale local branch that has no work beyond base.
+
+        A killed or superseded automation run can leave ``<issue>-auto-impl``
+        pointing at an old base commit. If that branch has no commits that are
+        unique relative to ``self.base_branch``, rerunning the loop should not
+        ask the implementer to re-create work that already landed on the base.
+        If the branch has any unique commits, keep it untouched so in-flight work
+        is preserved.
+        """
+        if not self._is_issue_automation_branch(branch_name):
+            return
+        try:
+            result = run(
+                [
+                    "git",
+                    "rev-list",
+                    "--left-right",
+                    "--count",
+                    f"{self.base_branch}...{branch_name}",
+                ],
+                cwd=self.repo_root,
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                return
+            parts = (result.stdout or "").strip().split()
+            if len(parts) != 2:
+                return
+            behind_base, ahead_base = (int(parts[0]), int(parts[1]))
+        except Exception as e:
+            logger.debug("Could not compute divergence for %s: %s", branch_name, e)
+            return
+
+        if ahead_base != 0 or behind_base == 0:
+            return
+
+        logger.info(
+            "Branch %s has no commits beyond %s and is %s commit(s) behind; fast-forwarding",
+            branch_name,
+            self.base_branch,
+            behind_base,
+        )
+        run(["git", "branch", "-f", branch_name, self.base_branch], cwd=self.repo_root)
+
+    def _is_issue_automation_branch(self, branch_name: str) -> bool:
+        """Return True for branch names owned by the issue automation loop."""
+        issue_prefix, sep, suffix = branch_name.partition("-")
+        return bool(sep and issue_prefix.isdigit() and suffix in {"auto", "auto-impl"})
 
     def _local_branch_exists(self, branch_name: str) -> bool:
         """Return True if ``branch_name`` exists in the local repository.
@@ -298,6 +374,74 @@ class WorktreeManager:
             logger.debug("ls-remote check failed for %s (treating as absent): %s", branch_name, e)
             return False
 
+    def _is_automation_prompt_artifact(self, path: Path) -> bool:
+        """Return True for exact generated agent prompt scratch files."""
+        if not path.is_file() or not path.name.endswith(".md"):
+            return False
+        for prefix in _AUTOMATION_PROMPT_PREFIXES:
+            if path.name.startswith(prefix):
+                issue_part = path.name.removeprefix(prefix).removesuffix(".md")
+                return issue_part.isdigit()
+        return False
+
+    def _cleanup_automation_prompt_artifacts(self, worktree_path: Path) -> None:
+        """Delete generated prompt scratch files from a worktree root.
+
+        These files are written only as debug/session scratch and are removed
+        in normal ``finally`` blocks. If an automation process is killed before
+        cleanup, they must not cause a worktree to be treated as meaningfully
+        dirty.
+        """
+        if not worktree_path.exists() or not worktree_path.is_dir():
+            return
+        for child in worktree_path.iterdir():
+            if self._is_automation_prompt_artifact(child):
+                child.unlink()
+
+    def _path_is_registered_worktree(self, worktree_path: Path) -> bool:
+        """Return True when ``worktree_path`` appears in git's worktree list."""
+        target = worktree_path.resolve()
+        for wt in self.list_worktrees(raise_on_error=True):
+            path = wt.get("path")
+            if path and Path(path).resolve() == target:
+                return True
+        return False
+
+    def _path_has_contents(self, path: Path) -> bool:
+        """Return True if a path exists and contains any directory entries."""
+        return path.exists() and path.is_dir() and any(path.iterdir())
+
+    def _reuse_existing_dirty_worktree(self, issue_number: int, worktree_path: Path) -> bool:
+        """Register and reuse an existing dirty worktree instead of deleting it.
+
+        A previous automation process may have preserved dirty work for an
+        issue. A new manager instance has an empty in-memory ``worktrees`` map,
+        so create_worktree must inspect the on-disk path before force-removal.
+        """
+        if not worktree_path.exists():
+            return False
+
+        self._cleanup_automation_prompt_artifacts(worktree_path)
+
+        if self._path_is_registered_worktree(worktree_path):
+            if not is_clean_working_tree(worktree_path):
+                logger.info(
+                    "Reusing dirty existing worktree for issue #%s at %s",
+                    issue_number,
+                    worktree_path,
+                )
+                self.worktrees[issue_number] = worktree_path
+                return True
+            return False
+
+        if self._path_has_contents(worktree_path):
+            raise RuntimeError(
+                f"Existing path {worktree_path} is not a registered git worktree and "
+                "contains files; refusing to remove it automatically"
+            )
+
+        return False
+
     def remove_worktree(self, issue_number: int, force: bool = False) -> None:
         """Remove a worktree.
 
@@ -316,6 +460,7 @@ class WorktreeManager:
                 return
 
             worktree_path = self.worktrees[issue_number]
+            self._cleanup_automation_prompt_artifacts(worktree_path)
 
             if not force and not is_clean_working_tree(worktree_path):
                 raise WorktreeDirtyError(issue_number, worktree_path)
@@ -392,19 +537,28 @@ class WorktreeManager:
         adding a worktree we must detect an existing one holding the branch and
         reuse it. ``list_worktrees`` reports the branch as the full ref
         ``refs/heads/<name>``; match on that. Returns ``None`` if no worktree
-        holds the branch (or on any lookup failure — caller falls back to add).
+        holds the branch.
         """
         target_ref = f"refs/heads/{branch_name}"
         try:
-            for wt in self.list_worktrees():
-                if wt.get("branch") == target_ref:
-                    return Path(wt["path"])
+            worktrees = self.list_worktrees(raise_on_error=True)
         except Exception as e:
-            logger.debug("worktree-holding-branch lookup failed for %s: %s", branch_name, e)
+            raise RuntimeError(
+                f"Cannot safely determine whether branch {branch_name!r} is already "
+                "checked out in another worktree"
+            ) from e
+
+        for wt in worktrees:
+            if wt.get("branch") == target_ref:
+                return Path(wt["path"])
         return None
 
-    def list_worktrees(self) -> list[dict[str, str]]:
+    def list_worktrees(self, *, raise_on_error: bool = False) -> list[dict[str, str]]:
         """List all git worktrees in the repository.
+
+        Args:
+            raise_on_error: When True, propagate git/listing failures so callers
+                that would otherwise force-remove or collide fail closed.
 
         Returns:
             List of worktree info dictionaries
@@ -442,6 +596,8 @@ class WorktreeManager:
 
         except Exception as e:
             logger.error("Failed to list worktrees: %s", e)
+            if raise_on_error:
+                raise RuntimeError("Failed to list git worktrees") from e
             return []
 
     def ensure_branch_deleted(self, branch_name: str) -> None:
