@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, cast
 
@@ -1419,6 +1420,20 @@ def _filter_comments_to_diff(
     return kept
 
 
+def gh_current_login() -> str | None:
+    """Return the authenticated GitHub login for the current ``gh`` token."""
+    try:
+        result = _gh_call(["api", "user", "--jq", ".login"], check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("Could not determine current GitHub login: %s", exc)
+        return None
+    if result.returncode != 0:
+        logger.warning("Could not determine current GitHub login: %s", result.stderr or "")
+        return None
+    login = (result.stdout or "").strip()
+    return login or None
+
+
 def gh_pr_inline_comment_index(pr_number: int) -> dict[tuple[str, Any], tuple[str, str]]:
     """Map ``(path, line)`` → ``(comment_node_id, body)`` for unresolved bot threads.
 
@@ -1517,15 +1532,45 @@ def gh_pr_update_review_comment(comment_node_id: str, body: str) -> None:
     )
 
 
+_ADDITIONAL_REVIEW_NOTE_DELIMITER = "\n\n---\n_Additional review note (same line):_\n\n"
+
+
+def _normalize_review_comment_body(body: str) -> str:
+    """Normalize a review comment body for duplicate-content comparison."""
+    normalized = body.lower()
+    normalized = re.sub(r"`([^`]*)`", r"\1", normalized)
+    normalized = re.sub(r"[^a-z0-9_#./-]+", " ", normalized)
+    return " ".join(normalized.split())
+
+
+def _review_comment_already_covers(existing_body: str, new_body: str) -> bool:
+    """Return True when an existing same-line comment already covers ``new_body``."""
+    new_norm = _normalize_review_comment_body(new_body)
+    if not new_norm:
+        return True
+    parts = existing_body.split(_ADDITIONAL_REVIEW_NOTE_DELIMITER)
+    for part in parts:
+        existing_norm = _normalize_review_comment_body(part)
+        if not existing_norm:
+            continue
+        if new_norm in existing_norm or existing_norm in new_norm:
+            return True
+        if SequenceMatcher(None, existing_norm, new_norm).ratio() >= 0.82:
+            return True
+    return False
+
+
 def _edit_or_keep_comments(pr_number: int, comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Edit comments whose line already has a bot comment; return the rest.
 
     For each comment whose ``(path, line)`` is in the existing-comment index,
-    rewrite the existing comment to ``existing_body + new_body`` (a single edit
-    that preserves the original text, #1085) and drop it from the returned list.
-    Comments on fresh lines are returned unchanged for posting. Fails open: an
-    empty index returns *comments* unchanged, and an edit that raises falls back
-    to posting that comment fresh.
+    first skip it if the existing body already covers the same finding. If the
+    finding is genuinely new, rewrite the existing comment to
+    ``existing_body + new_body`` (a single edit that preserves the original
+    text, #1085) and drop it from the returned list. Comments on fresh lines
+    are returned unchanged for posting. Fails open: an empty index returns
+    *comments* unchanged, and an edit that raises falls back to posting that
+    comment fresh.
     """
     index = gh_pr_inline_comment_index(pr_number)
     if not index:
@@ -1541,9 +1586,16 @@ def _edit_or_keep_comments(pr_number: int, comments: list[dict[str, Any]]) -> li
         # the existing body + the new note. Passing only the suffix would destroy
         # the original comment.
         existing_id, existing_body = existing
-        combined = f"{existing_body}\n\n---\n_Additional review note (same line):_\n\n" + (
-            c.get("body") or ""
-        )
+        body = c.get("body") or ""
+        if _review_comment_already_covers(existing_body, body):
+            logger.info(
+                "PR #%s: skipped duplicate same-line review comment on %s:%s",
+                pr_number,
+                key[0],
+                key[1],
+            )
+            continue
+        combined = f"{existing_body}{_ADDITIONAL_REVIEW_NOTE_DELIMITER}{body}"
         try:
             gh_pr_update_review_comment(existing_id, combined)
             logger.info(

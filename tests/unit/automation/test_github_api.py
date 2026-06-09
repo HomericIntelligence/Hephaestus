@@ -2166,6 +2166,55 @@ class TestGhPrReviewPost:
     @patch("hephaestus.automation.github_api.io_write_secure")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
+    def test_same_line_duplicate_comment_is_skipped_not_appended(
+        self,
+        mock_gh_call: Any,
+        _mock_repo: Any,
+        mock_write: Any,
+        mock_index: Any,
+        mock_update: Any,
+    ) -> None:
+        """A materially duplicate same-line review comment is not appended again."""
+        mock_gh_call.side_effect = self._gh_call_side_effect(
+            "REVIEW_1", [], diff_text=self._SAMPLE_DIFF
+        )
+        mock_index.return_value = {
+            (
+                "a.py",
+                2,
+            ): (
+                "COMMENT_NODE_A2",
+                "This regression coverage only exercises the Claude result-envelope path. "
+                "The production diff also changed the Codex stdout path, so add a Codex test.",
+            ),
+        }
+
+        gh_pr_review_post(
+            pr_number=7,
+            comments=[
+                {
+                    "path": "a.py",
+                    "line": 2,
+                    "side": "RIGHT",
+                    "body": (
+                        "This regression test only exercises the Claude JSON-envelope path. "
+                        "The production fix also changed the Codex stdout path, so add a "
+                        "Codex-path test."
+                    ),
+                }
+            ],
+            summary="Findings",
+            dedupe_existing=True,
+        )
+
+        mock_update.assert_not_called()
+        assert self._posted_comments(mock_write) == []
+
+    @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
+    @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
+    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch("hephaestus.automation.github_api._gh_call")
     def test_dedupe_disabled_posts_everything(
         self,
         mock_gh_call: Any,

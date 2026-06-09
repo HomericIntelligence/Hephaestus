@@ -125,6 +125,53 @@ class TestRunImplReviewLoop:
         # Address step must NOT be called because iteration 0 already passed.
         mock_addr.assert_not_called()
 
+    def test_go_resolves_only_automation_owned_stale_threads(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """A GO verdict cleans up stale automation comments but not human review threads."""
+        threads = [
+            {"id": "T_self", "author": "mvillmow", "path": "a.py", "line": 1, "body": "old"},
+            {
+                "id": "T_bot",
+                "author": "github-actions[bot]",
+                "path": "b.py",
+                "line": 2,
+                "body": "old",
+            },
+            {"id": "T_human", "author": "alice", "path": "c.py", "line": 3, "body": "human"},
+        ]
+        with (
+            patch.object(implementer, "_run_impl_review_step", return_value=(_go(), [])),
+            patch.object(implementer, "_run_address_review_step") as mock_addr,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_pr_list_unresolved_threads",
+                return_value=threads,
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_current_login",
+                return_value="mvillmow",
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_pr_resolve_thread"
+            ) as mock_resolve,
+        ):
+            iters, verdict, grade = implementer._run_impl_review_loop(
+                issue_number=1,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=42,
+            )
+
+        assert (iters, verdict, grade) == (1, "GO", "A")
+        mock_addr.assert_not_called()
+        resolved_ids = [call.args[0] for call in mock_resolve.call_args_list]
+        assert resolved_ids == ["T_self", "T_bot"]
+
     def test_runs_3_iterations_on_sustained_nogo(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:

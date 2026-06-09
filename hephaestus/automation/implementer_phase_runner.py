@@ -58,7 +58,12 @@ from .git_utils import (
     run,
     sync_worktree_to_remote_branch,
 )
-from .github_api import gh_issue_add_labels, gh_pr_list_unresolved_threads
+from .github_api import (
+    gh_current_login,
+    gh_issue_add_labels,
+    gh_pr_list_unresolved_threads,
+    gh_pr_resolve_thread,
+)
 from .learn import compact_session, learn_needs_rerun, run_learn
 from .models import (
     ImplementationPhase,
@@ -120,6 +125,14 @@ def _prepend_advise(advise_findings: str, prompt: str) -> str:
     if not findings or findings.startswith("<!-- advise step skipped"):
         return prompt
     return f"## Prior Learnings from Team Knowledge Base\n\n{findings}\n\n---\n\n{prompt}"
+
+
+def _is_automation_owned_thread(thread: dict[str, Any], current_login: str | None) -> bool:
+    """Return True for unresolved review threads the automation may resolve on GO."""
+    author = (thread.get("author") or "").strip()
+    if current_login and author == current_login:
+        return True
+    return author.endswith("[bot]")
 
 
 def _claude_quota_reset_epoch(*texts: str) -> int | None:
@@ -1467,6 +1480,12 @@ class ImplementationPhaseRunner:
             if reopened:
                 last_verdict = "NOGO"
             elif verdict.is_go:
+                if pr_number is not None and not self.options.dry_run:
+                    self._resolve_automation_threads_after_go(
+                        issue_number=issue_number,
+                        pr_number=pr_number,
+                        thread_id=thread_id,
+                    )
                 ref = issue_ref(issue_number)
                 impl._log(
                     "info",
@@ -1580,6 +1599,65 @@ class ImplementationPhaseRunner:
                 gh_issue_add_labels(issue_number, [STATE_SKIP])
 
         return iterations_run, last_verdict, last_grade
+
+    def _resolve_automation_threads_after_go(
+        self,
+        *,
+        issue_number: int,
+        pr_number: int,
+        thread_id: int | None,
+    ) -> None:
+        """Resolve stale automation-owned review threads after a GO verdict.
+
+        A fresh reviewer session can legitimately conclude the PR is now GO
+        while older automation comments remain unresolved on GitHub. Resolve
+        only threads authored by the current automation identity or bot
+        accounts; never close human reviewer threads from this automatic GO
+        cleanup pass.
+        """
+        impl = self.impl
+        try:
+            threads = gh_pr_list_unresolved_threads(pr_number, dry_run=False)
+        except Exception as exc:
+            impl._log(
+                "warning",
+                f"{issue_ref(issue_number)}: could not list unresolved threads "
+                f"after GO for {pr_ref(pr_number)}: {exc}",
+                thread_id,
+            )
+            return
+        if not threads:
+            return
+
+        current_login = gh_current_login()
+        resolved = 0
+        for thread in threads:
+            if not _is_automation_owned_thread(thread, current_login):
+                continue
+            tid = thread.get("id")
+            if not tid:
+                continue
+            try:
+                gh_pr_resolve_thread(
+                    tid,
+                    "Resolved by the automation reviewer after a GO implementation review.",
+                    dry_run=False,
+                )
+                resolved += 1
+            except Exception as exc:
+                impl._log(
+                    "warning",
+                    f"{issue_ref(issue_number)}: could not resolve stale automation "
+                    f"review thread {tid!r} on {pr_ref(pr_number)}: {exc}",
+                    thread_id,
+                )
+        if resolved:
+            impl._log(
+                "info",
+                f"{issue_ref(issue_number)}: resolved {resolved} stale automation-owned "
+                f"review thread(s) after GO on {pr_ref(pr_number)}",
+                thread_id,
+            )
 
     def _run_impl_review_step(
         self,
