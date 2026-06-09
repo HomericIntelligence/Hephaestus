@@ -4,9 +4,7 @@ Contains the PR review analysis prompt (inline-comment generator) and the
 plain PR description template.
 """
 
-import json
 import secrets
-from typing import Any
 
 from ._shared import _UNTRUSTED_NOTICE, _fence_untrusted
 from ._strict_rubric import _PR_STRICT_RUBRIC
@@ -28,45 +26,18 @@ Analyze PR #{pr_number} linked to issue #{issue_number}.
 **PR Diff (untrusted):**
 {pr_diff_block}
 
-**Auto-merge State (untrusted):**
-{auto_merge_state_block}
-
-**Commit Signing State (untrusted):**
-{commits_signing_block}
-
 ---
 
 {strict_rubric}
 
 ---
 
-**Policy checks (MANDATORY — run these BEFORE any code-quality review):**
+**Code-quality review:**
 
-This repository enforces three non-negotiable PR properties. If ANY check fails,
-your summary MUST begin with `POLICY VIOLATION:` and your final verdict line
-MUST be `Verdict: NOGO`. Inline code-quality findings can be reported in
-addition, but the NOGO verdict cannot be overridden by them.
-
-1. **Closes #N:** the PR Description above must contain a line matching the
-   regex `^Closes #\\d+\\s*$` (case-sensitive `Closes`, hash + number, on its
-   own line). `Fixes`, `Resolves`, `closes`, `Closes:` do NOT satisfy the
-   policy. If absent, NOGO and quote the relevant lines of the description.
-2. **Auto-merge deferred until implementation GO:** the Auto-merge State block
-   above contains a single line. During implementation review it MUST read
-   `auto_merge_enabled=false`. If it reads `auto_merge_enabled=true`, NOGO with
-   a note explaining auto-merge must stay disabled until this review returns GO
-   and the automation applies `state:implementation-go`.
-3. **Signed commits:** the Commit Signing State block above is a JSON array
-   where each element is `{{"oid": "<sha>", "signature_valid": <bool>,
-   "signer": "<login or null>"}}`. EVERY element must have
-   `signature_valid: true`. If any commit has `signature_valid: false` or the
-   array is empty, NOGO and list the offending OIDs.
-
-If all three checks pass, proceed to code-quality review below.
-
----
-
-**Code-quality review (only if policy checks pass):**
+> Note: repo PR policies (`Closes #N`, signed commits, deferred auto-merge) are
+> enforced authoritatively by the GitHub CI gates `pr-policy` (required) and
+> `auto-merge-policy` (advisory). Do NOT re-check them here — focus solely on
+> code correctness, completeness, and quality.
 
 Review the PR for correctness, completeness, and code quality. Identify any issues that should
 be addressed as inline review comments.
@@ -74,7 +45,7 @@ be addressed as inline review comments.
 **Comment severity (MANDATORY — tag every inline comment):**
 
 Classify each inline comment with a `severity`:
-- `critical` — correctness/security bug, data loss, or a policy violation.
+- `critical` — correctness/security bug or data loss.
 - `major` — a real design/maintainability problem that should be fixed before merge.
 - `minor` — a small but genuine improvement (naming, missing edge case, light duplication).
 - `nitpick` — purely cosmetic / stylistic / subjective preference with no functional impact.
@@ -86,8 +57,8 @@ The review prose + inline comments explain *why*; the verdict line is a binary
 gate. Write your analysis in prose, then end your response with exactly one of
 the two verdict lines below (the parser takes the LAST matching line):
 
-Verdict: GO — Policy passes, auto-merge is deferred, and code is acceptable.
-Verdict: NOGO — Policy violation OR fundamental code problem (explain in the review).
+Verdict: GO — Code is correct, complete, and acceptable to merge.
+Verdict: NOGO — A fundamental code problem must be fixed first (explain in the review).
 
 After the verdict line, emit a single fenced JSON block:
 
@@ -104,10 +75,8 @@ Rules for the JSON block:
   - `side`: always `"RIGHT"` for new code
   - `severity`: one of `"critical"`, `"major"`, `"minor"`, `"nitpick"` (see above)
   - `body`: the review comment text (string)
-- `summary`: overall review verdict, max 200 characters. If any policy check
-  failed, this MUST start with `POLICY VIOLATION:` followed by the failing
-  check name(s) (e.g. `POLICY VIOLATION: Closes, signed-commits`).
-- If there are no inline comments AND all policy checks pass, emit:
+- `summary`: overall review verdict, max 200 characters.
+- If there are no inline comments AND the code is acceptable, emit:
   `{{"comments": [], "summary": "LGTM"}}`
 - Emit only one JSON block, at the very end of your response (the parser takes the LAST one).
 """
@@ -136,13 +105,16 @@ def get_pr_review_analysis_prompt(
     issue_body: str = "",
     ci_status: str = "",
     pr_description: str = "",
-    auto_merge_enabled: bool = False,
-    commits_signing_state: list[dict[str, Any]] | None = None,
     include_nitpicks: bool = False,
 ) -> str:
     """Get the PR review analysis prompt for generating inline review comments.
 
     All free-text fields are fenced as untrusted (see module docstring).
+
+    Repo PR policies (`Closes #N`, signed commits, deferred auto-merge) are NOT
+    checked here — the GitHub CI gates ``pr-policy`` (required) and
+    ``auto-merge-policy`` (advisory) enforce them authoritatively. The in-loop
+    reviewer does code-quality review only.
 
     Args:
         pr_number: GitHub PR number
@@ -151,14 +123,6 @@ def get_pr_review_analysis_prompt(
         issue_body: Issue body/description
         ci_status: CI check status summary
         pr_description: PR description body
-        auto_merge_enabled: Whether GitHub auto-merge is currently enabled on
-            the PR. Callers MUST pass the real value; the default ``False``
-            exists only to keep the signature backward-compatible and will
-            cause the reviewer to emit a NOGO verdict.
-        commits_signing_state: List of per-commit signing summaries. Each
-            element must be a dict with keys ``oid`` (str), ``signature_valid``
-            (bool), and ``signer`` (str or None). Defaults to an empty list,
-            which the reviewer treats as a policy failure.
         include_nitpicks: When False (default), the reviewer is told to OMIT
             ``nitpick``-severity comments entirely. When True (``--nitpick``),
             nitpick comments are re-enabled. Either way every emitted comment
@@ -169,8 +133,6 @@ def get_pr_review_analysis_prompt(
 
     """
     nonce = secrets.token_hex(8).upper()
-    auto_merge_state = f"auto_merge_enabled={'true' if auto_merge_enabled else 'false'}"
-    signing_state_json = json.dumps(commits_signing_state or [])
     nitpick_directive = _NITPICK_INCLUDE if include_nitpicks else _NITPICK_SUPPRESS
     return PR_REVIEW_ANALYSIS_PROMPT.format(
         pr_number=pr_number,
@@ -179,8 +141,6 @@ def get_pr_review_analysis_prompt(
         issue_body_block=_fence_untrusted("ISSUE_BODY", issue_body, nonce),
         ci_status_block=_fence_untrusted("CI_STATUS", ci_status, nonce),
         pr_description_block=_fence_untrusted("PR_DESCRIPTION", pr_description, nonce),
-        auto_merge_state_block=_fence_untrusted("AUTO_MERGE_STATE", auto_merge_state, nonce),
-        commits_signing_block=_fence_untrusted("COMMITS_SIGNING_STATE", signing_state_json, nonce),
         untrusted_notice=_UNTRUSTED_NOTICE,
         strict_rubric=_PR_STRICT_RUBRIC.strip(),
         nitpick_directive=nitpick_directive,

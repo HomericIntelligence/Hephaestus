@@ -49,7 +49,7 @@ from .claude_timeouts import pr_reviewer_claude_timeout
 __all__ = ["StatusTracker", "ThreadLogManager", "WorktreeManager", "get_repo_root"]
 
 from .curses_ui import CursesUI, ThreadLogManager
-from .git_utils import get_repo_info, get_repo_root, get_repo_slug, issue_ref, pr_ref
+from .git_utils import get_repo_root, get_repo_slug, issue_ref, pr_ref
 from .github_api import _gh_call, fetch_issue_info, gh_pr_review_post
 from .models import ReviewerOptions, ReviewPhase, ReviewState, WorkerResult
 from .prompts import get_pr_review_analysis_prompt
@@ -58,79 +58,6 @@ from .status_tracker import StatusTracker
 from .worktree_manager import WorktreeManager
 
 logger = logging.getLogger(__name__)
-
-
-_SIGNING_GRAPHQL_QUERY = """
-query($owner: String!, $name: String!, $pr: Int!) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $pr) {
-      commits(first: 100) {
-        nodes {
-          commit {
-            oid
-            signature { isValid signer { login } }
-          }
-        }
-      }
-    }
-  }
-}
-"""
-
-
-def _fetch_signing_state(pr_number: int) -> list[dict[str, Any]]:
-    """Fetch per-commit signing state for *pr_number* via the GitHub GraphQL API.
-
-    The REST projection of ``gh pr view --json commits`` does NOT expose the
-    ``signature`` subfield, so we go to GraphQL. Each returned element is a
-    dict ``{"oid", "signature_valid", "signer"}`` matching the schema the
-    reviewer prompt expects. A null GraphQL ``signature`` (unsigned commit)
-    is coerced to ``signature_valid=False`` rather than dropped.
-
-    Failures are returned as an empty list; the reviewer treats an empty
-    signing-state as a policy NOGO, so the caller still surfaces the
-    violation rather than silently passing.
-    """
-    try:
-        owner, name = get_repo_info()
-        result = _gh_call(
-            [
-                "api",
-                "graphql",
-                "-f",
-                f"query={_SIGNING_GRAPHQL_QUERY}",
-                "-F",
-                f"owner={owner}",
-                "-F",
-                f"name={name}",
-                "-F",
-                f"pr={pr_number}",
-            ],
-        )
-        data = json.loads(result.stdout or "{}")
-        nodes = (
-            data.get("data", {})
-            .get("repository", {})
-            .get("pullRequest", {})
-            .get("commits", {})
-            .get("nodes", [])
-        )
-    except Exception as exc:
-        logger.warning("PR #%d: failed to fetch signing state via GraphQL: %s", pr_number, exc)
-        return []
-
-    out: list[dict[str, Any]] = []
-    for node in nodes:
-        commit = node.get("commit") or {}
-        signature = commit.get("signature") or {}
-        out.append(
-            {
-                "oid": commit.get("oid", ""),
-                "signature_valid": bool(signature.get("isValid", False)),
-                "signer": (signature.get("signer") or {}).get("login"),
-            }
-        )
-    return out
 
 
 def _parse_json_block(text: str) -> dict[str, Any]:
@@ -198,8 +125,6 @@ def run_pr_review_analysis(
         issue_body=context.get("issue_body", ""),
         ci_status=context.get("ci_status", ""),
         pr_description=context.get("pr_description", ""),
-        auto_merge_enabled=bool(context.get("auto_merge_enabled", False)),
-        commits_signing_state=context.get("commits_signing_state") or [],
         # #1083: nitpicks are suppressed unless --nitpick threaded the flag into
         # the review context.
         include_nitpicks=bool(context.get("include_nitpicks", False)),
@@ -328,8 +253,6 @@ def gather_impl_review_context(
         "ci_status": "",
         "review_comments": "",
         "pr_description": "",
-        "auto_merge_enabled": True,
-        "commits_signing_state": [],
         "include_nitpicks": include_nitpicks,
     }
 
@@ -533,8 +456,7 @@ class PRReviewer(BaseReviewer):
 
         Returns:
             Dictionary with keys: pr_diff, issue_body, ci_status,
-            review_comments, pr_description, auto_merge_enabled,
-            commits_signing_state.
+            review_comments, pr_description.
 
         """
         context: dict[str, Any] = {
@@ -543,8 +465,6 @@ class PRReviewer(BaseReviewer):
             "ci_status": "",
             "review_comments": "",
             "pr_description": "",
-            "auto_merge_enabled": False,
-            "commits_signing_state": [],
         }
 
         # Fetch PR diff. This is the only field we treat as load-bearing —
@@ -563,15 +483,10 @@ class PRReviewer(BaseReviewer):
                 f"PR {pr_ref(pr_number)} returned an empty diff — refusing to review"
             )
 
-        # Fetch PR description, reviews/comments, and policy state. Best-effort
-        # for everything except policy state — but the reviewer prompt treats
-        # an empty signing-state list as a NOGO, so a failure here surfaces
-        # as a policy violation rather than silently passing.
-        #
-        # Note: `gh pr view --json commits` returns commit OIDs but NOT the
-        # `signature` subfield. Per-commit signing state must come from the
-        # GraphQL API (see ``_fetch_signing_state``); auto-merge and body
-        # still come from the REST projection here.
+        # Fetch PR description and reviews/comments (best-effort). PR policy
+        # (Closes #N, signed commits, deferred auto-merge) is NOT fetched or
+        # checked here — the GitHub CI gates ``pr-policy`` / ``auto-merge-policy``
+        # enforce it authoritatively. The in-loop reviewer is code-quality only.
         try:
             result = _gh_call(
                 [
@@ -579,16 +494,11 @@ class PRReviewer(BaseReviewer):
                     "view",
                     str(pr_number),
                     "--json",
-                    "body,reviews,comments,autoMergeRequest",
+                    "body,reviews,comments",
                 ],
             )
             pr_data = json.loads(result.stdout or "{}")
             context["pr_description"] = pr_data.get("body", "")
-
-            # Policy state: auto-merge.
-            context["auto_merge_enabled"] = pr_data.get("autoMergeRequest") is not None
-            # Policy state: per-commit signing via GraphQL.
-            context["commits_signing_state"] = _fetch_signing_state(pr_number)
 
             # Aggregate review comments
             review_parts: list[str] = []

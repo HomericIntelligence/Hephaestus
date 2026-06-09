@@ -75,17 +75,25 @@ class TestPRReviewAnalysisPrompt:
         assert "PR #10" in out
         assert "issue #5" in out
 
-    def test_lists_three_policy_checks(self) -> None:
+    def test_omits_policy_checks_defers_to_ci_gates(self) -> None:
+        """The reviewer no longer enforces repo policy — CI gates own it.
+
+        Closes #N / signed-commits / deferred-auto-merge are enforced by the
+        pr-policy + auto-merge-policy CI gates, not the in-loop LLM reviewer
+        (which fabricated false POLICY VIOLATIONs from empty/stale data).
+        """
         out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
-        # Each of the three policy checks must be explicitly enumerated.
-        assert "Closes #N" in out or "Closes #\\d" in out
-        assert "auto_merge_enabled" in out
-        assert "MUST read" in out
-        assert "auto_merge_enabled=false" in out
-        assert "signature_valid" in out
-        # The NOGO / POLICY VIOLATION sentinels must be present.
-        assert "POLICY VIOLATION" in out
+        # The removed policy machinery must be gone.
+        assert "POLICY VIOLATION" not in out
+        assert "auto_merge_enabled" not in out
+        assert "signature_valid" not in out
+        assert "COMMITS_SIGNING_STATE" not in out
+        assert "Policy checks (MANDATORY" not in out
+        # But the prompt should tell the reviewer the CI gates own policy.
+        assert "pr-policy" in out
+        # The code-quality verdict contract stays intact.
         assert "Verdict: NOGO" in out
+        assert "Verdict: GO" in out
 
     def test_nitpicks_suppressed_by_default(self) -> None:
         """#1083: by default the reviewer must be told to OMIT nitpick comments."""
@@ -114,16 +122,6 @@ class TestPRReviewAnalysisPrompt:
         assert "nitpick" in out
         assert "major" in out
 
-    def test_passes_auto_merge_state(self) -> None:
-        on = prompts.get_pr_review_analysis_prompt(
-            pr_number=1, issue_number=1, auto_merge_enabled=True
-        )
-        off = prompts.get_pr_review_analysis_prompt(
-            pr_number=1, issue_number=1, auto_merge_enabled=False
-        )
-        assert "auto_merge_enabled=true" in on
-        assert "auto_merge_enabled=false" in off
-
     def test_pr_review_prompt_contains_strict_rubric(self) -> None:
         """Prompt must embed the strict rubric.
 
@@ -135,7 +133,7 @@ class TestPRReviewAnalysisPrompt:
         assert "DEFAULT IS F" in out
         assert "ANTI-INFLATION RULES" in out
         # PR-specific stage dimensions.
-        assert "D1 — Policy compliance" in out
+        assert "D1 — Correctness & completeness" in out
         assert "D2 — Diff review of CHANGED lines only" in out
         assert "D3 — Inline-comment quality" in out
         assert "D4 — CI failure analysis" in out
@@ -177,34 +175,6 @@ class TestPRReviewAnalysisPrompt:
         preceding_open = out.rfind("```", 0, last_fence_close)
         assert preceding_open != -1
         assert out[preceding_open : preceding_open + 7] == "```json"
-
-    def test_pr_review_prompt_preserves_policy_gates(self) -> None:
-        """All three policy gates must still appear in the prompt.
-
-        Closes #N, auto-merge, and signed commits remain alongside the new
-        rubric — the rubric references them as the highest-priority NOGO
-        gate.
-        """
-        out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
-        assert "Closes #N" in out
-        assert "auto-merge" in out.lower()
-        assert "Signed commits" in out or "signed commits" in out.lower()
-        # The mandatory policy-checks header must remain.
-        assert "Policy checks (MANDATORY" in out
-
-    def test_passes_commit_signing_state(self) -> None:
-        out = prompts.get_pr_review_analysis_prompt(
-            pr_number=1,
-            issue_number=1,
-            commits_signing_state=[
-                {"oid": "abc123", "signature_valid": True, "signer": "alice"},
-                {"oid": "def456", "signature_valid": False, "signer": None},
-            ],
-        )
-        # The JSON-serialized state must round-trip into the fenced block.
-        assert "abc123" in out
-        assert "def456" in out
-        assert "signature_valid" in out
 
 
 class TestPlanPrompt:

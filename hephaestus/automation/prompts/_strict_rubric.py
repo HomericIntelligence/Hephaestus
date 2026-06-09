@@ -130,13 +130,14 @@ _PR_STRICT_RUBRIC_DIMENSIONS = """
 **PR-review-specific graded dimensions (each starts at F; promote only on
 concrete evidence from the artifacts above):**
 
-D1 — Policy compliance (HIGHEST PRIORITY / NOGO gate).
-    The three mandatory gates below (Closes #N / auto-merge deferred until
-    implementation GO / signed commits) are graded as a single dimension. ANY
-    violation forces an overall NOGO verdict, regardless of every other
-    dimension's grade.
-    Policy compliance is NEVER weighed against code quality — it is a
-    hard precondition.
+D1 — Correctness & completeness (HIGHEST PRIORITY / NOGO gate).
+    Does the diff correctly and completely do what the issue asks, without
+    introducing bugs, regressions, or security holes? A genuine correctness
+    defect forces an overall NOGO verdict regardless of every other dimension.
+    NOTE: repo PR policy (Closes #N / deferred auto-merge / signed commits) is
+    NOT graded here — the GitHub CI gates ``pr-policy`` (required) and
+    ``auto-merge-policy`` (advisory) enforce it authoritatively. Do not re-check
+    policy; focus on whether the code is correct and complete.
 
 D2 — Diff review of CHANGED lines only.
     Restrict findings to lines actually modified in the PR diff above.
@@ -396,11 +397,11 @@ downgrade accordingly.
 # Per-stage strict rubric: PR REVIEW
 #
 # Composite rubric injected into PR_REVIEW_ANALYSIS_PROMPT (site 4 / #581).
-# Order: strict grading scale → PR-specific dimensions (D1 policy is the
-# NOGO gate) → seven software-engineering principles. The existing
-# policy-checks block in PR_REVIEW_ANALYSIS_PROMPT remains the
-# authoritative description of the three gates referenced by D1, and the
-# trailing JSON output format remains byte-exact for `_parse_json_block`.
+# Order: strict grading scale → PR-specific dimensions (D1 correctness is the
+# NOGO gate) → seven software-engineering principles. Repo PR policy (Closes #N
+# / deferred auto-merge / signed commits) is NOT graded here — the CI gates
+# pr-policy + auto-merge-policy own it. The trailing JSON output format remains
+# byte-exact for `_parse_json_block`.
 # ---------------------------------------------------------------------------
 _PR_STRICT_RUBRIC = (
     _STRICT_GRADING_AND_ANTI_INFLATION

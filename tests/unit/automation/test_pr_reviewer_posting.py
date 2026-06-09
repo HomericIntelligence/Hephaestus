@@ -311,153 +311,45 @@ class TestReviewPostsInlineComments:
         assert result.pr_number == 42
 
 
-class TestGatherPrContextPolicyState:
-    """Tests that _gather_pr_context collects auto-merge + commit signing state.
+class TestGatherPrContextNoPolicyState:
+    """_gather_pr_context no longer collects policy state (Closes/auto-merge/signing).
 
-    The policy gate in PR_REVIEW_ANALYSIS_PROMPT depends on two new fields
-    being populated; if they are absent or misparsed the reviewer treats the
-    PR as a policy failure, so this is load-bearing.
+    Policy is enforced by the CI gates pr-policy + auto-merge-policy; the in-loop
+    reviewer is code-quality only, so the context must NOT carry the removed
+    ``auto_merge_enabled`` / ``commits_signing_state`` keys and must NOT make the
+    GraphQL signing-state call. It still collects ``pr_description`` for review.
     """
 
-    def _gh_call_side_effect(
-        self,
-        diff_text: str,
-        pr_view_json: dict[str, Any],
-        graphql_nodes: list[dict[str, Any]] | None = None,
-        checks_json: list[dict[str, Any]] | None = None,
-    ) -> Any:
-        """Build a side_effect for the four _gh_call invocations.
-
-        Order: pr diff, pr view --json (body+autoMergeRequest), api graphql
-        (signing state), pr checks --json. The reviewer calls them in that
-        sequence in ``_gather_pr_context``.
-        """
-        diff_result = MagicMock(returncode=0, stdout=diff_text, stderr="")
-        view_result = MagicMock(returncode=0, stdout=json.dumps(pr_view_json), stderr="")
-        graphql_payload = {
-            "data": {"repository": {"pullRequest": {"commits": {"nodes": graphql_nodes or []}}}}
-        }
-        graphql_result = MagicMock(returncode=0, stdout=json.dumps(graphql_payload), stderr="")
-        checks_result = MagicMock(returncode=0, stdout=json.dumps(checks_json or []), stderr="")
-        return [diff_result, view_result, graphql_result, checks_result]
-
-    def test_extracts_auto_merge_enabled(self, reviewer: PRReviewer, tmp_path: Path) -> None:
-        with (
-            patch("hephaestus.automation.pr_reviewer._gh_call") as mock_gh,
-            patch(
-                "hephaestus.automation.pr_reviewer.get_repo_info",
-                return_value=("owner", "repo"),
-            ),
-            patch(
-                "hephaestus.automation.pr_reviewer.fetch_issue_info",
-                return_value=MagicMock(body=""),
-            ),
-        ):
-            mock_gh.side_effect = self._gh_call_side_effect(
-                diff_text="diff --git a/x b/x\n+y\n",
-                pr_view_json={
-                    "body": "Closes #1",
-                    "reviews": [],
-                    "comments": [],
-                    "autoMergeRequest": {"enabledBy": {"login": "alice"}},
-                },
-                graphql_nodes=[
-                    {
-                        "commit": {
-                            "oid": "abc",
-                            "signature": {"isValid": True, "signer": {"login": "alice"}},
-                        }
-                    }
-                ],
-            )
-            ctx = reviewer._gather_pr_context(pr_number=1, issue_number=1, worktree_path=tmp_path)
-        assert ctx["auto_merge_enabled"] is True
-        assert ctx["commits_signing_state"] == [
-            {"oid": "abc", "signature_valid": True, "signer": "alice"}
-        ]
-
-    def test_extracts_auto_merge_disabled(self, reviewer: PRReviewer, tmp_path: Path) -> None:
-        with (
-            patch("hephaestus.automation.pr_reviewer._gh_call") as mock_gh,
-            patch(
-                "hephaestus.automation.pr_reviewer.get_repo_info",
-                return_value=("owner", "repo"),
-            ),
-            patch(
-                "hephaestus.automation.pr_reviewer.fetch_issue_info",
-                return_value=MagicMock(body=""),
-            ),
-        ):
-            mock_gh.side_effect = self._gh_call_side_effect(
-                diff_text="diff --git a/x b/x\n+y\n",
-                pr_view_json={
-                    "body": "Closes #1",
-                    "reviews": [],
-                    "comments": [],
-                    "autoMergeRequest": None,
-                },
-                graphql_nodes=[],
-            )
-            ctx = reviewer._gather_pr_context(pr_number=1, issue_number=1, worktree_path=tmp_path)
-        assert ctx["auto_merge_enabled"] is False
-
-    def test_unsigned_commit_yields_signature_valid_false(
+    def test_context_omits_policy_keys_and_skips_signing_graphql(
         self, reviewer: PRReviewer, tmp_path: Path
     ) -> None:
-        """GitHub returns commit.signature == null for unsigned commits."""
+        diff_result = MagicMock(returncode=0, stdout="diff --git a/x b/x\n+y\n", stderr="")
+        view_result = MagicMock(
+            returncode=0,
+            stdout=json.dumps({"body": "Closes #1", "reviews": [], "comments": []}),
+            stderr="",
+        )
+        checks_result = MagicMock(returncode=0, stdout="[]", stderr="")
         with (
             patch("hephaestus.automation.pr_reviewer._gh_call") as mock_gh,
-            patch(
-                "hephaestus.automation.pr_reviewer.get_repo_info",
-                return_value=("owner", "repo"),
-            ),
             patch(
                 "hephaestus.automation.pr_reviewer.fetch_issue_info",
                 return_value=MagicMock(body=""),
             ),
         ):
-            mock_gh.side_effect = self._gh_call_side_effect(
-                diff_text="diff --git a/x b/x\n+y\n",
-                pr_view_json={
-                    "body": "Closes #1",
-                    "reviews": [],
-                    "comments": [],
-                    "autoMergeRequest": None,
-                },
-                graphql_nodes=[{"commit": {"oid": "deadbeef", "signature": None}}],
-            )
+            mock_gh.side_effect = [diff_result, view_result, checks_result]
             ctx = reviewer._gather_pr_context(pr_number=1, issue_number=1, worktree_path=tmp_path)
-        assert ctx["commits_signing_state"] == [
-            {"oid": "deadbeef", "signature_valid": False, "signer": None}
-        ]
 
-    def test_pr_view_failure_leaves_policy_state_at_nogo_default(
-        self, reviewer: PRReviewer, tmp_path: Path
-    ) -> None:
-        """`gh pr view` failure must default policy state to a NOGO.
-
-        If we silently treated a fetch failure as "no policy state needed",
-        the reviewer prompt would pass a PR that ought to be blocked.
-        """
-        with (
-            patch("hephaestus.automation.pr_reviewer._gh_call") as mock_gh,
-            patch(
-                "hephaestus.automation.pr_reviewer.get_repo_info",
-                return_value=("owner", "repo"),
-            ),
-            patch(
-                "hephaestus.automation.pr_reviewer.fetch_issue_info",
-                return_value=MagicMock(body=""),
-            ),
-        ):
-            diff_result = MagicMock(returncode=0, stdout="diff\n+x\n", stderr="")
-            # pr view fails → outer except handler skips both auto-merge AND
-            # the graphql signing fetch, so we only need a checks mock after.
-            checks_result = MagicMock(returncode=0, stdout="[]", stderr="")
-            mock_gh.side_effect = [diff_result, RuntimeError("API down"), checks_result]
-            ctx = reviewer._gather_pr_context(pr_number=1, issue_number=1, worktree_path=tmp_path)
-        assert ctx["auto_merge_enabled"] is False
-        assert ctx["commits_signing_state"] == []
+        # Policy keys are gone; code-quality fields remain.
+        assert "auto_merge_enabled" not in ctx
+        assert "commits_signing_state" not in ctx
+        assert ctx["pr_description"] == "Closes #1"
+        # No `api graphql` signing-state call is made anymore.
+        argvs = [c.args[0] for c in mock_gh.call_args_list if c.args]
+        assert not any("graphql" in argv for argv in argvs), "signing-state GraphQL call removed"
+        # The `gh pr view` projection no longer requests autoMergeRequest.
+        view_argv: list[str] = next((a for a in argvs if a[:2] == ["pr", "view"]), [])
+        assert "autoMergeRequest" not in "".join(view_argv)
 
 
 # ---------------------------------------------------------------------------
