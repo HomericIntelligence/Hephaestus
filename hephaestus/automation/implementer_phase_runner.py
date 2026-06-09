@@ -1440,18 +1440,18 @@ class ImplementationPhaseRunner:
                 )
                 break
 
-            # Convergence on "no blocking unresolved threads": the reviewer
-            # found nothing actionable to post AND the validator re-opened
-            # nothing, so there is nothing to address.
+            # Converge ONLY on an explicit Verdict: GO (handled above). A non-GO
+            # pass with NO posted threads (and nothing re-opened) must NOT end the
+            # loop here — a single garbage/AMBIGUOUS review would otherwise strand
+            # a fixable PR after R0. There is nothing to address (no threads), so
+            # skip the address step and RE-REVIEW on the next iteration; the loop
+            # is bounded by MAX_REVIEW_ITERATIONS and applies ``state:skip`` only
+            # on TRUE exhaustion (post-loop block). This is the "zero threads !=
+            # GO" rule from the pr-review-loop skill (verified-ci): don't converge
+            # on a zero-thread AMBIGUOUS/NO-GO pass.
             if pr_number is not None and not posted_thread_ids and not reopened:
-                ref = issue_ref(issue_number)
-                impl._log(
-                    "info",
-                    f"{ref}: no blocking review threads on iteration {iteration} — "
-                    "review loop terminated",
-                    thread_id,
-                )
-                break
+                prior_review = review_text
+                continue
 
             # Save this review for next iteration's context.
             prior_review = review_text
@@ -1519,20 +1519,19 @@ class ImplementationPhaseRunner:
             )
 
         # #1083 Bug 2 / #1085 C3: the loop must reach an explicit GO to be
-        # considered converged. Apply ``state:skip`` only when the automation has
-        # genuinely run out of road, NOT on every non-GO outcome:
-        #   * true exhaustion — ran all MAX_REVIEW_ITERATIONS without a GO, or
-        #   * AMBIGUOUS — the reviewer could not even render a verdict ("stuck").
-        # A plain NOGO that broke early (e.g. iteration-0 with zero actionable
-        # threads) stays retryable on the next loop, so a fixable issue is not
-        # permanently stranded after a single bad review. ``last_verdict`` is
-        # None only when there was no PR to review (dry-run / no-PR path).
+        # considered converged. Apply ``state:skip`` only on TRUE iteration
+        # exhaustion — ran all MAX_REVIEW_ITERATIONS without a GO — NOT on a
+        # single non-GO (including AMBIGUOUS) outcome. Per the pr-review-loop
+        # skill (verified-ci), a zero-thread AMBIGUOUS/NO-GO pass no longer ends
+        # the loop early (it re-reviews above), so a transient garbage review
+        # (e.g. a malformed verdict) gets MAX_REVIEW_ITERATIONS chances instead
+        # of stranding a fixable PR after R0. ``last_verdict`` is None only when
+        # there was no PR to review (dry-run / no-PR path).
         exhausted = iterations_run >= MAX_REVIEW_ITERATIONS and last_verdict != "GO"
-        is_ambiguous = last_verdict == "AMBIGUOUS"
         if (
             pr_number is not None
             and last_verdict is not None
-            and (exhausted or is_ambiguous)
+            and exhausted
             and not self.options.dry_run
         ):
             logger.info(

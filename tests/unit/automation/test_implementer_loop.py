@@ -226,50 +226,23 @@ class TestRunImplReviewLoop:
         assert verdict == "NOGO"
         mock_label.assert_called_once_with(7, [STATE_SKIP])
 
-    def test_ambiguous_zero_threads_applies_state_skip(
+    def test_ambiguous_zero_threads_re_reviews_then_skips_on_exhaustion(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
-        """An AMBIGUOUS (no verdict line), zero-thread review applies ``state:skip``.
+        """A zero-thread AMBIGUOUS pass re-reviews to exhaustion, THEN skips.
 
-        #1085 C3: AMBIGUOUS is the genuine 'stuck' case — the reviewer could not
-        even render a verdict — so skip immediately rather than spinning.
+        Per the pr-review-loop skill (verified-ci): "zero threads != GO" — a
+        single garbage/AMBIGUOUS review (e.g. a malformed verdict line) must NOT
+        end the loop at R0. It re-reviews up to MAX_REVIEW_ITERATIONS and applies
+        ``state:skip`` only on TRUE exhaustion.
         """
         from hephaestus.automation.state_labels import STATE_SKIP
 
         with (
-            patch.object(implementer, "_run_impl_review_step", return_value=(_ambiguous(), [])),
-            patch.object(implementer, "_run_address_review_step"),
-            patch(
-                "hephaestus.automation.implementer_phase_runner.gh_issue_add_labels"
-            ) as mock_label,
-        ):
-            _, verdict, _ = implementer._run_impl_review_loop(
-                issue_number=8,
-                worktree_path=tmp_path,
-                branch_name="b",
-                issue_title="t",
-                issue_body="ib",
-                session_id="sess",
-                slot_id=0,
-                thread_id=None,
-                pr_number=42,
-            )
-
-        assert verdict == "AMBIGUOUS"
-        mock_label.assert_called_once_with(8, [STATE_SKIP])
-
-    def test_iter0_zero_thread_nogo_does_not_apply_skip(
-        self, implementer: IssueImplementer, tmp_path: Path
-    ) -> None:
-        """#1085 C3: a single iteration-0 NOGO with zero threads must NOT skip.
-
-        A plain NOGO that posts no actionable threads is retryable on the next
-        loop — only true exhaustion (or AMBIGUOUS) applies ``state:skip``, so a
-        fixable issue isn't permanently stranded after one bad review.
-        """
-        with (
-            patch.object(implementer, "_run_impl_review_step", return_value=(_nogo("C"), [])),
-            patch.object(implementer, "_run_address_review_step"),
+            patch.object(
+                implementer, "_run_impl_review_step", return_value=(_ambiguous(), [])
+            ) as mock_rev,
+            patch.object(implementer, "_run_address_review_step") as mock_addr,
             patch(
                 "hephaestus.automation.implementer_phase_runner.gh_issue_add_labels"
             ) as mock_label,
@@ -286,9 +259,50 @@ class TestRunImplReviewLoop:
                 pr_number=42,
             )
 
-        assert verdict == "NOGO"
-        assert iters == 1  # broke at iteration 0, not exhausted
-        mock_label.assert_not_called()
+        assert verdict == "AMBIGUOUS"
+        assert iters == MAX_REVIEW_ITERATIONS == 3  # re-reviewed to exhaustion
+        assert mock_rev.call_count == 3
+        # No threads ever posted → the address step never runs.
+        mock_addr.assert_not_called()
+        # Skip applied only on true exhaustion.
+        mock_label.assert_called_once_with(8, [STATE_SKIP])
+
+    def test_iter0_zero_thread_nogo_re_reviews_not_skip_at_r0(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """A zero-thread NO-GO must NOT end the loop or skip at R0.
+
+        It re-reviews (the next pass may surface threads or reach GO). Here the
+        reviewer flips to GO on R1, so the loop converges WITHOUT skipping.
+        """
+        with (
+            patch.object(
+                implementer,
+                "_run_impl_review_step",
+                side_effect=[(_nogo("C"), []), (_go(), [])],
+            ) as mock_rev,
+            patch.object(implementer, "_run_address_review_step") as mock_addr,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_issue_add_labels"
+            ) as mock_label,
+        ):
+            iters, verdict, _ = implementer._run_impl_review_loop(
+                issue_number=8,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=42,
+            )
+
+        assert verdict == "GO"
+        assert iters == 2  # R0 NO-GO re-reviewed → R1 GO
+        assert mock_rev.call_count == 2
+        mock_addr.assert_not_called()  # no threads → nothing to address
+        mock_label.assert_not_called()  # reached GO, no skip
 
     def test_go_does_not_apply_state_skip(
         self, implementer: IssueImplementer, tmp_path: Path
@@ -343,10 +357,15 @@ class TestRunImplReviewLoop:
         finally:
             implementer.options.dry_run = False
 
-    def test_no_blocking_threads_terminates_loop(
+    def test_zero_thread_nogo_re_reviews_to_exhaustion(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
-        """A NOGO verdict but zero posted threads converges (nothing to address)."""
+        """A persistent zero-thread NO-GO re-reviews to exhaustion (does not stop at R0).
+
+        "Zero threads != GO": a non-GO review with nothing actionable to address
+        must NOT converge the loop — it re-reviews up to MAX_REVIEW_ITERATIONS so
+        a transient bad review cannot strand a fixable PR.
+        """
         with (
             patch.object(
                 implementer, "_run_impl_review_step", return_value=(_nogo("C"), [])
@@ -365,11 +384,11 @@ class TestRunImplReviewLoop:
                 pr_number=42,
             )
 
-        assert iters == 1
+        assert iters == MAX_REVIEW_ITERATIONS == 3
         assert verdict == "NOGO"
-        # No threads posted → nothing to address → loop stops without addressing.
+        # No threads posted → nothing to address; loop re-reviews, never addresses.
         mock_addr.assert_not_called()
-        assert mock_rev.call_count == 1
+        assert mock_rev.call_count == 3
 
     def test_no_session_id_still_addresses(
         self, implementer: IssueImplementer, tmp_path: Path
