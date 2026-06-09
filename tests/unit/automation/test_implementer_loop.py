@@ -1290,9 +1290,13 @@ class TestReviewExistingPrShortCircuit:
                 return_value=(has_go, has_no_go),
             ),
             patch.object(implementer.status_tracker, "update_slot"),
+            patch(
+                "hephaestus.automation.implementer.get_pr_head_branch",
+                return_value="real-pr-branch",
+            ),
             patch.object(
                 implementer.worktree_manager, "create_worktree", return_value=worktree_path
-            ),
+            ) as mock_create_wt,
             patch(
                 "hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"
             ) as mock_sync,
@@ -1314,13 +1318,13 @@ class TestReviewExistingPrShortCircuit:
                 slot_id=None,
                 thread_id=None,
             )
-        return result, mock_loop, mock_verdict, mock_sync
+        return result, mock_loop, mock_verdict, mock_sync, mock_create_wt
 
     def test_go_pr_short_circuits_without_review(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
         """A GO-labeled PR returns success and does NOT re-run the review loop."""
-        result, mock_loop, mock_verdict, mock_sync = self._call(
+        result, mock_loop, mock_verdict, mock_sync, _ = self._call(
             implementer, tmp_path, has_go=True, has_no_go=False
         )
         assert result.success is True
@@ -1334,22 +1338,64 @@ class TestReviewExistingPrShortCircuit:
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
         """A NO-GO-labeled PR re-runs implementation + review (the fix)."""
-        result, mock_loop, mock_verdict, mock_sync = self._call(
+        result, mock_loop, mock_verdict, mock_sync, mock_create_wt = self._call(
             implementer, tmp_path, has_go=False, has_no_go=True
         )
         assert result.success is True
         mock_loop.assert_called_once()
         mock_verdict.assert_called_once()
-        # Worktree is hard-reset to the PR head before the loop runs.
+        # Worktree is prepared + hard-reset on the PR's REAL head branch
+        # (from get_pr_head_branch), NOT the assumed "1-branch" passed in.
         mock_sync.assert_called_once()
+        assert mock_sync.call_args.args[1] == "real-pr-branch"
+        assert mock_create_wt.call_args.args[1] == "real-pr-branch"
+        assert result.branch_name == "real-pr-branch"
 
     def test_unlabeled_pr_runs_review_loop(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
         """An unlabeled existing PR runs the review loop (behavior preserved)."""
-        result, mock_loop, mock_verdict, _ = self._call(
+        result, mock_loop, mock_verdict, _, _ = self._call(
             implementer, tmp_path, has_go=False, has_no_go=False
         )
         assert result.success is True
         mock_loop.assert_called_once()
         mock_verdict.assert_called_once()
+
+    def test_no_go_falls_back_to_assumed_branch_when_lookup_fails(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """If get_pr_head_branch returns None, fall back to the passed-in name."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir(exist_ok=True)
+        state = ImplementationState(issue_number=1)
+        with (
+            patch(
+                "hephaestus.automation.implementer_phase_runner.pr_has_implementation_state_label",
+                return_value=(False, True),
+            ),
+            patch.object(implementer.status_tracker, "update_slot"),
+            patch("hephaestus.automation.implementer.get_pr_head_branch", return_value=None),
+            patch.object(
+                implementer.worktree_manager, "create_worktree", return_value=worktree_path
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"
+            ) as mock_sync,
+            patch.object(implementer, "_save_state"),
+            patch("hephaestus.automation.implementer.fetch_issue_info") as mock_issue,
+            patch.object(implementer, "_run_advise_as_implementer_turn"),
+            patch.object(implementer, "_run_impl_review_loop", return_value=(1, "GO", "A")),
+            patch.object(implementer.phase_runner, "_apply_impl_review_verdict"),
+        ):
+            mock_issue.return_value.title = "title"
+            mock_issue.return_value.body = "body"
+            implementer.phase_runner._review_existing_pr(
+                issue_number=1,
+                existing_pr=555,
+                branch_name="1-auto-impl",
+                state=state,
+                slot_id=None,
+                thread_id=None,
+            )
+        assert mock_sync.call_args.args[1] == "1-auto-impl"

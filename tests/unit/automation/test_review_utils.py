@@ -4,7 +4,11 @@ import json
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from hephaestus.automation._review_utils import find_pr_for_issue, parse_json_block
+from hephaestus.automation._review_utils import (
+    find_pr_for_issue,
+    get_pr_head_branch,
+    parse_json_block,
+)
 
 # ---------------------------------------------------------------------------
 # parse_json_block
@@ -228,3 +232,37 @@ class TestFindPrForIssue:
             result = find_pr_for_issue(123)
 
         assert result == 10
+
+
+class TestGetPrHeadBranch:
+    """get_pr_head_branch returns the PR's REAL head branch, not an assumption.
+
+    Regression for the wrong-branch bug: the loop assumed ``{issue}-auto-impl``
+    and ran ``git fetch origin {issue}-auto-impl`` which fails (exit 128) when
+    the existing PR was opened from a differently-named branch (e.g. found via
+    body ``Closes #N`` search, not the branch-name strategy).
+    """
+
+    def test_returns_real_head_ref_name(self) -> None:
+        """Reads headRefName from `gh pr view` and returns it verbatim."""
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            return_value=_make_gh_result({"headRefName": "708-auto-impl"}),
+        ):
+            assert get_pr_head_branch(996) == "708-auto-impl"
+
+    def test_returns_none_on_missing_field(self) -> None:
+        """Empty/absent headRefName → None so the caller can fall back safely."""
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            return_value=_make_gh_result({}),
+        ):
+            assert get_pr_head_branch(996) is None
+
+    def test_returns_none_on_gh_failure(self) -> None:
+        """A gh/parse failure degrades to None, never raises."""
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            side_effect=RuntimeError("gh boom"),
+        ):
+            assert get_pr_head_branch(996) is None

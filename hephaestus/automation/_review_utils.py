@@ -288,3 +288,31 @@ def find_pr_for_issue(
         logger.debug("Body search failed for issue #%d: %s", issue_number, e)
 
     return None
+
+
+def get_pr_head_branch(pr_number: int) -> str | None:
+    """Return the real head branch of ``pr_number`` via ``gh pr view``.
+
+    The automation loop must operate on the PR's ACTUAL head branch, never an
+    assumed ``{issue}-auto-impl`` name: ``find_pr_for_issue`` can resolve a PR
+    via PR-body ``Closes #N`` search, in which case the head branch may be named
+    after a different issue (or a bundle). Using the assumed name makes
+    ``git fetch origin <assumed-branch>`` fail with ``exit 128`` (no such ref).
+
+    Args:
+        pr_number: GitHub PR number.
+
+    Returns:
+        The PR's ``headRefName``, or ``None`` if it cannot be determined
+        (gh failure, parse error, or an empty field) so the caller can fall
+        back safely rather than crash.
+
+    """
+    try:
+        result = _gh_call(["pr", "view", str(pr_number), "--json", "headRefName"])
+        data = json.loads(result.stdout or "{}")
+        branch = data.get("headRefName") or None
+        return str(branch) if branch else None
+    except Exception as e:
+        logger.warning("Could not fetch head branch for PR #%d: %s", pr_number, e)
+        return None

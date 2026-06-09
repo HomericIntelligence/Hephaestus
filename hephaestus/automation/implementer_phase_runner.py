@@ -1043,9 +1043,13 @@ class ImplementationPhaseRunner:
         (auto-merge arming is drive-green's job). ``state:implementation-no-go``
         is NOT terminal — a NO-GO PR failed review and re-enters the
         review→address→re-review cycle until it earns GO, so it does NOT
-        short-circuit. Anti-clobber: the worktree is hard-reset to
-        ``origin/<branch>`` before the review loop so re-running never discards
-        commits that were pushed to the PR head, and the loop runs with
+        short-circuit. The worktree is prepared on the PR's REAL head branch
+        (resolved via ``get_pr_head_branch``), never the assumed
+        ``{issue}-auto-impl`` — the PR may have been matched by body ``Closes #N``
+        search and live on a differently-named branch. Anti-clobber: the worktree
+        is hard-reset to ``origin/<pr-head>`` before the review loop so re-running
+        never discards commits that were pushed to the PR head, and the loop runs
+        with
         ``session_id=None`` (no agent edit session is started here — the address
         step inside the loop resumes the implementer's own session by
         deterministic id only when there are threads to fix).
@@ -1088,17 +1092,31 @@ class ImplementationPhaseRunner:
                 thread_id,
             )
 
+        # Resolve the PR's REAL head branch — never assume ``{issue}-auto-impl``.
+        # ``find_pr_for_issue`` may have matched this PR via PR-body ``Closes #N``
+        # search, so its head branch can be named after a different issue (or a
+        # bundle). Fetching the assumed name fails with ``git fetch ... exit 128``.
+        # Fall back to the passed-in name only if the lookup fails.
+        pr_branch = self._impl_module.get_pr_head_branch(existing_pr) or branch_name
+        if pr_branch != branch_name:
+            impl._log(
+                "info",
+                f"Issue #{issue_number}: {pr_ref(existing_pr)} head branch is "
+                f"{pr_branch!r} (not the assumed {branch_name!r}); using the real branch",
+                thread_id,
+            )
+
         # Reuse-or-create the worktree, then hard-reset it to the PR head so the
         # reviewer sees the real PR state and any in-loop fix lands on top of it.
         self.status_tracker.update_slot(
             slot_id, f"{issue_ref(issue_number)}: Preparing worktree for existing PR"
         )
-        worktree_path = self.worktree_manager.create_worktree(issue_number, branch_name)
-        sync_worktree_to_remote_branch(worktree_path, branch_name)
+        worktree_path = self.worktree_manager.create_worktree(issue_number, pr_branch)
+        sync_worktree_to_remote_branch(worktree_path, pr_branch)
 
         with self.state_lock:
             state.worktree_path = str(worktree_path)
-            state.branch_name = branch_name
+            state.branch_name = pr_branch
             state.pr_number = existing_pr
             state.phase = ImplementationPhase.REVIEWING
         impl._save_state(state)
@@ -1117,7 +1135,7 @@ class ImplementationPhaseRunner:
         iterations, last_verdict, last_grade = impl._run_impl_review_loop(
             issue_number=issue_number,
             worktree_path=worktree_path,
-            branch_name=branch_name,
+            branch_name=pr_branch,
             issue_title=issue.title,
             issue_body=issue.body,
             session_id=None,
@@ -1150,7 +1168,7 @@ class ImplementationPhaseRunner:
             issue_number=issue_number,
             success=True,
             pr_number=existing_pr,
-            branch_name=branch_name,
+            branch_name=pr_branch,
             worktree_path=str(worktree_path),
             already_has_pr=True,
         )

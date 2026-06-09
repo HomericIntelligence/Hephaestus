@@ -445,6 +445,10 @@ class TestExistingPrEntersReviewLoop:
                 return_value=(False, False),
             ),
             patch(
+                "hephaestus.automation.implementer.get_pr_head_branch",
+                return_value="1-auto-impl",
+            ),
+            patch(
                 "hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"
             ) as sync,
             patch.object(
@@ -535,7 +539,13 @@ class TestExistingPrEntersReviewLoop:
                 "hephaestus.automation.implementer_phase_runner.pr_has_implementation_state_label",
                 return_value=(False, True),
             ),
-            patch("hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"),
+            patch(
+                "hephaestus.automation.implementer.get_pr_head_branch",
+                return_value="708-auto-impl",
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"
+            ) as sync,
             patch.object(
                 impl.worktree_manager, "create_worktree", return_value=worktree_path
             ) as create_wt,
@@ -564,6 +574,11 @@ class TestExistingPrEntersReviewLoop:
         create_wt.assert_called_once()
         review_loop.assert_called_once()
         mark_go.assert_called_once_with(777)
+        # Regression guard: the worktree is prepared/synced on the PR's REAL head
+        # branch (708-auto-impl from get_pr_head_branch), NOT the assumed
+        # "1-auto-impl" — otherwise git fetch fails with exit 128.
+        assert create_wt.call_args.args[1] == "708-auto-impl"
+        assert sync.call_args.args[1] == "708-auto-impl"
 
     def test_existing_pr_review_no_go_marks_no_go(
         self, impl: IssueImplementer, tmp_path: Path
@@ -579,6 +594,10 @@ class TestExistingPrEntersReviewLoop:
             patch(
                 "hephaestus.automation.implementer_phase_runner.pr_has_implementation_state_label",
                 return_value=(False, False),
+            ),
+            patch(
+                "hephaestus.automation.implementer.get_pr_head_branch",
+                return_value="1-auto-impl",
             ),
             patch("hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"),
             patch.object(impl.worktree_manager, "create_worktree", return_value=worktree_path),

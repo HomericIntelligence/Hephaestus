@@ -57,10 +57,18 @@ from . import (  # noqa: F401  # test-patch shim — see contract above
     review_state,
 )
 
-# Patched by: tests/unit/automation/test_implementer.py:{274,354,390,435,460};
-#             tests/unit/automation/test_implementer_loop.py:559
-# Runtime call site: ``implementer_phase_runner.py:262`` (via ``_impl_module``)
-from ._review_utils import find_pr_for_issue  # noqa: F401  # test-patch shim
+# Both re-exported as test-patch shims, reached at runtime via ``_impl_module``:
+#   - ``find_pr_for_issue``: locate the open PR for an issue.
+#       Patched by: tests/unit/automation/test_implementer.py:{274,354,390,435,460};
+#                   tests/unit/automation/test_implementer_loop.py:559
+#   - ``get_pr_head_branch``: resolve a PR's REAL head branch so
+#       ``_review_existing_pr`` never assumes ``{issue}-auto-impl`` (the assumption
+#       makes ``git fetch`` fail with exit 128 when the PR lives on another branch).
+# Runtime call site: ``implementer_phase_runner.py`` (via ``_impl_module``).
+from ._review_utils import (
+    find_pr_for_issue,  # noqa: F401  # test-patch shim
+    get_pr_head_branch,  # noqa: F401  # test-patch shim
+)
 
 # Patched by: tests/unit/automation/test_implementer_loop.py:{324,346,366,388}
 # Runtime call site: ``implementer_phase_runner.py:{855,1305,1580}`` (via ``_impl_module``)
