@@ -1178,9 +1178,7 @@ class TestResilientCallAdoption:
         ]
         assert unexpected_reset not in calls
 
-    def test_rebase_main_preserves_local_commits_when_rebase_fails(
-        self, tmp_path: Path
-    ) -> None:
+    def test_rebase_main_preserves_local_commits_when_rebase_fails(self, tmp_path: Path) -> None:
         """A failed rebase must not hard-reset away local commits ahead of origin."""
         calls: list[list[str]] = []
 

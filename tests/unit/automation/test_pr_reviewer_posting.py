@@ -446,9 +446,7 @@ class TestRunPrReviewAnalysis:
         """Claude JSON summary may omit Verdict, but full prose must be returned."""
         response_text = (
             "Detailed review.\n\nGrade: A\nVerdict: GO\n\n"
-            "```json\n"
-            + json.dumps({"comments": [], "summary": "No inline findings."})
-            + "\n```"
+            "```json\n" + json.dumps({"comments": [], "summary": "No inline findings."}) + "\n```"
         )
 
         with (
@@ -477,9 +475,7 @@ class TestRunPrReviewAnalysis:
         """Codex stdout prose must survive JSON parsing for verdict extraction."""
         stdout = (
             "Review complete.\n\nGrade: D\nVerdict: NOGO\n\n"
-            "```json\n"
-            + json.dumps({"comments": [], "summary": "Needs fixes."})
-            + "\n```"
+            "```json\n" + json.dumps({"comments": [], "summary": "Needs fixes."}) + "\n```"
         )
 
         with patch(
