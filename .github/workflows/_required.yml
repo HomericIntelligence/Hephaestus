@@ -9,6 +9,15 @@ on:
     # Re-running on auto_merge_enabled / auto_merge_disabled, labeled /
     # unlabeled, and ready_for_review makes that gate converge on the true
     # state with no timing reliance. See pr-policy below.
+    #
+    # IMPORTANT: a pull_request trigger applies to the WHOLE workflow, so the
+    # label / auto-merge event types would otherwise re-run EVERY job on each
+    # label change. Those four actions exist solely for pr-policy /
+    # auto-merge-policy to re-converge, so the `changes-gate` job below gates the
+    # 16 heavy jobs to skip on labeled/unlabeled/auto_merge_enabled/
+    # auto_merge_disabled — only the two policy jobs run on those events. The
+    # heavy jobs' results from the last code push still stand for the SHA, so
+    # branch-protection required checks remain satisfied.
     types:
       - opened
       - synchronize
@@ -29,10 +38,45 @@ permissions:
   contents: read
 
 jobs:
+  # Decides whether this event should run the 16 heavy jobs. A pull_request
+  # trigger fires the whole workflow, but the labeled / unlabeled /
+  # auto_merge_enabled / auto_merge_disabled actions exist only so pr-policy and
+  # auto-merge-policy re-converge — the heavy jobs must NOT re-run on them. This
+  # job always runs (no gate on itself) and the heavy jobs `needs:` it.
+  # ``github.event.action`` is a GitHub-controlled enum (empty on `push`), passed
+  # via env: and never interpolated into the script — injection-safe.
+  changes-gate:
+    name: changes-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    outputs:
+      code_event: ${{ steps.decide.outputs.code_event }}
+    steps:
+      - name: Decide whether this event runs the heavy jobs
+        id: decide
+        env:
+          ACTION: ${{ github.event.action }}
+        run: |
+          set -euo pipefail
+          # Heavy jobs skip ONLY on label / auto-merge PR actions. `push` has no
+          # action (empty) → falls to the default → code_event=true.
+          case "$ACTION" in
+            labeled | unlabeled | auto_merge_enabled | auto_merge_disabled)
+              echo "code_event=false" >> "$GITHUB_OUTPUT"
+              echo "Label/auto-merge event ($ACTION) — heavy jobs skipped; only policy jobs run."
+              ;;
+            *)
+              echo "code_event=true" >> "$GITHUB_OUTPUT"
+              echo "Code event (${ACTION:-push}) — heavy jobs run."
+              ;;
+          esac
+
   forbid-suppressions:
     name: forbid-suppressions
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
@@ -118,6 +162,8 @@ jobs:
     name: lint
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -144,7 +190,8 @@ jobs:
     name: markdownlint
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    needs: lint
+    needs: [lint, changes-gate]
+    if: needs.changes-gate.outputs.code_event == 'true'
     permissions:
       contents: read
     steps:
@@ -161,7 +208,8 @@ jobs:
     name: pixi-check
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    needs: lint
+    needs: [lint, changes-gate]
+    if: needs.changes-gate.outputs.code_event == 'true'
     permissions:
       contents: read
     steps:
@@ -195,7 +243,8 @@ jobs:
     name: justfile-check
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    needs: lint
+    needs: [lint, changes-gate]
+    if: needs.changes-gate.outputs.code_event == 'true'
     permissions:
       contents: read
     steps:
@@ -224,7 +273,8 @@ jobs:
     name: symlink-check
     runs-on: ubuntu-24.04
     timeout-minutes: 3
-    needs: lint
+    needs: [lint, changes-gate]
+    if: needs.changes-gate.outputs.code_event == 'true'
     permissions:
       contents: read
     steps:
@@ -236,7 +286,8 @@ jobs:
     name: shellcheck
     runs-on: ubuntu-24.04
     timeout-minutes: 3
-    needs: lint
+    needs: [lint, changes-gate]
+    if: needs.changes-gate.outputs.code_event == 'true'
     permissions:
       contents: read
     steps:
@@ -446,6 +497,8 @@ jobs:
     name: unit-tests
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -483,6 +536,8 @@ jobs:
     name: integration-tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -510,6 +565,8 @@ jobs:
     name: shell-tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -526,6 +583,8 @@ jobs:
     name: build
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -561,6 +620,8 @@ jobs:
     name: security/dependency-scan
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -594,6 +655,8 @@ jobs:
     name: security/secrets-scan
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -617,6 +680,8 @@ jobs:
     name: security/sast-scan
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -650,6 +715,8 @@ jobs:
     name: schema-validation
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -681,6 +748,8 @@ jobs:
     name: deps/version-sync
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
