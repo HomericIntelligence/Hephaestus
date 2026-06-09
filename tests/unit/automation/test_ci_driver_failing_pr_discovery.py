@@ -270,17 +270,25 @@ class TestDiscoverPrsUnion:
                     result = ci_driver._discover_prs([])
         assert result == {10: 10, 20: 20}
 
-    def test_discover_prs_skips_failing_path_when_issues_scoped(self, ci_driver: CIDriver) -> None:
-        """Failing-PR discovery is NOT invoked when --issues is provided."""
+    def test_discover_prs_skips_failing_and_bot_paths_when_issues_scoped(
+        self, ci_driver: CIDriver
+    ) -> None:
+        """Neither failing-PR NOR bot-PR discovery is invoked when --issues is set.
+
+        A scoped run must touch ONLY the selected issues' PRs — not unrelated
+        Dependabot PRs or every failing PR on the repo (POLA, #819).
+        """
         ci_driver.options.issues = [100]
+        ci_driver.options.include_bot_prs = True  # default-on, must be suppressed when scoped
 
         with patch.object(ci_driver, "_discover_failing_prs") as mock_failing:
             with patch.object(ci_driver, "_find_pr_for_issue") as mock_find:
                 mock_find.return_value = 200
                 with patch.object(ci_driver, "_discover_bot_prs") as mock_bot:
-                    mock_bot.return_value = {}
+                    mock_bot.return_value = {999: 999}  # would leak in if not suppressed
                     result = ci_driver._discover_prs([100])
         mock_failing.assert_not_called()
+        mock_bot.assert_not_called()
         assert result == {100: 200}
 
     def test_discover_prs_dedupes_across_bot_and_failing(self, ci_driver: CIDriver) -> None:

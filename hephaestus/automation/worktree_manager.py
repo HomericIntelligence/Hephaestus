@@ -144,6 +144,24 @@ class WorktreeManager:
 
             worktree_path = self.base_dir / f"issue-{issue_number}"
 
+            # Reuse, don't collide: git forbids the same branch in two worktrees.
+            # When ``branch_name`` is already checked out elsewhere (e.g. a PR
+            # resolved to its real head branch ``708-auto-impl`` which the
+            # issue-708 worktree already holds), ``git worktree add`` would fail
+            # with "already used by worktree at ..." (exit 128). Return that
+            # existing worktree and register it under this issue; the caller then
+            # syncs it to the PR head (fetch + reset --hard origin/<branch>).
+            existing = self._worktree_holding_branch(branch_name)
+            if existing is not None and existing != worktree_path:
+                logger.info(
+                    "Branch %s already checked out at %s — reusing that worktree for issue #%s",
+                    branch_name,
+                    existing,
+                    issue_number,
+                )
+                self.worktrees[issue_number] = existing
+                return existing
+
             # Remove existing directory if present
             if worktree_path.exists():
                 logger.warning("Removing existing worktree directory: %s", worktree_path)
@@ -366,6 +384,24 @@ class WorktreeManager:
             logger.info("Pruned stale worktrees")
         except Exception as e:
             logger.error("Failed to prune worktrees: %s", e)
+
+    def _worktree_holding_branch(self, branch_name: str) -> Path | None:
+        """Return the path of the worktree that has ``branch_name`` checked out.
+
+        git refuses to check out the same branch in two worktrees, so before
+        adding a worktree we must detect an existing one holding the branch and
+        reuse it. ``list_worktrees`` reports the branch as the full ref
+        ``refs/heads/<name>``; match on that. Returns ``None`` if no worktree
+        holds the branch (or on any lookup failure — caller falls back to add).
+        """
+        target_ref = f"refs/heads/{branch_name}"
+        try:
+            for wt in self.list_worktrees():
+                if wt.get("branch") == target_ref:
+                    return Path(wt["path"])
+        except Exception as e:
+            logger.debug("worktree-holding-branch lookup failed for %s: %s", branch_name, e)
+        return None
 
     def list_worktrees(self) -> list[dict[str, str]]:
         """List all git worktrees in the repository.

@@ -53,7 +53,9 @@ class TestWorktreeManager:
         mock_run.return_value.stdout = "origin/main"
         manager = WorktreeManager()
 
-        worktree_path = manager.create_worktree(123, "123-feature")
+        # No existing worktree holds this branch (collision check returns None).
+        with patch.object(manager, "_worktree_holding_branch", return_value=None):
+            worktree_path = manager.create_worktree(123, "123-feature")
 
         assert worktree_path == manager.base_dir / "issue-123"
         assert manager.worktrees[123] == worktree_path
@@ -92,11 +94,12 @@ class TestWorktreeManager:
         mock_run.return_value.stdout = "origin/main"
         manager = WorktreeManager()
 
-        # Create first worktree
-        path1 = manager.create_worktree(123, "123-feature")
+        with patch.object(manager, "_worktree_holding_branch", return_value=None):
+            # Create first worktree
+            path1 = manager.create_worktree(123, "123-feature")
 
-        # Try to create same worktree again
-        path2 = manager.create_worktree(123, "123-feature")
+            # Try to create same worktree again
+            path2 = manager.create_worktree(123, "123-feature")
 
         assert path1 == path2
         # First creation: base detection, local rev-parse, ls-remote (branch
@@ -148,7 +151,8 @@ class TestWorktreeManager:
         mock_run.side_effect = [rev_parse, ls_remote, fetch, add]
 
         manager = WorktreeManager()
-        manager.create_worktree(768, "768-auto-impl")
+        with patch.object(manager, "_worktree_holding_branch", return_value=None):
+            manager.create_worktree(768, "768-auto-impl")
 
         argvs = [c[0][0] for c in mock_run.call_args_list]
         # A fetch of the remote branch must occur.
@@ -175,7 +179,8 @@ class TestWorktreeManager:
         mock_run.side_effect = [rev_parse, ls_remote, detect, add]
 
         manager = WorktreeManager()
-        manager.create_worktree(999, "999-auto-impl")
+        with patch.object(manager, "_worktree_holding_branch", return_value=None):
+            manager.create_worktree(999, "999-auto-impl")
 
         add_argv = next(
             c[0][0] for c in mock_run.call_args_list if c[0][0][:3] == ["git", "worktree", "add"]
@@ -200,7 +205,8 @@ class TestWorktreeManager:
         mock_run.side_effect = [rev_parse, add]
 
         manager = WorktreeManager()
-        manager.create_worktree(123, "123-feature")
+        with patch.object(manager, "_worktree_holding_branch", return_value=None):
+            manager.create_worktree(123, "123-feature")
 
         argvs = [c[0][0] for c in mock_run.call_args_list]
         assert not any("ls-remote" in a for a in argvs)
@@ -562,3 +568,82 @@ class TestBaseBranchDetectionRaisesOnFailure:
             mgr = WorktreeManager()
 
         assert mgr.repo_root == tmp_path
+
+
+class TestCreateWorktreeBranchCollision:
+    """create_worktree reuses an existing worktree when the branch is checked out there.
+
+    Regression for the exit-128 collision: the implement loop resolves a PR's
+    real head branch (e.g. 708-auto-impl) for a DIFFERENT issue (#725), but that
+    branch is already checked out in the issue-708 worktree. git forbids the same
+    branch in two worktrees, so `git worktree add` failed. Reuse the existing
+    worktree instead of forcing or adding a second one.
+    """
+
+    @patch("hephaestus.automation.worktree_manager.run")
+    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    def test_reuses_worktree_already_holding_branch(
+        self, mock_get_root: Any, mock_run: Any, tmp_path: Any
+    ) -> None:
+        mock_get_root.return_value = tmp_path
+        mock_run.return_value.stdout = "origin/main"
+        manager = WorktreeManager()
+
+        existing = manager.base_dir / "issue-708"
+
+        # The branch 708-auto-impl is already checked out in the issue-708 worktree.
+        with patch.object(
+            manager,
+            "list_worktrees",
+            return_value=[
+                {"path": str(existing), "branch": "refs/heads/708-auto-impl", "commit": "abc"},
+            ],
+        ):
+            # Now ask for a worktree for issue #725 on that same branch.
+            result = manager.create_worktree(725, "708-auto-impl")
+
+        # Reuses the existing path, registers it under #725, and does NOT add a
+        # second worktree for the same branch.
+        assert result == existing
+        assert manager.worktrees[725] == existing
+        add_calls = [
+            c for c in mock_run.call_args_list if c[0] and c[0][0][:3] == ["git", "worktree", "add"]
+        ]
+        assert add_calls == [], "must NOT run `git worktree add` when reusing"
+
+    @patch("hephaestus.automation.worktree_manager.run")
+    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    def test_no_reuse_when_branch_not_checked_out_elsewhere(
+        self, mock_get_root: Any, mock_run: Any, tmp_path: Any
+    ) -> None:
+        """When the branch is NOT in any worktree, normal add path runs."""
+        mock_get_root.return_value = tmp_path
+        mock_run.return_value.stdout = "origin/main"
+        manager = WorktreeManager()
+
+        with patch.object(manager, "list_worktrees", return_value=[]):
+            result = manager.create_worktree(123, "123-auto-impl")
+
+        assert result == manager.base_dir / "issue-123"
+        add_calls = [
+            c for c in mock_run.call_args_list if c[0] and c[0][0][:3] == ["git", "worktree", "add"]
+        ]
+        assert len(add_calls) == 1, "fresh branch must add exactly one worktree"
+
+    @patch("hephaestus.automation.worktree_manager.run")
+    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    def test_worktree_holding_branch_matches_full_ref(
+        self, mock_get_root: Any, mock_run: Any, tmp_path: Any
+    ) -> None:
+        """_worktree_holding_branch matches on refs/heads/<name>, returns the path."""
+        mock_get_root.return_value = tmp_path
+        mock_run.return_value.stdout = "origin/main"
+        manager = WorktreeManager()
+        p = manager.base_dir / "issue-708"
+        with patch.object(
+            manager,
+            "list_worktrees",
+            return_value=[{"path": str(p), "branch": "refs/heads/708-auto-impl", "commit": "x"}],
+        ):
+            assert manager._worktree_holding_branch("708-auto-impl") == p
+            assert manager._worktree_holding_branch("999-auto-impl") is None

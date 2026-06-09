@@ -52,6 +52,7 @@ from .claude_timeouts import advise_claude_timeout, implementer_claude_timeout
 from .follow_up import parse_follow_up_items, run_follow_up_issues
 from .git_utils import (
     get_repo_slug,
+    is_clean_working_tree,
     issue_ref,
     pr_ref,
     run,
@@ -1112,6 +1113,20 @@ class ImplementationPhaseRunner:
             slot_id, f"{issue_ref(issue_number)}: Preparing worktree for existing PR"
         )
         worktree_path = self.worktree_manager.create_worktree(issue_number, pr_branch)
+        # ``create_worktree`` may have REUSED a worktree another issue already
+        # had checked out for ``pr_branch`` (git forbids one branch in two
+        # worktrees). A reused worktree can carry uncommitted changes from that
+        # other session; the ``reset --hard`` inside sync_worktree_to_remote_branch
+        # would silently discard them. Only when dirty, let an agent decide
+        # whether to commit (the work belongs to this branch) or stash it
+        # (unrelated/uncertain) before we sync to the PR head.
+        if not is_clean_working_tree(worktree_path):
+            self._resolve_dirty_reused_worktree(
+                issue_number=issue_number,
+                worktree_path=worktree_path,
+                branch_name=pr_branch,
+                thread_id=thread_id,
+            )
         sync_worktree_to_remote_branch(worktree_path, pr_branch)
 
         with self.state_lock:
@@ -1172,6 +1187,107 @@ class ImplementationPhaseRunner:
             worktree_path=str(worktree_path),
             already_has_pr=True,
         )
+
+    def _resolve_dirty_reused_worktree(
+        self,
+        *,
+        issue_number: int,
+        worktree_path: Path,
+        branch_name: str,
+        thread_id: int | None,
+    ) -> None:
+        """Decide commit-vs-stash for a REUSED worktree's uncommitted changes.
+
+        ``create_worktree`` can reuse a worktree another issue already had checked
+        out for ``branch_name``; that worktree may carry uncommitted work the
+        upcoming ``reset --hard`` would discard. Rather than guess, a bounded agent
+        turn inspects the diff and decides:
+
+        - **commit** — the changes belong to ``branch_name`` (same feature/PR), so
+          commit them onto the branch so the reset preserves them as history.
+        - **stash** — the changes are unrelated or their ownership is unclear; stash
+          them so they survive the reset without polluting the PR.
+
+        Best-effort: any failure falls back to ``git stash`` (the safe default —
+        preserves the work without committing it to the wrong branch) and is logged.
+        Codex has no two-turn injection point here, so it always stashes.
+        """
+        impl = self.impl
+        _impl_mod = self._impl_module
+        status = run(
+            ["git", "status", "--porcelain"],
+            cwd=worktree_path,
+            capture_output=True,
+            check=False,
+        )
+        diff = run(
+            ["git", "diff", "HEAD"],
+            cwd=worktree_path,
+            capture_output=True,
+            check=False,
+        )
+
+        decision = "stash"  # safe default
+        if not is_codex(self.options.agent):
+            try:
+                prompt = (
+                    "A reused git worktree on branch "
+                    f"`{branch_name}` has uncommitted changes that are about to be "
+                    "discarded by `git reset --hard origin/<branch>`. Decide whether "
+                    "these changes BELONG to this branch (answer COMMIT) or are "
+                    "unrelated / ownership unclear (answer STASH). Reply with a single "
+                    "word on the last line: COMMIT or STASH.\n\n"
+                    f"## git status --porcelain\n{(status.stdout or '').strip()}\n\n"
+                    f"## git diff HEAD (truncated)\n{(diff.stdout or '')[:6000]}"
+                )
+                repo_slug = _impl_mod.get_repo_slug(self.repo_root)
+                stdout, _ = _impl_mod.invoke_claude_with_session(
+                    repo=repo_slug,
+                    issue=issue_number,
+                    agent=_impl_mod.AGENT_ADVISE,
+                    prompt=prompt,
+                    model=advise_model(),
+                    cwd=worktree_path,
+                    timeout=advise_claude_timeout(),
+                    output_format="text",
+                )
+                last = (stdout or "").strip().splitlines()
+                verdict = last[-1].strip().upper() if last else ""
+                if "COMMIT" in verdict:
+                    decision = "commit"
+            except Exception as e:
+                impl._log(
+                    "warning",
+                    f"Issue #{issue_number}: dirty-worktree decision agent failed "
+                    f"({e}); defaulting to stash",
+                    thread_id,
+                )
+
+        if decision == "commit":
+            impl._log(
+                "info",
+                f"Issue #{issue_number}: committing reused-worktree changes onto "
+                f"{branch_name} before sync (agent decided COMMIT)",
+                thread_id,
+            )
+            run(["git", "add", "-A"], cwd=worktree_path, check=False)
+            run(
+                ["git", "commit", "-S", "-m", f"chore: salvage in-progress work on {branch_name}"],
+                cwd=worktree_path,
+                check=False,
+            )
+        else:
+            impl._log(
+                "info",
+                f"Issue #{issue_number}: stashing reused-worktree changes before sync "
+                "(agent decided STASH or defaulted)",
+                thread_id,
+            )
+            run(
+                ["git", "stash", "push", "-u", "-m", f"reused-worktree-{issue_number}"],
+                cwd=worktree_path,
+                check=False,
+            )
 
     def _validate_prior_threads(
         self,

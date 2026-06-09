@@ -236,6 +236,17 @@ class CIDriver:
         # this is empty (#838). Stored on the driver so ``main()`` can check
         # it without changing ``run()``'s established return type.
         self.open_prs_remaining = [] if self.options.dry_run else self._list_open_prs_remaining()
+        # When the operator scoped the run with --issues, "repo done" and
+        # auto-merge arming must consider ONLY the PRs this run drove (the
+        # pr_map values), not every open PR on the repo. Otherwise a scoped
+        # run arms unrelated PRs and fails rc=1 on out-of-scope open PRs (POLA,
+        # mirrors the discovery gates above). The no-args sweep keeps the full
+        # repo-wide done-check.
+        if self.options.issues and self.open_prs_remaining:
+            scoped_prs = set(pr_map.values())
+            self.open_prs_remaining = [
+                pr for pr in self.open_prs_remaining if pr.get("number") in scoped_prs
+            ]
         # Arm auto-merge on every implementation-GO un-armed open PR before
         # the final report (#882). The implementation-GO label is the policy
         # gate: PRs must not be queued for merge until in-loop implementation
@@ -612,7 +623,11 @@ class CIDriver:
         # would otherwise 404 on the synthetic key. PRs already discovered via
         # the issue-driven path are NOT overwritten — a bot PR that happens to
         # carry a Closes link (rare but possible) stays under its real issue.
-        if self.options.include_bot_prs:
+        #
+        # Like failing-PR discovery below, this widening is suppressed when the
+        # operator passed --issues: a scoped run must touch ONLY the selected
+        # issues' PRs, not unrelated Dependabot PRs (POLA, #819).
+        if self.options.include_bot_prs and not self.options.issues:
             bot_prs = self._discover_bot_prs()
             for pr_num, _ in bot_prs.items():
                 if pr_num in deduped.values():

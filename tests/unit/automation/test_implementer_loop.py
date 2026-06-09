@@ -6,7 +6,7 @@ import json
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -1399,3 +1399,122 @@ class TestReviewExistingPrShortCircuit:
                 thread_id=None,
             )
         assert mock_sync.call_args.args[1] == "1-auto-impl"
+
+
+class TestResolveDirtyReusedWorktree:
+    """A reused worktree that is dirty gets an agent commit-vs-stash decision."""
+
+    def test_clean_worktree_skips_decision_agent(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """When the reused worktree is clean, no decision agent runs."""
+        wt = tmp_path / "worktree"
+        wt.mkdir(exist_ok=True)
+        state = ImplementationState(issue_number=1)
+        with (
+            patch(
+                "hephaestus.automation.implementer_phase_runner.pr_has_implementation_state_label",
+                return_value=(False, True),
+            ),
+            patch.object(implementer.status_tracker, "update_slot"),
+            patch("hephaestus.automation.implementer.get_pr_head_branch", return_value="b"),
+            patch.object(implementer.worktree_manager, "create_worktree", return_value=wt),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.is_clean_working_tree",
+                return_value=True,
+            ),
+            patch.object(
+                implementer.phase_runner, "_resolve_dirty_reused_worktree"
+            ) as mock_resolve,
+            patch("hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"),
+            patch.object(implementer, "_save_state"),
+            patch("hephaestus.automation.implementer.fetch_issue_info") as mock_issue,
+            patch.object(implementer, "_run_advise_as_implementer_turn"),
+            patch.object(implementer, "_run_impl_review_loop", return_value=(1, "GO", "A")),
+            patch.object(implementer.phase_runner, "_apply_impl_review_verdict"),
+        ):
+            mock_issue.return_value.title = "t"
+            mock_issue.return_value.body = "b"
+            implementer.phase_runner._review_existing_pr(
+                issue_number=1,
+                existing_pr=5,
+                branch_name="1-auto-impl",
+                state=state,
+                slot_id=None,
+                thread_id=None,
+            )
+        mock_resolve.assert_not_called()
+
+    def test_dirty_worktree_invokes_decision_agent(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """When the reused worktree is dirty, the decision agent runs before sync."""
+        wt = tmp_path / "worktree"
+        wt.mkdir(exist_ok=True)
+        state = ImplementationState(issue_number=1)
+        with (
+            patch(
+                "hephaestus.automation.implementer_phase_runner.pr_has_implementation_state_label",
+                return_value=(False, True),
+            ),
+            patch.object(implementer.status_tracker, "update_slot"),
+            patch("hephaestus.automation.implementer.get_pr_head_branch", return_value="b"),
+            patch.object(implementer.worktree_manager, "create_worktree", return_value=wt),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.is_clean_working_tree",
+                return_value=False,
+            ),
+            patch.object(
+                implementer.phase_runner, "_resolve_dirty_reused_worktree"
+            ) as mock_resolve,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"
+            ) as mock_sync,
+            patch.object(implementer, "_save_state"),
+            patch("hephaestus.automation.implementer.fetch_issue_info") as mock_issue,
+            patch.object(implementer, "_run_advise_as_implementer_turn"),
+            patch.object(implementer, "_run_impl_review_loop", return_value=(1, "GO", "A")),
+            patch.object(implementer.phase_runner, "_apply_impl_review_verdict"),
+        ):
+            mock_issue.return_value.title = "t"
+            mock_issue.return_value.body = "b"
+            implementer.phase_runner._review_existing_pr(
+                issue_number=1,
+                existing_pr=5,
+                branch_name="1-auto-impl",
+                state=state,
+                slot_id=None,
+                thread_id=None,
+            )
+        mock_resolve.assert_called_once()
+        # Decision must run BEFORE the hard-reset sync.
+        mock_sync.assert_called_once()
+
+    def test_decision_agent_commit_verdict_commits(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """A COMMIT verdict commits; STASH/default stashes (best-effort, no raise)."""
+        wt = tmp_path / "worktree"
+        wt.mkdir(exist_ok=True)
+        implementer.options.agent = "claude"
+        with (
+            patch.object(
+                implementer.phase_runner._impl_module,
+                "invoke_claude_with_session",
+                return_value=("reasoning...\nCOMMIT", None),
+            ),
+            patch.object(
+                implementer.phase_runner._impl_module, "get_repo_slug", return_value="o/r"
+            ),
+            patch("hephaestus.automation.implementer_phase_runner.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(stdout="", returncode=0)
+            implementer.phase_runner._resolve_dirty_reused_worktree(
+                issue_number=1,
+                worktree_path=wt,
+                branch_name="708-auto-impl",
+                thread_id=None,
+            )
+        argvs = [c[0][0] for c in mock_run.call_args_list]
+        assert any(a[:2] == ["git", "commit"] for a in argvs), "COMMIT verdict must commit"
+        assert not any(a[:2] == ["git", "stash"] for a in argvs)

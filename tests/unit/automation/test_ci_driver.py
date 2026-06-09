@@ -1830,10 +1830,19 @@ class TestBotPrDiscovery:
     def test_discover_prs_unions_bot_prs_when_enabled(
         self, driver: CIDriver, tmp_path: Path
     ) -> None:
-        """include_bot_prs=True (default) unions bot PRs into the deduped map."""
+        """include_bot_prs=True unions bot PRs ONLY on an UNSCOPED run.
+
+        Bot-PR discovery is suppressed when --issues is set (a scoped run must
+        touch only the selected issues' PRs); the union behavior applies to the
+        no-args backlog sweep. Clear options.issues so the gate allows the union.
+        """
+        driver.options.issues = []  # unscoped — bot PRs are in scope
         with (
             patch.object(driver, "_find_pr_for_issue", return_value=500),
             patch.object(driver, "_discover_bot_prs", return_value={900: 900, 901: 901}),
+            # failing-PR discovery also runs on an unscoped run; keep it empty
+            # so this test isolates the bot-PR union.
+            patch.object(driver, "_discover_failing_prs", return_value={}),
         ):
             result = driver._discover_prs([42])
         # issue 42 → PR 500 PLUS the two bot PRs as self-keyed entries.
@@ -1855,9 +1864,11 @@ class TestBotPrDiscovery:
         self, driver: CIDriver, tmp_path: Path
     ) -> None:
         """A bot-PR collision with an issue-driven PR must not displace the issue key."""
+        driver.options.issues = []  # unscoped so bot discovery actually runs
         with (
             patch.object(driver, "_find_pr_for_issue", return_value=900),
             patch.object(driver, "_discover_bot_prs", return_value={900: 900}),
+            patch.object(driver, "_discover_failing_prs", return_value={}),
         ):
             result = driver._discover_prs([42])
         # Issue 42 already drives PR 900; bot enumeration must not add a
@@ -2627,3 +2638,62 @@ class TestRunDriveGreenCompact:
                 # Verify compact_session was called with repo_root
                 call_kwargs = mock_compact.call_args[1]
                 assert call_kwargs["cwd"] == driver.repo_root
+
+
+class TestScopedDoneGate:
+    """A --issues-scoped run gates 'repo done' / arming on ONLY the scoped PRs."""
+
+    def test_scoped_run_filters_open_prs_to_scoped_only(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """open_prs_remaining keeps only PRs this run drove; unrelated PRs dropped."""
+        driver.options.issues = [725, 711]
+        # Drove PRs 996 (issue 725) and 997 (issue 711).
+        scoped_map = {725: 996, 711: 997}
+        # The repo has many more open PRs; only the scoped ones should remain.
+        all_open = [
+            {"number": 996, "title": "scoped", "autoMergeRequest": None},
+            {"number": 997, "title": "scoped", "autoMergeRequest": None},
+            {"number": 1032, "title": "unrelated dependabot", "autoMergeRequest": None},
+            {"number": 988, "title": "unrelated", "autoMergeRequest": None},
+        ]
+        with (
+            patch.object(driver, "_sweep_orphaned_arming_records"),
+            patch.object(driver, "_discover_prs", return_value=scoped_map),
+            patch.object(driver, "_drive_issue", return_value=MagicMock()),
+            patch.object(driver.worktree_manager, "cleanup_all"),
+            patch.object(driver.worktree_manager, "preserved", []),
+            patch.object(driver, "_list_open_prs_remaining", return_value=all_open),
+            patch.object(
+                driver, "_arm_all_unarmed_open_prs", side_effect=lambda prs: prs
+            ) as mock_arm,
+        ):
+            driver.run()
+
+        remaining_nums = {pr["number"] for pr in driver.open_prs_remaining}
+        assert remaining_nums == {996, 997}, "out-of-scope PRs must be dropped"
+        # Arming is only offered the scoped PRs.
+        armed_nums = {pr["number"] for pr in mock_arm.call_args[0][0]}
+        assert armed_nums == {996, 997}
+
+    def test_unscoped_run_keeps_all_open_prs(self, driver: CIDriver, tmp_path: Path) -> None:
+        """With no --issues, the full repo-wide done-check is preserved."""
+        driver.options.issues = []
+        driver.options.include_bot_prs = True
+        all_open = [
+            {"number": 996, "title": "x", "autoMergeRequest": None},
+            {"number": 1032, "title": "y", "autoMergeRequest": None},
+        ]
+        with (
+            patch.object(driver, "_sweep_orphaned_arming_records"),
+            patch.object(driver, "_discover_prs", return_value={996: 996}),
+            patch.object(driver, "_drive_issue", return_value=MagicMock()),
+            patch.object(driver.worktree_manager, "cleanup_all"),
+            patch.object(driver.worktree_manager, "preserved", []),
+            patch.object(driver, "_list_open_prs_remaining", return_value=all_open),
+            patch.object(driver, "_arm_all_unarmed_open_prs", side_effect=lambda prs: prs),
+        ):
+            driver.run()
+
+        remaining_nums = {pr["number"] for pr in driver.open_prs_remaining}
+        assert remaining_nums == {996, 1032}, "unscoped run keeps all open PRs"
