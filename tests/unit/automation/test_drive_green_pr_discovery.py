@@ -183,7 +183,7 @@ class TestProcessRepoSkipLogic:
         _, cfg = repo_inputs
         cfg = LoopConfig(phases=("drive-green",), loops=1, projects_dir=cfg.projects_dir)
         with (
-            patch.object(loop_runner, "_rebase_main", return_value="deadbeef"),
+            patch.object(loop_runner, "_rebase_main", return_value=("deadbee", True)),
             patch.object(loop_runner, "_list_open_issue_numbers", return_value=[]),
             patch.object(loop_runner, "_count_failing_prs", return_value=0),
             patch.object(loop_runner, "run_phase") as mock_run,
@@ -201,7 +201,7 @@ class TestProcessRepoSkipLogic:
         _, cfg = repo_inputs
         cfg = LoopConfig(phases=("drive-green",), loops=1, projects_dir=cfg.projects_dir)
         with (
-            patch.object(loop_runner, "_rebase_main", return_value="deadbeef"),
+            patch.object(loop_runner, "_rebase_main", return_value=("deadbee", True)),
             patch.object(loop_runner, "_list_open_issue_numbers", return_value=[]),
             patch.object(loop_runner, "_count_failing_prs", return_value=3),
             patch.object(loop_runner, "run_phase", side_effect=lambda **kw: _ok(kw["phase"])),
@@ -222,7 +222,7 @@ class TestProcessRepoSkipLogic:
             projects_dir=cfg.projects_dir,
         )
         with (
-            patch.object(loop_runner, "_rebase_main", return_value="deadbeef"),
+            patch.object(loop_runner, "_rebase_main", return_value=("deadbee", True)),
             patch.object(loop_runner, "_list_open_issue_numbers", return_value=[]),
             patch.object(loop_runner, "_count_failing_prs", return_value=0),
             patch.object(loop_runner, "run_phase", side_effect=lambda **kw: _ok(kw["phase"])),

@@ -10,6 +10,12 @@ import pytest
 from hephaestus.automation.worktree_manager import WorktreeDirtyError, WorktreeManager
 
 
+@pytest.fixture(autouse=True)
+def _clear_loop_trunk_githash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep unit tests independent from automation-loop parent env."""
+    monkeypatch.delenv("HEPH_TRUNK_GITHASH", raising=False)
+
+
 class TestWorktreeManager:
     """Tests for WorktreeManager class."""
 

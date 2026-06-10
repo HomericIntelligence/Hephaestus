@@ -314,7 +314,7 @@ def test_process_repo_runs_all_phases_when_all_succeed(
     """Process repo runs all phases when all succeed."""
     _, cfg = repo_inputs
     with (
-        patch.object(loop_runner, "_rebase_main", return_value="abc1234"),
+        patch.object(loop_runner, "_rebase_main", return_value=("abc1234", True)),
         patch.object(loop_runner, "_list_open_issue_numbers", return_value=[1, 2]),
         patch.object(loop_runner, "run_phase", side_effect=lambda **kw: _ok(kw["phase"])),
     ):
@@ -335,7 +335,7 @@ def test_process_repo_continues_after_phase_failure(repo_inputs: tuple[Path, Loo
         return PhaseResult(name=name, rc=rc, elapsed_s=0.1)
 
     with (
-        patch.object(loop_runner, "_rebase_main", return_value="abc1234"),
+        patch.object(loop_runner, "_rebase_main", return_value=("abc1234", True)),
         patch.object(loop_runner, "_list_open_issue_numbers", return_value=[1]),
         patch.object(loop_runner, "_count_failing_prs", return_value=1),
         patch.object(loop_runner, "run_phase", side_effect=fake_run_phase),
@@ -364,7 +364,7 @@ def test_process_repo_skips_disabled_phases(repo_inputs: tuple[Path, LoopConfig]
     _, cfg = repo_inputs
     cfg = LoopConfig(loops=1, projects_dir=cfg.projects_dir, phases=("plan",))
     with (
-        patch.object(loop_runner, "_rebase_main", return_value="abc1234"),
+        patch.object(loop_runner, "_rebase_main", return_value=("abc1234", True)),
         patch.object(loop_runner, "_list_open_issue_numbers", return_value=[1]),
         patch.object(loop_runner, "run_phase", side_effect=lambda **kw: _ok(kw["phase"])),
     ):
@@ -382,7 +382,7 @@ def test_process_repo_skips_issue_phases_when_no_issues(
     """Process repo skips issue phases when no issues."""
     _, cfg = repo_inputs
     with (
-        patch.object(loop_runner, "_rebase_main", return_value="abc1234"),
+        patch.object(loop_runner, "_rebase_main", return_value=("abc1234", True)),
         patch.object(loop_runner, "_list_open_issue_numbers", return_value=[]),
         patch.object(loop_runner, "_count_failing_prs", return_value=0),
         patch.object(loop_runner, "run_phase", side_effect=lambda **kw: _ok(kw["phase"])),
@@ -405,7 +405,7 @@ def test_process_repo_skips_drive_green_on_non_final_loop(
     _, cfg = repo_inputs
     cfg = LoopConfig(loops=3, projects_dir=cfg.projects_dir)
     with (
-        patch.object(loop_runner, "_rebase_main", return_value="abc1234"),
+        patch.object(loop_runner, "_rebase_main", return_value=("abc1234", True)),
         patch.object(loop_runner, "_list_open_issue_numbers", return_value=[1]),
         patch.object(loop_runner, "_count_failing_prs", return_value=1),
         patch.object(loop_runner, "run_phase", side_effect=lambda **kw: _ok(kw["phase"])),
@@ -416,6 +416,26 @@ def test_process_repo_skips_drive_green_on_non_final_loop(
     drive_green_loop3 = next(p for p in result_loop3.phases if p.name == "drive-green")
     assert drive_green_loop1.skipped and drive_green_loop1.skip_reason == "not final loop"
     assert not drive_green_loop3.skipped
+
+
+def test_process_repo_logs_trunk_stale_when_fetch_fails(
+    repo_inputs: tuple[Path, LoopConfig], caplog: pytest.LogCaptureFixture
+) -> None:
+    """When _rebase_main returns fetch_ok=False, the [repo] trunk= log line carries '(stale)'.
+
+    Operators see refresh failures (#993).
+    """
+    _, cfg = repo_inputs
+    with (
+        patch.object(loop_runner, "_rebase_main", return_value=("abc1234", False)),
+        patch.object(loop_runner, "_list_open_issue_numbers", return_value=[]),
+        patch.object(loop_runner, "run_phase", side_effect=lambda **kw: _ok(kw["phase"])),
+        caplog.at_level("INFO", logger="hephaestus.automation.loop_runner"),
+    ):
+        process_repo("r", loop_idx=1, cfg=cfg)
+    assert any("trunk=abc1234 (stale)" in rec.message for rec in caplog.records), [
+        r.message for r in caplog.records
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1048,9 +1068,11 @@ class TestSummarizeLoop:
 # ---------------------------------------------------------------------------
 
 
-def _completed(returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess[str]:
+def _completed(
+    returncode: int = 0, stdout: str = "", stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
     """Build a CompletedProcess stand-in for mocked subprocess.run calls."""
-    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 class TestSubprocessTimeouts:
@@ -1146,17 +1168,19 @@ class TestResilientCallAdoption:
         ):
             mock_resilient.return_value = _completed()
 
-            def _run(argv: list[str], **_: object):
-                if "status" in argv:
-                    return _completed(stdout="")
+            def _run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
                 if "symbolic-ref" in argv:
                     return _completed(stdout="origin/main")
+                if "rev-list" in argv:
+                    return _completed(stdout="0")
                 if "rev-parse" in argv:
                     return _completed(stdout="abc1234")
                 return _completed()
 
             mock_run.side_effect = _run
-            _rebase_main("Repo", tmp_path)
+            sha, fetch_ok = _rebase_main("Repo", tmp_path)
+        assert sha == "abc1234"
+        assert fetch_ok is True
         assert mock_resilient.call_count == 1
         # The wrapped callable is the module's subprocess.run (here the patched mock).
         assert mock_resilient.call_args.args[0] is mock_run
@@ -1180,7 +1204,11 @@ class TestResilientCallAdoption:
                 _ensure_clone("Org", "Repo", dest)
 
     def test_rebase_main_fetch_timeout_is_non_fatal(self, tmp_path: Path) -> None:
-        """A timed-out fetch is logged and the rebase proceeds against stale main."""
+        """A timed-out fetch is logged; the rebase proceeds against stale main.
+
+        The returned ``fetch_ok`` flag is False so the caller can mark the
+        log line as stale (#993).
+        """
 
         def _hang(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
             raise subprocess.TimeoutExpired(cmd="git fetch", timeout=120)
@@ -1193,8 +1221,9 @@ class TestResilientCallAdoption:
             ),
         ):
             mock_run.return_value = _completed(stdout="def5678")
-            sha = _rebase_main("Repo", tmp_path)
+            sha, fetch_ok = _rebase_main("Repo", tmp_path)
         assert sha == "def5678"
+        assert fetch_ok is False
 
     def test_rebase_main_uses_origin_head_default_branch(self, tmp_path: Path) -> None:
         """Repos whose default branch is master must not be rebased against origin/main."""
@@ -1212,9 +1241,10 @@ class TestResilientCallAdoption:
             patch("hephaestus.automation.loop_runner.resilient_call", return_value=_completed()),
             patch("hephaestus.automation.loop_runner.subprocess.run", side_effect=fake_run),
         ):
-            sha = _rebase_main("Repo", tmp_path)
+            sha, fetch_ok = _rebase_main("Repo", tmp_path)
 
         assert sha == "def5678"
+        assert fetch_ok is True
         assert ["git", "-C", str(tmp_path), "rebase", "origin/master", "--quiet"] in calls
         unexpected_reset = [
             "git",
@@ -1247,13 +1277,63 @@ class TestResilientCallAdoption:
             patch("hephaestus.automation.loop_runner.resilient_call", return_value=_completed()),
             patch("hephaestus.automation.loop_runner.subprocess.run", side_effect=fake_run),
         ):
-            sha = _rebase_main("Repo", tmp_path)
+            sha, fetch_ok = _rebase_main("Repo", tmp_path)
 
         assert sha == "local12"
+        assert fetch_ok is True
         assert ["git", "-C", str(tmp_path), "rebase", "--abort"] in calls
         assert not any(
             call[:5] == ["git", "-C", str(tmp_path), "reset", "--hard"] for call in calls
         )
+
+    def test_rebase_main_fetch_nonzero_rc_marks_stale(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Non-zero git fetch rc (e.g. macOS sandboxing) must surface and mark stale.
+
+        The returned ``fetch_ok`` flag is False. The SHA value itself stays a
+        clean 7-char hash so ``HEPH_TRUNK_GITHASH`` and session naming downstream
+        remain unaffected.
+
+        Regression for #993: previously rc=1 silently passed through
+        ``resilient_call`` (subprocess.run with ``check=False`` does not raise)
+        and the loop logged a trunk SHA as if the refresh had succeeded.
+        """
+        fetch_failure = _completed(
+            returncode=1,
+            stderr="error: cannot open .git/FETCH_HEAD: Operation not permitted\n",
+        )
+
+        with (
+            patch(
+                "hephaestus.automation.loop_runner.resilient_call",
+                return_value=fetch_failure,
+            ),
+            patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run,
+            caplog.at_level("WARNING", logger="hephaestus.automation.loop_runner"),
+        ):
+            mock_run.return_value = _completed(stdout="abc1234")
+            sha, fetch_ok = _rebase_main("Repo", tmp_path)
+
+        assert sha == "abc1234"  # clean SHA — no suffix
+        assert fetch_ok is False
+        assert any(
+            "git fetch failed" in rec.message and "rc=1" in rec.message for rec in caplog.records
+        ), caplog.records
+
+    def test_rebase_main_fetch_success_returns_clean(self, tmp_path: Path) -> None:
+        """A zero-rc fetch returns ``fetch_ok=True`` and the unmodified SHA."""
+        with (
+            patch(
+                "hephaestus.automation.loop_runner.resilient_call",
+                return_value=_completed(returncode=0),
+            ),
+            patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = _completed(stdout="abc1234")
+            sha, fetch_ok = _rebase_main("Repo", tmp_path)
+        assert sha == "abc1234"
+        assert fetch_ok is True
 
 
 class TestDefaultPhaseTimeout:

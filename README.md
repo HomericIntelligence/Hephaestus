@@ -298,6 +298,36 @@ with `--help` to see full usage.
 | `hephaestus-ensure-state-labels` | Idempotently provision `state:needs-plan` / `state:plan-no-go` / `state:plan-go` labels on one or more repos |
 | `hephaestus-audit-prs` | Audit ALL open PRs in one coordinator agent invocation |
 
+#### Running the automation loop from a source checkout (macOS / Codex)
+
+When `hephaestus-automation-loop` is not installed on `PATH` (fresh source
+checkout) and Claude is not installed, invoke the loop through `uv` and pin
+Codex as the agent:
+
+```bash
+# Prerequisites
+command -v uv             # uv installed
+command -v codex && codex login status   # Codex authenticated
+command -v gh && gh auth status          # gh authenticated
+
+# Title-scoped loop over open "nitpick" / "minor" issues
+issues=$(
+  gh issue list --state open --limit 500 --json number,title \
+    --jq '.[] | select((.title | ascii_downcase) | test("(^|[^a-z0-9_])(nitpick|minor)([^a-z0-9_]|$)")) | .number' \
+  | sort -n -u | paste -sd, -
+)
+
+test -n "$issues" \
+  && uv run hephaestus-automation-loop --issues "$issues" --agent codex \
+  || echo "No open nitpick/minor title issues found"
+```
+
+If the pre-loop `git fetch` is denied (e.g. macOS sandboxing returns
+`error: cannot open .git/FETCH_HEAD: Operation not permitted`) the loop now
+logs a WARNING and renders the trunk line as `[Repo] trunk=<sha> (stale)`
+so the refresh failure is visible rather than silently treated as a clean
+sync (#993).
+
 ### GitHub
 
 | Command | Description |
