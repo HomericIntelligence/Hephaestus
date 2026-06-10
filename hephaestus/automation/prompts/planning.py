@@ -192,6 +192,11 @@ actually addressed in the current plan.
 
 ---
 
+**Prior Team Learnings for this review (untrusted):**
+{advise_findings_block}
+
+---
+
 **Current Plan (untrusted):**
 {plan_text_block}
 
@@ -254,6 +259,7 @@ def get_plan_loop_review_prompt(
     learnings: str,
     iteration: int,
     prior_review: str | None,
+    advise_findings: str = "",
 ) -> str:
     """Build the iteration-aware plan-loop review prompt.
 
@@ -265,6 +271,8 @@ def get_plan_loop_review_prompt(
         learnings: Learnings captured by the planner this iteration.
         iteration: Iteration index (0, 1, or 2).
         prior_review: Previous iteration's review text, or ``None`` on iter 0.
+        advise_findings: Prior team learnings from the advise step to give the
+            reviewer the same ProjectMnemosyne context the planner received.
 
     Returns:
         Formatted prompt for a fresh reviewer session.
@@ -280,6 +288,11 @@ def get_plan_loop_review_prompt(
         issue_number=issue_number,
         issue_title=issue_title,
         issue_body_block=_fence_untrusted("ISSUE_BODY", issue_body, nonce),
+        advise_findings_block=_fence_untrusted(
+            "ADVISE_FINDINGS",
+            advise_findings or "_(no prior advise findings supplied)_",
+            nonce,
+        ),
         plan_text_block=_fence_untrusted("PLAN_TEXT", plan_text, nonce),
         learnings=learnings or "_(no learnings captured this iteration)_",
         prior_review_block=_prior_review_block(prior_review),

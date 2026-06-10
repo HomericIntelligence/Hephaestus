@@ -3,7 +3,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from hephaestus.automation.learn import learn_needs_rerun, run_learn
+from hephaestus.automation.learn import build_learn_prompt, learn_needs_rerun, run_learn
 
 
 class TestLearnNeedsRerun:
@@ -45,6 +45,13 @@ class TestLearnNeedsRerun:
 class TestRunLearn:
     """Tests for run_learn."""
 
+    def test_build_learn_prompt_uses_user_facing_command(self) -> None:
+        prompt = build_learn_prompt("Capture what happened.")
+
+        assert prompt.startswith("/learn Capture what happened.")
+        assert "/skills-registry-commands:learn" not in prompt
+        assert "Only push skills to ProjectMnemosyne" in prompt
+
     def test_success_writes_log_and_returns_true(self, tmp_path: Path) -> None:
         """Returns True and writes log on successful claude run."""
         worktree_path = tmp_path / "worktree"
@@ -53,10 +60,14 @@ class TestRunLearn:
         mock_result = MagicMock()
         mock_result.stdout = "Learn complete. PR created."
 
-        with patch("hephaestus.automation.learn.run", return_value=mock_result):
+        with patch("hephaestus.automation.learn.run", return_value=mock_result) as mock_run:
             result = run_learn("session-abc", worktree_path, 42, tmp_path)
 
         assert result is True
+        cmd_args = mock_run.call_args.args[0]
+        prompt = cmd_args[cmd_args.index("session-abc") + 1]
+        assert prompt.startswith("/learn")
+        assert "/skills-registry-commands:learn" not in prompt
         log_file = tmp_path / "learn-42.log"
         assert log_file.exists()
         assert log_file.read_text() == "Learn complete. PR created."
@@ -100,7 +111,9 @@ class TestRunLearn:
         mock_result = MagicMock()
         mock_result.stdout = "learned"
 
-        with patch("hephaestus.automation.learn.resume_codex_session", return_value=mock_result):
+        with patch(
+            "hephaestus.automation.learn.resume_codex_session", return_value=mock_result
+        ) as mock_resume:
             result = run_learn(
                 "session-abc",
                 worktree_path,
@@ -111,6 +124,9 @@ class TestRunLearn:
             )
 
         assert result is True
+        prompt = mock_resume.call_args.args[1]
+        assert prompt.startswith("/learn")
+        assert "/skills-registry-commands:learn" not in prompt
         assert (tmp_path / "learn-42.log").read_text() == "learned"
 
     def test_creates_state_dir_if_missing(self, tmp_path: Path) -> None:

@@ -403,7 +403,7 @@ class TestUntrustedFencing:
         assert prompts._UNTRUSTED_NOTICE in out
 
     def test_plan_loop_review_prompt_fences_untrusted_fields(self) -> None:
-        """get_plan_loop_review_prompt fences issue_body and plan_text."""
+        """get_plan_loop_review_prompt fences issue_body, advise, and plan_text."""
         out = prompts.get_plan_loop_review_prompt(
             issue_number=1,
             issue_title="t",
@@ -412,8 +412,10 @@ class TestUntrustedFencing:
             learnings="",
             iteration=0,
             prior_review=None,
+            advise_findings=self.INJECTION,
         )
         assert self._fence_present(out, "ISSUE_BODY")
+        assert self._fence_present(out, "ADVISE_FINDINGS")
         assert self._fence_present(out, "PLAN_TEXT")
         assert prompts._UNTRUSTED_NOTICE in out
 
@@ -430,6 +432,18 @@ class TestUntrustedFencing:
         )
         assert self._fence_present(out, "ISSUE_BODY")
         assert self._fence_present(out, "DIFF_TEXT")
+        assert prompts._UNTRUSTED_NOTICE in out
+
+    def test_pr_review_analysis_prompt_fences_advise_findings(self) -> None:
+        """get_pr_review_analysis_prompt fences advise findings before review."""
+        out = prompts.get_pr_review_analysis_prompt(
+            pr_number=1,
+            issue_number=1,
+            issue_body=self.INJECTION,
+            advise_findings=self.INJECTION,
+        )
+        assert self._fence_present(out, "ISSUE_BODY")
+        assert self._fence_present(out, "ADVISE_FINDINGS")
         assert prompts._UNTRUSTED_NOTICE in out
 
     def test_dirty_reused_worktree_decision_prompt_fences_status_and_diff(self) -> None:

@@ -17,6 +17,9 @@ Analyze PR #{pr_number} linked to issue #{issue_number}.
 **Issue Description (untrusted):**
 {issue_body_block}
 
+**Prior Team Learnings for this review (untrusted):**
+{advise_findings_block}
+
 **PR Description (untrusted):**
 {pr_description_block}
 
@@ -105,6 +108,7 @@ def get_pr_review_analysis_prompt(
     issue_body: str = "",
     ci_status: str = "",
     pr_description: str = "",
+    advise_findings: str = "",
     include_nitpicks: bool = False,
 ) -> str:
     """Get the PR review analysis prompt for generating inline review comments.
@@ -123,6 +127,8 @@ def get_pr_review_analysis_prompt(
         issue_body: Issue body/description
         ci_status: CI check status summary
         pr_description: PR description body
+        advise_findings: Prior team learnings from ProjectMnemosyne to give the
+            reviewer continuity with the advise-first implementation turn.
         include_nitpicks: When False (default), the reviewer is told to OMIT
             ``nitpick``-severity comments entirely. When True (``--nitpick``),
             nitpick comments are re-enabled. Either way every emitted comment
@@ -139,6 +145,11 @@ def get_pr_review_analysis_prompt(
         issue_number=issue_number,
         pr_diff_block=_fence_untrusted("PR_DIFF", pr_diff, nonce),
         issue_body_block=_fence_untrusted("ISSUE_BODY", issue_body, nonce),
+        advise_findings_block=_fence_untrusted(
+            "ADVISE_FINDINGS",
+            advise_findings or "_(no prior advise findings supplied)_",
+            nonce,
+        ),
         ci_status_block=_fence_untrusted("CI_STATUS", ci_status, nonce),
         pr_description_block=_fence_untrusted("PR_DESCRIPTION", pr_description, nonce),
         untrusted_notice=_UNTRUSTED_NOTICE,

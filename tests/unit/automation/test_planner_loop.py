@@ -83,6 +83,23 @@ class TestRunPlanReviewLoop:
         assert mock_review.call_count == 1
         assert verdict_is_go is True
 
+    def test_forwards_advise_findings_to_plan_reviewer(self, planner: Planner) -> None:
+        """Plan review gets the same ProjectMnemosyne context as planning."""
+        planner.options.enable_advise = True
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
+                return_value={"title": "T", "body": "B"},
+            ),
+            patch.object(planner, "_run_advise", return_value="prior team learning"),
+            patch.object(planner, "_generate_plan", return_value="plan v0"),
+            patch.object(planner, "_capture_planner_learnings", return_value="learn0"),
+            patch.object(planner, "_run_plan_review", return_value=_go_review()) as mock_review,
+        ):
+            planner._run_plan_review_loop(123, slot_id=0)
+
+        assert mock_review.call_args.kwargs["advise_findings"] == "prior team learning"
+
     def test_runs_all_3_iterations_on_sustained_nogo(self, planner: Planner) -> None:
         """When every review says NOGO, the loop runs exactly 3 iterations."""
         with (
@@ -543,6 +560,17 @@ class TestCapturePlannerLearnings:
         agent = mock_call.call_args.kwargs["agent"]
         assert agent == AGENT_PLANNER
         assert agent != AGENT_LEARNINGS
+
+    def test_uses_user_facing_learn_command(self, planner: Planner) -> None:
+        """Planner learn capture must update ProjectMnemosyne through /learn."""
+        with patch.object(planner, "_call_claude", return_value="- learning A") as mock_call:
+            planner._capture_planner_learnings(123, "plan text")
+
+        prompt = mock_call.call_args.args[0]
+        assert prompt.startswith("/learn ")
+        assert "ProjectMnemosyne" in prompt
+        assert "/skills-registry-commands:learn" not in prompt
+        assert "plan text" in prompt
 
 
 class TestRunPlanReview:

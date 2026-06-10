@@ -393,6 +393,19 @@ class TestGatherImplReviewContext:
         assert "no plan comment found" in ctx["issue_body"]
         assert "no plan-review comment found" in ctx["issue_body"]
 
+    def test_preserves_advise_findings_for_prompt(self) -> None:
+        ctx = gather_impl_review_context(
+            pr_number=42,
+            issue_number=1,
+            issue_title="t",
+            issue_body="b",
+            plan_text="",
+            plan_review_text="",
+            diff_text="",
+            advise_findings="prior team finding",
+        )
+        assert ctx["advise_findings"] == "prior team finding"
+
 
 class TestRunPrReviewAnalysis:
     """run_pr_review_analysis is the shared analysis core (standalone + in-loop)."""
@@ -441,6 +454,35 @@ class TestRunPrReviewAnalysis:
                 dry_run=False,
             )
         assert captured["agent"] == "pr-reviewer-r1"
+
+    def test_passes_advise_findings_to_prompt_builder(self, tmp_path: Path) -> None:
+        captured: dict[str, object] = {}
+
+        def _fake_prompt(**kwargs: object) -> str:
+            captured.update(kwargs)
+            return "prompt"
+
+        with (
+            patch(
+                "hephaestus.automation.pr_reviewer.get_pr_review_analysis_prompt",
+                side_effect=_fake_prompt,
+            ),
+            patch("hephaestus.automation.pr_reviewer.run_codex_text") as mock_codex,
+        ):
+            mock_codex.return_value = MagicMock(
+                stdout='Verdict: GO\n```json\n{"comments": [], "summary": "ok"}\n```'
+            )
+            run_pr_review_analysis(
+                pr_number=1,
+                issue_number=1,
+                worktree_path=tmp_path,
+                context={"advise_findings": "prior team finding"},
+                agent="codex",
+                state_dir=tmp_path,
+                dry_run=False,
+            )
+
+        assert captured["advise_findings"] == "prior team finding"
 
     def test_claude_path_preserves_review_text_for_verdict(self, tmp_path: Path) -> None:
         """Claude JSON summary may omit Verdict, but full prose must be returned."""

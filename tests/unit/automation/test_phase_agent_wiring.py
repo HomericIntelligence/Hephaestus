@@ -172,10 +172,12 @@ def test_planner_module_uses_its_expected_agents() -> None:
 
     Stage 1 (#455/#468/#484) changed two of these:
 
-    AGENT_PLANNER       — main planning call AND post-plan learnings capture.
-                          Learnings now RESUME the planner's own session (it
-                          previously opened a separate AGENT_LEARNINGS session)
-                          so the model still "remembers" the plan it wrote.
+    AGENT_PLANNER       — main planning call AND post-plan /learn capture.
+                          Learnings RESUME the planner's own session with the
+                          user-facing /learn command (it previously opened a
+                          separate AGENT_LEARNINGS session), so the model still
+                          "remembers" the plan it wrote and ProjectMnemosyne is
+                          updated.
     AGENT_ADVISE        — pre-plan advice call.
     AGENT_PLAN_REVIEWER — in-process plan-review call, now wrapped in
                           ``reviewer_agent(AGENT_PLAN_REVIEWER, iteration)`` so

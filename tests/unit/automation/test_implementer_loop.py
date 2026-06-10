@@ -127,6 +127,27 @@ class TestRunImplReviewLoop:
         # Address step must NOT be called because iteration 0 already passed.
         mock_addr.assert_not_called()
 
+    def test_forwards_advise_findings_to_review_step(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        with patch.object(
+            implementer, "_run_impl_review_step", return_value=(_go(), [])
+        ) as mock_rev:
+            implementer._run_impl_review_loop(
+                issue_number=1,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=None,
+                thread_id=None,
+                pr_number=42,
+                advise_findings="prior team finding",
+            )
+
+        assert mock_rev.call_args.kwargs["advise_findings"] == "prior team finding"
+
     def test_go_resolves_only_automation_owned_stale_threads(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
@@ -139,6 +160,25 @@ class TestRunImplReviewLoop:
                 "path": "b.py",
                 "line": 2,
                 "body": "old",
+            },
+            {
+                "id": "T_nested_self",
+                "author": "coderabbitai[bot]",
+                "authors": ["coderabbitai[bot]", "mvillmow"],
+                "comments": [
+                    {"body": "old", "author": "coderabbitai[bot]"},
+                    {"body": "automation reply", "author": "mvillmow"},
+                ],
+                "path": "d.py",
+                "line": 4,
+                "body": "old",
+            },
+            {
+                "id": "T_other_bot",
+                "author": "coderabbitai[bot]",
+                "path": "e.py",
+                "line": 5,
+                "body": "bot",
             },
             {"id": "T_human", "author": "alice", "path": "c.py", "line": 3, "body": "human"},
         ]
@@ -172,7 +212,7 @@ class TestRunImplReviewLoop:
         assert (iters, verdict, grade) == (1, "GO", "A")
         mock_addr.assert_not_called()
         resolved_ids = [call.args[0] for call in mock_resolve.call_args_list]
-        assert resolved_ids == ["T_self", "T_bot"]
+        assert resolved_ids == ["T_self", "T_bot", "T_nested_self"]
 
     def test_runs_3_iterations_on_sustained_nogo(
         self, implementer: IssueImplementer, tmp_path: Path
@@ -978,6 +1018,31 @@ class TestRunImplReviewStep:
         assert "PLAN body" in ctx["issue_body"]
         assert "Verdict: GO" in ctx["issue_body"]
 
+    def test_passes_advise_findings_to_inline_review_context(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        with (
+            patch.object(implementer.phase_runner, "_fetch_plan_and_review", return_value=("", "")),
+            patch.object(implementer, "_collect_diff", return_value="the-diff"),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.review_pr_inline",
+                return_value=(_go(), []),
+            ) as mock_inline,
+        ):
+            implementer._run_impl_review_step(
+                issue_number=1,
+                issue_title="t",
+                issue_body="ib",
+                branch_name="b",
+                worktree_path=tmp_path,
+                pr_number=42,
+                iteration=0,
+                prior_review=None,
+                advise_findings="prior team finding",
+            )
+
+        assert mock_inline.call_args.kwargs["context"]["advise_findings"] == "prior team finding"
+
     def test_reviewer_uses_per_iteration_session_token(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
@@ -1434,6 +1499,54 @@ class TestReviewExistingPrShortCircuit:
         assert result.success is True
         mock_loop.assert_called_once()
         mock_verdict.assert_called_once()
+
+    def test_codex_existing_pr_forwards_advise_to_review_loop(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """Codex existing-PR review has no transcript injection, so pass context."""
+        implementer.options.agent = "codex"
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir(exist_ok=True)
+        state = ImplementationState(issue_number=1)
+        with (
+            patch(
+                "hephaestus.automation.implementer_phase_runner.pr_has_implementation_state_label",
+                return_value=(False, False),
+            ),
+            patch.object(implementer.status_tracker, "update_slot"),
+            patch("hephaestus.automation.implementer.get_pr_head_branch", return_value="b"),
+            patch.object(
+                implementer.worktree_manager, "create_worktree", return_value=worktree_path
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.is_clean_working_tree",
+                return_value=True,
+            ),
+            patch("hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"),
+            patch.object(implementer, "_save_state"),
+            patch("hephaestus.automation.implementer.fetch_issue_info") as mock_issue,
+            patch.object(
+                implementer, "_run_advise", return_value="prior team finding"
+            ) as mock_advise,
+            patch.object(
+                implementer, "_run_impl_review_loop", return_value=(1, "GO", "A")
+            ) as mock_loop,
+            patch.object(implementer.phase_runner, "_apply_impl_review_verdict"),
+            patch.object(implementer.phase_runner, "_run_post_pr_followup"),
+        ):
+            mock_issue.return_value.title = "title"
+            mock_issue.return_value.body = "body"
+            implementer.phase_runner._review_existing_pr(
+                issue_number=1,
+                existing_pr=555,
+                branch_name="1-branch",
+                state=state,
+                slot_id=None,
+                thread_id=None,
+            )
+
+        mock_advise.assert_called_once()
+        assert mock_loop.call_args.kwargs["advise_findings"] == "prior team finding"
 
     @pytest.mark.parametrize("learn_completed", [False, True])
     def test_existing_pr_runs_post_review_learn_when_needed(

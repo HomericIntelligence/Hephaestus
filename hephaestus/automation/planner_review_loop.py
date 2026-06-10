@@ -28,6 +28,7 @@ from .github_api import (
     gh_issue_remove_labels,
     gh_issue_upsert_comment,
 )
+from .learn import build_learn_prompt
 from .models import PLAN_COMMENT_MARKER
 from .prompts import get_plan_loop_review_prompt, get_plan_prompt
 from .review_state import PLAN_REVIEW_PREFIX
@@ -129,6 +130,7 @@ class PlannerHost(Protocol):
         learnings: str,
         iteration: int,
         prior_review: str | None,
+        advise_findings: str = "",
     ) -> str:
         """Run a reviewer pass on the current plan."""
         pass
@@ -267,6 +269,7 @@ class PlanReviewLoop:
                 learnings=learnings,
                 iteration=iteration,
                 prior_review=review_text,
+                advise_findings=cached_advise,
             )
 
             verdict = parse_review_verdict(review_text)
@@ -541,16 +544,16 @@ class PlanReviewLoop:
         return plan
 
     def capture_planner_learnings(self, issue_number: int, plan: str) -> str:
-        """Ask Claude to summarize what the planner just learned.
+        """Ask the planner session to run ``/learn`` for the plan it just wrote.
 
         Resumes the planner's own session (``AGENT_PLANNER``) rather than
         opening a separate learnings session, so the model still "remembers"
         the plan it just wrote and can introspect its own reasoning rather
-        than re-reading the plan cold. These learnings are passed to the
-        reviewer alongside the plan, giving the reviewer extra signal about
-        which aspects the planner is most/least confident in. Failure here is
-        non-fatal — return empty string and let the review proceed without
-        learnings.
+        than re-reading the plan cold. The prompt uses the user-facing
+        ``/learn`` skill command so the useful bits are written to
+        ProjectMnemosyne, then asks for short bullets to pass to the reviewer.
+        Failure here is non-fatal — return empty string and let the review
+        proceed without learnings.
 
         The pre-review learnings step inherits the planner's model
         (``planner_model()``) — /learn always runs on the same tier as the
@@ -564,18 +567,20 @@ class PlanReviewLoop:
             Bullet-point learnings text, or "" on any failure.
 
         """
-        prompt = (
+        context = (
             f"You just produced an implementation plan for GitHub issue "
             f"#{issue_number}. Below is the plan you wrote.\n\n"
-            "List 3-5 brief bullets describing:\n"
+            "Capture durable planning learnings for ProjectMnemosyne. Focus on:\n"
             "- The most uncertain assumptions in your plan\n"
             "- Any external sources, files, or APIs you relied on without "
             "directly verifying them\n"
             "- Risks the reviewer should focus on\n\n"
-            "Output only the bullets — no preamble, no headers.\n\n"
+            "After the /learn update, reply with only 3-5 brief bullets for the "
+            "plan reviewer — no preamble, no headers.\n\n"
             "---\n\n"
             f"{plan}"
         )
+        prompt = build_learn_prompt(context)
         try:
             return self.planner._call_claude(
                 prompt,
@@ -600,6 +605,7 @@ class PlanReviewLoop:
         learnings: str,
         iteration: int,
         prior_review: str | None,
+        advise_findings: str = "",
     ) -> str:
         """Run a reviewer pass on the current plan.
 
@@ -618,6 +624,8 @@ class PlanReviewLoop:
             learnings: Planner-captured learnings for this iteration.
             iteration: Iteration index (0, 1, or 2).
             prior_review: Previous iteration's review text, or ``None`` on iter 0.
+            advise_findings: Prior team learnings from ProjectMnemosyne, shared
+                with the plan reviewer so review also runs with advise context.
 
         Returns:
             Review text. On reviewer-call failure, returns a synthetic NoGo
@@ -632,6 +640,7 @@ class PlanReviewLoop:
             learnings=learnings,
             iteration=iteration,
             prior_review=prior_review,
+            advise_findings=advise_findings,
         )
         try:
             return self.planner._call_claude(

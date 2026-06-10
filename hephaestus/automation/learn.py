@@ -21,6 +21,19 @@ from .session_naming import session_uuid
 logger = logging.getLogger(__name__)
 
 
+def build_learn_prompt(context: str) -> str:
+    """Return the standard automation prompt for the user-facing /learn skill."""
+    detail = context.strip()
+    if detail:
+        detail = f" {detail}"
+    return (
+        f"/learn{detail}"
+        " Commit the results and create a PR."
+        " IMPORTANT: Only push skills to ProjectMnemosyne."
+        " Do NOT create files under .claude-plugin/ in this repo."
+    )
+
+
 def run_learn(
     session_id: str,
     worktree_path: Path,
@@ -66,12 +79,7 @@ def run_learn(
         try:
             codex_result = resume_codex_session(
                 session_id,
-                (
-                    "/skills-registry-commands:learn"
-                    " commit the results and create a PR."
-                    " IMPORTANT: Only push skills to ProjectMnemosyne."
-                    " Do NOT create files under .claude-plugin/ in this repo."
-                ),
+                build_learn_prompt(""),
                 cwd=worktree_path,
                 timeout=learn_claude_timeout(),
             )
@@ -97,12 +105,7 @@ def run_learn(
                 "claude",
                 "--resume",
                 session_id,
-                (
-                    "/skills-registry-commands:learn"
-                    " commit the results and create a PR."
-                    " IMPORTANT: Only push skills to ProjectMnemosyne."
-                    " Do NOT create files under .claude-plugin/ in this repo."
-                ),
+                build_learn_prompt(""),
                 "--print",
                 "--model",
                 effective_model,

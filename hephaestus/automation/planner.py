@@ -413,6 +413,7 @@ class Planner:
         learnings: str,
         iteration: int,
         prior_review: str | None,
+        advise_findings: str = "",
     ) -> str:
         """Run reviewer pass (delegates to review_loop)."""
         return self.review_loop.run_plan_review(
@@ -423,6 +424,7 @@ class Planner:
             learnings=learnings,
             iteration=iteration,
             prior_review=prior_review,
+            advise_findings=advise_findings,
         )
 
     def _print_summary(self) -> None:

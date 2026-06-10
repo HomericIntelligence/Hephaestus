@@ -58,8 +58,11 @@ class TestListUnresolvedThreadsParameterisation:
         assert "pullRequest(number: 42)" not in query  # regression guard
         assert 'owner: "owner"' not in query
         assert "owner=owner" in argv and "name=repo" in argv and "number=42" in argv
-        # The query must request the first comment's author login (#PR3).
+        # The query must request thread side and all comment authors so cleanup
+        # can reason over the full thread, not just the first flattened author.
         assert "author{ login }" in query
+        assert "side:diffSide" in query
+        assert "comments(first:20)" in query
 
     @patch("hephaestus.automation.github_api._gh_call")
     @patch("hephaestus.automation.github_api.get_repo_info")
@@ -72,7 +75,13 @@ class TestListUnresolvedThreadsParameterisation:
                 "isResolved": False,
                 "path": "a.py",
                 "line": 3,
-                "comments": {"nodes": [{"body": "nit", "author": {"login": "coderabbitai[bot]"}}]},
+                "side": "RIGHT",
+                "comments": {
+                    "nodes": [
+                        {"body": "nit", "author": {"login": "coderabbitai[bot]"}},
+                        {"body": "reply", "author": {"login": "mvillmow"}},
+                    ]
+                },
             },
             {
                 "id": "T_human",
@@ -99,5 +108,11 @@ class TestListUnresolvedThreadsParameterisation:
 
         by_id = {t["id"]: t for t in threads}
         assert by_id["T_bot"]["author"] == "coderabbitai[bot]"
+        assert by_id["T_bot"]["authors"] == ["coderabbitai[bot]", "mvillmow"]
+        assert by_id["T_bot"]["comments"] == [
+            {"body": "nit", "author": "coderabbitai[bot]"},
+            {"body": "reply", "author": "mvillmow"},
+        ]
+        assert by_id["T_bot"]["side"] == "RIGHT"
         assert by_id["T_human"]["author"] == "alice"
         assert by_id["T_noauthor"]["author"] == ""

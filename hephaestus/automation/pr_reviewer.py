@@ -128,6 +128,7 @@ def run_pr_review_analysis(
         issue_body=context.get("issue_body", ""),
         ci_status=context.get("ci_status", ""),
         pr_description=context.get("pr_description", ""),
+        advise_findings=context.get("advise_findings", ""),
         # #1083: nitpicks are suppressed unless --nitpick threaded the flag into
         # the review context.
         include_nitpicks=bool(context.get("include_nitpicks", False)),
@@ -224,6 +225,7 @@ def gather_impl_review_context(
     plan_text: str,
     plan_review_text: str,
     diff_text: str,
+    advise_findings: str = "",
     include_nitpicks: bool = False,
 ) -> dict[str, Any]:
     """Assemble the PR-review context for an in-loop implementer review.
@@ -242,6 +244,7 @@ def gather_impl_review_context(
         plan_text: The implementation PLAN comment body (or "" if absent).
         plan_review_text: The PLAN_REVIEW comment body (or "" if absent).
         diff_text: ``gh pr diff`` / cumulative branch diff for the impl.
+        advise_findings: Prior ProjectMnemosyne findings from the advise step.
         include_nitpicks: Forwarded into the context so the reviewer prompt
             emits nitpick-severity comments only when ``--nitpick`` is set
             (#1083).
@@ -264,6 +267,7 @@ def gather_impl_review_context(
         "ci_status": "",
         "review_comments": "",
         "pr_description": "",
+        "advise_findings": advise_findings,
         "include_nitpicks": include_nitpicks,
     }
 

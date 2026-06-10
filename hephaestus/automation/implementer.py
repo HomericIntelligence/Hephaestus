@@ -633,7 +633,7 @@ class IssueImplementer:
         issue_title: str,
         issue_body: str,
         worktree_path: Path,
-    ) -> None:
+    ) -> str:
         """Advise turn 1 of the implementer session (delegates to runner)."""
         return self.phase_runner._run_advise_as_implementer_turn(
             issue_number, issue_title, issue_body, worktree_path
@@ -652,6 +652,7 @@ class IssueImplementer:
         thread_id: int | None,
         state: ImplementationState | None = None,
         pr_number: int | None = None,
+        advise_findings: str = "",
     ) -> tuple[int, str | None, str | None]:
         """Run the bounded review loop for an implementation."""
         return self.phase_runner._run_impl_review_loop(
@@ -665,6 +666,7 @@ class IssueImplementer:
             thread_id=thread_id,
             state=state,
             pr_number=pr_number,
+            advise_findings=advise_findings,
         )
 
     def _run_impl_review_step(
@@ -678,6 +680,7 @@ class IssueImplementer:
         pr_number: int | None,
         iteration: int,
         prior_review: str | None,
+        advise_findings: str = "",
     ) -> tuple[str, list[str]]:
         """Run one in-loop review (posts inline PR threads) and return its verdict."""
         return self.phase_runner._run_impl_review_step(
@@ -689,6 +692,7 @@ class IssueImplementer:
             pr_number=pr_number,
             iteration=iteration,
             prior_review=prior_review,
+            advise_findings=advise_findings,
         )
 
     def _run_address_review_step(

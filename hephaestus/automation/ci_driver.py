@@ -60,7 +60,7 @@ from .github_api import (
     gh_pr_list_unresolved_threads,
     gh_pr_resolve_thread,
 )
-from .learn import compact_session
+from .learn import build_learn_prompt, compact_session
 from .models import CIDriverOptions, WorkerResult
 from .pr_manager import pr_has_implementation_go_label
 from .prompts import get_advise_prompt_builder
@@ -2041,6 +2041,25 @@ class CIDriver:
             if c.get("status") == "completed" and c.get("conclusion") == "failure"
         ]
 
+    def _tracked_worktree_changes(self, worktree_path: Path, issue_number: int) -> list[str]:
+        """Return tracked dirty status lines for a post-agent worktree.
+
+        Untracked tool output such as a local ``uv.lock`` is intentionally
+        ignored. A no-commit turn that left tracked files modified is still
+        actionable even when the remote has no red required checks, as happens
+        for merge-conflict/behind-branch repairs where the agent fixed files but
+        forgot the signed commit.
+        """
+        status = self._git_stdout_for_push_guard(
+            worktree_path,
+            issue_number,
+            ["git", "status", "--porcelain"],
+            "failed to inspect worktree status for no-commit retry",
+        )
+        if status is None:
+            return []
+        return [line for line in status.splitlines() if line.strip() and not line.startswith("?? ")]
+
     def _pending_required_check_names(self, pr_number: int) -> list[str]:
         """Return names of required checks that are still in flight (not completed).
 
@@ -2073,31 +2092,48 @@ class CIDriver:
         pr_head_branch: str,
         failing_check_names: list[str],
         review_threads_block: str,
+        dirty_tracked_changes: list[str] | None = None,
     ) -> str:
         """Build the retry prompt when the agent returned without committing (#846).
 
         The retry must engage the agent enough to either (a) produce a real
-        fix or (b) explicitly say why CI cannot pass. The prompt names the
-        failing checks verbatim, re-emphasises the existing PR/branch
-        invariant, and re-emphasises signed commits — a no-commit retry is a
-        contract violation that the agent has to address head-on.
+        fix or (b) explicitly say why CI cannot pass / merge. The prompt names
+        the failing checks and/or dirty tracked files verbatim, re-emphasises
+        the existing PR/branch invariant, and re-emphasises signed commits — a
+        no-commit retry is a contract violation that the agent has to address
+        head-on.
         """
         failing_block = "\n".join(f"- {n}" for n in failing_check_names) or "- (unknown)"
+        dirty_lines = dirty_tracked_changes or []
+        dirty_block = "\n".join(f"- {line}" for line in dirty_lines)
+        if dirty_block:
+            dirty_block = (
+                "\n\nThe local worktree also contains uncommitted tracked changes "
+                "from the previous turn. Review this existing diff first and either "
+                f"commit it after verification or amend it before committing:\n\n{dirty_block}\n"
+            )
+        remote_block = (
+            "The required CI checks below are STILL failing on the remote"
+            if failing_check_names
+            else "The remote checks may be green, but the PR still needs a committed "
+            "repair before the driver can push"
+        )
         return (
             f"{review_threads_block}"
             f"## Force-Engagement Retry — Previous Turn Produced No Commit\n\n"
             f"You just returned from a CI-fix session for PR {pr_ref(pr_number)} "
             f"(issue {issue_ref(issue_number)}) WITHOUT producing a new commit on "
-            f"branch `{pr_head_branch}`. The required CI checks below are STILL "
-            f"failing on the remote:\n\n"
+            f"branch `{pr_head_branch}`. {remote_block}:\n\n"
             f"{failing_block}\n\n"
+            f"{dirty_block}"
             f"Returning no commit when required checks are still red is itself a "
-            f"bug — fix the code so the failing checks pass. If no code fix is "
-            f"possible, DO NOT commit a 'blocker' file: a new Markdown/docs file "
-            f"will itself fail the repo's lint gates (e.g. markdownlint) and turn "
-            f"one red check into two. Instead leave the tree unchanged and report "
-            f"the blocker via the `BLOCKED:` line below — do NOT commit any file to "
-            f"document it.\n\n"
+            f"bug; returning no commit after editing tracked files is also a bug. "
+            f"Fix the code so the failing checks pass and the PR can merge. If no "
+            f"code fix is possible, DO NOT commit a 'blocker' file: a new "
+            f"Markdown/docs file will itself fail the repo's lint gates (e.g. "
+            f"markdownlint) and turn one blocker into two. Instead leave the tree "
+            f"unchanged and report the blocker via the `BLOCKED:` line below — do "
+            f"NOT commit any file to document it.\n\n"
             f"Working directory: {worktree_path}\n"
             f"Current branch (DO NOT change, DO NOT create a new branch): "
             f"{pr_head_branch}\n\n"
@@ -2206,10 +2242,11 @@ class CIDriver:
         failing: list[str] = []
         for retry in range(1, max_retries + 1):
             failing = self._failing_required_check_names(pr_number)
-            if not failing:
+            dirty_tracked_changes = self._tracked_worktree_changes(worktree_path, issue_number)
+            if not failing and not dirty_tracked_changes:
                 logger.info(
-                    "Issue #%s: no-commit turn but PR #%s has no failing required "
-                    "checks; skipping force-engagement retry",
+                    "Issue #%s: no-commit turn but PR #%s has no failing required checks "
+                    "and no tracked worktree changes; skipping force-engagement retry",
                     issue_number,
                     pr_number,
                 )
@@ -2222,16 +2259,18 @@ class CIDriver:
                 worktree_path=worktree_path,
                 pr_head_branch=pr_head_branch,
                 failing_check_names=failing,
+                dirty_tracked_changes=dirty_tracked_changes,
                 review_threads_block=review_threads_block,
             )
 
+            retry_reason = ", ".join(failing) if failing else "tracked worktree changes"
             logger.warning(
                 "Issue #%s: no-commit on CI fix turn; re-invoking with "
-                "force-engagement prompt (retry %s/%s, failing: %s)",
+                "force-engagement prompt (retry %s/%s, reason: %s)",
                 issue_number,
                 retry,
                 max_retries,
-                ", ".join(failing) or "<unknown>",
+                retry_reason,
             )
 
             try:
@@ -2362,6 +2401,110 @@ class CIDriver:
                 "at %s); skipping push and treating iteration as failed",
                 issue_number,
                 pre_agent_sha[:8],
+            )
+            return False
+        return True
+
+    def _git_stdout_for_push_guard(
+        self,
+        worktree_path: Path,
+        issue_number: int,
+        argv: list[str],
+        failure_message: str,
+    ) -> str | None:
+        """Run a git inspection command for the CI pre-push guard."""
+        try:
+            result = run(argv, cwd=worktree_path, capture_output=True, check=False)
+        except subprocess.CalledProcessError as exc:
+            logger.error(
+                "Issue #%s: %s: %s",
+                issue_number,
+                failure_message,
+                (exc.stderr or exc.stdout or "")[:300],
+            )
+            return None
+        if result.returncode != 0:
+            logger.error(
+                "Issue #%s: %s: %s",
+                issue_number,
+                failure_message,
+                (result.stderr or result.stdout or "")[:300],
+            )
+            return None
+        return result.stdout or ""
+
+    def _ci_fix_head_is_pushable(
+        self,
+        worktree_path: Path,
+        issue_number: int,
+        *,
+        base_ref: str = "origin/main",
+    ) -> bool:
+        """Return True when the post-agent worktree is safe to push.
+
+        ``_head_advanced`` only proves HEAD changed. A conflict-resolution agent
+        can still leave the index unmerged, leave tracked files uncommitted, or
+        accidentally detach at the base branch itself. None of those states may
+        be pushed to the PR head.
+        """
+        unmerged = self._git_stdout_for_push_guard(
+            worktree_path,
+            issue_number,
+            ["git", "diff", "--name-only", "--diff-filter=U"],
+            "failed to inspect merge state before push",
+        )
+        if unmerged is None:
+            return False
+        unmerged_paths = [line for line in unmerged.splitlines() if line.strip()]
+        if unmerged_paths:
+            logger.error(
+                "Issue #%s: refusing to push CI fix with unresolved merge paths: %s",
+                issue_number,
+                ", ".join(unmerged_paths[:10]),
+            )
+            return False
+
+        status = self._git_stdout_for_push_guard(
+            worktree_path,
+            issue_number,
+            ["git", "status", "--porcelain"],
+            "failed to inspect worktree status before push",
+        )
+        if status is None:
+            return False
+        tracked_dirty = [
+            line for line in status.splitlines() if line.strip() and not line.startswith("?? ")
+        ]
+        if tracked_dirty:
+            logger.error(
+                "Issue #%s: refusing to push CI fix with uncommitted tracked changes: %s",
+                issue_number,
+                ", ".join(tracked_dirty[:10]),
+            )
+            return False
+
+        ahead = self._git_stdout_for_push_guard(
+            worktree_path,
+            issue_number,
+            ["git", "rev-list", "--count", f"{base_ref}..HEAD"],
+            f"failed to inspect HEAD ahead of {base_ref} before push",
+        )
+        if ahead is None:
+            return False
+        try:
+            ahead_count = int(ahead.strip() or "0")
+        except ValueError:
+            logger.error(
+                "Issue #%s: refusing to push CI fix with invalid ahead count: %r",
+                issue_number,
+                ahead,
+            )
+            return False
+        if ahead_count <= 0:
+            logger.error(
+                "Issue #%s: refusing to push CI fix because HEAD has no commits ahead of %s",
+                issue_number,
+                base_ref,
             )
             return False
         return True
@@ -2517,6 +2660,8 @@ class CIDriver:
                         session_id=session_id,
                     ):
                         return False
+                if not self._ci_fix_head_is_pushable(worktree_path, issue_number):
+                    return False
                 try:
                     push_current_branch_with_lease_on_divergence(
                         worktree_path,
@@ -2580,6 +2725,8 @@ class CIDriver:
                         session_id=session_id,
                     ):
                         return False
+                if not self._ci_fix_head_is_pushable(worktree_path, issue_number):
+                    return False
                 try:
                     push_current_branch_with_lease_on_divergence(
                         worktree_path,
@@ -2707,24 +2854,10 @@ class CIDriver:
             True if the learnings session completed, False otherwise.
 
         """
-        # The Claude path resumes the deterministic AGENT_CI_DRIVER session via
-        # invoke_claude_with_session. Codex drive-green sessions are not
-        # persisted by this module, so there is no Session 3 to resume there.
-        if is_codex(self.options.agent):
-            logger.info(
-                "Issue #%s: skipping drive-green learnings (codex has no persisted "
-                "drive-green session to resume)",
-                issue_number,
-            )
-            return False
-
-        prompt = (
-            "/skills-registry-commands:learn "
+        prompt = build_learn_prompt(
             f"You just drove PR {pr_ref(pr_number)} (issue {issue_ref(issue_number)}) "
             "to green CI. Capture concise learnings about what made CI fail and how "
-            "you fixed it, scoped to this issue/PR. Commit the results and create a PR. "
-            "IMPORTANT: Only push skills to ProjectMnemosyne. "
-            "Do NOT create files under .claude-plugin/ in this repo."
+            "you fixed it, scoped to this issue/PR."
         )
         try:
             repo_slug = get_repo_slug(self.repo_root)
@@ -2745,6 +2878,15 @@ class CIDriver:
                     wt_err,
                 )
                 cwd = self.repo_root
+            if is_codex(self.options.agent):
+                run_codex_session(
+                    prompt,
+                    cwd=cwd,
+                    timeout=learn_claude_timeout(),
+                    sandbox="workspace-write",
+                )
+                logger.info("Issue #%s: drive-green learnings captured with Codex", issue_number)
+                return True
             invoke_claude_with_session(
                 repo=repo_slug,
                 issue=issue_number,
