@@ -166,7 +166,7 @@ class TestLoadImplSessionId:
 
 
 class TestReplyAndResolveBotThreads:
-    """After a CI fix, bot review threads are replied to + resolved; humans aren't."""
+    """After a CI fix, bot review threads are resolved quietly; humans aren't."""
 
     def test_resolves_only_bot_threads(self, driver: CIDriver) -> None:
         threads = [
@@ -180,8 +180,7 @@ class TestReplyAndResolveBotThreads:
             count = driver._reply_and_resolve_bot_threads(999)
 
         assert count == 1
-        resolve.assert_called_once()
-        assert resolve.call_args.args[0] == "T_bot"
+        resolve.assert_called_once_with("T_bot", dry_run=False)
 
     def test_no_threads_is_noop(self, driver: CIDriver) -> None:
         with (

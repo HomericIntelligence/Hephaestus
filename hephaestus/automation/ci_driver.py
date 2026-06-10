@@ -2017,14 +2017,14 @@ class CIDriver:
         return login.endswith("[bot]")
 
     def _reply_and_resolve_bot_threads(self, pr_number: int) -> int:
-        """Reply to and resolve automated review threads after a successful CI fix.
+        """Resolve automated review threads after a successful CI fix.
 
         ci_driver surfaces unresolved threads to the fix prompt but cannot rely
         on GitHub auto-resolving a bot thread when its line moves. After a fix
-        lands, post a templated reply on each BOT-authored unresolved thread and
-        resolve it, so the PR's automated review comments are acknowledged
-        rather than left dangling. Human threads are left untouched. Best-effort:
-        a failure on one thread is logged and skipped (never blocks the fix).
+        lands, resolve each BOT-authored unresolved thread without adding
+        another reply comment, so automated review comments are closed rather
+        than left dangling. Human threads are left untouched. Best-effort: a
+        failure on one thread is logged and skipped (never blocks the fix).
 
         Returns the number of threads resolved.
         """
@@ -2039,22 +2039,18 @@ class CIDriver:
             if not thread_id:
                 continue
             try:
-                gh_pr_resolve_thread(
-                    thread_id,
-                    "Addressed by the automated CI fix on this PR.",
-                    dry_run=False,
-                )
+                gh_pr_resolve_thread(thread_id, dry_run=False)
                 resolved += 1
             except Exception as exc:
                 logger.info(
-                    "PR #%s: could not reply/resolve bot thread %s (%s); skipping",
+                    "PR #%s: could not resolve bot thread %s (%s); skipping",
                     pr_number,
                     thread_id,
                     exc,
                 )
         if resolved:
             logger.info(
-                "PR #%s: replied to and resolved %s automated review thread(s)",
+                "PR #%s: resolved %s automated review thread(s)",
                 pr_number,
                 resolved,
             )
