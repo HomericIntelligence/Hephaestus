@@ -977,7 +977,10 @@ class TestDriveGreenLearnings:
         assert record["pr_number"] == 456
         assert record["pr_head_branch"] == "123-impl"
         assert record["head_sha_at_arming"] == "abc1234"
+        assert record["learn_attempted_at"] is None
         assert record["learn_captured_at"] is None
+        assert record["learn_status"] is None
+        assert record["learn_succeeded_at"] is None
 
     def test_arming_fans_out_across_shared_pr_group(self, driver: CIDriver) -> None:
         """A PR closing 9 issues → 9 arming records (so 9 /learns fire on merge)."""
@@ -1008,7 +1011,10 @@ class TestDriveGreenLearnings:
                 "pr_head_branch": "old-branch",
                 "head_sha_at_arming": "deadbee",
                 "armed_at": "2026-01-01T00:00:00Z",
+                "learn_attempted_at": "2026-01-02T00:00:00Z",
                 "learn_captured_at": "2026-01-02T00:00:00Z",
+                "learn_status": "succeeded",
+                "learn_succeeded_at": "2026-01-02T00:00:00Z",
             },
         )
 
@@ -1029,7 +1035,10 @@ class TestDriveGreenLearnings:
                 "pr_head_branch": "42-impl",
                 "head_sha_at_arming": "abc1234",
                 "armed_at": "2026-01-01T00:00:00Z",
+                "learn_attempted_at": None,
                 "learn_captured_at": None,
+                "learn_status": None,
+                "learn_succeeded_at": None,
             },
         )
         with (
@@ -1053,6 +1062,9 @@ class TestDriveGreenLearnings:
         record = driver._load_arming_state(42)
         assert record is not None
         assert record["learn_captured_at"] is not None
+        assert record["learn_attempted_at"] is not None
+        assert record["learn_status"] == "succeeded"
+        assert record["learn_succeeded_at"] == record["learn_captured_at"]
 
     def test_check_armed_pr_merged_skips_when_already_captured(self, driver: CIDriver) -> None:
         """learn_captured_at != None → return success without re-firing /learn."""
@@ -1063,7 +1075,10 @@ class TestDriveGreenLearnings:
                 "pr_head_branch": "42-impl",
                 "head_sha_at_arming": "abc1234",
                 "armed_at": "2026-01-01T00:00:00Z",
+                "learn_attempted_at": "2026-01-02T00:00:00Z",
                 "learn_captured_at": "2026-01-02T00:00:00Z",
+                "learn_status": "succeeded",
+                "learn_succeeded_at": "2026-01-02T00:00:00Z",
             },
         )
         with (
@@ -1078,6 +1093,37 @@ class TestDriveGreenLearnings:
         mock_learn.assert_not_called()
         mock_state.assert_not_called()
 
+    def test_check_armed_pr_merged_skips_when_learn_failed_terminal(self, driver: CIDriver) -> None:
+        """learn_status=failed prevents retry without pretending capture succeeded."""
+        driver._save_arming_state(
+            42,
+            {
+                "pr_number": 500,
+                "pr_head_branch": "42-impl",
+                "head_sha_at_arming": "abc1234",
+                "armed_at": "2026-01-01T00:00:00Z",
+                "learn_attempted_at": "2026-01-02T00:00:00Z",
+                "learn_captured_at": None,
+                "learn_status": "failed",
+                "learn_succeeded_at": None,
+            },
+        )
+        with (
+            patch.object(driver, "_gh_pr_state") as mock_state,
+            patch.object(driver, "_run_drive_green_learnings") as mock_learn,
+        ):
+            result = driver._check_arming_on_drive_start(42, 500)
+
+        assert result is not None
+        assert result.success is True
+        mock_learn.assert_not_called()
+        mock_state.assert_not_called()
+        record = driver._load_arming_state(42)
+        assert record is not None
+        assert record["learn_attempted_at"] == "2026-01-02T00:00:00Z"
+        assert record["learn_captured_at"] is None
+        assert record["learn_status"] == "failed"
+
     def test_check_armed_pr_open_at_same_sha_waits_then_pending(self, driver: CIDriver) -> None:
         """OPEN at the armed SHA → wait; still pending (TIMEOUT) keeps the record."""
         driver._save_arming_state(
@@ -1087,7 +1133,10 @@ class TestDriveGreenLearnings:
                 "pr_head_branch": "42-impl",
                 "head_sha_at_arming": "abc1234",
                 "armed_at": "2026-01-01T00:00:00Z",
+                "learn_attempted_at": None,
                 "learn_captured_at": None,
+                "learn_status": None,
+                "learn_succeeded_at": None,
             },
         )
         with (
@@ -1117,7 +1166,10 @@ class TestDriveGreenLearnings:
                 "pr_head_branch": "42-impl",
                 "head_sha_at_arming": "abc1234",
                 "armed_at": "2026-01-01T00:00:00Z",
+                "learn_attempted_at": None,
                 "learn_captured_at": None,
+                "learn_status": None,
+                "learn_succeeded_at": None,
             },
         )
         with (
@@ -1138,6 +1190,9 @@ class TestDriveGreenLearnings:
         record = driver._load_arming_state(42)
         assert record is not None
         assert record["learn_captured_at"] is not None
+        assert record["learn_attempted_at"] is not None
+        assert record["learn_status"] == "succeeded"
+        assert record["learn_succeeded_at"] == record["learn_captured_at"]
 
     def test_check_armed_pr_head_advanced_clears_record_and_falls_through(
         self, driver: CIDriver
@@ -1150,7 +1205,10 @@ class TestDriveGreenLearnings:
                 "pr_head_branch": "42-impl",
                 "head_sha_at_arming": "abc1234",
                 "armed_at": "2026-01-01T00:00:00Z",
+                "learn_attempted_at": None,
                 "learn_captured_at": None,
+                "learn_status": None,
+                "learn_succeeded_at": None,
             },
         )
         with patch.object(
@@ -1176,7 +1234,10 @@ class TestDriveGreenLearnings:
                 "pr_head_branch": "42-impl",
                 "head_sha_at_arming": "abc1234",
                 "armed_at": "2026-01-01T00:00:00Z",
+                "learn_attempted_at": None,
                 "learn_captured_at": None,
+                "learn_status": None,
+                "learn_succeeded_at": None,
             },
         )
         with (
@@ -1198,11 +1259,11 @@ class TestDriveGreenLearnings:
         result = driver._check_arming_on_drive_start(42, 500)
         assert result is None
 
-    def test_learn_failure_marks_captured_to_avoid_loop(self, driver: CIDriver) -> None:
-        """A failing /learn still flips learn_captured_at so we don't loop forever."""
+    def test_learn_failure_marks_failed_without_claiming_capture(self, driver: CIDriver) -> None:
+        """A failing /learn is terminal but does not claim Mnemosyne was updated."""
         # If /learn fails (model quota, network, etc.) and we retried it on
         # every subsequent run, we'd churn API calls for the same issue
-        # indefinitely. Best-effort: mark captured, log the failure, move on.
+        # indefinitely. Best-effort: mark failed, log the failure, move on.
         driver._save_arming_state(
             42,
             {
@@ -1210,7 +1271,10 @@ class TestDriveGreenLearnings:
                 "pr_head_branch": "42-impl",
                 "head_sha_at_arming": "abc1234",
                 "armed_at": "2026-01-01T00:00:00Z",
+                "learn_attempted_at": None,
                 "learn_captured_at": None,
+                "learn_status": None,
+                "learn_succeeded_at": None,
             },
         )
         with (
@@ -1227,7 +1291,10 @@ class TestDriveGreenLearnings:
         assert result.success is True
         record = driver._load_arming_state(42)
         assert record is not None
-        assert record["learn_captured_at"] is not None
+        assert record["learn_attempted_at"] is not None
+        assert record["learn_captured_at"] is None
+        assert record["learn_succeeded_at"] is None
+        assert record["learn_status"] == "failed"
 
     def test_learnings_run_with_codex(self, driver: CIDriver, tmp_path: Path) -> None:
         """Codex captures drive-green learnings without invoking Claude."""
@@ -2002,6 +2069,9 @@ class TestArmingSweep:
         issue: int,
         pr_number: int,
         learn_captured_at: str | None = None,
+        learn_status: str | None = None,
+        learn_attempted_at: str | None = None,
+        learn_succeeded_at: str | None = None,
     ) -> Path:
         path = driver.state_dir / f"drive-green-armed-{issue}.json"
         path.write_text(
@@ -2011,7 +2081,10 @@ class TestArmingSweep:
                     "pr_head_branch": f"{issue}-impl",
                     "head_sha_at_arming": "deadbeef",
                     "armed_at": "2026-05-31T00:00:00Z",
+                    "learn_attempted_at": learn_attempted_at,
                     "learn_captured_at": learn_captured_at,
+                    "learn_status": learn_status,
+                    "learn_succeeded_at": learn_succeeded_at,
                 }
             )
         )
@@ -2033,6 +2106,9 @@ class TestArmingSweep:
         mock_learn.assert_called_once_with(841, 843)
         record = json.loads((driver.state_dir / "drive-green-armed-841.json").read_text())
         assert record["learn_captured_at"] is not None
+        assert record["learn_attempted_at"] is not None
+        assert record["learn_status"] == "succeeded"
+        assert record["learn_succeeded_at"] == record["learn_captured_at"]
 
     def test_closed_not_merged_orphan_dropped(self, driver: CIDriver, tmp_path: Path) -> None:
         path = self._write_record(driver, issue=841, pr_number=843)
@@ -2056,7 +2132,13 @@ class TestArmingSweep:
 
     def test_already_captured_skipped(self, driver: CIDriver, tmp_path: Path) -> None:
         self._write_record(
-            driver, issue=841, pr_number=843, learn_captured_at="2026-05-31T00:00:00Z"
+            driver,
+            issue=841,
+            pr_number=843,
+            learn_captured_at="2026-05-31T00:00:00Z",
+            learn_status="succeeded",
+            learn_attempted_at="2026-05-31T00:00:00Z",
+            learn_succeeded_at="2026-05-31T00:00:00Z",
         )
         with (
             patch.object(driver, "_gh_pr_state") as mock_state,
@@ -2065,6 +2147,27 @@ class TestArmingSweep:
             driver._sweep_orphaned_arming_records()
         mock_state.assert_not_called()
         mock_learn.assert_not_called()
+
+    def test_already_failed_terminal_skipped(self, driver: CIDriver, tmp_path: Path) -> None:
+        self._write_record(
+            driver,
+            issue=841,
+            pr_number=843,
+            learn_captured_at=None,
+            learn_status="failed",
+            learn_attempted_at="2026-05-31T00:00:00Z",
+            learn_succeeded_at=None,
+        )
+        with (
+            patch.object(driver, "_gh_pr_state") as mock_state,
+            patch.object(driver, "_run_drive_green_learnings") as mock_learn,
+        ):
+            driver._sweep_orphaned_arming_records()
+        mock_state.assert_not_called()
+        mock_learn.assert_not_called()
+        record = json.loads((driver.state_dir / "drive-green-armed-841.json").read_text())
+        assert record["learn_captured_at"] is None
+        assert record["learn_status"] == "failed"
 
     def test_unknown_gh_state_left_alone(self, driver: CIDriver, tmp_path: Path) -> None:
         path = self._write_record(driver, issue=841, pr_number=843)
@@ -2076,8 +2179,10 @@ class TestArmingSweep:
         mock_learn.assert_not_called()
         assert path.exists()
 
-    def test_learn_failure_still_marks_captured(self, driver: CIDriver, tmp_path: Path) -> None:
-        """Best-effort: a /learn that throws still marks captured (no infinite retry)."""
+    def test_learn_exception_leaves_record_retryable(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """Unexpected exceptions leave the record unclaimed and retryable."""
         self._write_record(driver, issue=841, pr_number=843)
         with (
             patch.object(driver, "_gh_pr_state", return_value={"state": "MERGED"}),
@@ -2096,6 +2201,23 @@ class TestArmingSweep:
                 driver._sweep_orphaned_arming_records()
         record = json.loads((driver.state_dir / "drive-green-armed-841.json").read_text())
         assert record["learn_captured_at"] is None
+
+    def test_merged_orphan_learn_false_marks_failed_not_captured(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """A best-effort /learn failure is terminal but not recorded as captured."""
+        self._write_record(driver, issue=841, pr_number=843)
+        with (
+            patch.object(driver, "_gh_pr_state", return_value={"state": "MERGED"}),
+            patch.object(driver, "_run_drive_green_learnings", return_value=False) as mock_learn,
+        ):
+            driver._sweep_orphaned_arming_records()
+        mock_learn.assert_called_once_with(841, 843)
+        record = json.loads((driver.state_dir / "drive-green-armed-841.json").read_text())
+        assert record["learn_attempted_at"] is not None
+        assert record["learn_captured_at"] is None
+        assert record["learn_succeeded_at"] is None
+        assert record["learn_status"] == "failed"
 
 
 class TestRunSweeperWiring:

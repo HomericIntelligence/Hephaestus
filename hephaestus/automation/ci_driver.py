@@ -1493,6 +1493,38 @@ class CIDriver:
                 exc,
             )
 
+    @staticmethod
+    def _learn_record_terminal(record: dict[str, Any]) -> bool:
+        """Return whether a drive-green /learn record should not be retried."""
+        if record.get("learn_captured_at") or record.get("learn_succeeded_at"):
+            return True
+        return str(record.get("learn_status") or "").lower() in {"succeeded", "failed"}
+
+    def _mark_drive_green_learn_result(
+        self,
+        issue_number: int,
+        record: dict[str, Any],
+        *,
+        succeeded: bool,
+    ) -> None:
+        """Persist an explicit attempted/succeeded/failed learn result.
+
+        ``learn_captured_at`` is retained as the success timestamp for older
+        readers, but failure now records ``learn_status=failed`` without
+        claiming Mnemosyne was updated.
+        """
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        record["learn_attempted_at"] = timestamp
+        if succeeded:
+            record["learn_status"] = "succeeded"
+            record["learn_succeeded_at"] = timestamp
+            record["learn_captured_at"] = timestamp
+        else:
+            record["learn_status"] = "failed"
+            record["learn_succeeded_at"] = None
+            record["learn_captured_at"] = None
+        self._save_arming_state(issue_number, record)
+
     def _arm_drive_green(self, pr_number: int, pr_head_branch: str, pr_head_sha: str) -> None:
         """Record arming for every issue that resolved to ``pr_number``.
 
@@ -1511,15 +1543,18 @@ class CIDriver:
         armed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         for issue_num in siblings:
             existing = self._load_arming_state(issue_num) or {}
-            if existing.get("learn_captured_at"):
-                # Already captured — don't overwrite the captured timestamp.
+            if self._learn_record_terminal(existing):
+                # Already attempted terminally — don't overwrite learn evidence.
                 continue
             record = {
                 "pr_number": pr_number,
                 "pr_head_branch": pr_head_branch,
                 "head_sha_at_arming": pr_head_sha,
                 "armed_at": armed_at,
+                "learn_attempted_at": None,
                 "learn_captured_at": None,
+                "learn_status": None,
+                "learn_succeeded_at": None,
             }
             self._save_arming_state(issue_num, record)
             logger.info(
@@ -1701,8 +1736,8 @@ class CIDriver:
 
         Sweep every ``drive-green-armed-*.json`` at startup: drop records
         whose PR is CLOSED-not-merged, fire ``/learn`` once for records
-        whose PR is MERGED (then mark ``learn_captured_at``), leave OPEN
-        records alone for the normal per-issue path to handle.
+        whose PR is MERGED (then mark explicit succeeded/failed learn status),
+        leave OPEN records alone for the normal per-issue path to handle.
         """
         try:
             records = sorted(self.state_dir.glob("drive-green-armed-*.json"))
@@ -1722,7 +1757,7 @@ class CIDriver:
             record = self._load_arming_state(issue_number)
             if record is None:
                 continue
-            if record.get("learn_captured_at"):
+            if self._learn_record_terminal(record):
                 continue
             pr_number = record.get("pr_number")
             if not isinstance(pr_number, int):
@@ -1744,10 +1779,13 @@ class CIDriver:
                     issue_number,
                     pr_number,
                 )
-                self._run_drive_green_learnings(issue_number, pr_number)
+                learn_succeeded = self._run_drive_green_learnings(issue_number, pr_number)
                 self._run_drive_green_compact(issue_number, pr_number)
-                record["learn_captured_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                self._save_arming_state(issue_number, record)
+                self._mark_drive_green_learn_result(
+                    issue_number,
+                    record,
+                    succeeded=learn_succeeded,
+                )
             elif state == "CLOSED":
                 logger.info(
                     "Arming sweep: issue #%s / PR #%s CLOSED-not-merged; dropping record",
@@ -1765,20 +1803,23 @@ class CIDriver:
         Called at the top of ``_drive_issue``. Returns:
 
         - ``WorkerResult(success=True, ...)`` if the arming record handled
-          the issue (merge detected + ``/learn`` fired, OR still in flight,
-          OR already-captured). Caller returns this directly without doing
-          any further drive work.
+          the issue (merge detected + ``/learn`` attempted, OR still in flight,
+          OR a terminal learn result already exists). Caller returns this
+          directly without doing any further drive work.
         - ``None`` if the issue should fall through to the normal drive
           path (no arming record, arming stale, or PR abandoned).
         """
         record = self._load_arming_state(issue_number)
         if record is None:
             return None
-        if record.get("learn_captured_at"):
+        if self._learn_record_terminal(record):
             logger.info(
-                "Issue #%s: /learn already captured at %s; skipping further drive",
+                "Issue #%s: /learn already terminal (%s at %s); skipping further drive",
                 issue_number,
-                record["learn_captured_at"],
+                record.get("learn_status") or "succeeded",
+                record.get("learn_captured_at")
+                or record.get("learn_succeeded_at")
+                or record.get("learn_attempted_at"),
             )
             return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
@@ -1800,12 +1841,13 @@ class CIDriver:
             self.status_tracker.update_slot(
                 0, f"{issue_ref(issue_number)}: capturing post-merge /learn"
             )
-            self._run_drive_green_learnings(issue_number, pr_number)
+            learn_succeeded = self._run_drive_green_learnings(issue_number, pr_number)
             self._run_drive_green_compact(issue_number, pr_number)
-            # Mark captured even if /learn failed — it's best-effort and
-            # retrying it on every subsequent run would churn API calls.
-            record["learn_captured_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            self._save_arming_state(issue_number, record)
+            self._mark_drive_green_learn_result(
+                issue_number,
+                record,
+                succeeded=learn_succeeded,
+            )
             return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
         if state == "CLOSED":
@@ -1850,10 +1892,13 @@ class CIDriver:
             self.status_tracker.update_slot(
                 0, f"{issue_ref(issue_number)}: capturing post-merge /learn"
             )
-            self._run_drive_green_learnings(issue_number, pr_number)
+            learn_succeeded = self._run_drive_green_learnings(issue_number, pr_number)
             self._run_drive_green_compact(issue_number, pr_number)
-            record["learn_captured_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            self._save_arming_state(issue_number, record)
+            self._mark_drive_green_learn_result(
+                issue_number,
+                record,
+                succeeded=learn_succeeded,
+            )
             return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
         if outcome == "CLOSED":
             self._clear_arming_state(issue_number)
