@@ -220,6 +220,11 @@ class TestRunImplReviewLoop:
         mock_addr.assert_not_called()
         resolved_ids = [call.args[0] for call in mock_resolve.call_args_list]
         assert resolved_ids == ["T_self", "T_bot", "T_nested_self"]
+        assert all(
+            call.args == (thread_id,)
+            for call, thread_id in zip(mock_resolve.call_args_list, resolved_ids, strict=True)
+        )
+        assert all(call.kwargs == {"dry_run": False} for call in mock_resolve.call_args_list)
 
     def test_runs_3_iterations_on_sustained_nogo(
         self, implementer: IssueImplementer, tmp_path: Path

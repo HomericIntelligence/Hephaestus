@@ -2632,6 +2632,19 @@ class TestGhPrResolveThread:
         assert len(thread_id_fields) == 2
 
     @patch("hephaestus.automation.github_api._gh_call")
+    def test_resolve_without_reply_does_not_add_thread_comment(self, mock_gh_call: Any) -> None:
+        """Stale-thread cleanup can resolve without adding duplicate review noise."""
+        mock_gh_call.return_value = Mock(stdout="{}")
+
+        gh_pr_resolve_thread("PRRT_quiet")
+
+        queries = self._graphql_queries(mock_gh_call)
+        joined = "\n".join(queries)
+        assert "resolveReviewThread" in joined
+        assert "addPullRequestReviewThreadReply" not in joined
+        assert mock_gh_call.call_count == 1
+
+    @patch("hephaestus.automation.github_api._gh_call")
     def test_dry_run_sends_nothing(self, mock_gh_call: Any) -> None:
         gh_pr_resolve_thread("PRRT_abc", "reply", dry_run=True)
         mock_gh_call.assert_not_called()

@@ -2006,55 +2006,60 @@ def gh_pr_list_unresolved_threads(
 
 def gh_pr_resolve_thread(
     thread_id: str,
-    reply_body: str,
+    reply_body: str | None = None,
     dry_run: bool = False,
 ) -> None:
-    """Resolve a PR review thread with a reply comment.
+    """Resolve a PR review thread, optionally adding a reply first.
 
     Args:
         thread_id: GraphQL node ID of the review thread
-        reply_body: Reply comment text
+        reply_body: Optional reply comment text. When omitted, the thread is
+            resolved without adding another review comment.
         dry_run: If True, log intent without posting
 
     """
     if dry_run:
-        logger.info("[dry_run] Would resolve thread %r with reply: %r", thread_id, reply_body)
+        if reply_body:
+            logger.info("[dry_run] Would resolve thread %r with reply: %r", thread_id, reply_body)
+        else:
+            logger.info("[dry_run] Would resolve thread %r without reply", thread_id)
         return
 
-    # Step 1: post a reply to the thread via GraphQL addPullRequestReviewThreadReply.
-    # NOTE (#999): the deprecated ``addPullRequestReviewComment`` input type has no
-    # ``pullRequestReviewThreadId`` field, so it failed on every call. The reply-to-
-    # thread surface is ``addPullRequestReviewThreadReply``, whose input accepts
-    # ``pullRequestReviewThreadId`` + ``body``.
-    reply_mutation = """
+    if reply_body:
+        # Step 1: post a reply to the thread via GraphQL addPullRequestReviewThreadReply.
+        # NOTE (#999): the deprecated ``addPullRequestReviewComment`` input type has no
+        # ``pullRequestReviewThreadId`` field, so it failed on every call. The reply-to-
+        # thread surface is ``addPullRequestReviewThreadReply``, whose input accepts
+        # ``pullRequestReviewThreadId`` + ``body``.
+        reply_mutation = """
 mutation AddReply($threadId: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $threadId, body: $body}) {
     comment { id }
   }
 }
 """
-    reply_result = _gh_call(
-        [
-            "api",
-            "graphql",
-            "-f",
-            f"query={reply_mutation}",
-            "-f",
-            f"threadId={thread_id}",
-            "-f",
-            f"body={reply_body}",
-        ]
-    )
-    # JSONDecodeError is benign here — only an explicit ``errors`` array must
-    # surface. ``contextlib.suppress`` lets the helper raise on errors while
-    # silently absorbing the no-body case.
-    with contextlib.suppress(json.JSONDecodeError):
-        _check_graphql_errors(
-            json.loads(reply_result.stdout or "{}"),
-            f"gh_pr_resolve_thread.reply(thread={thread_id})",
+        reply_result = _gh_call(
+            [
+                "api",
+                "graphql",
+                "-f",
+                f"query={reply_mutation}",
+                "-f",
+                f"threadId={thread_id}",
+                "-f",
+                f"body={reply_body}",
+            ]
         )
+        # JSONDecodeError is benign here — only an explicit ``errors`` array must
+        # surface. ``contextlib.suppress`` lets the helper raise on errors while
+        # silently absorbing the no-body case.
+        with contextlib.suppress(json.JSONDecodeError):
+            _check_graphql_errors(
+                json.loads(reply_result.stdout or "{}"),
+                f"gh_pr_resolve_thread.reply(thread={thread_id})",
+            )
 
-    # Step 2: resolve the thread
+    # Resolve the thread.
     resolve_mutation = """
 mutation ResolveThread($threadId: ID!) {
   resolveReviewThread(input: {threadId: $threadId}) {

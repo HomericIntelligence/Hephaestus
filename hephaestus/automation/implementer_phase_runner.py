@@ -1778,11 +1778,7 @@ class ImplementationPhaseRunner:
             if not tid:
                 continue
             try:
-                gh_pr_resolve_thread(
-                    tid,
-                    "Resolved by the automation reviewer after a GO implementation review.",
-                    dry_run=False,
-                )
+                gh_pr_resolve_thread(tid, dry_run=False)
                 resolved += 1
             except Exception as exc:
                 impl._log(
