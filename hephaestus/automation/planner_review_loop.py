@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Protocol
 
-from .claude_invoke import parse_review_verdict
+from .claude_invoke import INFRA_ERROR_REVIEW_TEXT, parse_review_verdict
 from .claude_models import planner_model, reviewer_model
 from .claude_timeouts import planner_claude_timeout
 from .git_utils import issue_ref
@@ -292,7 +292,19 @@ class PlanReviewLoop:
             # NOGO (each iteration) → state:plan-no-go.
             # Either way, remove state:needs-plan (and the opposite terminal
             # label if it was set on a prior pass).
-            self._apply_state_label(issue_number, is_go=verdict.is_go)
+            # An ERROR verdict (reviewer-infra failure) is NOT a real verdict —
+            # leave the plan labels untouched so the issue stays in its prior
+            # state and gets re-reviewed next loop, rather than mislabeling a
+            # never-reviewed plan as state:plan-no-go.
+            if verdict.is_error:
+                logger.warning(
+                    "%s R%s: reviewer infrastructure failure — leaving plan labels "
+                    "unchanged for re-review next loop",
+                    issue_ref(issue_number),
+                    iteration,
+                )
+            else:
+                self._apply_state_label(issue_number, is_go=verdict.is_go)
 
             if verdict.is_go:
                 logger.info(
@@ -652,12 +664,13 @@ class PlanReviewLoop:
             )
         except Exception as e:
             logger.error(
-                "%s R%s: reviewer call failed: %s; treating as NOGO so the loop continues",
+                "%s R%s: reviewer call failed: %s; recording ERROR (re-review next loop, "
+                "no plan-no-go label) so an infra failure isn't mistaken for a NOGO",
                 issue_ref(issue_number),
                 iteration,
                 e,
             )
             return (
                 f"Reviewer invocation failed at iteration {iteration}: {e}\n\n"
-                "Grade: F\nVerdict: NOGO\n"
+                f"{INFRA_ERROR_REVIEW_TEXT}"
             )

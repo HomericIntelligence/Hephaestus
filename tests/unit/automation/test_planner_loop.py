@@ -60,6 +60,13 @@ def _nogo_review(grade: str = "D") -> str:
     return f"Significant gaps.\n\nGrade: {grade}\nVerdict: NOGO\n"
 
 
+def _error_review() -> str:
+    # Reviewer-infrastructure failure sentinel → parse_review_verdict → ERROR.
+    from hephaestus.automation.claude_invoke import INFRA_ERROR_REVIEW_TEXT
+
+    return f"Reviewer invocation failed at iteration 0: boom\n\n{INFRA_ERROR_REVIEW_TEXT}"
+
+
 class TestRunPlanReviewLoop:
     """Integration tests for _run_plan_review_loop end-to-end."""
 
@@ -151,6 +158,38 @@ class TestRunPlanReviewLoop:
         assert mock_plan.call_count == 2
         assert mock_review.call_count == 2
         assert verdict_is_go is True
+
+    def test_infra_error_review_leaves_plan_labels_unchanged(self, planner: Planner) -> None:
+        """A reviewer-infra ERROR must NOT apply state:plan-no-go.
+
+        Mirrors the implementation-loop fix (#911): an infra failure is not a
+        real verdict, so the plan stays unlabeled for re-review rather than
+        being mislabeled no-go.
+        """
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
+                return_value={"title": "T", "body": "B"},
+            ),
+            patch.object(
+                planner,
+                "_generate_plan",
+                side_effect=["plan v0", "plan v1", "plan v2"],
+            ),
+            patch.object(planner, "_capture_planner_learnings", return_value=""),
+            patch.object(
+                planner,
+                "_run_plan_review",
+                side_effect=[_error_review(), _error_review(), _error_review()],
+            ),
+            patch.object(planner.review_loop, "_apply_state_label") as mock_label,
+        ):
+            _plan, _review, iters, verdict_is_go = planner._run_plan_review_loop(123, slot_id=0)
+
+        # All three iterations were infra errors — never a real verdict.
+        assert verdict_is_go is False
+        assert iters == MAX_REVIEW_ITERATIONS == 3
+        mock_label.assert_not_called()
 
     def test_prior_review_passed_to_next_plan(self, planner: Planner) -> None:
         """Iteration N+1 must receive iteration N's review as `prior_review`."""
@@ -574,10 +613,16 @@ class TestCapturePlannerLearnings:
 
 
 class TestRunPlanReview:
-    """The reviewer must fail safely to NoGo when the call errors."""
+    """The reviewer must surface a distinct ERROR when the call itself errors."""
 
-    def test_review_call_failure_returns_synthetic_nogo(self, planner: Planner) -> None:
-        """Reviewer call failure synthesizes a NOGO verdict so the loop continues."""
+    def test_review_call_failure_returns_error_verdict_not_nogo(self, planner: Planner) -> None:
+        """Reviewer-infra failure yields an ERROR verdict, not a fabricated NOGO.
+
+        A genuine NOGO would stamp ``state:plan-no-go`` on a plan that was never
+        reviewed; the ERROR sentinel keeps the plan unlabeled for re-review.
+        """
+        from hephaestus.automation.claude_invoke import parse_review_verdict
+
         with patch.object(planner, "_call_claude", side_effect=RuntimeError("review down")):
             out = planner._run_plan_review(
                 issue_number=1,
@@ -588,8 +633,8 @@ class TestRunPlanReview:
                 iteration=0,
                 prior_review=None,
             )
-        assert "Verdict: NOGO" in out
-        assert "Grade: F" in out
+        assert parse_review_verdict(out).verdict == "ERROR"
+        assert "Verdict: NOGO" not in out
 
     def test_uses_fresh_per_iteration_reviewer_session(self, planner: Planner) -> None:
         """Stage 1: the reviewer gets a FRESH session per iteration (``-r{iteration}``).
