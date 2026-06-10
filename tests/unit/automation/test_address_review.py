@@ -213,7 +213,7 @@ class TestResolveAddressedThreads:
         with patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve:
             reviewer._resolve_addressed_threads(addressed, replies, presented)
 
-        mock_resolve.assert_called_once_with("thread-id-1", "Fixed the issue", dry_run=False)
+        mock_resolve.assert_called_once_with("thread-id-1", dry_run=False)
 
     def test_resolve_multiple_addressed_threads(self, reviewer: AddressReviewer) -> None:
         """All addressed threads present in the unresolved set are resolved."""
@@ -260,7 +260,7 @@ class TestResolveAddressedThreads:
         with patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve:
             reviewer._resolve_addressed_threads(addressed, replies, presented)
 
-        mock_resolve.assert_called_once_with("thread-real", "Fixed", dry_run=False)
+        mock_resolve.assert_called_once_with("thread-real", dry_run=False)
 
     def test_dry_run_no_resolve(self, mock_options: AddressReviewOptions, tmp_path: Path) -> None:
         """dry_run=True → gh_pr_resolve_thread is called with dry_run=True."""
@@ -284,7 +284,7 @@ class TestResolveAddressedThreads:
 
         # With dry_run=True, gh_pr_resolve_thread is called but internally is a no-op;
         # we verify the dry_run flag is forwarded correctly.
-        mock_resolve.assert_called_once_with("thread-1", "Fixed", dry_run=True)
+        mock_resolve.assert_called_once_with("thread-1", dry_run=True)
 
 
 class TestCommitIfChanges:
@@ -488,12 +488,12 @@ class TestResolveAddressedThreadsModuleLevel:
                 dry_run=False,
             )
         # The hallucinated id (not in the presented set) must NOT be resolved.
-        mock_resolve.assert_called_once_with("t-real", "fixed", dry_run=False)
+        mock_resolve.assert_called_once_with("t-real", dry_run=False)
 
     def test_forwards_dry_run(self) -> None:
         with patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve:
             resolve_addressed_threads(["t1"], {"t1": "r"}, {"t1"}, dry_run=True)
-        mock_resolve.assert_called_once_with("t1", "r", dry_run=True)
+        mock_resolve.assert_called_once_with("t1", dry_run=True)
 
 
 class TestRunAddressFixSessionModuleLevel:

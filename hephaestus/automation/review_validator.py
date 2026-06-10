@@ -270,11 +270,7 @@ def _resolve_addressed_prior_threads(
         if str(thread_id) in unaddressed_ids:
             continue  # still open — re-opened above
         try:
-            gh_pr_resolve_thread(
-                thread_id,
-                "Verified addressed by the current diff; resolving.",
-                dry_run=False,
-            )
+            gh_pr_resolve_thread(thread_id, dry_run=False)
             resolved.append(thread_id)
         except (subprocess.CalledProcessError, OSError) as exc:
             logger.warning("Failed to resolve addressed thread %s: %s", thread_id, exc)

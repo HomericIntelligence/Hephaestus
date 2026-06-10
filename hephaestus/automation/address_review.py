@@ -292,7 +292,9 @@ def resolve_addressed_threads(
 
     Args:
         addressed: Thread-id strings Claude reported as fixed.
-        replies: Mapping of thread-id to a one-line reply describing the fix.
+        replies: Mapping of thread-id to a one-line reply describing the fix. The
+            mapping is retained for the agent-output contract but intentionally
+            not posted; resolving quietly avoids adding duplicate review noise.
         presented_thread_ids: Thread IDs we presented to Claude (the unresolved
             set on this PR at fix time).
         dry_run: Forwarded to :func:`gh_pr_resolve_thread`.
@@ -306,9 +308,8 @@ def resolve_addressed_threads(
                 thread_id,
             )
             continue
-        reply = replies.get(thread_id, "Addressed in code.")
         try:
-            gh_pr_resolve_thread(thread_id, reply, dry_run=dry_run)
+            gh_pr_resolve_thread(thread_id, dry_run=dry_run)
         except Exception as e:
             logger.warning("Could not resolve thread %s: %s", thread_id, e)
 
@@ -972,7 +973,9 @@ class AddressReviewer(BaseReviewer):
 
         Args:
             addressed: List of thread_id strings Claude reported as fixed
-            replies: Mapping of thread_id to one-line reply describing the fix
+            replies: Mapping of thread_id to one-line reply describing the fix.
+                Retained for the agent-output contract; resolution is quiet and
+                does not post these replies to GitHub.
             presented_thread_ids: Set of thread IDs we presented to Claude
                 (i.e. the unresolved set on this PR at fix time)
 

@@ -1,5 +1,6 @@
 """Tests for the learn module."""
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -71,6 +72,12 @@ class TestRunLearn:
         log_file = tmp_path / "learn-42.log"
         assert log_file.exists()
         assert log_file.read_text() == "Learn complete. PR created."
+        record = json.loads((tmp_path / "learn-42.json").read_text())
+        assert record["issue_number"] == 42
+        assert record["learn_status"] == "succeeded"
+        assert record["learn_attempted_at"]
+        assert record["learn_succeeded_at"] == record["learn_attempted_at"]
+        assert record["log_path"] == str(log_file)
 
     def test_failure_writes_failed_log_and_returns_false(self, tmp_path: Path) -> None:
         """Returns False and writes FAILED: log on exception."""
@@ -84,6 +91,12 @@ class TestRunLearn:
         log_file = tmp_path / "learn-42.log"
         assert log_file.exists()
         assert log_file.read_text().startswith("FAILED:")
+        record = json.loads((tmp_path / "learn-42.json").read_text())
+        assert record["issue_number"] == 42
+        assert record["learn_status"] == "failed"
+        assert record["learn_attempted_at"]
+        assert record["learn_succeeded_at"] is None
+        assert record["error"] == "claude crashed"
 
     def test_codex_skips_legacy_claude_session(self, tmp_path: Path) -> None:
         """Legacy sessions must not be resumed through Codex."""
@@ -102,6 +115,9 @@ class TestRunLearn:
         assert result is False
         mock_resume.assert_not_called()
         assert (tmp_path / "learn-42.log").read_text().startswith("FAILED:")
+        record = json.loads((tmp_path / "learn-42.json").read_text())
+        assert record["learn_status"] == "failed"
+        assert "selected agent is codex" in record["error"]
 
     def test_codex_resumes_matching_codex_session(self, tmp_path: Path) -> None:
         """Codex sessions with provider metadata should resume through Codex."""
@@ -128,6 +144,7 @@ class TestRunLearn:
         assert prompt.startswith("/learn")
         assert "/skills-registry-commands:learn" not in prompt
         assert (tmp_path / "learn-42.log").read_text() == "learned"
+        assert json.loads((tmp_path / "learn-42.json").read_text())["learn_status"] == "succeeded"
 
     def test_creates_state_dir_if_missing(self, tmp_path: Path) -> None:
         """Creates state_dir if it does not exist."""
