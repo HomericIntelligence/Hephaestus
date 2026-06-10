@@ -648,19 +648,68 @@ def test_phase_env_loop_index_only_for_drive_green(monkeypatch: pytest.MonkeyPat
     assert env_dg["HEPH_TOTAL_LOOPS"] == "5"
 
 
-def test_phase_env_model_vars_only_when_non_empty() -> None:
+def test_phase_env_model_vars_only_when_non_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     """Model env vars only present when their cfg field is non-empty."""
+    for var in ("HEPH_PLANNER_MODEL", "HEPH_REVIEWER_MODEL", "HEPH_IMPLEMENTER_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("HEPH_ADVISE_MODEL", raising=False)
+
     cfg_empty = LoopConfig()
     env = loop_runner._phase_env(cfg_empty, loop_idx=1, trunk_sha="abc", phase="plan")
     assert "HEPH_PLANNER_MODEL" not in env
     assert "HEPH_REVIEWER_MODEL" not in env
     assert "HEPH_IMPLEMENTER_MODEL" not in env
+    assert "HEPH_ADVISE_MODEL" not in env
 
     cfg_set = LoopConfig(planner_model="opus", reviewer_model="sonnet", implementer_model="opus")
     env_set = loop_runner._phase_env(cfg_set, loop_idx=1, trunk_sha="abc", phase="plan")
     assert env_set["HEPH_PLANNER_MODEL"] == "opus"
     assert env_set["HEPH_REVIEWER_MODEL"] == "sonnet"
     assert env_set["HEPH_IMPLEMENTER_MODEL"] == "opus"
+
+
+def test_phase_env_model_fans_out_to_all_phases(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--model (cfg.model) sets every phase env var so no HEPH_*_MODEL is needed."""
+    for var in (
+        "HEPH_PLANNER_MODEL",
+        "HEPH_REVIEWER_MODEL",
+        "HEPH_IMPLEMENTER_MODEL",
+        "HEPH_ADVISE_MODEL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    cfg = LoopConfig(model="claude-fable-5")
+    env = loop_runner._phase_env(cfg, loop_idx=1, trunk_sha="abc", phase="plan")
+    assert env["HEPH_PLANNER_MODEL"] == "claude-fable-5"
+    assert env["HEPH_REVIEWER_MODEL"] == "claude-fable-5"
+    assert env["HEPH_IMPLEMENTER_MODEL"] == "claude-fable-5"
+    assert env["HEPH_ADVISE_MODEL"] == "claude-fable-5"
+
+
+def test_phase_env_per_phase_flag_overrides_catch_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A per-phase flag wins over the catch-all --model for that phase only."""
+    for var in (
+        "HEPH_PLANNER_MODEL",
+        "HEPH_REVIEWER_MODEL",
+        "HEPH_IMPLEMENTER_MODEL",
+        "HEPH_ADVISE_MODEL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    cfg = LoopConfig(model="claude-fable-5", reviewer_model="claude-sonnet-4-6")
+    env = loop_runner._phase_env(cfg, loop_idx=1, trunk_sha="abc", phase="plan")
+    assert env["HEPH_PLANNER_MODEL"] == "claude-fable-5"
+    assert env["HEPH_REVIEWER_MODEL"] == "claude-sonnet-4-6"
+    assert env["HEPH_IMPLEMENTER_MODEL"] == "claude-fable-5"
+    assert env["HEPH_ADVISE_MODEL"] == "claude-fable-5"
+
+
+def test_parse_args_model_flag_wires_to_namespace() -> None:
+    """--model parses into args.model (the path main() reads into cfg.model)."""
+    args = loop_runner._parse_args(["--model", "claude-fable-5"])
+    assert args.model == "claude-fable-5"
+    # Default is empty so the catch-all is inert unless explicitly passed.
+    assert loop_runner._parse_args([]).model == ""
 
 
 def test_phase_env_trunk_sha_always_set() -> None:

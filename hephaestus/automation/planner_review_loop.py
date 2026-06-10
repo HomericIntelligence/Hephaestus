@@ -19,7 +19,7 @@ import logging
 from typing import Any, Protocol
 
 from .claude_invoke import parse_review_verdict
-from .claude_models import learn_model, planner_model, reviewer_model
+from .claude_models import planner_model, reviewer_model
 from .claude_timeouts import planner_claude_timeout
 from .git_utils import issue_ref
 from .github_api import (
@@ -552,8 +552,9 @@ class PlanReviewLoop:
         non-fatal — return empty string and let the review proceed without
         learnings.
 
-        Uses ``learn_model()`` (Haiku by default) per the per-phase model
-        selection in :mod:`hephaestus.automation.claude_models`.
+        The pre-review learnings step inherits the planner's model
+        (``planner_model()``) — /learn always runs on the same tier as the
+        phase it is learning from, rather than carrying its own knob.
 
         Args:
             issue_number: GitHub issue number (used in prompt for grounding).
@@ -578,7 +579,7 @@ class PlanReviewLoop:
         try:
             return self.planner._call_claude(
                 prompt,
-                model=learn_model(),
+                model=planner_model(),
                 agent=AGENT_PLANNER,
                 issue_number=issue_number,
                 timeout=120,

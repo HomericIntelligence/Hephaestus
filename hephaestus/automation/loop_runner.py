@@ -265,6 +265,10 @@ class LoopConfig:
     no_advise: bool = False
     nitpick: bool = False
     allow_unsafe_phase_order: bool = False
+    # ``model`` is the catch-all applied to every phase when set; per-phase
+    # fields below take precedence over it. The /learn step is not a separate
+    # knob — it inherits its parent phase's model at the call site.
+    model: str = ""
     planner_model: str = ""
     reviewer_model: str = ""
     implementer_model: str = ""
@@ -375,6 +379,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--allow-unsafe-phase-order",
         action="store_true",
         help="Silence dependency-ordering warnings when --phases skips a recommended predecessor",
+    )
+    p.add_argument(
+        "--model",
+        default="",
+        help=(
+            "Model ID applied to every phase (planner, reviewer, implementer, advise) "
+            "for child processes, so no HEPH_*_MODEL env vars are required. The /learn "
+            "step inherits its parent phase's model automatically. A per-phase flag below "
+            "overrides this for that phase."
+        ),
     )
     p.add_argument("--planner-model", default="", help="HEPH_PLANNER_MODEL for child processes")
     p.add_argument(
@@ -954,12 +968,20 @@ def _phase_env(
     benign but a behavioral divergence from the bash version.
     """
     env = os.environ.copy()
-    if cfg.planner_model:
-        env["HEPH_PLANNER_MODEL"] = cfg.planner_model
-    if cfg.reviewer_model:
-        env["HEPH_REVIEWER_MODEL"] = cfg.reviewer_model
-    if cfg.implementer_model:
-        env["HEPH_IMPLEMENTER_MODEL"] = cfg.implementer_model
+    # Precedence per phase: explicit per-phase flag > catch-all --model > any
+    # ambient HEPH_*_MODEL the operator exported > the phase default resolved
+    # in the child. Only export when we have a value so we never clobber an
+    # ambient env var with an empty string. --model also covers advise, so an
+    # all-one-model run needs no env vars; /learn inherits its parent phase
+    # downstream (see claude_models / the learn call sites).
+    if planner := (cfg.planner_model or cfg.model):
+        env["HEPH_PLANNER_MODEL"] = planner
+    if reviewer := (cfg.reviewer_model or cfg.model):
+        env["HEPH_REVIEWER_MODEL"] = reviewer
+    if implementer := (cfg.implementer_model or cfg.model):
+        env["HEPH_IMPLEMENTER_MODEL"] = implementer
+    if cfg.model:
+        env["HEPH_ADVISE_MODEL"] = cfg.model
     env["HEPH_TRUNK_GITHASH"] = trunk_sha
     project_root = str(Path(__file__).resolve().parents[2])
     if env.get("PYTHONPATH"):
@@ -1438,6 +1460,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         no_advise=args.no_advise,
         nitpick=args.nitpick,
         allow_unsafe_phase_order=args.allow_unsafe_phase_order,
+        model=args.model,
         planner_model=args.planner_model,
         reviewer_model=args.reviewer_model,
         implementer_model=args.implementer_model,
@@ -1484,10 +1507,11 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
     if cfg.issues:
         LOG.info("Issues: %s", ",".join(str(n) for n in cfg.issues))
     LOG.info(
-        "Models: planner=%s reviewer=%s implementer=%s",
-        cfg.planner_model or "<default>",
-        cfg.reviewer_model or "<default>",
-        cfg.implementer_model or "<default>",
+        "Models: planner=%s reviewer=%s implementer=%s advise=%s",
+        cfg.planner_model or cfg.model or "<default>",
+        cfg.reviewer_model or cfg.model or "<default>",
+        cfg.implementer_model or cfg.model or "<default>",
+        cfg.model or "<default>",
     )
 
     results = run_loop(cfg, repos)

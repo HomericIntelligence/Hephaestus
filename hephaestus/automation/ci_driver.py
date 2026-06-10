@@ -35,7 +35,7 @@ from hephaestus.cli.utils import add_json_arg, emit_json_status
 from ._review_utils import find_pr_for_issue
 from .advise_runner import run_advise
 from .claude_invoke import invoke_claude_with_session
-from .claude_models import advise_model, implementer_model, learn_model
+from .claude_models import advise_model, implementer_model
 from .claude_timeouts import (
     advise_claude_timeout,
     ci_driver_claude_timeout,
@@ -2750,7 +2750,10 @@ class CIDriver:
                 issue=issue_number,
                 agent=AGENT_CI_DRIVER,
                 prompt=prompt,
-                model=learn_model(),
+                # /learn inherits the parent phase's model. drive-green resumes
+                # the implementer's session, and ``claude --resume`` is locked to
+                # the model that created it, so we must use implementer_model().
+                model=implementer_model(),
                 cwd=cwd,
                 timeout=learn_claude_timeout(),
                 output_format="text",
