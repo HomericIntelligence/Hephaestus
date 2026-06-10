@@ -208,6 +208,17 @@ repos:
         files: ^SECURITY\.md$
 
 
+  # Skill merge method check: skills must not hardcode merge flags
+  - repo: local
+    hooks:
+      - id: skill-merge-method
+        name: Skill files use choose_merge_flag (no hardcoded merge method)
+        description: Forbid hardcoded `gh pr merge --auto --(rebase|squash|merge)` in skills/**/SKILL.md
+        entry: pixi run python -m hephaestus.validation.skill_merge_method
+        language: system
+        files: ^skills/.*/SKILL\.md$
+        pass_filenames: false
+
   # Dependency-sync check: requirements*.txt entries must exist in pixi.toml
   # and fall within the declared range. See hephaestus.config.dep_sync.
   - repo: local

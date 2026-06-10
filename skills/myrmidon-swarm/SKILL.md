@@ -315,7 +315,16 @@ Sub-agents that create PRs must follow:
 3. `git commit -S -m "type(scope): description"`
 4. `git push -u origin <branch>`
 5. `gh pr create --title "..." --body "..."`
-6. `gh pr merge --auto --squash`
+6. Arm auto-merge with `choose_merge_flag`:
+
+   ```bash
+   . "$(git rev-parse --show-toplevel 2>/dev/null)/scripts/choose_merge_flag.sh" \
+       || . "$HOME/Projects/ProjectHephaestus/scripts/choose_merge_flag.sh"
+   MERGE_FLAG=$(choose_merge_flag "$(gh repo view --json nameWithOwner --jq .nameWithOwner)") || MERGE_FLAG="--squash"
+   gh pr merge --auto "$MERGE_FLAG"
+   ```
+
+   (Picks rebase → squash → merge per the target repo's allowed methods.)
 </constraints>
 
 <agent_prompt_template>
