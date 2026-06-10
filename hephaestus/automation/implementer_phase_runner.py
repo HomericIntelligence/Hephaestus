@@ -44,6 +44,7 @@ from .address_review import (
 )
 from .advise_runner import run_advise
 from .claude_invoke import (
+    INFRA_ERROR_REVIEW_TEXT,
     SESSION_EXPIRED_PHRASES,
     parse_review_verdict,
 )
@@ -1052,8 +1053,23 @@ class ImplementationPhaseRunner:
         path so the GO → ``mark_pr_implementation_go`` (+ auto-merge) /
         non-GO → ``mark_pr_implementation_no_go`` mapping cannot drift between
         them.
+
+        An ``ERROR`` verdict (reviewer-infrastructure failure) applies **neither**
+        label: the PR was never actually reviewed, so it must be left unlabeled
+        for the "no go/no-go label → re-review" path to pick it up next loop
+        (#911 / PR #1069). Labeling it no-go would falsely record a review that
+        never happened; labeling it go would arm auto-merge on unreviewed code.
         """
         impl = self.impl
+        if last_verdict == "ERROR":
+            impl._log(
+                "warning",
+                f"{issue_ref(issue_number)}: implementation review hit a reviewer-"
+                f"infrastructure error; leaving {pr_ref(pr_number)} unlabeled for "
+                "re-review (no implementation go/no-go label, auto-merge unchanged)",
+                thread_id,
+            )
+            return
         if last_verdict == "GO":
             mark_pr_implementation_go(pr_number)
             if self.options.auto_merge:
@@ -1686,7 +1702,18 @@ class ImplementationPhaseRunner:
         # (e.g. a malformed verdict) gets MAX_REVIEW_ITERATIONS chances instead
         # of stranding a fixable PR after R0. ``last_verdict`` is None only when
         # there was no PR to review (dry-run / no-PR path).
-        exhausted = iterations_run >= MAX_REVIEW_ITERATIONS and last_verdict != "GO"
+        #
+        # ERROR (reviewer-infrastructure failure — API 400, timeout, crash) is
+        # NOT a real verdict: the reviewer never actually judged the code, so an
+        # exhausted run that ended in ERROR must NOT be skipped. Skipping there
+        # strands a never-reviewed PR (#911 / PR #1069). Leave the issue/PR
+        # unlabeled so the "no go/no-go label → re-review" path re-runs the loop
+        # next time the reviewer infra is healthy.
+        exhausted = (
+            iterations_run >= MAX_REVIEW_ITERATIONS
+            and last_verdict != "GO"
+            and last_verdict != "ERROR"
+        )
         if (
             pr_number is not None
             and last_verdict is not None
@@ -1702,6 +1729,14 @@ class ImplementationPhaseRunner:
             )
             with contextlib.suppress(Exception):
                 gh_issue_add_labels(issue_number, [STATE_SKIP])
+        elif last_verdict == "ERROR":
+            logger.warning(
+                "#%d: review loop ended in reviewer-infrastructure ERROR after %d "
+                "iteration(s) — leaving PR unlabeled for re-review (no %s)",
+                issue_number,
+                iterations_run,
+                STATE_SKIP,
+            )
 
         return iterations_run, last_verdict, last_grade
 
@@ -1834,14 +1869,15 @@ class ImplementationPhaseRunner:
             )
         except Exception as e:
             logger.error(
-                "#%s R%s: in-loop PR review failed: %s; treating as NOGO so the loop continues",
+                "#%s R%s: in-loop PR review failed: %s; recording ERROR (re-review next "
+                "loop, no skip/label) so an infra failure isn't mistaken for a NOGO",
                 issue_number,
                 iteration,
                 e,
             )
             return (
                 f"In-loop reviewer invocation failed at iteration {iteration}: {e}\n\n"
-                "Grade: F\nVerdict: NOGO\n"
+                f"{INFRA_ERROR_REVIEW_TEXT}"
             ), []
 
     def _run_address_review_step(
@@ -2190,14 +2226,15 @@ class ImplementationPhaseRunner:
             return output
         except Exception as e:
             logger.error(
-                "#%s R%s: impl reviewer call failed: %s; treating as NOGO so the loop continues",
+                "#%s R%s: impl reviewer call failed: %s; recording ERROR (re-review next "
+                "loop, no skip/label) so an infra failure isn't mistaken for a NOGO",
                 issue_number,
                 iteration,
                 e,
             )
             return (
                 f"Reviewer invocation failed at iteration {iteration}: {e}\n\n"
-                "Grade: F\nVerdict: NOGO\n"
+                f"{INFRA_ERROR_REVIEW_TEXT}"
             )
 
     def _collect_diff(self, worktree_path: Path, branch_name: str) -> str:

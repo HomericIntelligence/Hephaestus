@@ -312,8 +312,15 @@ class ReviewVerdict:
 
     Attributes:
         grade: Letter grade extracted from ``Grade: <X>`` line. ``None`` if absent.
-        verdict: One of ``"GO"``, ``"NOGO"``, or ``"AMBIGUOUS"``.
+        verdict: One of ``"GO"``, ``"NOGO"``, ``"AMBIGUOUS"``, or ``"ERROR"``.
         raw: Full review text (kept for downstream prompts and logs).
+
+    ``"ERROR"`` is reserved for **reviewer-infrastructure failures** (the
+    reviewer subprocess raised — API 400, timeout, crash, empty output). It is
+    deliberately distinct from ``"NOGO"`` so the loop does not mistake "the
+    reviewer never ran" for "the reviewer judged the code not ready": an ERROR
+    must not burn toward ``state:skip`` exhaustion and must not stamp a
+    go/no-go label (#911 / PR #1069).
 
     """
 
@@ -326,14 +333,25 @@ class ReviewVerdict:
         """True only on an unambiguous GO."""
         return self.verdict == "GO"
 
+    @property
+    def is_error(self) -> bool:
+        """True when the verdict is a reviewer-infrastructure failure sentinel."""
+        return self.verdict == "ERROR"
+
 
 _GRADE_RE = re.compile(
     r"^\s*\**\s*Grade\s*:\s*\**\s*([A-F][+-]?)(?![A-Za-z])",
     re.MULTILINE | re.IGNORECASE,
 )
 _VERDICT_RE = re.compile(
-    r"^\s*\**\s*Verdict\s*:\s*\**\s*(GO|NO[\s-]?GO)\b", re.MULTILINE | re.IGNORECASE
+    r"^\s*\**\s*Verdict\s*:\s*\**\s*(GO|NO[\s-]?GO|ERROR)\b", re.MULTILINE | re.IGNORECASE
 )
+
+# Sentinel review text emitted when the reviewer subprocess itself fails
+# (e.g. an API 400 from an advisor-tier mismatch, a timeout, or a crash). It
+# parses to ``verdict="ERROR"`` via :func:`parse_review_verdict`, which the
+# review loop treats as inconclusive — re-review next loop, never skip/label.
+INFRA_ERROR_REVIEW_TEXT = "Grade: F\nVerdict: ERROR\n"
 
 
 def parse_review_verdict(text: str) -> ReviewVerdict:
@@ -341,10 +359,13 @@ def parse_review_verdict(text: str) -> ReviewVerdict:
 
     Looks for lines like:
         Grade: B+
-        Verdict: GO     (or NOGO, NO-GO, NO GO)
+        Verdict: GO     (or NOGO, NO-GO, NO GO, ERROR)
 
     A response missing or contradicting these markers is treated as
-    AMBIGUOUS — which the loop treats as NoGo (continue iterating).
+    AMBIGUOUS — which the loop treats as NoGo (continue iterating). An explicit
+    ``Verdict: ERROR`` marks a reviewer-infrastructure failure (see
+    :data:`INFRA_ERROR_REVIEW_TEXT`) and is surfaced as ``verdict="ERROR"`` so
+    callers can distinguish it from a genuine NOGO.
 
     Args:
         text: The full review text from Claude.
@@ -359,7 +380,12 @@ def parse_review_verdict(text: str) -> ReviewVerdict:
     verdict_match = _VERDICT_RE.search(text)
     if verdict_match:
         raw_verdict = re.sub(r"[\s-]", "", verdict_match.group(1).upper())
-        verdict = "GO" if raw_verdict == "GO" else "NOGO"
+        if raw_verdict == "GO":
+            verdict = "GO"
+        elif raw_verdict == "ERROR":
+            verdict = "ERROR"
+        else:
+            verdict = "NOGO"
     else:
         verdict = "AMBIGUOUS"
 

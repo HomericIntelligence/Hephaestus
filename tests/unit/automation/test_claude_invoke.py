@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from hephaestus.automation.claude_invoke import ReviewVerdict, parse_review_verdict
+from hephaestus.automation.claude_invoke import (
+    INFRA_ERROR_REVIEW_TEXT,
+    ReviewVerdict,
+    parse_review_verdict,
+)
 
 
 class TestParseReviewVerdict:
@@ -55,3 +59,42 @@ class TestParseReviewVerdict:
         v = parse_review_verdict("grade: c-\nverdict: nogo")
         assert v.grade == "C-"
         assert v.verdict == "NOGO"
+
+
+class TestInfraErrorVerdict:
+    """Reviewer-infrastructure failures parse to a distinct ERROR verdict.
+
+    A 400/timeout/crash from the reviewer subprocess must NOT be laundered into
+    a real ``NOGO`` — that would burn review iterations and trigger a spurious
+    ``state:skip`` on a PR that was never actually reviewed (#911 / PR #1069).
+    """
+
+    def test_sentinel_text_parses_to_error_verdict(self) -> None:
+        """The infra-error sentinel text resolves to verdict=ERROR."""
+        v = parse_review_verdict(INFRA_ERROR_REVIEW_TEXT)
+        assert v.verdict == "ERROR"
+        assert v.is_error is True
+        assert v.is_go is False
+
+    def test_error_verdict_round_trips_through_text(self) -> None:
+        """An ERROR verdict survives the text → log → re-parse round-trip.
+
+        The loop persists ``review_text`` and re-parses it, so the sentinel
+        must be recognizable as ERROR on a second parse, not collapse to NOGO.
+        """
+        first = parse_review_verdict(
+            f"Reviewer crashed at iteration 2\n\n{INFRA_ERROR_REVIEW_TEXT}"
+        )
+        assert first.verdict == "ERROR"
+        assert parse_review_verdict(first.raw).verdict == "ERROR"
+
+    def test_real_nogo_is_not_error(self) -> None:
+        """A genuine reviewer NOGO is distinct from an infra ERROR."""
+        v = parse_review_verdict("Grade: F\nVerdict: NOGO")
+        assert v.verdict == "NOGO"
+        assert v.is_error is False
+
+    def test_go_is_not_error(self) -> None:
+        """A GO verdict is not an error."""
+        v = parse_review_verdict("Grade: A\nVerdict: GO")
+        assert v.is_error is False

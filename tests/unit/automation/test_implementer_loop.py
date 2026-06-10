@@ -49,6 +49,13 @@ def _ambiguous() -> str:
     return "Some prose with no verdict line.\n"
 
 
+def _error() -> str:
+    # Reviewer-infrastructure failure sentinel → parse_review_verdict returns ERROR.
+    from hephaestus.automation.claude_invoke import INFRA_ERROR_REVIEW_TEXT
+
+    return f"Reviewer invocation failed at iteration 0: boom\n\n{INFRA_ERROR_REVIEW_TEXT}"
+
+
 def test_codex_implementer_advise_uses_codex_prompt_builder(
     implementer: IssueImplementer,
 ) -> None:
@@ -315,6 +322,75 @@ class TestRunImplReviewLoop:
 
         assert verdict == "NOGO"
         mock_label.assert_called_once_with(7, [STATE_SKIP])
+
+    def test_infra_error_exhaustion_does_not_apply_state_skip(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """A run that exhausts on reviewer-infra ERROR must NOT apply ``state:skip``.
+
+        Regression for #911 / PR #1069: a reviewer API 400 (advisor-tier
+        mismatch) produced an ERROR every iteration; the PR was never reviewed,
+        so skipping it strands a healthy PR. The issue must stay unlabeled for
+        re-review.
+        """
+        with (
+            patch.object(
+                implementer,
+                "_run_impl_review_step",
+                side_effect=[
+                    (_error(), []),
+                    (_error(), []),
+                    (_error(), []),
+                ],
+            ),
+            patch.object(implementer, "_run_address_review_step", return_value=True),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_issue_add_labels"
+            ) as mock_label,
+        ):
+            _, verdict, _ = implementer._run_impl_review_loop(
+                issue_number=911,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=1069,
+            )
+
+        assert verdict == "ERROR"
+        mock_label.assert_not_called()
+
+    def test_infra_error_verdict_applies_neither_implementation_label(
+        self, implementer: IssueImplementer
+    ) -> None:
+        """An ERROR verdict applies neither implementation-go nor -no-go.
+
+        The PR was never reviewed, so it must be left unlabeled for the
+        "no go/no-go label → re-review" path — not falsely marked no-go (which
+        records a review that never happened) or go (which arms auto-merge on
+        unreviewed code).
+        """
+        with (
+            patch(
+                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_go"
+            ) as mock_go,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_no_go"
+            ) as mock_no_go,
+        ):
+            implementer.phase_runner._apply_impl_review_verdict(
+                issue_number=911,
+                pr_number=1069,
+                last_verdict="ERROR",
+                slot_id=None,
+                thread_id=None,
+            )
+
+        mock_go.assert_not_called()
+        mock_no_go.assert_not_called()
 
     def test_ambiguous_zero_threads_re_reviews_then_skips_on_exhaustion(
         self, implementer: IssueImplementer, tmp_path: Path
@@ -637,10 +713,21 @@ class TestRunImplReviewLoop:
 
 
 class TestRunImplReviewFailsSafe:
-    """When the reviewer call itself fails, treat as NoGo."""
+    """When the reviewer call itself fails, surface a distinct ERROR verdict.
 
-    def test_synthetic_nogo_on_subprocess_failure(self, implementer: IssueImplementer) -> None:
-        """Reviewer subprocess failure synthesizes a NOGO verdict."""
+    A reviewer-infrastructure failure (subprocess crash, API 400, timeout) must
+    NOT be laundered into a real NOGO — that burns review iterations and
+    triggers a spurious ``state:skip`` on a PR that was never reviewed
+    (#911 / PR #1069). It emits an ERROR sentinel so the loop re-reviews
+    instead.
+    """
+
+    def test_infra_failure_emits_error_verdict_not_nogo(
+        self, implementer: IssueImplementer
+    ) -> None:
+        """Reviewer subprocess failure synthesizes an ERROR verdict, not NOGO."""
+        from hephaestus.automation.claude_invoke import parse_review_verdict
+
         with patch(
             "hephaestus.automation.implementer.subprocess.run",
             side_effect=RuntimeError("claude down"),
@@ -654,8 +741,10 @@ class TestRunImplReviewFailsSafe:
                 iteration=0,
                 prior_review=None,
             )
-        assert "Verdict: NOGO" in out
-        assert "Grade: F" in out
+        verdict = parse_review_verdict(out)
+        assert verdict.verdict == "ERROR"
+        assert verdict.is_error is True
+        assert "Verdict: NOGO" not in out
 
 
 class TestResumeImplWithFeedback:
@@ -1107,10 +1196,17 @@ class TestRunImplReviewStep:
         mock_diff_rev.assert_called_once()
         mock_inline.assert_not_called()
 
-    def test_inline_failure_synthesizes_nogo(
+    def test_inline_failure_emits_error_verdict(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
-        """If the in-loop reviewer raises, the step returns a synthetic NOGO."""
+        """If the in-loop reviewer raises, the step returns an ERROR sentinel.
+
+        Not a NOGO — a reviewer-infrastructure failure must be distinguishable
+        from a genuine reviewer NOGO so the loop re-reviews instead of skipping
+        (#911 / PR #1069).
+        """
+        from hephaestus.automation.claude_invoke import parse_review_verdict
+
         with (
             patch.object(implementer.phase_runner, "_fetch_plan_and_review", return_value=("", "")),
             patch.object(implementer, "_collect_diff", return_value="d"),
@@ -1131,8 +1227,8 @@ class TestRunImplReviewStep:
             )
 
         assert thread_ids == []
-        assert "Verdict: NOGO" in text
-        assert "Grade: F" in text
+        assert parse_review_verdict(text).verdict == "ERROR"
+        assert "Verdict: NOGO" not in text
 
 
 class TestRunAddressReviewStep:
