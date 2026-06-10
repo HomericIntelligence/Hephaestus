@@ -10,6 +10,9 @@ docs/api/
 # hatch-vcs generated version file
 hephaestus/_version.py
 
+# Automation scratch files (per-issue learnings, planning notes, etc.) — see #1023
+LEARNINGS_ISSUE_*.md
+
 # Python
 *__pycache__/
 *.py[cod]
