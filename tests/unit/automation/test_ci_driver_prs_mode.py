@@ -94,7 +94,8 @@ class TestDiscoverPrsDirectMode:
             return_value=661,
         ):
             with patch.object(driver, "_validate_pr_open", return_value=True) as mock_validate:
-                result = driver._discover_prs([918])
+                with patch.object(driver, "_discover_failing_prs", return_value={}):
+                    result = driver._discover_prs([918])
 
         # PR 661 should appear exactly once, keyed by issue 918 (from issue path)
         assert result[918] == 661
@@ -116,7 +117,8 @@ class TestDiscoverPrsDirectMode:
             return_value=999,
         ):
             with patch.object(driver, "_validate_pr_open", return_value=True):
-                result = driver._discover_prs([918])
+                with patch.object(driver, "_discover_failing_prs", return_value={}):
+                    result = driver._discover_prs([918])
 
         # Issue 918 should map to PR 999
         assert result[918] == 999

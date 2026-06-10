@@ -1139,10 +1139,8 @@ def _process_repo_inner(
 
     LOG.info("── %s (loop %d) ──", repo, loop_idx)
     trunk_sha, fetch_ok = _rebase_main(repo, repo_dir)
-    if fetch_ok:
-        LOG.info("[%s] trunk=%s", repo, trunk_sha)
-    else:
-        LOG.info("[%s] trunk=%s (stale)", repo, trunk_sha)
+    stale_suffix = "" if fetch_ok else " (stale)"
+    LOG.info("[%s] trunk=%s%s", repo, trunk_sha, stale_suffix)
 
     # Open-issue discovery happens once per repo per loop. When the operator
     # scopes the loop explicitly, reuse that bounded list for child phases.
