@@ -4,7 +4,12 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from hephaestus.automation.learn import build_learn_prompt, learn_needs_rerun, run_learn
+from hephaestus.automation.learn import (
+    build_learn_prompt,
+    learn_needs_rerun,
+    mnemosyne_update_evidence,
+    run_learn,
+)
 
 
 class TestLearnNeedsRerun:
@@ -46,6 +51,27 @@ class TestLearnNeedsRerun:
 class TestRunLearn:
     """Tests for run_learn."""
 
+    def test_mnemosyne_update_evidence_requires_project_mnemosyne_signal(self) -> None:
+        evidence = mnemosyne_update_evidence("Learn complete. PR created.")
+
+        assert evidence == {
+            "mnemosyne_update_status": "unverified",
+            "mnemosyne_update_urls": [],
+            "mnemosyne_update_pr_numbers": [],
+        }
+
+    def test_mnemosyne_update_evidence_extracts_pr_url_and_ref(self) -> None:
+        evidence = mnemosyne_update_evidence(
+            "Opened https://github.com/HomericIntelligence/ProjectMnemosyne/pull/45 "
+            "and referenced HomericIntelligence/ProjectMnemosyne#46"
+        )
+
+        assert evidence["mnemosyne_update_status"] == "confirmed"
+        assert evidence["mnemosyne_update_urls"] == [
+            "https://github.com/HomericIntelligence/ProjectMnemosyne/pull/45"
+        ]
+        assert evidence["mnemosyne_update_pr_numbers"] == [46]
+
     def test_build_learn_prompt_uses_user_facing_command(self) -> None:
         prompt = build_learn_prompt("Capture what happened.")
 
@@ -78,6 +104,9 @@ class TestRunLearn:
         assert record["learn_attempted_at"]
         assert record["learn_succeeded_at"] == record["learn_attempted_at"]
         assert record["log_path"] == str(log_file)
+        assert record["mnemosyne_update_status"] == "unverified"
+        assert record["mnemosyne_update_urls"] == []
+        assert record["mnemosyne_update_pr_numbers"] == []
 
     def test_failure_writes_failed_log_and_returns_false(self, tmp_path: Path) -> None:
         """Returns False and writes FAILED: log on exception."""
@@ -97,6 +126,7 @@ class TestRunLearn:
         assert record["learn_attempted_at"]
         assert record["learn_succeeded_at"] is None
         assert record["error"] == "claude crashed"
+        assert record["mnemosyne_update_status"] == "failed"
 
     def test_codex_skips_legacy_claude_session(self, tmp_path: Path) -> None:
         """Legacy sessions must not be resumed through Codex."""
@@ -144,7 +174,9 @@ class TestRunLearn:
         assert prompt.startswith("/learn")
         assert "/skills-registry-commands:learn" not in prompt
         assert (tmp_path / "learn-42.log").read_text() == "learned"
-        assert json.loads((tmp_path / "learn-42.json").read_text())["learn_status"] == "succeeded"
+        record = json.loads((tmp_path / "learn-42.json").read_text())
+        assert record["learn_status"] == "succeeded"
+        assert record["mnemosyne_update_status"] == "unverified"
 
     def test_creates_state_dir_if_missing(self, tmp_path: Path) -> None:
         """Creates state_dir if it does not exist."""

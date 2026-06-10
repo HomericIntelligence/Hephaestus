@@ -31,7 +31,7 @@ from .github_api import (
     gh_issue_remove_labels,
     gh_issue_upsert_comment,
 )
-from .learn import build_learn_prompt
+from .learn import build_learn_prompt, mnemosyne_update_evidence
 from .models import PLAN_COMMENT_MARKER
 from .prompts import get_plan_loop_review_prompt, get_plan_prompt
 from .review_state import PLAN_REVIEW_PREFIX
@@ -645,6 +645,16 @@ class PlanReviewLoop:
                 "learn_succeeded_at": timestamp if succeeded else None,
                 "log_path": str(log_file),
             }
+            if succeeded:
+                record.update(mnemosyne_update_evidence(output))
+            else:
+                record.update(
+                    {
+                        "mnemosyne_update_status": "failed",
+                        "mnemosyne_update_urls": [],
+                        "mnemosyne_update_pr_numbers": [],
+                    }
+                )
             if error:
                 record["error"] = error
             record_file.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")

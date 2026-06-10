@@ -1064,6 +1064,7 @@ class TestDriveGreenLearnings:
         assert record["learn_attempted_at"] is not None
         assert record["learn_status"] == "succeeded"
         assert record["learn_succeeded_at"] == record["learn_captured_at"]
+        assert record["mnemosyne_update_status"] == "unverified"
 
     def test_check_armed_pr_merged_skips_when_already_captured(self, driver: CIDriver) -> None:
         """learn_captured_at != None → return success without re-firing /learn."""
@@ -1294,13 +1295,22 @@ class TestDriveGreenLearnings:
         assert record["learn_captured_at"] is None
         assert record["learn_succeeded_at"] is None
         assert record["learn_status"] == "failed"
+        assert record["mnemosyne_update_status"] == "failed"
 
     def test_learnings_run_with_codex(self, driver: CIDriver, tmp_path: Path) -> None:
         """Codex captures drive-green learnings without invoking Claude."""
         driver.options.agent = "codex"
+        mock_codex_result = type(
+            "CodexResult",
+            (),
+            {"stdout": "Opened https://github.com/HomericIntelligence/ProjectMnemosyne/pull/77"},
+        )()
         with (
             patch.object(driver, "_get_worktree_path", return_value=tmp_path),
-            patch("hephaestus.automation.ci_driver.run_codex_session") as mock_codex,
+            patch(
+                "hephaestus.automation.ci_driver.run_codex_session",
+                return_value=mock_codex_result,
+            ) as mock_codex,
             patch("hephaestus.automation.ci_driver.invoke_claude_with_session") as mock_invoke,
         ):
             result = driver._run_drive_green_learnings(123, 456)
@@ -1313,6 +1323,7 @@ class TestDriveGreenLearnings:
         assert "Only push skills to ProjectMnemosyne" in prompt
         assert mock_codex.call_args.kwargs["cwd"] == tmp_path
         mock_invoke.assert_not_called()
+        assert driver._last_drive_green_learn_evidence["mnemosyne_update_status"] == "confirmed"
 
 
 # ---------------------------------------------------------------------------
@@ -2108,6 +2119,7 @@ class TestArmingSweep:
         assert record["learn_attempted_at"] is not None
         assert record["learn_status"] == "succeeded"
         assert record["learn_succeeded_at"] == record["learn_captured_at"]
+        assert record["mnemosyne_update_status"] == "unverified"
 
     def test_closed_not_merged_orphan_dropped(self, driver: CIDriver, tmp_path: Path) -> None:
         path = self._write_record(driver, issue=841, pr_number=843)

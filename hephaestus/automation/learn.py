@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from hephaestus.agents.runtime import resume_codex_session, session_agent_matches
 
@@ -22,6 +24,29 @@ from .session_naming import session_uuid
 
 logger = logging.getLogger(__name__)
 
+_MNEMOSYNE_URL_RE = re.compile(
+    r"https://github\.com/HomericIntelligence/ProjectMnemosyne/(?:pull|commit)/[A-Za-z0-9._/-]+"
+)
+_MNEMOSYNE_PR_REF_RE = re.compile(r"\bHomericIntelligence/ProjectMnemosyne#(?P<number>\d+)\b")
+
+
+def mnemosyne_update_evidence(output: str) -> dict[str, Any]:
+    """Extract ProjectMnemosyne update evidence from a ``/learn`` response.
+
+    A successful agent turn is not proof that ProjectMnemosyne changed. Treat
+    concrete ProjectMnemosyne PR/commit URLs or owner/repo issue-style PR refs
+    as confirmation; otherwise mark the update as unverified.
+    """
+    text = output if isinstance(output, str) else str(output or "")
+    urls = sorted(set(_MNEMOSYNE_URL_RE.findall(text)))
+    pr_numbers = sorted({int(m.group("number")) for m in _MNEMOSYNE_PR_REF_RE.finditer(text)})
+    status = "confirmed" if urls or pr_numbers else "unverified"
+    return {
+        "mnemosyne_update_status": status,
+        "mnemosyne_update_urls": urls,
+        "mnemosyne_update_pr_numbers": pr_numbers,
+    }
+
 
 def _write_learn_record(
     state_dir: Path,
@@ -29,6 +54,7 @@ def _write_learn_record(
     *,
     succeeded: bool,
     log_file: Path,
+    output: str = "",
     error: str = "",
 ) -> None:
     """Persist explicit implementer ``/learn`` attempt evidence."""
@@ -40,6 +66,16 @@ def _write_learn_record(
         "learn_succeeded_at": timestamp if succeeded else None,
         "log_path": str(log_file),
     }
+    if succeeded:
+        record.update(mnemosyne_update_evidence(output))
+    else:
+        record.update(
+            {
+                "mnemosyne_update_status": "failed",
+                "mnemosyne_update_urls": [],
+                "mnemosyne_update_pr_numbers": [],
+            }
+        )
     if error:
         record["error"] = error
     record_file = state_dir / f"learn-{issue_number}.json"
@@ -121,7 +157,13 @@ def run_learn(
                 timeout=learn_claude_timeout(),
             )
             log_file.write_text(codex_result.stdout)
-            _write_learn_record(state_dir, issue_number, succeeded=True, log_file=log_file)
+            _write_learn_record(
+                state_dir,
+                issue_number,
+                succeeded=True,
+                log_file=log_file,
+                output=codex_result.stdout or "",
+            )
             logger.info("Learn completed for issue #%s", issue_number)
             logger.info("Learn log: %s", log_file)
             return True
@@ -164,7 +206,13 @@ def run_learn(
         )
         # Write output to log file
         log_file.write_text(result.stdout or "")
-        _write_learn_record(state_dir, issue_number, succeeded=True, log_file=log_file)
+        _write_learn_record(
+            state_dir,
+            issue_number,
+            succeeded=True,
+            log_file=log_file,
+            output=result.stdout or "",
+        )
         logger.info("Learn completed for issue #%s", issue_number)
         logger.info("Learn log: %s", log_file)
         return True

@@ -631,6 +631,9 @@ class TestCapturePlannerLearnings:
         assert record["learn_status"] == "succeeded"
         assert record["learn_attempted_at"]
         assert record["learn_succeeded_at"] == record["learn_attempted_at"]
+        assert record["mnemosyne_update_status"] == "unverified"
+        assert record["mnemosyne_update_urls"] == []
+        assert record["mnemosyne_update_pr_numbers"] == []
         assert (state_dir / "planner-learn-123.log").read_text() == "- learning A\n"
 
     def test_writes_failure_record(self, planner: Planner, tmp_path: Any) -> None:
@@ -652,6 +655,9 @@ class TestCapturePlannerLearnings:
         assert record["learn_attempted_at"]
         assert record["learn_succeeded_at"] is None
         assert record["error"] == "claude down"
+        assert record["mnemosyne_update_status"] == "failed"
+        assert record["mnemosyne_update_urls"] == []
+        assert record["mnemosyne_update_pr_numbers"] == []
         assert (state_dir / "planner-learn-123.log").read_text().startswith("FAILED:")
 
 

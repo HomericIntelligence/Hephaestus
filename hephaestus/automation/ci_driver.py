@@ -60,7 +60,7 @@ from .github_api import (
     gh_pr_list_unresolved_threads,
     gh_pr_resolve_thread,
 )
-from .learn import build_learn_prompt, compact_session
+from .learn import build_learn_prompt, compact_session, mnemosyne_update_evidence
 from .models import CIDriverOptions, WorkerResult
 from .pr_manager import pr_has_implementation_go_label
 from .prompts import get_advise_prompt_builder
@@ -1519,10 +1519,20 @@ class CIDriver:
             record["learn_status"] = "succeeded"
             record["learn_succeeded_at"] = timestamp
             record["learn_captured_at"] = timestamp
+            record.update(
+                getattr(self, "_last_drive_green_learn_evidence", mnemosyne_update_evidence(""))
+            )
         else:
             record["learn_status"] = "failed"
             record["learn_succeeded_at"] = None
             record["learn_captured_at"] = None
+            record.update(
+                {
+                    "mnemosyne_update_status": "failed",
+                    "mnemosyne_update_urls": [],
+                    "mnemosyne_update_pr_numbers": [],
+                }
+            )
         self._save_arming_state(issue_number, record)
 
     def _arm_drive_green(self, pr_number: int, pr_head_branch: str, pr_head_sha: str) -> None:
@@ -2900,6 +2910,7 @@ class CIDriver:
             "to green CI. Capture concise learnings about what made CI fail and how "
             "you fixed it, scoped to this issue/PR."
         )
+        self._last_drive_green_learn_evidence = mnemosyne_update_evidence("")
         try:
             repo_slug = get_repo_slug(self.repo_root)
             # Best-effort: try to resume in the original worktree (so the
@@ -2920,15 +2931,18 @@ class CIDriver:
                 )
                 cwd = self.repo_root
             if is_codex(self.options.agent):
-                run_codex_session(
+                codex_result = run_codex_session(
                     prompt,
                     cwd=cwd,
                     timeout=learn_claude_timeout(),
                     sandbox="workspace-write",
                 )
+                self._last_drive_green_learn_evidence = mnemosyne_update_evidence(
+                    codex_result.stdout or ""
+                )
                 logger.info("Issue #%s: drive-green learnings captured with Codex", issue_number)
                 return True
-            invoke_claude_with_session(
+            stdout, _ = invoke_claude_with_session(
                 repo=repo_slug,
                 issue=issue_number,
                 agent=AGENT_CI_DRIVER,
@@ -2944,6 +2958,7 @@ class CIDriver:
                 extra_args=["--dangerously-skip-permissions"],
                 input_via_stdin=True,
             )
+            self._last_drive_green_learn_evidence = mnemosyne_update_evidence(stdout or "")
             logger.info("Issue #%s: drive-green learnings captured", issue_number)
             return True
         except Exception as e:  # broad: external claude process; non-blocking
