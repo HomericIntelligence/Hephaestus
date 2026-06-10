@@ -28,6 +28,8 @@ def build_learn_prompt(context: str) -> str:
         detail = f" {detail}"
     return (
         f"/learn{detail}"
+        " EXECUTE the /learn skill-creation workflow for ProjectMnemosyne."
+        " Do NOT return a plan. Do NOT ask for approval."
         " Commit the results and create a PR."
         " IMPORTANT: Only push skills to ProjectMnemosyne."
         " Do NOT create files under .claude-plugin/ in this repo."

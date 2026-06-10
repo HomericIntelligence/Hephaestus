@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import patch
 
@@ -607,9 +608,51 @@ class TestCapturePlannerLearnings:
 
         prompt = mock_call.call_args.args[0]
         assert prompt.startswith("/learn ")
+        assert "EXECUTE the /learn skill-creation workflow" in prompt
         assert "ProjectMnemosyne" in prompt
         assert "/skills-registry-commands:learn" not in prompt
         assert "plan text" in prompt
+
+    def test_writes_success_record(self, planner: Planner, tmp_path: Any) -> None:
+        """A successful planner /learn attempt leaves durable evidence."""
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.get_repo_root",
+                return_value=tmp_path,
+            ),
+            patch.object(planner, "_call_claude", return_value="- learning A\n"),
+        ):
+            out = planner._capture_planner_learnings(123, "plan text")
+
+        state_dir = tmp_path / "build" / ".issue_implementer"
+        record = json.loads((state_dir / "planner-learn-123.json").read_text())
+        assert out == "- learning A\n"
+        assert record["issue_number"] == 123
+        assert record["learn_status"] == "succeeded"
+        assert record["learn_attempted_at"]
+        assert record["learn_succeeded_at"] == record["learn_attempted_at"]
+        assert (state_dir / "planner-learn-123.log").read_text() == "- learning A\n"
+
+    def test_writes_failure_record(self, planner: Planner, tmp_path: Any) -> None:
+        """A failed planner /learn attempt is explicit but still non-fatal."""
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.get_repo_root",
+                return_value=tmp_path,
+            ),
+            patch.object(planner, "_call_claude", side_effect=RuntimeError("claude down")),
+        ):
+            out = planner._capture_planner_learnings(123, "plan text")
+
+        state_dir = tmp_path / "build" / ".issue_implementer"
+        record = json.loads((state_dir / "planner-learn-123.json").read_text())
+        assert out == ""
+        assert record["issue_number"] == 123
+        assert record["learn_status"] == "failed"
+        assert record["learn_attempted_at"]
+        assert record["learn_succeeded_at"] is None
+        assert record["error"] == "claude down"
+        assert (state_dir / "planner-learn-123.log").read_text().startswith("FAILED:")
 
 
 class TestRunPlanReview:

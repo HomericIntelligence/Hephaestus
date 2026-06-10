@@ -15,13 +15,16 @@ on the worker-pool driver. No behavior change.
 
 from __future__ import annotations
 
+import json
 import logging
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Protocol
 
 from .claude_invoke import INFRA_ERROR_REVIEW_TEXT, parse_review_verdict
 from .claude_models import planner_model, reviewer_model
 from .claude_timeouts import planner_claude_timeout
-from .git_utils import issue_ref
+from .git_utils import get_repo_root, issue_ref
 from .github_api import (
     gh_issue_add_labels,
     gh_issue_json,
@@ -594,18 +597,63 @@ class PlanReviewLoop:
         )
         prompt = build_learn_prompt(context)
         try:
-            return self.planner._call_claude(
+            output = self.planner._call_claude(
                 prompt,
                 model=planner_model(),
                 agent=AGENT_PLANNER,
                 issue_number=issue_number,
                 timeout=120,
             )
+            self._write_planner_learn_record(issue_number, succeeded=True, output=output)
+            return output
         except Exception as e:
             logger.warning(
                 "%s: planner-learnings capture failed (non-fatal): %s", issue_ref(issue_number), e
             )
+            self._write_planner_learn_record(issue_number, succeeded=False, error=str(e))
             return ""
+
+    def _planner_learn_state_dir(self) -> Path:
+        state_dir = get_repo_root() / "build" / ".issue_implementer"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        return state_dir
+
+    def _write_planner_learn_record(
+        self,
+        issue_number: int,
+        *,
+        succeeded: bool,
+        output: str = "",
+        error: str = "",
+    ) -> None:
+        """Persist explicit planner ``/learn`` attempt evidence.
+
+        Planner learn is best-effort and must never block planning, but the
+        automation loop needs durable evidence that the learn step was tried
+        and whether it actually succeeded.
+        """
+        try:
+            state_dir = self._planner_learn_state_dir()
+            timestamp = datetime.now(timezone.utc).isoformat()
+            log_file = state_dir / f"planner-learn-{issue_number}.log"
+            record_file = state_dir / f"planner-learn-{issue_number}.json"
+            log_file.write_text(output if succeeded else f"FAILED: {error}\n")
+            record = {
+                "issue_number": issue_number,
+                "learn_attempted_at": timestamp,
+                "learn_status": "succeeded" if succeeded else "failed",
+                "learn_succeeded_at": timestamp if succeeded else None,
+                "log_path": str(log_file),
+            }
+            if error:
+                record["error"] = error
+            record_file.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+        except OSError as exc:
+            logger.warning(
+                "%s: failed to write planner-learnings state (non-fatal): %s",
+                issue_ref(issue_number),
+                exc,
+            )
 
     def run_plan_review(
         self,
