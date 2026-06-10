@@ -851,3 +851,36 @@ class TestPlannerMainWorkReport:
 
         assert rc == 0
         assert captured["work"] == 0
+
+
+class TestHasPendingDriveGreenWork:
+    """Convergence gate: drive-green pending-work detection (#1128 review)."""
+
+    def test_not_selected_returns_false(self) -> None:
+        """No drive-green phase → no terminal work to wait for."""
+        cfg = LoopConfig(phases=("plan", "implement"))
+        assert loop_runner._has_pending_drive_green_work(cfg, ["r1"]) is False
+
+    def test_explicit_issues_keeps_looping(self) -> None:
+        """--issues scope → keep looping (repo-wide PR scan is the wrong signal).
+
+        ``_count_failing_prs`` has no issue filter, so a clean repo-wide scan
+        would wrongly converge before the terminal drive-green pass runs against
+        the pinned issues. Must return True and must NOT call _count_failing_prs.
+        """
+        cfg = LoopConfig(issues=[7, 8])  # default phases include drive-green
+        with patch.object(loop_runner, "_count_failing_prs") as mock_count:
+            assert loop_runner._has_pending_drive_green_work(cfg, ["r1"]) is True
+        mock_count.assert_not_called()
+
+    def test_failing_pr_means_pending(self) -> None:
+        """A failing PR in any repo → pending drive-green work."""
+        cfg = LoopConfig()  # default phases, no --issues
+        with patch.object(loop_runner, "_count_failing_prs", side_effect=[0, 2]):
+            assert loop_runner._has_pending_drive_green_work(cfg, ["r1", "r2"]) is True
+
+    def test_no_failing_pr_means_converged(self) -> None:
+        """All repos green → no pending drive-green work (loop may converge)."""
+        cfg = LoopConfig()
+        with patch.object(loop_runner, "_count_failing_prs", return_value=0):
+            assert loop_runner._has_pending_drive_green_work(cfg, ["r1", "r2"]) is False

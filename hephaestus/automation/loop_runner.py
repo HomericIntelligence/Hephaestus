@@ -489,15 +489,20 @@ def _has_pending_drive_green_work(cfg: LoopConfig, repos: list[str]) -> bool:
     ``_count_failing_prs`` predicate the driver uses so the gate cannot drift.
 
     When drive-green is not selected, there is no terminal work to wait for.
-    Returns ``True`` (conservatively keep looping) only when at least one repo
-    has a failing/un-green PR.
+    Returns ``True`` (conservatively keep looping) when at least one repo has a
+    failing/un-green PR.
     """
     if "drive-green" not in cfg.phases:
         return False
-    # An explicit --issues scope means the operator pinned the work set; defer
-    # to the normal convergence signals rather than scanning all repo PRs.
+    # An explicit --issues scope pins the work set to specific PRs/issues, but
+    # ``_count_failing_prs`` scans ALL open repo PRs (it has no issue filter), so
+    # it's the wrong signal here — a clean repo-wide scan would wrongly say "no
+    # pending work" and let the loop converge before the terminal drive-green
+    # pass runs against the pinned issues. Keep looping (defer to --loops as the
+    # bound) rather than early-exiting and abandoning the operator's explicit
+    # drive-green work.
     if cfg.issues:
-        return False
+        return True
     return any(_count_failing_prs(cfg.org, repo) > 0 for repo in repos)
 
 

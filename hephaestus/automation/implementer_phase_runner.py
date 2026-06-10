@@ -1054,19 +1054,27 @@ class ImplementationPhaseRunner:
         non-GO → ``mark_pr_implementation_no_go`` mapping cannot drift between
         them.
 
-        An ``ERROR`` verdict (reviewer-infrastructure failure) applies **neither**
-        label: the PR was never actually reviewed, so it must be left unlabeled
-        for the "no go/no-go label → re-review" path to pick it up next loop
-        (#911 / PR #1069). Labeling it no-go would falsely record a review that
-        never happened; labeling it go would arm auto-merge on unreviewed code.
+        An ``ERROR`` verdict (reviewer-infrastructure failure) or a
+        ``HUMAN_BLOCKED`` verdict (review reached GO but an unresolved human
+        review thread remains) applies **neither** label: the PR is not settled,
+        so it must be left unlabeled for the "no go/no-go label → re-review" path
+        to pick it up next loop (#911 / PR #1069). Labeling it no-go would falsely
+        record a converged failure; labeling it go would arm auto-merge on a PR
+        that was never reviewed (ERROR) or still has open human threads
+        (HUMAN_BLOCKED).
         """
         impl = self.impl
-        if last_verdict == "ERROR":
+        if last_verdict in ("ERROR", "HUMAN_BLOCKED"):
+            reason = (
+                "reviewer-infrastructure error"
+                if last_verdict == "ERROR"
+                else "unresolved human review thread(s)"
+            )
             impl._log(
                 "warning",
-                f"{issue_ref(issue_number)}: implementation review hit a reviewer-"
-                f"infrastructure error; leaving {pr_ref(pr_number)} unlabeled for "
-                "re-review (no implementation go/no-go label, auto-merge unchanged)",
+                f"{issue_ref(issue_number)}: implementation review blocked by {reason}; "
+                f"leaving {pr_ref(pr_number)} unlabeled for re-review "
+                "(no implementation go/no-go label, auto-merge unchanged)",
                 thread_id,
             )
             return
@@ -1616,22 +1624,33 @@ class ImplementationPhaseRunner:
                         thread_id=thread_id,
                     )
                 if blocking_threads and pr_number is not None:
-                    last_verdict = "NOGO"
+                    # GO cannot stand while HUMAN review threads remain open.
+                    # Automation must NOT resolve them and cannot fix them — a
+                    # human has to. So break immediately with a distinct terminal
+                    # state rather than re-reviewing to exhaustion (the GO review
+                    # posts no new threads, so the address step below would be
+                    # skipped by the zero-thread guard and the loop would just
+                    # spin GO→downgrade→re-review). HUMAN_BLOCKED is excluded from
+                    # the post-loop state:skip so the PR stays unlabeled, awaiting
+                    # the human; the loop re-runs next pass via the "no go/no-go
+                    # label → re-review" path once threads are resolved.
+                    last_verdict = "HUMAN_BLOCKED"
                     impl._log(
                         "info",
                         f"{pr_ref(pr_number)}: reviewer said GO but "
                         f"{blocking_threads} unresolved human review thread(s) remain "
-                        f"— not accepting GO, continuing to address them",
-                        thread_id,
-                    )
-                else:
-                    impl._log(
-                        "info",
-                        f"{pr_ref(pr_number) if pr_number is not None else issue_ref(issue_number)}"
-                        f": GO on iteration {iteration} — review loop terminated",
+                        f"— not accepting GO; awaiting human resolution, "
+                        f"leaving PR unlabeled",
                         thread_id,
                     )
                     break
+                impl._log(
+                    "info",
+                    f"{pr_ref(pr_number) if pr_number is not None else issue_ref(issue_number)}"
+                    f": GO on iteration {iteration} — review loop terminated",
+                    thread_id,
+                )
+                break
 
             # Converge ONLY on an explicit Verdict: GO (handled above). A non-GO
             # pass with NO posted threads (and nothing re-opened) must NOT end the
@@ -1727,10 +1746,13 @@ class ImplementationPhaseRunner:
         # strands a never-reviewed PR (#911 / PR #1069). Leave the issue/PR
         # unlabeled so the "no go/no-go label → re-review" path re-runs the loop
         # next time the reviewer infra is healthy.
-        exhausted = (
-            iterations_run >= MAX_REVIEW_ITERATIONS
-            and last_verdict != "GO"
-            and last_verdict != "ERROR"
+        # Neither ERROR (reviewer-infra failure) nor HUMAN_BLOCKED (GO blocked by
+        # an open human thread) is a converged failure, so neither applies
+        # state:skip — both leave the PR unlabeled for re-review / human action.
+        exhausted = iterations_run >= MAX_REVIEW_ITERATIONS and last_verdict not in (
+            "GO",
+            "ERROR",
+            "HUMAN_BLOCKED",
         )
         if (
             pr_number is not None
@@ -1753,6 +1775,13 @@ class ImplementationPhaseRunner:
                 "iteration(s) — leaving PR unlabeled for re-review (no %s)",
                 issue_number,
                 iterations_run,
+                STATE_SKIP,
+            )
+        elif last_verdict == "HUMAN_BLOCKED":
+            logger.warning(
+                "#%d: review reached GO but is blocked by unresolved human review "
+                "thread(s) — leaving PR unlabeled for human resolution (no %s)",
+                issue_number,
                 STATE_SKIP,
             )
 

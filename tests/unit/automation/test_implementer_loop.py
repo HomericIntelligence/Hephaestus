@@ -195,10 +195,11 @@ class TestRunImplReviewLoop:
         """A GO cleans up stale automation comments AND is blocked by a human thread.
 
         The automation-owned threads are resolved, but the lone human review
-        thread (alice) is left open and must DOWNGRADE the GO to NOGO — a GO
-        cannot stand while a human review thread is unresolved (#1: "no GO if
-        there are open issues/threads"). With every review returning GO, the
-        loop runs to exhaustion without ever accepting GO.
+        thread (alice) is left open and must BLOCK the GO — a GO cannot stand
+        while a human review thread is unresolved (#1). Because automation cannot
+        resolve a human thread, the loop breaks IMMEDIATELY with a distinct
+        HUMAN_BLOCKED verdict (iters == 1) rather than spinning to exhaustion,
+        and applies NO state:skip (the PR is left unlabeled, awaiting the human).
         """
         threads = [
             {"id": "T_self", "author": "mvillmow", "path": "a.py", "line": 1, "body": "old"},
@@ -244,7 +245,10 @@ class TestRunImplReviewLoop:
             patch(
                 "hephaestus.automation.implementer_phase_runner.gh_pr_resolve_thread"
             ) as mock_resolve,
-            patch("hephaestus.automation.implementer_phase_runner.gh_issue_add_labels"),
+            patch.object(implementer, "_run_address_review_step") as mock_addr2,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_issue_add_labels"
+            ) as mock_label,
         ):
             iters, verdict, _grade = implementer._run_impl_review_loop(
                 issue_number=1,
@@ -258,10 +262,13 @@ class TestRunImplReviewLoop:
                 pr_number=42,
             )
 
-        # GO was never accepted because a human thread stayed open.
-        assert verdict == "NOGO"
-        assert iters == MAX_REVIEW_ITERATIONS
-        # Automation-owned threads were still resolved on each GO attempt;
+        # GO was blocked by an open human thread → distinct terminal verdict,
+        # broke immediately (no spin to exhaustion), no address step, no skip.
+        assert verdict == "HUMAN_BLOCKED"
+        assert iters == 1
+        mock_addr2.assert_not_called()
+        mock_label.assert_not_called()  # no state:skip applied
+        # Automation-owned threads were still resolved on the GO attempt;
         # the human thread (T_human) was never resolved by automation.
         resolved_ids = {call.args[0] for call in mock_resolve.call_args_list}
         assert "T_human" not in resolved_ids
@@ -488,6 +495,34 @@ class TestRunImplReviewLoop:
                 issue_number=911,
                 pr_number=1069,
                 last_verdict="ERROR",
+                slot_id=None,
+                thread_id=None,
+            )
+
+        mock_go.assert_not_called()
+        mock_no_go.assert_not_called()
+
+    def test_human_blocked_verdict_applies_neither_implementation_label(
+        self, implementer: IssueImplementer
+    ) -> None:
+        """A HUMAN_BLOCKED verdict applies neither implementation-go nor -no-go.
+
+        Review reached GO but an open human thread blocks it; the PR is left
+        unlabeled for the human to resolve, not marked go (arming auto-merge on
+        an unresolved PR) or no-go (recording a converged failure).
+        """
+        with (
+            patch(
+                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_go"
+            ) as mock_go,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_no_go"
+            ) as mock_no_go,
+        ):
+            implementer.phase_runner._apply_impl_review_verdict(
+                issue_number=911,
+                pr_number=1069,
+                last_verdict="HUMAN_BLOCKED",
                 slot_id=None,
                 thread_id=None,
             )
