@@ -2041,6 +2041,25 @@ class CIDriver:
             if c.get("status") == "completed" and c.get("conclusion") == "failure"
         ]
 
+    def _tracked_worktree_changes(self, worktree_path: Path, issue_number: int) -> list[str]:
+        """Return tracked dirty status lines for a post-agent worktree.
+
+        Untracked tool output such as a local ``uv.lock`` is intentionally
+        ignored. A no-commit turn that left tracked files modified is still
+        actionable even when the remote has no red required checks, as happens
+        for merge-conflict/behind-branch repairs where the agent fixed files but
+        forgot the signed commit.
+        """
+        status = self._git_stdout_for_push_guard(
+            worktree_path,
+            issue_number,
+            ["git", "status", "--porcelain"],
+            "failed to inspect worktree status for no-commit retry",
+        )
+        if status is None:
+            return []
+        return [line for line in status.splitlines() if line.strip() and not line.startswith("?? ")]
+
     def _pending_required_check_names(self, pr_number: int) -> list[str]:
         """Return names of required checks that are still in flight (not completed).
 
@@ -2073,31 +2092,48 @@ class CIDriver:
         pr_head_branch: str,
         failing_check_names: list[str],
         review_threads_block: str,
+        dirty_tracked_changes: list[str] | None = None,
     ) -> str:
         """Build the retry prompt when the agent returned without committing (#846).
 
         The retry must engage the agent enough to either (a) produce a real
-        fix or (b) explicitly say why CI cannot pass. The prompt names the
-        failing checks verbatim, re-emphasises the existing PR/branch
-        invariant, and re-emphasises signed commits — a no-commit retry is a
-        contract violation that the agent has to address head-on.
+        fix or (b) explicitly say why CI cannot pass / merge. The prompt names
+        the failing checks and/or dirty tracked files verbatim, re-emphasises
+        the existing PR/branch invariant, and re-emphasises signed commits — a
+        no-commit retry is a contract violation that the agent has to address
+        head-on.
         """
         failing_block = "\n".join(f"- {n}" for n in failing_check_names) or "- (unknown)"
+        dirty_lines = dirty_tracked_changes or []
+        dirty_block = "\n".join(f"- {line}" for line in dirty_lines)
+        if dirty_block:
+            dirty_block = (
+                "\n\nThe local worktree also contains uncommitted tracked changes "
+                "from the previous turn. Review this existing diff first and either "
+                f"commit it after verification or amend it before committing:\n\n{dirty_block}\n"
+            )
+        remote_block = (
+            "The required CI checks below are STILL failing on the remote"
+            if failing_check_names
+            else "The remote checks may be green, but the PR still needs a committed "
+            "repair before the driver can push"
+        )
         return (
             f"{review_threads_block}"
             f"## Force-Engagement Retry — Previous Turn Produced No Commit\n\n"
             f"You just returned from a CI-fix session for PR {pr_ref(pr_number)} "
             f"(issue {issue_ref(issue_number)}) WITHOUT producing a new commit on "
-            f"branch `{pr_head_branch}`. The required CI checks below are STILL "
-            f"failing on the remote:\n\n"
+            f"branch `{pr_head_branch}`. {remote_block}:\n\n"
             f"{failing_block}\n\n"
+            f"{dirty_block}"
             f"Returning no commit when required checks are still red is itself a "
-            f"bug — fix the code so the failing checks pass. If no code fix is "
-            f"possible, DO NOT commit a 'blocker' file: a new Markdown/docs file "
-            f"will itself fail the repo's lint gates (e.g. markdownlint) and turn "
-            f"one red check into two. Instead leave the tree unchanged and report "
-            f"the blocker via the `BLOCKED:` line below — do NOT commit any file to "
-            f"document it.\n\n"
+            f"bug; returning no commit after editing tracked files is also a bug. "
+            f"Fix the code so the failing checks pass and the PR can merge. If no "
+            f"code fix is possible, DO NOT commit a 'blocker' file: a new "
+            f"Markdown/docs file will itself fail the repo's lint gates (e.g. "
+            f"markdownlint) and turn one blocker into two. Instead leave the tree "
+            f"unchanged and report the blocker via the `BLOCKED:` line below — do "
+            f"NOT commit any file to document it.\n\n"
             f"Working directory: {worktree_path}\n"
             f"Current branch (DO NOT change, DO NOT create a new branch): "
             f"{pr_head_branch}\n\n"
@@ -2206,10 +2242,11 @@ class CIDriver:
         failing: list[str] = []
         for retry in range(1, max_retries + 1):
             failing = self._failing_required_check_names(pr_number)
-            if not failing:
+            dirty_tracked_changes = self._tracked_worktree_changes(worktree_path, issue_number)
+            if not failing and not dirty_tracked_changes:
                 logger.info(
-                    "Issue #%s: no-commit turn but PR #%s has no failing required "
-                    "checks; skipping force-engagement retry",
+                    "Issue #%s: no-commit turn but PR #%s has no failing required checks "
+                    "and no tracked worktree changes; skipping force-engagement retry",
                     issue_number,
                     pr_number,
                 )
@@ -2222,16 +2259,18 @@ class CIDriver:
                 worktree_path=worktree_path,
                 pr_head_branch=pr_head_branch,
                 failing_check_names=failing,
+                dirty_tracked_changes=dirty_tracked_changes,
                 review_threads_block=review_threads_block,
             )
 
+            retry_reason = ", ".join(failing) if failing else "tracked worktree changes"
             logger.warning(
                 "Issue #%s: no-commit on CI fix turn; re-invoking with "
-                "force-engagement prompt (retry %s/%s, failing: %s)",
+                "force-engagement prompt (retry %s/%s, reason: %s)",
                 issue_number,
                 retry,
                 max_retries,
-                ", ".join(failing) or "<unknown>",
+                retry_reason,
             )
 
             try:

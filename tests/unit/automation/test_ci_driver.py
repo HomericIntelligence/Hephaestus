@@ -1635,7 +1635,7 @@ class TestNoCommitRetry:
     def test_retry_skipped_when_no_failing_required_checks(
         self, driver: CIDriver, tmp_path: Path
     ) -> None:
-        """No-commit + green CI → no retry, returns False (don't perturb a passing PR)."""
+        """No-commit + green CI + clean tracked tree → no retry."""
         with (
             patch(
                 "hephaestus.automation.ci_driver.gh_pr_checks",
@@ -1645,6 +1645,10 @@ class TestNoCommitRetry:
             patch(
                 "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
                 return_value=[],
+            ),
+            patch(
+                "hephaestus.automation.ci_driver.run",
+                return_value=MagicMock(stdout="?? uv.lock\n", stderr="", returncode=0),
             ),
         ):
             result = driver._retry_no_commit_once(
@@ -1658,11 +1662,56 @@ class TestNoCommitRetry:
         assert result is False
         mock_invoke.assert_not_called()
 
+    def test_retry_fires_when_green_but_tracked_changes_need_commit(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """No-commit + green CI + tracked edits → retry asks agent to commit them."""
+        status = MagicMock(
+            stdout=(
+                " M hephaestus/automation/loop_runner.py\n M scripts/shell/install.sh\n?? uv.lock\n"
+            ),
+            stderr="",
+            returncode=0,
+        )
+        post_sha = MagicMock(stdout="deadbeef\n", stderr="", returncode=0)
+        with (
+            patch(
+                "hephaestus.automation.ci_driver.gh_pr_checks",
+                return_value=[_make_check("lint", conclusion="success")],
+            ),
+            patch(
+                "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+                return_value=[],
+            ),
+            patch(
+                "hephaestus.automation.ci_driver.invoke_claude_with_session",
+                return_value=("done", "sess"),
+            ) as mock_invoke,
+            patch("hephaestus.automation.ci_driver.run", side_effect=[status, post_sha]),
+        ):
+            result = driver._retry_no_commit_once(
+                issue_number=993,
+                pr_number=1065,
+                worktree_path=tmp_path,
+                pr_head_branch="993-auto-impl",
+                pre_agent_sha="cafef00d",
+                session_id=None,
+            )
+
+        assert result is True
+        mock_invoke.assert_called_once()
+        prompt = mock_invoke.call_args.kwargs["prompt"]
+        assert "uncommitted tracked changes" in prompt
+        assert "M hephaestus/automation/loop_runner.py" in prompt
+        assert "scripts/shell/install.sh" in prompt
+        assert "uv.lock" not in prompt
+
     def test_retry_fires_when_failing_and_returns_true_on_commit(
         self, driver: CIDriver, tmp_path: Path
     ) -> None:
         """No-commit + failing CI → one resumed claude call; HEAD advanced ⇒ True."""
         post_sha = MagicMock(stdout="deadbeef\n")
+        clean_status = MagicMock(stdout="", stderr="", returncode=0)
         with (
             patch(
                 "hephaestus.automation.ci_driver.gh_pr_checks",
@@ -1676,7 +1725,7 @@ class TestNoCommitRetry:
                 "hephaestus.automation.ci_driver.invoke_claude_with_session",
                 return_value=("done", "sess"),
             ) as mock_invoke,
-            patch("hephaestus.automation.ci_driver.run", return_value=post_sha),
+            patch("hephaestus.automation.ci_driver.run", side_effect=[clean_status, post_sha]),
         ):
             result = driver._retry_no_commit_once(
                 issue_number=1,
@@ -1699,6 +1748,7 @@ class TestNoCommitRetry:
     ) -> None:
         """Retry returned without commit too → False + state_dir marker (#846)."""
         unchanged = MagicMock(stdout="cafef00d\n")  # post == pre
+        clean_status = MagicMock(stdout="", stderr="", returncode=0)
         with (
             patch(
                 "hephaestus.automation.ci_driver.gh_pr_checks",
@@ -1712,7 +1762,10 @@ class TestNoCommitRetry:
                 "hephaestus.automation.ci_driver.invoke_claude_with_session",
                 return_value=("nope", "sess"),
             ) as mock_invoke,
-            patch("hephaestus.automation.ci_driver.run", return_value=unchanged),
+            patch(
+                "hephaestus.automation.ci_driver.run",
+                side_effect=[clean_status, unchanged, clean_status, unchanged],
+            ),
         ):
             result = driver._retry_no_commit_once(
                 issue_number=1,
@@ -1769,6 +1822,7 @@ class TestNoCommitRetry:
         """Codex agent + session_id → resume_codex_session called once with the session."""
         driver.options.agent = "codex"
         post_sha = MagicMock(stdout="deadbeef\n")
+        clean_status = MagicMock(stdout="", stderr="", returncode=0)
         with (
             patch(
                 "hephaestus.automation.ci_driver.gh_pr_checks",
@@ -1783,7 +1837,7 @@ class TestNoCommitRetry:
                 return_value=AgentRunResult(stdout="ok", stderr="", session_id="s"),
             ) as mock_resume,
             patch("hephaestus.automation.ci_driver.run_codex_session") as mock_fresh,
-            patch("hephaestus.automation.ci_driver.run", return_value=post_sha),
+            patch("hephaestus.automation.ci_driver.run", side_effect=[clean_status, post_sha]),
         ):
             result = driver._retry_no_commit_once(
                 issue_number=1,
