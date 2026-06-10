@@ -1437,30 +1437,23 @@ def gh_current_login() -> str | None:
 ReviewCommentIndexKey = tuple[str, Any] | tuple[str, Any, str]
 
 
-def gh_pr_inline_comment_index(pr_number: int) -> dict[ReviewCommentIndexKey, tuple[str, str]]:
-    """Map ``(path, line)`` → ``(comment_node_id, body)`` for unresolved bot threads.
+def _fetch_pr_inline_review_thread_nodes(pr_number: int) -> list[dict[str, Any]]:
+    """Return PR review-thread nodes used by inline-comment dedupe helpers.
 
-    Returns the GraphQL node id AND current body of the FIRST comment of each
-    unresolved review thread, keyed by its ``(path, line)``. Used by
-    :func:`gh_pr_review_post` to detect a line that already has a comment so the
-    new content can be **appended** to the existing body in place rather than
-    posted as a duplicate (#1083). The body is required because the
-    ``updatePullRequestReviewComment`` mutation REPLACES the body — the caller
-    must concatenate ``existing + new`` or the original comment is lost (#1085).
-    Fails open: returns ``{}`` on any API/parse error so the caller posts
-    everything as before.
+    Fails open: returns ``[]`` on any API/parse error so callers preserve their
+    existing post-as-usual behaviour.
     """
     owner, repo = get_repo_info()
     if not re.match(r"^[a-zA-Z0-9_-]+$", owner) or not re.match(r"^[a-zA-Z0-9_-]+$", repo):
         logger.error("Invalid owner/repo format: %s/%s", owner, repo)
-        return {}
+        return []
     query = (
         "query($owner:String!,$name:String!,$number:Int!){"
         "  repository(owner:$owner,name:$name){"
         "    pullRequest(number:$number){"
         "      reviewThreads(first:100){"
         "        nodes{ isResolved path line side:diffSide "
-        "comments(first:1){ nodes{ id body } } }"
+        "comments(first:20){ nodes{ id body } } }"
         "      }"
         "    }"
         "  }"
@@ -1484,8 +1477,8 @@ def gh_pr_inline_comment_index(pr_number: int) -> dict[ReviewCommentIndexKey, tu
         )
         data = json.loads(result.stdout or "{}")
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
-        logger.warning("PR #%s: could not fetch inline-comment index (%s)", pr_number, exc)
-        return {}
+        logger.warning("PR #%s: could not fetch inline review-thread nodes (%s)", pr_number, exc)
+        return []
 
     nodes = (
         data.get("data", {})
@@ -1494,8 +1487,26 @@ def gh_pr_inline_comment_index(pr_number: int) -> dict[ReviewCommentIndexKey, tu
         .get("reviewThreads", {})
         .get("nodes", [])
     )
+    if not isinstance(nodes, list):
+        return []
+    return [node for node in nodes if isinstance(node, dict)]
+
+
+def gh_pr_inline_comment_index(pr_number: int) -> dict[ReviewCommentIndexKey, tuple[str, str]]:
+    """Map ``(path, line)`` → ``(comment_node_id, body)`` for unresolved bot threads.
+
+    Returns the GraphQL node id AND current body of the FIRST comment of each
+    unresolved review thread, keyed by its ``(path, line)``. Used by
+    :func:`gh_pr_review_post` to detect a line that already has a comment so the
+    new content can be **appended** to the existing body in place rather than
+    posted as a duplicate (#1083). The body is required because the
+    ``updatePullRequestReviewComment`` mutation REPLACES the body — the caller
+    must concatenate ``existing + new`` or the original comment is lost (#1085).
+    Fails open: returns ``{}`` on any API/parse error so the caller posts
+    everything as before.
+    """
     index: dict[ReviewCommentIndexKey, tuple[str, str]] = {}
-    for node in nodes:
+    for node in _fetch_pr_inline_review_thread_nodes(pr_number):
         if node.get("isResolved"):
             continue
         comment_nodes = node.get("comments", {}).get("nodes", [])
@@ -1513,6 +1524,34 @@ def gh_pr_inline_comment_index(pr_number: int) -> dict[ReviewCommentIndexKey, tu
         # support, and as a fallback if GitHub ever omits ``diffSide``.
         index.setdefault((path, line), (comment_id, body))
     return index
+
+
+def gh_pr_inline_comment_history_index(pr_number: int) -> dict[ReviewCommentIndexKey, list[str]]:
+    """Map ``(path, line)`` → historical inline review bodies, resolved or not.
+
+    Unlike :func:`gh_pr_inline_comment_index`, this index includes resolved
+    threads and carries only bodies, never comment IDs. It is used solely to
+    suppress materially identical reviewer findings after an earlier thread was
+    resolved; resolved comments must not be edited or re-opened just because a
+    later reviewer restates the same finding (#1116).
+    """
+    history: dict[ReviewCommentIndexKey, list[str]] = {}
+    for node in _fetch_pr_inline_review_thread_nodes(pr_number):
+        path = node.get("path") or ""
+        line = node.get("line")
+        side = node.get("side") or "RIGHT"
+        comment_nodes = node.get("comments", {}).get("nodes", [])
+        bodies = [
+            str(comment.get("body") or "")
+            for comment in comment_nodes
+            if isinstance(comment, dict) and str(comment.get("body") or "").strip()
+        ]
+        if not bodies:
+            continue
+        history.setdefault((path, line, side), []).extend(bodies)
+        # Preserve the older key shape for side-less lookup fallback.
+        history.setdefault((path, line), []).extend(bodies)
+    return history
 
 
 def gh_pr_update_review_comment(comment_node_id: str, body: str) -> None:
@@ -1651,28 +1690,47 @@ def _edit_or_keep_comments(pr_number: int, comments: list[dict[str, Any]]) -> li
     first skip it if the existing body already covers the same finding. If the
     finding is genuinely new, rewrite the existing comment to
     ``existing_body + new_body`` (a single edit that preserves the original
-    text, #1085) and drop it from the returned list. Comments on fresh lines
-    are returned unchanged for posting. Fails open: an empty index returns
-    *comments* unchanged, and an edit that raises falls back to posting that
-    comment fresh.
+    text, #1085) and drop it from the returned list. Resolved historical
+    comments are used only as duplicate evidence; they are never edited.
+    Comments on fresh lines are returned unchanged for posting. Fails open: an
+    empty index returns *comments* unchanged, and an edit that raises falls back
+    to posting that comment fresh.
     """
-    index = gh_pr_inline_comment_index(pr_number)
-    if not index:
+    editable_index = gh_pr_inline_comment_index(pr_number)
+    history_index = gh_pr_inline_comment_history_index(pr_number)
+    if not editable_index and not history_index:
         return comments
     fresh: list[dict[str, Any]] = []
     for c in comments:
         path = c.get("path") or ""
         line = c.get("line")
         side = c.get("side") or "RIGHT"
-        existing = index.get((path, line, side)) or index.get((path, line))
-        if existing is None:
+        body = c.get("body") or ""
+
+        historical_bodies = history_index.get((path, line, side)) or history_index.get(
+            (path, line), []
+        )
+        if any(
+            _review_comment_already_covers(existing_body, body)
+            for existing_body in historical_bodies
+        ):
+            logger.info(
+                "PR #%s: skipped duplicate same-line review comment on %s:%s (%s)",
+                pr_number,
+                path,
+                line,
+                side,
+            )
+            continue
+
+        editable = editable_index.get((path, line, side)) or editable_index.get((path, line))
+        if editable is None:
             fresh.append(c)
             continue
         # #1085: updatePullRequestReviewComment REPLACES the body, so concatenate
         # the existing body + the new note. Passing only the suffix would destroy
         # the original comment.
-        existing_id, existing_body = existing
-        body = c.get("body") or ""
+        existing_id, existing_body = editable
         if _review_comment_already_covers(existing_body, body):
             logger.info(
                 "PR #%s: skipped duplicate same-line review comment on %s:%s (%s)",
