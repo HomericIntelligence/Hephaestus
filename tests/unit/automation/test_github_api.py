@@ -2274,6 +2274,80 @@ class TestGhPrReviewPost:
     @patch("hephaestus.automation.github_api.io_write_secure")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
+    def test_actual_1116_codex_review_restatements_are_skipped(
+        self,
+        mock_gh_call: Any,
+        _mock_repo: Any,
+        mock_write: Any,
+        mock_index: Any,
+        mock_update: Any,
+    ) -> None:
+        """Issue #1116: observed Codex/Claude coverage restatements are duplicates."""
+        mock_gh_call.side_effect = self._gh_call_side_effect(
+            "REVIEW_1", [], diff_text=self._SAMPLE_DIFF
+        )
+        mock_index.return_value = {
+            (
+                "tests/unit/automation/test_pr_reviewer_posting.py",
+                540,
+            ): (
+                "COMMENT_NODE_540",
+                "This regression coverage only exercises the Claude result-envelope path. "
+                "The production diff also changed the Codex stdout path, so add a Codex "
+                "test where `summary` lacks a verdict and `review_text`/stdout contains "
+                "`Verdict: GO` or `Verdict: NOGO`; otherwise the second producer path can "
+                "regress without this suite catching it.",
+            ),
+        }
+
+        duplicate_bodies = [
+            (
+                "This regression only exercises the Claude JSON-envelope path. Production "
+                "also changed the Codex path to populate `review_text` from "
+                "`run_codex_text().stdout`; add a sibling test that patches "
+                "`is_codex`/`run_codex_text` and asserts a verdict-free `summary` still "
+                "returns verdict-bearing `review_text` for `--agent=codex`."
+            ),
+            (
+                "This regression test only exercises the Claude JSON-envelope path. The "
+                "production fix also changed the Codex stdout path, so please add a "
+                "Codex-path test that returns prose with `Verdict: GO`/`NOGO` and a "
+                "verdict-free JSON summary, then asserts `review_text` preserves the raw "
+                "stdout."
+            ),
+            (
+                "This regression test only exercises the Claude JSON-envelope path. The "
+                "production change also added `review_text` on the separate Codex stdout "
+                "branch selected by `is_codex(agent)`. Add a Codex case that patches "
+                "`is_codex=True` and `run_codex_text(stdout=...)`, then asserts `summary` "
+                "remains the JSON field while `review_text` contains the verdict-bearing "
+                "prose."
+            ),
+        ]
+
+        for body in duplicate_bodies:
+            gh_pr_review_post(
+                pr_number=1116,
+                comments=[
+                    {
+                        "path": "tests/unit/automation/test_pr_reviewer_posting.py",
+                        "line": 540,
+                        "side": "RIGHT",
+                        "body": body,
+                    }
+                ],
+                summary="Findings",
+                dedupe_existing=True,
+            )
+
+        mock_update.assert_not_called()
+        assert self._posted_comments(mock_write) == []
+
+    @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
+    @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
+    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch("hephaestus.automation.github_api._gh_call")
     def test_same_line_contract_restatement_is_skipped_not_appended(
         self,
         mock_gh_call: Any,

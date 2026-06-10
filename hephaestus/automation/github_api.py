@@ -1560,6 +1560,7 @@ _REVIEW_COMMENT_DEDUPE_STOPWORDS = {
     "coverage",
     "current",
     "future",
+    "only",
     "please",
     "production",
     "proves",
@@ -1573,6 +1574,18 @@ _REVIEW_COMMENT_DEDUPE_STOPWORDS = {
     "with",
     "without",
     "would",
+}
+
+_REVIEW_COMMENT_SIGNATURE_TOKENS = {
+    "claude",
+    "codex",
+    "is_codex",
+    "review_text",
+    "run_codex_text",
+    "stderr",
+    "stdout",
+    "summary",
+    "verdict",
 }
 
 
@@ -1589,11 +1602,15 @@ def _review_comment_keyword_tokens(body: str) -> set[str]:
     normalized = _normalize_review_comment_body(body)
     tokens: set[str] = set()
     for token in re.findall(r"[a-z0-9_#./-]+", normalized):
-        if len(token) < 4 and not token.startswith("#"):
-            continue
-        if token in _REVIEW_COMMENT_DEDUPE_STOPWORDS:
-            continue
-        tokens.add(token)
+        candidates = [token]
+        if any(sep in token for sep in "./-"):
+            candidates.extend(part for part in re.split(r"[./-]+", token) if part)
+        for candidate in candidates:
+            if len(candidate) < 4 and not candidate.startswith("#"):
+                continue
+            if candidate in _REVIEW_COMMENT_DEDUPE_STOPWORDS:
+                continue
+            tokens.add(candidate)
     return tokens
 
 
@@ -1620,6 +1637,9 @@ def _review_comment_already_covers(existing_body: str, new_body: str) -> bool:
             # a shorter restatement of the same finding is still suppressed.
             overlap_ratio = len(overlap) / min(len(existing_tokens), len(new_tokens))
             if len(overlap) >= 6 and overlap_ratio >= 0.6:
+                return True
+            signature_overlap = overlap & _REVIEW_COMMENT_SIGNATURE_TOKENS
+            if len(overlap) >= 6 and len(signature_overlap) >= 3:
                 return True
     return False
 
