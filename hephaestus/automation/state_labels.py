@@ -1,10 +1,10 @@
-"""GitHub-issue state-label vocabulary for the automation pipeline.
+"""GitHub issue/PR state-label vocabulary for the automation pipeline.
 
 The automation pipeline uses three mutually-exclusive ``state:*`` labels as the
 single source of truth for an issue's plan-review status. This module is the
-authoritative definition of those labels and the small helpers that interpret
-them; the reviewer, planner, implementer, and the org-wide provisioning script
-all import from here.
+authoritative definition of those labels, the PR-scoped implementation-review
+labels, and the small helpers that interpret them; the reviewer, planner,
+implementer, and the org-wide provisioning script all import from here.
 
 State machine
 -------------
@@ -34,7 +34,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 # Single source of truth for the three plan-state labels. All label-aware code
-# in the pipeline imports these constants — do not hard-code the names.
+# in the pipeline imports these constants; do not hard-code the names.
 STATE_NEEDS_PLAN = "state:needs-plan"
 STATE_PLAN_NO_GO = "state:plan-no-go"
 STATE_PLAN_GO = "state:plan-go"
@@ -74,6 +74,16 @@ STATE_LABEL_SPECS: dict[str, dict[str, str]] = {
     STATE_PLAN_GO: {
         "color": "0e8a16",  # green — approved
         "description": "Plan approved by reviewer; implementer may proceed.",
+    },
+    STATE_IMPLEMENTATION_NO_GO: {
+        "color": "d93f0b",  # red — blocked
+        "description": (
+            "Implementation-reviewer's latest verdict was NOGO; implementer should revise."
+        ),
+    },
+    STATE_IMPLEMENTATION_GO: {
+        "color": "0e8a16",  # green — approved
+        "description": "Implementation approved by reviewer; drive-green may proceed.",
     },
     STATE_SKIP: {
         "color": "ededed",  # grey — intentionally inert

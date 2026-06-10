@@ -21,6 +21,8 @@ from hephaestus.automation.ensure_state_labels import (
     main,
 )
 from hephaestus.automation.state_labels import (
+    STATE_IMPLEMENTATION_GO,
+    STATE_IMPLEMENTATION_NO_GO,
     STATE_LABEL_SPECS,
     STATE_NEEDS_PLAN,
     STATE_PLAN_GO,
@@ -73,9 +75,11 @@ class TestEnsureLabelsOnRepo:
             assert "--description" in args
             assert "--force" in args
             seen_labels.add(args[3])
-        # Every spec'd label was exercised (includes state:skip, #1083).
+        # Every spec'd label was exercised (includes implementation labels and
+        # state:skip, #1083).
         assert seen_labels == set(STATE_LABEL_SPECS.keys())
         assert {STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO} <= seen_labels
+        assert {STATE_IMPLEMENTATION_NO_GO, STATE_IMPLEMENTATION_GO} <= seen_labels
 
     def test_dry_run_issues_zero_calls(self, mock_run: MagicMock) -> None:
         issued = ensure_labels_on_repo("owner/name", dry_run=True)

@@ -1,10 +1,10 @@
-"""Idempotently provision the ``state:*`` plan-state labels on one or more repos.
+"""Idempotently provision automation ``state:*`` labels on one or more repos.
 
 Pairs with :mod:`hephaestus.automation.state_labels` (the single source of truth
 for the labels) and is the one-shot operator tool used after #704 ships: run
-once with ``--org`` to create the three labels across the whole
-HomericIntelligence org so the reviewer's first label-application call doesn't
-race against a missing label.
+once with ``--org`` to create/update the plan-state, implementation-review, and
+skip labels across the whole HomericIntelligence org so the first
+label-application call doesn't race against a missing label.
 
 The script is idempotent: GitHub's ``gh label create --force`` upserts the
 label (creating it if absent, updating colour/description if present), so
@@ -86,7 +86,7 @@ def _gh_list_org_repos(org: str, *, timeout: int = 60) -> list[str]:
 
 
 def ensure_labels_on_repo(repo: str, *, dry_run: bool = False) -> int:
-    """Create the three ``state:*`` labels on ``repo``.
+    """Create/update the automation ``state:*`` labels on ``repo``.
 
     Args:
         repo: ``OWNER/NAME`` slug.
@@ -156,8 +156,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hephaestus-ensure-state-labels",
         description=(
-            "Idempotently provision the state:* plan-state labels "
-            "(state:needs-plan, state:plan-no-go, state:plan-go) on one or more repos."
+            "Idempotently provision automation state:* labels "
+            "(plan-state, implementation-review, and skip) on one or more repos."
         ),
     )
     target = parser.add_mutually_exclusive_group()

@@ -10,13 +10,17 @@ from __future__ import annotations
 import pytest
 
 from hephaestus.automation.state_labels import (
+    ALL_IMPLEMENTATION_STATE_LABELS,
     ALL_STATE_LABELS,
+    STATE_IMPLEMENTATION_GO,
+    STATE_IMPLEMENTATION_NO_GO,
     STATE_LABEL_SPECS,
     STATE_NEEDS_PLAN,
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
     STATE_SKIP,
     has_label,
+    is_implementation_go,
     is_plan_go,
     is_plan_no_go,
     is_skipped,
@@ -45,11 +49,12 @@ class TestLabelVocabulary:
     def test_label_specs_cover_every_label(self) -> None:
         """The provisioning script needs a colour+description for each label.
 
-        Specs must cover every plan-state label (``ALL_STATE_LABELS``) plus the
-        independent ``state:skip`` override (#1083) — i.e. specs is a superset
-        of the plan-state tuple.
+        Specs must cover every plan-state label, every PR-scoped
+        implementation-review label, and the independent ``state:skip``
+        override (#1083).
         """
         assert set(ALL_STATE_LABELS) <= set(STATE_LABEL_SPECS.keys())
+        assert set(ALL_IMPLEMENTATION_STATE_LABELS) <= set(STATE_LABEL_SPECS.keys())
         assert STATE_SKIP in STATE_LABEL_SPECS
         for spec in STATE_LABEL_SPECS.values():
             assert "color" in spec
@@ -63,10 +68,23 @@ class TestLabelVocabulary:
         assert STATE_SKIP not in ALL_STATE_LABELS
         assert STATE_SKIP.startswith("state:")
 
+    def test_implementation_labels_are_independent_of_plan_state(self) -> None:
+        """Implementation-review state is PR-scoped, not part of issue plan state."""
+        assert set(ALL_IMPLEMENTATION_STATE_LABELS) == {
+            STATE_IMPLEMENTATION_NO_GO,
+            STATE_IMPLEMENTATION_GO,
+        }
+        assert set(ALL_IMPLEMENTATION_STATE_LABELS).isdisjoint(ALL_STATE_LABELS)
+
     def test_is_skipped(self) -> None:
         assert is_skipped(["bug", STATE_SKIP]) is True
         assert is_skipped([STATE_PLAN_GO]) is False
         assert is_skipped([]) is False
+
+    def test_is_implementation_go(self) -> None:
+        assert is_implementation_go([STATE_IMPLEMENTATION_GO]) is True
+        assert is_implementation_go([STATE_IMPLEMENTATION_NO_GO]) is False
+        assert is_implementation_go([]) is False
 
 
 class TestHasLabel:
