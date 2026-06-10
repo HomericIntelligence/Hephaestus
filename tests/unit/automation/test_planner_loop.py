@@ -585,6 +585,16 @@ class TestCapturePlannerLearnings:
             out = planner._capture_planner_learnings(123, "plan text")
         assert "learning A" in out
 
+    def test_uses_central_learn_timeout(
+        self, planner: Planner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Planner /learn must honor HEPH_LEARN_AGENT_TIMEOUT, not a short hard-code."""
+        monkeypatch.setenv("HEPH_LEARN_AGENT_TIMEOUT", "7200")
+        with patch.object(planner, "_call_claude", return_value="- learning A") as mock_call:
+            planner._capture_planner_learnings(123, "plan text")
+
+        assert mock_call.call_args.kwargs["timeout"] == 7200
+
     def test_resumes_planner_session(self, planner: Planner) -> None:
         """Stage 1: capturing learnings RESUMES the planner session (AGENT_PLANNER).
 

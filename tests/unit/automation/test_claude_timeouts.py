@@ -9,6 +9,8 @@ import pytest
 
 from hephaestus.automation import claude_timeouts
 
+TWO_HOURS_S = 7200
+
 
 def _clear_planner_timeout_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HEPH_PLANNER_AGENT_TIMEOUT", raising=False)
@@ -19,7 +21,7 @@ def test_planner_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Planner timeout uses the documented default when unset."""
     _clear_planner_timeout_env(monkeypatch)
 
-    assert claude_timeouts.planner_claude_timeout() == 600
+    assert claude_timeouts.planner_claude_timeout() == TWO_HOURS_S
 
 
 @pytest.mark.parametrize(
@@ -29,55 +31,55 @@ def test_planner_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
             "HEPH_PLANNER_AGENT_TIMEOUT",
             "HEPH_PLANNER_CLAUDE_TIMEOUT",
             claude_timeouts.planner_claude_timeout,
-            600,
+            TWO_HOURS_S,
         ),
         (
             "HEPH_PLAN_REVIEWER_AGENT_TIMEOUT",
             "HEPH_PLAN_REVIEWER_CLAUDE_TIMEOUT",
             claude_timeouts.plan_reviewer_claude_timeout,
-            300,
+            TWO_HOURS_S,
         ),
         (
             "HEPH_IMPLEMENTER_AGENT_TIMEOUT",
             "HEPH_IMPLEMENTER_CLAUDE_TIMEOUT",
             claude_timeouts.implementer_claude_timeout,
-            7200,
+            TWO_HOURS_S,
         ),
         (
             "HEPH_ADVISE_AGENT_TIMEOUT",
             "HEPH_ADVISE_CLAUDE_TIMEOUT",
             claude_timeouts.advise_claude_timeout,
-            360,
+            TWO_HOURS_S,
         ),
         (
             "HEPH_PR_REVIEWER_AGENT_TIMEOUT",
             "HEPH_PR_REVIEWER_CLAUDE_TIMEOUT",
             claude_timeouts.pr_reviewer_claude_timeout,
-            1200,
+            TWO_HOURS_S,
         ),
         (
             "HEPH_ADDRESS_REVIEW_AGENT_TIMEOUT",
             "HEPH_ADDRESS_REVIEW_CLAUDE_TIMEOUT",
             claude_timeouts.address_review_claude_timeout,
-            7200,
+            TWO_HOURS_S,
         ),
         (
             "HEPH_CI_DRIVER_AGENT_TIMEOUT",
             "HEPH_CI_DRIVER_CLAUDE_TIMEOUT",
             claude_timeouts.ci_driver_claude_timeout,
-            7200,
+            TWO_HOURS_S,
         ),
         (
             "HEPH_LEARN_AGENT_TIMEOUT",
             "HEPH_LEARN_CLAUDE_TIMEOUT",
             claude_timeouts.learn_claude_timeout,
-            600,
+            TWO_HOURS_S,
         ),
         (
             "HEPH_FOLLOW_UP_AGENT_TIMEOUT",
             "HEPH_FOLLOW_UP_CLAUDE_TIMEOUT",
             claude_timeouts.follow_up_claude_timeout,
-            600,
+            TWO_HOURS_S,
         ),
     ],
 )
@@ -113,16 +115,16 @@ def test_planner_timeout_invalid_agent_env_logs_and_defaults(
     monkeypatch.setenv("HEPH_PLANNER_AGENT_TIMEOUT", "slow")
 
     with caplog.at_level(logging.WARNING, logger="hephaestus.automation.claude_timeouts"):
-        assert claude_timeouts.planner_claude_timeout() == 600
+        assert claude_timeouts.planner_claude_timeout() == TWO_HOURS_S
 
     assert any("HEPH_PLANNER_AGENT_TIMEOUT" in record.message for record in caplog.records)
 
 
 def test_advise_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Advise timeout keeps its short default unless explicitly tuned."""
+    """Advise timeout uses the same 2h default as other agent calls."""
     monkeypatch.delenv("HEPH_ADVISE_AGENT_TIMEOUT", raising=False)
 
-    assert claude_timeouts.advise_claude_timeout() == 360
+    assert claude_timeouts.advise_claude_timeout() == TWO_HOURS_S
 
 
 def test_advise_timeout_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:

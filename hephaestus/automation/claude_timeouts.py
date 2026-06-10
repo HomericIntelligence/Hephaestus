@@ -32,13 +32,13 @@ def _read_int_env(name: str, default: int) -> int:
 
 
 def planner_claude_timeout() -> int:
-    """Timeout for agent calls inside the planner (default 600s)."""
-    return _read_int_env("HEPH_PLANNER_AGENT_TIMEOUT", 600)
+    """Timeout for agent calls inside the planner (default 7200s)."""
+    return _read_int_env("HEPH_PLANNER_AGENT_TIMEOUT", 7200)
 
 
 def plan_reviewer_claude_timeout() -> int:
-    """Timeout for agent calls inside the plan reviewer (default 300s)."""
-    return _read_int_env("HEPH_PLAN_REVIEWER_AGENT_TIMEOUT", 300)
+    """Timeout for agent calls inside the plan reviewer (default 7200s)."""
+    return _read_int_env("HEPH_PLAN_REVIEWER_AGENT_TIMEOUT", 7200)
 
 
 def implementer_claude_timeout() -> int:
@@ -47,13 +47,13 @@ def implementer_claude_timeout() -> int:
 
 
 def advise_claude_timeout() -> int:
-    """Timeout for lightweight advise agent calls (default 360s)."""
-    return _read_int_env("HEPH_ADVISE_AGENT_TIMEOUT", 360)
+    """Timeout for advise agent calls (default 7200s)."""
+    return _read_int_env("HEPH_ADVISE_AGENT_TIMEOUT", 7200)
 
 
 def pr_reviewer_claude_timeout() -> int:
-    """Timeout for the PR reviewer's agent analysis (default 1200s)."""
-    return _read_int_env("HEPH_PR_REVIEWER_AGENT_TIMEOUT", 1200)
+    """Timeout for the PR reviewer's agent analysis (default 7200s)."""
+    return _read_int_env("HEPH_PR_REVIEWER_AGENT_TIMEOUT", 7200)
 
 
 def address_review_claude_timeout() -> int:
@@ -67,13 +67,13 @@ def ci_driver_claude_timeout() -> int:
 
 
 def learn_claude_timeout() -> int:
-    """Timeout for the post-impl ``/learn`` agent call (default 600s)."""
-    return _read_int_env("HEPH_LEARN_AGENT_TIMEOUT", 600)
+    """Timeout for ``/learn`` agent calls (default 7200s)."""
+    return _read_int_env("HEPH_LEARN_AGENT_TIMEOUT", 7200)
 
 
 def follow_up_claude_timeout() -> int:
-    """Timeout for the follow-up-issue agent session (default 600s)."""
-    return _read_int_env("HEPH_FOLLOW_UP_AGENT_TIMEOUT", 600)
+    """Timeout for the follow-up-issue agent session (default 7200s)."""
+    return _read_int_env("HEPH_FOLLOW_UP_AGENT_TIMEOUT", 7200)
 
 
 def gh_cli_timeout() -> int:
