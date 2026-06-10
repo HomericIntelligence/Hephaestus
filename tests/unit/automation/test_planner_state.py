@@ -152,6 +152,82 @@ class TestHasExistingPlanCached:
 
 
 # ---------------------------------------------------------------------------
+# filter — drops state:plan-go issues via batched labels (no per-issue gh view)
+# ---------------------------------------------------------------------------
+
+
+class TestFilterDropsPlanGoIssues:
+    """``filter()`` skips already-GO issues using one batched label fetch.
+
+    Previously the planner re-evaluated every open issue every loop with a
+    per-issue ``gh issue view`` (via ``is_plan_review_go``); ``state:plan-go``
+    issues are now dropped up front from one aliased GraphQL call.
+    """
+
+    def test_plan_go_issue_dropped_no_per_issue_gh_view(self) -> None:
+        from hephaestus.automation.state_labels import STATE_PLAN_GO
+
+        opts = _make_options(issues=[10, 11, 12])
+        opts.skip_closed = False
+        mgr = PlannerStateManager(opts)
+
+        labels = {
+            10: [STATE_PLAN_GO],  # already planned → dropped
+            11: ["state:plan-no-go"],  # not GO → kept for re-plan
+            12: [],  # unlabeled → kept for re-plan
+        }
+        with (
+            patch(
+                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                return_value=labels,
+            ),
+            patch("hephaestus.automation.planner_state._gh_call") as mock_gh,
+        ):
+            kept = mgr.filter()
+
+        assert kept == [11, 12]
+        # No per-issue gh issue view: only the batched label fetch was used.
+        mock_gh.assert_not_called()
+
+    def test_force_replans_even_plan_go_issues(self) -> None:
+        from hephaestus.automation.state_labels import STATE_PLAN_GO
+
+        opts = _make_options(issues=[10])
+        opts.skip_closed = False
+        opts.force = True
+        mgr = PlannerStateManager(opts)
+
+        with patch(
+            "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+            return_value={10: [STATE_PLAN_GO]},
+        ):
+            kept = mgr.filter()
+
+        assert kept == [10]  # force overrides the plan-go skip
+
+    def test_cached_labels_served_to_callers(self) -> None:
+        from hephaestus.automation.state_labels import STATE_PLAN_GO
+
+        opts = _make_options(issues=[10, 11])
+        opts.skip_closed = False
+        mgr = PlannerStateManager(opts)
+
+        with patch(
+            "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+            return_value={10: [STATE_PLAN_GO], 11: ["bug"]},
+        ):
+            mgr.filter()
+
+        assert mgr.get_cached_labels(11) == ["bug"]
+        # Unfetched issue → empty list (cache populated but issue absent).
+        assert mgr.get_cached_labels(99) == []
+
+    def test_labels_cache_none_before_filter(self) -> None:
+        mgr = PlannerStateManager(_make_options())
+        assert mgr.get_cached_labels(1) is None
+
+
+# ---------------------------------------------------------------------------
 # has_existing_plan — fallback (no cache)
 # ---------------------------------------------------------------------------
 

@@ -31,6 +31,13 @@ from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
 logger = get_logger(__name__)
 
+# Model the tidy conflict-resolution swarm runs on. Defined locally rather than
+# imported from hephaestus.automation.claude_models because hephaestus.github
+# must not depend on hephaestus.automation (one-way layering boundary enforced
+# by tests/unit/utils/test_no_import_cycles.py). Keep this in sync with the
+# SONNET constant there.
+_TIDY_SWARM_MODEL = "claude-sonnet-4-6"
+
 # ANSI escape sequence stripper
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -325,7 +332,7 @@ def _claude_options(options_factory: Any, repo_path: Path) -> object:
     return options_factory(
         max_turns=40,
         cwd=str(repo_path),
-        model="claude-sonnet-4-6",
+        model=_TIDY_SWARM_MODEL,
     )
 
 

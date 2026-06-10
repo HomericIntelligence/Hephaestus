@@ -455,11 +455,15 @@ class TestRunLoopEarlyExit:
         assert max(r.loop_idx for r in results) == 1
         assert call_count == 1
 
-    def test_early_exit_does_not_skip_selected_final_loop_phase(self, tmp_path: Path) -> None:
-        """A selected final-loop-only phase prevents early-exit before its loop."""
+    def test_no_early_exit_while_drive_green_has_failing_prs(self, tmp_path: Path) -> None:
+        """drive-green selected + a failing PR blocks early-exit before the final loop.
+
+        Even with 0 new plan work, the loop must keep going while there is still
+        drive-green work (an open PR that isn't green / implementation-go) to do.
+        """
         projects = tmp_path
         (projects / "r1" / ".git").mkdir(parents=True)
-        cfg = LoopConfig(loops=3, projects_dir=projects)
+        cfg = LoopConfig(loops=3, projects_dir=projects)  # default phases incl. drive-green
 
         call_count = 0
 
@@ -468,11 +472,43 @@ class TestRunLoopEarlyExit:
             call_count += 1
             return _zero_work_result(repo, loop_idx)
 
-        with patch.object(loop_runner, "process_repo", side_effect=fake_process):
+        with (
+            patch.object(loop_runner, "process_repo", side_effect=fake_process),
+            patch.object(loop_runner, "_count_failing_prs", return_value=1),
+        ):
             results = run_loop(cfg, repos=["r1"])
 
+        # A failing PR keeps the loop running to the cap.
         assert max(r.loop_idx for r in results) == 3
         assert call_count == 3
+
+    def test_early_exit_when_drive_green_selected_but_no_failing_prs(self, tmp_path: Path) -> None:
+        """drive-green selected but NO failing PR + 0 plan work → converge early.
+
+        The user's model: drive-green runs after the implement loop; once there
+        is no plan work and every PR is green/implementation-go, stop — don't
+        spin out the full --loops just because drive-green is selected.
+        """
+        projects = tmp_path
+        (projects / "r1" / ".git").mkdir(parents=True)
+        cfg = LoopConfig(loops=5, projects_dir=projects)  # default phases incl. drive-green
+
+        call_count = 0
+
+        def fake_process(repo: str, loop_idx: int, cfg: LoopConfig) -> RepoResult:
+            nonlocal call_count
+            call_count += 1
+            return _zero_work_result(repo, loop_idx)
+
+        with (
+            patch.object(loop_runner, "process_repo", side_effect=fake_process),
+            patch.object(loop_runner, "_count_failing_prs", return_value=0),
+        ):
+            results = run_loop(cfg, repos=["r1"])
+
+        # No plan work and no failing PR → early-exit after loop 1.
+        assert max(r.loop_idx for r in results) == 1
+        assert call_count == 1
 
     def test_loops_caps_when_work_continues_every_loop(self, tmp_path: Path) -> None:
         """--loops is still respected as an upper bound when work is produced each loop.
@@ -815,3 +851,36 @@ class TestPlannerMainWorkReport:
 
         assert rc == 0
         assert captured["work"] == 0
+
+
+class TestHasPendingDriveGreenWork:
+    """Convergence gate: drive-green pending-work detection (#1128 review)."""
+
+    def test_not_selected_returns_false(self) -> None:
+        """No drive-green phase → no terminal work to wait for."""
+        cfg = LoopConfig(phases=("plan", "implement"))
+        assert loop_runner._has_pending_drive_green_work(cfg, ["r1"]) is False
+
+    def test_explicit_issues_keeps_looping(self) -> None:
+        """--issues scope → keep looping (repo-wide PR scan is the wrong signal).
+
+        ``_count_failing_prs`` has no issue filter, so a clean repo-wide scan
+        would wrongly converge before the terminal drive-green pass runs against
+        the pinned issues. Must return True and must NOT call _count_failing_prs.
+        """
+        cfg = LoopConfig(issues=[7, 8])  # default phases include drive-green
+        with patch.object(loop_runner, "_count_failing_prs") as mock_count:
+            assert loop_runner._has_pending_drive_green_work(cfg, ["r1"]) is True
+        mock_count.assert_not_called()
+
+    def test_failing_pr_means_pending(self) -> None:
+        """A failing PR in any repo → pending drive-green work."""
+        cfg = LoopConfig()  # default phases, no --issues
+        with patch.object(loop_runner, "_count_failing_prs", side_effect=[0, 2]):
+            assert loop_runner._has_pending_drive_green_work(cfg, ["r1", "r2"]) is True
+
+    def test_no_failing_pr_means_converged(self) -> None:
+        """All repos green → no pending drive-green work (loop may converge)."""
+        cfg = LoopConfig()
+        with patch.object(loop_runner, "_count_failing_prs", return_value=0):
+            assert loop_runner._has_pending_drive_green_work(cfg, ["r1", "r2"]) is False

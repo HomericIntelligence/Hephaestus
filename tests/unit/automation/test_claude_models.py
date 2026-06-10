@@ -102,3 +102,42 @@ class TestEnvVarValidation:
         assert claude_models.reviewer_model() == model_id
         assert claude_models.advise_model() == model_id
         assert claude_models.learn_model() == model_id
+
+
+class TestNewerModelsRecognized:
+    """Newer models are recognized — no spurious 'Unknown model' warning.
+
+    ``claude-opus-4-8`` and ``claude-fable-5`` are valid IDs (the Fable tier
+    sits above Opus). An operator pinning them must not be nagged every call.
+    """
+
+    @pytest.mark.parametrize("model_id", ["claude-opus-4-8", "claude-fable-5"])
+    def test_newer_model_override_no_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        model_id: str,
+    ) -> None:
+        import logging
+
+        monkeypatch.setenv("HEPH_REVIEWER_MODEL", model_id)
+        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.claude_models"):
+            result = claude_models.reviewer_model()
+        assert result == model_id
+        assert not caplog.records
+
+    def test_newer_models_in_known_set(self) -> None:
+        assert "claude-opus-4-8" in claude_models._KNOWN_MODELS
+        assert "claude-fable-5" in claude_models._KNOWN_MODELS
+
+    def test_genuinely_unknown_model_still_warns(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Adding newer models must not suppress warnings for true typos."""
+        import logging
+
+        monkeypatch.setenv("HEPH_REVIEWER_MODEL", "claude-fbale-5")  # typo
+        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.claude_models"):
+            result = claude_models.reviewer_model()
+        assert result == "claude-fbale-5"
+        assert any("Unknown model" in r.message for r in caplog.records)

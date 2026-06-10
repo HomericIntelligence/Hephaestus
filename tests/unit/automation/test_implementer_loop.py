@@ -108,6 +108,40 @@ class TestRunImplReviewLoop:
         ):
             yield
 
+    def test_review_status_slot_shows_pr_number(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """During PR review work the status slot shows the PR number, not the issue.
+
+        #5: when handling a PR, the PR number is the relevant identifier.
+        """
+        with (
+            patch.object(implementer, "_run_impl_review_step", return_value=(_nogo("D"), ["t0"])),
+            patch.object(implementer, "_run_address_review_step", return_value=True),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_pr_list_unresolved_threads",
+                return_value=[],
+            ),
+            patch.object(implementer.status_tracker, "update_slot") as mock_slot,
+            patch("hephaestus.automation.implementer_phase_runner.gh_issue_add_labels"),
+        ):
+            implementer._run_impl_review_loop(
+                issue_number=7,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=4242,
+            )
+
+        slot_texts = " | ".join(str(c.args[1]) for c in mock_slot.call_args_list if len(c.args) > 1)
+        # "reviewing impl" status must reference the PR (#4242), not the issue (#7).
+        assert "4242" in slot_texts
+        assert "reviewing impl" in slot_texts
+
     def test_terminates_on_iter0_go(self, implementer: IssueImplementer, tmp_path: Path) -> None:
         with (
             patch.object(
@@ -155,10 +189,18 @@ class TestRunImplReviewLoop:
 
         assert mock_rev.call_args.kwargs["advise_findings"] == "prior team finding"
 
-    def test_go_resolves_only_automation_owned_stale_threads(
+    def test_go_resolves_automation_threads_but_human_thread_blocks_go(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
-        """A GO verdict cleans up stale automation comments but not human review threads."""
+        """A GO cleans up stale automation comments AND is blocked by a human thread.
+
+        The automation-owned threads are resolved, but the lone human review
+        thread (alice) is left open and must BLOCK the GO — a GO cannot stand
+        while a human review thread is unresolved (#1). Because automation cannot
+        resolve a human thread, the loop breaks IMMEDIATELY with a distinct
+        HUMAN_BLOCKED verdict (iters == 1) rather than spinning to exhaustion,
+        and applies NO state:skip (the PR is left unlabeled, awaiting the human).
+        """
         threads = [
             {"id": "T_self", "author": "mvillmow", "path": "a.py", "line": 1, "body": "old"},
             {
@@ -191,6 +233,67 @@ class TestRunImplReviewLoop:
         ]
         with (
             patch.object(implementer, "_run_impl_review_step", return_value=(_go(), [])),
+            patch.object(implementer, "_run_address_review_step", return_value=True),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_pr_list_unresolved_threads",
+                return_value=threads,
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_current_login",
+                return_value="mvillmow",
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_pr_resolve_thread"
+            ) as mock_resolve,
+            patch.object(implementer, "_run_address_review_step") as mock_addr2,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_issue_add_labels"
+            ) as mock_label,
+        ):
+            iters, verdict, _grade = implementer._run_impl_review_loop(
+                issue_number=1,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=42,
+            )
+
+        # GO was blocked by an open human thread → distinct terminal verdict,
+        # broke immediately (no spin to exhaustion), no address step, no skip.
+        assert verdict == "HUMAN_BLOCKED"
+        assert iters == 1
+        mock_addr2.assert_not_called()
+        mock_label.assert_not_called()  # no state:skip applied
+        # Automation-owned threads were still resolved on the GO attempt;
+        # the human thread (T_human) was never resolved by automation.
+        resolved_ids = {call.args[0] for call in mock_resolve.call_args_list}
+        assert "T_human" not in resolved_ids
+        assert {"T_self", "T_bot", "T_nested_self"} <= resolved_ids
+
+    def test_go_accepted_when_only_automation_threads_remain(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """GO terminates the loop when every unresolved thread is automation-owned.
+
+        Automation cleans up its own stale threads on GO; with no human thread
+        left, the GO stands and the loop terminates at iteration 0.
+        """
+        threads = [
+            {"id": "T_self", "author": "mvillmow", "path": "a.py", "line": 1, "body": "old"},
+            {
+                "id": "T_bot",
+                "author": "github-actions[bot]",
+                "path": "b.py",
+                "line": 2,
+                "body": "old",
+            },
+        ]
+        with (
+            patch.object(implementer, "_run_impl_review_step", return_value=(_go(), [])),
             patch.object(implementer, "_run_address_review_step") as mock_addr,
             patch(
                 "hephaestus.automation.implementer_phase_runner.gh_pr_list_unresolved_threads",
@@ -219,7 +322,9 @@ class TestRunImplReviewLoop:
         assert (iters, verdict, grade) == (1, "GO", "A")
         mock_addr.assert_not_called()
         resolved_ids = [call.args[0] for call in mock_resolve.call_args_list]
-        assert resolved_ids == ["T_self", "T_bot", "T_nested_self"]
+        assert resolved_ids == ["T_self", "T_bot"]
+        # Each resolve call passes the thread id positionally and dry_run=False
+        # (signature guard carried over from main).
         assert all(
             call.args == (thread_id,)
             for call, thread_id in zip(mock_resolve.call_args_list, resolved_ids, strict=True)
@@ -390,6 +495,34 @@ class TestRunImplReviewLoop:
                 issue_number=911,
                 pr_number=1069,
                 last_verdict="ERROR",
+                slot_id=None,
+                thread_id=None,
+            )
+
+        mock_go.assert_not_called()
+        mock_no_go.assert_not_called()
+
+    def test_human_blocked_verdict_applies_neither_implementation_label(
+        self, implementer: IssueImplementer
+    ) -> None:
+        """A HUMAN_BLOCKED verdict applies neither implementation-go nor -no-go.
+
+        Review reached GO but an open human thread blocks it; the PR is left
+        unlabeled for the human to resolve, not marked go (arming auto-merge on
+        an unresolved PR) or no-go (recording a converged failure).
+        """
+        with (
+            patch(
+                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_go"
+            ) as mock_go,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_no_go"
+            ) as mock_no_go,
+        ):
+            implementer.phase_runner._apply_impl_review_verdict(
+                issue_number=911,
+                pr_number=1069,
+                last_verdict="HUMAN_BLOCKED",
                 slot_id=None,
                 thread_id=None,
             )
@@ -653,8 +786,24 @@ class TestRunImplReviewLoop:
             patch.object(implementer, "_run_address_review_step", return_value=True) as mock_addr,
             patch(
                 "hephaestus.automation.implementer_phase_runner.gh_pr_list_unresolved_threads",
-                return_value=[{"id": "T", "path": "a.py", "line": 1, "body": "fix"}],
+                # Automation-owned thread (posted by the reviewer bot) — the
+                # GO-gate resolves/ignores it, so it doesn't block the eventual
+                # GO. Only HUMAN threads block GO.
+                return_value=[
+                    {
+                        "id": "T",
+                        "author": "github-actions[bot]",
+                        "path": "a.py",
+                        "line": 1,
+                        "body": "fix",
+                    }
+                ],
             ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_current_login",
+                return_value="mvillmow",
+            ),
+            patch("hephaestus.automation.implementer_phase_runner.gh_pr_resolve_thread"),
             patch(
                 "hephaestus.automation.implementer_phase_runner.validate_prior_comments_addressed",
                 # R1 validation re-opens; R2 validation is clean.

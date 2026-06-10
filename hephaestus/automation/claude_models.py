@@ -25,10 +25,16 @@ OPUS = "claude-opus-4-7"
 SONNET = "claude-sonnet-4-6"
 HAIKU = "claude-haiku-4-5"
 
-# The set of model IDs the automation suite is tested against.  Overrides
-# to values outside this set are accepted (operators may have preview access)
-# but will trigger a one-time warning so misconfigured env vars are visible.
-_KNOWN_MODELS: frozenset[str] = frozenset({OPUS, SONNET, HAIKU})
+# Newer tiers that are valid model IDs but not the per-phase defaults. Listed in
+# the known set so pinning them via HEPH_*_MODEL doesn't emit a spurious
+# "Unknown model" warning. (Fable sits above Opus; 4.8 is the current Opus.)
+OPUS_48 = "claude-opus-4-8"
+FABLE = "claude-fable-5"
+
+# The set of model IDs the automation suite recognizes. Overrides to values
+# outside this set are still accepted (operators may have preview access) but
+# trigger a one-time warning so misconfigured/typo'd env vars are visible.
+_KNOWN_MODELS: frozenset[str] = frozenset({OPUS, SONNET, HAIKU, OPUS_48, FABLE})
 
 
 def _resolve_model(env_var: str, default: str) -> str:

@@ -327,6 +327,68 @@ def fetch_all_issue_comments_graphql(
     return result_map
 
 
+def fetch_all_issue_labels_graphql(
+    issue_numbers: list[int],
+) -> dict[int, list[str]]:
+    """Batch-fetch label names for multiple issues in one aliased GraphQL call.
+
+    Mirrors :func:`fetch_all_issue_comments_graphql` but retrieves each issue's
+    label names instead of comments. One aliased query replaces ``N`` per-issue
+    ``gh issue view`` round-trips, so the planner can cheaply drop already-GO
+    (``state:plan-go``) issues from its work set before the worker pool starts
+    (avoids re-scanning every open issue every loop).
+
+    Falls back to an empty list per issue on any failure (caller then treats the
+    issue as "labels unknown" and re-evaluates it the slow way).
+
+    Args:
+        issue_numbers: List of GitHub issue numbers to fetch.
+
+    Returns:
+        Mapping of ``issue_number → list[label_name]``. Issues that could not be
+        fetched map to ``[]``.
+
+    """
+    if not issue_numbers:
+        return {}
+
+    owner, name = get_repo_info(get_repo_root())
+
+    fragments = [
+        (f"issue{idx}: issue(number: {int(num)}){{labels(first: 50){{nodes{{name}}}}}}")
+        for idx, num in enumerate(issue_numbers)
+    ]
+    query = f"query{{repository(owner:{owner!r},name:{name!r}){{{' '.join(fragments)}}}}}"
+
+    idx_to_num = dict(enumerate(issue_numbers))
+    result_map: dict[int, list[str]] = {num: [] for num in issue_numbers}
+
+    try:
+        result = _gh_call(["api", "graphql", "-f", f"query={query}"])
+        data = json.loads(result.stdout)
+        repo_data = data.get("data", {}).get("repository", {})
+        for alias, issue_data in repo_data.items():
+            if not alias.startswith("issue"):
+                continue
+            try:
+                idx = int(alias[len("issue") :])
+            except ValueError:
+                continue
+            num = idx_to_num.get(idx)
+            if num is None or issue_data is None:
+                continue
+            nodes = issue_data.get("labels", {}).get("nodes", []) or []
+            result_map[num] = [n.get("name", "") for n in nodes if n.get("name")]
+    except Exception as exc:  # pragma: no cover - logged, callers get empty lists
+        logger.warning(
+            "Failed to batch-fetch labels for issues %s: %s",
+            issue_numbers,
+            exc,
+        )
+
+    return result_map
+
+
 def is_plan_review_go(  # noqa: C901  # labels-first gate with comment-scan backfill
     issue_number: int,
     comments: list[dict[str, Any]] | None = None,

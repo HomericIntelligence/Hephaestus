@@ -388,3 +388,63 @@ class TestUnparseableVerdictCap:
 def test_fetch_all_issue_comments_graphql_is_importable() -> None:
     """Guard the public import surface used by the planner's batch prefetch."""
     assert callable(fetch_all_issue_comments_graphql)
+
+
+# ---------------------------------------------------------------------------
+# fetch_all_issue_labels_graphql
+# ---------------------------------------------------------------------------
+
+
+class TestFetchAllIssueLabelsGraphql:
+    """Batched label fetch used by the planner to drop already-GO issues."""
+
+    def test_empty_input_returns_empty(self) -> None:
+        from hephaestus.automation.review_state import fetch_all_issue_labels_graphql
+
+        assert fetch_all_issue_labels_graphql([]) == {}
+
+    def test_parses_aliased_labels(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from hephaestus.automation.review_state import fetch_all_issue_labels_graphql
+
+        payload = {
+            "data": {
+                "repository": {
+                    "issue0": {"labels": {"nodes": [{"name": "state:plan-go"}, {"name": "bug"}]}},
+                    "issue1": {"labels": {"nodes": []}},
+                }
+            }
+        }
+        with (
+            patch("hephaestus.automation.review_state.get_repo_root", return_value="/tmp/repo"),
+            patch(
+                "hephaestus.automation.review_state.get_repo_info",
+                return_value=("owner", "repo"),
+            ),
+            patch("hephaestus.automation.review_state._gh_call") as mock_gh,
+        ):
+            mock_gh.return_value = MagicMock(stdout=json.dumps(payload))
+            result = fetch_all_issue_labels_graphql([10, 11])
+
+        assert result == {10: ["state:plan-go", "bug"], 11: []}
+
+    def test_fetch_failure_returns_empty_lists(self) -> None:
+        from unittest.mock import patch
+
+        from hephaestus.automation.review_state import fetch_all_issue_labels_graphql
+
+        with (
+            patch("hephaestus.automation.review_state.get_repo_root", return_value="/tmp/repo"),
+            patch(
+                "hephaestus.automation.review_state.get_repo_info",
+                return_value=("owner", "repo"),
+            ),
+            patch(
+                "hephaestus.automation.review_state._gh_call",
+                side_effect=RuntimeError("gh down"),
+            ),
+        ):
+            result = fetch_all_issue_labels_graphql([10, 11])
+
+        assert result == {10: [], 11: []}

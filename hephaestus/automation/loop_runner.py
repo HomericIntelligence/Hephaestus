@@ -478,9 +478,32 @@ def _phase_order_warnings(cfg: LoopConfig) -> list[str]:
     return warnings
 
 
-def _has_pending_final_loop_phase(cfg: LoopConfig, loop_idx: int) -> bool:
-    """Return true when early-exit would skip a selected final-loop-only phase."""
-    return loop_idx < cfg.loops and any(phase in cfg.phases for phase in FINAL_LOOP_ONLY_PHASES)
+def _has_pending_drive_green_work(cfg: LoopConfig, repos: list[str]) -> bool:
+    """Return True when drive-green still has PRs to drive across any repo.
+
+    drive-green runs as the terminal phase AFTER the implement loop converges
+    (it is in :data:`FINAL_LOOP_ONLY_PHASES`). Early-exit must therefore not
+    fire while there is still drive-green work to do — but the mere fact that
+    drive-green is *selected* is not, by itself, pending work. We gate on
+    whether any open PR actually needs CI/merge attention, using the same
+    ``_count_failing_prs`` predicate the driver uses so the gate cannot drift.
+
+    When drive-green is not selected, there is no terminal work to wait for.
+    Returns ``True`` (conservatively keep looping) when at least one repo has a
+    failing/un-green PR.
+    """
+    if "drive-green" not in cfg.phases:
+        return False
+    # An explicit --issues scope pins the work set to specific PRs/issues, but
+    # ``_count_failing_prs`` scans ALL open repo PRs (it has no issue filter), so
+    # it's the wrong signal here — a clean repo-wide scan would wrongly say "no
+    # pending work" and let the loop converge before the terminal drive-green
+    # pass runs against the pinned issues. Keep looping (defer to --loops as the
+    # bound) rather than early-exiting and abandoning the operator's explicit
+    # drive-green work.
+    if cfg.issues:
+        return True
+    return any(_count_failing_prs(cfg.org, repo) > 0 for repo in repos)
 
 
 # ---------------------------------------------------------------------------
@@ -1356,20 +1379,23 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
         LOG.info("%s", _summarize_loop(loop_results, loop_idx, elapsed_s))
         LOG.info("Loop %d complete.", loop_idx)
 
-        # Early-exit: when the full pass across ALL repos produced zero
-        # convergence-relevant work (0 new plans + 0 non-skipped reviews)
-        # and no failures, the pipeline has converged — continue loops would
-        # only re-spin non-converging issues. --loops remains an upper bound.
-        # (#614)
+        # Early-exit: the pipeline has converged when the full pass across ALL
+        # repos produced zero new plan work, no failures, AND there is no
+        # remaining drive-green work (every open PR is green / already
+        # state:implementation-go). drive-green is the terminal phase that runs
+        # after the implement loop converges, so we stop as soon as there are no
+        # plans to make and no PRs left to drive — rather than spinning out the
+        # full --loops just because drive-green is selected. --loops stays an
+        # upper bound. (#614; convergence-on-no-pending-PR refinement.)
         if (
             loop_idx < cfg.loops
-            and not _has_pending_final_loop_phase(cfg, loop_idx)
+            and not _has_pending_drive_green_work(cfg, repos)
             and not any(r.any_failure for r in loop_results)
             and not any(r.produced_work for r in loop_results)
         ):
             LOG.info(
                 "Early exit after loop %d/%d: full pass produced 0 new plans"
-                " and 0 non-skipped reviews across all %d repo(s)."
+                " across all %d repo(s) and no open PR needs drive-green."
                 " Remaining loops skipped.",
                 loop_idx,
                 cfg.loops,

@@ -18,6 +18,21 @@ from hephaestus.github.tidy import (
 
 tidy_module = importlib.import_module("hephaestus.github.tidy")
 
+
+def test_tidy_swarm_model_matches_canonical_sonnet() -> None:
+    """Drift guard: the tidy swarm model mirrors claude_models.SONNET.
+
+    ``hephaestus.github`` must not import ``hephaestus.automation`` (layering
+    boundary, see test_no_import_cycles), so tidy keeps a local model constant.
+    This test — which lives outside that boundary — pins the two together so a
+    canonical model bump doesn't silently leave tidy behind.
+    """
+    from hephaestus.automation.claude_models import SONNET
+    from hephaestus.github.tidy import _TIDY_SWARM_MODEL
+
+    assert _TIDY_SWARM_MODEL == SONNET
+
+
 # Fixture: clean gh-tidy run (no problem branches)
 CLEAN_OUTPUT = """\
 Checking out main and pulling the latest from remote origin...

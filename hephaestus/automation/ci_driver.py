@@ -700,9 +700,7 @@ class CIDriver:
             if self.options.enable_mechanical_rebase and not self.options.dry_run:
                 self._attempt_mechanical_rebase(issue_number, pr_number, acquired_slot)
 
-            self.status_tracker.update_slot(
-                acquired_slot, f"{issue_ref(issue_number)}: fetching checks"
-            )
+            self.status_tracker.update_slot(acquired_slot, f"{pr_ref(pr_number)}: fetching checks")
 
             # 2. Get CI checks — bounded poll loop for pending state.
             # The module docstring advertises "Parallel CI check polling" but the
@@ -753,10 +751,10 @@ class CIDriver:
                         issue_number=issue_number, success=True, pr_number=pr_number
                     )
 
-                iref = issue_ref(issue_number)
+                pref = pr_ref(pr_number)
                 self.status_tracker.update_slot(
                     acquired_slot,
-                    f"{iref}: waiting for CI checks "
+                    f"{pref}: waiting for CI checks "
                     f"(attempt {poll_attempt + 1}, {poll_elapsed}s elapsed)",
                 )
                 logger.debug(
@@ -789,7 +787,7 @@ class CIDriver:
                     )
 
                 self.status_tracker.update_slot(
-                    acquired_slot, f"{issue_ref(issue_number)}: enabling auto-merge"
+                    acquired_slot, f"{pr_ref(pr_number)}: enabling auto-merge"
                 )
                 # DRY-RUN GUARD before auto-merge
                 if self.options.dry_run:
@@ -813,7 +811,7 @@ class CIDriver:
                     # let the NEXT run's _check_arming_on_drive_start fire
                     # /learn once GitHub reports the PR as MERGED.
                     self.status_tracker.update_slot(
-                        acquired_slot, f"{issue_ref(issue_number)}: arming for post-merge /learn"
+                        acquired_slot, f"{pr_ref(pr_number)}: arming for post-merge /learn"
                     )
                     gh_state = self._gh_pr_state(pr_number)
                     pr_head_sha = (gh_state or {}).get("headRefOid", "") or ""
@@ -1131,7 +1129,7 @@ class CIDriver:
             return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
         self.status_tracker.update_slot(
-            acquired_slot, f"{issue_ref(issue_number)}: enabling auto-merge (post-fix)"
+            acquired_slot, f"{pr_ref(pr_number)}: enabling auto-merge (post-fix)"
         )
         merge_ok = self._enable_auto_merge(
             pr_number, is_bot_pr=self._is_bot_pr_mode(issue_number, pr_number)

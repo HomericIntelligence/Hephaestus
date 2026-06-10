@@ -22,7 +22,12 @@ from typing import TYPE_CHECKING, Any
 from .git_utils import issue_ref
 from .github_api import _gh_call, prefetch_issue_states
 from .models import PLAN_COMMENT_MARKER
-from .review_state import PLAN_REVIEW_PREFIX, fetch_all_issue_comments_graphql
+from .review_state import (
+    PLAN_REVIEW_PREFIX,
+    fetch_all_issue_comments_graphql,
+    fetch_all_issue_labels_graphql,
+)
+from .state_labels import STATE_PLAN_GO
 
 if TYPE_CHECKING:
     from .models import PlannerOptions
@@ -68,24 +73,35 @@ class PlannerStateManager:
         """
         self.options = options
         self._comments_cache: dict[int, list[dict[str, Any]]] | None = None
+        self._labels_cache: dict[int, list[str]] | None = None
 
     def filter(self) -> list[int]:
         """Filter issues based on options.
 
-        Only does the cheap, batched check here: skip closed issues using one
-        GraphQL call per 100 via :func:`prefetch_issue_states`. The
-        already-planned check happens per-issue inside
-        :meth:`Planner._plan_issue` so it runs in parallel with the worker
-        pool instead of blocking on N sequential ``gh issue view --comments``
-        round-trips before any worker starts (#548).
+        Two cheap, batched checks here, each one GraphQL call per 100 issues:
+
+        1. Skip **closed** issues (:func:`prefetch_issue_states`).
+        2. Skip issues already in ``state:plan-go`` (:func:`fetch_all_issue_labels_graphql`).
+
+        Dropping ``state:plan-go`` issues up front means the loop stops
+        re-evaluating every open issue every pass — previously each surviving
+        issue cost one ``gh issue view`` via ``is_plan_review_go`` inside the
+        worker, even ones already converged. The batched label fetch replaces
+        those N round-trips with one. Issues whose labels couldn't be fetched
+        fall through and are re-checked the slow way inside the worker (no
+        behavior loss, just no speed-up for that issue).
 
         Returns:
-            List of issue numbers to plan
+            List of issue numbers to plan.
 
         """
         cached_states = {}
         if self.options.skip_closed:
             cached_states = prefetch_issue_states(self.options.issues)
+
+        # Batch-fetch labels so we can cheaply drop already-GO issues here and
+        # also serve them to is_plan_review_go inside the worker (no extra call).
+        self._labels_cache = fetch_all_issue_labels_graphql(self.options.issues)
 
         issues_to_plan = []
         for issue_num in self.options.issues:
@@ -95,9 +111,29 @@ class PlannerStateManager:
                     logger.info("Issue #%s is closed, skipping", issue_num)
                     continue
 
+            # Already-planned fast path: a state:plan-go label is the single
+            # source of truth (#704). Drop it now without a per-issue round-trip.
+            # ``force`` re-plans everything, so don't pre-filter then.
+            if not self.options.force:
+                labels = self._labels_cache.get(issue_num)
+                if labels is not None and STATE_PLAN_GO in labels:
+                    logger.info("Issue #%s already has a plan (state:plan-go), skipping", issue_num)
+                    continue
+
             issues_to_plan.append(issue_num)
 
         return issues_to_plan
+
+    def get_cached_labels(self, issue_number: int) -> list[str] | None:
+        """Return cached label names for an issue, or None if unpopulated.
+
+        Populated by :meth:`filter`. Callers pass the result into
+        :func:`~hephaestus.automation.review_state.is_plan_review_go` as
+        ``issue_labels=`` to avoid a per-issue ``gh issue view``.
+        """
+        if self._labels_cache is None:
+            return None
+        return self._labels_cache.get(issue_number, [])
 
     def prefetch_comments(self, issue_numbers: list[int]) -> None:
         """Batch-fetch comments for all issues in one aliased GraphQL call.

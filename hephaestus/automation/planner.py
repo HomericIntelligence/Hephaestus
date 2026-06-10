@@ -125,8 +125,13 @@ class Planner:
         issues that converged before the labels rollout). Issues in
         ``state:plan-no-go`` or with no state label at all are re-planned so
         the loop drives them toward GO without churning on GO'd ones.
+
+        Reuses the labels batch-fetched in :meth:`PlannerStateManager.filter`
+        (passed as ``issue_labels=``) so this check costs no extra round-trip
+        for issues whose labels are already cached.
         """
-        return is_plan_review_go(issue_number)
+        cached_labels = self.state_mgr.get_cached_labels(issue_number)
+        return is_plan_review_go(issue_number, issue_labels=cached_labels)
 
     def _plan_issue(self, issue_number: int) -> PlanResult:
         """Plan a single issue.
