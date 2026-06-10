@@ -7,8 +7,10 @@ Provides:
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 from hephaestus.agents.runtime import resume_codex_session, session_agent_matches
@@ -19,6 +21,32 @@ from .git_utils import run
 from .session_naming import session_uuid
 
 logger = logging.getLogger(__name__)
+
+
+def _write_learn_record(
+    state_dir: Path,
+    issue_number: int,
+    *,
+    succeeded: bool,
+    log_file: Path,
+    error: str = "",
+) -> None:
+    """Persist explicit implementer ``/learn`` attempt evidence."""
+    timestamp = datetime.now(timezone.utc).isoformat()
+    record: dict[str, object] = {
+        "issue_number": issue_number,
+        "learn_attempted_at": timestamp,
+        "learn_status": "succeeded" if succeeded else "failed",
+        "learn_succeeded_at": timestamp if succeeded else None,
+        "log_path": str(log_file),
+    }
+    if error:
+        record["error"] = error
+    record_file = state_dir / f"learn-{issue_number}.json"
+    try:
+        record_file.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+    except OSError as exc:
+        logger.warning("Learn record write failed for issue #%s: %s", issue_number, exc)
 
 
 def build_learn_prompt(context: str) -> str:
@@ -75,6 +103,13 @@ def run_learn(
         )
         logger.warning("Learn skipped for issue #%s: %s", issue_number, message)
         log_file.write_text(f"FAILED: {message}\n")
+        _write_learn_record(
+            state_dir,
+            issue_number,
+            succeeded=False,
+            log_file=log_file,
+            error=message,
+        )
         return False
 
     if agent == "codex":
@@ -86,12 +121,20 @@ def run_learn(
                 timeout=learn_claude_timeout(),
             )
             log_file.write_text(codex_result.stdout)
+            _write_learn_record(state_dir, issue_number, succeeded=True, log_file=log_file)
             logger.info("Learn completed for issue #%s", issue_number)
             logger.info("Learn log: %s", log_file)
             return True
         except Exception as e:  # broad catch: external agent process; non-blocking
             logger.warning("Learn failed for issue #%s: %s", issue_number, e)
             log_file.write_text(f"FAILED: {e}\n")
+            _write_learn_record(
+                state_dir,
+                issue_number,
+                succeeded=False,
+                log_file=log_file,
+                error=str(e),
+            )
             return False
 
     # /learn is a SIMPLE-complexity task (summarization + file writes), so we
@@ -121,6 +164,7 @@ def run_learn(
         )
         # Write output to log file
         log_file.write_text(result.stdout or "")
+        _write_learn_record(state_dir, issue_number, succeeded=True, log_file=log_file)
         logger.info("Learn completed for issue #%s", issue_number)
         logger.info("Learn log: %s", log_file)
         return True
@@ -134,6 +178,13 @@ def run_learn(
         if hasattr(e, "stderr"):
             error_output += f"\nSTDERR:\n{e.stderr or ''}"
         log_file.write_text(error_output)
+        _write_learn_record(
+            state_dir,
+            issue_number,
+            succeeded=False,
+            log_file=log_file,
+            error=str(e),
+        )
 
         # Non-blocking: never re-raise
         return False

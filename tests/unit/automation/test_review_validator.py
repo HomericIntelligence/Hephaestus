@@ -83,10 +83,11 @@ class TestValidatePriorCommentsAddressed:
         assert reopened == []
         assert is_clean is True
         post.assert_not_called()
-        # Both prior threads (T1, T2) were confirmed addressed → resolved.
-        # gh_pr_resolve_thread(thread_id, reply) is called positionally.
+        # Both prior threads (T1, T2) were confirmed addressed → resolved
+        # quietly, without adding another review-thread reply.
         resolved_ids = {c.args[0] for c in resolve.call_args_list}
         assert resolved_ids == {"T1", "T2"}
+        assert all(c.kwargs == {"dry_run": False} for c in resolve.call_args_list)
 
     def test_partial_resolves_only_addressed_threads(self, tmp_path: Path) -> None:
         """Only the addressed thread is resolved; the unaddressed one stays open.
@@ -120,10 +121,10 @@ class TestValidatePriorCommentsAddressed:
             )
         assert reopened == ["NEW"]
         assert is_clean is False
-        # The resolve call is positional: gh_pr_resolve_thread(thread_id, reply).
         resolved_ids = {c.args[0] for c in resolve.call_args_list}
         # Only the addressed thread (T2) is resolved; T1 (unaddressed) stays open.
         assert resolved_ids == {"T2"}
+        assert resolve.call_args.kwargs == {"dry_run": False}
 
     def test_resolves_by_id_not_path_line(self, tmp_path: Path) -> None:
         """#1085 C2: two threads on the SAME (path, line) resolve independently.
