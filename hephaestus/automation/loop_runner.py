@@ -784,22 +784,50 @@ def _local_ahead_count(repo: str, repo_dir: Path, base_ref: str) -> int:
         return 0
 
 
-def _rebase_main(repo: str, repo_dir: Path) -> str:
-    """Fetch + rebase the remote default branch; return short trunk SHA."""
-    # The fetch touches the network, so route it through resilient_call:
-    # transient failures retry with backoff and a genuine stall is capped by
-    # NETWORK_TIMEOUT (#684). A timeout after retries is non-fatal here — the
-    # subsequent rebase against a stale remote base is still safe.
+def _rebase_main(repo: str, repo_dir: Path) -> tuple[str, bool]:
+    """Fetch + rebase the remote default branch.
+
+    Returns ``(short_sha, fetch_ok)`` — a 7-char SHA and a flag indicating
+    whether the network refresh succeeded. When ``fetch_ok`` is False the
+    rebase ran against whatever the local clone already had; callers should
+    surface the staleness in operator-facing logs but the SHA value itself
+    remains a clean git hash (no suffix) because it is exported to phase
+    subprocesses as ``HEPH_TRUNK_GITHASH`` and used for session naming
+    (``hephaestus/automation/session_naming.py:181``). Adding a suffix
+    would propagate the "stale" marker into every child session label and
+    would also break any future caller that consumed the env var as a git
+    ref. The staleness is conveyed via the second return value instead.
+    """
+    fetch_ok = True
     try:
-        resilient_call(
+        fetch_result = resilient_call(
             subprocess.run,
             ["git", "-C", str(repo_dir), "fetch", "origin", "--quiet"],
             check=False,
+            capture_output=True,
+            text=True,
             timeout=NETWORK_TIMEOUT,
             circuit_breaker_name="git-fetch",
         )
     except subprocess.TimeoutExpired:
         LOG.warning("[%s] git fetch timed out; rebasing against stale remote base", repo)
+        fetch_ok = False
+    else:
+        # subprocess.run(check=False) does NOT raise on non-zero rc. macOS
+        # sandbox denials surface here as rc=1 with stderr "cannot open
+        # .git/FETCH_HEAD: Operation not permitted" (#993). Without this
+        # inspection the loop logs the resulting trunk SHA as if the refresh
+        # succeeded, masking the permission problem.
+        rc = getattr(fetch_result, "returncode", 0)
+        if rc != 0:
+            stderr = (getattr(fetch_result, "stderr", "") or "").strip()
+            LOG.warning(
+                "[%s] git fetch failed (rc=%s); rebasing against stale remote base: %s",
+                repo,
+                rc,
+                stderr or "<no stderr>",
+            )
+            fetch_ok = False
     base_ref = _detect_remote_base_ref(repo, repo_dir)
     local_ahead = _local_ahead_count(repo, repo_dir, base_ref)
     rb = subprocess.run(
@@ -840,7 +868,7 @@ def _rebase_main(repo: str, repo_dir: Path) -> str:
         check=False,
         timeout=METADATA_TIMEOUT,
     )
-    return sha.stdout.strip() or "unknown"
+    return (sha.stdout.strip() or "unknown", fetch_ok)
 
 
 # ---------------------------------------------------------------------------
@@ -1110,8 +1138,9 @@ def _process_repo_inner(
         return result
 
     LOG.info("── %s (loop %d) ──", repo, loop_idx)
-    trunk_sha = _rebase_main(repo, repo_dir)
-    LOG.info("[%s] trunk=%s", repo, trunk_sha)
+    trunk_sha, fetch_ok = _rebase_main(repo, repo_dir)
+    stale_suffix = "" if fetch_ok else " (stale)"
+    LOG.info("[%s] trunk=%s%s", repo, trunk_sha, stale_suffix)
 
     # Open-issue discovery happens once per repo per loop. When the operator
     # scopes the loop explicitly, reuse that bounded list for child phases.
