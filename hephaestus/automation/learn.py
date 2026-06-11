@@ -265,8 +265,9 @@ def compact_session(
     agent: str,
     cwd: Path,
     timeout: int = 60,
+    model: str | None = None,
 ) -> bool:
-    """Send ``/compact`` to the (repo, issue, agent) Claude session.
+    """Send ``/compact`` to the (repo, issue, agent, model) Claude session.
 
     Best-effort transcript summarisation. Fires immediately after ``/learn``
     on a durably-done stage so the next ``--resume`` reads a summary instead
@@ -287,7 +288,7 @@ def compact_session(
         a non-zero exit code (e.g. /compact skill not registered).
 
     """
-    sid = session_uuid(repo, issue, agent)
+    sid = session_uuid(repo, issue, agent, model)
     try:
         result = subprocess.run(
             [
