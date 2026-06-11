@@ -242,9 +242,7 @@ class TestRunImplReviewLoop:
                 "hephaestus.automation.implementer_phase_runner.gh_current_login",
                 return_value="mvillmow",
             ),
-            patch(
-                "hephaestus.automation.implementer_phase_runner.gh_pr_resolve_thread"
-            ) as mock_resolve,
+            patch("hephaestus.automation.github_api.gh_pr_resolve_thread") as mock_resolve,
             patch.object(implementer, "_run_address_review_step") as mock_addr2,
             patch(
                 "hephaestus.automation.implementer_phase_runner.gh_issue_add_labels"
@@ -268,46 +266,61 @@ class TestRunImplReviewLoop:
         assert iters == 1
         mock_addr2.assert_not_called()
         mock_label.assert_not_called()  # no state:skip applied
-        # Automation-owned threads were still resolved on the GO attempt;
-        # the human thread (T_human) was never resolved by automation.
+        # The GO gate force-resolves NOTHING (#1152): a human thread is present,
+        # so automation must never close it, and the gate no longer bulk-resolves
+        # automation threads either (they'd be verified/addressed, but the human
+        # block ends the loop first). The human thread is never resolved here.
         resolved_ids = {call.args[0] for call in mock_resolve.call_args_list}
         assert "T_human" not in resolved_ids
-        assert {"T_self", "T_bot", "T_nested_self"} <= resolved_ids
 
-    def test_go_accepted_when_only_automation_threads_remain(
+    def test_go_does_not_stand_while_automation_threads_unresolved(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
-        """GO terminates the loop when every unresolved thread is automation-owned.
+        """A GO pass must NOT converge while automation threads remain unresolved (#1152).
 
-        Automation cleans up its own stale threads on GO; with no human thread
-        left, the GO stands and the loop terminates at iteration 0.
+        The OLD behavior force-resolved automation-owned threads on GO and
+        accepted the verdict. That let a reviewer say GO while leaving real,
+        unaddressed findings open — they were never fixed by the implementer nor
+        verified by a re-review. The corrected rule: an unresolved automation
+        thread downgrades GO to NOGO so the address step runs; the GO label is
+        only earned by a clean pass with ZERO unresolved threads. Nothing is
+        force-resolved here.
         """
-        threads = [
-            {"id": "T_self", "author": "mvillmow", "path": "a.py", "line": 1, "body": "old"},
-            {
-                "id": "T_bot",
-                "author": "github-actions[bot]",
-                "path": "b.py",
-                "line": 2,
-                "body": "old",
-            },
-        ]
+
+        def _automation_thread(tid: str, author: str, path: str, line: int) -> dict[str, object]:
+            return {"id": tid, "author": author, "path": path, "line": line, "body": "old"}
+
         with (
-            patch.object(implementer, "_run_impl_review_step", return_value=(_go(), [])),
-            patch.object(implementer, "_run_address_review_step") as mock_addr,
+            # R0 emits GO but 2 automation threads are still unresolved; R1 sees a
+            # clean board (address step fixed + resolved them) and GO stands. The
+            # two open snapshots feed R0's GO gate and R1's pre-address snapshot.
+            patch.object(
+                implementer,
+                "_run_impl_review_step",
+                side_effect=[(_go(), []), (_go(), [])],
+            ),
+            patch.object(implementer, "_run_address_review_step", return_value=True) as mock_addr,
             patch(
                 "hephaestus.automation.implementer_phase_runner.gh_pr_list_unresolved_threads",
-                return_value=threads,
+                side_effect=[
+                    [
+                        _automation_thread("T_self", "mvillmow", "a.py", 1),
+                        _automation_thread("T_bot", "github-actions[bot]", "b.py", 2),
+                    ],
+                    [
+                        _automation_thread("T_self", "mvillmow", "a.py", 1),
+                        _automation_thread("T_bot", "github-actions[bot]", "b.py", 2),
+                    ],
+                    [],
+                ],
             ),
             patch(
                 "hephaestus.automation.implementer_phase_runner.gh_current_login",
                 return_value="mvillmow",
             ),
-            patch(
-                "hephaestus.automation.implementer_phase_runner.gh_pr_resolve_thread"
-            ) as mock_resolve,
+            patch("hephaestus.automation.github_api.gh_pr_resolve_thread") as mock_resolve,
         ):
-            iters, verdict, grade = implementer._run_impl_review_loop(
+            iters, verdict, _grade = implementer._run_impl_review_loop(
                 issue_number=1,
                 worktree_path=tmp_path,
                 branch_name="b",
@@ -319,17 +332,59 @@ class TestRunImplReviewLoop:
                 pr_number=42,
             )
 
-        assert (iters, verdict, grade) == (1, "GO", "A")
-        mock_addr.assert_not_called()
-        resolved_ids = [call.args[0] for call in mock_resolve.call_args_list]
-        assert resolved_ids == ["T_self", "T_bot"]
-        # Each resolve call passes the thread id positionally and dry_run=False
-        # (signature guard carried over from main).
-        assert all(
-            call.args == (thread_id,)
-            for call, thread_id in zip(mock_resolve.call_args_list, resolved_ids, strict=True)
-        )
-        assert all(call.kwargs == {"dry_run": False} for call in mock_resolve.call_args_list)
+        # GO did not converge at R0 (threads open) — address ran, R1 confirmed GO.
+        assert verdict == "GO"
+        assert iters == 2
+        mock_addr.assert_called()  # the address step ran to fix the open threads
+        # The GO gate itself force-resolved NOTHING; only the address step (which
+        # we stubbed) resolves what it actually fixed.
+        mock_resolve.assert_not_called()
+
+    def test_go_does_not_converge_when_same_pass_posts_new_threads(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """A reviewer that emits GO while posting NEW findings must not converge (#1152).
+
+        This is the exact bug: ``Verdict: GO`` alongside freshly-posted inline
+        threads. Those threads must be addressed and re-verified, never accepted
+        as-is.
+        """
+        with (
+            patch.object(
+                implementer,
+                "_run_impl_review_step",
+                # R0: GO but posts a brand-new thread t0; R1: clean GO.
+                side_effect=[(_go(), ["t0"]), (_go(), [])],
+            ),
+            patch.object(implementer, "_run_address_review_step", return_value=True) as mock_addr,
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_pr_list_unresolved_threads",
+                side_effect=[
+                    [{"id": "t0", "author": "mvillmow", "path": "a.py", "line": 1, "body": "x"}],
+                    [{"id": "t0", "author": "mvillmow", "path": "a.py", "line": 1, "body": "x"}],
+                    [],
+                ],
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_current_login",
+                return_value="mvillmow",
+            ),
+        ):
+            iters, verdict, _grade = implementer._run_impl_review_loop(
+                issue_number=1,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=42,
+            )
+
+        assert verdict == "GO"
+        assert iters == 2  # did NOT accept GO on R0; addressed then re-reviewed
+        mock_addr.assert_called()
 
     def test_runs_3_iterations_on_sustained_nogo(
         self, implementer: IssueImplementer, tmp_path: Path
@@ -773,6 +828,13 @@ class TestRunImplReviewLoop:
         R0 NOGO → address. R1 the validator re-opens a prior comment AND the
         reviewer now says GO — but the re-open must override GO, forcing the loop
         to address again rather than terminating with an unaddressed comment.
+        By R2 the board is clean (no unresolved threads) so the GO stands (#1152:
+        GO requires zero unresolved threads).
+
+        ``_validate_prior_threads`` is patched directly to control the re-open
+        signal per iteration, decoupling this assertion from the snapshot
+        plumbing; the GO gate always sees a clean board so the ONLY thing keeping
+        the loop alive past R1 is the validator re-open.
         """
         with (
             patch.object(implementer, "_collect_diff", return_value="diff"),
@@ -784,30 +846,21 @@ class TestRunImplReviewLoop:
                 side_effect=[(_nogo("D"), ["t0"]), (_go(), []), (_go(), [])],
             ) as mock_rev,
             patch.object(implementer, "_run_address_review_step", return_value=True) as mock_addr,
+            # GO gate always sees a clean board (zero unresolved threads).
             patch(
                 "hephaestus.automation.implementer_phase_runner.gh_pr_list_unresolved_threads",
-                # Automation-owned thread (posted by the reviewer bot) — the
-                # GO-gate resolves/ignores it, so it doesn't block the eventual
-                # GO. Only HUMAN threads block GO.
-                return_value=[
-                    {
-                        "id": "T",
-                        "author": "github-actions[bot]",
-                        "path": "a.py",
-                        "line": 1,
-                        "body": "fix",
-                    }
-                ],
+                return_value=[],
             ),
             patch(
                 "hephaestus.automation.implementer_phase_runner.gh_current_login",
                 return_value="mvillmow",
             ),
-            patch("hephaestus.automation.implementer_phase_runner.gh_pr_resolve_thread"),
-            patch(
-                "hephaestus.automation.implementer_phase_runner.validate_prior_comments_addressed",
-                # R1 validation re-opens; R2 validation is clean.
-                side_effect=[(["RE1"], False), ([], True)],
+            patch("hephaestus.automation.github_api.gh_pr_resolve_thread"),
+            # R0 clean, R1 re-opens (overrides GO), R2 clean.
+            patch.object(
+                implementer.phase_runner,
+                "_validate_prior_threads",
+                side_effect=[[], ["RE1"], []],
             ) as mock_validate,
         ):
             iters, verdict, _ = implementer._run_impl_review_loop(
@@ -828,8 +881,8 @@ class TestRunImplReviewLoop:
         assert mock_rev.call_count == 3
         # Address ran after R0 and after the overridden R1 (not after R2's clean GO).
         assert mock_addr.call_count == 2
-        # Validation ran on iterations 1 and 2 (skipped on iteration 0 — no prior).
-        assert mock_validate.call_count == 2
+        # Validation ran every iteration (R0, R1, R2).
+        assert mock_validate.call_count == 3
 
     def test_no_pr_falls_back_to_diff_only_reviewer(
         self, implementer: IssueImplementer, tmp_path: Path
