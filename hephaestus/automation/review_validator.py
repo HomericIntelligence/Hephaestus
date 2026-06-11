@@ -43,6 +43,7 @@ from .claude_timeouts import pr_reviewer_claude_timeout
 from .git_utils import get_repo_root, get_repo_slug, pr_ref
 from .github_api import gh_pr_resolve_thread, gh_pr_review_post
 from .prompts import get_review_validation_prompt
+from .protocol import WONT_FIX_MARKER
 from .session_naming import AGENT_PR_REVIEWER, reviewer_agent
 
 logger = logging.getLogger(__name__)
@@ -58,13 +59,13 @@ def _run_validation_session(
     agent: str,
     review_agent: str,
     state_dir: Path,
-) -> list[dict[str, Any]]:
-    """Run the read-only validation sub-agent and return the ``unaddressed`` list.
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Run the read-only validation sub-agent; return ``(unaddressed, wont_fix)``.
 
     Mirrors :func:`pr_reviewer.run_pr_review_analysis`'s invocation shape (a
     fresh read-only reviewer session, ``allowed_tools="Read,Glob,Grep"``). On any
-    agent failure this returns an empty list — a failed validation must not block
-    the loop or fabricate re-opens.
+    agent failure this returns ``([], [])`` — a failed validation must not block
+    the loop, fabricate re-opens, or fabricate won't-fix dismissals.
     """
     prompt = get_review_validation_prompt(
         pr_number=pr_number,
@@ -111,13 +112,19 @@ def _run_validation_session(
             pr_number,
             exc,
         )
-        return []
+        return [], []
 
     unaddressed = parsed.get("unaddressed", [])
     if not isinstance(unaddressed, list):
-        return []
+        unaddressed = []
+    wont_fix = parsed.get("wont_fix", [])
+    if not isinstance(wont_fix, list):
+        wont_fix = []
     # Keep only well-formed dict entries.
-    return [u for u in unaddressed if isinstance(u, dict)]
+    return (
+        [u for u in unaddressed if isinstance(u, dict)],
+        [w for w in wont_fix if isinstance(w, dict)],
+    )
 
 
 def validate_prior_comments_addressed(
@@ -178,7 +185,7 @@ def validate_prior_comments_addressed(
         ]
     )
 
-    unaddressed = _run_validation_session(
+    unaddressed, wont_fix = _run_validation_session(
         pr_number=pr_number,
         issue_number=issue_number,
         worktree_path=worktree_path,
@@ -189,18 +196,30 @@ def validate_prior_comments_addressed(
         state_dir=state_dir,
     )
 
+    # Won't-fix dismissals (#1163): resolve each thread the agent judged
+    # intentional-by-design with a durable WONT_FIX_MARKER reply. A marked thread
+    # is skipped forever (see _filter_wont_fix_threads at the fetch boundary), so
+    # an intentional-design finding cannot stack duplicate re-open threads.
+    wont_fix_ids = {
+        str(item.get("thread_id"))
+        for item in wont_fix
+        if isinstance(item, dict) and item.get("thread_id")
+    }
+    _dismiss_wont_fix_prior_threads(prior_threads, wont_fix, wont_fix_ids)
+
     # Resolve the threads the validator confirms addressed (#1083). A prior
     # thread is "addressed" when its thread_id is NOT among the unaddressed items
-    # the sub-agent flagged. Matching on the GraphQL thread_id (not (path, line))
-    # is required so two threads on the same line resolve independently and a
-    # path-normalization mismatch can't silently resolve an unaddressed thread
-    # (#1085). The sub-agent echoes back the thread_id we provided.
+    # the sub-agent flagged AND not a won't-fix dismissal. Matching on the GraphQL
+    # thread_id (not (path, line)) is required so two threads on the same line
+    # resolve independently and a path-normalization mismatch can't silently
+    # resolve an unaddressed thread (#1085). The sub-agent echoes back the
+    # thread_id we provided.
     unaddressed_ids = {
         str(item.get("thread_id"))
         for item in unaddressed
         if isinstance(item, dict) and item.get("thread_id")
     }
-    _resolve_addressed_prior_threads(prior_threads, unaddressed_ids)
+    _resolve_addressed_prior_threads(prior_threads, unaddressed_ids | wont_fix_ids)
 
     if not unaddressed:
         return [], True
@@ -245,6 +264,46 @@ def validate_prior_comments_addressed(
         len(thread_ids),
     )
     return thread_ids, False
+
+
+def _dismiss_wont_fix_prior_threads(
+    prior_threads: list[dict[str, Any]],
+    wont_fix: list[dict[str, Any]],
+    wont_fix_ids: set[str],
+) -> list[str]:
+    """Resolve each won't-fix thread with a durable ``WONT_FIX_MARKER`` reply.
+
+    The reply records WHY the finding is intentional-by-design so the dismissal
+    is auditable in the PR UI and recognizable on later runs (the fetch boundary
+    skips any thread whose comments carry the marker, so it is never
+    re-validated or re-opened). Only threads the loop itself owns are touched
+    (#375); a missing/blank reason still resolves with the bare marker.
+
+    Returns the list of dismissed thread IDs (for logging/tests).
+    """
+    reason_by_id = {
+        str(item.get("thread_id")): str(item.get("reason") or "").strip()
+        for item in wont_fix
+        if isinstance(item, dict) and item.get("thread_id")
+    }
+    dismissed: list[str] = []
+    for thread in prior_threads:
+        thread_id = thread.get("id")
+        if not thread_id or str(thread_id) not in wont_fix_ids:
+            continue
+        reason = reason_by_id.get(str(thread_id), "")
+        reply = WONT_FIX_MARKER if not reason else f"{WONT_FIX_MARKER} — {reason}"
+        try:
+            gh_pr_resolve_thread(thread_id, reply_body=reply, dry_run=False)
+            dismissed.append(thread_id)
+            logger.info(
+                "Dismissed won't-fix review thread %s (intentional design): %s",
+                thread_id,
+                reason or "(no reason given)",
+            )
+        except (subprocess.CalledProcessError, OSError) as exc:
+            logger.warning("Failed to dismiss won't-fix thread %s: %s", thread_id, exc)
+    return dismissed
 
 
 def _resolve_addressed_prior_threads(

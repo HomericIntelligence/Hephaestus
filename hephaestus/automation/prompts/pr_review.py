@@ -182,21 +182,31 @@ The block above is a JSON array where each element has:
 
 ---
 
-For EACH prior comment, judge against the current diff:
+For EACH prior comment, judge against the current diff into ONE of three buckets:
 - ADDRESSED — the diff changes the cited code in a way that resolves the
   comment's concern. When in doubt that a change truly resolves it, treat it as
   NOT addressed (false "addressed" is worse than a redundant re-open).
 - NOT ADDRESSED — the cited code is unchanged, or the change does not actually
   resolve the concern the comment raised.
+- WON'T FIX — the cited code is INTENTIONAL BY DESIGN and the comment is asking
+  for a change that should NOT be made. Use this ONLY when the design is
+  CLEARLY deliberate, e.g.: an abstract base / interface method that raises
+  `NotImplementedError` on purpose; a documented design choice; a shim/stub that
+  is supposed to stay a stub. This permanently dismisses the finding (it will
+  never be re-raised), so be CONSERVATIVE: if you are not certain the code is
+  intentional-by-design, choose NOT ADDRESSED instead — never WON'T FIX on a
+  hunch. Read the surrounding code/docstring to confirm intent before using it.
 
 **Output format:**
 Write your reasoning in prose. At the very end, emit a single fenced JSON block
-listing ONLY the comments that are NOT addressed:
+listing the NOT-ADDRESSED comments and (separately) the WON'T-FIX ones:
 
 ```json
 {{"unaddressed": [
   {{"thread_id": "...", "path": "...", "line": 1,
     "original_body": "...", "detail": "why still unaddressed"}}
+], "wont_fix": [
+  {{"thread_id": "...", "reason": "why this is intentional by design"}}
 ]}}
 ```
 
@@ -206,7 +216,13 @@ Rules:
   exact); include the original `path`/`line`; `original_body` is the original
   comment text (verbatim or trimmed); `detail` states concretely what is still
   missing.
-- If every prior comment is addressed, emit `{{"unaddressed": []}}`.
+- `wont_fix`: array of comments asking to change INTENTIONAL-BY-DESIGN code.
+  Echo the `thread_id` VERBATIM; `reason` cites the concrete evidence of intent
+  (the abstract method, the docstring, the design note). Omit or leave empty
+  when none apply.
+- A thread_id appears in AT MOST ONE bucket. Addressed comments appear in
+  NEITHER list.
+- If every prior comment is addressed, emit `{{"unaddressed": [], "wont_fix": []}}`.
 - Emit only one JSON block, at the very end (the parser takes the LAST one).
 """
 

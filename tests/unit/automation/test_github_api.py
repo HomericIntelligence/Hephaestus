@@ -2632,6 +2632,86 @@ class TestGhPrInlineCommentIndex:
         assert gh_pr_inline_comment_index(7) == {}
 
 
+class TestWontFixLineIndex:
+    """gh_pr_wont_fix_line_index / dedup suppression of intentional-design findings (#1163)."""
+
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_indexes_only_resolved_marker_threads(self, mock_gh_call: Any, _mock_repo: Any) -> None:
+        from hephaestus.automation.github_api import gh_pr_wont_fix_line_index
+        from hephaestus.automation.protocol import WONT_FIX_MARKER
+
+        result = Mock()
+        result.stdout = json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [
+                                    {  # resolved + marker → indexed
+                                        "isResolved": True,
+                                        "path": "a.py",
+                                        "line": 2,
+                                        "side": "RIGHT",
+                                        "comments": {
+                                            "nodes": [
+                                                {"id": "N1", "body": "orig"},
+                                                {"id": "N2", "body": f"{WONT_FIX_MARKER} — stub"},
+                                            ]
+                                        },
+                                    },
+                                    {  # resolved but NO marker → not indexed
+                                        "isResolved": True,
+                                        "path": "b.py",
+                                        "line": 5,
+                                        "side": "RIGHT",
+                                        "comments": {"nodes": [{"id": "N3", "body": "fixed"}]},
+                                    },
+                                    {  # marker but UNRESOLVED → not indexed
+                                        "isResolved": False,
+                                        "path": "c.py",
+                                        "line": 9,
+                                        "side": "RIGHT",
+                                        "comments": {
+                                            "nodes": [{"id": "N4", "body": WONT_FIX_MARKER}]
+                                        },
+                                    },
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        )
+        mock_gh_call.return_value = result
+
+        keys = gh_pr_wont_fix_line_index(7)
+
+        assert ("a.py", 2, "RIGHT") in keys
+        assert ("a.py", 2) in keys
+        assert ("b.py", 5, "RIGHT") not in keys
+        assert ("c.py", 9, "RIGHT") not in keys
+
+    @patch("hephaestus.automation.github_api.gh_pr_wont_fix_line_index")
+    @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index", return_value={})
+    def test_dedup_suppresses_finding_on_wont_fix_line(
+        self, _mock_index: Any, mock_wont_fix: Any
+    ) -> None:
+        from hephaestus.automation.github_api import _edit_or_keep_comments
+
+        mock_wont_fix.return_value = {("a.py", 2, "RIGHT"), ("a.py", 2)}
+        comments = [
+            {"path": "a.py", "line": 2, "side": "RIGHT", "body": "re-raised intentional finding"},
+            {"path": "z.py", "line": 9, "side": "RIGHT", "body": "genuinely new finding"},
+        ]
+
+        kept = _edit_or_keep_comments(123, comments)
+
+        # The won't-fix line is dropped; the unrelated finding survives.
+        assert [c["path"] for c in kept] == ["z.py"]
+
+
 class TestValidReviewPositions:
     """_valid_review_positions / _filter_comments_to_diff: diff-hunk parsing (#1039)."""
 
