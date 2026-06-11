@@ -294,14 +294,32 @@ def fetch_all_issue_comments_graphql(
         )
         for idx, num in enumerate(issue_numbers)
     ]
-    query = f"query{{repository(owner:{owner!r},name:{name!r}){{{' '.join(fragments)}}}}}"
+    # owner/name MUST be passed as GraphQL variables, not interpolated. The
+    # {owner!r} repr produces single-quoted literals (owner:'Owner'), which is
+    # invalid GraphQL (only double quotes are accepted) and gh rejects with
+    # "Expected VALUE, actual: UNKNOWN_CHAR". Mirror fetch_issue_review_comments.
+    query = (
+        f"query($owner:String!,$name:String!)"
+        f"{{repository(owner:$owner,name:$name){{{' '.join(fragments)}}}}}"
+    )
 
     # Map alias index back to issue number for result assembly.
     idx_to_num = dict(enumerate(issue_numbers))
     result_map: dict[int, list[dict[str, Any]]] = {num: [] for num in issue_numbers}
 
     try:
-        result = _gh_call(["api", "graphql", "-f", f"query={query}"])
+        result = _gh_call(
+            [
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"name={name}",
+            ],
+        )
         data = json.loads(result.stdout)
         repo_data = data.get("data", {}).get("repository", {})
         for alias, issue_data in repo_data.items():
@@ -358,13 +376,28 @@ def fetch_all_issue_labels_graphql(
         (f"issue{idx}: issue(number: {int(num)}){{labels(first: 50){{nodes{{name}}}}}}")
         for idx, num in enumerate(issue_numbers)
     ]
-    query = f"query{{repository(owner:{owner!r},name:{name!r}){{{' '.join(fragments)}}}}}"
+    # owner/name as GraphQL variables (see fetch_all_issue_comments_graphql).
+    query = (
+        f"query($owner:String!,$name:String!)"
+        f"{{repository(owner:$owner,name:$name){{{' '.join(fragments)}}}}}"
+    )
 
     idx_to_num = dict(enumerate(issue_numbers))
     result_map: dict[int, list[str]] = {num: [] for num in issue_numbers}
 
     try:
-        result = _gh_call(["api", "graphql", "-f", f"query={query}"])
+        result = _gh_call(
+            [
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"name={name}",
+            ],
+        )
         data = json.loads(result.stdout)
         repo_data = data.get("data", {}).get("repository", {})
         for alias, issue_data in repo_data.items():
