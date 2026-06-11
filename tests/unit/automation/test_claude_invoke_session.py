@@ -42,10 +42,23 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-class TestAlwaysResume:
-    """#1166: every call uses --resume; the harness creates on first use."""
+def _make_existing_jsonl(home: Path, cwd: Path, sid: str) -> None:
+    """Pre-create the transcript file so the helper takes the --resume path."""
+    encoded = str(cwd.resolve()).replace("/", "-")
+    target_dir = home / ".claude" / "projects" / encoded
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / f"{sid}.jsonl").write_text("{}\n")
 
-    def test_call_always_uses_resume_never_create(
+
+class TestCreateThenResume:
+    """#1168: first call --session-id (create), later calls --resume.
+
+    ``claude --resume`` does NOT auto-create — it errors "No conversation found"
+    for an unknown id — so the first call for a (repo, issue, agent, model) key
+    must create the session, and later calls resume it.
+    """
+
+    def test_first_call_creates_with_model_keyed_id(
         self, stub_run: MagicMock, fake_home: Path
     ) -> None:
         cwd = fake_home / "work"
@@ -59,21 +72,23 @@ class TestAlwaysResume:
             cwd=cwd,
         )
         argv = _argv(stub_run.call_args)
-        assert "--resume" in argv
+        # No transcript yet → create path.
+        assert "--session-id" in argv
+        assert "--name" in argv
+        assert "--resume" not in argv
         assert sid in argv
-        # No create path anymore: no --session-id / --name probing.
-        assert "--session-id" not in argv
-        assert "--name" not in argv
         assert out == "ok"
         # The session id includes the model (#1166).
         assert sid == session_uuid("R", 1, AGENT_PLANNER, "sonnet")
 
-    def test_resume_is_used_even_without_existing_transcript(
+    def test_subsequent_call_resumes_existing_transcript(
         self, stub_run: MagicMock, fake_home: Path
     ) -> None:
-        """No transcript on disk → still --resume (harness creates it lazily)."""
         cwd = fake_home / "work"
         cwd.mkdir()
+        sid = session_uuid("R", 1, AGENT_PLANNER, "sonnet")
+        _make_existing_jsonl(fake_home, cwd, sid)
+
         invoke_claude_with_session(
             repo="R",
             issue=1,
@@ -83,8 +98,11 @@ class TestAlwaysResume:
             cwd=cwd,
         )
         argv = _argv(stub_run.call_args)
+        # Transcript exists → resume path; no re-create.
         assert "--resume" in argv
+        assert sid in argv
         assert "--session-id" not in argv
+        assert "--name" not in argv
 
     def test_different_models_get_different_uuids(
         self, stub_run: MagicMock, fake_home: Path
@@ -119,8 +137,8 @@ class TestAlwaysResume:
         )
         assert sid_planner != sid_reviewer
 
-    def test_resume_failure_propagates(self, fake_home: Path) -> None:
-        """A --resume non-zero exit is raised; there is no recreate fallback."""
+    def test_failure_propagates_without_recreate_cascade(self, fake_home: Path) -> None:
+        """A create/resume non-zero exit is raised; no recreate/fresh fallback."""
         cwd = fake_home / "work"
         cwd.mkdir()
         err = subprocess.CalledProcessError(
@@ -136,7 +154,7 @@ class TestAlwaysResume:
                     model="sonnet",
                     cwd=cwd,
                 )
-        # Exactly one attempt — no create/recreate/fresh cascade.
+        # Exactly one attempt — no recreate/fresh cascade.
         assert m.call_count == 1
 
 
@@ -244,28 +262,27 @@ class TestRecreateOnResumeFailureToggle:
 
 
 class TestEndToEndSessionResume:
-    """Two sequential invocations for the same tuple: create then resume.
+    """Two sequential invocations for the same key: create then resume (#1168).
 
-    The first call has no JSONL — must use ``--session-id``. The mocked
-    subprocess writes a JSONL on first call so the helper's existence
-    probe will report True on the second call, which must then use
-    ``--resume`` of the same UUID. This is the empirical proof that
-    cross-iteration cache reuse will trigger.
+    The first call has no JSONL → ``--session-id`` (create). The mocked
+    subprocess writes the JSONL on the first call so the existence probe reports
+    True on the second, which must then ``--resume`` the same UUID. Empirical
+    proof that cross-iteration cache reuse triggers.
     """
 
-    def test_both_calls_resume_same_uuid_distinct_prompts(self, fake_home: Path) -> None:
-        """Two calls for the same key both --resume the same uuid (#1166).
-
-        The id includes the model. Both invocations --resume (the harness
-        created it on the first), and the prompts are distinct — proving the
-        second call continues the transcript rather than replaying the first.
-        """
+    def test_create_then_resume_same_uuid_distinct_prompts(self, fake_home: Path) -> None:
         cwd = fake_home / "work"
         cwd.mkdir()
         expected_sid = session_uuid("ProjectScylla", 1944, AGENT_PLANNER, "sonnet")
 
-        with patch("hephaestus.automation.claude_invoke.subprocess.run") as m:
-            m.return_value = MagicMock(stdout="ok", stderr="", returncode=0)
+        # First call writes the transcript so the second call's probe finds it.
+        def _side_effect(*args: Any, **kwargs: Any) -> MagicMock:
+            _make_existing_jsonl(fake_home, cwd, expected_sid)
+            return MagicMock(stdout="ok", stderr="", returncode=0)
+
+        with patch(
+            "hephaestus.automation.claude_invoke.subprocess.run", side_effect=_side_effect
+        ) as m:
             _, sid1 = invoke_claude_with_session(
                 repo="ProjectScylla",
                 issue=1944,
@@ -287,12 +304,14 @@ class TestEndToEndSessionResume:
         assert m.call_count == 2
         first_argv = _argv(m.call_args_list[0])
         second_argv = _argv(m.call_args_list[1])
-        # Both calls --resume the same id; no create path.
-        for argv in (first_argv, second_argv):
-            assert "--resume" in argv
-            assert expected_sid in argv
-            assert "--session-id" not in argv
-        # The prompts are distinct — the second call did NOT replay the first.
+        # First creates, second resumes — same id.
+        assert "--session-id" in first_argv
+        assert expected_sid in first_argv
+        assert "--resume" not in first_argv
+        assert "--resume" in second_argv
+        assert expected_sid in second_argv
+        assert "--session-id" not in second_argv
+        # Distinct prompts — the second call did NOT replay the first.
         assert first_argv[-1] == "iter 0"
         assert second_argv[-1] == "iter 1"
 
@@ -307,6 +326,8 @@ class TestEndToEndSessionResume:
         cwd = fake_home / "work"
         cwd.mkdir()
         expected_sid = session_uuid("R", 1, AGENT_PLANNER, "sonnet")
+        # Existing transcript → resume path.
+        _make_existing_jsonl(fake_home, cwd, expected_sid)
 
         with patch("hephaestus.automation.claude_invoke.subprocess.run") as m:
             m.return_value = MagicMock(stdout="ok", stderr="", returncode=0)
@@ -323,4 +344,5 @@ class TestEndToEndSessionResume:
         argv = _argv(m.call_args)
         assert "--resume" in argv
         assert expected_sid in argv
+        assert "--session-id" not in argv
         assert "--session-id" not in argv

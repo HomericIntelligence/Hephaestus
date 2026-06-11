@@ -11,9 +11,9 @@ What lives here:
   ``--resume`` targets a session that no longer exists locally.
 - :func:`invoke_claude_with_session` — the single entry point every
   automation phase must use. Picks ``--session-id`` (first call) vs
-  ``--resume`` (subsequent calls) based on whether the session's JSONL
-  transcript already exists, and falls back to ``--session-id`` on any
-  resume failure.
+  ``--resume`` (subsequent calls) based on whether the model-keyed JSONL
+  transcript already exists. No recreate-on-failure cascade — a create/resume
+  error propagates (#1168).
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from hephaestus.automation.session_naming import session_name
+from hephaestus.automation.session_naming import session_jsonl_path, session_name
 from hephaestus.github.rate_limit import detect_claude_usage_cap, detect_rate_limit
 
 logger = logging.getLogger(__name__)
@@ -71,14 +71,16 @@ def invoke_claude_with_session(
 ) -> tuple[str, str]:
     """Invoke Claude with a deterministic per-(repo, issue, agent, model) session.
 
-    The session id is ``uuid5`` of ``(repo, issue, agent, model)`` and the call
-    ALWAYS uses ``--resume <uuid>`` (#1166). The Claude harness creates the
-    session transparently on the first ``--resume`` for an id that does not yet
-    exist, so there is no separate create path, no create-vs-resume probe, and no
-    expired/contention fallback to a fresh id — every call for the same key
-    continues the SAME transcript, so cached context is reused instead of
-    re-sent. Because ``--resume`` is locked to the creating model, the model is
-    part of the key: switching a per-agent model simply starts that model's own
+    The session id is ``uuid5`` of ``(repo, issue, agent, model)``. The FIRST
+    call for a key uses ``--session-id`` to create the transcript; every later
+    call ``--resume``s it so cached context is reused instead of re-sent (#1166,
+    #1168). ``claude --resume`` does NOT auto-create — it errors "No conversation
+    found" for an unknown id — so create-on-first-use is required; the probe is
+    the model-keyed transcript file's existence. There is no expired/contention
+    recreate cascade (the old one mis-fired on 429s, re-sending full prompts 3×
+    and crossing models); a ``--session-id``/``--resume`` failure simply
+    propagates. Because ``--resume`` is locked to the creating model, the model
+    is part of the key: switching a per-agent model starts that model's own
     create-once-then-resume lineage rather than colliding with another model's
     transcript.
 
@@ -114,15 +116,32 @@ def invoke_claude_with_session(
         ``(repo, issue, agent, model)``.
 
     Raises:
-        subprocess.CalledProcessError: If the ``--resume`` call exits non-zero.
+        subprocess.CalledProcessError: If the create/resume call exits non-zero.
         subprocess.TimeoutExpired: If the call exceeds ``timeout``.
 
     """
-    del recreate_on_resume_failure  # back-compat shim only; always-resume model
+    del recreate_on_resume_failure  # back-compat shim only; no recreate cascade
     display_name = session_name(repo, issue, agent, model)
     sid = str(uuid.uuid5(uuid.NAMESPACE_DNS, display_name))
 
-    cmd: list[str] = ["claude", "--resume", sid, "--model", model, "--output-format", output_format]
+    # Create on FIRST use, resume after (#1168). ``claude --resume`` does NOT
+    # auto-create — it errors "No conversation found" for an unknown id — so the
+    # first call for a (repo, issue, agent, model) key must use ``--session-id``
+    # to create the transcript; every later call ``--resume``s it to reuse cached
+    # context. The probe is the transcript file's existence, which is model-keyed
+    # because ``sid`` is. This is NOT the old recreate-on-failure cascade (that
+    # mis-fired on 429s, re-sending full prompts 3x and crossing models); a
+    # ``--resume``/``--session-id`` failure now simply propagates.
+    create = not session_jsonl_path(sid, cwd).exists()
+    mode_args = ["--session-id", sid, "--name", display_name] if create else ["--resume", sid]
+    cmd: list[str] = [
+        "claude",
+        *mode_args,
+        "--model",
+        model,
+        "--output-format",
+        output_format,
+    ]
     if system_prompt_file is not None and system_prompt_file.exists():
         cmd += ["--system-prompt", str(system_prompt_file)]
     if allowed_tools:
@@ -146,12 +165,13 @@ def invoke_claude_with_session(
     if cid:
         env["GH_TRACE_ID"] = cid
 
-    logger.debug("claude invoke: agent=%s issue=%s sid=%s mode=resume", agent, issue, sid)
-    # ALWAYS --resume (#1166): the harness creates the session transparently when
-    # the id does not yet exist, so there is no create path, probe, or fallback.
-    # Resuming the same (repo, issue, agent, model) key reuses cached context
-    # instead of re-sending the full prompt — and never crosses models, since the
-    # model is part of the key.
+    logger.debug(
+        "claude invoke: agent=%s issue=%s sid=%s mode=%s",
+        agent,
+        issue,
+        sid,
+        "create" if create else "resume",
+    )
     result = subprocess.run(
         cmd,
         input=prompt if input_via_stdin else None,
