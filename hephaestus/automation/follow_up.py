@@ -25,6 +25,8 @@ import contextlib
 import json
 import logging
 import re
+import subprocess
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -54,6 +56,12 @@ _SECTION_HEADINGS: dict[str, str] = {
     "safety": "## Safety",
     "critical_bug": "## Critical bug",
 }
+
+_EXPECTED_FOLLOW_UP_FAILURES: tuple[type[BaseException], ...] = (
+    subprocess.CalledProcessError,
+    json.JSONDecodeError,
+    OSError,
+)
 
 
 @dataclass(frozen=True)
@@ -458,15 +466,30 @@ def run_follow_up_issues(  # noqa: C901  # quota-check + parse + file paths are 
         )
         return response
 
-    except (
-        Exception
-    ) as e:  # broad: top-level boundary; follow-up failure must NEVER block the PR pipeline
-        logger.warning("Follow-up issues failed for issue #%d: %s", issue_number, e)
-        error_output = f"FAILED: {e}\n"
+    except Exception as e:  # broad boundary; follow-up failure must NEVER block the PR pipeline
+        exc_type = type(e).__name__
+        if isinstance(e, _EXPECTED_FOLLOW_UP_FAILURES):
+            logger.warning(
+                "Follow-up issues failed for issue #%d [%s]: %s",
+                issue_number,
+                exc_type,
+                e,
+                exc_info=True,
+            )
+        else:
+            logger.error(
+                "Unexpected follow-up failure for issue #%d [%s]: %s",
+                issue_number,
+                exc_type,
+                e,
+                exc_info=True,
+            )
+        error_output = f"FAILED: [{exc_type}] {e}\n"
         if hasattr(e, "stdout"):
             error_output += f"\nSTDOUT:\n{e.stdout or ''}"
         if hasattr(e, "stderr"):
             error_output += f"\nSTDERR:\n{e.stderr or ''}"
+        error_output += f"\nTRACEBACK:\n{traceback.format_exc()}"
         with contextlib.suppress(Exception):
             follow_up_log.write_text(error_output)
         return None

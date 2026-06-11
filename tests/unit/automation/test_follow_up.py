@@ -366,6 +366,64 @@ class TestRunFollowUpIssues:
         prompt_file = worktree_path / ".claude-followup-42.md"
         assert not prompt_file.exists()
 
+    def test_failure_log_includes_exception_type(self, tmp_path: Path) -> None:
+        """Acceptance: error log records exception class name for observability."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+        with patch(
+            "hephaestus.automation.follow_up.run",
+            side_effect=RuntimeError("claude failed"),
+        ):
+            run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+        log_text = (tmp_path / "follow-up-42.log").read_text()
+        assert log_text.startswith("FAILED: [RuntimeError]")
+        assert "TRACEBACK:" in log_text
+
+    def test_unexpected_exception_logged_at_error(self, tmp_path: Path, caplog: Any) -> None:
+        """Acceptance: programmer bugs (AttributeError etc.) surface at ERROR with exc_info."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+        with (
+            caplog.at_level("WARNING", logger="hephaestus.automation.follow_up"),
+            patch(
+                "hephaestus.automation.follow_up.run",
+                side_effect=AttributeError("bug"),
+            ),
+        ):
+            response = run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+        assert response is None  # safety contract still holds
+        error_records = [
+            r
+            for r in caplog.records
+            if r.levelname == "ERROR" and r.name == "hephaestus.automation.follow_up"
+        ]
+        assert error_records, "expected an ERROR-level record for unexpected exception"
+        assert any("AttributeError" in r.getMessage() for r in error_records)
+        assert any(r.exc_info is not None for r in error_records)
+
+    def test_expected_exception_logged_at_warning(self, tmp_path: Path, caplog: Any) -> None:
+        """Acceptance: known pipeline failures (CalledProcessError) stay at WARNING."""
+        import subprocess
+
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+        with (
+            caplog.at_level("WARNING", logger="hephaestus.automation.follow_up"),
+            patch(
+                "hephaestus.automation.follow_up.run",
+                side_effect=subprocess.CalledProcessError(1, "claude"),
+            ),
+        ):
+            run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+        follow_up_records = [
+            r for r in caplog.records if r.name == "hephaestus.automation.follow_up"
+        ]
+        warning_records = [r for r in follow_up_records if r.levelname == "WARNING"]
+        error_records = [r for r in follow_up_records if r.levelname == "ERROR"]
+        assert warning_records, "expected at least one WARNING record"
+        assert not error_records, "expected pipeline failure must not escalate to ERROR"
+        assert any(r.exc_info is not None for r in warning_records)
+
     def test_status_tracker_updated_once_for_consolidated_issue(self, tmp_path: Path) -> None:
         worktree_path = tmp_path / "worktree"
         worktree_path.mkdir()
