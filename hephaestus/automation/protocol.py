@@ -28,4 +28,12 @@ PLAN_COMMENT_MARKER: Final[str] = "# Implementation Plan"
 PLAN_REVIEW_PREFIX: Final[str] = "## 🔍 Plan Review"
 """Heading the plan reviewer writes at the top of each review comment."""
 
-__all__ = ["PLAN_COMMENT_MARKER", "PLAN_REVIEW_PREFIX"]
+WONT_FIX_MARKER: Final[str] = "WONT-FIX: intentional design"
+"""Prefix the validator (or a human) replies with to dismiss a review finding as
+intentional-by-design (#1163). A resolved thread whose comments carry this prefix
+is permanently skipped: never re-validated, re-opened, or re-raised — so an
+intentional-design finding (e.g. an abstract method's ``NotImplementedError``)
+cannot stack duplicate threads across runs. Part of the wire protocol — both the
+validator's resolve-reply and the reviewer's dedup match on this exact string."""
+
+__all__ = ["PLAN_COMMENT_MARKER", "PLAN_REVIEW_PREFIX", "WONT_FIX_MARKER"]

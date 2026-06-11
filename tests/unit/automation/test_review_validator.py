@@ -66,7 +66,7 @@ class TestValidatePriorCommentsAddressed:
         self-report to the validator/reviewer.
         """
         with (
-            patch.object(review_validator, "_run_validation_session", return_value=[]),
+            patch.object(review_validator, "_run_validation_session", return_value=([], [])),
             patch.object(review_validator, "gh_pr_review_post") as post,
             patch.object(review_validator, "gh_pr_resolve_thread") as resolve,
         ):
@@ -105,7 +105,9 @@ class TestValidatePriorCommentsAddressed:
             }
         ]
         with (
-            patch.object(review_validator, "_run_validation_session", return_value=unaddressed),
+            patch.object(
+                review_validator, "_run_validation_session", return_value=(unaddressed, [])
+            ),
             patch.object(review_validator, "gh_pr_review_post", return_value=["NEW"]),
             patch.object(review_validator, "gh_pr_resolve_thread") as resolve,
         ):
@@ -147,7 +149,9 @@ class TestValidatePriorCommentsAddressed:
             }
         ]
         with (
-            patch.object(review_validator, "_run_validation_session", return_value=unaddressed),
+            patch.object(
+                review_validator, "_run_validation_session", return_value=(unaddressed, [])
+            ),
             patch.object(review_validator, "gh_pr_review_post", return_value=["NEW"]),
             patch.object(review_validator, "gh_pr_resolve_thread") as resolve,
         ):
@@ -193,7 +197,9 @@ class TestValidatePriorCommentsAddressed:
             }
         ]
         with (
-            patch.object(review_validator, "_run_validation_session", return_value=unaddressed),
+            patch.object(
+                review_validator, "_run_validation_session", return_value=(unaddressed, [])
+            ),
             patch.object(
                 review_validator, "gh_pr_review_post", return_value=["NEW_THREAD"]
             ) as post,
@@ -228,7 +234,9 @@ class TestValidatePriorCommentsAddressed:
         """An item with no path can't be an inline thread → skipped, stays clean."""
         unaddressed = [{"path": "", "line": None, "original_body": "x", "detail": "y"}]
         with (
-            patch.object(review_validator, "_run_validation_session", return_value=unaddressed),
+            patch.object(
+                review_validator, "_run_validation_session", return_value=(unaddressed, [])
+            ),
             patch.object(review_validator, "gh_pr_review_post") as post,
             # Both real threads are "addressed" (the unaddressed item has no
             # path) → the validator resolves them; mock to avoid real gh calls.
@@ -247,6 +255,89 @@ class TestValidatePriorCommentsAddressed:
         assert reopened == []
         assert is_clean is True
         post.assert_not_called()
+
+    def test_wont_fix_dismisses_with_marker_reply_and_no_reopen(self, tmp_path: Path) -> None:
+        """#1163: a won't-fix finding resolves with the marker reply, never re-opens.
+
+        The validator partitions T1 as won't-fix (intentional design); it must be
+        resolved with a ``WONT_FIX_MARKER`` reply and NOT posted as a re-open
+        thread. T2 (addressed) resolves plainly. Nothing is re-opened, so the pass
+        is clean.
+        """
+        from hephaestus.automation.protocol import WONT_FIX_MARKER
+
+        wont_fix = [{"thread_id": "T1", "reason": "abstract method, NotImplementedError by design"}]
+        with (
+            patch.object(review_validator, "_run_validation_session", return_value=([], wont_fix)),
+            patch.object(review_validator, "gh_pr_review_post") as post,
+            patch.object(review_validator, "gh_pr_resolve_thread") as resolve,
+        ):
+            reopened, is_clean = review_validator.validate_prior_comments_addressed(
+                pr_number=1,
+                issue_number=1,
+                worktree_path=tmp_path,
+                prior_threads=_threads(),
+                diff_text="diff",
+                agent="claude",
+                iteration=1,
+                state_dir=tmp_path,
+            )
+
+        assert reopened == []
+        assert is_clean is True
+        post.assert_not_called()  # won't-fix is NOT re-opened
+        # T1 resolved WITH the won't-fix marker reply; T2 resolved plainly.
+        calls = {c.args[0]: c.kwargs.get("reply_body") for c in resolve.call_args_list}
+        assert set(calls) == {"T1", "T2"}
+        assert calls["T1"] is not None and calls["T1"].startswith(WONT_FIX_MARKER)
+        assert "NotImplementedError by design" in calls["T1"]
+        assert calls["T2"] is None  # addressed → bare resolve
+
+
+class TestDismissWontFixPriorThreads:
+    """#1163: won't-fix dismissal resolves threads with the durable marker reply."""
+
+    def test_resolves_only_wont_fix_ids_with_marker(self) -> None:
+        from hephaestus.automation.protocol import WONT_FIX_MARKER
+
+        threads = [
+            {"id": "T1", "path": "a.py", "line": 1, "body": "x"},
+            {"id": "T2", "path": "b.py", "line": 2, "body": "y"},
+        ]
+        wont_fix = [{"thread_id": "T1", "reason": "interface stub"}]
+        with patch.object(review_validator, "gh_pr_resolve_thread") as resolve:
+            dismissed = review_validator._dismiss_wont_fix_prior_threads(threads, wont_fix, {"T1"})
+        assert dismissed == ["T1"]
+        assert resolve.call_count == 1
+        assert resolve.call_args.args[0] == "T1"
+        assert resolve.call_args.kwargs["reply_body"].startswith(WONT_FIX_MARKER)
+        assert "interface stub" in resolve.call_args.kwargs["reply_body"]
+
+    def test_bare_marker_when_no_reason(self) -> None:
+        from hephaestus.automation.protocol import WONT_FIX_MARKER
+
+        threads = [{"id": "T1", "path": "a.py", "line": 1, "body": "x"}]
+        with patch.object(review_validator, "gh_pr_resolve_thread") as resolve:
+            review_validator._dismiss_wont_fix_prior_threads(threads, [{"thread_id": "T1"}], {"T1"})
+        assert resolve.call_args.kwargs["reply_body"] == WONT_FIX_MARKER
+
+    def test_continues_past_failure(self) -> None:
+        import subprocess
+
+        threads = [
+            {"id": "T1", "path": "a.py", "line": 1, "body": "x"},
+            {"id": "T2", "path": "b.py", "line": 2, "body": "y"},
+        ]
+        wont_fix = [{"thread_id": "T1"}, {"thread_id": "T2"}]
+        with patch.object(
+            review_validator,
+            "gh_pr_resolve_thread",
+            side_effect=[subprocess.CalledProcessError(1, "gh"), None],
+        ):
+            dismissed = review_validator._dismiss_wont_fix_prior_threads(
+                threads, wont_fix, {"T1", "T2"}
+            )
+        assert dismissed == ["T2"]  # only the successful one
 
 
 class TestResolveAddressedPriorThreads:
