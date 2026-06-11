@@ -68,7 +68,7 @@ def format_summary_table(elapsed_s: int, file_count: int, hook_status: str) -> s
         Markdown-formatted table string including a trailing newline.
 
     """
-    status_icon = "✅" if hook_status == "passed" else "❌"
+    status_icon = "[PASS]" if hook_status == "passed" else "[FAIL]"
     return (
         "## Pre-commit Hook Benchmark\n\n"
         "| Metric | Value |\n"
