@@ -925,6 +925,35 @@ def _assert_body_has_closes(body: str) -> None:
 _ACCEPTABLE_SIG_STATUSES = frozenset({"G", "U"})
 
 
+def _gh_commit_is_verified(oid: str) -> bool:
+    """Return True if GitHub reports *oid*'s signature as verified.
+
+    The local ``git log --format=%G?`` check returns ``N`` (no signature) for a
+    commit that is actually **SSH-signed** when the local checkout has no
+    ``gpg.ssh.allowedSignersFile`` configured — git cannot verify SSH signatures
+    without it. GitHub, however, validates the signature server-side and exposes
+    the result at ``repos/{owner}/{repo}/commits/{sha}`` under
+    ``.commit.verification.verified``. That flag is the source of truth at PR
+    time (the same rationale that makes ``U`` acceptable above), so we consult
+    it before declaring a policy violation. Any lookup failure returns False so
+    the caller falls back to the strict local verdict (fail safe).
+    """
+    try:
+        owner, name = get_repo_info()
+        result = _gh_call(
+            [
+                "api",
+                f"repos/{owner}/{name}/commits/{oid}",
+                "--jq",
+                ".commit.verification.verified",
+            ],
+        )
+        return (result.stdout or "").strip().lower() == "true"
+    except Exception as exc:  # pragma: no cover - logged, treated as unverified
+        logger.warning("Could not confirm GitHub signature for %s: %s", oid[:10], exc)
+        return False
+
+
 def _assert_branch_commits_signed(branch: str, base: str = "main") -> None:
     """Raise if any commit on *branch* (since *base*) is unsigned or invalid.
 
@@ -932,6 +961,13 @@ def _assert_branch_commits_signed(branch: str, base: str = "main") -> None:
     status. The base ref is fetched first to ensure the range is meaningful in
     detached/shallow clones; failure to fetch is non-fatal because the existing
     local ref is sufficient when present.
+
+    A commit whose local status is *not* acceptable (e.g. ``N`` for an
+    SSH-signed commit the local checkout can't verify without
+    ``gpg.ssh.allowedSignersFile``) is re-checked against GitHub's commit
+    verification API before it is flagged — GitHub's ``verified`` flag is
+    authoritative at PR time. Only commits that fail BOTH the local check and
+    the API check are treated as policy violations.
     """
     # Best-effort fetch of the base ref. Don't fail signing checks just because
     # the operator is offline — the local base is usually fresh enough.
@@ -960,6 +996,11 @@ def _assert_branch_commits_signed(branch: str, base: str = "main") -> None:
             continue
         oid, status = parts[0], parts[1].strip()
         if status not in _ACCEPTABLE_SIG_STATUSES:
+            # Local git couldn't bless it — but it may be SSH-signed and simply
+            # unverifiable here. Defer to GitHub's authoritative verdict before
+            # flagging it as a policy violation.
+            if _gh_commit_is_verified(oid):
+                continue
             bad.append((oid, status))
 
     if bad:
