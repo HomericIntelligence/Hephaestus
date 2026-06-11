@@ -161,13 +161,13 @@ def check_ci_matrix_coverage(repo_root: Path) -> bool:
 
     ci_workflow = repo_root / ".github" / "workflows" / "test.yml"
     if not ci_workflow.exists():
-        print(f"WARNING: CI workflow not found at {ci_workflow} — skipping matrix check")
+        print(f"INFO: CI workflow not found at {ci_workflow} — skipping matrix check")
         return True
 
     matrix_versions = extract_ci_matrix_python_versions(ci_workflow.read_text())
 
     if not matrix_versions:
-        print(f"WARNING: No python-version matrix found in {ci_workflow} — skipping matrix check")
+        print(f"INFO: No python-version matrix found in {ci_workflow} — skipping matrix check")
         return True
 
     missing = sorted(set(classifier_versions) - set(matrix_versions))

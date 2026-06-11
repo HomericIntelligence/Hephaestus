@@ -251,11 +251,30 @@ class TestCheckCiMatrixCoverage:
         pyproject.write_text('[project]\nname = "mypkg"\n')
         assert check_ci_matrix_coverage(tmp_path) is True
 
-    def test_returns_true_when_no_ci_workflow(self, tmp_path: Path) -> None:
-        """Returns True (with warning) when CI workflow file does not exist."""
+    def test_returns_true_when_no_ci_workflow(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Returns True with INFO (not WARNING) when CI workflow file does not exist."""
         pyproject = tmp_path / "pyproject.toml"
         pyproject.write_text('"Programming Language :: Python :: 3.10",\n')
         assert check_ci_matrix_coverage(tmp_path) is True
+        captured = capsys.readouterr().out
+        assert "INFO:" in captured
+        assert "WARNING:" not in captured
+
+    def test_returns_true_when_no_matrix_in_workflow(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Returns True with INFO (not WARNING) when workflow has no python-version matrix."""
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text('"Programming Language :: Python :: 3.10",\n')
+        workflow_dir = tmp_path / ".github" / "workflows"
+        workflow_dir.mkdir(parents=True)
+        (workflow_dir / "test.yml").write_text("jobs:\n  test:\n    runs-on: ubuntu-latest\n")
+        assert check_ci_matrix_coverage(tmp_path) is True
+        captured = capsys.readouterr().out
+        assert "INFO:" in captured
+        assert "WARNING:" not in captured
 
     def test_returns_true_when_matrix_has_extra_versions(self, tmp_path: Path) -> None:
         """Returns True when CI matrix has versions beyond what classifiers list."""
