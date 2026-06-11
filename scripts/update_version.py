@@ -57,10 +57,10 @@ def main() -> int:
         if args.verify_only:
             # Verify only
             if version_manager.verify(args.version):
-                print("\n✅ All version files are consistent")
+                print("\n[OK] All version files are consistent")
                 return 0
             else:
-                print("\n❌ Version files are inconsistent")
+                print("\n[FAIL] Version files are inconsistent")
                 return 1
         else:
             # Update all version files
@@ -68,10 +68,10 @@ def main() -> int:
 
             # Verify updates
             if version_manager.verify(args.version):
-                print("\n✅ All version files updated successfully")
+                print("\n[OK] All version files updated successfully")
                 return 0
             else:
-                print("\n❌ Version update incomplete")
+                print("\n[FAIL] Version update incomplete")
                 return 1
 
     except ValueError as e:
