@@ -42,10 +42,6 @@ module — most users invoke the `hephaestus-*` console scripts instead.
   implementation in parallel worktrees; absorbs PR-review +
   thread-addressing in-loop).
 - **`drive_prs_green.py`** → drive open PRs to green CI.
-- **`run_automation_loop.sh`** — Legacy bash glue script, superseded by the
-  `hephaestus-automation-loop` console script
-  (`hephaestus.automation.loop_runner`). Drives the 3-stage pipeline
-  (plan → implement → drive-green).
 
 ### GitHub
 
@@ -73,9 +69,6 @@ python3 scripts/check_cli_table_sync.py
 
 # Markdown link fixer
 python3 scripts/fix_invalid_links.py .
-
-# Automation pipeline (shell glue)
-scripts/run_automation_loop.sh
 
 # Symlink check
 scripts/check-symlinks.sh
