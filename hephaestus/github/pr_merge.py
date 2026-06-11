@@ -71,7 +71,10 @@ def run_git_cmd(cmd: list[str], dry_run: bool = False, cwd: str | None = None) -
         cwd: Working directory
 
     """
-    logger.info("$ %s", " ".join(cmd))
+    if cwd is not None:
+        logger.info("$ %s (cwd=%s)", " ".join(cmd), cwd)
+    else:
+        logger.info("$ %s", " ".join(cmd))
     run_subprocess(cmd, cwd=cwd, dry_run=dry_run)
 
 

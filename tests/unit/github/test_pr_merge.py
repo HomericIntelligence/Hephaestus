@@ -84,6 +84,20 @@ class TestRunGitCmd:
         run_git_cmd(["git", "log"], cwd="/some/path")
         mock_run.assert_called_once_with(["git", "log"], cwd="/some/path", dry_run=False)
 
+    @patch("hephaestus.github.pr_merge.logger")
+    @patch("hephaestus.github.pr_merge.run_subprocess")
+    def test_log_includes_cwd_when_provided(self, _mock_run, mock_logger) -> None:
+        """Log line includes (cwd=...) when cwd is passed."""
+        run_git_cmd(["git", "log"], cwd="/some/path")
+        mock_logger.info.assert_called_once_with("$ %s (cwd=%s)", "git log", "/some/path")
+
+    @patch("hephaestus.github.pr_merge.logger")
+    @patch("hephaestus.github.pr_merge.run_subprocess")
+    def test_log_omits_cwd_when_not_provided(self, _mock_run, mock_logger) -> None:
+        """Log line omits cwd suffix when cwd is None (no noise added to existing traces)."""
+        run_git_cmd(["git", "status"])
+        mock_logger.info.assert_called_once_with("$ %s", "git status")
+
 
 class TestChecksSuccessAndPrint:
     """Tests for checks_success_and_log."""
