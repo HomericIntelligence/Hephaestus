@@ -8,6 +8,7 @@ in ProjectHephaestus.
 import tempfile
 from pathlib import Path
 
+import hephaestus
 from hephaestus.cli.utils import add_logging_args, create_parser
 
 # Import our utilities
@@ -46,7 +47,7 @@ def main():
         # Write data
         sample_data = {
             "name": "ProjectHephaestus",
-            "version": "0.1.0",
+            "version": hephaestus.__version__,
             "modules": ["config", "logging", "io", "utils", "cli"],
         }
 
