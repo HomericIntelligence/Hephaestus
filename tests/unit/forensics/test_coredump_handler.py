@@ -219,3 +219,85 @@ class TestMainTargetDir:
         # Cap of 3 bytes should clip output to 3 bytes.
         written = (cores / "core.1.p.0.sig6").read_bytes()
         assert len(written) == 3
+
+
+class TestParseMaxBytes:
+    """Unit tests for ``_parse_max_bytes``."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("1024", 1024),
+            ("  42  ", 42),
+            ("4G", 4 * 1024**3),
+            ("500M", 500 * 1024**2),
+            ("2GiB", 2 * 1024**3),
+            ("1k", 1024),
+            ("1KB", 1024),
+        ],
+    )
+    def test_valid_inputs(self, raw: str, expected: int) -> None:
+        from hephaestus.forensics.coredump_handler import _parse_max_bytes
+
+        assert _parse_max_bytes(raw) == expected
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["", "   ", "abc", "4X", "-1", "0", "4G500M", "1.5G", "4 G B"],
+    )
+    def test_invalid_inputs_return_none(self, raw: str) -> None:
+        from hephaestus.forensics.coredump_handler import _parse_max_bytes
+
+        assert _parse_max_bytes(raw) is None
+
+
+class TestMaxBytesEnvFallback:
+    """``main()`` env-var error handling."""
+
+    def test_malformed_env_falls_back_and_logs(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Malformed COREDUMP_MAX_BYTES logs to handler.log and uses default."""
+        cores = tmp_path / "cores"
+        monkeypatch.setenv("COREDUMP_MAX_BYTES", "4X")
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b"ELF-bytes"))
+        rc = main(["--target-dir", str(cores), "1", "p", "0", "6"])
+        assert rc == 0
+        # Core is still written (default cap is generous).
+        assert (cores / "core.1.p.0.sig6").read_bytes() == b"ELF-bytes"
+        # Failure is recorded in handler.log next to the cores dir.
+        log_text = (tmp_path / "handler.log").read_text(encoding="utf-8")
+        assert "COREDUMP_MAX_BYTES=" in log_text
+        assert "'4X'" in log_text
+        assert "falling back to default" in log_text
+
+    def test_suffix_env_var_parsed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """COREDUMP_MAX_BYTES='4K' caps at 4096 bytes."""
+        cores = tmp_path / "cores"
+        monkeypatch.setenv("COREDUMP_MAX_BYTES", "4K")
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b"A" * 8192))
+        rc = main(["--target-dir", str(cores), "1", "p", "0", "6"])
+        assert rc == 0
+        written = (cores / "core.1.p.0.sig6").read_bytes()
+        assert len(written) == 4096
+
+    def test_whitespace_only_env_uses_default(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Whitespace-only COREDUMP_MAX_BYTES is treated as unset, no warning."""
+        cores = tmp_path / "cores"
+        monkeypatch.setenv("COREDUMP_MAX_BYTES", "   ")
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b"X"))
+        rc = main(["--target-dir", str(cores), "1", "p", "0", "6"])
+        assert rc == 0
+        log_path = tmp_path / "handler.log"
+        if log_path.exists():
+            assert "COREDUMP_MAX_BYTES" not in log_path.read_text(encoding="utf-8")

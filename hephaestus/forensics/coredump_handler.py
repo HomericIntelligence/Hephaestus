@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +60,46 @@ DEFAULT_TARGET_DIRS: tuple[str, ...] = ("/tmp/crash-bundle/cores",)  # nosec B10
 #: Default cap on the core size written to disk (4 GiB). Prevents a runaway
 #: process from filling the host disk.
 DEFAULT_MAX_BYTES: int = 4 * 1024 * 1024 * 1024
+
+#: Regex for parsing ``COREDUMP_MAX_BYTES``: integer with optional IEC unit
+#: suffix (K/M/G/T, case-insensitive, optional trailing 'i' and/or 'B' for
+#: ``KiB``/``MB``/etc.). Whitespace allowed at either end. Bare digits and
+#: ``4G``/``500M``/``2GiB`` all parse; ``-1``/``0``/``4X``/``4G500M`` do not.
+_MAX_BYTES_RE = re.compile(r"^\s*(\d+)\s*([KMGT]?)i?B?\s*$", re.IGNORECASE)
+_UNIT_MULTIPLIERS: dict[str, int] = {
+    "": 1,
+    "K": 1024,
+    "M": 1024 * 1024,
+    "G": 1024 * 1024 * 1024,
+    "T": 1024 * 1024 * 1024 * 1024,
+}
+
+
+def _parse_max_bytes(raw: str) -> int | None:
+    """Parse a ``COREDUMP_MAX_BYTES`` value, returning ``None`` on any failure.
+
+    Accepts bare digits (``"4096"``) and IEC suffixes (``"4G"``, ``"500M"``,
+    ``"2GiB"``, case-insensitive). All suffixes use power-of-two (IEC)
+    semantics. Rejects empty/whitespace input, negatives, zero, unknown
+    suffixes, and any value that ``int()`` cannot consume.
+
+    Args:
+        raw: The raw env-var string (caller has already established it is set).
+
+    Returns:
+        The parsed positive byte count, or ``None`` if the input is malformed.
+        Never raises.
+
+    """
+    match = _MAX_BYTES_RE.match(raw)
+    if match is None:
+        return None
+    digits, suffix = match.group(1), match.group(2).upper()
+    try:
+        value = int(digits) * _UNIT_MULTIPLIERS[suffix]
+    except (ValueError, KeyError):
+        return None
+    return value if value > 0 else None
 
 
 def resolve_target_dir(candidates: list[str]) -> Path:
@@ -239,10 +280,24 @@ def main(argv: list[str] | None = None) -> int:
         target_dirs = os.environ.get("COREDUMP_TARGET_DIRS")
         candidates = target_dirs.split(":") if target_dirs else list(DEFAULT_TARGET_DIRS)
 
-    max_bytes_env = os.environ.get("COREDUMP_MAX_BYTES")
-    max_bytes = int(max_bytes_env) if max_bytes_env else DEFAULT_MAX_BYTES
-
     target_dir = resolve_target_dir(candidates)
+
+    max_bytes_env = os.environ.get("COREDUMP_MAX_BYTES")
+    if max_bytes_env and max_bytes_env.strip():
+        parsed = _parse_max_bytes(max_bytes_env)
+        if parsed is None:
+            _log(
+                target_dir.parent,
+                f"WARNING: COREDUMP_MAX_BYTES={max_bytes_env!r} is not a valid "
+                f"byte count (expected digits with optional K/M/G/T suffix); "
+                f"falling back to default {DEFAULT_MAX_BYTES}",
+            )
+            max_bytes = DEFAULT_MAX_BYTES
+        else:
+            max_bytes = parsed
+    else:
+        max_bytes = DEFAULT_MAX_BYTES
+
     out_path = write_core(
         sys.stdin.buffer,
         pid=args.pid,
