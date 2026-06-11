@@ -11,6 +11,7 @@ Follows development principles:
 """
 
 import argparse
+import json
 import sys
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -139,8 +140,6 @@ def emit_json_status(exit_code: int, message: str | None = None, **extra: Any) -
         **extra: Additional fields to merge into the envelope.
 
     """
-    import json
-
     envelope: dict[str, Any] = {
         "status": "ok" if exit_code == 0 else "error",
         "exit_code": exit_code,
@@ -243,8 +242,6 @@ def format_output(data: Any, format_type: str = "text") -> str:
 
     """
     if format_type == "json":
-        import json
-
         return json.dumps(data, indent=2)
     elif format_type == "table" and isinstance(data, (list, tuple)):
         if data and isinstance(data[0], dict):
