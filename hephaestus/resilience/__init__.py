@@ -8,6 +8,7 @@ from __future__ import annotations
 from hephaestus.resilience.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerOpenError,
+    CircuitBreakerOpenReason,
     CircuitBreakerState,
     get_circuit_breaker,
     reset_all_circuit_breakers,
@@ -24,6 +25,7 @@ __all__ = [
     "TRANSIENT_SUBPROCESS_ERRORS",
     "CircuitBreaker",
     "CircuitBreakerOpenError",
+    "CircuitBreakerOpenReason",
     "CircuitBreakerState",
     "get_circuit_breaker",
     "is_transient_subprocess_error",

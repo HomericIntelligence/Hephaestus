@@ -12,6 +12,7 @@ import pytest
 from hephaestus.resilience.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerOpenError,
+    CircuitBreakerOpenReason,
     CircuitBreakerState,
     get_circuit_breaker,
     reset_all_circuit_breakers,
@@ -157,6 +158,7 @@ class TestCircuitBreakerOpenError:
 
         assert exc_info.value.time_until_recovery > 0
         assert exc_info.value.name == "test"
+        assert exc_info.value.reason is CircuitBreakerOpenReason.RECOVERY_TIMEOUT
 
     def test_half_open_max_calls_exceeded(self) -> None:
         """Exceeding half_open_max_calls raises CircuitBreakerOpenError."""
@@ -179,8 +181,57 @@ class TestCircuitBreakerOpenError:
             cb.call(MagicMock(side_effect=RuntimeError("half-open fail")))
 
         # Now it's OPEN again, so next call should be rejected
-        with pytest.raises(CircuitBreakerOpenError):
+        with pytest.raises(CircuitBreakerOpenError) as exc_info:
             cb.call(lambda: "should not run")
+        assert exc_info.value.reason is CircuitBreakerOpenReason.RECOVERY_TIMEOUT
+
+    def test_open_state_reports_recovery_timeout_reason(self) -> None:
+        """OPEN state raises with reason=RECOVERY_TIMEOUT and positive ETA."""
+        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=60.0)
+        with pytest.raises(RuntimeError):
+            cb.call(MagicMock(side_effect=RuntimeError("fail")))
+        with pytest.raises(CircuitBreakerOpenError) as exc_info:
+            cb.call(lambda: "should not run")
+        assert exc_info.value.reason is CircuitBreakerOpenReason.RECOVERY_TIMEOUT
+        assert exc_info.value.time_until_recovery > 0
+
+    def test_half_open_exhausted_reports_distinct_reason(self) -> None:
+        """HALF_OPEN with no slots raises HALF_OPEN_EXHAUSTED with time_until_recovery=0.0."""
+        cb = CircuitBreaker(
+            "test", failure_threshold=1, recovery_timeout=0.05, half_open_max_calls=1,
+        )
+        with pytest.raises(RuntimeError):
+            cb.call(MagicMock(side_effect=RuntimeError("fail")))
+        time.sleep(0.1)  # allow OPEN -> HALF_OPEN transition on next call
+
+        barrier = threading.Event()
+        release = threading.Event()
+
+        def slow() -> str:
+            barrier.set()
+            release.wait(timeout=2.0)
+            return "ok"
+
+        t = threading.Thread(target=lambda: cb.call(slow))
+        t.start()
+        try:
+            assert barrier.wait(timeout=1.0), "slow probe never entered call()"
+            with pytest.raises(CircuitBreakerOpenError) as exc_info:
+                cb.call(lambda: "rejected")
+            assert exc_info.value.reason is CircuitBreakerOpenReason.HALF_OPEN_EXHAUSTED
+            assert exc_info.value.time_until_recovery == 0.0
+            assert "half-open slot exhausted" in str(exc_info.value)
+        finally:
+            release.set()
+            t.join(timeout=2.0)
+
+    def test_reason_string_value_matches_enum(self) -> None:
+        """Reason is string-equality-comparable via the (str, Enum) mixin."""
+        err = CircuitBreakerOpenError(
+            "x", 0.0, reason=CircuitBreakerOpenReason.HALF_OPEN_EXHAUSTED,
+        )
+        assert err.reason == "half_open_exhausted"
+        assert err.reason is CircuitBreakerOpenReason.HALF_OPEN_EXHAUSTED
 
 
 class TestCircuitBreakerReset:
