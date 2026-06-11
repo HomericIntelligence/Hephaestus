@@ -25,7 +25,6 @@ from hephaestus.automation.github_api import (
     gh_list_open_issues,
     gh_pr_checks,
     gh_pr_create,
-    gh_pr_inline_comment_history_index,
     gh_pr_inline_comment_index,
     gh_pr_resolve_thread,
     gh_pr_review_post,
@@ -2338,34 +2337,34 @@ class TestGhPrReviewPost:
         assert self._posted_comments(mock_write) == []
 
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
-    @patch("hephaestus.automation.github_api.gh_pr_inline_comment_history_index")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
     @patch("hephaestus.automation.github_api.io_write_secure")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_resolved_same_line_duplicate_comment_is_skipped_not_edited(
+    def test_finding_matching_only_a_resolved_thread_is_reposted(
         self,
         mock_gh_call: Any,
         _mock_repo: Any,
         mock_write: Any,
         mock_index: Any,
-        mock_history: Any,
         mock_update: Any,
     ) -> None:
-        """Issue #1116: resolved historical findings suppress duplicate re-reviews."""
+        """#1152 reverses #1116: a finding matching only a RESOLVED thread re-posts.
+
+        A resolved thread is supposed to mean the finding was fixed and verified.
+        If the reviewer re-raises it, the resolution was wrong (e.g. the old gate
+        force-resolved it without addressing), so it must re-surface as a fresh
+        thread rather than be suppressed — otherwise the GO gate sees zero
+        unresolved threads and the PR converges with the issue unfixed.
+
+        ``gh_pr_inline_comment_index`` (UNRESOLVED threads only) returns ``{}``
+        here, so the line has no open thread and the finding posts fresh.
+        """
         mock_gh_call.side_effect = self._gh_call_side_effect(
             "REVIEW_1", [], diff_text=self._SAMPLE_DIFF
         )
+        # No UNRESOLVED thread on the line — the only prior comment was resolved.
         mock_index.return_value = {}
-        mock_history.return_value = {
-            ("a.py", 2, "RIGHT"): [
-                "This regression coverage only exercises the Claude result-envelope path. "
-                "The production diff also changed the Codex stdout path, so add a Codex "
-                "test where `summary` lacks a verdict and `review_text`/stdout contains "
-                "`Verdict: GO` or `Verdict: NOGO`; otherwise the second producer path can "
-                "regress without this suite catching it."
-            ],
-        }
 
         gh_pr_review_post(
             pr_number=1116,
@@ -2374,22 +2373,17 @@ class TestGhPrReviewPost:
                     "path": "a.py",
                     "line": 2,
                     "side": "RIGHT",
-                    "body": (
-                        "This regression test only exercises the Claude JSON-envelope path. "
-                        "The production fix also changed the Codex stdout path, so please add "
-                        "a Codex-path test that returns prose with `Verdict: GO`/`NOGO` and a "
-                        "verdict-free JSON summary, then asserts `review_text` preserves the "
-                        "raw stdout."
-                    ),
+                    "body": "Real finding the old gate force-resolved without fixing.",
                 }
             ],
             summary="Findings",
             dedupe_existing=True,
         )
 
+        # The finding was NOT edited into a (nonexistent) open thread...
         mock_update.assert_not_called()
-        mock_write.assert_not_called()
-        assert not any(
+        # ...it was posted fresh as a new review.
+        assert any(
             "repos/owner/repo/pulls/1116/reviews" in str(arg)
             for call in mock_gh_call.call_args_list
             for arg in (call.args[0] if call.args else call.kwargs.get("args", []))
@@ -2636,51 +2630,6 @@ class TestGhPrInlineCommentIndex:
         result.stdout = "not json{"
         mock_gh_call.return_value = result
         assert gh_pr_inline_comment_index(7) == {}
-
-
-class TestGhPrInlineCommentHistoryIndex:
-    """gh_pr_inline_comment_history_index includes resolved comments for dedupe."""
-
-    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
-    @patch("hephaestus.automation.github_api._gh_call")
-    def test_indexes_resolved_and_unresolved_thread_bodies(
-        self, mock_gh_call: Any, _mock_repo: Any
-    ) -> None:
-        result = Mock()
-        result.stdout = json.dumps(
-            {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "reviewThreads": {
-                                "nodes": [
-                                    {
-                                        "isResolved": True,
-                                        "path": "a.py",
-                                        "line": 2,
-                                        "side": "RIGHT",
-                                        "comments": {"nodes": [{"id": "N1", "body": "old"}]},
-                                    },
-                                    {
-                                        "isResolved": False,
-                                        "path": "a.py",
-                                        "line": 2,
-                                        "side": "RIGHT",
-                                        "comments": {"nodes": [{"id": "N2", "body": "open"}]},
-                                    },
-                                ]
-                            }
-                        }
-                    }
-                }
-            }
-        )
-        mock_gh_call.return_value = result
-
-        history = gh_pr_inline_comment_history_index(7)
-
-        assert history[("a.py", 2, "RIGHT")] == ["old", "open"]
-        assert history[("a.py", 2)] == ["old", "open"]
 
 
 class TestValidReviewPositions:

@@ -1567,34 +1567,6 @@ def gh_pr_inline_comment_index(pr_number: int) -> dict[ReviewCommentIndexKey, tu
     return index
 
 
-def gh_pr_inline_comment_history_index(pr_number: int) -> dict[ReviewCommentIndexKey, list[str]]:
-    """Map ``(path, line)`` → historical inline review bodies, resolved or not.
-
-    Unlike :func:`gh_pr_inline_comment_index`, this index includes resolved
-    threads and carries only bodies, never comment IDs. It is used solely to
-    suppress materially identical reviewer findings after an earlier thread was
-    resolved; resolved comments must not be edited or re-opened just because a
-    later reviewer restates the same finding (#1116).
-    """
-    history: dict[ReviewCommentIndexKey, list[str]] = {}
-    for node in _fetch_pr_inline_review_thread_nodes(pr_number):
-        path = node.get("path") or ""
-        line = node.get("line")
-        side = node.get("side") or "RIGHT"
-        comment_nodes = node.get("comments", {}).get("nodes", [])
-        bodies = [
-            str(comment.get("body") or "")
-            for comment in comment_nodes
-            if isinstance(comment, dict) and str(comment.get("body") or "").strip()
-        ]
-        if not bodies:
-            continue
-        history.setdefault((path, line, side), []).extend(bodies)
-        # Preserve the older key shape for side-less lookup fallback.
-        history.setdefault((path, line), []).extend(bodies)
-    return history
-
-
 def gh_pr_update_review_comment(comment_node_id: str, body: str) -> None:
     """Replace a PR review comment's body via ``updatePullRequestReviewComment``.
 
@@ -1725,21 +1697,27 @@ def _review_comment_already_covers(existing_body: str, new_body: str) -> bool:
 
 
 def _edit_or_keep_comments(pr_number: int, comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Edit comments whose line already has a bot comment; return the rest.
+    """Edit comments whose line already has an UNRESOLVED bot comment; keep the rest.
 
-    For each comment whose ``(path, line)`` is in the existing-comment index,
-    first skip it if the existing body already covers the same finding. If the
-    finding is genuinely new, rewrite the existing comment to
-    ``existing_body + new_body`` (a single edit that preserves the original
-    text, #1085) and drop it from the returned list. Resolved historical
-    comments are used only as duplicate evidence; they are never edited.
-    Comments on fresh lines are returned unchanged for posting. Fails open: an
-    empty index returns *comments* unchanged, and an edit that raises falls back
-    to posting that comment fresh.
+    For each comment whose ``(path, line)`` matches an UNRESOLVED existing bot
+    thread, skip it if the existing body already covers the same finding, else
+    rewrite that thread's comment to ``existing_body + new_body`` (a single edit
+    preserving the original text, #1085) and drop it from the returned list.
+
+    Findings on fresh lines — including lines whose only prior comment is a
+    RESOLVED thread — are returned unchanged for posting. Dedup is deliberately
+    NOT done against resolved history (#1152 reversed #1116): a resolved thread
+    is supposed to mean the finding was *fixed and verified*, so if the reviewer
+    re-raises it the resolution was wrong and the finding MUST re-surface as a
+    fresh thread — otherwise a force-resolved-but-unaddressed finding is
+    silently suppressed, leaving the GO gate with zero unresolved threads and
+    letting the PR converge with the issue still unfixed.
+
+    Fails open: an empty index returns *comments* unchanged, and an edit that
+    raises falls back to posting that comment fresh.
     """
     editable_index = gh_pr_inline_comment_index(pr_number)
-    history_index = gh_pr_inline_comment_history_index(pr_number)
-    if not editable_index and not history_index:
+    if not editable_index:
         return comments
     fresh: list[dict[str, Any]] = []
     for c in comments:
@@ -1747,22 +1725,6 @@ def _edit_or_keep_comments(pr_number: int, comments: list[dict[str, Any]]) -> li
         line = c.get("line")
         side = c.get("side") or "RIGHT"
         body = c.get("body") or ""
-
-        historical_bodies = history_index.get((path, line, side)) or history_index.get(
-            (path, line), []
-        )
-        if any(
-            _review_comment_already_covers(existing_body, body)
-            for existing_body in historical_bodies
-        ):
-            logger.info(
-                "PR #%s: skipped duplicate same-line review comment on %s:%s (%s)",
-                pr_number,
-                path,
-                line,
-                side,
-            )
-            continue
 
         editable = editable_index.get((path, line, side)) or editable_index.get((path, line))
         if editable is None:
