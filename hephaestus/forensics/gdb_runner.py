@@ -20,15 +20,20 @@ Environment variables:
 * ``RUN_UNDER_GDB=0`` — skip gdb entirely and exec the command directly
   (local-dev escape hatch; gdb adds overhead).
 * ``GDB_CMD_PREFIX`` — optional command prefix inserted before ``gdb``, e.g.
-  ``"pixi run --"``, so gdb and its inferior inherit an activated environment.
+  ``"pixi run --"``. Parsed with ``shlex.split`` so values containing
+  shell-quoted whitespace (e.g. ``"'/path with space/pixi' run --"``) are
+  tokenized correctly.
 
 Security:
 
 * ``GDB_CMD_PREFIX`` is an intentional escape hatch and its tokens are spliced
   into the ``gdb`` argv, so unvalidated input would allow argv injection (e.g.
-  ``--init-eval-command``). Each whitespace-separated token MUST either be the
-  bare argv terminator ``--`` or fully match ``[A-Za-z0-9_./:=,@+~\\-]+`` AND
-  NOT start with ``-``. Anything else is rejected: the library entry point
+  ``--init-eval-command``). The value is tokenized with ``shlex.split`` (so
+  shell-quoted whitespace is honored) and each resulting token MUST either be
+  the bare argv terminator ``--`` or fully match ``[A-Za-z0-9_./:=,@+~ \\-]+``
+  (a literal space is allowed only because it can arise solely from a quoted
+  token, which is spliced as a single argv element) AND NOT start with ``-``.
+  Anything else — including unbalanced quotes — is rejected: the library entry point
   raises ``ValueError`` and the CLI prints ``[run-under-gdb] ERROR: …`` to
   stderr and exits with code ``2``. The supported shape is a sub-runner like
   ``"pixi run --"`` that ends in its own argument terminator.
@@ -45,6 +50,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -54,14 +60,20 @@ from pathlib import Path
 
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 
-_GDB_PREFIX_TOKEN_RE = re.compile(r"[A-Za-z0-9_./:=,@+~\-]+")
+# A literal space is permitted because tokens are produced by ``shlex.split``
+# and spliced into ``subprocess.run`` WITHOUT a shell: an embedded space can
+# only originate from shell-quoting (e.g. a quoted path), so the token is a
+# single, safe argv element rather than a word boundary an attacker controls.
+_GDB_PREFIX_TOKEN_RE = re.compile(r"[A-Za-z0-9_./:=,@+~ \-]+")
 
 
 def _validate_gdb_cmd_prefix(raw: str | None) -> list[str]:
     """Whitelist-validate ``GDB_CMD_PREFIX`` into argv tokens.
 
-    Returns ``[]`` for ``None``/empty/whitespace-only input. Otherwise splits
-    on whitespace; each token must either be the bare argv terminator ``--``
+    Returns ``[]`` for ``None``/empty/whitespace-only input. Otherwise
+    tokenizes with :func:`shlex.split` so values containing shell-quoted
+    whitespace (e.g. ``"'/path with space/pixi' run --"``) are split
+    correctly; each token must either be the bare argv terminator ``--``
     or fully match the safe character class AND not begin with ``-`` (which
     would let a caller inject gdb flags such as ``--init-eval-command``).
 
@@ -72,14 +84,21 @@ def _validate_gdb_cmd_prefix(raw: str | None) -> list[str]:
         The validated argv tokens, ready to splice before ``gdb``.
 
     Raises:
-        ValueError: If any token contains disallowed characters or is a
-            ``-``-leading flag-like token other than the bare ``--``. The
-            message names the offending token.
+        ValueError: If the value cannot be tokenized (e.g. an unbalanced
+            quote), if any token contains disallowed characters, or if a token
+            is a ``-``-leading flag-like token other than the bare ``--``. The
+            message is prefixed with ``GDB_CMD_PREFIX``.
 
     """
     if not raw or not raw.strip():
         return []
-    tokens = raw.split()
+    try:
+        tokens = shlex.split(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"GDB_CMD_PREFIX value {raw!r} is not valid shell syntax "
+            f"({exc}); refusing to splice into gdb argv"
+        ) from exc
     for tok in tokens:
         if tok == "--":
             continue
@@ -92,7 +111,7 @@ def _validate_gdb_cmd_prefix(raw: str | None) -> list[str]:
         if not _GDB_PREFIX_TOKEN_RE.fullmatch(tok):
             raise ValueError(
                 f"GDB_CMD_PREFIX token {tok!r} contains characters outside the "
-                r"allowed set [A-Za-z0-9_./:=,@+~\-]; refusing to splice into "
+                r"allowed set [A-Za-z0-9_./:=,@+~ \-]; refusing to splice into "
                 "gdb argv"
             )
     return tokens
@@ -217,11 +236,14 @@ def run_under_gdb(
         core_dir: Directory for cores and gdb logs (created if absent).
         command: The program to run. Resolved via ``PATH`` if not a path.
         command_args: Arguments passed to ``command`` verbatim.
-        gdb_cmd_prefix: Optional whitespace-separated command prefix inserted
-            before ``gdb`` (e.g. ``"pixi run --"``). Each token must either
-            be the bare ``--`` terminator or match
-            ``[A-Za-z0-9_./:=,@+~-]+`` and not start with ``-``; otherwise a
-            ``ValueError`` is raised (see module ``Security:`` note).
+        gdb_cmd_prefix: Optional command prefix inserted before ``gdb`` (e.g.
+            ``"pixi run --"``) so gdb and its inferior inherit an activated
+            environment. Tokenized with :func:`shlex.split` to honor shell
+            quoting rules, so paths with embedded whitespace can be quoted.
+            Each resulting token must either be the bare ``--`` terminator or
+            match ``[A-Za-z0-9_./:=,@+~ -]+`` and not start with ``-``;
+            otherwise a ``ValueError`` is raised (see module ``Security:``
+            note).
 
     Returns:
         ``0``/``N`` for a normal exit with code ``N``; ``128 + signo`` if the
@@ -324,7 +346,8 @@ def main(argv: list[str] | None = None) -> int:
     Reads two environment variables:
 
     * ``RUN_UNDER_GDB=0`` — bypass gdb and exec the command directly.
-    * ``GDB_CMD_PREFIX`` — optional prefix word list inserted before ``gdb``.
+    * ``GDB_CMD_PREFIX`` — optional prefix inserted before ``gdb``; parsed with
+      ``shlex.split`` so shell-quoted whitespace in paths is preserved.
 
     Args:
         argv: Argument vector (defaults to ``sys.argv[1:]``).

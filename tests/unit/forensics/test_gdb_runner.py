@@ -117,6 +117,83 @@ class TestRunUnderGdb:
         assert rc == 5
 
 
+class TestGdbCmdPrefixParsing:
+    """Regression tests for GDB_CMD_PREFIX shell-quote parsing (issue #756)."""
+
+    @staticmethod
+    def _capture_argv(monkeypatch) -> list[list[str]]:
+        captured: list[list[str]] = []
+
+        def fake_run(argv, check=False):
+            captured.append(list(argv))
+
+            class _R:
+                returncode = 0
+
+            return _R()
+
+        monkeypatch.setattr("hephaestus.forensics.gdb_runner.subprocess.run", fake_run)
+        return captured
+
+    def test_prefix_none_yields_no_prefix_tokens(self, monkeypatch, tmp_path) -> None:
+        captured = self._capture_argv(monkeypatch)
+        run_under_gdb(str(tmp_path / "cores"), "sh", ["-c", "true"], gdb_cmd_prefix=None)
+        assert captured, "subprocess.run was not invoked"
+        assert captured[0][0] == "gdb"
+
+    def test_prefix_empty_string_yields_no_prefix_tokens(self, monkeypatch, tmp_path) -> None:
+        captured = self._capture_argv(monkeypatch)
+        run_under_gdb(str(tmp_path / "cores"), "sh", ["-c", "true"], gdb_cmd_prefix="")
+        assert captured[0][0] == "gdb"
+
+    def test_unquoted_prefix_splits_on_whitespace(self, monkeypatch, tmp_path) -> None:
+        captured = self._capture_argv(monkeypatch)
+        run_under_gdb(
+            str(tmp_path / "cores"),
+            "sh",
+            ["-c", "true"],
+            gdb_cmd_prefix="pixi run --",
+        )
+        argv = captured[0]
+        assert argv[:3] == ["pixi", "run", "--"]
+        assert argv[3] == "gdb"
+
+    def test_single_quoted_path_with_spaces_stays_one_token(self, monkeypatch, tmp_path) -> None:
+        """Regression for issue #756: '/path with space/pixi' must be ONE token."""
+        captured = self._capture_argv(monkeypatch)
+        run_under_gdb(
+            str(tmp_path / "cores"),
+            "sh",
+            ["-c", "true"],
+            gdb_cmd_prefix="'/path with space/pixi' run --",
+        )
+        argv = captured[0]
+        assert argv[:3] == ["/path with space/pixi", "run", "--"]
+        assert argv[3] == "gdb"
+
+    def test_double_quoted_path_with_spaces_stays_one_token(self, monkeypatch, tmp_path) -> None:
+        captured = self._capture_argv(monkeypatch)
+        run_under_gdb(
+            str(tmp_path / "cores"),
+            "sh",
+            ["-c", "true"],
+            gdb_cmd_prefix='"/abs path/to/pixi" run --',
+        )
+        argv = captured[0]
+        assert argv[:3] == ["/abs path/to/pixi", "run", "--"]
+
+    def test_malformed_quoting_raises_valueerror(self, monkeypatch, tmp_path) -> None:
+        """Unclosed quotes surface as ValueError, not as silently broken argv."""
+        self._capture_argv(monkeypatch)
+        with pytest.raises(ValueError):
+            run_under_gdb(
+                str(tmp_path / "cores"),
+                "sh",
+                ["-c", "true"],
+                gdb_cmd_prefix="'unterminated",
+            )
+
+
 class TestMain:
     """Tests for the CLI entry point."""
 
@@ -207,11 +284,20 @@ class TestValidateGdbCmdPrefix:
             "foo?",
             "foo'bar",
             'foo"bar',
-            "foo\\bar",
+            "foo#bar",
+            "foo!bar",
+            "foo;bar",
         ],
     )
     def test_rejects_unsafe_prefixes(self, raw: str) -> None:
-        """Unsafe prefixes raise ValueError with a descriptive message."""
+        """Unsafe prefixes raise ValueError with a descriptive message.
+
+        After issue #756 the value is tokenized with ``shlex.split`` before the
+        per-token whitelist runs. Unbalanced-quote cases (e.g. ``foo'bar``) are
+        rejected by shlex itself (re-raised with a ``GDB_CMD_PREFIX`` message);
+        the remaining cases survive tokenization but carry shell metacharacters
+        outside the whitelist.
+        """
         with pytest.raises(ValueError, match="GDB_CMD_PREFIX"):
             _validate_gdb_cmd_prefix(raw)
 
