@@ -63,6 +63,7 @@ def test_public_surface_pins_expected_symbols() -> None:
     expected = {
         "AddressReviewOptions",
         "AddressReviewer",
+        "AuditReviewer",
         "CIDriver",
         "CIDriverOptions",
         "DependencyResolver",
