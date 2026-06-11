@@ -448,3 +448,62 @@ class TestFetchAllIssueLabelsGraphql:
             result = fetch_all_issue_labels_graphql([10, 11])
 
         assert result == {10: [], 11: []}
+
+    def test_owner_name_passed_as_graphql_variables_not_interpolated(self) -> None:
+        """Regression: owner/name must be GraphQL variables, not interpolated.
+
+        The original implementation interpolated ``{owner!r}`` into the query
+        body, producing single-quoted GraphQL string literals
+        (``owner:'HomericIntelligence'``). GraphQL only accepts double-quoted
+        strings, so ``gh`` rejected every batch label fetch with
+        ``Expected VALUE, actual: UNKNOWN_CHAR``. Pass owner/name as ``-F``
+        variables instead, matching ``fetch_issue_review_comments``.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from hephaestus.automation.review_state import fetch_all_issue_labels_graphql
+
+        with (
+            patch("hephaestus.automation.review_state.get_repo_root", return_value="/tmp/repo"),
+            patch(
+                "hephaestus.automation.review_state.get_repo_info",
+                return_value=("HomericIntelligence", "ProjectHephaestus"),
+            ),
+            patch("hephaestus.automation.review_state._gh_call") as mock_gh,
+        ):
+            mock_gh.return_value = MagicMock(stdout=json.dumps({"data": {"repository": {}}}))
+            fetch_all_issue_labels_graphql([10, 11])
+
+        argv = mock_gh.call_args.args[0]
+        query_arg = next(a for a in argv if a.startswith("query="))
+        # No single-quoted GraphQL string literals (invalid GraphQL).
+        assert "'HomericIntelligence'" not in query_arg
+        assert "'ProjectHephaestus'" not in query_arg
+        # owner/name supplied as declared variables, passed via -F.
+        assert "$owner" in query_arg and "$name" in query_arg
+        assert "owner=HomericIntelligence" in argv
+        assert "name=ProjectHephaestus" in argv
+
+    def test_comments_owner_name_passed_as_graphql_variables(self) -> None:
+        """Same regression guard for the batched comments fetch."""
+        from unittest.mock import MagicMock, patch
+
+        from hephaestus.automation.review_state import fetch_all_issue_comments_graphql
+
+        with (
+            patch("hephaestus.automation.review_state.get_repo_root", return_value="/tmp/repo"),
+            patch(
+                "hephaestus.automation.review_state.get_repo_info",
+                return_value=("HomericIntelligence", "ProjectHephaestus"),
+            ),
+            patch("hephaestus.automation.review_state._gh_call") as mock_gh,
+        ):
+            mock_gh.return_value = MagicMock(stdout=json.dumps({"data": {"repository": {}}}))
+            fetch_all_issue_comments_graphql([10])
+
+        argv = mock_gh.call_args.args[0]
+        query_arg = next(a for a in argv if a.startswith("query="))
+        assert "'HomericIntelligence'" not in query_arg
+        assert "$owner" in query_arg and "$name" in query_arg
+        assert "owner=HomericIntelligence" in argv
+        assert "name=ProjectHephaestus" in argv
