@@ -93,6 +93,14 @@ def test_run_skips_issue_with_existing_plan() -> None:
         patch.object(planner, "_has_existing_plan", return_value=True) as mock_has,
         patch.object(planner, "_call_claude") as mock_claude,
         patch.object(planner, "_post_plan") as mock_post,
+        # Isolate the pre-pass label filter from the live repo: without this the
+        # batched fetch sees real issue #123's plan-go label and drops it before
+        # the worker, so _has_existing_plan never runs (#1156). Empty labels →
+        # the issue reaches the worker, where the mocked guard returns True.
+        patch(
+            "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+            return_value={},
+        ),
     ):
         results = planner.run()
 

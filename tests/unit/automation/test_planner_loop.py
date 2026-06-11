@@ -892,6 +892,13 @@ class TestFilterIssues:
                 "hephaestus.automation.planner_state.prefetch_issue_states",
                 return_value={},
             ),
+            # Isolate from the live repo: the batched label fetch would otherwise
+            # hit the network for the real issue #123 (which carries plan-go) and
+            # drop it. Empty labels → issue falls through to the worker (#1156).
+            patch(
+                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                return_value={},
+            ),
         ):
             result = planner._filter_issues()
 
@@ -902,9 +909,15 @@ class TestFilterIssues:
         """Closed-issue filtering (cheap, batched GraphQL) stays in the pre-pass."""
         from hephaestus.automation.models import IssueState
 
-        with patch(
-            "hephaestus.automation.planner_state.prefetch_issue_states",
-            return_value={123: IssueState.CLOSED},
+        with (
+            patch(
+                "hephaestus.automation.planner_state.prefetch_issue_states",
+                return_value={123: IssueState.CLOSED},
+            ),
+            patch(
+                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                return_value={},
+            ),
         ):
             result = planner._filter_issues()
 
@@ -914,9 +927,16 @@ class TestFilterIssues:
         """Open issues survive the pre-pass and are returned for the worker pool."""
         from hephaestus.automation.models import IssueState
 
-        with patch(
-            "hephaestus.automation.planner_state.prefetch_issue_states",
-            return_value={123: IssueState.OPEN},
+        with (
+            patch(
+                "hephaestus.automation.planner_state.prefetch_issue_states",
+                return_value={123: IssueState.OPEN},
+            ),
+            # Isolate from the live repo's label state for issue #123 (#1156).
+            patch(
+                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                return_value={},
+            ),
         ):
             result = planner._filter_issues()
 
