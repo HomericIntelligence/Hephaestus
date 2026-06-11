@@ -137,6 +137,26 @@ class TestSessionUUID:
     def test_different_issue_different_uuid(self) -> None:
         assert session_uuid("R", 1, AGENT_PLANNER) != session_uuid("R", 2, AGENT_PLANNER)
 
+    def test_different_model_different_uuid(self) -> None:
+        """#1166: the model is part of the key so sessions never cross models."""
+        a = session_uuid("R", 1, AGENT_PLANNER, "claude-sonnet-4-6")
+        b = session_uuid("R", 1, AGENT_PLANNER, "claude-opus-4-8")
+        assert a != b
+
+    def test_omitting_model_preserves_legacy_key(self) -> None:
+        """Backward compat: no model reproduces the historical (repo, issue, agent) id."""
+        from hephaestus.automation.session_naming import session_name
+
+        assert session_name("R", 1, AGENT_PLANNER) == "R_1_planner"
+        assert session_name("R", 1, AGENT_PLANNER, None) == "R_1_planner"
+
+    def test_model_token_sanitized_into_key(self) -> None:
+        from hephaestus.automation.session_naming import session_name
+
+        # Slashes/colons in a model id are normalized to a name-safe token.
+        name = session_name("R", 1, AGENT_PLANNER, "us.anthropic/opus:4-8")
+        assert name == "R_1_planner_us.anthropic-opus-4-8"
+
     def test_each_agent_constant_yields_distinct_uuid(self) -> None:
         agents = [
             AGENT_PLANNER,

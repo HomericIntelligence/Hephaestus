@@ -917,6 +917,7 @@ class ImplementationPhaseRunner:
             issue=issue_number,
             agent=self._impl_module.AGENT_IMPLEMENTER,
             cwd=worktree_path,
+            model=implementer_model(),
         )
 
     def _run_advise(self, issue_number: int, issue_title: str, issue_body: str) -> str:

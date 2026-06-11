@@ -2997,6 +2997,7 @@ class CIDriver:
             issue=issue_number,
             agent=AGENT_CI_DRIVER,
             cwd=cwd,
+            model=implementer_model(),
         )
 
     def _parse_json_block(self, text: str) -> dict[str, Any]:

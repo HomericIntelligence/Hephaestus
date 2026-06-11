@@ -27,6 +27,7 @@ letting each agent resume itself across loop iterations.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import uuid
 from pathlib import Path
@@ -121,19 +122,41 @@ def _is_valid_agent(agent: str) -> bool:
     return bool(sep) and base in _PER_ITERATION_REVIEWERS and suffix.isdigit()
 
 
-def session_name(repo: str, issue: int | str, agent: str) -> str:
+def _model_token(model: str | None) -> str:
+    """Normalize a model id into a filesystem/name-safe session-key token.
+
+    ``claude --resume`` is locked to the model that created the session, so the
+    model MUST be part of the deterministic key — otherwise switching
+    ``--implementer-model`` (or any per-agent model) between runs resumes a
+    transcript created under a different model, which the CLI rejects (#1166).
+    Returns ``""`` when no model is given (legacy callers keep the old key).
+    """
+    if not model:
+        return ""
+    return re.sub(r"[^A-Za-z0-9._-]", "-", model.strip())
+
+
+def session_name(repo: str, issue: int | str, agent: str, model: str | None = None) -> str:
     """Return the human-readable session name.
 
-    The tuple is intentionally **(repo, issue, agent) only** — no githash.
-    The Claude transcript persists across main-bumps so a long-running
-    drive (CI fix loop, planner, implementer) resumes its context whenever
-    the same artifact (issue/PR) is touched again, instead of being
-    discarded every time main advances (#841).
+    The key is **(repo, issue, agent, model)**. The model is part of the key
+    because ``claude --resume`` is locked to the creating model: a session
+    created under one model cannot be resumed under another, so each
+    ``(repo, issue, agent, model)`` gets its OWN create-once-then-resume lineage
+    (#1166). Omitting ``model`` reproduces the historical ``(repo, issue, agent)``
+    key for backward compatibility.
+
+    No githash is included — the transcript persists across main-bumps so a
+    long-running drive (CI fix loop, planner, implementer) resumes its context
+    whenever the same artifact is touched again, instead of being discarded
+    every time main advances (#841).
 
     Args:
         repo: Repository slug without owner (e.g. ``"ProjectScylla"``).
         issue: Issue number; leading ``#`` is stripped.
         agent: One of the ``AGENT_*`` constants in this module.
+        model: Optional model id; appended to the key when given so sessions
+            never cross models.
 
     Returns:
         Underscore-joined name suitable for ``claude --name``.
@@ -153,12 +176,14 @@ def session_name(repo: str, issue: int | str, agent: str) -> str:
     issue_s = str(issue).lstrip("#").strip()
     if not issue_s:
         raise ValueError("issue must be non-empty")
-    return f"{repo_s}_{issue_s}_{agent}"
+    model_token = _model_token(model)
+    base = f"{repo_s}_{issue_s}_{agent}"
+    return f"{base}_{model_token}" if model_token else base
 
 
-def session_uuid(repo: str, issue: int | str, agent: str) -> str:
-    """Return the deterministic UUIDv5 session ID for the tuple."""
-    name = session_name(repo, issue, agent)
+def session_uuid(repo: str, issue: int | str, agent: str, model: str | None = None) -> str:
+    """Return the deterministic UUIDv5 session ID for the (repo, issue, agent, model) key."""
+    name = session_name(repo, issue, agent, model)
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, name))
 
 
