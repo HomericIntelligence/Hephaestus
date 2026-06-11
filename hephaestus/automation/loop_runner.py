@@ -29,6 +29,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -137,17 +138,17 @@ PHASES_REQUIRING_ISSUES: frozenset[str] = frozenset()
 
 # Sentinel for cooperative shutdown on SIGINT/SIGTERM. Worker threads
 # check this between phases so an in-flight subprocess can still finish
-# but the next phase is skipped.
-_SHUTDOWN_REQUESTED = False
+# but the next phase is skipped. threading.Event provides atomic, GIL-safe
+# set/check semantics without the global-mutation footgun.
+_SHUTDOWN_EVENT = threading.Event()
 
 
 def _shutdown_requested() -> bool:
-    return _SHUTDOWN_REQUESTED
+    return _SHUTDOWN_EVENT.is_set()
 
 
 def _request_shutdown(signum: int, _frame: object) -> None:
-    global _SHUTDOWN_REQUESTED
-    _SHUTDOWN_REQUESTED = True
+    _SHUTDOWN_EVENT.set()
     LOG.warning("Signal %s received — requesting cooperative shutdown", signum)
 
 

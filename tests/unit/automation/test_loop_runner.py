@@ -9,6 +9,7 @@ subsequent phases from being attempted.
 
 from __future__ import annotations
 
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -1444,3 +1445,15 @@ class TestDefaultPhaseTimeout:
         ):
             main(["--repos", "Repo", "--phase-timeout", "0", "--loops", "1", "--agent", "claude"])
         assert captured["cfg"].phase_timeout_s is None
+
+
+def test_shutdown_event_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_request_shutdown sets the Event; _shutdown_requested observes it."""
+    import threading
+
+    # Isolate from any prior test that may have set the module-level Event.
+    monkeypatch.setattr(loop_runner, "_SHUTDOWN_EVENT", threading.Event())
+
+    assert loop_runner._shutdown_requested() is False
+    loop_runner._request_shutdown(signal.SIGINT, None)
+    assert loop_runner._shutdown_requested() is True
