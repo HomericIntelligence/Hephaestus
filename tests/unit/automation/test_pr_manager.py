@@ -7,6 +7,7 @@ and GitHub-API calls.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -178,15 +179,17 @@ class TestCreatePR:
 
 
 # ---------------------------------------------------------------------------
-# #382/A4-08: Co-Authored-By uses implementer_model() not hardcoded string
+# #717: Co-Authored-By uses a human-shaped name; model id moves to Implemented-By
 # ---------------------------------------------------------------------------
 
 
-class TestCoAuthorLine:
-    """Tests that commit_changes uses implementer_model() for Co-Authored-By (#382/A4-08)."""
+_COAUTHOR_HUMAN_NAME_RE = re.compile(r"^Co-Authored-By: [A-Za-z].* <.*@.*>$")
 
-    def test_coauthor_uses_implementer_model(self) -> None:
-        """Co-Authored-By line reflects whatever implementer_model() returns."""
+
+class TestCoAuthorLine:
+    """commit_changes emits a human Co-Authored-By and a separate Implemented-By trailer (#717)."""
+
+    def test_claude_coauthor_is_human_name_not_model_id(self) -> None:
         porcelain = " M src/feature.py\n"
         run_mock = MagicMock(
             side_effect=[
@@ -200,29 +203,48 @@ class TestCoAuthorLine:
         with (
             patch.object(pr_manager, "run", run_mock),
             patch.object(pr_manager, "fetch_issue_info", return_value=issue),
-            patch.object(
-                pr_manager, "implementer_model", return_value="claude-test-model-9"
-            ) as mock_model,
+            patch.object(pr_manager, "implementer_model", return_value="claude-test-model-9"),
         ):
             pr_manager.commit_changes(10, Path("/tmp/wt"))
 
-        # The commit call must include the dynamic model name, not a hardcoded string
-        commit_call = run_mock.call_args_list[2].args[0]
-        commit_msg = commit_call[-1]  # last arg is the -m message
-        assert "claude-test-model-9" in commit_msg
-        assert "Claude Sonnet 4.6" not in commit_msg  # old hardcoded value must be gone
-        mock_model.assert_called_once()
+        commit_msg = run_mock.call_args_list[2].args[0][-1]
+        coauthor_line = next(
+            line for line in commit_msg.splitlines() if line.startswith("Co-Authored-By:")
+        )
+        assert coauthor_line == "Co-Authored-By: Claude Code <noreply@anthropic.com>"
+        assert _COAUTHOR_HUMAN_NAME_RE.match(coauthor_line)
+        # Model id must NOT appear in the name slot of Co-Authored-By (#717).
+        assert "claude-test-model-9" not in coauthor_line
 
-    def test_coauthor_reflects_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """When HEPH_IMPLEMENTER_MODEL is set, commit uses that model name."""
+    def test_claude_implemented_by_carries_model_id(self) -> None:
+        porcelain = " M src/feature.py\n"
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="Add feature")
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "implementer_model", return_value="claude-test-model-9"),
+        ):
+            pr_manager.commit_changes(11, Path("/tmp/wt"))
+
+        commit_msg = run_mock.call_args_list[2].args[0][-1]
+        assert "Implemented-By: claude-test-model-9" in commit_msg
+
+    def test_implemented_by_reflects_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("HEPH_IMPLEMENTER_MODEL", "claude-env-override-5")
-
         porcelain = " M foo.py\n"
         run_mock = MagicMock(
             side_effect=[
-                _status(porcelain),
-                _status(""),
-                _status(""),
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status(""),  # git commit
             ]
         )
         issue = MagicMock(title="env override test")
@@ -233,17 +255,22 @@ class TestCoAuthorLine:
         ):
             pr_manager.commit_changes(20, Path("/tmp/wt"))
 
-        commit_call = run_mock.call_args_list[2].args[0]
-        commit_msg = commit_call[-1]
-        assert "claude-env-override-5" in commit_msg
+        commit_msg = run_mock.call_args_list[2].args[0][-1]
+        # Env override flows into Implemented-By, not Co-Authored-By.
+        assert "Implemented-By: claude-env-override-5" in commit_msg
+        coauthor_line = next(
+            line for line in commit_msg.splitlines() if line.startswith("Co-Authored-By:")
+        )
+        assert "claude-env-override-5" not in coauthor_line
+        assert coauthor_line == "Co-Authored-By: Claude Code <noreply@anthropic.com>"
 
-    def test_codex_coauthor_does_not_use_claude_model(self) -> None:
+    def test_codex_coauthor_is_codex_human_name(self) -> None:
         porcelain = " M foo.py\n"
         run_mock = MagicMock(
             side_effect=[
-                _status(porcelain),
-                _status(""),
-                _status(""),
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status(""),  # git commit
             ]
         )
         issue = MagicMock(title="codex fallback commit")
@@ -255,9 +282,13 @@ class TestCoAuthorLine:
         ):
             pr_manager.commit_changes(30, Path("/tmp/wt"), agent="codex")
 
-        commit_call = run_mock.call_args_list[2].args[0]
-        commit_msg = commit_call[-1]
-        assert "Co-Authored-By: Codex <noreply@openai.com>" in commit_msg
+        commit_msg = run_mock.call_args_list[2].args[0][-1]
+        coauthor_line = next(
+            line for line in commit_msg.splitlines() if line.startswith("Co-Authored-By:")
+        )
+        assert coauthor_line == "Co-Authored-By: Codex <noreply@openai.com>"
+        assert _COAUTHOR_HUMAN_NAME_RE.match(coauthor_line)
+        assert "Implemented-By: Codex" in commit_msg
         mock_model.assert_not_called()
 
 

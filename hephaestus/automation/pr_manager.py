@@ -43,10 +43,26 @@ def _agent_display_name(agent: str) -> str:
 
 
 def _coauthor_for_agent(agent: str) -> tuple[str, str]:
-    """Return the co-author identity for fallback commits made by automation."""
+    """Return the co-author identity for fallback commits made by automation.
+
+    Returns a stable, human-shaped (name, email) pair suitable for the
+    ``Co-Authored-By:`` git trailer. Model identifiers are intentionally NOT
+    placed in the name slot — see ``_provenance_for_agent`` for that.
+    """
     if is_codex(agent):
         return ("Codex", "noreply@openai.com")
-    return (implementer_model(), "noreply@anthropic.com")
+    return ("Claude Code", "noreply@anthropic.com")
+
+
+def _provenance_for_agent(agent: str) -> str:
+    """Return the value for an ``Implemented-By:`` trailer.
+
+    For Claude agents this is the resolved model id (honoring
+    ``HEPH_IMPLEMENTER_MODEL``); for Codex it is the literal ``"Codex"``.
+    """
+    if is_codex(agent):
+        return "Codex"
+    return implementer_model()
 
 
 def _detect_default_base_branch(worktree_path: Path) -> str:
@@ -254,12 +270,14 @@ def commit_changes(issue_number: int, worktree_path: Path, agent: str = "claude"
     # Generate commit message
     issue = fetch_issue_info(issue_number)
     coauthor_name, coauthor_email = _coauthor_for_agent(agent)
+    provenance = _provenance_for_agent(agent)
     commit_msg = f"""feat: Implement #{issue_number}
 
 {issue.title}
 
 Closes #{issue_number}
 
+Implemented-By: {provenance}
 Co-Authored-By: {coauthor_name} <{coauthor_email}>
 """
 
