@@ -150,6 +150,8 @@ only-include = [
     "hephaestus",
     "README.md",
     "LICENSE",
+    "NOTICE",
+    "COMPATIBILITY.md",
     "pyproject.toml",
 ]
 
