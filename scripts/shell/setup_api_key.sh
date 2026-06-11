@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Helper script to export ANTHROPIC_API_KEY from Claude CLI credentials
 # This is necessary for container execution which needs the key in environment
 
