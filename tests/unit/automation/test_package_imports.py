@@ -8,8 +8,11 @@ import sys
 import pytest
 
 _PHASE_ENTRYPOINTS = (
-    "hephaestus.automation.planner",
+    "hephaestus.automation.address_review",
+    "hephaestus.automation.ci_driver",
     "hephaestus.automation.implementer",
+    "hephaestus.automation.plan_reviewer",
+    "hephaestus.automation.planner",
     "hephaestus.automation.pr_reviewer",
 )
 
@@ -51,6 +54,33 @@ for name in automation.__all__:
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_public_surface_pins_expected_symbols() -> None:
+    """Pin __all__ so silent omission of peer classes (e.g. issue #775) regresses loudly."""
+    import hephaestus.automation as automation
+
+    expected = {
+        "AddressReviewOptions",
+        "AddressReviewer",
+        "AuditReviewer",
+        "CIDriver",
+        "CIDriverOptions",
+        "DependencyResolver",
+        "ImplementerOptions",
+        "IssueImplementer",
+        "IssueInfo",
+        "PlanReviewer",
+        "PlanReviewerOptions",
+        "Planner",
+        "PlannerOptions",
+        "PRReviewer",
+        "ReviewerOptions",
+    }
+    assert set(automation.__all__) == expected
+    assert set(automation.__all__) <= set(automation._LAZY_EXPORTS), (
+        "every __all__ entry must have a _LAZY_EXPORTS row"
+    )
 
 
 @pytest.mark.parametrize("module_name", _PHASE_ENTRYPOINTS)
