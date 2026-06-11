@@ -78,9 +78,11 @@ class TestCallClaude:
             mock_run.assert_called_once()
             args = mock_run.call_args[0][0]
             assert args[0] == "claude"
-            # First call has no existing JSONL → --session-id path.
-            assert "--session-id" in args
-            assert "--name" in args
+            # #1166: every call --resumes the deterministic session; the harness
+            # creates it on first use, so there is no --session-id/--name path.
+            assert "--resume" in args
+            assert "--session-id" not in args
+            assert "--name" not in args
             assert "--model" in args
             assert "claude-opus-4-7" in args
             assert "--print" in args
