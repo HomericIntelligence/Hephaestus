@@ -1350,10 +1350,13 @@ class TestGhPrCreate:
             )
         mock_gh_call.assert_not_called()
 
+    @patch("hephaestus.automation.github_api._gh_commit_is_verified", return_value=False)
     @patch("hephaestus.automation.github_api.run")
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_rejects_unsigned_commit(self, mock_gh_call: Any, mock_run: Any) -> None:
-        """An 'N' (no signature) commit must abort PR creation."""
+    def test_rejects_unsigned_commit(
+        self, mock_gh_call: Any, mock_run: Any, _mock_verified: Any
+    ) -> None:
+        """An 'N' commit that GitHub also reports unverified must abort PR creation."""
         # First run() call: git fetch (best-effort, contextlib.suppress); ignored
         # Second run() call: git log --format='%H %G?' against origin/<base>
         fetch_result = Mock(returncode=0, stdout="", stderr="")
@@ -1367,12 +1370,16 @@ class TestGhPrCreate:
                 body=_POLICY_BODY,
                 auto_merge=True,
             )
+        # PR creation (_gh_call) must not run once signing fails.
         mock_gh_call.assert_not_called()
 
+    @patch("hephaestus.automation.github_api._gh_commit_is_verified", return_value=False)
     @patch("hephaestus.automation.github_api.run")
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_rejects_bad_signature(self, mock_gh_call: Any, mock_run: Any) -> None:
-        """A 'B' (bad signature) commit must abort PR creation."""
+    def test_rejects_bad_signature(
+        self, mock_gh_call: Any, mock_run: Any, _mock_verified: Any
+    ) -> None:
+        """A 'B' commit that GitHub also reports unverified must abort PR creation."""
         fetch_result = Mock(returncode=0, stdout="", stderr="")
         log_result = Mock(returncode=0, stdout="aaa111bbb B\n", stderr="")
         mock_run.side_effect = [fetch_result, log_result]
@@ -1406,6 +1413,66 @@ class TestGhPrCreate:
         assert pr_number == 42
         # Pre-flight dedup list + create (auto_merge defaults False).
         assert mock_gh_call.call_count == 2
+
+
+class TestAssertBranchCommitsSignedApiFallback:
+    """SSH-signed commits the local checkout can't verify must not false-NOGO.
+
+    When a commit is SSH-signed but ``gpg.ssh.allowedSignersFile`` is not
+    configured locally, ``git log --format=%G?`` returns ``N`` (or ``E``) even
+    though GitHub has authoritatively verified the signature. The local check
+    must consult the GitHub commit-verification API before declaring a policy
+    violation, since GitHub's ``verified`` flag is the source of truth at PR
+    time (the same rationale that makes ``U`` acceptable). Regression for the
+    implementer false-NOGO on pre-existing SSH-signed branches.
+    """
+
+    @patch("hephaestus.automation.github_api._gh_commit_is_verified")
+    @patch("hephaestus.automation.github_api.run")
+    def test_local_unverifiable_but_github_verified_is_accepted(
+        self, mock_run: Any, mock_verified: Any
+    ) -> None:
+        from hephaestus.automation.github_api import _assert_branch_commits_signed
+
+        fetch_result = Mock(returncode=0, stdout="", stderr="")
+        # Local can't verify the SSH signature -> 'N'.
+        log_result = Mock(returncode=0, stdout="aaa111bbb N\n", stderr="")
+        mock_run.side_effect = [fetch_result, log_result]
+        # GitHub says it's verified.
+        mock_verified.return_value = True
+
+        # Must NOT raise.
+        _assert_branch_commits_signed("feature-branch", base="main")
+        mock_verified.assert_called_once_with("aaa111bbb")
+
+    @patch("hephaestus.automation.github_api._gh_commit_is_verified")
+    @patch("hephaestus.automation.github_api.run")
+    def test_local_unverifiable_and_github_unverified_still_raises(
+        self, mock_run: Any, mock_verified: Any
+    ) -> None:
+        from hephaestus.automation.github_api import _assert_branch_commits_signed
+
+        fetch_result = Mock(returncode=0, stdout="", stderr="")
+        log_result = Mock(returncode=0, stdout="aaa111bbb N\n", stderr="")
+        mock_run.side_effect = [fetch_result, log_result]
+        # GitHub also says unverified (genuinely unsigned) -> policy violation.
+        mock_verified.return_value = False
+
+        with pytest.raises(ValueError, match="Unsigned or invalid commits"):
+            _assert_branch_commits_signed("feature-branch", base="main")
+
+    @patch("hephaestus.automation.github_api._gh_commit_is_verified")
+    @patch("hephaestus.automation.github_api.run")
+    def test_good_local_signature_skips_api_call(self, mock_run: Any, mock_verified: Any) -> None:
+        from hephaestus.automation.github_api import _assert_branch_commits_signed
+
+        fetch_result = Mock(returncode=0, stdout="", stderr="")
+        log_result = Mock(returncode=0, stdout="aaa111bbb G\n", stderr="")
+        mock_run.side_effect = [fetch_result, log_result]
+
+        _assert_branch_commits_signed("feature-branch", base="main")
+        # 'G' is locally good — no API round-trip needed.
+        mock_verified.assert_not_called()
 
 
 class TestWriteSecure:
