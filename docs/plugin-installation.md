@@ -26,7 +26,7 @@ adding or removing a skill without updating this table, or shipping a skill with
 | create-reusable-utilities | Port and generalize utility scripts from one project into ProjectHephaestus for cross-project reuse |
 | finish-branch | Use when implementation is complete and all tests pass — guides branch completion by presenting structured options for merge, PR creation, or cleanup |
 | git-worktrees | Use when starting feature work that needs isolation from current workspace — creates isolated git worktrees with safety verification |
-| github-actions-python-cicd | Set up a comprehensive GitHub Actions CI/CD pipeline for a Python project with multi-version testing |
+| github-actions-python-cicd | Set up a GitHub Actions CI/CD pipeline for a Python project on the ProjectHephaestus reference stack (pixi + pyproject.toml + ruff + mypy + hatch-vcs), Python 3.10-3.13 |
 | learn | Save session learnings as a skill plugin — amends existing skills when the topic matches, creates new ones otherwise. Use after experiments, debugging sessions, or when you want to preserve team knowledge. |
 | myrmidon-swarm | Summon the Myrmidon swarm — hierarchical agent delegation with Opus/Sonnet/Haiku model tiers for the HomericIntelligence ecosystem |
 | python-repo-modernization | Bring a partially modernized Python repo to production-grade quality: fix bugs, restructure tests, enhance CI/pre-commit, prepare for PyPI publishing |

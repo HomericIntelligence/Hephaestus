@@ -6,6 +6,17 @@ allowed-tools: [Read, Write, Edit, Bash, Grep, Glob]
 
 # GitHub Actions Python CI/CD Setup
 
+## Source of Truth
+
+The canonical stack parameters (Python floor, supported-version classifiers,
+package layout, linter, env manager, versioning scheme) live in the
+repository's `CLAUDE.md` and in `pyproject.toml`. If you find this skill
+drifting from `CLAUDE.md` (e.g. the Python floor moves to 3.11, a new
+classifier is added), update `CLAUDE.md` and `pyproject.toml` FIRST, then
+propagate the change here. Snippets in this skill MUST NOT be treated as
+the source of truth for stack choices — they are illustrative examples of
+how to wire the canonical parameters into a workflow.
+
 ## Overview
 
 | Attribute | Value |
@@ -13,6 +24,7 @@ allowed-tools: [Read, Write, Edit, Bash, Grep, Glob]
 | **Stack** | pixi + pyproject.toml + hatch-vcs + ruff + mypy + yamllint + pytest |
 | **Python matrix** | 3.10, 3.11, 3.12, 3.13 (mirrors `pyproject.toml` classifiers) |
 | **Action pinning** | Digest-pinned with `# vX.Y.Z` comment, never bare `@v6` |
+| **Workflow split** | Required gate (`_required.yml`) + cross-version matrix (`test.yml`) |
 | **Audience** | HomericIntelligence-ecosystem repos on (or adopting) the ProjectHephaestus reference stack |
 | **Single source of truth** | `CLAUDE.md` (§ Language Preference, § Python Development Guidelines, § Version Management) |
 
@@ -28,9 +40,14 @@ first and treat every value in this skill as a derived copy that must follow.
   classifiers in `pyproject.toml`; `scripts/check_python_version_consistency.py`
   enforces the invariant via pre-commit).
 
-Do NOT use this skill for repos that have intentionally chosen a divergent
-stack (e.g. poetry, pdm, hatch envs without pixi). Pick the stack-appropriate
-skill instead.
+Do NOT use this skill for:
+
+- Repos that have intentionally chosen a divergent stack (e.g. poetry, pdm,
+  hatch envs without pixi). Pick the stack-appropriate skill instead.
+- Setting `cache: true` on `prefix-dev/setup-pixi` (key on `pixi.lock` with
+  `actions/cache` instead).
+- Repos that use `requirements.txt` / `setup.py` (use a different skill).
+- Python 3.8/3.9 — these are below the CLAUDE.md-mandated 3.10 floor.
 
 ## Stack Decisions
 
@@ -46,6 +63,23 @@ skill instead.
 | Digest-pinned `uses:` with version comment | Supply-chain hygiene, matches repo CI convention | bare `@v6` tags |
 
 ## Reference Workflow — multi-interpreter test matrix
+
+### Two workflows, not one
+
+The recommended structure is a split:
+
+- **`_required.yml`** — the required gate. Runs lint (ruff/yamllint/mypy),
+  unit + integration tests with coverage gating, build smoke test, and
+  schema/pr-policy gates on a single canonical Python (3.12 in this repo).
+- **`test.yml`** — cross-version compatibility matrix only. Proves the library
+  imports and its tests pass on every supported Python. Does NOT re-run lint,
+  coverage, or build (DRY).
+
+Adding a new supported Python means updating the matrix in `test.yml` AND
+the `Programming Language :: Python :: 3.x` classifiers in `pyproject.toml`.
+A `check_python_version_consistency` pre-commit hook enforces the match.
+
+### 1. Cross-version matrix workflow
 
 `.github/workflows/test.yml`:
 
@@ -72,29 +106,46 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
+        # MUST match every `Programming Language :: Python :: 3.x`
+        # classifier in pyproject.toml. CLAUDE.md mandates 3.10+ floor.
         python-version: ["3.10", "3.11", "3.12", "3.13"]
         test-type: [unit, integration]
     defaults:
       run:
         shell: bash
     steps:
+      # Pin third-party actions by commit SHA, with the version tag in a
+      # trailing comment. Mirrors the rest of this repo's workflows.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
         with:
           python-version: ${{ matrix.python-version }}
+
       - name: Cache pip packages
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: ~/.cache/pip
+          # No requirements.txt or setup.py in a pixi/hatchling project —
+          # key on pyproject.toml.
           key: pip-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
           restore-keys: |
             pip-${{ runner.os }}-${{ matrix.python-version }}-
+
       - name: Install package
         run: pip install -e ".[dev,schema]"
+
       - name: Run unit tests
         if: matrix.test-type == 'unit'
         run: pytest tests/unit --override-ini="addopts=" -v --strict-markers
+
+      - name: Check unit test structure
+        if: matrix.test-type == 'unit'
+        # Console script: hephaestus-check-test-structure =
+        # "hephaestus.validation.test_structure:main" (see pyproject.toml).
+        run: hephaestus-check-test-structure
+
       - name: Run integration tests
         if: matrix.test-type == 'integration'
         run: pytest tests/integration --override-ini="addopts=" -v --strict-markers
@@ -103,7 +154,7 @@ jobs:
 Adjust `[dev,schema]` to match the extras your `[project.optional-dependencies]`
 exposes. If your repo has only `dev`, use `.[dev]`.
 
-## Reference Workflow — required lint job (pixi-driven)
+### 2. Required lint job (pixi-driven)
 
 `.github/workflows/_required.yml` (excerpt):
 
@@ -217,20 +268,23 @@ churn documented in `pixi.toml` comments on the `dev-install` task.
 
 - [ ] `.github/workflows/test.yml` matrix is `["3.10", "3.11", "3.12", "3.13"]`
 - [ ] Lint job runs `pixi run --environment lint ruff check / ruff format --check / yamllint / mypy`
-- [ ] Cache key hashes `pyproject.toml`
+- [ ] Cache key hashes `pyproject.toml` (pip cache) or `pixi.lock` (pixi env)
 - [ ] No `flake8`, `black`, or `src/` references in `.github/workflows/`
 - [ ] All `uses:` lines are digest-pinned with a `# vX.Y.Z` comment
 - [ ] `pyproject.toml` has `dynamic = ["version"]`, `[tool.hatch.version] source = "vcs"`, AND `[tool.hatch.build.hooks.vcs]` with a `version-file =`
 - [ ] `requires-python = ">=3.10"` and classifiers list 3.10–3.13
 - [ ] `pixi.toml [workspace]` has no `version` field
 - [ ] Workflow matrix and `Programming Language :: Python :: 3.x` classifiers match
+- [ ] Required gate (`_required.yml`) separate from cross-version matrix (`test.yml`)
 
 ## Related Skills
 
 - `renovate-pixi-conda-dependency-automation` — pixi-aware dependency automation
 - `github-actions-workflow-required-checks` — branch-protection ruleset alignment
 - `run-tests` — pytest execution patterns
-- `python-repo-modernization` — bringing a legacy repo onto this stack
+- `python-repo-modernization` — bringing a legacy repo onto this stack;
+  reference implementation for the patterns in this skill
+- `create-reusable-utilities` — porting utilities across the HomericIntelligence ecosystem
 
 ## Cross-References (single source of truth)
 
