@@ -38,19 +38,32 @@ The final summary block (`install.sh:968–988`) aggregates results from **all s
 
 ## What the Script Is *Not*
 
-The entry-point guard at `install.sh:136–138` returns early when the script is
+The entry-point guard at `install.sh:137–141` returns early when the script is
 sourced rather than executed (its inline comment anticipates Odysseus phase
-scripts as the intended sourcing consumer). **No caller within this repository
-currently sources it**, so the guard is defensive infrastructure with no
-in-repo consumer today. Verified 2026-06-05 via:
+scripts as the intended sourcing consumer).
+
+**The guard is load-bearing.** The regression suite
+`tests/shell/scripts/test_install_install_branches.bats` sources `install.sh`
+in its `setup()` (line 15) and depends on the guard returning before argument
+parsing so it can exercise the helper functions (`check_pass`/`check_fail`) and
+counters (`_PASS`/`_FAIL`/`_WARN`/`_SKIP`) directly. The suite's first test,
+`@test "sourcing guard exposes helpers and counters"`, explicitly asserts the
+guard worked. The guard must not be removed without updating that suite.
+
+An honest grep that includes `tests/` confirms the in-repo consumer exists:
 
 ```bash
-grep -rn "source.*install\.sh\|\. .*install\.sh\|source.*scripts/shell/install" \
-     scripts/ docs/ .github/ README.md CONTRIBUTING.md justfile
-# Result: zero hits (except install_helpers inclusion within install.sh itself)
+grep -rn "source .*SRC_SCRIPT\|SRC_SCRIPT=.*install\.sh" \
+     scripts/ docs/ .github/ tests/ README.md CONTRIBUTING.md justfile
+# Result:
+#   tests/shell/scripts/test_install_install_branches.bats:12:    SRC_SCRIPT="${REPO_ROOT}/scripts/shell/install.sh"
+#   tests/shell/scripts/test_install_install_branches.bats:15:    source "$SRC_SCRIPT"
 ```
 
-The entry-point guard must **not** be cited as a reason to preserve the monolith. The three verified pillars above are the load-bearing justifications.
+That consumer is narrow (test-only) and does not justify the monolith's
+structure on its own. The three verified pillars above — shared counters,
+`--role` filter, and unified summary — remain the load-bearing justifications
+for keeping the 12 sections together.
 
 ## Triggers That Would Justify Revisiting This Decision
 
