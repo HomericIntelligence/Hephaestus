@@ -8,9 +8,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "compare_benchmarks.py"
 
-# 4-byte UTF-8 lead bytes covering the Misc Symbols / Pictographs ranges
-# used by ❌ (U+274C → \xe2\x9d\x8c) and ✅ (U+2705 → \xe2\x9c\x85),
-# plus the wider emoji planes (\xf0\x9f...) used in the Markdown report.
+# UTF-8 byte sequences covering the Misc Symbols / Pictographs ranges
+# used by ❌ (U+274C → \xe2\x9d\x8c) and ✅ (U+2705 → \xe2\x9c\x85), which are
+# 3-byte (BMP) encodings, plus the 4-byte supplementary-plane lead
+# (\xf0\x9f...) used by the wider emoji planes in the Markdown report.
 EMOJI_BYTE_PREFIXES = (b"\xf0\x9f", b"\xe2\x9d\x8c", b"\xe2\x9c\x85")
 
 
