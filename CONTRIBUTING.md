@@ -21,6 +21,10 @@ Before opening a PR, locate the work in:
   — the PR scaffolding (`Closes #N` line is enforced by the
   `pr-policy` CI gate).
 
+Keep PRs small: prefer one issue per PR so each change can be reviewed
+and reverted independently. Releases are cut on demand by pushing a
+signed `vX.Y.Z` git tag (see [`docs/RELEASING.md`](docs/RELEASING.md)).
+
 ## How to Contribute
 
 ### Reporting Bugs
