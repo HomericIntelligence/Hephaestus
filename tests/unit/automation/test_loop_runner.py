@@ -47,13 +47,15 @@ from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
 
 def test_all_phases_is_three_stage_pipeline() -> None:
-    """The pipeline collapsed to exactly (plan, implement, drive-green).
+    """The loop body collapsed to exactly (plan, implement); drive-green moved post-loop.
 
-    Plan-review, PR-review, and address-review are no longer standalone phases;
-    they fold into plan/implement. This pins the canonical topology so a stray
-    re-introduction of a retired phase fails loudly.
+    Plan-review, PR-review, and address-review fold into plan/implement
+    (#455/#468/#484); drive-green moved to ALL_POST_LOOP_STAGES (#818).
     """
-    assert ALL_PHASES == ("plan", "implement", "drive-green")
+    from hephaestus.automation.loop_runner import ALL_POST_LOOP_STAGES
+
+    assert ALL_PHASES == ("plan", "implement")
+    assert ALL_POST_LOOP_STAGES == ("drive-green",)
 
 
 @pytest.mark.parametrize("dropped", ["review-plans", "review-prs", "address-review"])
@@ -102,11 +104,12 @@ def test_validate_phases_rejects_typo() -> None:
         _validate_phases("plan,implmnt")
 
 
-def test_phase_order_warnings_drive_green_without_implement_warns() -> None:
-    """drive-green selected without implement triggers the cross-stage warning."""
-    cfg = LoopConfig(phases=("drive-green",))
-    warnings = _phase_order_warnings(cfg)
-    assert any("drive-green" in w and "implement" in w for w in warnings)
+def test_phase_order_warnings_drive_green_no_longer_warns() -> None:
+    """Per #818, drive-green without implement is a legitimate operator intent."""
+    cfg_alone = LoopConfig(phases=("drive-green",))
+    cfg_with = LoopConfig(phases=("implement", "drive-green"))
+    assert all("drive-green" not in w for w in _phase_order_warnings(cfg_alone))
+    assert all("drive-green" not in w for w in _phase_order_warnings(cfg_with))
 
 
 def test_phase_order_warnings_plan_without_implement_warns() -> None:
@@ -114,12 +117,6 @@ def test_phase_order_warnings_plan_without_implement_warns() -> None:
     cfg = LoopConfig(phases=("plan",))
     warnings = _phase_order_warnings(cfg)
     assert any("planning-only" in w and "implementation PRs" in w for w in warnings)
-
-
-def test_phase_order_warnings_drive_green_with_implement_silent() -> None:
-    """drive-green selected alongside implement produces no warning."""
-    cfg = LoopConfig(phases=("implement", "drive-green"))
-    assert _phase_order_warnings(cfg) == []
 
 
 def test_phase_order_warnings_silent_on_full_pipeline() -> None:
@@ -395,51 +392,6 @@ def test_process_repo_skips_disabled_phases(repo_inputs: tuple[Path, LoopConfig]
     for name in ALL_PHASES[1:]:
         assert by_name[name].skipped
         assert by_name[name].skip_reason == "disabled by --phases"
-
-
-def test_process_repo_skips_issue_phases_when_no_issues(
-    repo_inputs: tuple[Path, LoopConfig],
-) -> None:
-    """Process repo no longer gates plan/implement on an issue list (#820).
-
-    PHASES_REQUIRING_ISSUES is empty, so only drive-green has a work gate
-    (the failing-PR gate). plan and implement auto-discover and still run.
-    """
-    _, cfg = repo_inputs
-    with (
-        patch.object(loop_runner, "_rebase_main", return_value=("abc1234", True)),
-        patch.object(loop_runner, "_list_open_issue_numbers", return_value=[]),
-        patch.object(loop_runner, "_count_failing_prs", return_value=0),
-        patch.object(loop_runner, "run_phase", side_effect=lambda **kw: _ok(kw["phase"])),
-    ):
-        result = process_repo("r", loop_idx=1, cfg=cfg)
-    by_name = {p.name: p for p in result.phases}
-    # drive-green has no failing PRs to drive, so it skips.
-    assert by_name["drive-green"].skipped
-    assert by_name["drive-green"].skip_reason == "no failing PRs"
-    # plan and implement auto-discover, so they still run
-    assert not by_name["plan"].skipped
-    assert not by_name["implement"].skipped
-
-
-def test_process_repo_skips_drive_green_on_non_final_loop(
-    repo_inputs: tuple[Path, LoopConfig],
-) -> None:
-    """Process repo skips drive green on non final loop."""
-    _, cfg = repo_inputs
-    cfg = LoopConfig(loops=3, projects_dir=cfg.projects_dir)
-    with (
-        patch.object(loop_runner, "_rebase_main", return_value=("abc1234", True)),
-        patch.object(loop_runner, "_list_open_issue_numbers", return_value=[1]),
-        patch.object(loop_runner, "_count_failing_prs", return_value=1),
-        patch.object(loop_runner, "run_phase", side_effect=lambda **kw: _ok(kw["phase"])),
-    ):
-        result_loop1 = process_repo("r", loop_idx=1, cfg=cfg)
-        result_loop3 = process_repo("r", loop_idx=3, cfg=cfg)
-    drive_green_loop1 = next(p for p in result_loop1.phases if p.name == "drive-green")
-    drive_green_loop3 = next(p for p in result_loop3.phases if p.name == "drive-green")
-    assert drive_green_loop1.skipped and drive_green_loop1.skip_reason == "not final loop"
-    assert not drive_green_loop3.skipped
 
 
 def test_process_repo_logs_trunk_stale_when_fetch_fails(

@@ -439,31 +439,9 @@ class TestRunLoopEarlyExit:
         """
         projects = tmp_path
         (projects / "r1" / ".git").mkdir(parents=True)
-        cfg = LoopConfig(loops=5, projects_dir=projects, phases=("plan", "implement"))
-
-        call_count = 0
-
-        def fake_process(repo: str, loop_idx: int, cfg: LoopConfig) -> RepoResult:
-            nonlocal call_count
-            call_count += 1
-            return _zero_work_result(repo, loop_idx)
-
-        with patch.object(loop_runner, "process_repo", side_effect=fake_process):
-            results = run_loop(cfg, repos=["r1"])
-
-        # Only loop 1 should have run — early-exit fires immediately.
-        assert max(r.loop_idx for r in results) == 1
-        assert call_count == 1
-
-    def test_no_early_exit_while_drive_green_has_failing_prs(self, tmp_path: Path) -> None:
-        """drive-green selected + a failing PR blocks early-exit before the final loop.
-
-        Even with 0 new plan work, the loop must keep going while there is still
-        drive-green work (an open PR that isn't green / implementation-go) to do.
-        """
-        projects = tmp_path
-        (projects / "r1" / ".git").mkdir(parents=True)
-        cfg = LoopConfig(loops=3, projects_dir=projects)  # default phases incl. drive-green
+        cfg = LoopConfig(
+            loops=5, projects_dir=projects, phases=("plan", "implement"), org="testorg"
+        )
 
         call_count = 0
 
@@ -474,13 +452,53 @@ class TestRunLoopEarlyExit:
 
         with (
             patch.object(loop_runner, "process_repo", side_effect=fake_process),
-            patch.object(loop_runner, "_count_failing_prs", return_value=1),
+            patch.object(loop_runner, "_run_post_loop_stages", return_value=[]),
         ):
             results = run_loop(cfg, repos=["r1"])
 
-        # A failing PR keeps the loop running to the cap.
-        assert max(r.loop_idx for r in results) == 3
-        assert call_count == 3
+        # Only loop 1 should have run — early-exit fires immediately.
+        assert max(r.loop_idx for r in results) == 1
+        assert call_count == 1
+
+    def test_early_exit_still_fires_with_post_loop_drive_green_selected(
+        self, tmp_path: Path
+    ) -> None:
+        """Per #818: drive-green is post-loop, so its selection does NOT block early-exit.
+
+        Pre-#818 this test asserted that selecting drive-green prevented early-exit
+        before loop 3 (so the final-loop-only phase could fire). With drive-green
+        promoted to a post-loop terminal stage, early-exit fires after loop 1
+        on a zero-work pass — drive-green is invoked AFTER the iteration body
+        by ``_run_post_loop_stages`` regardless. The loop_runner_post_loop.py
+        suite asserts the post-loop invocation; this test pins the early-exit
+        behaviour for the loop body itself.
+        """
+        projects = tmp_path
+        (projects / "r1" / ".git").mkdir(parents=True)
+        cfg = LoopConfig(
+            loops=3,
+            projects_dir=projects,
+            org="testorg",
+            phases=("plan", "implement", "drive-green"),
+        )
+
+        call_count = 0
+
+        def fake_process(repo: str, loop_idx: int, cfg: LoopConfig) -> RepoResult:
+            nonlocal call_count
+            call_count += 1
+            return _zero_work_result(repo, loop_idx)
+
+        with (
+            patch.object(loop_runner, "process_repo", side_effect=fake_process),
+            patch.object(loop_runner, "_run_post_loop_stages", return_value=[]),
+        ):
+            results = run_loop(cfg, repos=["r1"])
+
+        # Early-exit fires on loop 1 even with drive-green selected.
+        per_loop = [r for r in results if not r.post_loop_phases]
+        assert max(r.loop_idx for r in per_loop) == 1
+        assert call_count == 1
 
     def test_early_exit_when_drive_green_selected_but_no_failing_prs(self, tmp_path: Path) -> None:
         """drive-green selected but NO failing PR + 0 plan work → converge early.
@@ -491,7 +509,10 @@ class TestRunLoopEarlyExit:
         """
         projects = tmp_path
         (projects / "r1" / ".git").mkdir(parents=True)
-        cfg = LoopConfig(loops=5, projects_dir=projects)  # default phases incl. drive-green
+        # Default phases are loop-body-only (``ALL_PHASES`` = plan, implement);
+        # drive-green is NOT in the bare-``LoopConfig()`` default post-#818, so
+        # the post-loop block is exercised separately and stubbed out here.
+        cfg = LoopConfig(loops=5, projects_dir=projects)
 
         call_count = 0
 
@@ -502,7 +523,7 @@ class TestRunLoopEarlyExit:
 
         with (
             patch.object(loop_runner, "process_repo", side_effect=fake_process),
-            patch.object(loop_runner, "_count_failing_prs", return_value=0),
+            patch.object(loop_runner, "_run_post_loop_stages", return_value=[]),
         ):
             results = run_loop(cfg, repos=["r1"])
 
@@ -517,12 +538,15 @@ class TestRunLoopEarlyExit:
         """
         projects = tmp_path
         (projects / "r1" / ".git").mkdir(parents=True)
-        cfg = LoopConfig(loops=3, projects_dir=projects)
+        cfg = LoopConfig(loops=3, projects_dir=projects, org="testorg")
 
         def fake_process(repo: str, loop_idx: int, cfg: LoopConfig) -> RepoResult:
             return _work_result(repo, loop_idx)
 
-        with patch.object(loop_runner, "process_repo", side_effect=fake_process):
+        with (
+            patch.object(loop_runner, "process_repo", side_effect=fake_process),
+            patch.object(loop_runner, "_run_post_loop_stages", return_value=[]),
+        ):
             results = run_loop(cfg, repos=["r1"])
 
         assert max(r.loop_idx for r in results) == 3
@@ -536,7 +560,7 @@ class TestRunLoopEarlyExit:
         """
         projects = tmp_path
         (projects / "r1" / ".git").mkdir(parents=True)
-        cfg = LoopConfig(loops=3, projects_dir=projects)
+        cfg = LoopConfig(loops=3, projects_dir=projects, org="testorg")
 
         call_count = 0
 
@@ -545,7 +569,10 @@ class TestRunLoopEarlyExit:
             call_count += 1
             return _failed_result(repo, loop_idx)
 
-        with patch.object(loop_runner, "process_repo", side_effect=fake_process):
+        with (
+            patch.object(loop_runner, "process_repo", side_effect=fake_process),
+            patch.object(loop_runner, "_run_post_loop_stages", return_value=[]),
+        ):
             results = run_loop(cfg, repos=["r1"])
 
         # All 3 loops must run — failure blocks early-exit.
@@ -560,12 +587,15 @@ class TestRunLoopEarlyExit:
         """
         projects = tmp_path
         (projects / "r1" / ".git").mkdir(parents=True)
-        cfg = LoopConfig(loops=1, projects_dir=projects)
+        cfg = LoopConfig(loops=1, projects_dir=projects, org="testorg")
 
         def fake_process(repo: str, loop_idx: int, cfg: LoopConfig) -> RepoResult:
             return _zero_work_result(repo, loop_idx)
 
-        with patch.object(loop_runner, "process_repo", side_effect=fake_process):
+        with (
+            patch.object(loop_runner, "process_repo", side_effect=fake_process),
+            patch.object(loop_runner, "_run_post_loop_stages", return_value=[]),
+        ):
             results = run_loop(cfg, repos=["r1"])
 
         # Exactly one result — the single configured loop ran to completion.
@@ -580,12 +610,15 @@ class TestRunLoopEarlyExit:
         """
         projects = tmp_path
         (projects / "r1" / ".git").mkdir(parents=True)
-        cfg = LoopConfig(loops=3, projects_dir=projects)
+        cfg = LoopConfig(loops=3, projects_dir=projects, org="testorg")
 
         def fake_process(repo: str, loop_idx: int, cfg: LoopConfig) -> RepoResult:
             return _unknown_work_result(repo, loop_idx)
 
-        with patch.object(loop_runner, "process_repo", side_effect=fake_process):
+        with (
+            patch.object(loop_runner, "process_repo", side_effect=fake_process),
+            patch.object(loop_runner, "_run_post_loop_stages", return_value=[]),
+        ):
             results = run_loop(cfg, repos=["r1"])
 
         # All 3 loops run because unknown phases are treated as productive.
@@ -599,7 +632,7 @@ class TestRunLoopEarlyExit:
         projects = tmp_path
         for repo in ("r1", "r2"):
             (projects / repo / ".git").mkdir(parents=True)
-        cfg = LoopConfig(loops=5, projects_dir=projects)
+        cfg = LoopConfig(loops=5, projects_dir=projects, org="testorg")
 
         call_counts: dict[str, int] = {"r1": 0, "r2": 0}
 
@@ -611,7 +644,10 @@ class TestRunLoopEarlyExit:
             # r2 produces no work
             return _zero_work_result(repo, loop_idx)
 
-        with patch.object(loop_runner, "process_repo", side_effect=fake_process):
+        with (
+            patch.object(loop_runner, "process_repo", side_effect=fake_process),
+            patch.object(loop_runner, "_run_post_loop_stages", return_value=[]),
+        ):
             results = run_loop(cfg, repos=["r1", "r2"])
 
         # All 5 loops should run because r1 is always productive.
@@ -853,34 +889,10 @@ class TestPlannerMainWorkReport:
         assert captured["work"] == 0
 
 
-class TestHasPendingDriveGreenWork:
-    """Convergence gate: drive-green pending-work detection (#1128 review)."""
-
-    def test_not_selected_returns_false(self) -> None:
-        """No drive-green phase → no terminal work to wait for."""
-        cfg = LoopConfig(phases=("plan", "implement"))
-        assert loop_runner._has_pending_drive_green_work(cfg, ["r1"]) is False
-
-    def test_explicit_issues_keeps_looping(self) -> None:
-        """--issues scope → keep looping (repo-wide PR scan is the wrong signal).
-
-        ``_count_failing_prs`` has no issue filter, so a clean repo-wide scan
-        would wrongly converge before the terminal drive-green pass runs against
-        the pinned issues. Must return True and must NOT call _count_failing_prs.
-        """
-        cfg = LoopConfig(issues=[7, 8])  # default phases include drive-green
-        with patch.object(loop_runner, "_count_failing_prs") as mock_count:
-            assert loop_runner._has_pending_drive_green_work(cfg, ["r1"]) is True
-        mock_count.assert_not_called()
-
-    def test_failing_pr_means_pending(self) -> None:
-        """A failing PR in any repo → pending drive-green work."""
-        cfg = LoopConfig()  # default phases, no --issues
-        with patch.object(loop_runner, "_count_failing_prs", side_effect=[0, 2]):
-            assert loop_runner._has_pending_drive_green_work(cfg, ["r1", "r2"]) is True
-
-    def test_no_failing_pr_means_converged(self) -> None:
-        """All repos green → no pending drive-green work (loop may converge)."""
-        cfg = LoopConfig()
-        with patch.object(loop_runner, "_count_failing_prs", return_value=0):
-            assert loop_runner._has_pending_drive_green_work(cfg, ["r1", "r2"]) is False
+# NOTE: ``TestHasPendingDriveGreenWork`` was removed when #818 promoted
+# drive-green out of the loop body and into the post-loop terminal stage
+# (``_run_post_loop_stages``). The "still has failing PRs" gate now lives
+# inside that helper as a per-stage skip-reason (covered by
+# ``tests/unit/automation/test_loop_runner_post_loop.py::``
+# ``test_run_post_loop_stages_skips_when_no_failing_prs``), so the function
+# under test (``_has_pending_drive_green_work``) no longer exists.
