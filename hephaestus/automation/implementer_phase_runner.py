@@ -66,10 +66,12 @@ from .github_api import (
 )
 from .learn import compact_session, learn_needs_rerun, run_learn
 from .models import (
+    PLAN_COMMENT_MARKER,
     ImplementationPhase,
     ImplementationState,
     WorkerResult,
 )
+from .planner_state import _comments_contain_plan
 from .pr_manager import (
     commit_changes,
     enable_auto_merge_after_implementation_go,
@@ -712,7 +714,18 @@ class ImplementationPhaseRunner:
     # ------------------------------------------------------------------
 
     def _has_plan(self, issue_number: int) -> bool:
-        """Check if issue has an implementation plan."""
+        """Check if issue has an implementation plan.
+
+        Delegates to :func:`planner_state._comments_contain_plan` so the
+        prefix-anchored check stays in sync with the planner. Substring
+        matching here previously caused the implementer to mistake a
+        ``## 🔍 Plan Review`` comment (which quotes the plan body) for the
+        plan itself — the same bug class fixed in #455/#468/#484 (#715).
+
+        Note: ``_comments_contain_plan`` is a private helper but is the
+        canonical implementation per its own docstring; cross-module reuse
+        here is intentional to avoid a third copy of the same prefix logic.
+        """
         try:
             result = run(
                 ["gh", "issue", "view", str(issue_number), "--comments", "--json", "comments"],
@@ -720,13 +733,7 @@ class ImplementationPhaseRunner:
             )
             data = json.loads(result.stdout)
             comments = data.get("comments", [])
-
-            for comment in comments:
-                body = comment.get("body", "")
-                if "Implementation Plan" in body or "## Plan" in body:
-                    return True
-
-            return False
+            return _comments_contain_plan(comments)
         except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
             return False
 
@@ -2098,11 +2105,14 @@ class ImplementationPhaseRunner:
     def _fetch_plan_and_review(self, issue_number: int) -> tuple[str, str]:
         """Return ``(plan_text, plan_review_text)`` for the reviewer context.
 
-        The PLAN comment is identified the same way :meth:`_has_plan` does
-        ("Implementation Plan" / "## Plan"); the PLAN_REVIEW comment is the one
-        whose body starts with ``review_state.PLAN_REVIEW_PREFIX``. Best-effort:
-        any fetch failure yields empty strings (looked up via ``_impl_module``
-        so tests can patch ``hephaestus.automation.implementer.review_state``).
+        The PLAN comment is identified the same way
+        :func:`planner_state._comments_contain_plan` does — prefix-anchored on
+        :data:`PLAN_COMMENT_MARKER`, skipping comments whose body starts with
+        :data:`review_state.PLAN_REVIEW_PREFIX`. The PLAN_REVIEW comment is
+        the one whose body starts with ``review_state.PLAN_REVIEW_PREFIX``.
+        Best-effort: any fetch failure yields empty strings (looked up via
+        ``_impl_module`` so tests can patch
+        ``hephaestus.automation.implementer.review_state``).
         """
         plan_text = ""
         plan_review_text = ""
@@ -2111,9 +2121,10 @@ class ImplementationPhaseRunner:
             comments = review_state._fetch_issue_comments_graphql(issue_number)
             for comment in comments:
                 body = comment.get("body", "")
-                if body.startswith(review_state.PLAN_REVIEW_PREFIX):
+                stripped = body.lstrip()
+                if stripped.startswith(review_state.PLAN_REVIEW_PREFIX):
                     plan_review_text = body
-                elif "Implementation Plan" in body or "## Plan" in body:
+                elif stripped.startswith(PLAN_COMMENT_MARKER):
                     plan_text = body
         except Exception as e:
             logger.warning("#%s: failed to fetch PLAN/PLAN_REVIEW context: %s", issue_number, e)

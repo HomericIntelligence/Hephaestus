@@ -8,9 +8,11 @@ the public CLI contract that other repos shell out to.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -981,3 +983,86 @@ class TestAdviseAsImplementerTurn:
         assert call_kw["model"] == implementer_model(), (
             f"Expected implementer_model() but got {call_kw['model']!r}"
         )
+
+
+# #715 — _has_plan and _fetch_plan_and_review must use prefix-match not substring
+# ---------------------------------------------------------------------------------
+
+
+class TestHasPlanPrefixMatch:
+    """Regression coverage for #715 — _has_plan must NOT substring-match.
+
+    A ``## 🔍 Plan Review`` comment quotes the plan and therefore contains
+    ``## Implementation Plan`` and ``## Plan`` as substrings. The pre-#715
+    implementation returned True on those, causing the implementer to
+    treat its own prior plan-review as "the plan" (#455/#468/#484 bug
+    class).
+    """
+
+    @pytest.fixture
+    def impl(self, tmp_path: Path) -> IssueImplementer:
+        # Mirror TestPlanReviewVerdictGate.impl (line 241-251): the fixture
+        # is class-scoped throughout this module, never module-level, so this
+        # class declares its own to stay self-contained.
+        options = ImplementerOptions(
+            issues=[1],
+            dry_run=False,
+            enable_learn=False,
+            enable_follow_up=False,
+            enable_ui=False,
+        )
+        with patch("hephaestus.automation.implementer.get_repo_root", return_value=tmp_path):
+            return IssueImplementer(options)
+
+    @staticmethod
+    def _mock_gh_view(comments: list[dict[str, Any]]) -> Any:
+        def mock_gh_view(*args: Any, **kwargs: Any) -> MagicMock:
+            result = MagicMock()
+            result.stdout = json.dumps({"comments": comments}).encode("utf-8")
+            return result
+
+        return mock_gh_view
+
+    def test_plan_review_quoting_plan_heading_is_not_a_plan(self, impl: IssueImplementer) -> None:
+        """_has_plan does not match a Plan Review comment that merely quotes the plan.
+
+        Regression for #455/#468/#484/#715: a ``## 🔍 Plan Review`` body contains
+        ``# Implementation Plan`` as substring when it quotes the plan, and
+        substring matching caused the false positive. Prefix-matching (only at
+        the start of the body) must be used instead.
+
+        The fixture intentionally contains ONLY the Plan-Review comment (no
+        genuine plan), so the OLD substring code would return ``True`` here —
+        this test fails against the pre-fix code and guards the bug.
+        """
+        comments = [
+            {
+                "body": (
+                    "## 🔍 Plan Review\n\n"
+                    "The plan's # Implementation Plan section looks good.\n\n"
+                    "Verdict: GO"
+                )
+            },
+        ]
+
+        with patch(
+            "hephaestus.automation.implementer_phase_runner.run",
+            side_effect=self._mock_gh_view(comments),
+        ):
+            assert impl.phase_runner._has_plan(1) is False
+
+    def test_real_plan_comment_is_detected(self, impl: IssueImplementer) -> None:
+        """_has_plan returns True for a comment whose body starts with the marker.
+
+        Covers the positive branch of the prefix check (#715): a body beginning
+        with ``# Implementation Plan`` is a genuine plan.
+        """
+        comments = [
+            {"body": "# Implementation Plan\n\nStep 1: Do something"},
+        ]
+
+        with patch(
+            "hephaestus.automation.implementer_phase_runner.run",
+            side_effect=self._mock_gh_view(comments),
+        ):
+            assert impl.phase_runner._has_plan(1) is True
