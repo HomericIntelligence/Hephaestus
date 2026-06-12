@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation.ci_driver import CIDriver
+from hephaestus.automation.github_api import GitHubUnavailableError
 from hephaestus.automation.models import CIDriverOptions
 
 
@@ -173,6 +174,21 @@ class TestResolveViewerLogin:
         with patch(
             "hephaestus.automation.ci_driver._gh_call",
             side_effect=FileNotFoundError("gh not on PATH"),
+        ):
+            with pytest.raises(RuntimeError, match="Could not resolve viewer login"):
+                driver._resolve_viewer_login()
+
+    def test_resolve_breaker_open_raises_with_guidance(self, driver: CIDriver) -> None:
+        """Open circuit breaker still fails CLOSED with operator guidance.
+
+        ``GitHubUnavailableError`` (raised when the breaker opens) is mapped
+        to a ``RuntimeError`` carrying the `gh auth login` / --all guidance
+        rather than propagating raw (#821).
+        """
+        driver._viewer_login = ""
+        with patch(
+            "hephaestus.automation.ci_driver._gh_call",
+            side_effect=GitHubUnavailableError("circuit breaker open"),
         ):
             with pytest.raises(RuntimeError, match="Could not resolve viewer login"):
                 driver._resolve_viewer_login()

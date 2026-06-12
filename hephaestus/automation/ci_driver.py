@@ -54,6 +54,7 @@ from .git_utils import (
     sync_worktree_to_remote_branch,
 )
 from .github_api import (
+    GitHubUnavailableError,
     _gh_call,
     gh_issue_json,
     gh_pr_checks,
@@ -405,7 +406,11 @@ class CIDriver:
             return self._viewer_login
         try:
             result = _gh_call(["api", "user", "-q", ".login"], check=True)
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        except (
+            subprocess.CalledProcessError,
+            FileNotFoundError,
+            GitHubUnavailableError,
+        ) as exc:
             raise RuntimeError(
                 "Could not resolve viewer login via `gh api user`: "
                 f"{exc}. Re-authenticate with `gh auth login`, or pass "
@@ -438,8 +443,17 @@ class CIDriver:
 
         Returns:
             Mapping of ``pr_number -> pr_number`` for every open bot PR.
-            Empty dict if the lookup fails or returns nothing — bot
-            discovery must never abort the drive.
+            Empty dict if the ``gh api`` pulls lookup fails or returns
+            nothing — bot discovery must never abort the drive on a list
+            failure.
+
+        Raises:
+            RuntimeError: When the default @me author filter is active
+                (``--all`` not set) and viewer-login resolution fails. This
+                fail-CLOSED abort is intentional per #821 (POLA): a broken
+                ``gh auth`` must never silently widen scope to every author's
+                PRs. Pass ``--all`` to opt out of the filter and bypass the
+                resolver entirely.
 
         """
         try:
