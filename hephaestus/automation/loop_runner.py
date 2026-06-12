@@ -1345,11 +1345,11 @@ def _run_post_loop_stages(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]
     repo-level exception is captured in ``runner_error`` so the helper
     never raises to the caller (parity with ``process_repo``).
 
-    The ``loop_idx=cfg.loops`` argument to ``run_phase`` deliberately makes
-    ``_phase_env`` set ``HEPH_LOOP_INDEX == HEPH_TOTAL_LOOPS`` for the
-    child process — this IS the terminal pass, so the existing env contract
-    naturally produces the correct values without any drive-green-specific
-    branch.
+    Post-loop stages run ``run_phase`` with ``loop_idx=cfg.loops`` to mark
+    this as the terminal pass. The old ``HEPH_LOOP_INDEX``/``HEPH_TOTAL_LOOPS``
+    env-gating contract was removed in #820/#1061, so ``_phase_env`` no longer
+    injects loop-index env vars for any phase; the post-loop semantics are now
+    expressed purely by this dedicated terminal stage rather than via env vars.
     """
     selected_post = [s for s in ALL_POST_LOOP_STAGES if s in cfg.phases]
     if not selected_post:

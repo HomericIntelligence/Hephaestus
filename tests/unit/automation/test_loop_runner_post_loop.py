@@ -214,12 +214,21 @@ def test_plan_without_implement_still_warns() -> None:
     assert any("plan" in w and "implement" in w for w in warnings)
 
 
-def test_post_loop_phase_env_marks_terminal(tmp_path: Path) -> None:
-    """_phase_env called with loop_idx=cfg.loops produces terminal env vars."""
+def test_post_loop_phase_env_omits_loop_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Post-loop drive-green env no longer carries loop-index vars (#820/#1061).
+
+    The HEPH_LOOP_INDEX/HEPH_TOTAL_LOOPS env-gating contract was removed; the
+    terminal-pass semantics are expressed by the dedicated post-loop stage, not
+    by env vars, so even ``loop_idx=cfg.loops`` must not inject them.
+    """
+    monkeypatch.delenv("HEPH_LOOP_INDEX", raising=False)
+    monkeypatch.delenv("HEPH_TOTAL_LOOPS", raising=False)
     cfg = _cfg(tmp_path, loops=5)
     env = loop_runner._phase_env(cfg, loop_idx=cfg.loops, trunk_sha="abc", phase="drive-green")
-    assert env["HEPH_LOOP_INDEX"] == "5"
-    assert env["HEPH_TOTAL_LOOPS"] == "5"
+    assert "HEPH_LOOP_INDEX" not in env
+    assert "HEPH_TOTAL_LOOPS" not in env
 
 
 def test_validate_phases_accepts_all_selectable() -> None:
