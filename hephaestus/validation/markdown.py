@@ -143,6 +143,8 @@ def _is_within_repo(candidate: Path, repo_root: Path) -> bool:
         True if candidate is the same as or nested under repo_root.
 
     """
+    # resolve() is non-strict (default): confine the target before any
+    # existence check, even if the link target does not exist yet.
     try:
         candidate.resolve().relative_to(repo_root.resolve())
     except ValueError:

@@ -488,6 +488,22 @@ class TestLinkValidationPipeline:
         assert valid is True
         assert error is None
 
+    def test_validate_internal_link_rejects_symlink_escape(self, tmp_path):
+        """Symlinks pointing outside repo_root are rejected by .resolve() in _is_within_repo."""
+        md_file = tmp_path / "docs" / "index.md"
+        md_file.parent.mkdir()
+        md_file.write_text("# Index")
+        symlink = tmp_path / "docs" / "escape"
+        try:
+            symlink.symlink_to("/etc")
+        except (OSError, NotImplementedError):
+            pytest.skip("Platform does not support symlinks")
+        # escape/passwd resolves to /etc/passwd via the symlink — outside tmp_path
+        valid, error = validate_internal_link("escape/passwd", md_file, tmp_path)
+        assert valid is False
+        assert error is not None
+        assert "outside repository" in error.lower()
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
