@@ -291,9 +291,9 @@ class TestPlanReviewVerdictGate:
             patch.object(impl, "_finalize_pr", return_value=999),
             patch.object(impl, "_run_post_pr_followup"),
             patch("hephaestus.automation.implementer_phase_runner.ensure_pr_auto_merge_deferred"),
-            patch("hephaestus.automation.implementer_phase_runner.mark_pr_implementation_go"),
+            patch("hephaestus.automation._review_phase.mark_pr_implementation_go"),
             patch(
-                "hephaestus.automation.implementer_phase_runner."
+                "hephaestus.automation._review_phase."
                 "enable_auto_merge_after_implementation_go"
             ),
             patch(
@@ -471,13 +471,13 @@ class TestExistingPrEntersReviewLoop:
             ),
             patch.object(impl, "_run_advise_as_implementer_turn"),
             patch(
-                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_go"
+                "hephaestus.automation._review_phase.mark_pr_implementation_go"
             ) as mark_go,
             patch(
-                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_no_go"
+                "hephaestus.automation._review_phase.mark_pr_implementation_no_go"
             ) as mark_no_go,
             patch(
-                "hephaestus.automation.implementer_phase_runner."
+                "hephaestus.automation._review_phase."
                 "enable_auto_merge_after_implementation_go"
             ),
         ):
@@ -567,11 +567,11 @@ class TestExistingPrEntersReviewLoop:
             patch.object(impl, "_run_advise_as_implementer_turn"),
             patch.object(impl, "_run_impl_review_loop", return_value=(2, "GO", "A")) as review_loop,
             patch(
-                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_go"
+                "hephaestus.automation._review_phase.mark_pr_implementation_go"
             ) as mark_go,
-            patch("hephaestus.automation.implementer_phase_runner.mark_pr_implementation_no_go"),
+            patch("hephaestus.automation._review_phase.mark_pr_implementation_no_go"),
             patch(
-                "hephaestus.automation.implementer_phase_runner."
+                "hephaestus.automation._review_phase."
                 "enable_auto_merge_after_implementation_go"
             ),
         ):
@@ -624,10 +624,10 @@ class TestExistingPrEntersReviewLoop:
             ),
             patch.object(impl, "_run_advise_as_implementer_turn"),
             patch(
-                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_go"
+                "hephaestus.automation._review_phase.mark_pr_implementation_go"
             ) as mark_go,
             patch(
-                "hephaestus.automation.implementer_phase_runner.mark_pr_implementation_no_go"
+                "hephaestus.automation._review_phase.mark_pr_implementation_no_go"
             ) as mark_no_go,
         ):
             result = impl._implement_issue(1)
@@ -660,9 +660,9 @@ class TestExistingPrEntersReviewLoop:
             patch.object(impl, "_run_impl_review_loop", return_value=(1, "GO", "A")),
             patch.object(impl, "_finalize_pr", return_value=999),
             patch("hephaestus.automation.implementer_phase_runner.ensure_pr_auto_merge_deferred"),
-            patch("hephaestus.automation.implementer_phase_runner.mark_pr_implementation_go"),
+            patch("hephaestus.automation._review_phase.mark_pr_implementation_go"),
             patch(
-                "hephaestus.automation.implementer_phase_runner."
+                "hephaestus.automation._review_phase."
                 "enable_auto_merge_after_implementation_go"
             ),
             patch.object(impl, "_run_post_pr_followup"),
@@ -972,7 +972,7 @@ class TestAdviseAsImplementerTurn:
             return True
 
         with patch(
-            "hephaestus.automation.implementer_phase_runner.run_learn",
+            "hephaestus.automation._followup_phase.run_learn",
             side_effect=_fake_run_learn,
         ):
             impl._run_learn("sess-1", tmp_path, issue_number=1)
@@ -1046,7 +1046,7 @@ class TestHasPlanPrefixMatch:
         ]
 
         with patch(
-            "hephaestus.automation.implementer_phase_runner.run",
+            "hephaestus.automation._plan_phase.run",
             side_effect=self._mock_gh_view(comments),
         ):
             assert impl.phase_runner._has_plan(1) is False
@@ -1062,7 +1062,7 @@ class TestHasPlanPrefixMatch:
         ]
 
         with patch(
-            "hephaestus.automation.implementer_phase_runner.run",
+            "hephaestus.automation._plan_phase.run",
             side_effect=self._mock_gh_view(comments),
         ):
             assert impl.phase_runner._has_plan(1) is True

@@ -44,13 +44,23 @@ AUTOMATION_DIR = Path(automation_pkg.__file__).parent
 # where ``companion_files`` is an optional tuple of sibling modules that
 # share the same self-agent identity. For ``implementer.py`` the
 # per-issue phase runner was extracted into ``implementer_phase_runner.py``
-# in #597 — both files participate in the implementer's session and must
-# be inspected together. ``invoke_claude_with_session`` is called inside
-# the runner; the ``AGENT_IMPLEMENTER`` constant is referenced through
-# the implementer module's namespace (``_impl_mod.AGENT_IMPLEMENTER``)
-# so test patches at ``implementer.AGENT_IMPLEMENTER`` still take effect.
+# in #597, and #712 further split the runner into single-responsibility phase
+# modules (``_implement_phase.py`` / ``_review_phase.py`` hold the
+# ``invoke_claude_with_session`` callsites). All of these files participate in
+# the implementer's session and must be inspected together. The
+# ``AGENT_IMPLEMENTER`` constant is referenced through the implementer
+# module's namespace (``_impl_mod.AGENT_IMPLEMENTER``) so test patches at
+# ``implementer.AGENT_IMPLEMENTER`` still take effect.
 SELF_AGENT_PHASES: list[tuple[str, str, tuple[str, ...]]] = [
-    ("implementer.py", "AGENT_IMPLEMENTER", ("implementer_phase_runner.py",)),
+    (
+        "implementer.py",
+        "AGENT_IMPLEMENTER",
+        (
+            "implementer_phase_runner.py",
+            "_implement_phase.py",
+            "_review_phase.py",
+        ),
+    ),
     # ci_driver owns Session 3 (AGENT_CI_DRIVER): its fix sessions and its
     # post-green learnings run on a transcript independent of the implementer.
     ("ci_driver.py", "AGENT_CI_DRIVER", ()),

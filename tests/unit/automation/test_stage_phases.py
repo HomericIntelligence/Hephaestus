@@ -1,0 +1,318 @@
+"""Isolated unit tests for the #712 phase decomposition.
+
+Each phase is exercised against a lightweight :class:`StageContext` built from
+a ``SimpleNamespace`` stub — no 30-collaborator mock setup required (issue #712
+acceptance criterion). These tests pin the phase API surface and the
+cross-phase dispatch contract that the thin
+:class:`ImplementationPhaseRunner` coordinator relies on.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest import mock
+
+import pytest
+
+from hephaestus.automation._followup_phase import FollowUpPhase
+from hephaestus.automation._implement_phase import ImplementPhase, _prepend_advise
+from hephaestus.automation._plan_phase import PlanPhase
+from hephaestus.automation._pr_create_phase import PRCreatePhase
+from hephaestus.automation._review_phase import ReviewPhase, _is_automation_owned_thread
+from hephaestus.automation._stage_context import StageContext, StageMixin
+
+
+def _make_ctx(tmp_path: Path, **option_overrides: Any) -> StageContext:
+    """Build a StageContext over a stub impl + runner with no live collaborators."""
+    option_values: dict[str, Any] = {
+        "agent": "claude",
+        "dry_run": False,
+        "auto_merge": True,
+        "enable_advise": True,
+        "enable_learn": True,
+        "enable_follow_up": True,
+        "run_pre_pr_tests": False,
+        "include_nitpicks": False,
+    }
+    option_values.update(option_overrides)
+    options = SimpleNamespace(**option_values)
+    impl = cast(
+        Any,
+        SimpleNamespace(
+            options=options,
+            state_dir=tmp_path,
+            repo_root=tmp_path,
+            status_tracker=SimpleNamespace(update_slot=lambda *a, **k: None),
+            worktree_manager=SimpleNamespace(),
+            state_mgr=SimpleNamespace(lock=mock.MagicMock(), states={}),
+            _log=lambda *a, **k: None,
+            _save_state=lambda *a, **k: None,
+        ),
+    )
+    runner = cast(Any, SimpleNamespace())
+    ctx = StageContext(impl=impl, runner=runner)
+    return ctx
+
+
+def test_stage_context_accessors_delegate_to_impl(tmp_path: Path) -> None:
+    """StageContext re-exposes the impl's shared references."""
+    ctx = _make_ctx(tmp_path)
+    assert ctx.options.agent == "claude"
+    assert ctx.state_dir == tmp_path
+    assert ctx.repo_root == tmp_path
+    assert ctx.state_lock is ctx.impl.state_mgr.lock
+    # impl_module is the live implementer module (used for patchable lookups).
+    assert ctx.impl_module.__name__ == "hephaestus.automation.implementer"
+
+
+def test_stage_mixin_exposes_runner_and_impl(tmp_path: Path) -> None:
+    """A phase reads impl/runner/options through the mixin accessors."""
+    ctx = _make_ctx(tmp_path)
+    phase = PlanPhase(ctx)
+    assert isinstance(phase, StageMixin)
+    assert phase.impl is ctx.impl
+    assert phase.runner is ctx.runner
+    assert phase.options is ctx.options
+    assert phase.state_dir == tmp_path
+
+
+# ---------------------------------------------------------------------------
+# PlanPhase
+# ---------------------------------------------------------------------------
+
+
+def test_plan_phase_has_plan_true_on_plan_comment(tmp_path: Path) -> None:
+    """_has_plan returns True when a plan comment is present."""
+    phase = PlanPhase(_make_ctx(tmp_path))
+    fake = SimpleNamespace(
+        stdout=json.dumps({"comments": [{"body": "# Implementation Plan\n\nstep 1"}]})
+    )
+    with (
+        mock.patch("hephaestus.automation._plan_phase.run", return_value=fake),
+        mock.patch(
+            "hephaestus.automation._plan_phase._comments_contain_plan", return_value=True
+        ) as mock_check,
+    ):
+        assert phase._has_plan(7) is True
+    mock_check.assert_called_once()
+
+
+def test_plan_phase_has_plan_false_on_subprocess_error(tmp_path: Path) -> None:
+    """_has_plan swallows subprocess/JSON errors and returns False."""
+    phase = PlanPhase(_make_ctx(tmp_path))
+    with mock.patch("hephaestus.automation._plan_phase.run", side_effect=OSError("boom")):
+        assert phase._has_plan(7) is False
+
+
+def test_plan_phase_generate_uses_entry_point(tmp_path: Path) -> None:
+    """_generate prefers the installed hephaestus-plan-issues entry point."""
+    phase = PlanPhase(_make_ctx(tmp_path))
+    with (
+        mock.patch("shutil.which", return_value="/usr/bin/hpi"),
+        mock.patch("hephaestus.automation._plan_phase.run") as mock_run,
+    ):
+        phase._generate(7)
+    args = mock_run.call_args[0][0]
+    assert args[0] == "/usr/bin/hpi"
+    assert "--issues" in args and "7" in args
+
+
+# ---------------------------------------------------------------------------
+# ImplementPhase
+# ---------------------------------------------------------------------------
+
+
+def test_prepend_advise_injects_block() -> None:
+    """_prepend_advise prepends a learnings block for real findings."""
+    out = _prepend_advise("use the cached resolver", "DO THE WORK")
+    assert "Prior Learnings" in out and out.endswith("DO THE WORK")
+
+
+def test_prepend_advise_skips_marker() -> None:
+    """_prepend_advise returns the prompt unchanged for a skipped-marker."""
+    assert _prepend_advise("<!-- advise step skipped: x -->", "P") == "P"
+    assert _prepend_advise("   ", "P") == "P"
+
+
+def test_implement_phase_run_claude_code_dry_run(tmp_path: Path) -> None:
+    """_run_claude_code is a no-op returning None under dry-run."""
+    phase = ImplementPhase(_make_ctx(tmp_path, dry_run=True))
+    assert phase._run_claude_code(7, tmp_path, "prompt") is None
+
+
+def test_implement_phase_run_claude_code_dispatches_claude(tmp_path: Path) -> None:
+    """_run_claude_code routes to the Claude session for non-codex agents."""
+    ctx = _make_ctx(tmp_path)
+    ctx.impl._run_claude_impl_session = mock.MagicMock(return_value="sess-1")  # type: ignore[attr-defined]
+    phase = ImplementPhase(ctx)
+    with mock.patch("hephaestus.automation._implement_phase.is_codex", return_value=False):
+        assert phase._run_claude_code(7, tmp_path, "prompt") == "sess-1"
+    ctx.impl._run_claude_impl_session.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# PRCreatePhase
+# ---------------------------------------------------------------------------
+
+
+def test_pr_create_finalize_persists_pr_number(tmp_path: Path) -> None:
+    """_finalize_pr ensures the PR exists and persists its number on state."""
+    ctx = _make_ctx(tmp_path)
+    ctx.impl._ensure_pr_created = mock.MagicMock(return_value=321)  # type: ignore[attr-defined]
+    ctx.impl._run_tests_in_worktree = mock.MagicMock(return_value=True)  # type: ignore[attr-defined]
+    phase = PRCreatePhase(ctx)
+    state = SimpleNamespace(phase=None, pr_number=None)
+    pr = phase._finalize_pr(7, "7-auto-impl", tmp_path, cast(Any, state), slot_id=None)
+    assert pr == 321
+    assert state.pr_number == 321
+    # Pre-PR tests are off by default, so the gate must not have run.
+    ctx.impl._run_tests_in_worktree.assert_not_called()
+
+
+def test_pr_create_finalize_runs_pre_pr_tests_when_enabled(tmp_path: Path) -> None:
+    """_finalize_pr runs the opt-in pre-PR test gate before creating the PR."""
+    ctx = _make_ctx(tmp_path, run_pre_pr_tests=True)
+    ctx.impl._ensure_pr_created = mock.MagicMock(return_value=9)  # type: ignore[attr-defined]
+    ctx.impl._run_tests_in_worktree = mock.MagicMock(return_value=False)  # type: ignore[attr-defined]
+    phase = PRCreatePhase(ctx)
+    state = SimpleNamespace(phase=None, pr_number=None)
+    phase._finalize_pr(7, "b", tmp_path, cast(Any, state), slot_id=None)
+    ctx.impl._run_tests_in_worktree.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# FollowUpPhase
+# ---------------------------------------------------------------------------
+
+
+def test_followup_can_resume_requires_session(tmp_path: Path) -> None:
+    """_can_resume_state_session is False without a saved session id."""
+    phase = FollowUpPhase(_make_ctx(tmp_path))
+    state = SimpleNamespace(session_id=None, session_agent=None, issue_number=7)
+    assert phase._can_resume_state_session(cast(Any, state)) is False
+
+
+def test_followup_can_resume_matches_agent(tmp_path: Path) -> None:
+    """_can_resume_state_session is True when the saved agent matches."""
+    phase = FollowUpPhase(_make_ctx(tmp_path))
+    state = SimpleNamespace(session_id="s", session_agent="claude", issue_number=7)
+    with mock.patch(
+        "hephaestus.automation._followup_phase.session_agent_matches", return_value=True
+    ):
+        assert phase._can_resume_state_session(cast(Any, state)) is True
+
+
+# ---------------------------------------------------------------------------
+# ReviewPhase
+# ---------------------------------------------------------------------------
+
+
+def test_is_automation_owned_thread_recognizes_bot() -> None:
+    """A github-actions[bot] thread is automation-owned."""
+    thread = {"comments": [{"author": "github-actions[bot]"}]}
+    assert _is_automation_owned_thread(thread, current_login=None) is True
+
+
+def test_is_automation_owned_thread_human_not_owned() -> None:
+    """A human-authored thread is not automation-owned."""
+    thread = {"comments": [{"author": "mvillmow"}]}
+    assert _is_automation_owned_thread(thread, current_login="hephaestus-bot") is False
+
+
+def test_review_phase_apply_verdict_go_arms_auto_merge(tmp_path: Path) -> None:
+    """GO labels the PR and arms auto-merge when auto_merge is enabled."""
+    phase = ReviewPhase(_make_ctx(tmp_path))
+    with (
+        mock.patch("hephaestus.automation._review_phase.mark_pr_implementation_go") as mark_go,
+        mock.patch(
+            "hephaestus.automation._review_phase.enable_auto_merge_after_implementation_go"
+        ) as arm,
+    ):
+        phase._apply_impl_review_verdict(
+            issue_number=7, pr_number=12, last_verdict="GO", slot_id=None, thread_id=None
+        )
+    mark_go.assert_called_once_with(12)
+    arm.assert_called_once_with(12)
+
+
+def test_review_phase_apply_verdict_error_applies_no_label(tmp_path: Path) -> None:
+    """An ERROR verdict applies neither GO nor NO-GO labels."""
+    phase = ReviewPhase(_make_ctx(tmp_path))
+    with (
+        mock.patch("hephaestus.automation._review_phase.mark_pr_implementation_go") as mark_go,
+        mock.patch(
+            "hephaestus.automation._review_phase.mark_pr_implementation_no_go"
+        ) as mark_no_go,
+    ):
+        phase._apply_impl_review_verdict(
+            issue_number=7, pr_number=12, last_verdict="ERROR", slot_id=None, thread_id=None
+        )
+    mark_go.assert_not_called()
+    mark_no_go.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "verdict, calls_go, calls_no_go",
+    [
+        ("NOGO", False, True),
+        ("AMBIGUOUS", False, True),
+        ("HUMAN_BLOCKED", False, False),
+    ],
+)
+def test_review_phase_apply_verdict_mapping(
+    tmp_path: Path, verdict: str, calls_go: bool, calls_no_go: bool
+) -> None:
+    """Verdict→label mapping is centralized and consistent."""
+    phase = ReviewPhase(_make_ctx(tmp_path))
+    with (
+        mock.patch("hephaestus.automation._review_phase.mark_pr_implementation_go") as mark_go,
+        mock.patch(
+            "hephaestus.automation._review_phase.mark_pr_implementation_no_go"
+        ) as mark_no_go,
+        mock.patch("hephaestus.automation._review_phase.enable_auto_merge_after_implementation_go"),
+    ):
+        phase._apply_impl_review_verdict(
+            issue_number=7, pr_number=12, last_verdict=verdict, slot_id=None, thread_id=None
+        )
+    assert mark_go.called is calls_go
+    assert mark_no_go.called is calls_no_go
+
+
+def test_review_phase_push_branch_raises_on_failure(tmp_path: Path) -> None:
+    """_push_branch raises RuntimeError on a failed git push (no silent swallow)."""
+    import subprocess
+
+    phase = ReviewPhase(_make_ctx(tmp_path))
+    with mock.patch(
+        "hephaestus.automation._review_phase.run",
+        side_effect=subprocess.CalledProcessError(1, ["git", "push"]),
+    ):
+        with pytest.raises(RuntimeError, match="Failed to push branch"):
+            phase._push_branch("b", tmp_path)
+
+
+def test_review_phase_commit_if_changes_skips_secrets_via_commit_changes(tmp_path: Path) -> None:
+    """_commit_if_changes delegates to pr_manager.commit_changes (secret-skip path)."""
+    phase = ReviewPhase(_make_ctx(tmp_path))
+    dirty = SimpleNamespace(stdout=" M file.py\n")
+    with (
+        mock.patch("hephaestus.automation._review_phase.run", return_value=dirty),
+        mock.patch("hephaestus.automation._review_phase.commit_changes") as mock_commit,
+    ):
+        assert phase._commit_if_changes(7, tmp_path) is True
+    mock_commit.assert_called_once()
+
+
+def test_review_phase_commit_if_changes_clean_returns_false(tmp_path: Path) -> None:
+    """_commit_if_changes returns False (no commit) when the worktree is clean."""
+    phase = ReviewPhase(_make_ctx(tmp_path))
+    clean = SimpleNamespace(stdout="")
+    with (
+        mock.patch("hephaestus.automation._review_phase.run", return_value=clean),
+        mock.patch("hephaestus.automation._review_phase.commit_changes") as mock_commit,
+    ):
+        assert phase._commit_if_changes(7, tmp_path) is False
+    mock_commit.assert_not_called()

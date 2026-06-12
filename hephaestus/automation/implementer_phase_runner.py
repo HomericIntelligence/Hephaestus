@@ -1,111 +1,83 @@
-"""Per-issue 3-stage pipeline runner for :class:`IssueImplementer`.
+"""Per-issue pipeline coordinator for :class:`IssueImplementer`.
 
-Extracted from :mod:`hephaestus.automation.implementer` as part of the #597
-decomposition. The runner owns the body of ``_implement_issue`` and all of
-its phase helpers (plan / impl / review-loop / test / PR / follow-up /
-learn). It does NOT own:
+Originally extracted from :mod:`hephaestus.automation.implementer` (#597), the
+runner owned the entire ``_implement_issue`` body plus every phase helper in
+one ~2600-line class. The #712 decomposition splits that god-class into five
+single-responsibility phase collaborators —
+:class:`~hephaestus.automation._plan_phase.PlanPhase`,
+:class:`~hephaestus.automation._implement_phase.ImplementPhase`,
+:class:`~hephaestus.automation._review_phase.ReviewPhase`,
+:class:`~hephaestus.automation._pr_create_phase.PRCreatePhase`, and
+:class:`~hephaestus.automation._followup_phase.FollowUpPhase` — each built
+around a single :class:`~hephaestus.automation._stage_context.StageContext`.
 
-* the ``states`` dict + lock — that lives on
-  :class:`~hephaestus.automation.implementer_state.ImplementationStateManager`.
-* the end-of-run summary — that lives on
-  :class:`~hephaestus.automation.implementer_summary.ImplementationSummaryPrinter`.
+:class:`ImplementationPhaseRunner` is now a thin pipeline coordinator: it owns
+the top-level per-issue orchestration (``_implement_issue`` /
+``_review_existing_pr`` and the dirty-reused-worktree salvage helpers) and
+delegates each phase's work to the matching collaborator.
 
-The runner keeps a back-reference to the parent ``IssueImplementer`` so
-that cross-method dispatch can flow back through the coordinator's
-thin shims. That preserves the test-patch contract:
-``patch.object(impl, "_has_plan", ...)`` still intercepts every callsite,
-including the ones inside ``_implement_issue`` that were moved here.
+The runner still keeps a back-reference to the parent ``IssueImplementer`` and
+re-exposes the phase methods under their original names. That preserves the
+test-patch contract: ``patch.object(impl, "_has_plan", ...)`` still intercepts
+every callsite — ``IssueImplementer`` forwards ``impl._has_plan`` to the runner,
+the runner forwards to ``PlanPhase``, and the phases dispatch cross-phase work
+back through ``impl._method`` so the patch wins.
 """
 
 from __future__ import annotations
 
 import contextlib
-import json
 import logging
-import os
 import subprocess
-import sys
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
-from hephaestus.agents.runtime import (
-    is_codex,
-    resume_codex_session,
-    run_codex_session,
-    run_codex_text,
-    session_agent_matches,
-)
-from hephaestus.github.rate_limit import wait_until
+from hephaestus.agents.runtime import is_codex, run_codex_text
 
-from .address_review import (
-    run_address_fix_session,
-)
-from .advise_runner import run_advise
-from .claude_invoke import (
-    INFRA_ERROR_REVIEW_TEXT,
-    SESSION_EXPIRED_PHRASES,
-    parse_review_verdict,
-)
-from .claude_models import advise_model, implementer_model, reviewer_model
-from .claude_timeouts import advise_claude_timeout, implementer_claude_timeout
-from .follow_up import parse_follow_up_items, run_follow_up_issues
+from ._followup_phase import FollowUpPhase
+from ._implement_phase import ImplementPhase, _prepend_advise
+from ._plan_phase import PlanPhase
+from ._pr_create_phase import PRCreatePhase
+from ._review_phase import MAX_REVIEW_ITERATIONS, ReviewPhase
+from ._stage_context import StageContext
+from .claude_models import advise_model
+from .claude_timeouts import advise_claude_timeout
 from .git_utils import (
-    get_repo_slug,
     is_clean_working_tree,
     issue_ref,
     pr_ref,
     run,
     sync_worktree_to_remote_branch,
 )
-from .github_api import (
-    gh_current_login,
-    gh_issue_add_labels,
-    gh_pr_list_unresolved_threads,
-)
-from .learn import compact_session, learn_needs_rerun, run_learn
+from .github_api import gh_issue_add_labels
 from .models import (
-    PLAN_COMMENT_MARKER,
     ImplementationPhase,
     ImplementationState,
     WorkerResult,
 )
-from .planner_state import _comments_contain_plan
 from .pr_manager import (
-    commit_changes,
-    enable_auto_merge_after_implementation_go,
     ensure_pr_auto_merge_deferred,
-    ensure_pr_created,
-    mark_pr_implementation_go,
-    mark_pr_implementation_no_go,
     pr_has_implementation_state_label,
 )
-from .pr_reviewer import gather_impl_review_context, review_pr_inline
-from .prompts import (
-    get_advise_prompt_builder,
-    get_dirty_reused_worktree_decision_prompt,
-    get_impl_loop_review_prompt,
-    get_impl_resume_feedback_prompt,
-    get_implementation_prompt,
-)
-from .review_validator import validate_prior_comments_addressed
+from .prompts import get_dirty_reused_worktree_decision_prompt, get_implementation_prompt
 from .state_labels import STATE_SKIP
 
-# NOTE: ``is_plan_review_go``, ``fetch_issue_info``,
-# ``invoke_claude_with_session``, ``get_repo_slug``, ``current_trunk_githash``,
-# and ``AGENT_IMPLEMENTER`` are deliberately NOT imported here. Existing tests
-# patch them at ``hephaestus.automation.implementer.X`` so the call sites
-# below look them up dynamically through that module via
-# :meth:`._impl_module`. This preserves the test-patch contract after the
-# #597 extraction.
+# NOTE: ``is_plan_review_go``, ``fetch_issue_info``, ``find_pr_for_issue``,
+# ``get_pr_head_branch``, ``invoke_claude_with_session``, ``get_repo_slug``, and
+# ``AGENT_IMPLEMENTER`` are deliberately NOT imported here. Existing tests patch
+# them at ``hephaestus.automation.implementer.X`` so the call sites below look
+# them up dynamically through that module via :meth:`._impl_module`. This
+# preserves the test-patch contract after the #597/#712 extractions.
 
 if TYPE_CHECKING:
     from .implementer import IssueImplementer
 
 logger = logging.getLogger(__name__)
 
-MAX_REVIEW_ITERATIONS = 3
+# Re-exported for back-compat: ``implementer`` imports ``MAX_REVIEW_ITERATIONS``
+# from this module. The canonical value now lives in ``_review_phase``.
+__all__ = ["MAX_REVIEW_ITERATIONS", "ImplementationPhaseRunner"]
 
 DirtyWorktreeDecision = Literal["commit", "stash"]
 
@@ -123,76 +95,23 @@ def _parse_dirty_worktree_decision(text: str) -> DirtyWorktreeDecision:
     return _parse_dirty_reused_worktree_decision(text)
 
 
-def _prepend_advise(advise_findings: str, prompt: str) -> str:
-    """Prepend advise findings as a context block to an implementation prompt.
-
-    Returns ``prompt`` unchanged when there are no real findings — an empty
-    string or an ``advise_runner.advise_skipped`` HTML-comment marker (which
-    records *why* advise produced nothing) carries no guidance worth injecting.
-    """
-    findings = advise_findings.strip()
-    if not findings or findings.startswith("<!-- advise step skipped"):
-        return prompt
-    return f"## Prior Learnings from Team Knowledge Base\n\n{findings}\n\n---\n\n{prompt}"
-
-
-def _is_automation_owned_thread(thread: dict[str, Any], current_login: str | None) -> bool:
-    """Return True for unresolved review threads the automation may resolve on GO."""
-    authors = {str(author).strip() for author in thread.get("authors", []) if str(author).strip()}
-    author = (thread.get("author") or "").strip()
-    if author:
-        authors.add(author)
-    for comment in thread.get("comments", []):
-        comment_author = (comment.get("author") or "").strip()
-        if comment_author:
-            authors.add(comment_author)
-
-    if current_login and current_login in authors:
-        return True
-    automation_bot_logins = {
-        "github-actions[bot]",
-        "hephaestus[bot]",
-    }
-    return bool(authors & automation_bot_logins)
-
-
-def _claude_quota_reset_epoch(*texts: str) -> int | None:
-    """Find a quota-reset epoch across one or more output streams.
-
-    Mirrors the helper in :mod:`hephaestus.automation.implementer`. Kept
-    local to the runner so the agent-call paths don't import back through
-    the coordinator module.
-    """
-    from hephaestus.github.rate_limit import detect_claude_usage_cap, detect_rate_limit
-
-    for text in texts:
-        if not text:
-            continue
-        epoch = detect_rate_limit(text)
-        if epoch is not None:
-            return epoch
-        epoch = detect_claude_usage_cap(text)
-        if epoch is not None:
-            return epoch
-    return None
-
-
 class ImplementationPhaseRunner:
-    """Runs the per-issue implementation pipeline for one ``IssueImplementer``.
+    """Coordinate the per-issue implementation pipeline for one ``IssueImplementer``.
 
     The runner is constructed by :class:`IssueImplementer` and keeps a
-    back-reference to it so cross-method dispatch (``_has_plan``,
+    back-reference to it so cross-phase dispatch (``_has_plan``,
     ``_save_state``, ``_run_claude_code``, …) can flow back through the
-    coordinator. That keeps existing ``patch.object(impl, "_method")``
-    test idioms working unchanged.
+    coordinator. It owns the top-level orchestration and delegates the
+    plan / implement / review / PR-create / follow-up work to dedicated phase
+    collaborators built on a shared :class:`StageContext`.
     """
 
     def __init__(self, impl: IssueImplementer) -> None:
-        """Initialize the runner.
+        """Initialize the runner and its phase collaborators.
 
         Args:
             impl: Parent ``IssueImplementer``. Held by reference; the
-                runner reads ``impl.options``, ``impl.state_dir``,
+                runner and its phases read ``impl.options``, ``impl.state_dir``,
                 ``impl.repo_root``, ``impl.worktree_manager``,
                 ``impl.status_tracker``, ``impl.state_mgr``, and the
                 ``_log`` / ``_get_state`` / ``_get_or_create_state`` /
@@ -200,10 +119,15 @@ class ImplementationPhaseRunner:
 
         """
         self.impl = impl
+        self.ctx = StageContext(impl=impl, runner=self)
+        self.plan_phase = PlanPhase(self.ctx)
+        self.implement_phase = ImplementPhase(self.ctx)
+        self.review_phase = ReviewPhase(self.ctx)
+        self.pr_create_phase = PRCreatePhase(self.ctx)
+        self.followup_phase = FollowUpPhase(self.ctx)
 
     # ------------------------------------------------------------------
-    # Convenience accessors — keep method bodies readable without
-    # rewriting them.
+    # Convenience accessors — keep orchestration bodies readable.
     # ------------------------------------------------------------------
 
     @property
@@ -241,20 +165,18 @@ class ImplementationPhaseRunner:
         """Return the ``hephaestus.automation.implementer`` module.
 
         Used for dynamic lookup of patchable symbols (``is_plan_review_go``,
-        ``fetch_issue_info``, ``invoke_claude_with_session``, ``get_repo_slug``,
-        ``current_trunk_githash``, ``AGENT_IMPLEMENTER``) so that tests which
-        ``patch("hephaestus.automation.implementer.X", ...)`` keep working
-        after the #597 extraction moved the call sites out to this module.
+        ``fetch_issue_info``, ``find_pr_for_issue``, ``get_pr_head_branch``,
+        ``invoke_claude_with_session``, ``get_repo_slug``, ``AGENT_IMPLEMENTER``)
+        so tests that ``patch("hephaestus.automation.implementer.X", ...)`` keep
+        working after the call sites moved into the phase modules.
         """
-        from . import implementer as _impl_mod
-
-        return _impl_mod
+        return self.ctx.impl_module
 
     # ------------------------------------------------------------------
     # Top-level per-issue pipeline
     # ------------------------------------------------------------------
 
-    def _implement_issue(self, issue_number: int) -> WorkerResult:  # noqa: C901  # orchestration with many retry/outcome paths
+    def _implement_issue(self, issue_number: int) -> WorkerResult:
         """Implement a single issue.
 
         Args:
@@ -336,183 +258,31 @@ class ImplementationPhaseRunner:
                 state.branch_name = branch_name
             impl._save_state(state)
 
-            # Check for existing plan
-            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Checking plan")
-            if not impl._has_plan(issue_number):
-                self.status_tracker.update_slot(
-                    slot_id, f"{issue_ref(issue_number)}: Generating plan"
-                )
-                impl._log("info", f"Issue #{issue_number} has no plan, generating...", thread_id)
-                with self.state_lock:
-                    state.phase = ImplementationPhase.PLANNING
-                impl._save_state(state)
-                impl._generate_plan(issue_number)
-
-            # Gate on a GO plan-review verdict (#551). The legacy ``_has_plan``
-            # check above only verifies a plan comment EXISTS; it does not look
-            # at the plan-reviewer's verdict, so a NOGO plan (or a NOGO-exhausted
-            # plan that still starts with "# Implementation Plan", see
-            # planner.py:692-700) used to be implemented just like a GO one. We
-            # now defer the issue when the latest plan-review is anything other
-            # than GO, so the planner can re-plan and the reviewer re-evaluate.
-            self.status_tracker.update_slot(
-                slot_id, f"{issue_ref(issue_number)}: Checking plan-review verdict"
-            )
-            if not self._impl_module.is_plan_review_go(issue_number):
-                impl._log(
-                    "info",
-                    f"Issue #{issue_number}: latest plan-review verdict is not "
-                    f"GO — deferring implementation until next loop",
-                    thread_id,
-                )
-                with self.state_lock:
-                    state.phase = ImplementationPhase.WAITING_FOR_PLAN_REVIEW
-                impl._save_state(state)
-                self.status_tracker.update_slot(
-                    slot_id,
-                    f"{issue_ref(issue_number)}: Waiting for GO plan-review",
-                )
-                return WorkerResult(
-                    issue_number=issue_number,
-                    success=True,
-                    branch_name=branch_name,
-                    worktree_path=str(worktree_path),
-                    plan_review_not_go=True,
-                )
-
-            # Fetch issue info for context
-            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Fetching issue")
-            with self.state_lock:
-                state.phase = ImplementationPhase.IMPLEMENTING
-            impl._save_state(state)
-
-            issue = self._impl_module.fetch_issue_info(issue_number)
-
-            # Advise-first (#30): pull prior learnings from ProjectMnemosyne
-            # before the implementation session.  For Claude agents the advise
-            # prompt is sent as the *first turn* of the implementer's own
-            # session (cwd=worktree_path) so the findings live in the transcript
-            # and are automatically visible to the implementation turn that
-            # follows via --resume.  For Codex agents the old separate-session
-            # path is retained because Codex has no multi-turn session model.
-            implementation_advise_findings = ""
-            if self.options.enable_advise and not is_codex(self.options.agent):
-                self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Advising")
-                implementation_advise_findings = impl._run_advise_as_implementer_turn(
-                    issue_number, issue.title, issue.body, worktree_path
-                )
-
-            # Run the selected implementation agent
-            self.status_tracker.update_slot(
-                slot_id, f"{issue_ref(issue_number)}: Running {self.options.agent}"
-            )
-            # Codex: run advise separately (returns findings text) then inject.
-            codex_advise_findings = ""
-            if self.options.enable_advise and is_codex(self.options.agent):
-                self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Advising")
-                codex_advise_findings = impl._run_advise(issue_number, issue.title, issue.body)
-                implementation_advise_findings = codex_advise_findings
-
-            session_id = impl._run_claude_code(
-                issue_number,
-                worktree_path,
-                _prepend_advise(
-                    codex_advise_findings,
-                    get_implementation_prompt(
-                        issue_number=issue_number,
-                        issue_title=issue.title,
-                        issue_body=issue.body,
-                        branch_name=branch_name,
-                        worktree_path=str(worktree_path),
-                        repo_root=str(self.repo_root),
-                    ),
-                ),
-                slot_id=slot_id,
-            )
-            with self.state_lock:
-                state.session_id = session_id
-                state.session_agent = self.options.agent if session_id else None
-            impl._save_state(state)
-
-            # Create the PR up-front so the in-loop reviewer (Stage 2, #28) has
-            # a concrete PR to post INLINE review threads against. Verify commit,
-            # push, PR creation. ``_finalize_pr`` is idempotent — ``ensure_pr_
-            # created`` is a fallback that no-ops when the agent already opened
-            # the PR.
-            pr_number = impl._finalize_pr(issue_number, branch_name, worktree_path, state, slot_id)
-            ensure_pr_auto_merge_deferred(pr_number)
-
-            # Strict review loop now absorbs the former ``review-prs`` and
-            # ``address-review`` phases: each iteration runs a FRESH reviewer
-            # session that posts inline PR threads, then resumes Session 2
-            # (AGENT_IMPLEMENTER) to address them, looping until GO / no
-            # blocking unresolved threads. Reviewer calls are always fresh so
-            # their judgment is unbiased.
-            with self.state_lock:
-                state.phase = ImplementationPhase.REVIEWING
-            impl._save_state(state)
-            iterations, last_verdict, last_grade = impl._run_impl_review_loop(
+            deferred = self._ensure_plan_ready(
                 issue_number=issue_number,
+                branch_name=branch_name,
                 worktree_path=worktree_path,
-                branch_name=branch_name,
-                issue_title=issue.title,
-                issue_body=issue.body,
-                session_id=session_id,
-                slot_id=slot_id,
-                thread_id=thread_id,
                 state=state,
-                pr_number=pr_number,
-                advise_findings=implementation_advise_findings,
-            )
-            with self.state_lock:
-                state.review_iterations = iterations
-                state.last_review_verdict = last_verdict
-                state.last_review_grade = last_grade
-            impl._save_state(state)
-
-            self._apply_impl_review_verdict(
-                issue_number=issue_number,
-                pr_number=pr_number,
-                last_verdict=last_verdict,
                 slot_id=slot_id,
                 thread_id=thread_id,
             )
+            if deferred is not None:
+                return deferred
 
-            # impl-learnings + follow-up filing stay in Session 2 (#28 §B),
-            # resuming AGENT_IMPLEMENTER AFTER the loop converges.
-            impl._run_post_pr_followup(issue_number, worktree_path, state, slot_id)
-
-            impl._log("info", f"Issue #{issue_number} completed: PR {pr_ref(pr_number)}", thread_id)
-
-            return WorkerResult(
+            return self._run_implementation_and_review(
                 issue_number=issue_number,
-                success=True,
-                pr_number=pr_number,
                 branch_name=branch_name,
-                worktree_path=str(worktree_path),
+                worktree_path=worktree_path,
+                state=state,
+                slot_id=slot_id,
+                thread_id=thread_id,
             )
 
         except subprocess.TimeoutExpired as e:
             error_msg = f"Timeout: {' '.join(e.cmd[:3])} exceeded {e.timeout}s"
             impl._log("error", error_msg, thread_id)
-
-            # Show failure in UI before releasing slot
-            self.status_tracker.update_slot(
-                slot_id, f"{issue_ref(issue_number)}: FAILED - {error_msg[:50]}"
-            )
-
-            err_state = impl._get_state(issue_number)
-            if err_state:
-                with self.state_lock:
-                    err_state.phase = ImplementationPhase.FAILED
-                    err_state.error = error_msg
-                    err_state.attempts += 1
-                impl._save_state(err_state)
-
-            return WorkerResult(
-                issue_number=issue_number,
-                success=False,
-                error=error_msg,
+            return self._record_issue_failure(
+                issue_number, slot_id, thread_id, error_msg, persist_error=error_msg
             )
 
         except subprocess.CalledProcessError as e:
@@ -520,587 +290,293 @@ class ImplementationPhaseRunner:
             impl._log("error", error_msg, thread_id)
             if e.stderr:
                 impl._log("error", f"stderr: {e.stderr[:300]}", thread_id)
-
-            # Show failure in UI before releasing slot
-            self.status_tracker.update_slot(
-                slot_id, f"{issue_ref(issue_number)}: FAILED - {error_msg[:50]}"
-            )
-
-            err_state = impl._get_state(issue_number)
-            if err_state:
-                with self.state_lock:
-                    err_state.phase = ImplementationPhase.FAILED
-                    err_state.error = str(e)
-                    err_state.attempts += 1
-                impl._save_state(err_state)
-
-            return WorkerResult(
-                issue_number=issue_number,
-                success=False,
-                error=str(e),
+            return self._record_issue_failure(
+                issue_number, slot_id, thread_id, error_msg, persist_error=str(e)
             )
 
         except RuntimeError as e:
-            # "No changes produced" means the branch has 0 commits vs main —
-            # the implementation already landed via a prior merged PR. Treat
-            # this as success and apply state:skip so future loops don't
-            # re-attempt the issue.
-            msg = str(e)
-            if "no commits vs" in msg.lower() or "no changes produced" in msg.lower():
-                impl._log(
-                    "info",
-                    f"Issue #{issue_number}: no new commits vs main — "
-                    "work already merged; applying state:skip",
-                    thread_id,
-                )
-                self.status_tracker.update_slot(
-                    slot_id, f"{issue_ref(issue_number)}: already implemented — state:skip"
-                )
-                with contextlib.suppress(Exception):
-                    gh_issue_add_labels(issue_number, [STATE_SKIP])
-                return WorkerResult(
-                    issue_number=issue_number,
-                    success=True,
-                )
-
-            impl._log("error", f"Runtime error: {e}", thread_id)
-
-            # Show failure in UI before releasing slot
-            error_msg = str(e)[:80]
-            self.status_tracker.update_slot(
-                slot_id, f"{issue_ref(issue_number)}: FAILED - {error_msg[:50]}"
-            )
-
-            err_state = impl._get_state(issue_number)
-            if err_state:
-                with self.state_lock:
-                    err_state.phase = ImplementationPhase.FAILED
-                    err_state.error = str(e)
-                    err_state.attempts += 1
-                impl._save_state(err_state)
-
-            return WorkerResult(
-                issue_number=issue_number,
-                success=False,
-                error=str(e),
-            )
+            return self._handle_runtime_error(issue_number, slot_id, thread_id, e)
 
         except Exception as e:  # broad catch: top-level worker boundary, must not crash thread pool
             impl._log("error", f"Unexpected {type(e).__name__}: {e}", thread_id)
-
-            # Show failure in UI before releasing slot
-            error_msg = str(e)[:80]
-            self.status_tracker.update_slot(
-                slot_id, f"{issue_ref(issue_number)}: FAILED - {error_msg[:50]}"
-            )
-
-            err_state = impl._get_state(issue_number)
-            if err_state:
-                with self.state_lock:
-                    err_state.phase = ImplementationPhase.FAILED
-                    err_state.error = str(e)
-                    err_state.attempts += 1
-                impl._save_state(err_state)
-
-            return WorkerResult(
-                issue_number=issue_number,
-                success=False,
-                error=str(e),
+            return self._record_issue_failure(
+                issue_number, slot_id, thread_id, str(e)[:80], persist_error=str(e)
             )
         finally:
             self.status_tracker.release_slot(slot_id)
 
-    # ------------------------------------------------------------------
-    # PR finalization + post-PR followup (extracted from _implement_issue
-    # for SRP; preserved here verbatim).
-    # ------------------------------------------------------------------
-
-    def _finalize_pr(
+    def _handle_runtime_error(
         self,
+        issue_number: int,
+        slot_id: int | None,
+        thread_id: int | None,
+        e: RuntimeError,
+    ) -> WorkerResult:
+        """Map a ``RuntimeError`` from the pipeline to a WorkerResult.
+
+        "No changes produced" / "no commits vs" means the branch has 0 commits
+        vs main — the implementation already landed via a prior merged PR. Treat
+        that as success and apply ``state:skip`` so future loops don't re-attempt
+        the issue. Any other RuntimeError is a genuine failure.
+        """
+        impl = self.impl
+        msg = str(e)
+        if "no commits vs" in msg.lower() or "no changes produced" in msg.lower():
+            impl._log(
+                "info",
+                f"Issue #{issue_number}: no new commits vs main — "
+                "work already merged; applying state:skip",
+                thread_id,
+            )
+            self.status_tracker.update_slot(
+                slot_id, f"{issue_ref(issue_number)}: already implemented — state:skip"
+            )
+            with contextlib.suppress(Exception):
+                gh_issue_add_labels(issue_number, [STATE_SKIP])
+            return WorkerResult(
+                issue_number=issue_number,
+                success=True,
+            )
+
+        impl._log("error", f"Runtime error: {e}", thread_id)
+        return self._record_issue_failure(
+            issue_number, slot_id, thread_id, str(e)[:80], persist_error=str(e)
+        )
+
+    def _record_issue_failure(
+        self,
+        issue_number: int,
+        slot_id: int | None,
+        thread_id: int | None,
+        ui_error: str,
+        *,
+        persist_error: str,
+    ) -> WorkerResult:
+        """Surface a failure in the UI, persist FAILED state, and return a result.
+
+        Shared by every ``_implement_issue`` exception handler so the
+        "show-in-UI → mark state FAILED + bump attempts → return failure
+        WorkerResult" tail cannot drift between handlers.
+
+        Args:
+            issue_number: The issue that failed.
+            slot_id: UI slot to update (``None`` skips the UI update).
+            thread_id: Worker thread id for log correlation.
+            ui_error: Short error string shown in the status slot.
+            persist_error: Full error string recorded on the issue state and
+                returned in the :class:`WorkerResult`.
+
+        """
+        impl = self.impl
+        self.status_tracker.update_slot(
+            slot_id, f"{issue_ref(issue_number)}: FAILED - {ui_error[:50]}"
+        )
+
+        err_state = impl._get_state(issue_number)
+        if err_state:
+            with self.state_lock:
+                err_state.phase = ImplementationPhase.FAILED
+                err_state.error = persist_error
+                err_state.attempts += 1
+            impl._save_state(err_state)
+
+        return WorkerResult(
+            issue_number=issue_number,
+            success=False,
+            error=persist_error,
+        )
+
+    def _ensure_plan_ready(
+        self,
+        *,
         issue_number: int,
         branch_name: str,
         worktree_path: Path,
         state: ImplementationState,
         slot_id: int | None,
-    ) -> int:
-        """Ensure commit is pushed and PR is created, then persist the PR number."""
+        thread_id: int | None,
+    ) -> WorkerResult | None:
+        """Ensure the issue has a plan and a GO plan-review before implementing.
+
+        Generates a plan if none exists, then gates on the plan-review verdict
+        (#551). ``_has_plan`` only verifies a plan comment EXISTS; it does not
+        look at the plan-reviewer's verdict, so a NOGO plan (or a NOGO-exhausted
+        plan that still starts with "# Implementation Plan") used to be
+        implemented just like a GO one. When the latest plan-review is anything
+        other than GO, the issue is deferred so the planner can re-plan and the
+        reviewer re-evaluate.
+
+        Returns a deferral :class:`WorkerResult` (``plan_review_not_go=True``)
+        when the gate fails, or ``None`` when the plan is GO and implementation
+        may proceed.
+        """
         impl = self.impl
-        with self.state_lock:
-            state.phase = ImplementationPhase.CREATING_PR
-        impl._save_state(state)
+        # Check for existing plan
+        self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Checking plan")
+        if not impl._has_plan(issue_number):
+            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Generating plan")
+            impl._log("info", f"Issue #{issue_number} has no plan, generating...", thread_id)
+            with self.state_lock:
+                state.phase = ImplementationPhase.PLANNING
+            impl._save_state(state)
+            impl._generate_plan(issue_number)
 
-        # A2-004: optional pre-PR test gate (opt-in via run_pre_pr_tests=True).
-        if self.options.run_pre_pr_tests:
-            if slot_id is not None:
-                self.status_tracker.update_slot(
-                    slot_id, f"{issue_ref(issue_number)}: Running pre-PR tests"
-                )
-            tests_passed = impl._run_tests_in_worktree(worktree_path, issue_number)
-            if not tests_passed:
-                logger.warning(
-                    "#%d: pre-PR tests failed; PR will still be created but "
-                    "manual review is required before merging",
-                    issue_number,
-                )
+        self.status_tracker.update_slot(
+            slot_id, f"{issue_ref(issue_number)}: Checking plan-review verdict"
+        )
+        if not self._impl_module.is_plan_review_go(issue_number):
+            impl._log(
+                "info",
+                f"Issue #{issue_number}: latest plan-review verdict is not "
+                f"GO — deferring implementation until next loop",
+                thread_id,
+            )
+            with self.state_lock:
+                state.phase = ImplementationPhase.WAITING_FOR_PLAN_REVIEW
+            impl._save_state(state)
+            self.status_tracker.update_slot(
+                slot_id,
+                f"{issue_ref(issue_number)}: Waiting for GO plan-review",
+            )
+            return WorkerResult(
+                issue_number=issue_number,
+                success=True,
+                branch_name=branch_name,
+                worktree_path=str(worktree_path),
+                plan_review_not_go=True,
+            )
+        return None
 
-        pr_number = impl._ensure_pr_created(issue_number, branch_name, worktree_path, slot_id)
-        with self.state_lock:
-            state.pr_number = pr_number
-        impl._save_state(state)
-        return pr_number
-
-    def _run_post_pr_followup(
+    def _run_implementation_and_review(
         self,
+        *,
         issue_number: int,
+        branch_name: str,
         worktree_path: Path,
         state: ImplementationState,
         slot_id: int | None,
-    ) -> None:
-        """Run /learn and file follow-up issues after the PR is created."""
+        thread_id: int | None,
+    ) -> WorkerResult:
+        """Run the fresh-implementation happy path: implement → PR → review → follow-up.
+
+        Reached only after the plan-review GO gate in :meth:`_implement_issue`
+        passes. Fetches issue context, runs advise + the selected agent, opens
+        the PR up-front, drives the strict review loop, labels the verdict, then
+        runs post-PR /learn + follow-up filing.
+        """
         impl = self.impl
-        # Learn phase (after CREATING_PR, before COMPLETED)
-        can_resume_session = self._can_resume_state_session(state)
-        if (
-            self.options.enable_learn
-            and not state.learn_completed
-            and can_resume_session
-            and state.session_id
-        ):
-            if slot_id is not None:
-                self.status_tracker.update_slot(
-                    slot_id, f"{issue_ref(issue_number)}: Running learn"
-                )
-            with self.state_lock:
-                state.phase = ImplementationPhase.LEARN
-            impl._save_state(state)
-            retro_success = self._run_learn(
-                state.session_id,
-                worktree_path,
-                issue_number,
-                slot_id,
-                session_agent=state.session_agent,
-            )
-            with self.state_lock:
-                state.learn_completed = retro_success
-            impl._save_state(state)
-            if retro_success and not is_codex(self.options.agent):
-                self._compact_implementer_session(issue_number, worktree_path)
 
-        # Follow-up issues phase (after LEARN, before COMPLETED)
-        if self.options.enable_follow_up and can_resume_session and state.session_id:
-            if slot_id is not None:
-                self.status_tracker.update_slot(
-                    slot_id, f"{issue_ref(issue_number)}: Identifying follow-ups"
-                )
-            with self.state_lock:
-                state.phase = ImplementationPhase.FOLLOW_UP_ISSUES
-            impl._save_state(state)
-            self._run_follow_up_issues(
-                state.session_id,
-                worktree_path,
-                issue_number,
-                slot_id,
-                session_agent=state.session_agent,
-            )
-
-        # Mark as completed
+        # Fetch issue info for context
+        self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Fetching issue")
         with self.state_lock:
-            state.phase = ImplementationPhase.COMPLETED
-            state.completed_at = datetime.now(timezone.utc)
+            state.phase = ImplementationPhase.IMPLEMENTING
         impl._save_state(state)
 
-    # ------------------------------------------------------------------
-    # Plan-presence and plan-generation
-    # ------------------------------------------------------------------
+        issue = self._impl_module.fetch_issue_info(issue_number)
 
-    def _has_plan(self, issue_number: int) -> bool:
-        """Check if issue has an implementation plan.
-
-        Delegates to :func:`planner_state._comments_contain_plan` so the
-        prefix-anchored check stays in sync with the planner. Substring
-        matching here previously caused the implementer to mistake a
-        ``## 🔍 Plan Review`` comment (which quotes the plan body) for the
-        plan itself — the same bug class fixed in #455/#468/#484 (#715).
-
-        Note: ``_comments_contain_plan`` is a private helper but is the
-        canonical implementation per its own docstring; cross-module reuse
-        here is intentional to avoid a third copy of the same prefix logic.
-        """
-        try:
-            result = run(
-                ["gh", "issue", "view", str(issue_number), "--comments", "--json", "comments"],
-                capture_output=True,
+        # Advise-first (#30): pull prior learnings from ProjectMnemosyne
+        # before the implementation session.  For Claude agents the advise
+        # prompt is sent as the *first turn* of the implementer's own
+        # session (cwd=worktree_path) so the findings live in the transcript
+        # and are automatically visible to the implementation turn that
+        # follows via --resume.  For Codex agents the old separate-session
+        # path is retained because Codex has no multi-turn session model.
+        implementation_advise_findings = ""
+        if self.options.enable_advise and not is_codex(self.options.agent):
+            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Advising")
+            implementation_advise_findings = impl._run_advise_as_implementer_turn(
+                issue_number, issue.title, issue.body, worktree_path
             )
-            data = json.loads(result.stdout)
-            comments = data.get("comments", [])
-            return _comments_contain_plan(comments)
-        except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
-            return False
 
-    def _generate_plan(self, issue_number: int) -> None:
-        """Generate plan for an issue using hephaestus-plan-issues."""
-        import shutil
-
-        # Prefer the installed entry point (works in any repo)
-        entry_point = shutil.which("hephaestus-plan-issues")
-        if entry_point:
-            run(
-                [entry_point, "--issues", str(issue_number), "--agent", self.options.agent],
-                timeout=600,
-            )
-            return
-
-        # Fall back to python -m invocation (works when PYTHONPATH is set).
-        # On failure, fall through to the legacy scripts/plan_issues.py path.
-        with contextlib.suppress(subprocess.SubprocessError, OSError):
-            run(
-                [
-                    sys.executable,
-                    "-m",
-                    "hephaestus.automation.planner",
-                    "--issues",
-                    str(issue_number),
-                    "--agent",
-                    self.options.agent,
-                ],
-                timeout=600,
-            )
-            return
-
-        # Legacy fallback: local scripts/plan_issues.py (ProjectScylla layout)
-        plan_script = self.repo_root / "scripts" / "plan_issues.py"
-        if plan_script.exists():
-            run(
-                [sys.executable, str(plan_script), "--issues", str(issue_number)],
-                timeout=600,
-            )
-            return
-
-        raise RuntimeError(
-            "Could not find hephaestus-plan-issues entry point, "
-            "hephaestus.automation.planner module, or "
-            f"scripts/plan_issues.py in {self.repo_root}"
+        # Run the selected implementation agent
+        self.status_tracker.update_slot(
+            slot_id, f"{issue_ref(issue_number)}: Running {self.options.agent}"
         )
+        # Codex: run advise separately (returns findings text) then inject.
+        codex_advise_findings = ""
+        if self.options.enable_advise and is_codex(self.options.agent):
+            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Advising")
+            codex_advise_findings = impl._run_advise(issue_number, issue.title, issue.body)
+            implementation_advise_findings = codex_advise_findings
 
-    # ------------------------------------------------------------------
-    # Follow-up / learn helpers
-    # ------------------------------------------------------------------
-
-    def _parse_follow_up_items(self, text: str) -> list[dict[str, Any]]:
-        """Parse follow-up items from Claude's JSON response."""
-        return parse_follow_up_items(text)
-
-    def _can_resume_state_session(self, state: ImplementationState) -> bool:
-        """Return True when the saved session can be resumed by the selected agent."""
-        if not state.session_id:
-            return False
-        if session_agent_matches(state.session_agent, self.options.agent):
-            return True
-        logger.info(
-            "Skipping session resume for issue #%s: session belongs to %s, selected agent is %s",
-            state.issue_number,
-            state.session_agent or "claude",
-            self.options.agent,
-        )
-        return False
-
-    def _run_follow_up_issues(
-        self,
-        session_id: str,
-        worktree_path: Path,
-        issue_number: int,
-        slot_id: int | None = None,
-        *,
-        session_agent: str | None = None,
-    ) -> None:
-        """Resume the selected agent session to identify and file follow-up issues."""
-        run_follow_up_issues(
-            session_id,
-            worktree_path,
+        session_id = impl._run_claude_code(
             issue_number,
-            self.state_dir,
-            self.status_tracker,
-            slot_id,
-            dry_run=self.options.dry_run,
-            agent=self.options.agent,
-            session_agent=session_agent,
-        )
-
-    def _learn_needs_rerun(self, issue_number: int) -> bool:
-        """Check if learn log indicates failure."""
-        return learn_needs_rerun(issue_number, self.state_dir)
-
-    def _rerun_failed_learns(self) -> dict[int, bool]:
-        """Re-run failed learns for completed issues.
-
-        Returns:
-            Dictionary mapping issue number to success status
-
-        """
-        impl = self.impl
-        results: dict[int, bool] = {}
-
-        for issue_number, state in self.impl.state_mgr.states.items():
-            # Only re-run for completed issues with failed learns
-            if (
-                state.phase != ImplementationPhase.COMPLETED
-                or state.learn_completed
-                or not self._can_resume_state_session(state)
-            ):
-                continue
-
-            # Check if log indicates failure
-            if not impl._learn_needs_rerun(issue_number):
-                continue
-
-            # Verify worktree exists
-            if not state.worktree_path:
-                logger.warning("Skipping learn re-run for #%s: no worktree_path", issue_number)
-                continue
-
-            session_id = state.session_id
-            if session_id is None:
-                continue
-
-            worktree_path = Path(state.worktree_path)
-            if not worktree_path.exists():
-                logger.warning("Skipping learn re-run for #%s: worktree not found", issue_number)
-                continue
-
-            # Re-run learn
-            logger.info("Re-running failed learn for issue #%s", issue_number)
-            success = impl._run_learn(
-                session_id,
-                worktree_path,
-                issue_number,
-                slot_id=None,
-                session_agent=state.session_agent,
-            )
-
-            # Update and save state
-            with self.state_lock:
-                state.learn_completed = success
-            impl._save_state(state)
-
-            results[issue_number] = success
-
-        if results:
-            success_count = sum(1 for s in results.values() if s)
-            logger.info(
-                "Re-ran %s learn(s): %s succeeded, %s failed",
-                len(results),
-                success_count,
-                len(results) - success_count,
-            )
-
-        return results
-
-    def _run_learn(
-        self,
-        session_id: str,
-        worktree_path: Path,
-        issue_number: int,
-        slot_id: int | None = None,
-        *,
-        session_agent: str | None = None,
-    ) -> bool:
-        """Resume the selected agent session to run /learn."""
-        return run_learn(
-            session_id,
             worktree_path,
-            issue_number,
-            self.state_dir,
-            slot_id,
-            agent=self.options.agent,
-            session_agent=session_agent,
-            model=implementer_model(),
+            _prepend_advise(
+                codex_advise_findings,
+                get_implementation_prompt(
+                    issue_number=issue_number,
+                    issue_title=issue.title,
+                    issue_body=issue.body,
+                    branch_name=branch_name,
+                    worktree_path=str(worktree_path),
+                    repo_root=str(self.repo_root),
+                ),
+            ),
+            slot_id=slot_id,
         )
+        with self.state_lock:
+            state.session_id = session_id
+            state.session_agent = self.options.agent if session_id else None
+        impl._save_state(state)
 
-    def _compact_implementer_session(self, issue_number: int, worktree_path: Path) -> None:
-        """Compact the implementer session after /learn (#842). Non-fatal."""
-        repo_slug = get_repo_slug(self.repo_root)
-        compact_session(
-            repo=repo_slug,
-            issue=issue_number,
-            agent=self._impl_module.AGENT_IMPLEMENTER,
-            cwd=worktree_path,
-            model=implementer_model(),
-        )
+        # Create the PR up-front so the in-loop reviewer (Stage 2, #28) has
+        # a concrete PR to post INLINE review threads against. Verify commit,
+        # push, PR creation. ``_finalize_pr`` is idempotent — ``ensure_pr_
+        # created`` is a fallback that no-ops when the agent already opened
+        # the PR.
+        pr_number = impl._finalize_pr(issue_number, branch_name, worktree_path, state, slot_id)
+        ensure_pr_auto_merge_deferred(pr_number)
 
-    def _run_advise(self, issue_number: int, issue_title: str, issue_body: str) -> str:
-        """Search ProjectMnemosyne for prior learnings — planner's separate-session path.
-
-        Used by the planner (and Codex) where advise runs under ``AGENT_ADVISE``
-        (a distinct, cheap, read-only session) and returns text findings for the
-        caller to inject into its own prompt context.  Claude implementer sessions
-        use :meth:`_run_advise_as_implementer_turn` instead, which makes advise
-        the *first turn* of the implementer's own session so the findings live in
-        the transcript and inform the implementation turn directly.
-        """
-        _impl_mod = self._impl_module
-
-        def _invoke(prompt: str) -> str:
-            if is_codex(self.options.agent):
-                result = run_codex_text(
-                    prompt,
-                    cwd=self.repo_root,
-                    timeout=advise_claude_timeout(),
-                    sandbox="read-only",
-                )
-                return (result.stdout or "").strip()
-            repo_slug = _impl_mod.get_repo_slug(self.repo_root)
-            stdout, _ = _impl_mod.invoke_claude_with_session(
-                repo=repo_slug,
-                issue=issue_number,
-                agent=_impl_mod.AGENT_ADVISE,
-                prompt=prompt,
-                model=advise_model(),
-                cwd=self.repo_root,
-                timeout=advise_claude_timeout(),
-                output_format="text",
-            )
-            return (stdout or "").strip()
-
-        return run_advise(
+        # Strict review loop now absorbs the former ``review-prs`` and
+        # ``address-review`` phases: each iteration runs a FRESH reviewer
+        # session that posts inline PR threads, then resumes Session 2
+        # (AGENT_IMPLEMENTER) to address them, looping until GO / no
+        # blocking unresolved threads. Reviewer calls are always fresh so
+        # their judgment is unbiased.
+        with self.state_lock:
+            state.phase = ImplementationPhase.REVIEWING
+        impl._save_state(state)
+        iterations, last_verdict, last_grade = impl._run_impl_review_loop(
             issue_number=issue_number,
-            issue_title=issue_title,
-            issue_body=issue_body,
-            invoke=_invoke,
-            build_prompt=get_advise_prompt_builder(self.options.agent),
+            worktree_path=worktree_path,
+            branch_name=branch_name,
+            issue_title=issue.title,
+            issue_body=issue.body,
+            session_id=session_id,
+            slot_id=slot_id,
+            thread_id=thread_id,
+            state=state,
+            pr_number=pr_number,
+            advise_findings=implementation_advise_findings,
         )
+        with self.state_lock:
+            state.review_iterations = iterations
+            state.last_review_verdict = last_verdict
+            state.last_review_grade = last_grade
+        impl._save_state(state)
 
-    def _run_advise_as_implementer_turn(
-        self,
-        issue_number: int,
-        issue_title: str,
-        issue_body: str,
-        worktree_path: Path,
-    ) -> str:
-        """Send the advise prompt as the first turn of the implementer's Claude session.
-
-        Unlike :meth:`_run_advise`, which creates a separate ``AGENT_ADVISE``
-        session and returns text, this method sends the advise prompt directly to
-        ``AGENT_IMPLEMENTER`` (using ``cwd=worktree_path`` so the session transcript
-        is co-located with the subsequent implementation turn).  The advise findings
-        live in the implementer's own transcript, so turn 2 (the implementation
-        prompt) automatically inherits them via ``--resume`` — no text injection
-        needed.
-
-        Codex does not support this two-turn flow; callers must guard with
-        ``is_codex`` and fall back to :meth:`_run_advise` + text injection for
-        Codex agents.
-
-        On first run ``invoke_claude_with_session`` auto-creates the session
-        (``transcript.exists()`` is False).  On subsequent loops the same
-        deterministic session UUID auto-resumes so the advise findings accumulate
-        across iterations.
-
-        Any failure degrades gracefully inside ``run_advise`` and returns an
-        empty string, so the caller can still proceed to the implementation turn.
-        """
-        _impl_mod = self._impl_module
-        repo_slug = _impl_mod.get_repo_slug(self.repo_root)
-
-        # Fetch plan and plan-review from GitHub comments to give advise the full
-        # context of what's been planned (same anchored selection as
-        # _fetch_plan_and_review so PLAN_REVIEW comments are distinguished from
-        # the PLAN comment).
-        plan_text, plan_review_text = self._fetch_plan_and_review(issue_number)
-
-        def _build_prompt_with_plan(**kw: object) -> str:
-            # Claude runs with cwd=worktree_path, so pass worktree_path as the
-            # relativization root.  marketplace.json lives under build/ in the main
-            # repo, not under the worktree, so _relativize_path will fall back to
-            # the absolute path — which is always readable regardless of cwd.
-            kw["repo_root"] = str(worktree_path)
-            base_prompt = get_advise_prompt_builder(self.options.agent)(**kw)
-            if not plan_text and not plan_review_text:
-                return base_prompt
-            parts = []
-            if plan_text:
-                parts.append(f"## Implementation Plan\n\n{plan_text}")
-            if plan_review_text:
-                parts.append(f"## Plan Review\n\n{plan_review_text}")
-            plan_block = "\n\n".join(parts)
-            return f"{plan_block}\n\n---\n\n{base_prompt}"
-
-        def _invoke(prompt: str) -> str:
-            stdout, _ = _impl_mod.invoke_claude_with_session(
-                repo=repo_slug,
-                issue=issue_number,
-                agent=_impl_mod.AGENT_IMPLEMENTER,
-                prompt=prompt,
-                model=implementer_model(),
-                cwd=worktree_path,
-                timeout=advise_claude_timeout(),
-                output_format="text",
-            )
-            return (stdout or "").strip()
-
-        return run_advise(
+        self._apply_impl_review_verdict(
             issue_number=issue_number,
-            issue_title=issue_title,
-            issue_body=issue_body,
-            invoke=_invoke,
-            build_prompt=_build_prompt_with_plan,
+            pr_number=pr_number,
+            last_verdict=last_verdict,
+            slot_id=slot_id,
+            thread_id=thread_id,
         )
 
-    def _apply_impl_review_verdict(
-        self,
-        *,
-        issue_number: int,
-        pr_number: int,
-        last_verdict: str | None,
-        slot_id: int | None,
-        thread_id: int | None,
-    ) -> None:
-        """Label a PR from the review loop's final verdict and arm auto-merge.
+        # impl-learnings + follow-up filing stay in Session 2 (#28 §B),
+        # resuming AGENT_IMPLEMENTER AFTER the loop converges.
+        impl._run_post_pr_followup(issue_number, worktree_path, state, slot_id)
 
-        Shared by both the fresh-implementation path and the existing-PR review
-        path so the GO → ``mark_pr_implementation_go`` (+ auto-merge) /
-        non-GO → ``mark_pr_implementation_no_go`` mapping cannot drift between
-        them.
+        impl._log("info", f"Issue #{issue_number} completed: PR {pr_ref(pr_number)}", thread_id)
 
-        An ``ERROR`` verdict (reviewer-infrastructure failure) or a
-        ``HUMAN_BLOCKED`` verdict (review reached GO but an unresolved human
-        review thread remains) applies **neither** label: the PR is not settled,
-        so it must be left unlabeled for the "no go/no-go label → re-review" path
-        to pick it up next loop (#911 / PR #1069). Labeling it no-go would falsely
-        record a converged failure; labeling it go would arm auto-merge on a PR
-        that was never reviewed (ERROR) or still has open human threads
-        (HUMAN_BLOCKED).
-        """
-        impl = self.impl
-        if last_verdict in ("ERROR", "HUMAN_BLOCKED"):
-            reason = (
-                "reviewer-infrastructure error"
-                if last_verdict == "ERROR"
-                else "unresolved human review thread(s)"
-            )
-            impl._log(
-                "warning",
-                f"{issue_ref(issue_number)}: implementation review blocked by {reason}; "
-                f"leaving {pr_ref(pr_number)} unlabeled for re-review "
-                "(no implementation go/no-go label, auto-merge unchanged)",
-                thread_id,
-            )
-            return
-        if last_verdict == "GO":
-            mark_pr_implementation_go(pr_number)
-            if self.options.auto_merge:
-                if slot_id is not None:
-                    self.status_tracker.update_slot(
-                        slot_id, f"{pr_ref(pr_number)}: enabling auto-merge"
-                    )
-                enable_auto_merge_after_implementation_go(pr_number)
-        else:
-            mark_pr_implementation_no_go(pr_number)
-            impl._log(
-                "warning",
-                f"{issue_ref(issue_number)}: implementation review did not reach GO; "
-                f"auto-merge remains disabled for {pr_ref(pr_number)}",
-                thread_id,
-            )
+        return WorkerResult(
+            issue_number=issue_number,
+            success=True,
+            pr_number=pr_number,
+            branch_name=branch_name,
+            worktree_path=str(worktree_path),
+        )
 
     def _review_existing_pr(
         self,
@@ -1284,6 +760,10 @@ class ImplementationPhaseRunner:
             worktree_path=str(worktree_path),
             already_has_pr=True,
         )
+
+    # ------------------------------------------------------------------
+    # Dirty reused-worktree salvage (orchestration helpers)
+    # ------------------------------------------------------------------
 
     def _resolve_dirty_reused_worktree(
         self,
@@ -1471,53 +951,91 @@ class ImplementationPhaseRunner:
             check=True,
         )
 
-    def _validate_prior_threads(
+    # ------------------------------------------------------------------
+    # Phase delegators — preserve the original public method names so the
+    # ``patch.object(impl, "_method", ...)`` test contract keeps intercepting.
+    # ``IssueImplementer`` forwards ``impl._method`` to the runner; the runner
+    # forwards to the owning phase.
+    # ------------------------------------------------------------------
+
+    # PlanPhase
+    def _has_plan(self, issue_number: int) -> bool:
+        """Delegate to :meth:`PlanPhase._has_plan`."""
+        return self.plan_phase._has_plan(issue_number)
+
+    def _generate_plan(self, issue_number: int) -> None:
+        """Delegate to :meth:`PlanPhase._generate`."""
+        self.plan_phase._generate(issue_number)
+
+    # ImplementPhase
+    def _run_advise(self, issue_number: int, issue_title: str, issue_body: str) -> str:
+        """Delegate to :meth:`ImplementPhase._run_advise`."""
+        return self.implement_phase._run_advise(issue_number, issue_title, issue_body)
+
+    def _run_advise_as_implementer_turn(
         self,
-        *,
         issue_number: int,
-        pr_number: int | None,
+        issue_title: str,
+        issue_body: str,
+        worktree_path: Path,
+    ) -> str:
+        """Delegate to :meth:`ImplementPhase._run_advise_as_implementer_turn`."""
+        return self.implement_phase._run_advise_as_implementer_turn(
+            issue_number, issue_title, issue_body, worktree_path
+        )
+
+    def _compact_implementer_session(self, issue_number: int, worktree_path: Path) -> None:
+        """Delegate to :meth:`ImplementPhase._compact_implementer_session`."""
+        self.implement_phase._compact_implementer_session(issue_number, worktree_path)
+
+    def _run_claude_code(
+        self, issue_number: int, worktree_path: Path, prompt: str, slot_id: int | None = None
+    ) -> str | None:
+        """Delegate to :meth:`ImplementPhase._run_claude_code`."""
+        return self.implement_phase._run_claude_code(issue_number, worktree_path, prompt, slot_id)
+
+    def _run_claude_impl_session(
+        self, issue_number: int, worktree_path: Path, prompt: str
+    ) -> str | None:
+        """Delegate to :meth:`ImplementPhase._run_claude_impl_session`."""
+        return self.implement_phase._run_claude_impl_session(issue_number, worktree_path, prompt)
+
+    def _run_codex_code(self, issue_number: int, worktree_path: Path, prompt: str) -> str | None:
+        """Delegate to :meth:`ImplementPhase._run_codex_code`."""
+        return self.implement_phase._run_codex_code(issue_number, worktree_path, prompt)
+
+    # PRCreatePhase
+    def _finalize_pr(
+        self,
+        issue_number: int,
         branch_name: str,
         worktree_path: Path,
-        prior_threads: list[dict[str, Any]],
-        iteration: int,
-        thread_id: int | None,
-    ) -> list[str]:
-        """Re-open prior review comments the current diff does not address.
-
-        Runs the read-only validation sub-agent
-        (:func:`review_validator.validate_prior_comments_addressed`) against the
-        previous iteration's threads. Returns the IDs of any threads it
-        re-opened (empty when there is no PR, no prior threads, on the first
-        iteration, in dry-run, or when everything was addressed).
-        """
-        if pr_number is None or not prior_threads or self.options.dry_run:
-            return []
-        diff_text = self.impl._collect_diff(worktree_path, branch_name)
-        reopened, is_clean = validate_prior_comments_addressed(
-            pr_number=pr_number,
-            issue_number=issue_number,
-            worktree_path=worktree_path,
-            prior_threads=prior_threads,
-            diff_text=diff_text,
-            agent=self.options.agent,
-            iteration=iteration,
-            state_dir=self.state_dir,
-            dry_run=False,
+        state: ImplementationState,
+        slot_id: int | None,
+    ) -> int:
+        """Delegate to :meth:`PRCreatePhase._finalize_pr`."""
+        return self.pr_create_phase._finalize_pr(
+            issue_number, branch_name, worktree_path, state, slot_id
         )
-        if not is_clean:
-            self.impl._log(
-                "warning",
-                f"{issue_ref(issue_number)} R{iteration}: validator re-opened "
-                f"{len(reopened)} prior review comment(s) the diff did not address",
-                thread_id,
-            )
-        return reopened
 
-    # ------------------------------------------------------------------
-    # Strict review loop for implementer sessions
-    # ------------------------------------------------------------------
+    def _run_tests_in_worktree(self, worktree_path: Path, issue_number: int) -> bool:
+        """Delegate to :meth:`PRCreatePhase._run_tests_in_worktree`."""
+        return self.pr_create_phase._run_tests_in_worktree(worktree_path, issue_number)
 
-    def _run_impl_review_loop(  # noqa: C901  # validate + review + address has several outcome paths
+    def _ensure_pr_created(
+        self,
+        issue_number: int,
+        branch_name: str,
+        worktree_path: Path,
+        slot_id: int | None = None,
+    ) -> int:
+        """Delegate to :meth:`PRCreatePhase._ensure_pr_created`."""
+        return self.pr_create_phase._ensure_pr_created(
+            issue_number, branch_name, worktree_path, slot_id
+        )
+
+    # ReviewPhase
+    def _run_impl_review_loop(
         self,
         *,
         issue_number: int,
@@ -1532,381 +1050,20 @@ class ImplementationPhaseRunner:
         pr_number: int | None = None,
         advise_findings: str = "",
     ) -> tuple[int, str | None, str | None]:
-        """Run the bounded in-loop review + address cycle for an implementation.
-
-        Stage 2 (#28): each iteration runs a FRESH reviewer session
-        (``reviewer_agent(AGENT_PR_REVIEWER, i)``) that posts INLINE PR review
-        threads and returns a verdict; if the verdict is not GO and blocking
-        threads were posted, Session 2 (``AGENT_IMPLEMENTER``) is resumed to
-        address those threads (fix → commit → push → resolve), then the next
-        iteration re-reviews. The loop terminates on GO, on an iteration that
-        posts no blocking threads, or after :data:`MAX_REVIEW_ITERATIONS`.
-
-        When no ``pr_number`` is available (e.g. dry-run or the agent failed to
-        open a PR), the in-loop posting/addressing cannot run; the loop falls
-        back to the diff-only reviewer (no PR writes) so the verdict is still
-        surfaced.
-        """
-        impl = self.impl
-        last_verdict: str | None = None
-        last_grade: str | None = None
-        prior_review: str | None = None
-        iterations_run = 0
-        # Threads the previous iteration's address step was asked to fix, kept so
-        # the next iteration can independently validate they were actually
-        # addressed (and re-open the ones that weren't).
-        prior_addressed_threads: list[dict[str, Any]] = []
-
-        for iteration in range(MAX_REVIEW_ITERATIONS):
-            # Step 1 (#1152): before the fresh review, verify (via the read-only
-            # sub-agent) that every PRIOR review comment was truly addressed by
-            # the current diff — resolving the ones confirmed fixed and re-opening
-            # the ones that aren't. On iteration 0 of the existing-PR path there
-            # is no prior-address snapshot, so seed it with the PR's currently
-            # unresolved threads; otherwise pre-existing threads would never be
-            # verified and the GO gate below would (wrongly) ignore them. From
-            # iteration 1 on, ``prior_addressed_threads`` is the snapshot the
-            # previous address step was asked to fix.
-            #
-            # The seed only applies to the existing-PR review path
-            # (``session_id is None`` — see ``_review_existing_pr``): that PR
-            # arrives with threads from earlier loops that must be re-verified
-            # before a GO. The fresh-implementation path (``session_id`` set) has
-            # no prior threads at iteration 0 — its threads are posted by R0's own
-            # review — so seeding there would wrongly validate not-yet-addressed
-            # comments against an empty diff.
-            threads_to_validate = prior_addressed_threads
-            if (
-                not threads_to_validate
-                and session_id is None
-                and pr_number is not None
-                and not self.options.dry_run
-            ):
-                with contextlib.suppress(Exception):
-                    threads_to_validate = gh_pr_list_unresolved_threads(pr_number, dry_run=False)
-            reopened = self._validate_prior_threads(
-                issue_number=issue_number,
-                pr_number=pr_number,
-                branch_name=branch_name,
-                worktree_path=worktree_path,
-                prior_threads=threads_to_validate,
-                iteration=iteration,
-                thread_id=thread_id,
-            )
-
-            # Review step: a fresh reviewer session posts inline PR threads and
-            # returns its verdict text. ``prior_review`` carries the previous
-            # iteration's critique forward as reviewer context.
-            if slot_id is not None:
-                review_ref = pr_ref(pr_number) if pr_number is not None else issue_ref(issue_number)
-                self.status_tracker.update_slot(
-                    slot_id, f"{review_ref}: reviewing impl [R{iteration}]"
-                )
-            review_text, posted_thread_ids = impl._run_impl_review_step(
-                issue_number=issue_number,
-                issue_title=issue_title,
-                issue_body=issue_body,
-                branch_name=branch_name,
-                worktree_path=worktree_path,
-                pr_number=pr_number,
-                iteration=iteration,
-                prior_review=prior_review,
-                advise_findings=advise_findings,
-            )
-            impl._save_review_log(issue_number, iteration, review_text)
-            iterations_run = iteration + 1
-
-            verdict = parse_review_verdict(review_text)
-            last_verdict = verdict.verdict
-            last_grade = verdict.grade
-            impl._log(
-                "info",
-                f"{issue_ref(issue_number)} R{iteration}: Verdict={verdict.verdict} "
-                f"Grade={verdict.grade or '?'} threads={len(posted_thread_ids)} "
-                f"reopened={len(reopened)}",
-                thread_id,
-            )
-
-            # A2-005: Persist review iteration progress so --resume can skip
-            # already-completed iterations.  Persist BEFORE breaking out so
-            # the final iteration's data is always on disk.
-            impl._save_review_iteration_state(issue_number, iterations_run, review_text)
-
-            # A GO (or empty) review cannot terminate the loop while the
-            # validator just re-opened prior comments — those unresolved
-            # re-opened threads must still be addressed. Treat the iteration as
-            # NOGO so the address step below runs against them.
-            go_blocked_by_automation = False
-            if reopened:
-                last_verdict = "NOGO"
-            elif verdict.is_go:
-                # GO converges ONLY when the PR has ZERO unresolved review threads
-                # (#1152). The reviewer's verdict alone is not enough: a reviewer
-                # can emit GO while the SAME pass posts new findings, or while
-                # prior automation threads remain open. The GO label must be
-                # earned by a clean pass where every comment has been addressed
-                # (by the implementer) and verified resolved (by the prior-thread
-                # validator that ran at the top of this iteration). This gate
-                # RESOLVES NOTHING — it only counts what is still open.
-                automation_unresolved = 0
-                human_unresolved = 0
-                if pr_number is not None and not self.options.dry_run:
-                    (
-                        automation_unresolved,
-                        human_unresolved,
-                    ) = self._count_unresolved_threads_blocking_go(
-                        issue_number=issue_number,
-                        pr_number=pr_number,
-                        thread_id=thread_id,
-                    )
-                if human_unresolved and pr_number is not None:
-                    # A GO cannot stand while a HUMAN review thread is open.
-                    # Automation must NOT resolve it and cannot fix it — a human
-                    # has to. Break with a distinct terminal state (no spin to
-                    # exhaustion, no state:skip) so the PR stays unlabeled,
-                    # awaiting the human; the loop re-runs next pass via the
-                    # "no go/no-go label → re-review" path once threads resolve.
-                    last_verdict = "HUMAN_BLOCKED"
-                    impl._log(
-                        "info",
-                        f"{pr_ref(pr_number)}: reviewer said GO but "
-                        f"{human_unresolved} unresolved human review thread(s) remain "
-                        f"— not accepting GO; awaiting human resolution, "
-                        f"leaving PR unlabeled",
-                        thread_id,
-                    )
-                    break
-                if automation_unresolved and pr_number is not None:
-                    # GO + open automation thread(s): the work is NOT actually
-                    # done. Downgrade to NOGO so the address step (below) fixes
-                    # and resolves them, and the next iteration re-reviews to
-                    # confirm. ``go_blocked_by_automation`` forces the address
-                    # step to run even though this GO pass may have posted no new
-                    # threads (otherwise the zero-thread guard would skip it and
-                    # the loop would spin GO→downgrade to exhaustion).
-                    last_verdict = "NOGO"
-                    go_blocked_by_automation = True
-                    impl._log(
-                        "info",
-                        f"{pr_ref(pr_number)}: reviewer said GO but "
-                        f"{automation_unresolved} unresolved automation review thread(s) "
-                        "remain — addressing and re-reviewing before GO can stand",
-                        thread_id,
-                    )
-                else:
-                    impl._log(
-                        "info",
-                        f"{pr_ref(pr_number) if pr_number is not None else issue_ref(issue_number)}"
-                        f": GO on iteration {iteration} — all review threads resolved, "
-                        "review loop terminated",
-                        thread_id,
-                    )
-                    break
-
-            # Converge ONLY on an explicit Verdict: GO (handled above). A non-GO
-            # pass with NO posted threads (and nothing re-opened) must NOT end the
-            # loop here — a single garbage/AMBIGUOUS review would otherwise strand
-            # a fixable PR after R0. There is nothing to address (no threads), so
-            # skip the address step and RE-REVIEW on the next iteration; the loop
-            # is bounded by MAX_REVIEW_ITERATIONS and applies ``state:skip`` only
-            # on TRUE exhaustion (post-loop block). This is the "zero threads !=
-            # GO" rule from the pr-review-loop skill (verified-ci): don't converge
-            # on a zero-thread AMBIGUOUS/NO-GO pass.
-            if (
-                pr_number is not None
-                and not posted_thread_ids
-                and not reopened
-                and not go_blocked_by_automation
-            ):
-                prior_review = review_text
-                continue
-
-            # Save this review for next iteration's context.
-            prior_review = review_text
-
-            # On the final iteration there is no subsequent review to verify a
-            # fix, so addressing would be a wasted Session 2 resume + push.
-            # Stop here and let the warning below flag the non-GO outcome.
-            if iteration == MAX_REVIEW_ITERATIONS - 1:
-                break
-
-            # Address step: resume Session 2 to fix the posted threads, commit,
-            # push, and resolve the threads it actually addressed. Skipped only
-            # when there is no PR (no inline threads to address). ``session_id``
-            # is informational — the address step resumes ``AGENT_IMPLEMENTER``
-            # by its deterministic per-(repo,issue,agent) id (or starts a fresh
-            # implementer session when no transcript exists), so the existing-PR
-            # path (which has no initial session_id) can still fix review
-            # threads rather than dead-ending here.
-            if pr_number is None:
-                continue
-            # Snapshot the unresolved threads the address step is about to fix so
-            # the NEXT iteration's validator can check they were truly addressed.
-            prior_addressed_threads = gh_pr_list_unresolved_threads(pr_number, dry_run=False)
-            if slot_id is not None:
-                self.status_tracker.update_slot(
-                    slot_id, f"{pr_ref(pr_number)}: addressing review [R{iteration}]"
-                )
-            addressed = impl._run_address_review_step(
-                issue_number=issue_number,
-                pr_number=pr_number,
-                branch_name=branch_name,
-                worktree_path=worktree_path,
-                iteration=iteration,
-                # When the loop started without an initial implementer session
-                # (existing-PR review path), the address session may run fresh
-                # with no transcript to resume — give it the task + task-review
-                # + diff so it can read the work and continue. The fresh-impl
-                # path already carries this in its long-lived transcript.
-                include_bootstrap_context=session_id is None,
-                issue_title=issue_title,
-                issue_body=issue_body,
-            )
-            if not addressed:
-                ref = issue_ref(issue_number)
-                impl._log(
-                    "info",
-                    f"{ref}: address step resolved no threads on iteration {iteration}; "
-                    "stopping review loop",
-                    thread_id,
-                )
-                break
-
-        # A2-003: Surface AMBIGUOUS verdict distinctly so operators can triage
-        # without inspecting raw log files.
-        if last_verdict == "AMBIGUOUS" or (
-            iterations_run == MAX_REVIEW_ITERATIONS and last_verdict not in (None, "GO")
-        ):
-            logger.warning(
-                "#%d: review loop ended without clear GO — "
-                "final verdict=%r after %d iteration(s); "
-                "PR created but manual review is recommended",
-                issue_number,
-                last_verdict,
-                iterations_run,
-            )
-
-        # #1083 Bug 2 / #1085 C3: the loop must reach an explicit GO to be
-        # considered converged. Apply ``state:skip`` only on TRUE iteration
-        # exhaustion — ran all MAX_REVIEW_ITERATIONS without a GO — NOT on a
-        # single non-GO (including AMBIGUOUS) outcome. Per the pr-review-loop
-        # skill (verified-ci), a zero-thread AMBIGUOUS/NO-GO pass no longer ends
-        # the loop early (it re-reviews above), so a transient garbage review
-        # (e.g. a malformed verdict) gets MAX_REVIEW_ITERATIONS chances instead
-        # of stranding a fixable PR after R0. ``last_verdict`` is None only when
-        # there was no PR to review (dry-run / no-PR path).
-        #
-        # ERROR (reviewer-infrastructure failure — API 400, timeout, crash) is
-        # NOT a real verdict: the reviewer never actually judged the code, so an
-        # exhausted run that ended in ERROR must NOT be skipped. Skipping there
-        # strands a never-reviewed PR (#911 / PR #1069). Leave the issue/PR
-        # unlabeled so the "no go/no-go label → re-review" path re-runs the loop
-        # next time the reviewer infra is healthy.
-        # Neither ERROR (reviewer-infra failure) nor HUMAN_BLOCKED (GO blocked by
-        # an open human thread) is a converged failure, so neither applies
-        # state:skip — both leave the PR unlabeled for re-review / human action.
-        exhausted = iterations_run >= MAX_REVIEW_ITERATIONS and last_verdict not in (
-            "GO",
-            "ERROR",
-            "HUMAN_BLOCKED",
+        """Delegate to :meth:`ReviewPhase._run_impl_review_loop`."""
+        return self.review_phase._run_impl_review_loop(
+            issue_number=issue_number,
+            worktree_path=worktree_path,
+            branch_name=branch_name,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            session_id=session_id,
+            slot_id=slot_id,
+            thread_id=thread_id,
+            state=state,
+            pr_number=pr_number,
+            advise_findings=advise_findings,
         )
-        if (
-            pr_number is not None
-            and last_verdict is not None
-            and exhausted
-            and not self.options.dry_run
-        ):
-            logger.info(
-                "#%d: review loop ended without GO (verdict=%r, iterations=%d) — applying %s",
-                issue_number,
-                last_verdict,
-                iterations_run,
-                STATE_SKIP,
-            )
-            with contextlib.suppress(Exception):
-                gh_issue_add_labels(issue_number, [STATE_SKIP])
-        elif last_verdict == "ERROR":
-            logger.warning(
-                "#%d: review loop ended in reviewer-infrastructure ERROR after %d "
-                "iteration(s) — leaving PR unlabeled for re-review (no %s)",
-                issue_number,
-                iterations_run,
-                STATE_SKIP,
-            )
-        elif last_verdict == "HUMAN_BLOCKED":
-            logger.warning(
-                "#%d: review reached GO but is blocked by unresolved human review "
-                "thread(s) — leaving PR unlabeled for human resolution (no %s)",
-                issue_number,
-                STATE_SKIP,
-            )
-
-        return iterations_run, last_verdict, last_grade
-
-    def _count_unresolved_threads_blocking_go(
-        self,
-        *,
-        issue_number: int,
-        pr_number: int,
-        thread_id: int | None,
-    ) -> tuple[int, int]:
-        """Count unresolved review threads that block a GO, by ownership.
-
-        A GO verdict may NOT stand while ANY review thread is unresolved — not
-        even an automation-owned one. The earlier implementation bulk-resolved
-        automation threads here so a GO could converge immediately; that was
-        wrong (#1152). A reviewer can emit ``Verdict: GO`` in the SAME pass that
-        posts new inline findings, and force-resolving those "automation-owned"
-        threads accepted the GO without the implementer ever addressing them or
-        a subsequent review verifying the fix. The GO label must only be earned
-        once every comment has been genuinely addressed AND a clean re-review
-        confirms zero unresolved threads.
-
-        This method therefore RESOLVES NOTHING. It returns
-        ``(automation_unresolved, human_unresolved)``:
-
-        * ``human_unresolved > 0`` — automation cannot fix human threads, so the
-          caller breaks with a distinct ``HUMAN_BLOCKED`` terminal state.
-        * ``automation_unresolved > 0`` — the caller downgrades GO to NOGO so the
-          address step fixes (and resolves only what it actually addressed) and a
-          re-review re-evaluates. Convergence requires a GO pass that leaves zero
-          unresolved threads.
-
-        Returns ``(0, 0)`` when the thread list can't be fetched (fail-open:
-        don't strand a GO on a transient API blip — a genuinely unresolved
-        thread re-surfaces on the next loop's existing-PR re-review).
-        """
-        impl = self.impl
-        try:
-            threads = gh_pr_list_unresolved_threads(pr_number, dry_run=False)
-        except Exception as exc:
-            impl._log(
-                "warning",
-                f"{issue_ref(issue_number)}: could not list unresolved threads "
-                f"after GO for {pr_ref(pr_number)}: {exc}",
-                thread_id,
-            )
-            return (0, 0)
-        if not threads:
-            return (0, 0)
-
-        current_login = gh_current_login()
-        automation_unresolved = 0
-        human_unresolved = 0
-        for thread in threads:
-            if _is_automation_owned_thread(thread, current_login):
-                automation_unresolved += 1
-            else:
-                human_unresolved += 1
-        if automation_unresolved or human_unresolved:
-            impl._log(
-                "info",
-                f"{issue_number}: GO pass left {automation_unresolved} automation + "
-                f"{human_unresolved} human unresolved thread(s) on {pr_ref(pr_number)} "
-                "— GO cannot stand until all are addressed and a clean re-review confirms",
-                thread_id,
-            )
-        return (automation_unresolved, human_unresolved)
 
     def _run_impl_review_step(
         self,
@@ -1921,73 +1078,18 @@ class ImplementationPhaseRunner:
         prior_review: str | None,
         advise_findings: str = "",
     ) -> tuple[str, list[str]]:
-        """Run one in-loop review and return ``(review_text, posted_thread_ids)``.
-
-        With a ``pr_number`` this folds in ``pr_reviewer``'s core
-        (:func:`review_pr_inline`): a fresh per-iteration reviewer session posts
-        INLINE PR review threads and returns its summary text (carrying the
-        ``Grade:`` / ``Verdict:`` line). The reviewer context includes the TASK
-        (issue title + body), the PLAN and PLAN_REVIEW comments, and the impl
-        diff (#28).
-
-        Without a ``pr_number`` (dry-run / no PR) it falls back to the diff-only
-        reviewer (:meth:`_run_impl_review`) which posts nothing.
-        """
-        impl = self.impl
-        if pr_number is None:
-            diff_text = impl._collect_diff(worktree_path, branch_name)
-            files_changed = impl._collect_changed_files(worktree_path, branch_name)
-            review_text = impl._run_impl_review(
-                issue_number=issue_number,
-                issue_title=issue_title,
-                issue_body=issue_body,
-                diff_text=diff_text,
-                files_changed=files_changed,
-                iteration=iteration,
-                prior_review=prior_review,
-            )
-            return review_text, []
-
-        if self.options.dry_run:
-            logger.info("[DRY RUN] Would run in-loop PR review for #%s", pr_number)
-            return "Grade: A\nVerdict: GO\n", []
-
-        diff_text = impl._collect_diff(worktree_path, branch_name)
-        plan_text, plan_review_text = self._fetch_plan_and_review(issue_number)
-        context = gather_impl_review_context(
-            pr_number=pr_number,
+        """Delegate to :meth:`ReviewPhase._run_impl_review_step`."""
+        return self.review_phase._run_impl_review_step(
             issue_number=issue_number,
             issue_title=issue_title,
             issue_body=issue_body,
-            plan_text=plan_text,
-            plan_review_text=plan_review_text,
-            diff_text=diff_text,
+            branch_name=branch_name,
+            worktree_path=worktree_path,
+            pr_number=pr_number,
+            iteration=iteration,
+            prior_review=prior_review,
             advise_findings=advise_findings,
-            include_nitpicks=self.options.include_nitpicks,
         )
-        try:
-            return review_pr_inline(
-                pr_number=pr_number,
-                issue_number=issue_number,
-                worktree_path=worktree_path,
-                context=context,
-                agent=self.options.agent,
-                iteration=iteration,
-                state_dir=self.state_dir,
-                dry_run=False,
-            )
-        except Exception as e:
-            logger.error(
-                "#%s R%s: in-loop PR review failed: %s; recording ERROR (re-review next "
-                "loop, no skip/label) so an infra failure isn't mistaken for a NOGO",
-                issue_number,
-                iteration,
-                e,
-            )
-            return (
-                f"In-loop reviewer invocation failed at iteration {iteration}: {e}\n\n"
-                f"{INFRA_ERROR_REVIEW_TEXT}"
-            ), []
 
     def _run_address_review_step(
         self,
@@ -2001,178 +1103,17 @@ class ImplementationPhaseRunner:
         issue_title: str = "",
         issue_body: str = "",
     ) -> bool:
-        """Address the posted PR threads in-loop, resuming Session 2.
-
-        Folds in ``address_review``'s core: lists the unresolved threads on the
-        PR, runs the fix session (resuming ``AGENT_IMPLEMENTER`` via
-        :func:`run_address_fix_session`, which fans out one sub-agent per COMMENT
-        at the model tier matching its classified difficulty, #1083), then
-        commits + pushes the fixes. Thread RESOLUTION is no longer done here — it
-        moved to the evidence-based validator (#1083); this step only counts as
-        progress when a real commit was produced (#1085).
-
-        Returns:
-            ``True`` if at least one thread was addressed (so the loop should
-            re-review); ``False`` when nothing was addressable (the loop stops).
-
-        """
-        threads = gh_pr_list_unresolved_threads(pr_number, dry_run=False)
-        if not threads:
-            logger.info(
-                "#%s R%s: no unresolved threads to address on PR %s",
-                issue_number,
-                iteration,
-                pr_ref(pr_number),
-            )
-            return False
-
-        # On the existing-PR path the address session may run fresh (no
-        # implementer transcript to resume), so it has no memory of the task or
-        # the implementation. Bootstrap it with the task, the plan-review, and
-        # the current diff. The fresh-impl path already carries this in its
-        # long-lived transcript, so the blocks stay empty there (no extra cost).
-        task_block = ""
-        task_review_block = ""
-        diff_text = ""
-        if include_bootstrap_context:
-            task_block = f"#{issue_number} {issue_title}\n\n{issue_body}".strip()
-            _, task_review_block = self._fetch_plan_and_review(issue_number)
-            diff_text = self.impl._collect_diff(worktree_path, branch_name)
-
-        log_file = self.state_dir / f"address-review-{issue_number}-r{iteration}.log"
-        fix_result = run_address_fix_session(
+        """Delegate to :meth:`ReviewPhase._run_address_review_step`."""
+        return self.review_phase._run_address_review_step(
             issue_number=issue_number,
             pr_number=pr_number,
+            branch_name=branch_name,
             worktree_path=worktree_path,
-            threads=threads,
-            agent=self.options.agent,
-            repo_root=self.repo_root,
-            parse_fn=lambda text: self._parse_address_result(text, issue_number, iteration),
-            log_file=log_file,
-            dry_run=False,
-            task_block=task_block,
-            task_review_block=task_review_block,
-            diff_text=diff_text,
+            iteration=iteration,
+            include_bootstrap_context=include_bootstrap_context,
+            issue_title=issue_title,
+            issue_body=issue_body,
         )
-        addressed: list[str] = fix_result.get("addressed", [])
-
-        # #1083 Bug 1: gate "addressed" on a REAL commit. The fix session's
-        # self-reported ``addressed`` list is not trusted on its own — a session
-        # can claim it resolved a thread while leaving the worktree clean (e.g.
-        # replying "documented as a limitation" with no code change). Only when
-        # _commit_if_changes actually produced a commit do we push and report
-        # progress, so a no-op fix can never advance the loop.
-        committed = self._commit_if_changes(issue_number, worktree_path)
-        if not (addressed and committed):
-            logger.info(
-                "#%s R%s: address step produced no committed change "
-                "(addressed=%s, committed=%s) — not counted as progress",
-                issue_number,
-                iteration,
-                bool(addressed),
-                committed,
-            )
-            return False
-        self._push_branch(branch_name, worktree_path)
-
-        # #1083 Bug 1/Move-to-reviewer: resolution is NO LONGER done here. The
-        # validator (review_validator.validate_prior_comments_addressed) resolves
-        # each prior thread only after a fresh read-only sub-agent confirms the
-        # current diff actually addresses it. This closes the "resolved without
-        # implementing" hole — a self-reported fix with no diff change stays open.
-        return True
-
-    def _parse_address_result(self, text: str, issue_number: int, iteration: int) -> dict[str, Any]:
-        """Parse the address-session JSON block, tracing parse failures.
-
-        Wraps :func:`address_review._parse_addressed_block` but writes a
-        diagnostic trace file when the block is missing/malformed, so an empty
-        ``addressed`` list is distinguishable from "the model reviewed and
-        chose no fixes" (mirrors the standalone phase's behavior).
-        """
-        from .address_review import _parse_addressed_block
-
-        matches = _parse_addressed_block(text)
-        if not matches.get("addressed") and "```json" not in text:
-            with contextlib.suppress(Exception):
-                trace_path = self.state_dir / f"address-{issue_number}-r{iteration}.parse-error.log"
-                trace_path.write_text(
-                    f"reason: no fenced ```json block found in response\n\n"
-                    f"=== full response ===\n{text}"
-                )
-        return matches
-
-    def _fetch_plan_and_review(self, issue_number: int) -> tuple[str, str]:
-        """Return ``(plan_text, plan_review_text)`` for the reviewer context.
-
-        The PLAN comment is identified the same way
-        :func:`planner_state._comments_contain_plan` does — prefix-anchored on
-        :data:`PLAN_COMMENT_MARKER`, skipping comments whose body starts with
-        :data:`review_state.PLAN_REVIEW_PREFIX`. The PLAN_REVIEW comment is
-        the one whose body starts with ``review_state.PLAN_REVIEW_PREFIX``.
-        Best-effort: any fetch failure yields empty strings (looked up via
-        ``_impl_module`` so tests can patch
-        ``hephaestus.automation.implementer.review_state``).
-        """
-        plan_text = ""
-        plan_review_text = ""
-        try:
-            review_state = self._impl_module.review_state
-            comments = review_state._fetch_issue_comments_graphql(issue_number)
-            for comment in comments:
-                body = comment.get("body", "")
-                stripped = body.lstrip()
-                if stripped.startswith(review_state.PLAN_REVIEW_PREFIX):
-                    plan_review_text = body
-                elif stripped.startswith(PLAN_COMMENT_MARKER):
-                    plan_text = body
-        except Exception as e:
-            logger.warning("#%s: failed to fetch PLAN/PLAN_REVIEW context: %s", issue_number, e)
-        return plan_text, plan_review_text
-
-    def _commit_if_changes(self, issue_number: int, worktree_path: Path) -> bool:
-        """Commit any pending changes from the in-loop address step.
-
-        Silently skips when the worktree is clean. Mirrors
-        ``AddressReviewer._commit_if_changes``.
-
-        Returns:
-            ``True`` iff a commit was actually created. ``False`` when the
-            worktree was clean (nothing to commit) or the commit failed. The
-            caller (#1083) uses this to gate progress/resolution on a real
-            change rather than the model's self-report.
-
-        """
-        result = run(
-            ["git", "status", "--porcelain"],
-            cwd=worktree_path,
-            capture_output=True,
-        )
-        if not result.stdout.strip():
-            logger.info("No changes to commit for issue #%s", issue_number)
-            return False
-        try:
-            commit_changes(issue_number, worktree_path, self.options.agent)
-            logger.info("Committed in-loop address changes for issue #%s", issue_number)
-            return True
-        except RuntimeError as e:
-            logger.warning("Commit skipped for issue #%s: %s", issue_number, e)
-            return False
-
-    def _push_branch(self, branch_name: str, worktree_path: Path) -> None:
-        """Push *branch_name* to origin after an in-loop address step.
-
-        Mirrors ``AddressReviewer._push_branch``.
-
-        Raises:
-            RuntimeError: If the push fails.
-
-        """
-        try:
-            run(["git", "push", "origin", branch_name], cwd=worktree_path)
-            logger.info("Pushed branch %s to origin", branch_name)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to push branch {branch_name}: {e}") from e
 
     def _resume_impl_with_feedback(
         self,
@@ -2185,101 +1126,16 @@ class ImplementationPhaseRunner:
         verdict: str,
         state: ImplementationState | None = None,
     ) -> bool:
-        """Resume the impl session and feed reviewer feedback as the next prompt."""
-        impl = self.impl
-        prompt = get_impl_resume_feedback_prompt(
+        """Delegate to :meth:`ReviewPhase._resume_impl_with_feedback`."""
+        return self.review_phase._resume_impl_with_feedback(
+            session_id=session_id,
+            worktree_path=worktree_path,
             issue_number=issue_number,
+            review_text=review_text,
             prev_iteration=prev_iteration,
             verdict=verdict,
-            review_text=review_text,
+            state=state,
         )
-        if is_codex(self.options.agent):
-            try:
-                result = resume_codex_session(
-                    session_id,
-                    prompt,
-                    cwd=worktree_path,
-                    timeout=implementer_claude_timeout(),
-                )
-                log_file = (
-                    self.state_dir / f"codex-feedback-{issue_number}-r{prev_iteration + 1}.log"
-                )
-                log_file.write_text(result.stdout or "")
-                return True
-            except subprocess.CalledProcessError as e:
-                logger.error(
-                    "#%d: Codex failed to address R%d feedback (exit=%d): %s",
-                    issue_number,
-                    prev_iteration + 1,
-                    e.returncode,
-                    (e.stderr or e.stdout or "")[:500],
-                )
-                return False
-            except subprocess.TimeoutExpired:
-                logger.error(
-                    "#%d: Codex timed out addressing R%d feedback",
-                    issue_number,
-                    prev_iteration + 1,
-                )
-                return False
-
-        # Route through the centralized helper so create/resume semantics and
-        # the SESSION_EXPIRED phrase list stay in one place. The deterministic
-        # UUID matches what the initial impl session was created with, so the
-        # passed-in ``session_id`` (legacy ``state.session_id``) is ignored on
-        # the Claude path — it's still consumed by the codex branch above.
-        # ``recreate_on_resume_failure=False`` propagates the underlying error
-        # so we can preserve the "stop iterating on expiry" contract.
-        _impl_mod = self._impl_module
-        repo_slug = _impl_mod.get_repo_slug(self.repo_root)
-        try:
-            _impl_mod.invoke_claude_with_session(
-                repo=repo_slug,
-                issue=issue_number,
-                agent=_impl_mod.AGENT_IMPLEMENTER,
-                prompt=prompt,
-                model=implementer_model(),
-                cwd=worktree_path,
-                timeout=implementer_claude_timeout(),
-                permission_mode="dontAsk",
-                allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
-                recreate_on_resume_failure=False,
-            )
-            return True
-        except subprocess.CalledProcessError as e:
-            combined = ((e.stderr or "") + (e.stdout or "")).lower()
-            if any(phrase in combined for phrase in SESSION_EXPIRED_PHRASES):
-                # Session pruned — partial work may still be committable;
-                # don't treat this as an unrecoverable failure.
-                error_tag = f"session_expired:{session_id}"
-                logger.warning(
-                    "#%d: impl session %r expired before R%d; "
-                    "stopping review loop (partial work preserved)",
-                    issue_number,
-                    session_id,
-                    prev_iteration + 1,
-                )
-                if state is not None:
-                    with self.state_lock:
-                        state.error = error_tag
-                    impl._save_state(state)
-            else:
-                logger.error(
-                    "#%d: failed to resume impl session for R%d (exit=%d): %s",
-                    issue_number,
-                    prev_iteration + 1,
-                    e.returncode,
-                    (e.stderr or e.stdout or "")[:500],
-                )
-            return False
-        except Exception as e:  # broad: resume is best-effort, never crash the loop
-            logger.error(
-                "#%d: unexpected error resuming impl session for R%d: %s",
-                issue_number,
-                prev_iteration + 1,
-                e,
-            )
-            return False
 
     def _run_impl_review(
         self,
@@ -2292,8 +1148,8 @@ class ImplementationPhaseRunner:
         iteration: int,
         prior_review: str | None,
     ) -> str:
-        """Run a fresh-session reviewer against the current impl diff."""
-        prompt = get_impl_loop_review_prompt(
+        """Delegate to :meth:`ReviewPhase._run_impl_review`."""
+        return self.review_phase._run_impl_review(
             issue_number=issue_number,
             issue_title=issue_title,
             issue_body=issue_body,
@@ -2302,343 +1158,150 @@ class ImplementationPhaseRunner:
             iteration=iteration,
             prior_review=prior_review,
         )
-        try:
-            if is_codex(self.options.agent):
-                result = run_codex_text(
-                    prompt,
-                    cwd=self.repo_root,
-                    timeout=600,
-                    sandbox="read-only",
-                )
-                output = (result.stdout or "").strip()
-                if not output:
-                    raise RuntimeError("reviewer returned empty output")
-                return output
-
-            env = os.environ.copy()
-            env["CLAUDECODE"] = ""
-            result = subprocess.run(
-                [
-                    "claude",
-                    "--print",
-                    "--model",
-                    reviewer_model(),
-                    "--output-format",
-                    "text",
-                ],
-                input=prompt,
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=600,
-                env=env,
-            )
-            output = (result.stdout or "").strip()
-            if not output:
-                raise RuntimeError("reviewer returned empty output")
-            return output
-        except Exception as e:
-            logger.error(
-                "#%s R%s: impl reviewer call failed: %s; recording ERROR (re-review next "
-                "loop, no skip/label) so an infra failure isn't mistaken for a NOGO",
-                issue_number,
-                iteration,
-                e,
-            )
-            return (
-                f"Reviewer invocation failed at iteration {iteration}: {e}\n\n"
-                f"{INFRA_ERROR_REVIEW_TEXT}"
-            )
 
     def _collect_diff(self, worktree_path: Path, branch_name: str) -> str:
-        """Return the cumulative diff of *branch_name* against ``origin/main``."""
-        try:
-            result = run(
-                ["git", "diff", "origin/main...HEAD"],
-                cwd=worktree_path,
-                capture_output=True,
-                check=False,
-                timeout=60,
-            )
-            diff = result.stdout or ""
-            if not diff.strip():
-                fb = run(
-                    ["git", "diff", "HEAD~1..HEAD"],
-                    cwd=worktree_path,
-                    capture_output=True,
-                    check=False,
-                    timeout=60,
-                )
-                diff = fb.stdout or ""
-        except Exception as e:
-            logger.warning("diff collection failed for %s: %s", branch_name, e)
-            return ""
-
-        max_chars = 200_000
-        if len(diff) > max_chars:
-            diff = diff[:max_chars] + f"\n\n[... diff truncated at {max_chars} chars ...]\n"
-        return diff
+        """Delegate to :meth:`ReviewPhase._collect_diff`."""
+        return self.review_phase._collect_diff(worktree_path, branch_name)
 
     def _collect_changed_files(self, worktree_path: Path, branch_name: str) -> str:
-        """Return a newline-separated list of changed files vs ``origin/main``."""
-        try:
-            result = run(
-                ["git", "diff", "--name-only", "origin/main...HEAD"],
-                cwd=worktree_path,
-                capture_output=True,
-                check=False,
-                timeout=30,
-            )
-            files = (result.stdout or "").strip()
-            if files:
-                return files
-            fb = run(
-                ["git", "diff", "--name-only", "HEAD~1..HEAD"],
-                cwd=worktree_path,
-                capture_output=True,
-                check=False,
-                timeout=30,
-            )
-            return (fb.stdout or "").strip()
-        except Exception as e:
-            logger.warning("changed-files collection failed for %s: %s", branch_name, e)
-            return ""
+        """Delegate to :meth:`ReviewPhase._collect_changed_files`."""
+        return self.review_phase._collect_changed_files(worktree_path, branch_name)
 
     def _save_review_log(self, issue_number: int, iteration: int, review_text: str) -> None:
-        """Persist a per-iteration review log for later inspection."""
-        try:
-            log_file = self.state_dir / f"review-{issue_number}-r{iteration}.log"
-            log_file.write_text(review_text)
-        except Exception as e:
-            logger.warning("#%s: failed to save review log r%s: %s", issue_number, iteration, e)
+        """Delegate to :meth:`ReviewPhase._save_review_log`."""
+        self.review_phase._save_review_log(issue_number, iteration, review_text)
 
     def _save_review_iteration_state(
         self, issue_number: int, iterations_run: int, prior_review: str
     ) -> None:
-        """Persist review loop progress for ``--resume`` continuity (A2-005)."""
-        try:
-            iter_file = self.state_dir / f"review-iter-{issue_number}.json"
-            iter_file.write_text(json.dumps({"iterations_run": iterations_run}))
-        except Exception as e:
-            logger.warning("#%d: failed to persist review iteration count: %s", issue_number, e)
-        try:
-            prior_file = self.state_dir / f"review-prior-{issue_number}.txt"
-            prior_file.write_text(prior_review)
-        except Exception as e:
-            logger.warning("#%d: failed to persist prior review text: %s", issue_number, e)
+        """Delegate to :meth:`ReviewPhase._save_review_iteration_state`."""
+        self.review_phase._save_review_iteration_state(issue_number, iterations_run, prior_review)
 
     def _load_review_iteration_state(self, issue_number: int) -> tuple[int, str | None]:
-        """Load persisted review iteration progress for ``--resume`` (A2-005)."""
-        iterations_run = 0
-        prior_review: str | None = None
-        try:
-            iter_file = self.state_dir / f"review-iter-{issue_number}.json"
-            if iter_file.exists():
-                data = json.loads(iter_file.read_text())
-                iterations_run = int(data.get("iterations_run", 0))
-        except Exception as e:
-            logger.warning(
-                "#%d: failed to load persisted review iteration count: %s", issue_number, e
-            )
-        try:
-            prior_file = self.state_dir / f"review-prior-{issue_number}.txt"
-            if prior_file.exists():
-                prior_review = prior_file.read_text()
-        except Exception as e:
-            logger.warning("#%d: failed to load persisted prior review text: %s", issue_number, e)
-        return iterations_run, prior_review
+        """Delegate to :meth:`ReviewPhase._load_review_iteration_state`."""
+        return self.review_phase._load_review_iteration_state(issue_number)
 
-    # ------------------------------------------------------------------
-    # Pre-PR test gate
-    # ------------------------------------------------------------------
-
-    def _run_tests_in_worktree(self, worktree_path: Path, issue_number: int) -> bool:
-        """Run the unit test suite inside the worktree as a pre-PR gate (A2-004)."""
-        try:
-            result = subprocess.run(
-                ["pixi", "run", "pytest", "tests/unit", "-q", "--tb=short"],
-                cwd=worktree_path,
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
-            if result.returncode == 0:
-                logger.info("#%d: pre-PR tests passed", issue_number)
-                return True
-            logger.warning(
-                "#%d: pre-PR tests FAILED (exit %d):\n%s",
-                issue_number,
-                result.returncode,
-                (result.stdout + result.stderr)[-2000:],
-            )
-            return False
-        except subprocess.TimeoutExpired:
-            logger.warning("#%d: pre-PR tests timed out after 600s", issue_number)
-            return False
-        except Exception as e:
-            logger.warning("#%d: pre-PR tests could not run: %s", issue_number, e)
-            return False
-
-    # ------------------------------------------------------------------
-    # Agent invocation
-    # ------------------------------------------------------------------
-
-    def _run_claude_code(
-        self, issue_number: int, worktree_path: Path, prompt: str, slot_id: int | None = None
-    ) -> str | None:
-        """Run the selected implementation agent in a worktree."""
-        if self.options.dry_run:
-            logger.info("[DRY RUN] Would run %s for issue #%s", self.options.agent, issue_number)
-            return None
-
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-
-        if is_codex(self.options.agent):
-            return self.impl._run_codex_code(issue_number, worktree_path, prompt)
-
-        return self.impl._run_claude_impl_session(issue_number, worktree_path, prompt)
-
-    def _run_claude_impl_session(
-        self, issue_number: int, worktree_path: Path, prompt: str
-    ) -> str | None:
-        """Run Claude implementation prompt and return its session id."""
-        prompt_file = worktree_path / f".claude-prompt-{issue_number}.md"
-        prompt_file.write_text(prompt)
-
-        _impl_mod = self._impl_module
-        repo_slug = _impl_mod.get_repo_slug(self.repo_root)
-
-        try:
-            stdout, _ = _impl_mod.invoke_claude_with_session(
-                repo=repo_slug,
-                issue=issue_number,
-                agent=_impl_mod.AGENT_IMPLEMENTER,
-                prompt=prompt,
-                model=implementer_model(),
-                cwd=worktree_path,
-                timeout=implementer_claude_timeout(),
-                output_format="json",
-                permission_mode="dontAsk",
-                allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
-            )
-            result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
-            # Parse session_id from JSON output
-            try:
-                data = json.loads(result.stdout)
-
-                # The CLI sometimes returns exit 0 with ``is_error: true`` in
-                # JSON (e.g. usage caps in some channels). Treat that as a
-                # failure so the orchestrator can wait/retry instead of
-                # silently logging a useless session_id.
-                if isinstance(data, dict) and data.get("is_error"):
-                    err_text = str(data.get("result") or "")
-                    log_file = self.state_dir / f"claude-{issue_number}.log"
-                    log_file.write_text(result.stdout or "")
-                    reset_epoch = _claude_quota_reset_epoch(err_text)
-                    if reset_epoch is not None and reset_epoch > 0:
-                        logger.warning(
-                            "Claude usage cap hit for issue #%s; waiting for reset", issue_number
-                        )
-                        wait_until(reset_epoch)
-                    raise RuntimeError(f"Claude Code failed: {err_text or 'is_error=true'}")
-
-                session_id = data.get("session_id")
-
-                # Save successful output to log file
-                log_file = self.state_dir / f"claude-{issue_number}.log"
-                log_file.write_text(result.stdout or "")
-
-                return cast(str | None, session_id)
-            except (json.JSONDecodeError, AttributeError):
-                logger.warning("Could not parse session_id for issue #%s", issue_number)
-                logger.debug("Claude stdout: %s", result.stdout[:500])
-
-                # Save output even if JSON parsing failed
-                log_file = self.state_dir / f"claude-{issue_number}.log"
-                log_file.write_text(result.stdout or "")
-
-                return None
-        except subprocess.CalledProcessError as e:
-            logger.error("Claude Code failed for issue #%s", issue_number)
-            logger.error("Exit code: %s", e.returncode)
-            if e.stdout:
-                logger.error("Stdout: %s", e.stdout[:1000])
-            if e.stderr:
-                logger.error("Stderr: %s", e.stderr[:1000])
-
-            # Save failure output to log file
-            log_file = self.state_dir / f"claude-{issue_number}.log"
-            stdout = e.stdout or ""
-            stderr = e.stderr or ""
-            output = f"EXIT CODE: {e.returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
-            log_file.write_text(output)
-
-            # If the failure was a quota cap, block until reset rather than
-            # letting the orchestrator burn through every remaining issue in
-            # seconds. The Claude CLI puts its 429 message in stdout JSON.
-            reset_epoch = _claude_quota_reset_epoch(stderr, stdout)
-            if reset_epoch is not None and reset_epoch > 0:
-                logger.warning(
-                    "Claude usage cap hit for issue #%s; waiting for reset", issue_number
-                )
-                wait_until(reset_epoch)
-
-            raise RuntimeError(f"Claude Code failed: {e.stderr or e.stdout}") from e
-        except subprocess.TimeoutExpired as e:
-            # Save timeout info to log file
-            log_file = self.state_dir / f"claude-{issue_number}.log"
-            log_file.write_text(f"TIMEOUT after {e.timeout}s\n\nOutput:\n{e.output or ''}")
-
-            raise RuntimeError("Claude Code timed out") from e
-        finally:
-            # Clean up temp file
-            with contextlib.suppress(Exception):
-                prompt_file.unlink()
-
-    def _run_codex_code(self, issue_number: int, worktree_path: Path, prompt: str) -> str | None:
-        """Run Codex implementation prompt in a worktree."""
-        log_file = self.state_dir / f"codex-{issue_number}.log"
-        try:
-            result = run_codex_session(
-                prompt,
-                cwd=worktree_path,
-                timeout=implementer_claude_timeout(),
-                sandbox="workspace-write",
-            )
-            log_file.write_text(result.stdout or "")
-            return result.session_id
-        except subprocess.CalledProcessError as e:
-            stdout = e.stdout or ""
-            stderr = e.stderr or ""
-            output = f"EXIT CODE: {e.returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
-            log_file.write_text(output)
-            reset_epoch = _claude_quota_reset_epoch(stderr, stdout)
-            if reset_epoch is not None and reset_epoch > 0:
-                logger.warning("Codex usage cap hit for issue #%s; waiting for reset", issue_number)
-                wait_until(reset_epoch)
-            raise RuntimeError(f"Codex failed: {stderr or stdout}") from e
-        except subprocess.TimeoutExpired as e:
-            log_file.write_text(f"TIMEOUT after {e.timeout}s\n\nOutput:\n{e.output or ''}")
-            raise RuntimeError("Codex timed out") from e
-
-    # ------------------------------------------------------------------
-    # PR creation (thin wrappers preserved for back-compat)
-    # ------------------------------------------------------------------
-
-    def _ensure_pr_created(
+    def _apply_impl_review_verdict(
         self,
+        *,
         issue_number: int,
+        pr_number: int,
+        last_verdict: str | None,
+        slot_id: int | None,
+        thread_id: int | None,
+    ) -> None:
+        """Delegate to :meth:`ReviewPhase._apply_impl_review_verdict`."""
+        self.review_phase._apply_impl_review_verdict(
+            issue_number=issue_number,
+            pr_number=pr_number,
+            last_verdict=last_verdict,
+            slot_id=slot_id,
+            thread_id=thread_id,
+        )
+
+    def _fetch_plan_and_review(self, issue_number: int) -> tuple[str, str]:
+        """Delegate to :meth:`ReviewPhase._fetch_plan_and_review`."""
+        return self.review_phase._fetch_plan_and_review(issue_number)
+
+    def _validate_prior_threads(
+        self,
+        *,
+        issue_number: int,
+        pr_number: int | None,
         branch_name: str,
         worktree_path: Path,
+        prior_threads: list[dict[str, Any]],
+        iteration: int,
+        thread_id: int | None,
+    ) -> list[str]:
+        """Delegate to :meth:`ReviewPhase._validate_prior_threads`."""
+        return self.review_phase._validate_prior_threads(
+            issue_number=issue_number,
+            pr_number=pr_number,
+            branch_name=branch_name,
+            worktree_path=worktree_path,
+            prior_threads=prior_threads,
+            iteration=iteration,
+            thread_id=thread_id,
+        )
+
+    def _count_unresolved_threads_blocking_go(
+        self,
+        *,
+        issue_number: int,
+        pr_number: int,
+        thread_id: int | None,
+    ) -> tuple[int, int]:
+        """Delegate to :meth:`ReviewPhase._count_unresolved_threads_blocking_go`."""
+        return self.review_phase._count_unresolved_threads_blocking_go(
+            issue_number=issue_number,
+            pr_number=pr_number,
+            thread_id=thread_id,
+        )
+
+    def _parse_address_result(self, text: str, issue_number: int, iteration: int) -> dict[str, Any]:
+        """Delegate to :meth:`ReviewPhase._parse_address_result`."""
+        return self.review_phase._parse_address_result(text, issue_number, iteration)
+
+    def _commit_if_changes(self, issue_number: int, worktree_path: Path) -> bool:
+        """Delegate to :meth:`ReviewPhase._commit_if_changes`."""
+        return self.review_phase._commit_if_changes(issue_number, worktree_path)
+
+    def _push_branch(self, branch_name: str, worktree_path: Path) -> None:
+        """Delegate to :meth:`ReviewPhase._push_branch`."""
+        self.review_phase._push_branch(branch_name, worktree_path)
+
+    # FollowUpPhase
+    def _run_post_pr_followup(
+        self,
+        issue_number: int,
+        worktree_path: Path,
+        state: ImplementationState,
+        slot_id: int | None,
+    ) -> None:
+        """Delegate to :meth:`FollowUpPhase._run_post_pr_followup`."""
+        self.followup_phase._run_post_pr_followup(issue_number, worktree_path, state, slot_id)
+
+    def _parse_follow_up_items(self, text: str) -> list[dict[str, Any]]:
+        """Delegate to :meth:`FollowUpPhase._parse_follow_up_items`."""
+        return self.followup_phase._parse_follow_up_items(text)
+
+    def _can_resume_state_session(self, state: ImplementationState) -> bool:
+        """Delegate to :meth:`FollowUpPhase._can_resume_state_session`."""
+        return self.followup_phase._can_resume_state_session(state)
+
+    def _run_follow_up_issues(
+        self,
+        session_id: str,
+        worktree_path: Path,
+        issue_number: int,
         slot_id: int | None = None,
-    ) -> int:
-        """Ensure commit is pushed and PR is created (fallback if Claude didn't do it)."""
-        return ensure_pr_created(
-            issue_number,
-            branch_name,
-            worktree_path,
-            self.options.auto_merge,
-            self.status_tracker,
-            slot_id,
-            self.options.agent,
+        *,
+        session_agent: str | None = None,
+    ) -> None:
+        """Delegate to :meth:`FollowUpPhase._run_follow_up_issues`."""
+        self.followup_phase._run_follow_up_issues(
+            session_id, worktree_path, issue_number, slot_id, session_agent=session_agent
+        )
+
+    def _learn_needs_rerun(self, issue_number: int) -> bool:
+        """Delegate to :meth:`FollowUpPhase._learn_needs_rerun`."""
+        return self.followup_phase._learn_needs_rerun(issue_number)
+
+    def _rerun_failed_learns(self) -> dict[int, bool]:
+        """Delegate to :meth:`FollowUpPhase._rerun_failed_learns`."""
+        return self.followup_phase._rerun_failed_learns()
+
+    def _run_learn(
+        self,
+        session_id: str,
+        worktree_path: Path,
+        issue_number: int,
+        slot_id: int | None = None,
+        *,
+        session_agent: str | None = None,
+    ) -> bool:
+        """Delegate to :meth:`FollowUpPhase._run_learn`."""
+        return self.followup_phase._run_learn(
+            session_id, worktree_path, issue_number, slot_id, session_agent=session_agent
         )
