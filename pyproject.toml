@@ -73,8 +73,17 @@ schema = [
 nats = [
     "nats-py>=2.6,<3",
 ]
+# Product layer (hephaestus.automation). See docs/adr/0001-automation-library-boundary.md.
+# Explicitly declares the deps automation needs at runtime even though some are
+# also currently base deps (pydantic is pulled in transitionally via hephaestus.nats).
+# Listing them here means the extra is honest and forward-compatible: when the
+# base dep list shrinks, this extra remains load-bearing. CI verifies the
+# library-side import surface stays clean via tests/unit/test_import_surface.py.
+automation = [
+    "pydantic>=2.12.5,<3",
+]
 all = [
-    "HomericIntelligence-Hephaestus[github,nats,toml,xml,schema]",
+    "HomericIntelligence-Hephaestus[automation,github,nats,toml,xml,schema]",
 ]
 
 [project.scripts]

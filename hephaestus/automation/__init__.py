@@ -1,4 +1,14 @@
-"""Automation utilities for GitHub issue planning and implementation."""
+"""Automation product layer for the HomericIntelligence ecosystem.
+
+This subpackage is the Claude/Codex automation pipeline (Planner,
+Implementer, CIDriver, reviewers, loop runner, curses TUI). It is the
+product layer of ProjectHephaestus; the rest of `hephaestus.*` is a
+utility library. Install with
+``pip install HomericIntelligence-Hephaestus[automation]`` to opt in.
+
+See ``docs/adr/0001-automation-library-boundary.md`` for the boundary
+contract. `import hephaestus` does not load this subpackage.
+"""
 
 from __future__ import annotations
 
