@@ -31,6 +31,7 @@ import logging
 import subprocess
 import threading
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, Literal
 
 from hephaestus.agents.runtime import is_codex, run_codex_text
@@ -63,12 +64,14 @@ from .pr_manager import (
 from .prompts import get_dirty_reused_worktree_decision_prompt, get_implementation_prompt
 from .state_labels import STATE_SKIP
 
-# NOTE: ``is_plan_review_go``, ``fetch_issue_info``, ``find_pr_for_issue``,
-# ``get_pr_head_branch``, ``invoke_claude_with_session``, ``get_repo_slug``, and
-# ``AGENT_IMPLEMENTER`` are deliberately NOT imported here. Existing tests patch
-# them at ``hephaestus.automation.implementer.X`` so the call sites below look
-# them up dynamically through that module via :meth:`._impl_module`. This
-# preserves the test-patch contract after the #597/#712 extractions.
+# Patchable collaborators (``is_plan_review_go``, ``fetch_issue_info``,
+# ``find_pr_for_issue``, ``get_pr_head_branch``, ``invoke_claude_with_session``,
+# ``get_repo_slug``, ``AGENT_IMPLEMENTER``, …) are NOT imported here — they are
+# resolved at call time via ``self._impl_module.X`` so that the patch path
+# ``hephaestus.automation.implementer.X`` remains the single source of truth.
+# See the "Test-Patch Contract" table in :mod:`.implementer` for the full list
+# and the rationale (Reverse-Delegation, issue #710 / PR #674). This preserves
+# the test-patch contract after the #597/#712 extractions.
 
 if TYPE_CHECKING:
     from .implementer import IssueImplementer
@@ -161,14 +164,17 @@ class ImplementationPhaseRunner:
         return self.impl.state_mgr.lock
 
     @property
-    def _impl_module(self) -> Any:
-        """Return the ``hephaestus.automation.implementer`` module.
+    def _impl_module(self) -> ModuleType:
+        """Return the :mod:`hephaestus.automation.implementer` module.
 
-        Used for dynamic lookup of patchable symbols (``is_plan_review_go``,
+        Resolves the patchable-symbol surface documented by the "Test-Patch
+        Contract" table in :mod:`.implementer` (``is_plan_review_go``,
         ``fetch_issue_info``, ``find_pr_for_issue``, ``get_pr_head_branch``,
-        ``invoke_claude_with_session``, ``get_repo_slug``, ``AGENT_IMPLEMENTER``)
-        so tests that ``patch("hephaestus.automation.implementer.X", ...)`` keep
-        working after the call sites moved into the phase modules.
+        ``invoke_claude_with_session``, ``get_repo_slug``, ``AGENT_IMPLEMENTER``,
+        …) so tests that ``patch("hephaestus.automation.implementer.X", ...)``
+        keep working after the call sites moved into the phase modules. The
+        cycle-safe inline import lives in :attr:`StageContext.impl_module`,
+        which this property delegates to.
         """
         return self.ctx.impl_module
 

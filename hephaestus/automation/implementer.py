@@ -1,10 +1,66 @@
-"""Bulk issue implementation using the selected coding agent in parallel worktrees.
+r"""Bulk issue implementation using the selected coding agent in parallel worktrees.
 
 Provides:
 - Dependency-aware parallel implementation
 - Git worktree isolation
 - State persistence and resume
 - CI fix automation
+
+Test-Patch Contract
+-------------------
+This module is the **single patch surface** for the bulk-implementation
+pipeline's external collaborators. The phase runner
+(:mod:`.implementer_phase_runner`) resolves these symbols at call time via
+``self._impl_module.X`` (see
+:meth:`.implementer_phase_runner.ImplementationPhaseRunner._impl_module`),
+so a single ``unittest.mock.patch("hephaestus.automation.implementer.X", …)``
+intercepts both direct call sites in this module AND runner-side dispatch.
+
+Patchable surface (every symbol the test suite patches at the
+``hephaestus.automation.implementer.<name>`` path — keep this table in sync
+with ``grep -rn 'patch.*hephaestus\.automation\.implementer\.' tests/``):
+
+  Symbol                          Defining module           Mechanism
+  ------------------------------- ------------------------- -----------------------------
+  review_state (submodule)        .review_state             from . import review_state
+  find_pr_for_issue               ._review_utils            re-export (noqa: F401)
+  invoke_claude_with_session      .claude_invoke            re-export (noqa: F401)
+  get_repo_root                   .git_utils                re-export (``as`` alias)
+  get_repo_slug                   .git_utils                re-export (noqa: F401)
+  fetch_issue_info                .github_api               direct import (used in body)
+  gh_list_open_issues             .github_api               re-export (``as`` alias)
+  is_plan_review_go               .review_state             re-export (noqa: F401)
+  current_trunk_githash           .session_naming           re-export (noqa: F401)
+  AGENT_IMPLEMENTER (constant)    .session_naming           re-export (noqa: F401)
+  AGENT_ADVISE (constant)         .session_naming           re-export (noqa: F401)
+  _parse_args                     .implementer_cli          re-export (``as`` alias)
+  _setup_logging                  .implementer_cli          re-export (``as`` alias)
+  main                            .implementer_cli          re-export (``as`` alias)
+  subprocess.run                  ``import subprocess``     stdlib import (top-level
+                                                            ``import subprocess``);
+                                                            patched via dotted-path
+                                                            traversal at
+                                                            ``…implementer.subprocess.run``
+
+When adding a new patchable dependency:
+
+  1. Import it here. Use ``from .module import name as name`` (mypy
+     ``implicit_reexport=false``) for callable re-exports, or
+     ``from .module import name  # noqa: F401`` if the symbol is not used
+     in this module's body.
+  2. Add a row to the table above (and update the grep keep-in-sync comment
+     if the surface grows).
+  3. In :mod:`.implementer_phase_runner`, look the symbol up via
+     ``self._impl_module.X`` — NOT a direct import — so the patch path stays
+     the single source of truth.
+
+Why this pattern instead of constructor DI: this module exists to be patched
+by 18 existing test call sites across ``tests/unit/automation/test_implementer.py``
+and ``tests/unit/automation/test_implementer_loop.py``. Converting to
+constructor-injected collaborators would force editing every one — see issue
+#710's tradeoff analysis and the team's
+``python-module-decomposition-and-refactor-patterns`` skill, Phase 11
+(Reverse-Delegation), validated by PR #674.
 """
 
 from __future__ import annotations
@@ -30,8 +86,8 @@ from hephaestus.agents.runtime import (
 # Why these re-exports exist:
 #   - ``implementer_phase_runner`` (the runtime call site) deliberately does
 #     NOT import these symbols directly. Instead, it dynamically looks them
-#     up via ``ImplementationPhaseRunner._impl_module`` (see
-#     ``implementer_phase_runner.py:188-199``), which returns *this* module.
+#     up via the ``ImplementationPhaseRunner._impl_module`` property (see
+#     :mod:`.implementer_phase_runner`), which returns *this* module.
 #   - That indirection means a test calling
 #     ``patch("hephaestus.automation.implementer.X", ...)`` intercepts the
 #     runtime call inside the phase runner too — without the runner needing
