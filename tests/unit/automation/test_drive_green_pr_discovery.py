@@ -15,7 +15,6 @@ from hephaestus.automation.loop_runner import (
     PhaseResult,
     _build_phase_argv,
     _count_failing_prs,
-    process_repo,
 )
 
 
@@ -173,23 +172,34 @@ class TestBuildPhaseArgv:
         assert argv[issues_idx + 1 : issues_idx + 3] == ["123", "456"]
 
 
-class TestProcessRepoSkipLogic:
-    """Tests for drive-green SKIP logic in process_repo."""
+class TestPostLoopDriveGreenSkipLogic:
+    """Tests for drive-green SKIP logic in ``_run_post_loop_stages`` (post-#818).
+
+    drive-green moved out of the loop body and into the post-loop terminal
+    stage. The same work-discovery gate (``_count_failing_prs``, --issues
+    override) now lives in ``_run_post_loop_stages`` rather than
+    ``process_repo``; these tests pin that invariant at the new home.
+    """
 
     def test_drive_green_skips_with_reason_no_failing_prs(
         self, repo_inputs: tuple[Path, LoopConfig]
     ) -> None:
         """drive-green SKIPs with reason 'no failing PRs' when no failing PRs exist."""
-        _, cfg = repo_inputs
-        cfg = LoopConfig(phases=("drive-green",), loops=1, projects_dir=cfg.projects_dir)
+        projects, cfg = repo_inputs
+        cfg = LoopConfig(phases=("drive-green",), loops=1, projects_dir=projects)
         with (
             patch.object(loop_runner, "_rebase_main", return_value=("deadbee", True)),
             patch.object(loop_runner, "_list_open_issue_numbers", return_value=[]),
             patch.object(loop_runner, "_count_failing_prs", return_value=0),
+            patch.object(
+                loop_runner,
+                "_resolve_repo_dir",
+                side_effect=lambda pd, r: pd / r,
+            ),
             patch.object(loop_runner, "run_phase") as mock_run,
         ):
-            result = process_repo("r", loop_idx=1, cfg=cfg)
-        drive_green = next(p for p in result.phases if p.name == "drive-green")
+            results = loop_runner._run_post_loop_stages(cfg, ["r"])
+        drive_green = next(p for p in results[0].post_loop_phases if p.name == "drive-green")
         assert drive_green.skipped
         assert drive_green.skip_reason == "no failing PRs"
         mock_run.assert_not_called()
@@ -198,35 +208,45 @@ class TestProcessRepoSkipLogic:
         self, repo_inputs: tuple[Path, LoopConfig]
     ) -> None:
         """drive-green RUNS when failing PRs exist but no issues are scoped."""
-        _, cfg = repo_inputs
-        cfg = LoopConfig(phases=("drive-green",), loops=1, projects_dir=cfg.projects_dir)
+        projects, cfg = repo_inputs
+        cfg = LoopConfig(phases=("drive-green",), loops=1, projects_dir=projects)
         with (
             patch.object(loop_runner, "_rebase_main", return_value=("deadbee", True)),
             patch.object(loop_runner, "_list_open_issue_numbers", return_value=[]),
             patch.object(loop_runner, "_count_failing_prs", return_value=3),
+            patch.object(
+                loop_runner,
+                "_resolve_repo_dir",
+                side_effect=lambda pd, r: pd / r,
+            ),
             patch.object(loop_runner, "run_phase", side_effect=lambda **kw: _ok(kw["phase"])),
         ):
-            result = process_repo("r", loop_idx=1, cfg=cfg)
-        drive_green = next(p for p in result.phases if p.name == "drive-green")
+            results = loop_runner._run_post_loop_stages(cfg, ["r"])
+        drive_green = next(p for p in results[0].post_loop_phases if p.name == "drive-green")
         assert not drive_green.skipped
 
     def test_drive_green_runs_when_operator_scoped_issues_present(
         self, repo_inputs: tuple[Path, LoopConfig]
     ) -> None:
         """drive-green RUNS when operator passes --issues, regardless of failing PR count."""
-        _, cfg = repo_inputs
+        projects, cfg = repo_inputs
         cfg = LoopConfig(
             issues=[10],
             phases=("drive-green",),
             loops=1,
-            projects_dir=cfg.projects_dir,
+            projects_dir=projects,
         )
         with (
             patch.object(loop_runner, "_rebase_main", return_value=("deadbee", True)),
             patch.object(loop_runner, "_list_open_issue_numbers", return_value=[]),
             patch.object(loop_runner, "_count_failing_prs", return_value=0),
+            patch.object(
+                loop_runner,
+                "_resolve_repo_dir",
+                side_effect=lambda pd, r: pd / r,
+            ),
             patch.object(loop_runner, "run_phase", side_effect=lambda **kw: _ok(kw["phase"])),
         ):
-            result = process_repo("r", loop_idx=1, cfg=cfg)
-        drive_green = next(p for p in result.phases if p.name == "drive-green")
+            results = loop_runner._run_post_loop_stages(cfg, ["r"])
+        drive_green = next(p for p in results[0].post_loop_phases if p.name == "drive-green")
         assert not drive_green.skipped

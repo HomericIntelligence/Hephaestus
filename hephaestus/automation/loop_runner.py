@@ -1,11 +1,16 @@
 """Multi-repo, multi-stage automation loop driver.
 
 Replaces ``scripts/run_automation_loop.sh``. Iterates over all
-non-archived HomericIntelligence repos, running the 3-stage pipeline
-(plan → implement → drive-green) ``--loops`` times per repo. Plan-review,
-PR-review, and address-review are no longer standalone phases — the planner
-owns its review loop and the implementer absorbs PR-review + thread-addressing
-in-loop (#455/#468/#484).
+non-archived HomericIntelligence repos. Per loop iteration, runs the
+2-phase iteration body (``plan`` → ``implement``) ``--loops`` times per
+repo. After the loop body finishes (whether by exhaustion or early-exit),
+runs the post-loop terminal stages (``drive-green``) **once per repo**.
+
+Plan-review, PR-review, and address-review are no longer standalone phases —
+the planner owns its review loop and the implementer absorbs PR-review +
+thread-addressing in-loop (#455/#468/#484). ``drive-green`` was promoted
+from "third loop phase, final-loop only" to "post-loop terminal stage" in
+#818 — it is a per-repo terminal action, not an iteration step.
 
 The key correctness invariant — and the reason this replaces the bash
 version — is that each phase is a plain ``subprocess.run`` call inside a
@@ -80,18 +85,27 @@ def _default_phase_timeout_s() -> float:
         return float(default)
 
 
-# Canonical phase ordering. The pipeline collapsed from 6 phases to 3
-# session-stable stages (#455/#468/#484): the former standalone review-plans,
-# review-prs, and address-review phases are now in-loop steps of plan/implement
-# (the planner owns its review loop; the implementer absorbs PR-review +
-# thread-addressing). Index 0 = stage 1 (plan), index 2 = stage 3 (drive-green).
+# Canonical loop-body ordering. The pipeline collapsed from 6 phases to 2
+# session-stable iteration phases (#455/#468/#484/#818): plan-review,
+# PR-review, and address-review fold into plan/implement, and drive-green
+# was promoted from "final-loop-only phase" to a post-loop terminal stage
+# (see ALL_POST_LOOP_STAGES below).
 ALL_PHASES: tuple[str, ...] = (
     "plan",
     "implement",
-    "drive-green",
 )
 
-FINAL_LOOP_ONLY_PHASES: frozenset[str] = frozenset({"drive-green"})
+# Post-loop terminal stages. Run once per repo AFTER all loop iterations
+# finish (exhaustion or early-exit). Per #818, drive-green belongs here
+# because it polls existing PRs — it is a terminal action, not an iteration
+# step. Operators select it with ``--phases drive-green`` (same flag, no
+# new arg); the runner partitions selected names into loop phases vs.
+# post-loop stages internally.
+ALL_POST_LOOP_STAGES: tuple[str, ...] = ("drive-green",)
+
+# Union used by --phases validation. Operators may select any combination
+# of loop phases and post-loop stages on the same flag.
+ALL_SELECTABLE: tuple[str, ...] = ALL_PHASES + ALL_POST_LOOP_STAGES
 
 # DEFAULT_PROJECTS_DIR is re-exported from hephaestus.config.paths so existing
 # tests that patch this module-level name continue to work. See #704: the
@@ -137,9 +151,10 @@ def _parse_issue_list(value: str) -> list[int]:
 
 
 # drive-green discovers PRs directly via gh and no longer requires an
-# input issue list (#820, #819). plan + implement auto-discover their own.
-# The set is kept (currently empty) so any future phase that genuinely
-# needs an issue list has one place to opt in.
+# input issue list (#820, #819) — see ``_count_failing_prs`` and the
+# post-loop check in ``_run_post_loop_stages``. plan + implement
+# auto-discover their own. The set is kept (currently empty) so any
+# future phase that genuinely needs an issue list has one place to opt in.
 PHASES_REQUIRING_ISSUES: frozenset[str] = frozenset()
 
 # Sentinel for cooperative shutdown on SIGINT/SIGTERM. Worker threads
@@ -207,17 +222,38 @@ class RepoResult:
     repo: str
     loop_idx: int
     phases: list[PhaseResult] = field(default_factory=list)
+    # Post-loop terminal stages (drive-green) recorded separately from
+    # per-loop ``phases`` so they don't pollute per-loop convergence
+    # metrics (#818). Populated only by the post-loop RepoResult returned
+    # by ``_run_post_loop_stages``; per-loop RepoResults leave this empty.
+    post_loop_phases: list[PhaseResult] = field(default_factory=list)
+    # True only for records produced by ``_run_post_loop_stages`` (#818).
+    # Tagging explicitly lets per-loop counting exclude post-loop records
+    # even when a crashed/uncloned repo leaves BOTH phase lists empty —
+    # emptiness alone cannot distinguish a post-loop record from a per-loop one.
+    is_post_loop: bool = False
     # Populated when the WORKER itself crashed (not a phase failure).
     runner_error: str | None = None
 
     @property
     def any_failure(self) -> bool:
-        """True when any phase failed or the worker itself crashed."""
-        return self.runner_error is not None or any(p.failed for p in self.phases)
+        """True when any phase (loop or post-loop) failed or the worker crashed."""
+        return (
+            self.runner_error is not None
+            or any(p.failed for p in self.phases)
+            or any(p.failed for p in self.post_loop_phases)
+        )
 
     @property
     def produced_work(self) -> bool:
-        """Whether any convergence-relevant phase produced work."""
+        """Whether any convergence-relevant LOOP phase produced work.
+
+        Post-loop stages never count toward convergence — they are
+        terminal, not iterative — so ``post_loop_phases`` is intentionally
+        excluded here. The early-exit predicate at the end of ``run_loop``
+        operates on per-loop ``loop_results`` only, so this property is
+        never consulted on a post-loop RepoResult.
+        """
         return any(p.produced_work for p in self.phases if p.name in _CONVERGENCE_PHASES)
 
 
@@ -258,6 +294,14 @@ def _summarize_loop(loop_results: list[RepoResult], loop_idx: int, elapsed_s: fl
     )
 
 
+def _summarize_post_loop(results: list[RepoResult]) -> str:
+    """One-line summary of post-loop terminal stage outcomes per repo."""
+    ran = sum(1 for r in results for p in r.post_loop_phases if not p.skipped and not p.failed)
+    skipped = sum(1 for r in results for p in r.post_loop_phases if p.skipped)
+    failed = sum(1 for r in results for p in r.post_loop_phases if p.failed)
+    return f"post-loop: stages_ran={ran} skipped={skipped} failed={failed} repos={len(results)}"
+
+
 @dataclass
 class LoopConfig:
     """Top-level CLI-derived configuration."""
@@ -265,6 +309,13 @@ class LoopConfig:
     loops: int = 5
     max_workers: int = 3
     parallel_repos: int = 1
+    # Dataclass default is loop-body-only by design: it covers ONLY the
+    # iteration phases (``ALL_PHASES``), deliberately excluding post-loop
+    # terminal stages like drive-green. This differs from the CLI ``--phases``
+    # default (``ALL_SELECTABLE`` = loop phases + post-loop stages, set in
+    # ``_parse_args``): an operator on the CLI opts into drive-green by default,
+    # but a bare ``LoopConfig()`` (tests/programmatic callers) gets a quiet
+    # loop-only run that never touches existing PRs via ``_run_post_loop_stages``.
     phases: tuple[str, ...] = ALL_PHASES
     agent: str = "claude"
     issues: list[int] = field(default_factory=list)
@@ -342,7 +393,10 @@ def _build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser for the loop runner."""
     p = argparse.ArgumentParser(
         prog="hephaestus-automation-loop",
-        description="Run the 3-stage automation pipeline across HomericIntelligence repos.",
+        description=(
+            "Run the 2-stage loop body and post-loop terminal stages across "
+            "HomericIntelligence repos."
+        ),
     )
     add_dry_run_arg(
         p,
@@ -361,8 +415,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--phases",
-        default=",".join(ALL_PHASES),
-        help=f"Comma-separated subset of phases to run. Valid: {','.join(ALL_PHASES)}",
+        default=",".join(ALL_SELECTABLE),
+        help=(
+            "Comma-separated subset of phases/stages to run. "
+            f"Valid: {','.join(ALL_SELECTABLE)} "
+            "(plan/implement are loop-body phases; drive-green is a "
+            "post-loop terminal stage that runs once per repo)."
+        ),
     )
     add_agent_argument(p)
     p.add_argument(
@@ -463,20 +522,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def _validate_phases(phases_csv: str) -> tuple[str, ...]:
     selected = tuple(p.strip() for p in phases_csv.split(",") if p.strip())
-    invalid = [p for p in selected if p not in ALL_PHASES]
+    invalid = [p for p in selected if p not in ALL_SELECTABLE]
     if invalid:
-        raise SystemExit(f"Unknown phase(s): {invalid}. Valid: {','.join(ALL_PHASES)}")
+        raise SystemExit(f"Unknown phase(s): {invalid}. Valid: {','.join(ALL_SELECTABLE)}")
     return selected
 
 
 def _phase_order_warnings(cfg: LoopConfig) -> list[str]:
-    """Dependency-ordering safety warnings for the 3-stage pipeline.
+    """Dependency-ordering safety warnings for the 2-phase loop body.
 
-    Plan-review and PR-review/address-review are no longer separate phases —
-    the planner owns its review loop and the implementer absorbs PR-review +
-    thread-addressing in-loop, so the only cross-stage ordering hazard left is
-    running drive-green without implement (it would poll PRs not produced this
-    invocation).
+    Plan-review and PR-review/address-review fold into plan/implement; the
+    only remaining ordering hazard is selecting plan without implement
+    (planning-only, produces no PRs). Per #818, drive-green is a post-loop
+    terminal stage and intentionally supports being run without implement
+    ("drive existing PRs without opening new work").
     """
     warnings: list[str] = []
     selected = set(cfg.phases)
@@ -485,40 +544,7 @@ def _phase_order_warnings(cfg: LoopConfig) -> list[str]:
             "--phases includes 'plan' but not 'implement'; this is planning-only "
             "and will not create implementation PRs"
         )
-    if "drive-green" in selected and "implement" not in selected:
-        warnings.append(
-            "--phases includes 'drive-green' but not 'implement'; "
-            "drive-green will run against PRs not touched this invocation"
-        )
     return warnings
-
-
-def _has_pending_drive_green_work(cfg: LoopConfig, repos: list[str]) -> bool:
-    """Return True when drive-green still has PRs to drive across any repo.
-
-    drive-green runs as the terminal phase AFTER the implement loop converges
-    (it is in :data:`FINAL_LOOP_ONLY_PHASES`). Early-exit must therefore not
-    fire while there is still drive-green work to do — but the mere fact that
-    drive-green is *selected* is not, by itself, pending work. We gate on
-    whether any open PR actually needs CI/merge attention, using the same
-    ``_count_failing_prs`` predicate the driver uses so the gate cannot drift.
-
-    When drive-green is not selected, there is no terminal work to wait for.
-    Returns ``True`` (conservatively keep looping) when at least one repo has a
-    failing/un-green PR.
-    """
-    if "drive-green" not in cfg.phases:
-        return False
-    # An explicit --issues scope pins the work set to specific PRs/issues, but
-    # ``_count_failing_prs`` scans ALL open repo PRs (it has no issue filter), so
-    # it's the wrong signal here — a clean repo-wide scan would wrongly say "no
-    # pending work" and let the loop converge before the terminal drive-green
-    # pass runs against the pinned issues. Keep looping (defer to --loops as the
-    # bound) rather than early-exiting and abandoning the operator's explicit
-    # drive-green work.
-    if cfg.issues:
-        return True
-    return any(_count_failing_prs(cfg.org, repo) > 0 for repo in repos)
 
 
 # ---------------------------------------------------------------------------
@@ -1184,31 +1210,6 @@ def _process_repo_inner(
             )
             continue
 
-        # Some phases only run on the configured final loop. Mirrors bash behavior.
-        if phase in FINAL_LOOP_ONLY_PHASES and loop_idx != cfg.loops:
-            LOG.info("[%s] phase %s SKIP (not final loop)", repo, phase)
-            result.phases.append(
-                PhaseResult(name=phase, skipped=True, skip_reason="not final loop")
-            )
-            continue
-
-        if phase in PHASES_REQUIRING_ISSUES and not open_issues:
-            LOG.info("[%s] phase %s SKIP (no open issues)", repo, phase)
-            result.phases.append(
-                PhaseResult(name=phase, skipped=True, skip_reason="no open issues")
-            )
-            continue
-
-        if phase == "drive-green" and not cfg.issues:
-            failing = _count_failing_prs(cfg.org, repo)
-            if failing == 0:
-                LOG.info("[%s] phase %s SKIP (no failing PRs)", repo, phase)
-                result.phases.append(
-                    PhaseResult(name=phase, skipped=True, skip_reason="no failing PRs")
-                )
-                continue
-            LOG.info("[%s] phase %s has %d failing PR(s) — running", repo, phase, failing)
-
         phase_result = run_phase(
             repo=repo,
             repo_dir=repo_dir,
@@ -1326,6 +1327,102 @@ def _maybe_sleep_for_rate_budget(loop_idx: int, total_loops: int) -> None:
         time.sleep(min(1.0, deadline - time.monotonic()))
 
 
+def _post_loop_stage_skip_reason(
+    cfg: LoopConfig, repo: str, stage: str, open_issues: list[int]
+) -> str | None:
+    """Return a skip reason for ``stage`` in repo ``repo``, or ``None`` to run.
+
+    Encapsulates the per-stage work-discovery gates so ``_run_post_loop_stages``
+    stays under the project complexity budget. Matches the in-loop gating used
+    pre-#818 plus the issue-list gate retained for any future stage opting in
+    via :data:`PHASES_REQUIRING_ISSUES`.
+    """
+    if stage in PHASES_REQUIRING_ISSUES and not open_issues:
+        return "no open issues"
+    # drive-green discovers failing PRs directly (#819 / PR #1060).
+    # When --issues pins specific PRs, defer to drive-green itself.
+    if stage == "drive-green" and not cfg.issues:
+        failing = _count_failing_prs(cfg.org, repo)
+        if failing == 0:
+            return "no failing PRs"
+        LOG.info("[%s] stage %s has %d failing PR(s) — running", repo, stage, failing)
+    return None
+
+
+def _run_post_loop_stages(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
+    """Run post-loop terminal stages (drive-green) once per repo.
+
+    Iterates ``repos`` sequentially (no thread pool) — post-loop stages are
+    terminal and per-repo, so concurrent execution offers no benefit and
+    risks two workers hitting the same PRs. Returns a list of RepoResult
+    with ``loop_idx=cfg.loops`` and ``post_loop_phases`` populated. Any
+    repo-level exception is captured in ``runner_error`` so the helper
+    never raises to the caller (parity with ``process_repo``).
+
+    Post-loop stages run ``run_phase`` with ``loop_idx=cfg.loops`` to mark
+    this as the terminal pass. The old ``HEPH_LOOP_INDEX``/``HEPH_TOTAL_LOOPS``
+    env-gating contract was removed in #820/#1061, so ``_phase_env`` no longer
+    injects loop-index env vars for any phase; the post-loop semantics are now
+    expressed purely by this dedicated terminal stage rather than via env vars.
+    """
+    selected_post = [s for s in ALL_POST_LOOP_STAGES if s in cfg.phases]
+    if not selected_post:
+        return []
+
+    LOG.info("━" * 60)
+    LOG.info("▶ POST-LOOP STAGES: %s", ",".join(selected_post))
+    LOG.info("━" * 60)
+
+    results: list[RepoResult] = []
+    for repo in repos:
+        if _shutdown_requested():
+            LOG.warning("[%s] post-loop SKIP (shutdown requested)", repo)
+            break
+        result = RepoResult(repo=repo, loop_idx=cfg.loops, is_post_loop=True)
+        repo_dir = _resolve_repo_dir(cfg.projects_dir, repo)
+        if not (repo_dir / ".git").exists():
+            result.runner_error = f"repo {repo} not cloned at {repo_dir}"
+            results.append(result)
+            continue
+        try:
+            trunk_sha, _fetch_ok = _rebase_main(repo, repo_dir)
+            open_issues = cfg.issues or _list_open_issue_numbers(cfg.org, repo)
+            for stage in selected_post:
+                skip_reason = _post_loop_stage_skip_reason(cfg, repo, stage, open_issues)
+                if skip_reason is not None:
+                    LOG.info("[%s] stage %s SKIP (%s)", repo, stage, skip_reason)
+                    result.post_loop_phases.append(
+                        PhaseResult(name=stage, skipped=True, skip_reason=skip_reason)
+                    )
+                    continue
+                stage_result = run_phase(
+                    repo=repo,
+                    repo_dir=repo_dir,
+                    phase=stage,
+                    cfg=cfg,
+                    loop_idx=cfg.loops,
+                    open_issues=open_issues,
+                    trunk_sha=trunk_sha,
+                )
+                result.post_loop_phases.append(stage_result)
+                if stage_result.failed:
+                    LOG.warning(
+                        "[%s] post-loop stage %s FAILED rc=%d — retry with: "
+                        "hephaestus-automation-loop --phases %s --repos %s --loops 1",
+                        repo,
+                        stage,
+                        stage_result.rc,
+                        stage,
+                        repo,
+                    )
+        except Exception as exc:
+            tb = traceback.format_exc()
+            result.runner_error = f"{type(exc).__name__}: {exc}\n{tb}"
+            LOG.error("[%s] post-loop runner crashed: %s", repo, exc)
+        results.append(result)
+    return results
+
+
 def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
     """Drive ``cfg.loops`` iterations across ``repos``. Returns flat result list.
 
@@ -1379,24 +1476,19 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
         LOG.info("%s", _summarize_loop(loop_results, loop_idx, elapsed_s))
         LOG.info("Loop %d complete.", loop_idx)
 
-        # Early-exit: the pipeline has converged when the full pass across ALL
-        # repos produced zero new plan work, no failures, AND there is no
-        # remaining drive-green work (every open PR is green / already
-        # state:implementation-go). drive-green is the terminal phase that runs
-        # after the implement loop converges, so we stop as soon as there are no
-        # plans to make and no PRs left to drive — rather than spinning out the
-        # full --loops just because drive-green is selected. --loops stays an
-        # upper bound. (#614; convergence-on-no-pending-PR refinement.)
+        # Early-exit: when the full pass across ALL repos produced zero
+        # convergence-relevant work (0 new plans) and no failures, the
+        # iteration body has converged. Post-loop stages still run after
+        # the break (see below). --loops remains an upper bound. (#614/#818)
         if (
             loop_idx < cfg.loops
-            and not _has_pending_drive_green_work(cfg, repos)
             and not any(r.any_failure for r in loop_results)
             and not any(r.produced_work for r in loop_results)
         ):
             LOG.info(
                 "Early exit after loop %d/%d: full pass produced 0 new plans"
-                " across all %d repo(s) and no open PR needs drive-green."
-                " Remaining loops skipped.",
+                " across all %d repo(s). Remaining loops skipped;"
+                " post-loop stages will still run.",
                 loop_idx,
                 cfg.loops,
                 len(repos),
@@ -1405,14 +1497,27 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
 
         _maybe_sleep_for_rate_budget(loop_idx, cfg.loops)
 
-    # Report actual loops run (may be less than cfg.loops due to early exit)
-    actual_loops = max((r.loop_idx for r in all_results), default=0)
+    # Post-loop terminal stages run once per repo regardless of how the
+    # iteration body exited (exhaustion or early-exit). Per #818.
+    post_loop_results = _run_post_loop_stages(cfg, repos)
+    all_results.extend(post_loop_results)
+
+    # Report actual loops run (may be less than cfg.loops due to early
+    # exit). Post-loop RepoResults are tagged ``is_post_loop=True`` by
+    # ``_run_post_loop_stages``, so filtering on that flag reliably excludes
+    # them even when a crashed/uncloned repo leaves both phase lists empty.
+    # This prevents the post-loop record's loop_idx=cfg.loops from spuriously
+    # inflating the count when early-exit cut the loop body short.
+    per_loop_results = [r for r in all_results if not r.is_post_loop]
+    actual_loops = max((r.loop_idx for r in per_loop_results), default=0)
     LOG.info(
         "✓ Completed %d of %d loop(s) across %d repo(s).",
         actual_loops,
         cfg.loops,
         len(repos),
     )
+    if post_loop_results:
+        LOG.info("%s", _summarize_post_loop(post_loop_results))
     return all_results
 
 
