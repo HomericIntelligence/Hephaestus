@@ -760,7 +760,10 @@ def test_repos_argparse_rejects_space_separated() -> None:
 
 
 def test_gh_list_repos_filters_forks_and_archived() -> None:
-    """``isFork: true`` and ``isArchived: true`` entries are excluded."""
+    """``isFork: true`` and ``isArchived: true`` entries are excluded.
+
+    Repo names are NOT filtered — only isArchived/isFork status gates inclusion.
+    """
     payload = (
         '[{"name":"keep","isFork":false,"isArchived":false},'
         '{"name":"drop-fork","isFork":true,"isArchived":false},'
@@ -772,10 +775,26 @@ def test_gh_list_repos_filters_forks_and_archived() -> None:
             args=[], returncode=0, stdout=payload, stderr=""
         )
         names = loop_runner._gh_list_repos("MyOrg")
-    assert names == ["keep"]
+    # Odysseus is included — no name-based filtering (issue #814).
+    assert sorted(names) == ["Odysseus", "keep"]
     invoked_argv = mock_run.call_args[0][0]
     assert "--no-archived" in invoked_argv
     assert "name,isArchived,isFork" in invoked_argv
+
+
+def test_gh_list_repos_does_not_filter_by_name() -> None:
+    """Regression for #814: only isArchived/isFork gate inclusion, never name."""
+    payload = (
+        '[{"name":"Odysseus","isFork":false,"isArchived":false},'
+        '{"name":"Hephaestus","isFork":false,"isArchived":false},'
+        '{"name":"AnyName","isFork":false,"isArchived":false}]'
+    )
+    with patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=payload, stderr=""
+        )
+        names = loop_runner._gh_list_repos("MyOrg")
+    assert sorted(names) == ["AnyName", "Hephaestus", "Odysseus"]
 
 
 def test_list_open_issue_numbers_returns_all_open_sorted() -> None:

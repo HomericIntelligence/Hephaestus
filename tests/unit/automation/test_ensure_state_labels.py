@@ -3,8 +3,8 @@
 The script is a thin CLI wrapper around ``gh label create --force``. Tests
 mock the ``subprocess.run`` boundary and assert: (1) the right gh commands
 are built per repo and per label, (2) dry-run mutates nothing, (3) org
-enumeration filters archived/fork repos and the Odysseus sandbox, (4) the
-script is idempotent under multiple runs.
+enumeration filters archived/fork repos only — no name-based exclusion,
+(4) the script is idempotent under multiple runs.
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ class TestEnsureLabelsOnRepo:
 
 
 class TestGhListOrgRepos:
-    """Org enumeration filters archives, forks, and Odysseus."""
+    """Org enumeration filters archives and forks only (no name-based skip)."""
 
     def test_returns_sorted_non_archived_non_fork_names(self, mock_run: MagicMock) -> None:
         mock_run.return_value = _ok_proc(
@@ -115,8 +115,22 @@ class TestGhListOrgRepos:
             )
         )
         names = _gh_list_org_repos("AnOrg")
-        # Sorted, archives/forks/Odysseus excluded.
-        assert names == ["ProjectAlpha", "ProjectZeta"]
+        # Sorted, archives/forks excluded. Odysseus is INCLUDED (issue #814).
+        assert names == ["Odysseus", "ProjectAlpha", "ProjectZeta"]
+
+    def test_does_not_filter_by_name(self, mock_run: MagicMock) -> None:
+        """Regression for #814: only isArchived/isFork gate inclusion, never name."""
+        mock_run.return_value = _ok_proc(
+            stdout=json.dumps(
+                [
+                    {"name": "Odysseus", "isArchived": False, "isFork": False},
+                    {"name": "Hephaestus", "isArchived": False, "isFork": False},
+                    {"name": "AnyName", "isArchived": False, "isFork": False},
+                ]
+            )
+        )
+        names = _gh_list_org_repos("AnOrg")
+        assert names == ["AnyName", "Hephaestus", "Odysseus"]
 
     def test_propagates_gh_list_failure(self, mock_run: MagicMock) -> None:
         mock_run.return_value = _fail_proc(rc=4, stderr="rate limit")
