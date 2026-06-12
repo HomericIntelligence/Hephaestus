@@ -249,6 +249,7 @@ repos:
         files: \.(sh|bash|yml|yaml|hcl)$|(^|/)Dockerfile[^/]*$|(^|/)[Jj]ustfile$
         types: [text]
         pass_filenames: true
+        exclude: ^scripts/shell/install\.sh$  # issue #743: intentional || true for brew shellenv tolerance
 
       - id: forbid-continue-on-error
         name: "forbid continue-on-error workflow opt-out"

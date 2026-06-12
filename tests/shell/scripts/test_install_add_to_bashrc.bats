@@ -71,14 +71,15 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
     [ "$(grep -cF '/usr/local/go/bin' "$HOME/.bashrc")" -eq 1 ]
 }
 
-@test "eval failure on whitelisted line surfaces non-zero return code" {
-    # The test verifies that add_to_bashrc returns eval's exit code
-    # When eval '$(...path/shellenv)' runs and the path doesn't exist,
-    # the command substitution fails but produces empty output, so eval
-    # succeeds with an empty string. The real test is the code structure:
-    # we verify the whitelist accepts the form and line gets appended.
-    # The P7/POLA principle is tested via the function capturing _rc.
-    run add_to_bashrc 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"'
-    # Line should be appended even if the binary doesn't exist
-    grep -qF 'brew shellenv' "$HOME/.bashrc"
+@test "whitelisted eval form is accepted even if command not found" {
+    # When a whitelisted eval form references a nonexistent command, the command
+    # substitution fails silently (in subshell), producing empty output. The eval
+    # then executes the empty string and succeeds. The line is still appended to
+    # ~/.bashrc because the append happens before eval. The function's rc-capture
+    # code (local _rc=0; eval || _rc=$?) is in place for when eval truly fails
+    # (e.g., evaluating invalid shell syntax). Callers using || true at call-sites
+    # enforce the P7/POLA principle by making failure suppression visible.
+    run add_to_bashrc 'eval "$(/nonexistent/bin/brew shellenv)"'
+    [ "$status" -eq 0 ]
+    grep -qF '/nonexistent/bin/brew' "$HOME/.bashrc"
 }
