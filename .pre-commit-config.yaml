@@ -279,6 +279,25 @@ repos:
         exclude: ^\.github/workflows/_required\.yml$
         pass_filenames: true
 
+      - id: forbid-unwhitelisted-add-to-bashrc
+        name: "forbid non-whitelisted add_to_bashrc call-site (#743)"
+        description: >
+          add_to_bashrc passes its argument to `eval`. Only two shapes are
+          permitted (see ADD_TO_BASHRC_ALLOWED_RE in scripts/shell/install.sh):
+          (1) `eval "$(<abs-path> shellenv)"` or
+          (2) `export PATH=$PATH:<path>` (path may contain $dir for caller
+          expansion; $(...) and other substitution forms are forbidden).
+          Any other shape would let untrusted input reach eval. If you need
+          a new shape, extend BOTH this hook and the shell constant in the
+          same commit.
+        language: pygrep
+        # Pygrep fails when the regex matches. We match any add_to_bashrc
+        # call whose quoted argument is NOT one of the two whitelisted
+        # shapes. Verified against the four real call-sites plus five
+        # synthetic violations (Python re; 9/9 pass at planning time).
+        entry: 'add_to_bashrc\s+"(?!(?:eval \\"\\\$\(/[A-Za-z0-9._/\-]+ shellenv\)\\"|export PATH=\\\$PATH:[A-Za-z0-9._/\-$]+)")[^"]*"'
+        files: ^scripts/shell/install\.sh$
+        pass_filenames: true
   # Shellcheck for shell scripts
   - repo: https://github.com/shellcheck-py/shellcheck-py
     rev: v0.10.0.1
