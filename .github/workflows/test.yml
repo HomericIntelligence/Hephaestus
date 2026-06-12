@@ -1,3 +1,17 @@
+# Platform scope: Linux-only.
+#
+# This workflow intentionally runs only on `ubuntu-latest`. The project's pixi
+# environment targets `linux-64` exclusively (see `pixi.toml` `[workspace]`
+# platforms), so the CI test matrix mirrors the supported development surface.
+#
+# macOS and Windows support is tracked separately in #539 and is currently
+# out of scope. The published wheels remain pure-Python and importable on
+# other platforms (see CONTRIBUTING.md "Platform Support"), but CI does
+# not exercise them there.
+#
+# When #539 lands, expand `matrix.os` here and remove this header.
+# Tracking: #794, #539.
+
 name: Test
 
 # Cross-Python compatibility matrix.
