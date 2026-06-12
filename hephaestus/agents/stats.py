@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.loader import AgentInfo, load_all_agents
-from hephaestus.cli.utils import add_json_arg, format_output
+from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 
 # ---------------------------------------------------------------------------
 # Stats computation
@@ -243,6 +243,7 @@ def main() -> int:
         help="Write output to file instead of stdout",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
 
     args = parser.parse_args()
 

@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status, format_output
 
 _yaml: Any | None = None
 try:
@@ -317,6 +317,7 @@ def check_workflow_inventory_main() -> int:
         help="Repository root (default: auto-detect via git)",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
     args = parser.parse_args()
 
     if args.repo_root is not None:
@@ -380,6 +381,7 @@ def validate_workflow_checkout_main() -> int:
         help="Workflow files or directories (default: .github/workflows/)",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
     args = parser.parse_args()
 
     target_paths: list[str] = args.paths

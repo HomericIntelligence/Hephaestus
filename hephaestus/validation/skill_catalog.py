@@ -30,7 +30,7 @@ import sys
 from pathlib import Path
 
 from hephaestus.agents.frontmatter import check_agent_file, extract_frontmatter_parsed
-from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.discovery.skills import discover_skills
 from hephaestus.utils.helpers import get_repo_root
 
@@ -239,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Repository root (default: auto-detect)",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
     args = parser.parse_args(argv)
 
     repo_root: Path = args.repo_root or get_repo_root()

@@ -20,7 +20,7 @@ import sys
 from datetime import datetime
 from typing import Any
 
-from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status, format_output
 from hephaestus.utils.helpers import METADATA_TIMEOUT
 
 # ---------------------------------------------------------------------------
@@ -325,6 +325,7 @@ def main() -> int:
     parser.add_argument("--author", help="Filter by author username")
     parser.add_argument("--repo", help="Repository (owner/repo), defaults to current repo")
     add_json_arg(parser)
+    add_version_arg(parser)
 
     args = parser.parse_args()
 

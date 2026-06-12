@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
-from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status, format_output
 from hephaestus.utils.helpers import get_repo_root
 
 HIGH_THRESHOLD: float = 7.0
@@ -158,6 +158,7 @@ def main() -> int:
     """
     parser = _build_parser()
     add_json_arg(parser)
+    add_version_arg(parser)
     args = parser.parse_args()
 
     ignore_ids = load_ignore_list(args.ignore_file)

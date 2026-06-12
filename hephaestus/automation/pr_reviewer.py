@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import is_codex, resolve_agent, run_codex_text
-from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 
 from ._review_utils import (
     build_review_parser,
@@ -900,6 +900,7 @@ Examples:
         dry_run_help="Show what would be done without actually posting any review comments",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
     return parser.parse_args()
 
 

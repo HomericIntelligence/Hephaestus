@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg
+from hephaestus.cli.utils import add_json_arg, add_version_arg
 from hephaestus.utils.helpers import get_repo_root
 
 # ---------------------------------------------------------------------------
@@ -377,6 +377,7 @@ def main() -> int:
         help="Additional path prefix to exclude (may be repeated)",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
 
     args = parser.parse_args()
     repo_root: Path = args.repo_root or get_repo_root()

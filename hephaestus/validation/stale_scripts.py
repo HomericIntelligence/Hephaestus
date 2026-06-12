@@ -29,7 +29,7 @@ import re
 import sys
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg, format_output
+from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 
 # Scripts that are imported by other scripts (not invoked directly) — always active.
 _ALWAYS_ACTIVE: frozenset[str] = frozenset(
@@ -285,6 +285,7 @@ def main() -> int:
         help="Exclude scripts whose name contains PATTERN (e.g. 'test_')",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
 
     args = parser.parse_args()
 

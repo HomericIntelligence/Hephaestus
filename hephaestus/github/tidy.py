@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument, is_codex, resolve_agent, run_codex_text
-from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.github.pr_merge import detect_repo_from_remote
 from hephaestus.logging.utils import get_logger
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
@@ -454,6 +454,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     add_agent_argument(parser)
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
     add_json_arg(parser)
+    add_version_arg(parser)
     return parser
 
 

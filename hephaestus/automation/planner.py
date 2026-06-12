@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument, resolve_agent
-from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 
 from .advise_runner import advise_skipped, ensure_mnemosyne, run_advise
 from .claude_models import advise_model
@@ -548,6 +548,7 @@ Examples:
         help="Enable verbose logging",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
 
     return parser.parse_args()
 

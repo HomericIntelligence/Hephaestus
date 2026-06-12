@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument, is_codex, resolve_agent, run_codex_text
-from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.github.rate_limit import detect_rate_limit, wait_until
 from hephaestus.logging.utils import get_logger
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
@@ -838,6 +838,7 @@ def main() -> int:
     add_agent_argument(parser)
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
     add_json_arg(parser)
+    add_version_arg(parser)
     args = parser.parse_args()
     agent = resolve_agent(args.agent)
     args.agent = agent

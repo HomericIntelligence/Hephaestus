@@ -22,7 +22,7 @@ import logging
 from pathlib import Path
 
 from hephaestus.agents.runtime import add_agent_argument, resolve_agent
-from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 
 from .models import ImplementerOptions
 
@@ -160,6 +160,7 @@ Examples:
         help="Enable verbose logging",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
 
     args = parser.parse_args()
 

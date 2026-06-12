@@ -21,7 +21,7 @@ import re
 import sys
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg, format_output
+from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 
 
 def is_shadowing_pattern(alias: str, target: str) -> bool:
@@ -180,6 +180,7 @@ def main() -> int:
         help="Print verbose output",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
 
     args = parser.parse_args()
 

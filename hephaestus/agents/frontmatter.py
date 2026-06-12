@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from hephaestus.cli.utils import add_json_arg, format_output
+from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 
 _yaml: Any | None = None
 try:
@@ -286,6 +286,7 @@ def validate_agents_main(argv: list[str] | None = None) -> int:
         help="Treat warnings as errors",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
     args = parser.parse_args(argv)
 
     if args.agents_dir is not None:

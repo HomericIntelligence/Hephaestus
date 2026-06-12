@@ -13,7 +13,7 @@ from hephaestus.agents.runtime import (
     run_claude_text,
     run_codex_session,
 )
-from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the agent command before running",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
     return parser
 
 

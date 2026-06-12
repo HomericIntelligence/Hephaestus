@@ -130,6 +130,49 @@ class TestCLIJsonFlag:
         )
 
 
+class TestCLIVersionFlag:
+    """Every console script must respond to ``--version`` with exit code 0."""
+
+    @pytest.mark.parametrize("command,module_path,attr", ENTRY_POINTS, ids=ENTRY_POINT_IDS)
+    def test_version_flag(self, command: str, module_path: str, attr: str) -> None:
+        """``<cmd> --version`` must exit 0 and print a version line."""
+        if sys.platform == "win32" and "automation" in module_path:
+            pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
+        binary: str | None = shutil.which(command)
+        if binary is None:
+            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
+        assert binary is not None
+
+        result = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, (
+            f"{command} --version exited {result.returncode}\n"
+            f"stdout: {result.stdout[:500]}\n"
+            f"stderr: {result.stderr[:500]}"
+        )
+        combined = result.stdout + result.stderr
+        assert command in combined, (
+            f"{command} --version output did not include the command name.\n"
+            f"output: {combined[:500]}"
+        )
+
+    @pytest.mark.parametrize("command,module_path,attr", ENTRY_POINTS, ids=ENTRY_POINT_IDS)
+    def test_version_flag_short_form(self, command: str, module_path: str, attr: str) -> None:
+        """``<cmd> -V`` must also work (short form of --version)."""
+        if sys.platform == "win32" and "automation" in module_path:
+            pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
+        binary: str | None = shutil.which(command)
+        if binary is None:
+            pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
+        assert binary is not None
+
+        result = subprocess.run([binary, "-V"], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, (
+            f"{command} -V exited {result.returncode}\n"
+            f"stdout: {result.stdout[:500]}\n"
+            f"stderr: {result.stderr[:500]}"
+        )
+
+
 class TestCLIEntryPointDiscovery:
     """Sanity-check the discovery itself."""
 

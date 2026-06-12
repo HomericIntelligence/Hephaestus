@@ -40,7 +40,7 @@ from urllib.parse import urlparse
 from hephaestus.agents.runtime import add_agent_argument, resolve_agent
 from hephaestus.automation.ci_driver import _pr_is_failing
 from hephaestus.automation.claude_timeouts import gh_cli_timeout
-from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.config.paths import DEFAULT_PROJECTS_DIR, resolve_projects_dir
 from hephaestus.constants import scripts_dir as _scripts_dir
 from hephaestus.resilience.subprocess_resilience import resilient_call
@@ -444,6 +444,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("-v", "--verbose", action="store_true", help="Enable DEBUG logging")
     add_json_arg(p)
+    add_version_arg(p)
     return p.parse_args(argv)
 
 

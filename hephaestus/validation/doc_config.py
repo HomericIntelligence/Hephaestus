@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
-from hephaestus.cli.utils import add_json_arg, format_output
+from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 from hephaestus.io.toml import import_tomllib
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
@@ -464,6 +464,7 @@ def main() -> int:
         help="Skip the live pytest --collect-only test count check",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
 
     args = parser.parse_args()
 
