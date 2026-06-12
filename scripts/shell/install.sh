@@ -15,6 +15,20 @@
 #   0 — all checks passed (or installed successfully)
 #   1 — one or more checks failed
 #
+# Architecture (see docs/INSTALLER_ARCHITECTURE.md):
+#   12 numbered sections (Section 0 Homebrew … Section 11 PATH + Summary)
+#   intentionally live in this one file. The SRP boundary that matters is
+#   already in scripts/shell/lib/install_helpers.sh, which extracts reusable
+#   primitives (colors, counters, has_cmd, apt_install, install_github_binary,
+#   version_gte). The sections themselves share three pieces of state that
+#   make splitting expensive:
+#     1. _PASS/_FAIL/_WARN/_SKIP counters (defined in lib/install_helpers.sh)
+#     2. The --role filter via should_check_worker / should_check_control
+#     3. The single trailing summary that aggregates results across sections
+#   A per-tool split would require replicating these in every child or
+#   threading them through a dispatcher. See the doc for the triggers that
+#   would justify revisiting this decision.
+#
 set -uo pipefail
 
 # ─── Shared helpers (colors, counters, has_cmd, apt_install, etc.) ────────────
