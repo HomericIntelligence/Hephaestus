@@ -53,7 +53,7 @@ dev = [
     # Upper-cap kept in lockstep with pixi.toml [feature.dev]/[feature.lint] —
     # mypy 1.x and 2.x have different error semantics; CI tests only 1.x.
     # Enforced by tests/unit/scripts/test_dependency_floor_consistency.py.
-    "mypy>=1.8.0,<2",
+    "mypy>=1.8.0,<3",
     "build>=1.0,<2",
     "pip-audit>=2.7,<3",
     "tomli>=2.0,<3;python_version<'3.11'",

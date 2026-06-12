@@ -62,7 +62,7 @@ editables = ">=0.5,<1"
 pre-commit = ">=3.0,<5"
 types-pyyaml = ">=6.0.12,<7"
 ruff = ">=0.1.0,<1"
-mypy = ">=1.8.0,<2"
+mypy = ">=1.8.0,<3"
 # yamllint floor tracks the .pre-commit-config.yaml mirror rev (v1.38.0) so the
 # local hook and the pixi-driven CI `lint` job resolve the same major/minor.
 # See the single-source-of-truth note at the top of .pre-commit-config.yaml.
