@@ -332,7 +332,7 @@ class TestMain:
         """main() with --json emits ok envelope when no failures occur."""
         from hephaestus.github import fleet_sync
 
-        def fake_process(repo, args, clone_dir, *, symbols=None):
+        def fake_process(repo, org, args, clone_dir, *, symbols=None):
             return {
                 "merged": 1,
                 "rebased": 0,
@@ -344,7 +344,7 @@ class TestMain:
         monkeypatch.setattr(fleet_sync, "process_repo", fake_process)
         monkeypatch.setattr(
             "sys.argv",
-            ["fleet-sync", "--repos", "owner/a", "--json", "--dry-run", "--agent", "claude"],
+            ["fleet-sync", "--org", "owner", "--repos", "a", "--json", "--dry-run", "--agent", "claude"],
         )
         assert fleet_sync.main() == 0
         payload = json.loads(capsys.readouterr().out)
@@ -356,7 +356,7 @@ class TestMain:
         """main() with failures returns 1 and JSON envelope shows error."""
         from hephaestus.github import fleet_sync
 
-        def fake_process(repo, args, clone_dir, *, symbols=None):
+        def fake_process(repo, org, args, clone_dir, *, symbols=None):
             return {
                 "merged": 0,
                 "rebased": 0,
@@ -368,7 +368,7 @@ class TestMain:
         monkeypatch.setattr(fleet_sync, "process_repo", fake_process)
         monkeypatch.setattr(
             "sys.argv",
-            ["fleet-sync", "--repos", "owner/a", "--json", "--dry-run", "--agent", "claude"],
+            ["fleet-sync", "--org", "owner", "--repos", "a", "--json", "--dry-run", "--agent", "claude"],
         )
         assert fleet_sync.main() == 1
         payload = json.loads(capsys.readouterr().out)
@@ -381,7 +381,7 @@ class TestMain:
 
         calls = []
 
-        def fake_process(repo, args, clone_dir, *, symbols=None):
+        def fake_process(repo, org, args, clone_dir, *, symbols=None):
             calls.append(repo)
             return {
                 "merged": 0,
@@ -394,10 +394,10 @@ class TestMain:
         monkeypatch.setattr(fleet_sync, "process_repo", fake_process)
         monkeypatch.setattr(
             "sys.argv",
-            ["fleet-sync", "--repos", "owner/a", "owner/b", "--dry-run", "--agent", "claude"],
+            ["fleet-sync", "--org", "owner", "--repos", "a", "b", "--dry-run", "--agent", "claude"],
         )
         assert fleet_sync.main() == 0
-        assert calls == ["owner/a", "owner/b"]
+        assert calls == ["a", "b"]
 
 
 class TestTimeoutHandling:
@@ -529,7 +529,7 @@ class TestCloneReuseAndWorktrees:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch.object(fleet_sync_module, "_git", side_effect=fake_git):
-            path = fleet_sync_module.ensure_repo_clone("RepoA", tmp_path)
+            path = fleet_sync_module.ensure_repo_clone("RepoA", "HomericIntelligence", tmp_path)
 
         assert path == tmp_path / "RepoA"
         assert calls[0][0] == "clone"
@@ -545,7 +545,7 @@ class TestCloneReuseAndWorktrees:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch.object(fleet_sync_module, "_git", side_effect=fake_git):
-            path = fleet_sync_module.ensure_repo_clone("RepoA", tmp_path)
+            path = fleet_sync_module.ensure_repo_clone("RepoA", "HomericIntelligence", tmp_path)
 
         assert path == tmp_path / "RepoA"
         # Reuse path fetches, never clones.
@@ -925,7 +925,7 @@ class TestAsciiFlag:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capture_fleet_sync_logs
     ) -> None:
         """process_repo logs ASCII banner under ASCII_SYMBOLS — no module state."""
-        monkeypatch.setattr(fleet_sync_module, "list_prs", lambda _repo: [])
+        monkeypatch.setattr(fleet_sync_module, "list_prs", lambda _repo, _org: [])
 
         import argparse
 
@@ -940,7 +940,11 @@ class TestAsciiFlag:
             )
 
             fleet_sync_module.process_repo(
-                "test-repo", args, tmp_path, symbols=fleet_sync_module.ASCII_SYMBOLS
+                "test-repo",
+                "HomericIntelligence",
+                args,
+                tmp_path,
+                symbols=fleet_sync_module.ASCII_SYMBOLS,
             )
 
             # Check logged messages
@@ -952,7 +956,7 @@ class TestAsciiFlag:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capture_fleet_sync_logs
     ) -> None:
         """Default kwarg gives Unicode — backward-compat for existing callers."""
-        monkeypatch.setattr(fleet_sync_module, "list_prs", lambda _repo: [])
+        monkeypatch.setattr(fleet_sync_module, "list_prs", lambda _repo, _org: [])
 
         import argparse
 
@@ -966,7 +970,7 @@ class TestAsciiFlag:
                 ascii=False,
             )
 
-            fleet_sync_module.process_repo("test-repo", args, tmp_path)
+            fleet_sync_module.process_repo("test-repo", "HomericIntelligence", args, tmp_path)
 
             # Check logged messages
             output = "\n".join(logged_messages)
