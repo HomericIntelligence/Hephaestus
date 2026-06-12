@@ -23,7 +23,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg
+from hephaestus.cli.utils import add_json_arg, add_version_arg
 from hephaestus.io.toml import import_tomllib
 from hephaestus.utils.helpers import get_repo_root
 
@@ -166,6 +166,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=None)
     add_json_arg(parser)
+    add_version_arg(parser)
     args = parser.parse_args(argv)
     repo_root = args.repo_root or get_repo_root()
     scripts = load_pyproject_scripts(repo_root / "pyproject.toml")

@@ -198,7 +198,10 @@ class TestCircuitBreakerOpenError:
     def test_half_open_exhausted_reports_distinct_reason(self) -> None:
         """HALF_OPEN with no slots raises HALF_OPEN_EXHAUSTED with time_until_recovery=0.0."""
         cb = CircuitBreaker(
-            "test", failure_threshold=1, recovery_timeout=0.05, half_open_max_calls=1,
+            "test",
+            failure_threshold=1,
+            recovery_timeout=0.05,
+            half_open_max_calls=1,
         )
         with pytest.raises(RuntimeError):
             cb.call(MagicMock(side_effect=RuntimeError("fail")))
@@ -228,7 +231,9 @@ class TestCircuitBreakerOpenError:
     def test_reason_string_value_matches_enum(self) -> None:
         """Reason is string-equality-comparable via the (str, Enum) mixin."""
         err = CircuitBreakerOpenError(
-            "x", 0.0, reason=CircuitBreakerOpenReason.HALF_OPEN_EXHAUSTED,
+            "x",
+            0.0,
+            reason=CircuitBreakerOpenReason.HALF_OPEN_EXHAUSTED,
         )
         assert err.reason == "half_open_exhausted"
         assert err.reason is CircuitBreakerOpenReason.HALF_OPEN_EXHAUSTED

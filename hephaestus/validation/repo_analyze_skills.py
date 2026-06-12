@@ -16,7 +16,7 @@ from string import Template
 
 import yaml
 
-from hephaestus.cli.utils import add_json_arg
+from hephaestus.cli.utils import add_json_arg, add_version_arg
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMMON_DIR = REPO_ROOT / "skills" / "_repo_analyze_common"
@@ -150,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Regenerate SKILL.md files in place",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
     args = parser.parse_args(argv)
 
     spec = yaml.safe_load((COMMON_DIR / "variants.yaml").read_text(encoding="utf-8"))

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import is_codex, run_codex_text
-from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import reviewer_model
@@ -249,6 +249,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="DEBUG-level logging.")
     add_json_arg(parser)
+    add_version_arg(parser)
     return parser
 
 
