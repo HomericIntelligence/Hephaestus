@@ -206,6 +206,13 @@ repos:
         language: system
         pass_filenames: false
         files: ^SECURITY\.md$
+      - id: check-security-version-consistency
+        name: Check SECURITY.md supported versions match git tags
+        description: Ensure SECURITY.md supported/EOL rows track the latest vX.Y.Z tag
+        entry: python3 scripts/check_security_version_consistency.py
+        language: system
+        pass_filenames: false
+        files: ^SECURITY\.md$
 
 
   # Skill merge method check: skills must not hardcode merge flags
