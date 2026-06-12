@@ -309,6 +309,16 @@ def resolve_fleet_config(
     if not final_org:
         raise RuntimeError("no fleet org configured. Set --org, FLEET_ORG, or org: in .fleet.yml")
 
+    # Distinguish "FLEET_REPOS set but empty after comma-split" from "unset" so
+    # operators can tell a typo'd value (e.g. " , , " or "") apart from simply
+    # not having configured the env var. Only fires when no higher-priority CLI
+    # value overrides it.
+    if not cli_repos and env_repos_raw is not None and env_repos is None:
+        raise RuntimeError(
+            f"FLEET_REPOS is set but contains no valid entries after comma-split "
+            f"(got {env_repos_raw!r})"
+        )
+
     final_repos = cli_repos or env_repos or file_repos
 
     if not final_repos:

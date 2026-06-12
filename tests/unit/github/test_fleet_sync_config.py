@@ -86,15 +86,54 @@ class TestResolveFleetConfig:
         assert all(isinstance(r, str) for r in repos)
 
     def test_env_repos_empty_after_split_raises(self, monkeypatch, tmp_path) -> None:
-        """FLEET_REPOS set but with no valid entries fails with clear error."""
+        """FLEET_REPOS set but with no valid entries fails with the differentiated error.
+
+        The matcher pins the FLEET_REPOS-specific diagnostic (``FLEET_REPOS is set``)
+        rather than the substring ``FLEET_REPOS``, which the generic fallback message
+        ("no fleet repos configured. Set --repos, FLEET_REPOS, ...") would also satisfy.
+        """
         monkeypatch.setenv("FLEET_ORG", "Org")
         monkeypatch.setenv("FLEET_REPOS", " , , ")
-        with pytest.raises(RuntimeError, match="FLEET_REPOS"):
+        with pytest.raises(RuntimeError, match=r"FLEET_REPOS is set but contains no valid entries"):
             resolve_fleet_config(
                 cli_org=None,
                 cli_repos=None,
                 config_path=str(tmp_path / "nope.yml"),
             )
+
+    def test_env_repos_empty_string_raises_differentiated_error(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """FLEET_REPOS='' (set but empty) hits the differentiated error, not the generic one.
+
+        ``FLEET_REPOS=''`` follows the set-but-empty path (raw is ``''`` not ``None``),
+        so operators must see the FLEET_REPOS-specific diagnostic to tell it apart from
+        leaving the variable unset.
+        """
+        monkeypatch.setenv("FLEET_ORG", "Org")
+        monkeypatch.setenv("FLEET_REPOS", "")
+        with pytest.raises(RuntimeError, match=r"FLEET_REPOS is set but contains no valid entries"):
+            resolve_fleet_config(
+                cli_org=None,
+                cli_repos=None,
+                config_path=str(tmp_path / "nope.yml"),
+            )
+
+    def test_cli_repos_override_bad_env_repos(self, monkeypatch, tmp_path) -> None:
+        """An explicit --repos overrides a malformed FLEET_REPOS without erroring.
+
+        The differentiated FLEET_REPOS error must NOT fire when a higher-priority CLI
+        value is present, since the bad env var is irrelevant in that case.
+        """
+        monkeypatch.setenv("FLEET_ORG", "Org")
+        monkeypatch.setenv("FLEET_REPOS", " , , ")
+        org, repos = resolve_fleet_config(
+            cli_org=None,
+            cli_repos=["repoX"],
+            config_path=str(tmp_path / "nope.yml"),
+        )
+        assert org == "Org"
+        assert repos == ["repoX"]
 
     def test_missing_config_file_falls_through_to_env(self, monkeypatch, tmp_path) -> None:
         """Missing config file does not raise — falls through to env vars."""

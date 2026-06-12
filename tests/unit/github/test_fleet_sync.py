@@ -620,7 +620,7 @@ class TestCloneReuseAndWorktrees:
         prs = [_pr(n, PRStatus.OUTDATED, head=f"feat{n}") for n in (1, 2, 3)]
         clone_count = [0]
 
-        def fake_ensure(repo, clone_dir, dry_run=False):
+        def fake_ensure(repo, org, clone_dir, dry_run=False):
             clone_count[0] += 1
             return clone_dir / repo
 
@@ -631,7 +631,7 @@ class TestCloneReuseAndWorktrees:
             patch.object(fleet_sync_module, "ensure_repo_clone", side_effect=fake_ensure),
             patch.object(fleet_sync_module, "rebase_and_resign", return_value=True),
         ):
-            counts = fleet_sync_module.process_repo("RepoA", args, tmp_path)
+            counts = fleet_sync_module.process_repo("RepoA", "HomericIntelligence", args, tmp_path)
 
         assert clone_count[0] == 1
         assert counts["rebased"] == 3
@@ -641,7 +641,7 @@ class TestCloneReuseAndWorktrees:
         prs = [_pr(1, PRStatus.READY, head="feat1")]
         clone_count = [0]
 
-        def fake_ensure(repo, clone_dir, dry_run=False):
+        def fake_ensure(repo, org, clone_dir, dry_run=False):
             clone_count[0] += 1
             return clone_dir / repo
 
@@ -652,7 +652,7 @@ class TestCloneReuseAndWorktrees:
             patch.object(fleet_sync_module, "ensure_repo_clone", side_effect=fake_ensure),
             patch.object(fleet_sync_module, "merge_pr", return_value=True),
         ):
-            counts = fleet_sync_module.process_repo("RepoA", args, tmp_path)
+            counts = fleet_sync_module.process_repo("RepoA", "HomericIntelligence", args, tmp_path)
 
         assert clone_count[0] == 0
         assert counts["merged"] == 1
@@ -870,13 +870,13 @@ class TestListPrsAuthorScope:
         """The ``gh pr list`` argv must include ``--author @me``."""
         captured_argv: list[list[str]] = []
 
-        def fake_gh(args, repo):
+        def fake_gh(args, repo=None, org=None, **kwargs):
             captured_argv.append(args)
             return MagicMock(stdout="[]")
 
         monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
 
-        fleet_sync_module.list_prs("RepoA")
+        fleet_sync_module.list_prs("RepoA", "HomericIntelligence")
 
         assert captured_argv, "_gh was never called"
         pr_list_argv = captured_argv[0]
@@ -895,10 +895,10 @@ class TestListPrsAuthorScope:
         monkeypatch.setattr(
             fleet_sync_module,
             "_fetch_pr_ci_state",
-            lambda repo, number: "SUCCESS",
+            lambda repo, number, org=None: "SUCCESS",
         )
 
-        def fake_gh(args, repo):
+        def fake_gh(args, repo=None, org=None, **kwargs):
             assert "--author" in args and args[args.index("--author") + 1] == "@me"
             payload = [
                 {
@@ -915,7 +915,7 @@ class TestListPrsAuthorScope:
 
         monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
 
-        prs = fleet_sync_module.list_prs("RepoA")
+        prs = fleet_sync_module.list_prs("RepoA", "HomericIntelligence")
 
         assert [p.number for p in prs] == [1]
 
