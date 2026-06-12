@@ -1,10 +1,14 @@
 """Tests for shared review utilities (_review_utils.py)."""
 
+import argparse
 import json
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from hephaestus.automation._review_utils import (
+    add_max_workers_arg,
     find_pr_for_issue,
     get_pr_head_branch,
     parse_json_block,
@@ -266,3 +270,48 @@ class TestGetPrHeadBranch:
             side_effect=RuntimeError("gh boom"),
         ):
             assert get_pr_head_branch(996) is None
+
+
+# ---------------------------------------------------------------------------
+# add_max_workers_arg
+# ---------------------------------------------------------------------------
+
+
+class TestAddMaxWorkersArg:
+    """Tests for the shared add_max_workers_arg helper."""
+
+    def test_default_help_and_value(self) -> None:
+        """Default case: uses standard help text and default=3."""
+        parser = argparse.ArgumentParser()
+        add_max_workers_arg(parser)
+        args = parser.parse_args([])
+        assert args.max_workers == 3
+
+    def test_custom_help_text(self) -> None:
+        """Custom help_text is used in the parser."""
+        parser = argparse.ArgumentParser()
+        add_max_workers_arg(parser, help_text="custom help")
+        assert "custom help" in parser.format_help()
+
+    def test_accepts_valid_values(self) -> None:
+        """Valid range 1-32 accepted."""
+        parser = argparse.ArgumentParser()
+        add_max_workers_arg(parser)
+        args = parser.parse_args(["--max-workers", "16"])
+        assert args.max_workers == 16
+
+    @pytest.mark.parametrize("bad", ["0", "-1", "33", "100"])
+    def test_rejects_out_of_range(self, bad: str) -> None:
+        """Out-of-range values 0, -1, 33+ are rejected with exit code 2."""
+        parser = argparse.ArgumentParser()
+        add_max_workers_arg(parser)
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args(["--max-workers", bad])
+        assert excinfo.value.code == 2
+
+    def test_custom_default(self) -> None:
+        """Custom default value is honored."""
+        parser = argparse.ArgumentParser()
+        add_max_workers_arg(parser, default=8)
+        args = parser.parse_args([])
+        assert args.max_workers == 8

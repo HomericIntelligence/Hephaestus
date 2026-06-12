@@ -182,3 +182,30 @@ class TestCLIEntryPointDiscovery:
     def test_no_duplicate_commands(self) -> None:
         commands = [ep[0] for ep in ENTRY_POINTS]
         assert len(commands) == len(set(commands)), "Duplicate command names in [project.scripts]"
+
+
+class TestMaxWorkersValidation:
+    """Regression for #723: --max-workers validation must be consistent."""
+
+    def test_automation_loop_rejects_zero_max_workers(self) -> None:
+        """hephaestus-automation-loop --max-workers=0 exits non-zero with clear error."""
+        import os
+
+        binary = shutil.which("hephaestus-automation-loop")
+        if binary is None:
+            pytest.skip("hephaestus-automation-loop not on PATH")
+        assert binary is not None  # narrow Optional[str] for mypy
+
+        env = os.environ.copy()
+        env.pop("PYTHONPATH", None)
+        result = subprocess.run(
+            [binary, "--max-workers", "0"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env=env,
+        )
+        assert result.returncode != 0, "Expected non-zero exit for --max-workers=0"
+        assert "--max-workers" in result.stderr, "Error must mention --max-workers argument"
+        assert "invalid choice" in result.stderr.lower(), "Error must mention invalid choice"

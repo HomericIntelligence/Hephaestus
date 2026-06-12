@@ -22,6 +22,7 @@ import logging
 from pathlib import Path
 
 from hephaestus.agents.runtime import add_agent_argument, resolve_agent
+from hephaestus.automation._review_utils import add_max_workers_arg
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 
 from .models import ImplementerOptions
@@ -105,14 +106,7 @@ Examples:
         action="store_true",
         help="Resume previous implementation from saved state",
     )
-    parser.add_argument(
-        "--max-workers",
-        type=int,
-        default=3,
-        choices=range(1, 33),
-        metavar="N",
-        help="Maximum number of parallel workers, 1-32 (default: 3)",
-    )
+    add_max_workers_arg(parser)
     parser.add_argument(
         "--no-skip-closed",
         action="store_true",

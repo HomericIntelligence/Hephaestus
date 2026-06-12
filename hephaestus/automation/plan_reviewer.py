@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument, is_codex, resolve_agent, run_codex_text
+from hephaestus.automation._review_utils import add_max_workers_arg
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 from hephaestus.github.rate_limit import wait_until
 
@@ -647,14 +648,7 @@ Examples:
         help="Issue numbers whose plans should be reviewed",
     )
     add_agent_argument(parser)
-    parser.add_argument(
-        "--max-workers",
-        type=int,
-        default=3,
-        choices=range(1, 33),
-        metavar="N",
-        help="Maximum number of parallel workers, 1-32 (default: 3)",
-    )
+    add_max_workers_arg(parser)
     parser.add_argument(
         "--dry-run",
         action="store_true",

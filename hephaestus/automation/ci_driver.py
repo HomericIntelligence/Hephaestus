@@ -32,7 +32,7 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 
-from ._review_utils import find_pr_for_issue
+from ._review_utils import add_max_workers_arg, find_pr_for_issue
 from .advise_runner import run_advise
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import advise_model, implementer_model
@@ -3117,14 +3117,7 @@ Examples:
         ),
     )
     add_agent_argument(parser)
-    parser.add_argument(
-        "--max-workers",
-        type=int,
-        default=3,
-        choices=range(1, 33),
-        metavar="N",
-        help="Maximum number of parallel workers, 1-32 (default: 3)",
-    )
+    add_max_workers_arg(parser)
     parser.add_argument(
         "--dry-run",
         action="store_true",

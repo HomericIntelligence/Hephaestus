@@ -38,6 +38,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from hephaestus.agents.runtime import add_agent_argument, resolve_agent
+from hephaestus.automation._review_utils import add_max_workers_arg
 from hephaestus.automation.ci_driver import _pr_is_failing
 from hephaestus.automation.claude_timeouts import gh_cli_timeout
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
@@ -339,11 +340,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--dry-run", action="store_true", help="Pass --dry-run to every phase")
     p.add_argument("--loops", type=int, default=5, help="Number of loop iterations (default: 5)")
-    p.add_argument(
-        "--max-workers",
-        type=int,
-        default=3,
-        help="Parallel workers per repo per phase (default: 3). Passed to each phase binary.",
+    add_max_workers_arg(
+        p,
+        help_text="Parallel workers per repo per phase (1-32, default: 3). Passes to child phases.",
     )
     p.add_argument(
         "--parallel-repos",

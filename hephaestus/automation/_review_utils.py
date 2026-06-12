@@ -49,6 +49,35 @@ def setup_review_logging(verbose: bool = False) -> None:
     )
 
 
+def add_max_workers_arg(
+    parser: argparse.ArgumentParser,
+    *,
+    default: int = 3,
+    help_text: str = "Maximum number of parallel workers, 1-32 (default: 3)",
+) -> None:
+    """Add a validated ``--max-workers`` argument to ``parser``.
+
+    Centralises the validation used by every automation CLI so that
+    ``hephaestus-automation-loop`` cannot accept a value (e.g. ``0`` or ``-1``)
+    that a child phase will later reject — see #723.
+
+    Args:
+        parser: Parser to mutate.
+        default: Default worker count when the flag is omitted.
+        help_text: Help string. Callers that pass workers through to child
+            binaries (e.g. ``loop_runner``) override the default phrasing.
+
+    """
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=default,
+        choices=range(1, 33),
+        metavar="N",
+        help=help_text,
+    )
+
+
 def build_review_parser(
     description: str,
     epilog: str | None = None,
@@ -87,14 +116,7 @@ def build_review_parser(
         help=issues_help,
     )
     add_agent_argument(parser)
-    parser.add_argument(
-        "--max-workers",
-        type=int,
-        default=3,
-        choices=range(1, 33),
-        metavar="N",
-        help="Maximum number of parallel workers, 1-32 (default: 3)",
-    )
+    add_max_workers_arg(parser)
     parser.add_argument(
         "--dry-run",
         action="store_true",

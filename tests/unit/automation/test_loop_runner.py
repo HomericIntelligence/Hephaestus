@@ -168,6 +168,26 @@ def test_parse_args_accepts_issue_scope() -> None:
     assert args.issues == [8, 13]
 
 
+@pytest.mark.parametrize("bad", ["0", "-1", "33", "100"])
+def test_parse_args_rejects_out_of_range_max_workers(bad: str) -> None:
+    """Regression for #723: loop_runner must reject --max-workers outside 1-32."""
+    with pytest.raises(SystemExit) as excinfo:
+        loop_runner._parse_args(["--max-workers", bad])
+    assert excinfo.value.code == 2
+
+
+def test_parse_args_accepts_valid_max_workers() -> None:
+    """Valid --max-workers in range 1-32 accepted."""
+    args = loop_runner._parse_args(["--max-workers", "8"])
+    assert args.max_workers == 8
+
+
+def test_parse_args_default_max_workers_is_three() -> None:
+    """Omitted --max-workers defaults to 3."""
+    args = loop_runner._parse_args([])
+    assert args.max_workers == 3
+
+
 # ---------------------------------------------------------------------------
 # run_phase — never raises, always returns PhaseResult
 # ---------------------------------------------------------------------------
