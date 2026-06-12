@@ -22,6 +22,13 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, cast
 
+from hephaestus.github.client import (
+    ClaudeUsageCapError,
+    GitHubRateLimitError,
+    GitHubUnavailableError,
+    gh_call,
+    gh_cli_timeout,  # noqa: F401  (re-exported for legacy import paths)
+)
 from hephaestus.github.rate_limit import (
     detect_claude_usage_cap,
     detect_claude_usage_limit,
@@ -32,114 +39,26 @@ from hephaestus.github.rate_limit import (
     wait_until,
 )
 from hephaestus.io.utils import write_secure as io_write_secure
-from hephaestus.resilience.circuit_breaker import CircuitBreakerOpenError, get_circuit_breaker
 
-from .claude_timeouts import gh_cli_timeout
 from .git_utils import get_repo_info, run
 from .models import IssueInfo, IssueState
+from hephaestus.github import client as _gh_client  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
 _label_cache: set[str] | None = None
 
-# Per-thread proactive throttle for `gh` invocations. Default 5 calls/sec
-# per worker thread; the GH_RATE_LIMIT_PER_SEC env var overrides for ops
-# tuning, and 0 disables. With max-workers=3 the aggregate is ~15/sec,
-# well below GitHub's per-token REST limits and tame enough that GH
-# secondary rate limits stay quiet during phase bursts (e.g. a planner
-# fetching N issue bodies back-to-back).
-_GH_THROTTLE = threading.local()
-
-# Circuit breaker for gh API calls. When a sustained GitHub outage occurs
-# (5+ consecutive failures), the breaker opens and subsequent calls fail fast
-# with GitHubUnavailableError instead of exhausting retry budgets at each
-# call site. half_open_max_calls=2 (not the default 1) allows a pair of
-# recovery attempts before fully closing.
-_GH_BREAKER = get_circuit_breaker(
-    "github-api",
-    failure_threshold=5,
-    recovery_timeout=60,
-    half_open_max_calls=2,
-)
+# Module-level aliases so every existing test patch keeps resolving.
+# unittest.mock.patch walks the dotted path's module attributes at patch
+# time; both names below exist as attributes of this module after the
+# aliases, so @patch("hephaestus.automation.github_api._gh_call") and
+# @patch("hephaestus.automation.github_api._gh_call_impl") continue to work
+# without test churn.
+_gh_call = gh_call
+_gh_call_impl = _gh_client._gh_call_impl
+_GH_BREAKER = _gh_client._GH_BREAKER
 
 
-def _gh_throttle_wait() -> None:
-    rate = float(os.environ.get("GH_RATE_LIMIT_PER_SEC", "5"))
-    if rate <= 0:
-        return
-    min_interval = 1.0 / rate
-    last = getattr(_GH_THROTTLE, "last_call", 0.0)
-    now = time.monotonic()
-    elapsed = now - last
-    if elapsed < min_interval:
-        time.sleep(min_interval - elapsed)
-    _GH_THROTTLE.last_call = time.monotonic()
-
-
-class GitHubRateLimitError(RuntimeError):
-    """Raised when GitHub reports the API rate limit has been exceeded.
-
-    Subclasses :class:`RuntimeError` so existing ``except RuntimeError``
-    handlers continue to catch it; callers that want rate-limit-specific
-    handling (e.g. exit cleanly instead of aborting a batch) should catch
-    this class explicitly.
-
-    Attributes:
-        reset_epoch: Unix timestamp at which the relevant rate-limit
-            window resets, or ``0`` if the reset time could not be
-            determined.
-
-    """
-
-    def __init__(self, message: str, reset_epoch: int = 0) -> None:
-        """Initialise the error with an optional reset epoch.
-
-        Args:
-            message: Human-readable error description, typically the
-                upstream GitHub message.
-            reset_epoch: Unix timestamp at which the limit resets, or
-                ``0`` if unknown.
-
-        """
-        super().__init__(message)
-        self.reset_epoch: int = reset_epoch
-
-
-class ClaudeUsageCapError(RuntimeError):
-    """Raised when the Claude CLI reports that the per-period usage cap has been hit.
-
-    Subclasses :class:`RuntimeError` so that existing ``except RuntimeError``
-    handlers continue to catch it.
-
-    Attributes:
-        reset_epoch: Unix timestamp at which the cap resets, or ``None`` if the
-            reset time could not be determined.
-
-    """
-
-    def __init__(self, message: str, reset_epoch: int | None = None) -> None:
-        """Initialise the error with an optional reset epoch.
-
-        Args:
-            message: Human-readable error description.
-            reset_epoch: Unix timestamp at which the cap resets, or ``None``.
-
-        """
-        super().__init__(message)
-        self.reset_epoch: int | None = reset_epoch
-
-
-class GitHubUnavailableError(RuntimeError):
-    """Raised when the GitHub API is unavailable due to a circuit breaker opening.
-
-    Subclasses :class:`RuntimeError` so that existing ``except RuntimeError``
-    handlers continue to catch it. Represents a condition where repeated failures
-    have caused the circuit breaker to open, indicating sustained GitHub API
-    unavailability.
-
-    """
-
-    pass
 
 
 def gh_list_labels(refresh: bool = False, *, raise_on_error: bool = False) -> set[str]:
