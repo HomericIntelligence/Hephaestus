@@ -41,7 +41,12 @@ from hephaestus.agents.runtime import add_agent_argument, resolve_agent
 from hephaestus.automation._review_utils import add_max_workers_arg
 from hephaestus.automation.ci_driver import _pr_is_failing
 from hephaestus.automation.claude_timeouts import gh_cli_timeout
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.cli.utils import (
+    add_dry_run_arg,
+    add_json_arg,
+    add_version_arg,
+    emit_json_status,
+)
 from hephaestus.config.paths import DEFAULT_PROJECTS_DIR, resolve_projects_dir
 from hephaestus.constants import scripts_dir as _scripts_dir
 from hephaestus.resilience.subprocess_resilience import resilient_call
@@ -333,12 +338,16 @@ def _read_work_report(path: str) -> int | None:
 # ---------------------------------------------------------------------------
 
 
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the argparse parser for the loop runner."""
     p = argparse.ArgumentParser(
         prog="hephaestus-automation-loop",
         description="Run the 3-stage automation pipeline across HomericIntelligence repos.",
     )
-    p.add_argument("--dry-run", action="store_true", help="Pass --dry-run to every phase")
+    add_dry_run_arg(
+        p,
+        prefix="Forward --dry-run to every phase (suppresses GitHub mutations and git pushes).",
+    )
     p.add_argument("--loops", type=int, default=5, help="Number of loop iterations (default: 5)")
     add_max_workers_arg(
         p,
@@ -444,7 +453,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("-v", "--verbose", action="store_true", help="Enable DEBUG logging")
     add_json_arg(p)
     add_version_arg(p)
-    return p.parse_args(argv)
+    return p
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command line arguments for the loop runner."""
+    return _build_parser().parse_args(argv)
 
 
 def _validate_phases(phases_csv: str) -> tuple[str, ...]:

@@ -30,7 +30,7 @@ from hephaestus.agents.runtime import (
     run_codex_session,
     session_agent_matches,
 )
-from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.cli.utils import add_dry_run_arg, add_json_arg, emit_json_status
 
 from ._review_utils import add_max_workers_arg, find_pr_for_issue
 from .advise_runner import run_advise
@@ -3068,8 +3068,8 @@ def _setup_logging(verbose: bool = False) -> None:
     )
 
 
-def _parse_args() -> argparse.Namespace:
-    """Parse command line arguments for the CI driver CLI."""
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the argparse parser for the CI-driver CLI."""
     parser = argparse.ArgumentParser(
         description="Drive PRs to green CI: fix failures and enable auto-merge",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -3121,10 +3121,9 @@ Examples:
     )
     add_agent_argument(parser)
     add_max_workers_arg(parser)
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be done without any GitHub writes or git pushes",
+    add_dry_run_arg(
+        parser,
+        prefix="Suppress GitHub writes and git pushes (no comments, no merges, no pushes).",
     )
     parser.add_argument(
         "--no-ui",
@@ -3169,8 +3168,12 @@ Examples:
         ),
     )
     add_json_arg(parser)
+    return parser
 
-    return parser.parse_args()
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command line arguments for the CI driver CLI."""
+    return _build_parser().parse_args(argv)
 
 
 def _evaluate_run_result(

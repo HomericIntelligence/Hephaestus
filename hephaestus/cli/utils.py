@@ -22,7 +22,9 @@ __version__ = get_version()
 
 __all__ = [
     "COMMAND_REGISTRY",
+    "DRY_RUN_HELP_CAVEAT",
     "CommandRegistry",
+    "add_dry_run_arg",
     "add_json_arg",
     "add_logging_args",
     "add_version_arg",
@@ -139,6 +141,45 @@ def add_json_arg(parser: argparse.ArgumentParser) -> None:
         "--json",
         action="store_true",
         help="Emit machine-readable JSON output instead of human-readable text",
+    )
+
+
+DRY_RUN_HELP_CAVEAT = (
+    "NOTE: Claude is still invoked, so --dry-run still incurs full "
+    "Claude API token cost. It is for correctness rehearsal, not cost preview."
+)
+
+
+def add_dry_run_arg(parser: argparse.ArgumentParser, *, prefix: str | None = None) -> None:
+    """Add the standard ``--dry-run`` flag with the canonical help-text contract.
+
+    Every ProjectHephaestus CLI that invokes Claude must surface the same
+    contract: GitHub/git mutations are suppressed, but Claude is still called
+    and tokens are still spent.
+
+    ``prefix`` is an optional CLI-specific lead-in that names the side-effects
+    this particular CLI suppresses (e.g. ``"No review comments posted."``).
+    It is placed BEFORE the canonical caveat. If ``prefix`` does not end in
+    sentence-terminating punctuation, a period and space are appended so the
+    concatenation reads cleanly. The canonical caveat is always appended last
+    so it cannot be silently dropped (#772).
+
+    Args:
+        parser: ArgumentParser instance to add the flag to
+        prefix: Optional CLI-specific description of suppressed side-effects
+
+    """
+    if prefix:
+        trimmed = prefix.rstrip()
+        if trimmed and trimmed[-1] not in ".!?":
+            trimmed = trimmed + "."
+        help_text = f"{trimmed} {DRY_RUN_HELP_CAVEAT}"
+    else:
+        help_text = DRY_RUN_HELP_CAVEAT
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=help_text,
     )
 
 

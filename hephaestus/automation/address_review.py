@@ -1060,8 +1060,8 @@ class AddressReviewer(BaseReviewer):
                     logger.info("  #%s: %s", issue_num, result.error)
 
 
-def _parse_args() -> argparse.Namespace:
-    """Parse command line arguments for the address review CLI."""
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the argparse parser for address review CLI."""
     parser = build_review_parser(
         description=(
             "Find PRs with unresolved review threads and use Claude Code or Codex to fix the "
@@ -1079,10 +1079,15 @@ Examples:
   %(prog)s --issues 595 596 597 --max-workers 5
         """,
         issues_help="Issue numbers whose linked PRs should have review threads addressed",
-        dry_run_help=("Show what would be done without actually resolving threads or pushing code"),
+        dry_run_help="Show what would be done without actually resolving threads or pushing code.",
     )
     add_json_arg(parser)
-    return parser.parse_args()
+    return parser
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command line arguments for the address review CLI."""
+    return _build_parser().parse_args(argv)
 
 
 def main() -> int:

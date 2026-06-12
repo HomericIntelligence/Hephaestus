@@ -17,7 +17,12 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument, resolve_agent
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.cli.utils import (
+    add_dry_run_arg,
+    add_json_arg,
+    add_version_arg,
+    emit_json_status,
+)
 
 from .advise_runner import advise_skipped, ensure_mnemosyne, run_advise
 from .claude_models import advise_model
@@ -469,8 +474,11 @@ def _setup_logging(verbose: bool = False) -> None:
     )
 
 
-def _parse_args() -> argparse.Namespace:
-    """Parse command line arguments for the planner CLI."""
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the argparse parser for the planner CLI.
+
+    Extracted so tests can inspect help text without invoking parse_args.
+    """
     from pathlib import Path
 
     parser = argparse.ArgumentParser(
@@ -505,13 +513,9 @@ Examples:
         help="Issue numbers to plan (default: all open issues)",
     )
     add_agent_argument(parser)
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help=(
-            "Suppress GitHub mutations and agent calls (no issue comments posted). "
-            "This is for wiring and discovery rehearsal, not plan generation."
-        ),
+    add_dry_run_arg(
+        parser,
+        prefix="Suppress GitHub mutations and agent calls (no issue comments posted).",
     )
     parser.add_argument(
         "--force",
@@ -549,8 +553,12 @@ Examples:
     )
     add_json_arg(parser)
     add_version_arg(parser)
+    return parser
 
-    return parser.parse_args()
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command line arguments for the planner CLI."""
+    return _build_parser().parse_args(argv)
 
 
 def main() -> int:
