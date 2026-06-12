@@ -267,6 +267,12 @@ class CIDriverOptions(BaseModel):
     # etc.) carry no ``Closes #N`` link so they are architecturally invisible
     # to issue-driven discovery; without this they leak forever.
     include_bot_prs: bool = True
+    # When False (default, #821), discovery is restricted to PRs whose
+    # author.login matches the authenticated `gh api user` viewer login.
+    # Set True via the CLI's --all flag to drive every open PR (teammates'
+    # and bots' included). Issue-scoped lookups (`--issues N`) bypass this
+    # filter — they always resolve to the matching PR regardless of author.
+    include_all_authors: bool = False
     # When True (default), _drive_issue first attempts a mechanical ``git
     # rebase`` onto the base branch for PRs that are behind/conflicting, pushing
     # the result with --force-with-lease — no agent spend. Only PRs whose rebase

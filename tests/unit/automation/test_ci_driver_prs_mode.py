@@ -179,14 +179,19 @@ class TestRunGateWithPrs:
         options = CIDriverOptions(issues=[], prs=[661], include_bot_prs=False)
         driver = CIDriver(options)
 
-        # Mock _discover_prs, _sweep_orphaned_arming_records, and _drive_issue
-        # to avoid network I/O (circuit breaker would trip on real _gh_call).
+        # Mock _discover_prs, _sweep_orphaned_arming_records, _drive_issue, and
+        # _list_open_prs_remaining to avoid network I/O (circuit breaker would
+        # trip on real _gh_call). The post-drive done-check
+        # (_list_open_prs_remaining) resolves the viewer login via `gh api user`
+        # under the default @me author filter (#821); without gh auth (CI) that
+        # raises, so it must be mocked here alongside the other I/O paths.
         # Return a proper WorkerResult so run() can call result.success without error.
         fake_result = WorkerResult(issue_number=661, success=True)
         with patch.object(driver, "_discover_prs", return_value={661: 661}) as mock_discover:
             with patch.object(driver, "_sweep_orphaned_arming_records"):
                 with patch.object(driver, "_drive_issue", return_value=fake_result):
-                    driver.run()
+                    with patch.object(driver, "_list_open_prs_remaining", return_value=[]):
+                        driver.run()
 
         # Verify the gate did not abort by checking that _discover_prs was called
         mock_discover.assert_called_once()
