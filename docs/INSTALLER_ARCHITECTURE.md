@@ -21,6 +21,7 @@ Three verified pillars justify keeping the sections in a single file:
 ### 1. Shared Result Counters
 
 Every section increments `_PASS`/`_FAIL`/`_WARN`/`_SKIP` counters (defined in `lib/install_helpers.sh:21`) to track installation outcomes. Splitting into per-tool installers would require either:
+
 - Replicating the counter logic in each child script, or
 - Building a dispatcher that threads the counters through every call
 
@@ -29,6 +30,7 @@ Both violate KISS/YAGNI for a script with no current caller pain.
 ### 2. The `--role` Filter
 
 A single `--role` argument (values: `all`, `worker`, `control`) is parsed once at the entry point and used by the `should_check_worker` and `should_check_control` helper functions (lines 53–54 of `install.sh`) to gate entire sections. All 12 sections obey the same filter. A per-tool split would require either:
+
 - Replicating role-gating logic in each child, or
 - Threading role state through a dispatcher
 
