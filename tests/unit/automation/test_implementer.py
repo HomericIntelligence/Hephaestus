@@ -292,10 +292,7 @@ class TestPlanReviewVerdictGate:
             patch.object(impl, "_run_post_pr_followup"),
             patch("hephaestus.automation.implementer_phase_runner.ensure_pr_auto_merge_deferred"),
             patch("hephaestus.automation._review_phase.mark_pr_implementation_go"),
-            patch(
-                "hephaestus.automation._review_phase."
-                "enable_auto_merge_after_implementation_go"
-            ),
+            patch("hephaestus.automation._review_phase.enable_auto_merge_after_implementation_go"),
             patch(
                 "hephaestus.automation.implementer.fetch_issue_info",
                 return_value=MagicMock(title="t", body="b"),
@@ -470,16 +467,9 @@ class TestExistingPrEntersReviewLoop:
                 return_value=MagicMock(title="t", body="b"),
             ),
             patch.object(impl, "_run_advise_as_implementer_turn"),
-            patch(
-                "hephaestus.automation._review_phase.mark_pr_implementation_go"
-            ) as mark_go,
-            patch(
-                "hephaestus.automation._review_phase.mark_pr_implementation_no_go"
-            ) as mark_no_go,
-            patch(
-                "hephaestus.automation._review_phase."
-                "enable_auto_merge_after_implementation_go"
-            ),
+            patch("hephaestus.automation._review_phase.mark_pr_implementation_go") as mark_go,
+            patch("hephaestus.automation._review_phase.mark_pr_implementation_no_go") as mark_no_go,
+            patch("hephaestus.automation._review_phase.enable_auto_merge_after_implementation_go"),
         ):
             result = impl._implement_issue(1)
 
@@ -566,14 +556,9 @@ class TestExistingPrEntersReviewLoop:
             ),
             patch.object(impl, "_run_advise_as_implementer_turn"),
             patch.object(impl, "_run_impl_review_loop", return_value=(2, "GO", "A")) as review_loop,
-            patch(
-                "hephaestus.automation._review_phase.mark_pr_implementation_go"
-            ) as mark_go,
+            patch("hephaestus.automation._review_phase.mark_pr_implementation_go") as mark_go,
             patch("hephaestus.automation._review_phase.mark_pr_implementation_no_go"),
-            patch(
-                "hephaestus.automation._review_phase."
-                "enable_auto_merge_after_implementation_go"
-            ),
+            patch("hephaestus.automation._review_phase.enable_auto_merge_after_implementation_go"),
         ):
             result = impl._implement_issue(1)
 
@@ -623,12 +608,8 @@ class TestExistingPrEntersReviewLoop:
                 return_value=MagicMock(title="t", body="b"),
             ),
             patch.object(impl, "_run_advise_as_implementer_turn"),
-            patch(
-                "hephaestus.automation._review_phase.mark_pr_implementation_go"
-            ) as mark_go,
-            patch(
-                "hephaestus.automation._review_phase.mark_pr_implementation_no_go"
-            ) as mark_no_go,
+            patch("hephaestus.automation._review_phase.mark_pr_implementation_go") as mark_go,
+            patch("hephaestus.automation._review_phase.mark_pr_implementation_no_go") as mark_no_go,
         ):
             result = impl._implement_issue(1)
 
@@ -661,10 +642,7 @@ class TestExistingPrEntersReviewLoop:
             patch.object(impl, "_finalize_pr", return_value=999),
             patch("hephaestus.automation.implementer_phase_runner.ensure_pr_auto_merge_deferred"),
             patch("hephaestus.automation._review_phase.mark_pr_implementation_go"),
-            patch(
-                "hephaestus.automation._review_phase."
-                "enable_auto_merge_after_implementation_go"
-            ),
+            patch("hephaestus.automation._review_phase.enable_auto_merge_after_implementation_go"),
             patch.object(impl, "_run_post_pr_followup"),
             patch(
                 "hephaestus.automation.implementer.fetch_issue_info",

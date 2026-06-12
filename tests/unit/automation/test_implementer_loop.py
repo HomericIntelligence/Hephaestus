@@ -62,9 +62,7 @@ def test_codex_implementer_advise_uses_codex_prompt_builder(
     """Codex implementer runs should trigger the Codex `$advise` skill prompt."""
     implementer.options.agent = "codex"
 
-    with patch(
-        "hephaestus.automation._implement_phase.run_advise", return_value="findings"
-    ) as run:
+    with patch("hephaestus.automation._implement_phase.run_advise", return_value="findings") as run:
         result = implementer._run_advise(123, "Test Issue", "Issue body")
 
     assert result == "findings"
@@ -244,9 +242,7 @@ class TestRunImplReviewLoop:
             ),
             patch("hephaestus.automation.github_api.gh_pr_resolve_thread") as mock_resolve,
             patch.object(implementer, "_run_address_review_step") as mock_addr2,
-            patch(
-                "hephaestus.automation._review_phase.gh_issue_add_labels"
-            ) as mock_label,
+            patch("hephaestus.automation._review_phase.gh_issue_add_labels") as mock_label,
         ):
             iters, verdict, _grade = implementer._run_impl_review_loop(
                 issue_number=1,
@@ -469,9 +465,7 @@ class TestRunImplReviewLoop:
                 ],
             ),
             patch.object(implementer, "_run_address_review_step", return_value=True),
-            patch(
-                "hephaestus.automation._review_phase.gh_issue_add_labels"
-            ) as mock_label,
+            patch("hephaestus.automation._review_phase.gh_issue_add_labels") as mock_label,
         ):
             _, verdict, _ = implementer._run_impl_review_loop(
                 issue_number=7,
@@ -509,9 +503,7 @@ class TestRunImplReviewLoop:
                 ],
             ),
             patch.object(implementer, "_run_address_review_step", return_value=True),
-            patch(
-                "hephaestus.automation._review_phase.gh_issue_add_labels"
-            ) as mock_label,
+            patch("hephaestus.automation._review_phase.gh_issue_add_labels") as mock_label,
         ):
             _, verdict, _ = implementer._run_impl_review_loop(
                 issue_number=911,
@@ -539,12 +531,8 @@ class TestRunImplReviewLoop:
         unreviewed code).
         """
         with (
-            patch(
-                "hephaestus.automation._review_phase.mark_pr_implementation_go"
-            ) as mock_go,
-            patch(
-                "hephaestus.automation._review_phase.mark_pr_implementation_no_go"
-            ) as mock_no_go,
+            patch("hephaestus.automation._review_phase.mark_pr_implementation_go") as mock_go,
+            patch("hephaestus.automation._review_phase.mark_pr_implementation_no_go") as mock_no_go,
         ):
             implementer.phase_runner._apply_impl_review_verdict(
                 issue_number=911,
@@ -567,12 +555,8 @@ class TestRunImplReviewLoop:
         an unresolved PR) or no-go (recording a converged failure).
         """
         with (
-            patch(
-                "hephaestus.automation._review_phase.mark_pr_implementation_go"
-            ) as mock_go,
-            patch(
-                "hephaestus.automation._review_phase.mark_pr_implementation_no_go"
-            ) as mock_no_go,
+            patch("hephaestus.automation._review_phase.mark_pr_implementation_go") as mock_go,
+            patch("hephaestus.automation._review_phase.mark_pr_implementation_no_go") as mock_no_go,
         ):
             implementer.phase_runner._apply_impl_review_verdict(
                 issue_number=911,
@@ -602,9 +586,7 @@ class TestRunImplReviewLoop:
                 implementer, "_run_impl_review_step", return_value=(_ambiguous(), [])
             ) as mock_rev,
             patch.object(implementer, "_run_address_review_step") as mock_addr,
-            patch(
-                "hephaestus.automation._review_phase.gh_issue_add_labels"
-            ) as mock_label,
+            patch("hephaestus.automation._review_phase.gh_issue_add_labels") as mock_label,
         ):
             iters, verdict, _ = implementer._run_impl_review_loop(
                 issue_number=8,
@@ -641,9 +623,7 @@ class TestRunImplReviewLoop:
                 side_effect=[(_nogo("C"), []), (_go(), [])],
             ) as mock_rev,
             patch.object(implementer, "_run_address_review_step") as mock_addr,
-            patch(
-                "hephaestus.automation._review_phase.gh_issue_add_labels"
-            ) as mock_label,
+            patch("hephaestus.automation._review_phase.gh_issue_add_labels") as mock_label,
         ):
             iters, verdict, _ = implementer._run_impl_review_loop(
                 issue_number=8,
@@ -670,9 +650,7 @@ class TestRunImplReviewLoop:
         with (
             patch.object(implementer, "_run_impl_review_step", return_value=(_go(), [])),
             patch.object(implementer, "_run_address_review_step"),
-            patch(
-                "hephaestus.automation._review_phase.gh_issue_add_labels"
-            ) as mock_label,
+            patch("hephaestus.automation._review_phase.gh_issue_add_labels") as mock_label,
         ):
             implementer._run_impl_review_loop(
                 issue_number=9,
@@ -697,9 +675,7 @@ class TestRunImplReviewLoop:
             with (
                 patch.object(implementer, "_run_impl_review_step", return_value=(_nogo("C"), [])),
                 patch.object(implementer, "_run_address_review_step"),
-                patch(
-                    "hephaestus.automation._review_phase.gh_issue_add_labels"
-                ) as mock_label,
+                patch("hephaestus.automation._review_phase.gh_issue_add_labels") as mock_label,
             ):
                 implementer._run_impl_review_loop(
                     issue_number=10,
@@ -1195,15 +1171,10 @@ class TestImplementationAutoMergeGate:
             patch(
                 "hephaestus.automation.implementer_phase_runner.ensure_pr_auto_merge_deferred"
             ) as mock_defer,
+            patch("hephaestus.automation._review_phase.mark_pr_implementation_go") as mock_go,
+            patch("hephaestus.automation._review_phase.mark_pr_implementation_no_go") as mock_nogo,
             patch(
-                "hephaestus.automation._review_phase.mark_pr_implementation_go"
-            ) as mock_go,
-            patch(
-                "hephaestus.automation._review_phase.mark_pr_implementation_no_go"
-            ) as mock_nogo,
-            patch(
-                "hephaestus.automation._review_phase."
-                "enable_auto_merge_after_implementation_go"
+                "hephaestus.automation._review_phase.enable_auto_merge_after_implementation_go"
             ) as mock_arm,
             patch.object(
                 implementer.worktree_manager, "create_worktree", return_value=worktree_path
@@ -1528,9 +1499,7 @@ class TestRunAddressReviewStep:
                 "hephaestus.automation._review_phase.gh_pr_list_unresolved_threads",
                 return_value=[],
             ),
-            patch(
-                "hephaestus.automation._review_phase.run_address_fix_session"
-            ) as mock_fix,
+            patch("hephaestus.automation._review_phase.run_address_fix_session") as mock_fix,
         ):
             addressed = implementer._run_address_review_step(
                 issue_number=1,
@@ -1629,9 +1598,7 @@ class TestCompactImplementerSession:
         self, impl: IssueImplementer, tmp_path: Path
     ) -> None:
         """Verify /compact is called after /learn succeeds."""
-        with patch(
-            "hephaestus.automation._implement_phase.compact_session"
-        ) as mock_compact:
+        with patch("hephaestus.automation._implement_phase.compact_session") as mock_compact:
             mock_compact.return_value = True
 
             impl.phase_runner._compact_implementer_session(842, tmp_path)
