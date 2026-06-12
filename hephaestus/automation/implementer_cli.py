@@ -23,7 +23,12 @@ from pathlib import Path
 
 from hephaestus.agents.runtime import add_agent_argument, resolve_agent
 from hephaestus.automation._review_utils import add_max_workers_arg
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.cli.utils import (
+    add_dry_run_arg,
+    add_json_arg,
+    add_version_arg,
+    emit_json_status,
+)
 
 from .models import ImplementerOptions
 
@@ -49,8 +54,8 @@ def _setup_logging(verbose: bool = False, log_dir: Path | None = None) -> None:
         logging.getLogger().addHandler(fh)
 
 
-def _parse_args() -> argparse.Namespace:
-    """Parse command line arguments for the implementer CLI."""
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the argparse parser for the implementer CLI."""
     parser = argparse.ArgumentParser(
         description="Bulk implement GitHub issues using Claude Code or Codex",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -117,10 +122,9 @@ Examples:
         action="store_true",
         help="Don't enable auto-merge after implementation-review GO",
     )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be done without actually doing it",
+    add_dry_run_arg(
+        parser,
+        prefix="Suppress GitHub mutations and git pushes (no PR creation, no commits).",
     )
     parser.add_argument(
         "--no-learn",
@@ -155,8 +159,13 @@ Examples:
     )
     add_json_arg(parser)
     add_version_arg(parser)
+    return parser
 
-    args = parser.parse_args()
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command line arguments for the implementer CLI."""
+    parser = _build_parser()
+    args = parser.parse_args(argv)
 
     if args.epic and args.issues:
         parser.error("Cannot specify both --epic and --issues")

@@ -25,6 +25,7 @@ import threading
 from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument
+from hephaestus.cli.utils import add_dry_run_arg
 
 from .github_api import _gh_call
 
@@ -117,11 +118,7 @@ def build_review_parser(
     )
     add_agent_argument(parser)
     add_max_workers_arg(parser)
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help=dry_run_help,
-    )
+    add_dry_run_arg(parser, prefix=dry_run_help)
     parser.add_argument(
         "--no-ui",
         action="store_true",

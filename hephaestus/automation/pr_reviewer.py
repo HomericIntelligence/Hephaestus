@@ -878,8 +878,8 @@ class PRReviewer(BaseReviewer):
                     logger.info("  #%s: %s", issue_num, result.error)
 
 
-def _parse_args() -> argparse.Namespace:
-    """Parse command line arguments for the reviewer CLI."""
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the argparse parser for PR reviewer CLI."""
     parser = build_review_parser(
         description=(
             "Analyze open PRs linked to GitHub issues using Claude Code or Codex "
@@ -897,11 +897,16 @@ Examples:
   %(prog)s --issues 595 596 --max-workers 5
         """,
         issues_help="Issue numbers whose linked PRs should be reviewed",
-        dry_run_help="Show what would be done without actually posting any review comments",
+        dry_run_help="Show what would be done without actually posting any review comments.",
     )
     add_json_arg(parser)
     add_version_arg(parser)
-    return parser.parse_args()
+    return parser
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command line arguments for the reviewer CLI."""
+    return _build_parser().parse_args(argv)
 
 
 def main() -> int:

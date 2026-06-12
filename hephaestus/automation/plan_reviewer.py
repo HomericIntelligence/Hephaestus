@@ -21,7 +21,7 @@ from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument, is_codex, resolve_agent, run_codex_text
 from hephaestus.automation._review_utils import add_max_workers_arg
-from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.cli.utils import add_dry_run_arg, add_json_arg, emit_json_status
 from hephaestus.github.rate_limit import wait_until
 
 from .claude_invoke import invoke_claude_with_session, parse_review_verdict, scan_quota_reset
@@ -619,8 +619,8 @@ def _setup_logging(verbose: bool = False) -> None:
     )
 
 
-def _parse_args() -> argparse.Namespace:
-    """Parse command line arguments for the plan reviewer CLI."""
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the argparse parser for plan_reviewer CLI."""
     parser = argparse.ArgumentParser(
         description="Review implementation plans posted to GitHub issues using Claude",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -649,14 +649,9 @@ Examples:
     )
     add_agent_argument(parser)
     add_max_workers_arg(parser)
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help=(
-            "Suppress GitHub mutations (no review comments posted). NOTE: Claude "
-            "is still invoked to analyse plans — dry-run still incurs full "
-            "Claude token cost. It is for correctness rehearsal, not cost preview."
-        ),
+    add_dry_run_arg(
+        parser,
+        prefix="Suppress GitHub mutations (no review comments posted).",
     )
     parser.add_argument(
         "--no-ui",
@@ -670,8 +665,12 @@ Examples:
         help="Enable verbose logging",
     )
     add_json_arg(parser)
+    return parser
 
-    return parser.parse_args()
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command line arguments for the plan reviewer CLI."""
+    return _build_parser().parse_args(argv)
 
 
 def main() -> int:
