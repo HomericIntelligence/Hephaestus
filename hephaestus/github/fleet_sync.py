@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Sync all PRs across the HomericIntelligence fleet.
+r"""Sync all PRs across a configurable GitHub org's fleet of repos.
 
 For every open PR in every configured repo:
   - Ready (CI green, no conflicts) → merge via merge commit (GitHub signs it)
@@ -11,12 +10,19 @@ Signing uses the local GPG key configured in git's ``user.signingkey``.
 All commits produced by this script are signed with ``git commit -S``.
 
 Usage:
-    hephaestus-fleet-sync [--dry-run] [--repos REPO ...] [--skip-conflict-resolution]
+    hephaestus-fleet-sync [--dry-run] [--org ORG] [--repos REPO ...] \
+                          [--config PATH] [--skip-conflict-resolution]
 
-Options:
-    --dry-run                    Print actions without executing
-    --repos REPO [REPO ...]      Restrict to specific repos (default: all 15)
-    --skip-conflict-resolution   Skip agent conflict resolution for conflicted PRs
+Config resolution (highest priority first):
+    1. ``--org`` / ``--repos`` CLI flags
+    2. ``FLEET_ORG`` / ``FLEET_REPOS`` env vars
+       (``FLEET_REPOS`` is comma-separated; whitespace is trimmed;
+        values are always treated as strings — no int/float coercion)
+    3. ``.fleet.yml`` at ``--config PATH`` if given, else ``./.fleet.yml``,
+       else repo-root ``.fleet.yml``
+
+For ProjectHephaestus's own fleet, a bundled ``.fleet.yml`` lives at the
+repo root, so no configuration is required for the default operator flow.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument, is_codex, resolve_agent, run_codex_text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.config.utils import load_config
 from hephaestus.github.client import gh_call
 from hephaestus.logging.utils import get_logger
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
@@ -56,7 +63,7 @@ class Symbols:
 UNICODE_SYMBOLS = Symbols(banner="══", check="✓", arrow="→", dash="—")
 ASCII_SYMBOLS = Symbols(banner="==", check="*", arrow="->", dash="--")
 
-ORG = "HomericIntelligence"
+DEFAULT_FLEET_CONFIG_FILENAME = ".fleet.yml"
 
 
 def _signing_key_uid_emails() -> list[str] | None:
@@ -201,23 +208,125 @@ def get_resign_exec() -> str:
     return f"git -c user.email={get_resign_email()} commit --amend --no-edit -S --reset-author"
 
 
-ALL_REPOS: list[str] = [
-    "Odysseus",
-    "AchaeanFleet",
-    "ProjectArgus",
-    "ProjectHermes",
-    "ProjectTelemachy",
-    "ProjectKeystone",
-    "Myrmidons",
-    "ProjectProteus",
-    "ProjectOdyssey",
-    "ProjectScylla",
-    "ProjectMnemosyne",
-    "ProjectHephaestus",
-    "ProjectAgamemnon",
-    "ProjectNestor",
-    "ProjectCharybdis",
-]
+def _parse_env_repos(env_repos_raw: str | None) -> list[str] | None:
+    """Parse comma-separated FLEET_REPOS, returning None if empty after splitting.
+
+    Args:
+        env_repos_raw: Raw FLEET_REPOS value from environment
+
+    Returns:
+        List of repo names with whitespace trimmed, or None if input is None or empty after split
+
+    """
+    if env_repos_raw is None:
+        return None
+    env_repos = [r.strip() for r in env_repos_raw.split(",") if r.strip()]
+    return env_repos if env_repos else None
+
+
+def _find_default_config() -> Path | None:
+    """Return the first existing .fleet.yml in CWD or repo-root, else None."""
+    cwd_path = Path.cwd() / DEFAULT_FLEET_CONFIG_FILENAME
+    if cwd_path.exists():
+        return cwd_path
+
+    repo_root_path = Path(__file__).resolve().parent.parent.parent / DEFAULT_FLEET_CONFIG_FILENAME
+    if repo_root_path.exists():
+        return repo_root_path
+
+    return None
+
+
+def _load_fleet_config(config_path: str | None) -> tuple[str | None, list[str] | None]:
+    """Load org and repos from config file, auto-discovering if needed.
+
+    Args:
+        config_path: Explicit path to .fleet.yml, or None for auto-discovery
+
+    Returns:
+        Tuple of (org, repos) where either may be None if not found
+
+    """
+    if config_path is None:
+        found_config = _find_default_config()
+        if found_config is not None:
+            config_path = str(found_config)
+
+    file_org = None
+    file_repos = None
+
+    if config_path is not None:
+        config_path_obj = Path(config_path)
+        if config_path_obj.exists():
+            try:
+                cfg = load_config(config_path_obj)
+                file_org = cfg.get("org")
+                file_repos_raw = cfg.get("repos")
+                if isinstance(file_repos_raw, list):
+                    file_repos = file_repos_raw
+            except FileNotFoundError as e:
+                raise RuntimeError(f"Failed to load fleet config from {config_path}: {e}") from e
+            except ValueError as e:
+                raise RuntimeError(f"Failed to load fleet config from {config_path}: {e}") from e
+
+    return file_org, file_repos
+
+
+def resolve_fleet_config(
+    cli_org: str | None = None,
+    cli_repos: list[str] | None = None,
+    config_path: str | None = None,
+) -> tuple[str, list[str]]:
+    """Resolve fleet organization and repo list with layered config sources.
+
+    Resolution order (highest to lowest priority):
+    1. CLI flags (cli_org, cli_repos) — applied per-key, partial CLI args merge
+    2. Environment variables (FLEET_ORG, FLEET_REPOS)
+    3. Config file (.fleet.yml at config_path, or auto-discovered)
+
+    Args:
+        cli_org: Organization name from --org flag
+        cli_repos: Repo names from --repos flag
+        config_path: Explicit path to .fleet.yml, or None for auto-discovery
+
+    Returns:
+        Tuple of (org, repos) where repos is a list of bare repo names
+
+    Raises:
+        RuntimeError: If org or repos cannot be resolved from any source
+
+    """
+    # Step 1: Load environment variables (as strings, bypassing merge_with_env type coercion)
+    env_org = os.environ.get("FLEET_ORG", "").strip()
+    env_repos_raw = os.environ.get("FLEET_REPOS")
+    env_repos = _parse_env_repos(env_repos_raw) if env_repos_raw is not None else None
+
+    # Step 2: Load config file
+    file_org, file_repos = _load_fleet_config(config_path)
+
+    # Step 3: Merge per-key with CLI taking precedence, then env, then file
+    final_org = cli_org or env_org or file_org
+    if not final_org:
+        raise RuntimeError("no fleet org configured. Set --org, FLEET_ORG, or org: in .fleet.yml")
+
+    # Distinguish "FLEET_REPOS set but empty after comma-split" from "unset" so
+    # operators can tell a typo'd value (e.g. " , , " or "") apart from simply
+    # not having configured the env var. Only fires when no higher-priority CLI
+    # value overrides it.
+    if not cli_repos and env_repos_raw is not None and env_repos is None:
+        raise RuntimeError(
+            f"FLEET_REPOS is set but contains no valid entries after comma-split "
+            f"(got {env_repos_raw!r})"
+        )
+
+    final_repos = cli_repos or env_repos or file_repos
+
+    if not final_repos:
+        raise RuntimeError(
+            "no fleet repos configured. Set --repos, FLEET_REPOS, or repos: in .fleet.yml"
+        )
+
+    return final_org, final_repos
 
 
 class PRStatus(Enum):
@@ -250,6 +359,7 @@ class PRInfo:
 def _gh(
     args: list[str],
     repo: str | None = None,
+    org: str | None = None,
     check: bool = True,
     dry_run: bool = False,
 ) -> subprocess.CompletedProcess[str]:
@@ -262,7 +372,10 @@ def _gh(
     """
     full_args = args
     if repo and not any(a.startswith("--repo") or a == "-R" for a in args):
-        full_args = ["--repo", f"{ORG}/{repo}", *args]
+        if not org:
+            raise ValueError("org must be provided when repo is specified")
+        repo_arg = f"{org}/{repo}"
+        full_args = ["--repo", repo_arg, *args]
 
     if dry_run:
         logger.info("[dry-run] gh %s", " ".join(full_args))
@@ -310,7 +423,7 @@ def _ci_state(checks: list[dict[str, Any]]) -> str:
     return "SUCCESS"
 
 
-def _fetch_pr_ci_state(repo: str, number: int) -> str:
+def _fetch_pr_ci_state(repo: str, number: int, org: str | None = None) -> str:
     """Fetch a single PR's statusCheckRollup and reduce it to a CI state.
 
     Fetched per-PR rather than in the bulk list: requesting statusCheckRollup for
@@ -324,6 +437,7 @@ def _fetch_pr_ci_state(repo: str, number: int) -> str:
         result = _gh(
             ["pr", "view", str(number), "--json", "statusCheckRollup"],
             repo=repo,
+            org=org,
         )
         data = json.loads(result.stdout)
     except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as e:
@@ -332,7 +446,7 @@ def _fetch_pr_ci_state(repo: str, number: int) -> str:
     return _ci_state(data.get("statusCheckRollup") or [])
 
 
-def list_prs(repo: str) -> list[PRInfo]:
+def list_prs(repo: str, org: str) -> list[PRInfo]:
     """List all open PRs in a repo with their readiness status.
 
     The bulk ``gh pr list`` deliberately omits ``statusCheckRollup`` — requesting
@@ -366,6 +480,7 @@ def list_prs(repo: str) -> list[PRInfo]:
                 "100",
             ],
             repo=repo,
+            org=org,
         )
         prs_raw: list[dict[str, Any]] = json.loads(result.stdout)
     except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as e:
@@ -377,7 +492,7 @@ def list_prs(repo: str) -> list[PRInfo]:
     out: list[PRInfo] = []
 
     for p in prs_raw:
-        ci = _fetch_pr_ci_state(repo, p["number"])
+        ci = _fetch_pr_ci_state(repo, p["number"], org)
         mergeable = p.get("mergeable", "UNKNOWN")
         merge_state = p.get("mergeStateStatus", "UNKNOWN")
 
@@ -420,7 +535,7 @@ def list_prs(repo: str) -> list[PRInfo]:
     return out
 
 
-def ensure_repo_clone(repo: str, clone_dir: Path, dry_run: bool = False) -> Path:
+def ensure_repo_clone(repo: str, org: str, clone_dir: Path, dry_run: bool = False) -> Path:
     """Return a single reusable clone of ``repo``, cloning once or fetching if present.
 
     fleet_sync used to ``git clone`` the whole repo afresh for every PR (#1044).
@@ -429,7 +544,8 @@ def ensure_repo_clone(repo: str, clone_dir: Path, dry_run: bool = False) -> Path
     Per-PR work then happens in cheap ``git worktree`` checkouts off this clone.
 
     Args:
-        repo: Repository name (under ``ORG``).
+        repo: Repository name (under ``org``).
+        org: GitHub organization owning ``repo``.
         clone_dir: Directory that holds per-repo clones for this run.
         dry_run: If True, log intent without running git.
 
@@ -437,7 +553,7 @@ def ensure_repo_clone(repo: str, clone_dir: Path, dry_run: bool = False) -> Path
         Path to the reusable repo clone (``clone_dir/<repo>``).
 
     """
-    repo_url = f"https://github.com/{ORG}/{repo}.git"
+    repo_url = f"https://github.com/{org}/{repo}.git"
     clone_path = clone_dir / repo
     git_dir = clone_path / ".git"
 
@@ -505,13 +621,14 @@ def remove_worktree(repo_clone: Path, work: Path, dry_run: bool = False) -> None
     )
 
 
-def merge_pr(pr: PRInfo, dry_run: bool = False) -> bool:
+def merge_pr(pr: PRInfo, org: str, dry_run: bool = False) -> bool:
     """Merge a ready PR via merge commit (GitHub signs the merge commit)."""
     logger.info("  Merging PR #%d via merge commit...", pr.number)
     try:
         _gh(
             ["pr", "merge", str(pr.number), "--merge", "--auto"],
             repo=pr.repo,
+            org=org,
             dry_run=dry_run,
         )
         return True
@@ -603,6 +720,7 @@ def _run_conflict_agent(agent: str, prompt: str, work: Path, pr_number: int) -> 
 
 def resolve_conflict_with_agent(
     pr: PRInfo,
+    org: str,
     repo_clone: Path,
     dry_run: bool = False,
     agent: str = "claude",
@@ -623,7 +741,7 @@ def resolve_conflict_with_agent(
         # agent spawn is what's gated, not the rebase that surfaces conflicts).
         # ensure_repo_clone is idempotent, so this reuses the shared clone if
         # already present and only forces a real clone when dry-run skipped it.
-        repo_clone = ensure_repo_clone(pr.repo, repo_clone.parent, dry_run=False)
+        repo_clone = ensure_repo_clone(pr.repo, org, repo_clone.parent, dry_run=False)
         add_pr_worktree(repo_clone, work, branch, base, dry_run=False)
 
         # Start rebase — will stop at conflicts
@@ -676,7 +794,7 @@ def resolve_conflict_with_agent(
 
             prompt = f"""You are resolving merge conflicts in a git rebase.
 
-Repository: {ORG}/{pr.repo}
+Repository: {org}/{pr.repo}
 PR: #{pr.number} — "{pr.title}"
 Branch `{branch}` is being rebased onto `origin/{base}`.
 Working directory: {work}
@@ -738,6 +856,7 @@ Rules:
 
 def process_repo(
     repo: str,
+    org: str,
     args: argparse.Namespace,
     clone_dir: Path,
     *,
@@ -754,7 +873,7 @@ def process_repo(
 
     logger.info("\n%s %s %s", symbols.banner, repo, symbols.banner)
     try:
-        prs = list_prs(repo)
+        prs = list_prs(repo, org)
     except RuntimeError as e:
         # A list failure must NOT be silently treated as "no PRs" — that would
         # skip the whole repo while reporting success. Count it as a failure so
@@ -778,7 +897,7 @@ def process_repo(
     def _repo_clone() -> Path:
         nonlocal repo_clone
         if repo_clone is None:
-            repo_clone = ensure_repo_clone(repo, clone_dir, dry_run=args.dry_run)
+            repo_clone = ensure_repo_clone(repo, org, clone_dir, dry_run=args.dry_run)
         return repo_clone
 
     status_labels = {
@@ -802,7 +921,7 @@ def process_repo(
         )
 
         if pr.status == PRStatus.READY:
-            ok = merge_pr(pr, dry_run=args.dry_run)
+            ok = merge_pr(pr, org, dry_run=args.dry_run)
             counts["merged" if ok else "failed"] += 1
 
         elif pr.status == PRStatus.OUTDATED:
@@ -816,6 +935,7 @@ def process_repo(
             else:
                 ok = resolve_conflict_with_agent(
                     pr,
+                    org,
                     _repo_clone(),
                     dry_run=args.dry_run,
                     agent=args.agent,
@@ -841,16 +961,29 @@ def _build_parser() -> argparse.ArgumentParser:
 
     """
     parser = argparse.ArgumentParser(
-        description="Sync all PRs across the HomericIntelligence fleet",
+        description="Sync all PRs across a configurable GitHub organization's fleet",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--dry-run", action="store_true", help="Print actions without executing")
     parser.add_argument(
+        "--org",
+        metavar="ORG",
+        default=None,
+        help="GitHub organization (overrides FLEET_ORG and .fleet.yml)",
+    )
+    parser.add_argument(
         "--repos",
         nargs="+",
         metavar="REPO",
-        help=f"Restrict to specific repos (default: all {len(ALL_REPOS)})",
-        default=ALL_REPOS,
+        default=None,
+        help="Restrict to specific repos (overrides FLEET_REPOS and .fleet.yml)",
+    )
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        type=str,
+        default=None,
+        help="Path to fleet config YAML (default: ./.fleet.yml then repo-root .fleet.yml)",
     )
     parser.add_argument(
         "--skip-conflict-resolution",
@@ -877,8 +1010,7 @@ def main() -> int:
     """Entry point for hephaestus-fleet-sync."""
     parser = _build_parser()
     args = parser.parse_args()
-    agent = resolve_agent(args.agent)
-    args.agent = agent
+    args.agent = resolve_agent(args.agent)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -886,10 +1018,19 @@ def main() -> int:
         datefmt="%H:%M:%S",
     )
 
-    repos = args.repos
+    try:
+        org, repos = resolve_fleet_config(args.org, args.repos, args.config)
+    except RuntimeError as e:
+        logger.error("%s", e)
+        if args.json:
+            emit_json_status(2, str(e))
+        return 2
+
+    args.org = org
+    args.repos = repos
     dry_tag = " [DRY RUN]" if args.dry_run else ""
     symbols = ASCII_SYMBOLS if args.ascii else UNICODE_SYMBOLS
-    logger.info("Fleet sync %s %d repo(s)%s", symbols.dash, len(repos), dry_tag)
+    logger.info("Fleet sync %s org=%s, %d repo(s)%s", symbols.dash, org, len(repos), dry_tag)
 
     totals: dict[str, int] = {
         "merged": 0,
@@ -902,7 +1043,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="hephaestus-fleet-") as tmp:
         clone_dir = Path(tmp)
         for repo in repos:
-            counts = process_repo(repo, args, clone_dir, symbols=symbols)
+            counts = process_repo(repo, org, args, clone_dir, symbols=symbols)
             for k, v in counts.items():
                 totals[k] = totals.get(k, 0) + v
 

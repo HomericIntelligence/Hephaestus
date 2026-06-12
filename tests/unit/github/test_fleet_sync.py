@@ -332,7 +332,7 @@ class TestMain:
         """main() with --json emits ok envelope when no failures occur."""
         from hephaestus.github import fleet_sync
 
-        def fake_process(repo, args, clone_dir, *, symbols=None):
+        def fake_process(repo, org, args, clone_dir, *, symbols=None):
             return {
                 "merged": 1,
                 "rebased": 0,
@@ -344,7 +344,17 @@ class TestMain:
         monkeypatch.setattr(fleet_sync, "process_repo", fake_process)
         monkeypatch.setattr(
             "sys.argv",
-            ["fleet-sync", "--repos", "owner/a", "--json", "--dry-run", "--agent", "claude"],
+            [
+                "fleet-sync",
+                "--org",
+                "owner",
+                "--repos",
+                "a",
+                "--json",
+                "--dry-run",
+                "--agent",
+                "claude",
+            ],
         )
         assert fleet_sync.main() == 0
         payload = json.loads(capsys.readouterr().out)
@@ -356,7 +366,7 @@ class TestMain:
         """main() with failures returns 1 and JSON envelope shows error."""
         from hephaestus.github import fleet_sync
 
-        def fake_process(repo, args, clone_dir, *, symbols=None):
+        def fake_process(repo, org, args, clone_dir, *, symbols=None):
             return {
                 "merged": 0,
                 "rebased": 0,
@@ -368,7 +378,17 @@ class TestMain:
         monkeypatch.setattr(fleet_sync, "process_repo", fake_process)
         monkeypatch.setattr(
             "sys.argv",
-            ["fleet-sync", "--repos", "owner/a", "--json", "--dry-run", "--agent", "claude"],
+            [
+                "fleet-sync",
+                "--org",
+                "owner",
+                "--repos",
+                "a",
+                "--json",
+                "--dry-run",
+                "--agent",
+                "claude",
+            ],
         )
         assert fleet_sync.main() == 1
         payload = json.loads(capsys.readouterr().out)
@@ -381,7 +401,7 @@ class TestMain:
 
         calls = []
 
-        def fake_process(repo, args, clone_dir, *, symbols=None):
+        def fake_process(repo, org, args, clone_dir, *, symbols=None):
             calls.append(repo)
             return {
                 "merged": 0,
@@ -394,10 +414,10 @@ class TestMain:
         monkeypatch.setattr(fleet_sync, "process_repo", fake_process)
         monkeypatch.setattr(
             "sys.argv",
-            ["fleet-sync", "--repos", "owner/a", "owner/b", "--dry-run", "--agent", "claude"],
+            ["fleet-sync", "--org", "owner", "--repos", "a", "b", "--dry-run", "--agent", "claude"],
         )
         assert fleet_sync.main() == 0
-        assert calls == ["owner/a", "owner/b"]
+        assert calls == ["a", "b"]
 
 
 class TestTimeoutHandling:
@@ -443,7 +463,7 @@ class TestTimeoutHandling:
         """_gh function uses NETWORK_TIMEOUT."""
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="[]")
-            fleet_sync_module._gh(["pr", "list"], repo="TestRepo")
+            fleet_sync_module._gh(["pr", "list"], repo="TestRepo", org="TestOrg")
             assert mock_run.called
             call_kwargs = mock_run.call_args[1]
             assert "timeout" in call_kwargs
@@ -529,7 +549,7 @@ class TestCloneReuseAndWorktrees:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch.object(fleet_sync_module, "_git", side_effect=fake_git):
-            path = fleet_sync_module.ensure_repo_clone("RepoA", tmp_path)
+            path = fleet_sync_module.ensure_repo_clone("RepoA", "HomericIntelligence", tmp_path)
 
         assert path == tmp_path / "RepoA"
         assert calls[0][0] == "clone"
@@ -545,7 +565,7 @@ class TestCloneReuseAndWorktrees:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch.object(fleet_sync_module, "_git", side_effect=fake_git):
-            path = fleet_sync_module.ensure_repo_clone("RepoA", tmp_path)
+            path = fleet_sync_module.ensure_repo_clone("RepoA", "HomericIntelligence", tmp_path)
 
         assert path == tmp_path / "RepoA"
         # Reuse path fetches, never clones.
@@ -600,7 +620,7 @@ class TestCloneReuseAndWorktrees:
         prs = [_pr(n, PRStatus.OUTDATED, head=f"feat{n}") for n in (1, 2, 3)]
         clone_count = [0]
 
-        def fake_ensure(repo, clone_dir, dry_run=False):
+        def fake_ensure(repo, org, clone_dir, dry_run=False):
             clone_count[0] += 1
             return clone_dir / repo
 
@@ -611,7 +631,7 @@ class TestCloneReuseAndWorktrees:
             patch.object(fleet_sync_module, "ensure_repo_clone", side_effect=fake_ensure),
             patch.object(fleet_sync_module, "rebase_and_resign", return_value=True),
         ):
-            counts = fleet_sync_module.process_repo("RepoA", args, tmp_path)
+            counts = fleet_sync_module.process_repo("RepoA", "HomericIntelligence", args, tmp_path)
 
         assert clone_count[0] == 1
         assert counts["rebased"] == 3
@@ -621,7 +641,7 @@ class TestCloneReuseAndWorktrees:
         prs = [_pr(1, PRStatus.READY, head="feat1")]
         clone_count = [0]
 
-        def fake_ensure(repo, clone_dir, dry_run=False):
+        def fake_ensure(repo, org, clone_dir, dry_run=False):
             clone_count[0] += 1
             return clone_dir / repo
 
@@ -632,7 +652,7 @@ class TestCloneReuseAndWorktrees:
             patch.object(fleet_sync_module, "ensure_repo_clone", side_effect=fake_ensure),
             patch.object(fleet_sync_module, "merge_pr", return_value=True),
         ):
-            counts = fleet_sync_module.process_repo("RepoA", args, tmp_path)
+            counts = fleet_sync_module.process_repo("RepoA", "HomericIntelligence", args, tmp_path)
 
         assert clone_count[0] == 0
         assert counts["merged"] == 1
@@ -672,7 +692,7 @@ class TestListPrs:
             return MagicMock(stdout=json.dumps({"statusCheckRollup": []}))
 
         monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
-        prs = fleet_sync_module.list_prs("ProjectHephaestus")
+        prs = fleet_sync_module.list_prs("ProjectHephaestus", "HomericIntelligence")
         json_idx = captured["list_args"].index("--json")
         json_fields = captured["list_args"][json_idx + 1]
         assert "statusCheckRollup" not in json_fields
@@ -708,7 +728,7 @@ class TestListPrs:
             )
 
         monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
-        prs = fleet_sync_module.list_prs("ProjectHephaestus")
+        prs = fleet_sync_module.list_prs("ProjectHephaestus", "HomericIntelligence")
         assert view_calls and view_calls[0][:3] == ["pr", "view", "7"]
         assert prs[0].ci_state == "SUCCESS"
         assert prs[0].status == PRStatus.READY
@@ -736,7 +756,7 @@ class TestListPrs:
             raise RuntimeError("504 on pr view")
 
         monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
-        prs = fleet_sync_module.list_prs("ProjectHephaestus")
+        prs = fleet_sync_module.list_prs("ProjectHephaestus", "HomericIntelligence")
         assert prs[0].ci_state == "UNKNOWN"
 
     def test_list_failure_raises_not_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -747,7 +767,7 @@ class TestListPrs:
 
         monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
         with pytest.raises(RuntimeError, match="could not list PRs"):
-            fleet_sync_module.list_prs("ProjectHephaestus")
+            fleet_sync_module.list_prs("ProjectHephaestus", "HomericIntelligence")
 
     def test_empty_list_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """An actually-empty repo returns [] (distinct from a list failure)."""
@@ -756,7 +776,7 @@ class TestListPrs:
             return MagicMock(stdout="[]")
 
         monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
-        assert fleet_sync_module.list_prs("ProjectHephaestus") == []
+        assert fleet_sync_module.list_prs("ProjectHephaestus", "HomericIntelligence") == []
 
 
 class TestPrClassification:
@@ -798,7 +818,7 @@ class TestPrClassification:
             return MagicMock(stdout=json.dumps({"statusCheckRollup": rollup}))
 
         monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
-        return fleet_sync_module.list_prs("ProjectHephaestus")[0].status
+        return fleet_sync_module.list_prs("ProjectHephaestus", "HomericIntelligence")[0].status
 
     def test_blocked_mergeable_failing_is_outdated(self, monkeypatch) -> None:
         """BLOCKED+MERGEABLE with red CI = stale failure → rebase (OUTDATED)."""
@@ -850,13 +870,13 @@ class TestListPrsAuthorScope:
         """The ``gh pr list`` argv must include ``--author @me``."""
         captured_argv: list[list[str]] = []
 
-        def fake_gh(args, repo):
+        def fake_gh(args, repo=None, org=None, **kwargs):
             captured_argv.append(args)
             return MagicMock(stdout="[]")
 
         monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
 
-        fleet_sync_module.list_prs("RepoA")
+        fleet_sync_module.list_prs("RepoA", "HomericIntelligence")
 
         assert captured_argv, "_gh was never called"
         pr_list_argv = captured_argv[0]
@@ -875,10 +895,10 @@ class TestListPrsAuthorScope:
         monkeypatch.setattr(
             fleet_sync_module,
             "_fetch_pr_ci_state",
-            lambda repo, number: "SUCCESS",
+            lambda repo, number, org=None: "SUCCESS",
         )
 
-        def fake_gh(args, repo):
+        def fake_gh(args, repo=None, org=None, **kwargs):
             assert "--author" in args and args[args.index("--author") + 1] == "@me"
             payload = [
                 {
@@ -895,7 +915,7 @@ class TestListPrsAuthorScope:
 
         monkeypatch.setattr(fleet_sync_module, "_gh", fake_gh)
 
-        prs = fleet_sync_module.list_prs("RepoA")
+        prs = fleet_sync_module.list_prs("RepoA", "HomericIntelligence")
 
         assert [p.number for p in prs] == [1]
 
@@ -925,7 +945,7 @@ class TestAsciiFlag:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capture_fleet_sync_logs
     ) -> None:
         """process_repo logs ASCII banner under ASCII_SYMBOLS — no module state."""
-        monkeypatch.setattr(fleet_sync_module, "list_prs", lambda _repo: [])
+        monkeypatch.setattr(fleet_sync_module, "list_prs", lambda _repo, _org: [])
 
         import argparse
 
@@ -940,7 +960,11 @@ class TestAsciiFlag:
             )
 
             fleet_sync_module.process_repo(
-                "test-repo", args, tmp_path, symbols=fleet_sync_module.ASCII_SYMBOLS
+                "test-repo",
+                "HomericIntelligence",
+                args,
+                tmp_path,
+                symbols=fleet_sync_module.ASCII_SYMBOLS,
             )
 
             # Check logged messages
@@ -952,7 +976,7 @@ class TestAsciiFlag:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capture_fleet_sync_logs
     ) -> None:
         """Default kwarg gives Unicode — backward-compat for existing callers."""
-        monkeypatch.setattr(fleet_sync_module, "list_prs", lambda _repo: [])
+        monkeypatch.setattr(fleet_sync_module, "list_prs", lambda _repo, _org: [])
 
         import argparse
 
@@ -966,7 +990,7 @@ class TestAsciiFlag:
                 ascii=False,
             )
 
-            fleet_sync_module.process_repo("test-repo", args, tmp_path)
+            fleet_sync_module.process_repo("test-repo", "HomericIntelligence", args, tmp_path)
 
             # Check logged messages
             output = "\n".join(logged_messages)

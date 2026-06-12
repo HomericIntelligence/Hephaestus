@@ -1,0 +1,19 @@
+# Fleet configuration consumed by hephaestus-fleet-sync.
+# Override per-invocation with --org / --repos or FLEET_ORG / FLEET_REPOS.
+org: HomericIntelligence
+repos:
+  - Odysseus
+  - AchaeanFleet
+  - ProjectArgus
+  - ProjectHermes
+  - ProjectTelemachy
+  - ProjectKeystone
+  - Myrmidons
+  - ProjectProteus
+  - ProjectOdyssey
+  - ProjectScylla
+  - ProjectMnemosyne
+  - ProjectHephaestus
+  - ProjectAgamemnon
+  - ProjectNestor
+  - ProjectCharybdis
