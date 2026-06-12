@@ -57,6 +57,20 @@ ProjectHephaestus/
 Skill directories use kebab-case (`code-review`, `git-worktrees`) per the
 Claude Code plugin format. All Python packages use lowercase_snake_case.
 
+## Library vs product layer
+
+`hephaestus/automation/` is a **product layer** (19.7k LoC, 48% of the
+codebase) co-located with the utility library. It is gated behind the
+`HomericIntelligence-Hephaestus[automation]` optional extra. The base
+`import hephaestus` surface MUST NOT pull `curses`, `fcntl`, `pydantic`,
+or any `hephaestus.automation.*` module. Enforced by
+`tests/unit/test_import_surface.py` (subprocess) and
+`tests/unit/test_automation_boundary.py` (static grep).
+
+Library subpackages of `hephaestus` may not import from
+`hephaestus.automation`. The dependency arrow points only one way:
+automation → library. See `docs/adr/0001-automation-library-boundary.md`.
+
 ## Python Development Guidelines
 
 ### Language Preference

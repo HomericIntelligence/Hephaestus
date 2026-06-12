@@ -60,6 +60,25 @@ pixi install
 pre-commit install
 ```
 
+## Library vs product layer
+
+ProjectHephaestus ships two layers from one distribution:
+
+- **Library** — `hephaestus.{utils, io, config, logging, cli, system,
+  github, validation, resilience, markdown, ci, benchmarks, datasets,
+  discovery, forensics, nats, version, agents}`. Loaded lazily by
+  `import hephaestus`.
+- **Product** — `hephaestus.automation`. Opt-in via
+  `pip install HomericIntelligence-Hephaestus[automation]`. Implements
+  the Claude/Codex automation pipeline (Planner, Implementer, CIDriver,
+  reviewers, loop runner, curses TUI).
+
+`import hephaestus` does **not** load `hephaestus.automation`, `curses`,
+`fcntl`, or `pydantic`. The boundary is enforced by
+`tests/unit/test_import_surface.py` and
+`tests/unit/test_automation_boundary.py`. See
+[`docs/adr/0001-automation-library-boundary.md`](docs/adr/0001-automation-library-boundary.md).
+
 ## Directory Structure
 
 ```
