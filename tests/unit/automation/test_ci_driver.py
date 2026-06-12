@@ -490,6 +490,8 @@ class TestOpenPrsRemaining:
         """Empty paginated response → ``open_prs_remaining`` is empty."""
         # gh api --paginate emits a concatenated JSON array; an empty repo
         # surfaces as ``[]``. The driver must read this as "done".
+        # #821: this test verifies empty-list handling, not author scope.
+        driver.options.include_all_authors = True
         result_mock = MagicMock(stdout="[]")
         with (
             patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
@@ -502,6 +504,8 @@ class TestOpenPrsRemaining:
         """REST snake_case fields are normalised to the gh-CLI camelCase shape."""
         # gh api returns the GitHub REST shape (``head.ref``, ``auto_merge``);
         # downstream consumers in this module expect gh-CLI shape.
+        # #821: this test verifies normalization, not author scope.
+        driver.options.include_all_authors = True
         rest_pulls = [
             {
                 "number": 1,
@@ -549,6 +553,8 @@ class TestOpenPrsRemaining:
         # The conservative default: if we can't list open PRs we don't claim
         # the repo is clean. ``main()`` reads non-empty open_prs_remaining as
         # a failure.
+        # #821: this test verifies gh-failure handling, not author scope.
+        driver.options.include_all_authors = True
         with (
             patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
             patch(
@@ -565,6 +571,8 @@ class TestOpenPrsRemaining:
         """The call must include ``--paginate`` so all open PRs are returned, not 100."""
         # Without --paginate a repo with 200 open dependabot PRs would falsely
         # pass the done-check after looking at only 100.
+        # #821: this test verifies pagination, not author scope.
+        driver.options.include_all_authors = True
         result_mock = MagicMock(stdout="[]")
         with (
             patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
@@ -1938,6 +1946,8 @@ class TestBotPrDiscovery:
     """``_discover_bot_prs`` and ``_discover_prs`` bot-mode union."""
 
     def test_no_bot_prs_returns_empty(self, driver: CIDriver, tmp_path: Path) -> None:
+        # #821: this test verifies empty-list handling, not author scope.
+        driver.options.include_all_authors = True
         with (
             patch(
                 "hephaestus.automation.ci_driver.get_repo_info",
@@ -1951,6 +1961,8 @@ class TestBotPrDiscovery:
             assert driver._discover_bot_prs() == {}
 
     def test_bot_prs_returned_as_self_keyed_map(self, driver: CIDriver, tmp_path: Path) -> None:
+        # #821: this test verifies bot-type filter, not author scope.
+        driver.options.include_all_authors = True
         raw = [
             {"number": 100, "user": {"type": "Bot", "login": "app/dependabot"}},
             {"number": 101, "user": {"type": "User", "login": "alice"}},
@@ -1971,6 +1983,8 @@ class TestBotPrDiscovery:
         assert result == {100: 100, 102: 102}
 
     def test_gh_failure_returns_empty(self, driver: CIDriver, tmp_path: Path) -> None:
+        # #821: this test verifies gh-failure handling, not author scope.
+        driver.options.include_all_authors = True
         with (
             patch(
                 "hephaestus.automation.ci_driver.get_repo_info",

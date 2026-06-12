@@ -629,6 +629,30 @@ def test_build_phase_argv_plan_uses_parallel_worker_flag() -> None:
     assert argv[argv.index("--parallel") + 1] == "4"
 
 
+def test_build_phase_argv_drive_green_default_omits_all_flag() -> None:
+    """Default drive-green (no --drive-green-all) omits --all flag (#821)."""
+    cfg = LoopConfig(phases=("drive-green",))
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/py", ["script.py"])):
+        argv = loop_runner._build_phase_argv("drive-green", cfg, open_issues=[1], loop_idx=1)
+    assert argv is not None and "--all" not in argv
+
+
+def test_build_phase_argv_drive_green_all_flag_appends_all() -> None:
+    """--drive-green-all flag appends --all to drive-green phase argv (#821)."""
+    cfg = LoopConfig(phases=("drive-green",), drive_green_all=True)
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/py", ["script.py"])):
+        argv = loop_runner._build_phase_argv("drive-green", cfg, open_issues=[1], loop_idx=1)
+    assert argv is not None and "--all" in argv
+
+
+def test_build_phase_argv_drive_green_all_flag_not_passed_to_other_phases() -> None:
+    """--drive-green-all flag only affects drive-green phase, not others (#821)."""
+    cfg = LoopConfig(phases=("implement",), drive_green_all=True)
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/py", ["script.py"])):
+        argv = loop_runner._build_phase_argv("implement", cfg, open_issues=[1], loop_idx=1)
+    assert argv is not None and "--all" not in argv
+
+
 def test_phase_env_does_not_inject_loop_index_envs(monkeypatch: pytest.MonkeyPatch) -> None:
     """Loop env vars are no longer injected for any phase (#820)."""
     # _phase_env copies os.environ; clean any ambient vars so the assertion
