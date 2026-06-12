@@ -52,11 +52,11 @@ _LAZY_EXPORTS: dict[str, str] = {
     "ImplementerOptions": "hephaestus.automation.models",
     "IssueImplementer": "hephaestus.automation.implementer",
     "IssueInfo": "hephaestus.automation.models",
+    "PRReviewer": "hephaestus.automation.pr_reviewer",
     "PlanReviewer": "hephaestus.automation.plan_reviewer",
     "PlanReviewerOptions": "hephaestus.automation.models",
     "Planner": "hephaestus.automation.planner",
     "PlannerOptions": "hephaestus.automation.models",
-    "PRReviewer": "hephaestus.automation.pr_reviewer",
     "ReviewerOptions": "hephaestus.automation.models",
 }
 
