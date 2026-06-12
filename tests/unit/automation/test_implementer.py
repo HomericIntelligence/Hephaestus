@@ -1014,16 +1014,28 @@ class TestHasPlanPrefixMatch:
         with patch("hephaestus.automation.implementer.get_repo_root", return_value=tmp_path):
             return IssueImplementer(options)
 
-    def test_plan_review_quoting_plan_heading_is_not_a_plan(self, impl: IssueImplementer) -> None:
-        """_has_plan does not match substring in a Plan Review comment.
+    @staticmethod
+    def _mock_gh_view(comments: list[dict[str, Any]]) -> Any:
+        def mock_gh_view(*args: Any, **kwargs: Any) -> MagicMock:
+            result = MagicMock()
+            result.stdout = json.dumps({"comments": comments}).encode("utf-8")
+            return result
 
-        Regression for #455/#468/#484: a ``## 🔍 Plan Review`` body contains
-        ``## Implementation Plan`` as substring when it quotes the plan, and
+        return mock_gh_view
+
+    def test_plan_review_quoting_plan_heading_is_not_a_plan(self, impl: IssueImplementer) -> None:
+        """_has_plan does not match a Plan Review comment that merely quotes the plan.
+
+        Regression for #455/#468/#484/#715: a ``## 🔍 Plan Review`` body contains
+        ``# Implementation Plan`` as substring when it quotes the plan, and
         substring matching caused the false positive. Prefix-matching (only at
         the start of the body) must be used instead.
+
+        The fixture intentionally contains ONLY the Plan-Review comment (no
+        genuine plan), so the OLD substring code would return ``True`` here —
+        this test fails against the pre-fix code and guards the bug.
         """
         comments = [
-            {"body": "# Implementation Plan\n\nStep 1: Do something"},
             {
                 "body": (
                     "## 🔍 Plan Review\n\n"
@@ -1033,14 +1045,24 @@ class TestHasPlanPrefixMatch:
             },
         ]
 
-        def mock_gh_view(*args: Any, **kwargs: Any) -> MagicMock:
-            result = MagicMock()
-            result.stdout = json.dumps({"comments": comments}).encode("utf-8")
-            return result
+        with patch(
+            "hephaestus.automation.implementer_phase_runner.run",
+            side_effect=self._mock_gh_view(comments),
+        ):
+            assert impl.phase_runner._has_plan(1) is False
+
+    def test_real_plan_comment_is_detected(self, impl: IssueImplementer) -> None:
+        """_has_plan returns True for a comment whose body starts with the marker.
+
+        Covers the positive branch of the prefix check (#715): a body beginning
+        with ``# Implementation Plan`` is a genuine plan.
+        """
+        comments = [
+            {"body": "# Implementation Plan\n\nStep 1: Do something"},
+        ]
 
         with patch(
             "hephaestus.automation.implementer_phase_runner.run",
-            side_effect=mock_gh_view,
+            side_effect=self._mock_gh_view(comments),
         ):
-            # The first comment is the plan; the second quotes it but is NOT the plan
             assert impl.phase_runner._has_plan(1) is True
