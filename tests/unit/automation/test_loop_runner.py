@@ -400,7 +400,11 @@ def test_process_repo_skips_disabled_phases(repo_inputs: tuple[Path, LoopConfig]
 def test_process_repo_skips_issue_phases_when_no_issues(
     repo_inputs: tuple[Path, LoopConfig],
 ) -> None:
-    """Process repo skips issue phases when no issues."""
+    """Process repo no longer gates plan/implement on an issue list (#820).
+
+    PHASES_REQUIRING_ISSUES is empty, so only drive-green has a work gate
+    (the failing-PR gate). plan and implement auto-discover and still run.
+    """
     _, cfg = repo_inputs
     with (
         patch.object(loop_runner, "_rebase_main", return_value=("abc1234", True)),
@@ -410,8 +414,7 @@ def test_process_repo_skips_issue_phases_when_no_issues(
     ):
         result = process_repo("r", loop_idx=1, cfg=cfg)
     by_name = {p.name: p for p in result.phases}
-    # PHASES_REQUIRING_ISSUES is now empty; only drive-green has a
-    # work-gate, and it's the failing-PR gate. No phase should run.
+    # drive-green has no failing PRs to drive, so it skips.
     assert by_name["drive-green"].skipped
     assert by_name["drive-green"].skip_reason == "no failing PRs"
     # plan and implement auto-discover, so they still run
@@ -674,19 +677,17 @@ def test_build_phase_argv_plan_uses_parallel_worker_flag() -> None:
     assert argv[argv.index("--parallel") + 1] == "4"
 
 
-def test_phase_env_loop_index_only_for_drive_green(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Regression: HEPH_LOOP_INDEX/HEPH_TOTAL_LOOPS scoped to drive-green only."""
-    # Clean pre-existing vars from the actual environment that _phase_env will copy
+def test_phase_env_does_not_inject_loop_index_envs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Loop env vars are no longer injected for any phase (#820)."""
+    # _phase_env copies os.environ; clean any ambient vars so the assertion
+    # tests injection behavior, not the inherited environment.
     monkeypatch.delenv("HEPH_LOOP_INDEX", raising=False)
     monkeypatch.delenv("HEPH_TOTAL_LOOPS", raising=False)
     cfg = LoopConfig(loops=5)
-    for phase in ("plan", "implement"):
+    for phase in ("plan", "implement", "drive-green"):
         env = loop_runner._phase_env(cfg, loop_idx=3, trunk_sha="abc", phase=phase)
-        assert "HEPH_LOOP_INDEX" not in env, f"phase {phase} leaked HEPH_LOOP_INDEX"
-        assert "HEPH_TOTAL_LOOPS" not in env, f"phase {phase} leaked HEPH_TOTAL_LOOPS"
-    env_dg = loop_runner._phase_env(cfg, loop_idx=3, trunk_sha="abc", phase="drive-green")
-    assert env_dg["HEPH_LOOP_INDEX"] == "3"
-    assert env_dg["HEPH_TOTAL_LOOPS"] == "5"
+        assert "HEPH_LOOP_INDEX" not in env, f"phase {phase} unexpectedly has HEPH_LOOP_INDEX"
+        assert "HEPH_TOTAL_LOOPS" not in env, f"phase {phase} unexpectedly has HEPH_TOTAL_LOOPS"
 
 
 def test_phase_env_model_vars_only_when_non_empty(monkeypatch: pytest.MonkeyPatch) -> None:

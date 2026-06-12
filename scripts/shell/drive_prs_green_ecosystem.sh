@@ -7,8 +7,6 @@
 # Workaround for the structural bugs filed as #818–#821 in
 # HomericIntelligence/ProjectHephaestus:
 #   - drive_prs_green.py has no --repos / --org flag (this script loops)
-#   - drive_prs_green.py marks --issues as required=True (we look them up)
-#   - the script gates on HEPH_LOOP_INDEX == HEPH_TOTAL_LOOPS (we pass --force-run)
 #   - issue-driven discovery only: PRs without `Closes #<open-issue>` are invisible
 #
 # Pre-reqs:
@@ -305,13 +303,11 @@ for REPO in "${REPOS[@]}"; do
       pixi run --manifest-path "$HEPHAESTUS_DIR/pixi.toml" python -u \
         "$DRIVER" \
         --issues "${ISSUES[@]}" \
-        --force-run \
         --no-ui \
         "${DRIVER_ARGS[@]}"
     else
       pixi run --manifest-path "$HEPHAESTUS_DIR/pixi.toml" python -u \
         "$DRIVER" \
-        --force-run \
         --no-ui \
         "${DRIVER_ARGS[@]}"
     fi

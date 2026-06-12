@@ -206,7 +206,7 @@ class TestMainPrsFlow:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """main() threads --prs into CIDriverOptions.prs."""
-        monkeypatch.setattr(sys, "argv", ["ci", "--prs", "661", "662", "--dry-run", "--force-run"])
+        monkeypatch.setattr(sys, "argv", ["ci", "--prs", "661", "662", "--dry-run"])
         with patch("hephaestus.automation.ci_driver.resolve_agent", return_value="claude"):
             with patch("hephaestus.automation.ci_driver.CIDriver") as mock_driver_class:
                 with patch(
@@ -229,7 +229,7 @@ class TestMainPrsFlow:
 
     def test_main_prs_json_output_includes_open_prs(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """--prs --json output includes open PRs from result."""
-        monkeypatch.setattr(sys, "argv", ["ci", "--prs", "661", "662", "--json", "--force-run"])
+        monkeypatch.setattr(sys, "argv", ["ci", "--prs", "661", "662", "--json"])
         with patch("hephaestus.automation.ci_driver.resolve_agent", return_value="claude"):
             with patch("hephaestus.automation.ci_driver.CIDriver") as mock_driver_class:
                 with patch(

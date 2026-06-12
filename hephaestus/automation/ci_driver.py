@@ -3075,8 +3075,11 @@ def _parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Drive CI for specific issues
-  %(prog)s --issues 123 456 789
+  # Discover every failing open PR (issue-driven + bot-PR union, #848)
+  %(prog)s
+
+  # Scope to specific issues' PRs
+  %(prog)s --issues 814 815
 
   # Drive specific PRs directly
   %(prog)s --prs 661 662 664 666
@@ -3084,23 +3087,23 @@ Examples:
   # Dry run (no GitHub writes or git pushes)
   %(prog)s --issues 123 --dry-run
 
-  # Run with more workers
+  # More parallel workers
   %(prog)s --issues 123 456 --max-workers 5
 
-  # Verbose output
-  %(prog)s --issues 123 -v
+  # Verbose
+  %(prog)s -v
         """,
     )
 
     parser.add_argument(
         "--issues",
         type=int,
-        nargs="*",
+        nargs="+",
         default=[],
         help=(
-            "Issue numbers whose PRs should be driven to green CI. Optional: "
-            "when omitted, the driver still picks up open bot-authored PRs via "
-            "--include-bot-prs (default on) (#848)."
+            "Scope to these issue numbers' PRs. Requires at least one issue "
+            "number when given. Omit the flag entirely to drive every failing "
+            "open PR discovered via gh (issue-linked PRs plus bot-authored PRs)."
         ),
     )
     parser.add_argument(
@@ -3140,16 +3143,6 @@ Examples:
         help="Enable verbose logging",
     )
     parser.add_argument(
-        "--force-run",
-        action="store_true",
-        help=(
-            "Bypass the final-loop-only gate. By default, the driver refuses to "
-            "run unless HEPH_LOOP_INDEX == HEPH_TOTAL_LOOPS or both are unset; "
-            "use --force-run to override (e.g. ad-hoc invocation outside the "
-            "automation loop). Setting HEPH_CI_DRIVER_FORCE=1 has the same effect."
-        ),
-    )
-    parser.add_argument(
         "--no-include-bot-prs",
         dest="include_bot_prs",
         action="store_false",
@@ -3178,37 +3171,6 @@ Examples:
     add_json_arg(parser)
 
     return parser.parse_args()
-
-
-def _final_loop_gate_passes(force: bool) -> tuple[bool, str]:
-    """Return (allowed, reason) for the final-loop-only gate.
-
-    The shell loop sets HEPH_LOOP_INDEX (1-based current loop) and
-    HEPH_TOTAL_LOOPS so this module can refuse to run on non-final loops.
-    Both unset means "not running under the loop" — allowed (CI debugging,
-    one-shot invocations). Either set without the other is treated as a
-    misconfiguration and the gate fails closed.
-    """
-    if force or os.environ.get("HEPH_CI_DRIVER_FORCE") == "1":
-        return True, "force flag set"
-
-    idx_raw = os.environ.get("HEPH_LOOP_INDEX")
-    total_raw = os.environ.get("HEPH_TOTAL_LOOPS")
-    if idx_raw is None and total_raw is None:
-        return True, "no loop env set (standalone invocation)"
-    if idx_raw is None or total_raw is None:
-        return False, (
-            "only one of HEPH_LOOP_INDEX/HEPH_TOTAL_LOOPS is set "
-            f"(idx={idx_raw!r}, total={total_raw!r}); fail-closed"
-        )
-    try:
-        idx = int(idx_raw)
-        total = int(total_raw)
-    except ValueError:
-        return False, (f"non-integer loop env: idx={idx_raw!r} total={total_raw!r}")
-    if idx != total:
-        return False, f"loop {idx}/{total} — drive-green is final-loop-only"
-    return True, f"final loop {idx}/{total}"
 
 
 def _evaluate_run_result(
@@ -3288,19 +3250,11 @@ def main() -> int:
 
     log = logging.getLogger(__name__)
 
-    allowed, reason = _final_loop_gate_passes(force=args.force_run)
-    if not allowed:
-        log.error(
-            "ci_driver refused to run: %s. Pass --force-run (or set "
-            "HEPH_CI_DRIVER_FORCE=1) to override.",
-            reason,
-        )
-        if args.json:
-            emit_json_status(2, message=f"gate refused: {reason}")
-        return 2
-    log.debug("ci_driver gate passed: %s", reason)
-
-    log.info("Starting CI driver for issues: %s, direct PRs: %s", args.issues, args.prs)
+    log.info(
+        "Starting CI driver for issues: %s, direct PRs: %s",
+        args.issues or "<discovery mode>",
+        args.prs,
+    )
 
     try:
         options = CIDriverOptions(

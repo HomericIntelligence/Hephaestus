@@ -131,10 +131,10 @@ def _parse_issue_list(value: str) -> list[int]:
     return issues
 
 
-# drive-green used to be issue-gated, but #819 inverted its discovery to
-# "any failing open PR" via a separate _count_failing_prs gate below. Set
-# is kept (currently empty) so any future phase that genuinely needs an
-# issue list has one place to opt in.
+# drive-green discovers PRs directly via gh and no longer requires an
+# input issue list (#820, #819). plan + implement auto-discover their own.
+# The set is kept (currently empty) so any future phase that genuinely
+# needs an issue list has one place to opt in.
 PHASES_REQUIRING_ISSUES: frozenset[str] = frozenset()
 
 # Sentinel for cooperative shutdown on SIGINT/SIGTERM. Worker threads
@@ -1006,15 +1006,7 @@ def _phase_env(
     trunk_sha: str,
     phase: str,
 ) -> dict[str, str]:
-    """Build the environment dict for a phase subprocess.
-
-    ``HEPH_LOOP_INDEX`` / ``HEPH_TOTAL_LOOPS`` are scoped to the
-    ``drive-green`` phase only — matching the bash script which set these
-    inline solely for the drive-green subshell (scripts/run_automation_loop.sh:570).
-    The ci_driver.py defense-in-depth check uses these to refuse to run
-    outside the final loop; injecting them into other phases' envs is
-    benign but a behavioral divergence from the bash version.
-    """
+    """Build the environment dict for a phase subprocess."""
     env = os.environ.copy()
     # Precedence per phase: explicit per-phase flag > catch-all --model > any
     # ambient HEPH_*_MODEL the operator exported > the phase default resolved
@@ -1036,9 +1028,6 @@ def _phase_env(
         env["PYTHONPATH"] = f"{project_root}{os.pathsep}{env['PYTHONPATH']}"
     else:
         env["PYTHONPATH"] = project_root
-    if phase == "drive-green":
-        env["HEPH_LOOP_INDEX"] = str(loop_idx)
-        env["HEPH_TOTAL_LOOPS"] = str(cfg.loops)
     return env
 
 
