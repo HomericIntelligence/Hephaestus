@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from hephaestus.cli.utils import add_json_arg, format_output
+from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 from hephaestus.logging.utils import get_logger
 from hephaestus.markdown.utils import find_markdown_files
 
@@ -476,6 +476,7 @@ def check_readmes_main() -> int:
         help="Print each README path as it is checked",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
 
     args = parser.parse_args()
     directory = args.directory or Path.cwd()
@@ -708,6 +709,7 @@ def main() -> int:
         help="Print verbose output",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
 
     args = parser.parse_args()
     repo_root = args.repo_root or get_repo_root()

@@ -11,6 +11,7 @@ from hephaestus.cli.utils import (
     CommandRegistry,
     add_json_arg,
     add_logging_args,
+    add_version_arg,
     confirm_action,
     create_parser,
     emit_json_status,
@@ -111,6 +112,35 @@ class TestCreateParser:
         """Prog name is set correctly."""
         parser = create_parser("myprog")
         assert parser.prog == "myprog"
+
+
+class TestAddVersionArg:
+    """Tests for add_version_arg."""
+
+    def test_adds_long_form(self) -> None:
+        """add_version_arg() registers --version as a version action."""
+        parser = argparse.ArgumentParser(prog="demo")
+        add_version_arg(parser)
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args(["--version"])
+        assert exc.value.code == 0
+
+    def test_adds_short_form(self) -> None:
+        """-V is the short form for --version."""
+        parser = argparse.ArgumentParser(prog="demo")
+        add_version_arg(parser)
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args(["-V"])
+        assert exc.value.code == 0
+
+    def test_version_string_includes_prog(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Version output includes the prog name."""
+        parser = argparse.ArgumentParser(prog="demo")
+        add_version_arg(parser)
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--version"])
+        captured = capsys.readouterr()
+        assert "demo" in captured.out
 
 
 class TestAddLoggingArgs:
@@ -254,7 +284,9 @@ class TestCliBarrelExports:
             COMMAND_REGISTRY,
             Colors,
             CommandRegistry,
+            add_json_arg,
             add_logging_args,
+            add_version_arg,
             confirm_action,
             create_parser,
             format_output,
@@ -266,7 +298,14 @@ class TestCliBarrelExports:
         """hephaestus.cli.__all__ lists the framework symbols, not just Colors."""
         import hephaestus.cli as cli
 
-        for symbol in ("create_parser", "COMMAND_REGISTRY", "format_table", "Colors"):
+        symbols = (
+            "create_parser",
+            "COMMAND_REGISTRY",
+            "format_table",
+            "Colors",
+            "add_version_arg",
+        )
+        for symbol in symbols:
             assert symbol in cli.__all__
             assert hasattr(cli, symbol)
 

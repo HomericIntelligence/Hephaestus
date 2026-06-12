@@ -21,7 +21,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.utils.helpers import get_repo_root
 
 ALLOWED_ROOT_FILES: frozenset[str] = frozenset({"__init__.py", "conftest.py"})
@@ -211,6 +211,7 @@ def main() -> int:
         help="Print detailed output",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
 
     args = parser.parse_args()
     repo_root = args.repo_root or get_repo_root()

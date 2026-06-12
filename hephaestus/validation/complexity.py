@@ -17,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg, format_output
+from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, get_repo_root
 
 
@@ -150,6 +150,7 @@ def main() -> int:
         help="Enable verbose output",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
     args = parser.parse_args()
 
     repo_root = args.repo_root or get_repo_root()

@@ -38,7 +38,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.logging.utils import get_logger
 
 logger = get_logger(__name__)
@@ -620,6 +620,7 @@ def main() -> int:
         help="EMNIST split (only used when dataset=emnist, default: balanced)",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
 
     args = parser.parse_args()
     success = True

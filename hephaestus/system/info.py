@@ -13,7 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from hephaestus.cli.utils import add_json_arg, format_output
+from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 from hephaestus.utils.helpers import run_subprocess
 
 
@@ -309,6 +309,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Collect system information")
     parser.add_argument("--no-tools", action="store_true", help="Skip tool version checks")
     add_json_arg(parser)
+    add_version_arg(parser)
 
     args = parser.parse_args()
 

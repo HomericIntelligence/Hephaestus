@@ -33,7 +33,7 @@ import logging
 import subprocess
 import sys
 
-from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 
 from .state_labels import STATE_LABEL_SPECS
 
@@ -186,6 +186,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Enable DEBUG logging.",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
     return parser
 
 

@@ -20,7 +20,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg
+from hephaestus.cli.utils import add_json_arg, add_version_arg
 from hephaestus.utils.helpers import get_repo_root
 
 _CONTINUATION_STARTERS = frozenset(
@@ -304,6 +304,7 @@ def main() -> int:
         help="Print detailed output",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
 
     args = parser.parse_args()
     repo_root = args.repo_root or get_repo_root()

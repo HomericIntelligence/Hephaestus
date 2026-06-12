@@ -22,7 +22,7 @@ import re
 import sys
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg, format_output
+from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 
 
 def heading_to_anchor(heading: str) -> str:
@@ -236,6 +236,7 @@ def main() -> int:
         help="Print success message when no errors are found",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
 
     args = parser.parse_args()
 

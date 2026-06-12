@@ -24,7 +24,7 @@ import subprocess
 import sys
 from typing import Any
 
-from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.logging.utils import get_logger
 from hephaestus.utils.helpers import METADATA_TIMEOUT, run_subprocess
 
@@ -222,6 +222,7 @@ def main() -> int:  # noqa: C901
         help="Repository in format OWNER/REPO (auto-detected if not provided)",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
     args = parser.parse_args()
 
     # Get GitHub token

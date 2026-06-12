@@ -50,7 +50,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 
 #: Default candidate output directories, tried in order. The first that
 #: already exists wins; if none exist, the last is created. A CI job
@@ -232,6 +232,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="global (host-namespace) PID (%%P) — captured, unused in the filename",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
     return parser
 
 

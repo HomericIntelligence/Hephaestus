@@ -38,7 +38,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status, format_output
 from hephaestus.config.pixi import is_deps_section
 from hephaestus.utils.helpers import METADATA_TIMEOUT
 from hephaestus.version.parsing import parse_version_tuple
@@ -465,6 +465,7 @@ def check_dep_sync_main() -> int:
         help="Repository root (default: auto-detect via git)",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
     args = parser.parse_args()
 
     errors = check_dep_sync(args.repo_root)
@@ -529,6 +530,7 @@ def sync_requirements_main() -> int:
         help="Dev-only packages for requirements-dev.txt",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
 
     args = parser.parse_args()
 

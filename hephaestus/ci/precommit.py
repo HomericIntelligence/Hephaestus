@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from hephaestus.cli.utils import add_json_arg, emit_json_status, format_output
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status, format_output
 from hephaestus.config.pixi import is_deps_section
 from hephaestus.io.toml import import_tomllib
 from hephaestus.version.parsing import parse_version_tuple
@@ -411,6 +411,7 @@ def bench_precommit_main(argv: list[str] | None = None) -> int:
         "--threshold", type=int, default=120, help="Warning threshold in seconds (default: 120)."
     )
     add_json_arg(parser)
+    add_version_arg(parser)
 
     args = parser.parse_args(argv)
 
@@ -464,6 +465,7 @@ def check_precommit_versions_main(argv: list[str] | None = None) -> int:
         help="Path to pixi.toml (default: repo root)",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
     args = parser.parse_args(argv)
 
     try:

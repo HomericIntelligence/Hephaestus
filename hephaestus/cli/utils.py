@@ -25,6 +25,7 @@ __all__ = [
     "CommandRegistry",
     "add_json_arg",
     "add_logging_args",
+    "add_version_arg",
     "confirm_action",
     "create_parser",
     "emit_json_status",
@@ -110,6 +111,19 @@ def add_logging_args(parser: argparse.ArgumentParser) -> None:
         "-q", "--quiet", action="store_true", help="Suppress informational messages"
     )
     logging_group.add_argument("--log-file", help="Log to file instead of stdout")
+
+
+def add_version_arg(parser: argparse.ArgumentParser) -> None:
+    """Add the standard ``--version`` / ``-V`` flag to a CLI parser.
+
+    Every ``hephaestus-*`` console script accepts ``--version`` for version introspection.
+    """
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
 
 
 def add_json_arg(parser: argparse.ArgumentParser) -> None:
