@@ -66,9 +66,9 @@ from .github_api import (
 )
 from .learn import compact_session, learn_needs_rerun, run_learn
 from .models import (
+    PLAN_COMMENT_MARKER,
     ImplementationPhase,
     ImplementationState,
-    PLAN_COMMENT_MARKER,
     WorkerResult,
 )
 from .planner_state import _comments_contain_plan

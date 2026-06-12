@@ -12,6 +12,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1013,9 +1014,7 @@ class TestHasPlanPrefixMatch:
         with patch("hephaestus.automation.implementer.get_repo_root", return_value=tmp_path):
             return IssueImplementer(options)
 
-    def test_plan_review_quoting_plan_heading_is_not_a_plan(
-        self, impl: IssueImplementer
-    ) -> None:
+    def test_plan_review_quoting_plan_heading_is_not_a_plan(self, impl: IssueImplementer) -> None:
         """_has_plan does not match substring in a Plan Review comment.
 
         Regression for #455/#468/#484: a ``## 🔍 Plan Review`` body contains
@@ -1034,7 +1033,7 @@ class TestHasPlanPrefixMatch:
             },
         ]
 
-        def mock_gh_view(*args, **kwargs) -> MagicMock:  # type: ignore[no-untyped-def]
+        def mock_gh_view(*args: Any, **kwargs: Any) -> MagicMock:
             result = MagicMock()
             result.stdout = json.dumps({"comments": comments}).encode("utf-8")
             return result
