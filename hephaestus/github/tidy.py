@@ -25,9 +25,10 @@ from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument, is_codex, resolve_agent, run_codex_text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.github.client import gh_call
 from hephaestus.github.pr_merge import detect_repo_from_remote
 from hephaestus.logging.utils import get_logger
-from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
+from hephaestus.utils.helpers import METADATA_TIMEOUT
 
 logger = get_logger(__name__)
 
@@ -65,17 +66,13 @@ def _detect_default_branch(override: str | None) -> str:
     if override:
         return override
     try:
-        result = subprocess.run(
-            ["gh", "repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=NETWORK_TIMEOUT,
+        result = gh_call(
+            ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"],
         )
         branch = result.stdout.strip()
         if branch:
             return branch
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError) as e:
         logger.warning("Could not detect default branch via gh: %s", getattr(e, "stderr", str(e)))
     return "main"
 
@@ -171,6 +168,9 @@ def _run_gh_tidy(trunk: str, dry_run: bool) -> tuple[int, str]:
     buf: list[str] = []
 
     # Use Popen so we can tee output while keeping stdin connected to the TTY.
+    # Intentionally NOT routed through hephaestus.github.client.gh_call: that
+    # adapter captures stdout/stderr and detaches stdin, which would break
+    # gh-tidy's interactive y/N delete prompts (the whole point of this call).
     with subprocess.Popen(
         cmd,
         stdin=sys.stdin,

@@ -15,7 +15,6 @@ from hephaestus.github.stats import (
     get_prs_stats,
     validate_date,
 )
-from hephaestus.utils.helpers import METADATA_TIMEOUT
 
 
 class TestValidateDate:
@@ -346,7 +345,14 @@ class TestMain:
 
 
 class TestStatsSubprocessTimeouts:
-    """Every gh metadata read in stats.py must pass ``timeout=`` (#684)."""
+    """Every gh metadata read in stats.py must pass ``timeout=`` (#684).
+
+    stats.py now routes every gh read through
+    :func:`hephaestus.github.client.gh_call`, which invokes the subprocess via
+    ``run_subprocess`` with ``timeout=gh_cli_timeout()`` (#713). These tests
+    assert at that seam that a positive timeout is still supplied on every call,
+    preserving the no-timeout-less-read invariant after the adapter move.
+    """
 
     @staticmethod
     def _ok(stdout: str = "0\n") -> MagicMock:
@@ -356,28 +362,30 @@ class TestStatsSubprocessTimeouts:
         return m
 
     def test_get_current_repo_passes_timeout(self) -> None:
-        with patch("subprocess.run") as mock_run:
+        with patch("hephaestus.github.client.run_subprocess") as mock_run:
             mock_run.return_value = self._ok("owner/repo")
             get_current_repo()
-        assert mock_run.call_args.kwargs["timeout"] == METADATA_TIMEOUT
+        assert mock_run.call_args.kwargs["timeout"] > 0
 
     def test_get_issues_stats_all_calls_pass_timeout(self) -> None:
-        with patch("subprocess.run") as mock_run:
+        with patch("hephaestus.github.client.run_subprocess") as mock_run:
             mock_run.side_effect = [self._ok("10\n"), self._ok("3\n")]
             get_issues_stats("2026-01-01", "2026-01-31", None, "owner/repo")
         assert mock_run.call_count == 2
         for call in mock_run.call_args_list:
-            assert call.kwargs["timeout"] == METADATA_TIMEOUT
+            assert call.kwargs["timeout"] > 0
 
     def test_get_prs_stats_passes_timeout(self) -> None:
-        with patch("subprocess.run") as mock_run:
+        # get_prs_stats batches total/merged/open into a single GraphQL call
+        # routed through the shared gh_call adapter (client.run_subprocess).
+        with patch("hephaestus.github.client.run_subprocess") as mock_run:
             mock_run.return_value = self._ok("[8,5,1]\n")
             get_prs_stats("2026-01-01", "2026-01-31", None, "owner/repo")
         assert mock_run.call_count == 1
-        assert mock_run.call_args.kwargs["timeout"] == METADATA_TIMEOUT
+        assert mock_run.call_args.kwargs["timeout"] > 0
 
     def test_get_commits_stats_passes_timeout(self) -> None:
-        with patch("subprocess.run") as mock_run:
+        with patch("hephaestus.github.client.run_subprocess") as mock_run:
             mock_run.return_value = self._ok("4\n")
             get_commits_stats("2026-01-01", "2026-01-31", None, "owner/repo")
-        assert mock_run.call_args.kwargs["timeout"] == METADATA_TIMEOUT
+        assert mock_run.call_args.kwargs["timeout"] > 0

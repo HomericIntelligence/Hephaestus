@@ -29,7 +29,6 @@ import os
 import subprocess
 import sys
 import tempfile
-import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
@@ -37,7 +36,7 @@ from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument, is_codex, resolve_agent, run_codex_text
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
-from hephaestus.github.rate_limit import detect_rate_limit, wait_until
+from hephaestus.github.client import gh_call
 from hephaestus.logging.utils import get_logger
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
@@ -254,7 +253,13 @@ def _gh(
     check: bool = True,
     dry_run: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    """Run gh CLI, optionally scoped to a repo, with rate-limit retry."""
+    """Run gh CLI, optionally scoped to a repo, routed through the shared adapter.
+
+    Delegates to :func:`hephaestus.github.client.gh_call` so the call goes
+    through the ``github-api`` circuit breaker, the per-thread throttle, and
+    rate-limit detection — instead of the hand-rolled retry loop this function
+    used to inline (which bypassed the breaker entirely).
+    """
     full_args = args
     if repo and not any(a.startswith("--repo") or a == "-R" for a in args):
         full_args = ["--repo", f"{ORG}/{repo}", *args]
@@ -263,25 +268,7 @@ def _gh(
         logger.info("[dry-run] gh %s", " ".join(full_args))
         return subprocess.CompletedProcess(full_args, 0, stdout="[]", stderr="")
 
-    for attempt in range(4):
-        try:
-            return subprocess.run(
-                ["gh", *full_args],
-                check=check,
-                capture_output=True,
-                text=True,
-                timeout=NETWORK_TIMEOUT,
-            )
-        except subprocess.CalledProcessError as e:
-            epoch = detect_rate_limit(e.stderr or "")
-            if epoch is not None:
-                wait_until(epoch)
-                continue
-            if attempt == 3:
-                raise
-            time.sleep(2**attempt)
-
-    raise RuntimeError("gh call failed after retries")
+    return gh_call(full_args, check=check)
 
 
 def _git(

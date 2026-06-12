@@ -304,15 +304,22 @@ class TestTimeoutHandling:
             assert result == "main"
 
     def test_detect_default_branch_calls_with_network_timeout(self) -> None:
-        """_detect_default_branch uses NETWORK_TIMEOUT."""
-        with patch("subprocess.run") as mock_run:
+        """_detect_default_branch passes a positive timeout through gh_call.
+
+        _detect_default_branch now routes through
+        :func:`hephaestus.github.client.gh_call`, which invokes the subprocess
+        via ``run_subprocess`` with ``timeout=gh_cli_timeout()`` (#713). Assert
+        at that seam that a positive timeout is still supplied, preserving the
+        no-timeout-less-read invariant after the adapter move.
+        """
+        with patch("hephaestus.github.client.run_subprocess") as mock_run:
             mock_run.return_value = MagicMock(stdout="main\n")
             _detect_default_branch(None)
-            # Verify the call included timeout
+            # Verify the call included a positive timeout
             assert mock_run.called
             call_kwargs = mock_run.call_args[1]
             assert "timeout" in call_kwargs
-            assert call_kwargs["timeout"] == tidy_module.NETWORK_TIMEOUT
+            assert call_kwargs["timeout"] > 0
 
     def test_working_tree_clean_with_timeout(self) -> None:
         """_working_tree_clean propagates TimeoutExpired."""

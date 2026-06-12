@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 import hephaestus.automation.github_api as _github_api_module
+import hephaestus.github.client as client_module
 from hephaestus.automation.github_api import (
     GitHubRateLimitError,
     _check_graphql_errors,
@@ -327,7 +328,7 @@ class TestGhCall:
 
         reset_all_circuit_breakers()
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_successful_call(self, mock_run: Any) -> None:
         """Test successful gh call."""
         mock_result = Mock()
@@ -339,9 +340,9 @@ class TestGhCall:
         assert result.stdout == "success"
         mock_run.assert_called_once()
 
-    @patch("hephaestus.automation.github_api.run")
-    @patch("hephaestus.automation.github_api.wait_until")
-    @patch("hephaestus.automation.github_api.detect_rate_limit")
+    @patch("hephaestus.github.client.run_subprocess")
+    @patch("hephaestus.github.client.wait_until")
+    @patch("hephaestus.github.client.detect_rate_limit")
     def test_retry_on_rate_limit(self, mock_detect: Any, mock_wait: Any, mock_run: Any) -> None:
         """Test retry on rate limit."""
         # First call fails with rate limit, second succeeds
@@ -359,7 +360,7 @@ class TestGhCall:
         assert mock_run.call_count == 2
         mock_wait.assert_called_once_with(1234567890)
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_fail_fast_on_permission_error(self, mock_run: Any) -> None:
         """Test that permission errors fail fast without retry."""
         mock_run.side_effect = subprocess.CalledProcessError(
@@ -372,7 +373,7 @@ class TestGhCall:
         # Should only call once, no retries
         assert mock_run.call_count == 1
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_fail_fast_on_not_found(self, mock_run: Any) -> None:
         """Test that 404 errors fail fast without retry."""
         mock_run.side_effect = subprocess.CalledProcessError(1, "gh", stderr="404 Not Found")
@@ -382,7 +383,7 @@ class TestGhCall:
 
         assert mock_run.call_count == 1
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_fail_fast_on_bad_request(self, mock_run: Any) -> None:
         """Test that 400 errors fail fast without retry."""
         mock_run.side_effect = subprocess.CalledProcessError(1, "gh", stderr="400 Bad Request")
@@ -392,7 +393,7 @@ class TestGhCall:
 
         assert mock_run.call_count == 1
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_fail_fast_on_unprocessable_entity(self, mock_run: Any) -> None:
         """422 Unprocessable Entity must fail fast without retry.
 
@@ -411,7 +412,7 @@ class TestGhCall:
 
         assert mock_run.call_count == 1
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_fail_fast_on_graphql_schema_error(self, mock_run: Any) -> None:
         """GraphQL schema errors (bad argument / unused variable) must fail fast.
 
@@ -436,8 +437,8 @@ class TestGhCall:
 
         assert mock_run.call_count == 1
 
-    @patch("hephaestus.automation.github_api.run")
-    @patch("hephaestus.automation.github_api.time.sleep")
+    @patch("hephaestus.github.client.run_subprocess")
+    @patch("hephaestus.github.client.time.sleep")
     def test_retry_on_transient_error(self, mock_sleep: Any, mock_run: Any) -> None:
         """Test retry on transient errors with jitter.
 
@@ -459,7 +460,7 @@ class TestGhCall:
         # Verify that retries occurred (time.sleep was called with jittered delays)
         assert len(mock_sleep.call_args_list) > 0, "Expected sleep calls for jittered backoff"
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_claude_usage_limit_detection(self, mock_run: Any) -> None:
         """Test detection of Claude usage limit (A5-01/A5-02).
 
@@ -478,7 +479,7 @@ class TestGhCall:
         with pytest.raises(ClaudeUsageCapError):
             _gh_call(["issue", "view", "123"])
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_github_usage_limit_not_misidentified(self, mock_run: Any) -> None:
         """GitHub's own 'usage limit' message must not raise ClaudeUsageCapError (A5-01).
 
@@ -494,12 +495,12 @@ class TestGhCall:
             success,
         ]
 
-        with patch("hephaestus.automation.github_api.time.sleep"):
+        with patch("hephaestus.github.client.time.sleep"):
             result = _gh_call(["issue", "view", "123"], max_retries=2)
 
         assert result.stdout == "success"
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_token_scope_error_is_non_transient(self, mock_run: Any, caplog: Any) -> None:
         """The GraphQL "Resource not accessible by …" error fails fast.
 
@@ -522,7 +523,7 @@ class TestGhCall:
         assert "GITHUB_TOKEN=" in joined
         assert "gh auth status" in joined
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_token_scope_error_for_integration_also_non_transient(self, mock_run: Any) -> None:
         """GitHub-App variant of the scope error is recognised too."""
         stderr = "GraphQL: Resource not accessible by integration (addComment)"
@@ -533,7 +534,7 @@ class TestGhCall:
 
         assert mock_run.call_count == 1
 
-    @patch("hephaestus.automation.github_api._gh_call_impl")
+    @patch("hephaestus.github.client._gh_call_impl")
     def test_circuit_breaker_wraps_gh_call_impl(self, mock_impl: Any) -> None:
         """Test that _gh_call routes through the circuit breaker to _gh_call_impl.
 
@@ -555,7 +556,7 @@ class TestGhCall:
         assert call_args[0] == ["issue", "view", "123"]
         assert call_kwargs["max_retries"] == 6
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_non_transient_errors_not_retried_by_resilient_call(self, mock_run: Any) -> None:
         """Test that non-transient errors bypass resilient_call retries.
 
@@ -572,8 +573,8 @@ class TestGhCall:
         # Should only call once despite max_retries=6
         assert mock_run.call_count == 1
 
-    @patch("hephaestus.automation.github_api.run")
-    @patch("hephaestus.automation.github_api.time.sleep")
+    @patch("hephaestus.github.client.run_subprocess")
+    @patch("hephaestus.github.client.time.sleep")
     def test_transient_errors_retried_with_jitter(self, mock_sleep: Any, mock_run: Any) -> None:
         """Test that transient errors are retried with jitter.
 
@@ -595,9 +596,9 @@ class TestGhCall:
         # Should have been retried by inner resilient_call (up to 2 retries = 3 total attempts)
         assert mock_run.call_count == 3
 
-    @patch("hephaestus.automation.github_api.run")
-    @patch("hephaestus.automation.github_api.wait_until")
-    @patch("hephaestus.automation.github_api.detect_rate_limit")
+    @patch("hephaestus.github.client.run_subprocess")
+    @patch("hephaestus.github.client.wait_until")
+    @patch("hephaestus.github.client.detect_rate_limit")
     def test_rate_limit_errors_propagate_correctly(
         self, mock_detect: Any, mock_wait: Any, mock_run: Any
     ) -> None:
@@ -619,7 +620,7 @@ class TestGhCall:
         # Should detect rate limit on first inner attempt
         assert mock_detect.called
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_claude_usage_cap_errors_propagate_correctly(self, mock_run: Any) -> None:
         """Test that ClaudeUsageCapError is not retried by resilient_call.
 
@@ -639,7 +640,7 @@ class TestGhCall:
         # Should fail on first attempt, not retried by resilient_call
         assert mock_run.call_count == 1
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_circuit_breaker_integration(self, mock_run: Any) -> None:
         """Test that circuit breaker is integrated with resilient_call.
 
@@ -656,7 +657,7 @@ class TestGhCall:
 
         assert result.stdout == "success"
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_non_transient_error_original_exception_type_preserved(self, mock_run: Any) -> None:
         """Test that non-transient errors preserve original CalledProcessError type.
 
@@ -674,7 +675,7 @@ class TestGhCall:
         assert isinstance(exc_info.value, subprocess.CalledProcessError)
         assert exc_info.value.returncode == 1
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_max_retries_exhaustion_outer_loop(self, mock_run: Any) -> None:
         """Test that outer loop exhausts max_retries correctly.
 
@@ -692,8 +693,8 @@ class TestGhCall:
         # (range(2) = [0, 1], each iteration tries resilient_call with max_retries=2)
         assert mock_run.call_count >= 2  # At least the outer iterations
 
-    @patch("hephaestus.automation.github_api.time")
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.time")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_secondary_rate_limit_retries_with_15s_base_backoff(
         self, mock_run: Any, mock_time: Any
     ) -> None:
@@ -727,8 +728,8 @@ class TestGhCall:
         first_wait = sleep_calls[0]
         assert first_wait == 15, f"Expected 15s base wait, got {first_wait}s"
 
-    @patch("hephaestus.automation.github_api.time")
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.time")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_secondary_rate_limit_raises_rate_limit_error_when_retry_disabled(
         self, mock_run: Any, mock_time: Any
     ) -> None:
@@ -745,8 +746,8 @@ class TestGhCall:
         with pytest.raises(GitHubRateLimitError):
             _gh_call(["issue", "view", "123"], max_retries=6, retry_on_rate_limit=False)
 
-    @patch("hephaestus.automation.github_api.time")
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.time")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_secondary_rate_limit_backoff_doubles_each_attempt(
         self, mock_run: Any, mock_time: Any
     ) -> None:
@@ -777,10 +778,11 @@ class TestGhCall:
         assert sleep_calls[1] == 30, f"Expected 30s (attempt 1), got {sleep_calls[1]}"
 
 
-# NOTE on patch targets: tests in TestGhCall patch "hephaestus.automation.github_api.run"
-# because _gh_call (defined in github_api) calls run() imported from .git_utils.
-# All other tests patch "hephaestus.automation.github_api._gh_call" to intercept at
-# a higher level, bypassing the gh CLI entirely.
+# NOTE on patch targets: tests in TestGhCall patch "hephaestus.github.client.run_subprocess"
+# because _gh_call now routes through hephaestus.github.client._gh_call_impl, which calls
+# run_subprocess imported from hephaestus.utils.helpers. All other tests patch
+# "hephaestus.automation.github_api._gh_call" to intercept at a higher level, bypassing
+# the gh CLI entirely.
 class TestGhIssueComment:
     """Tests for gh_issue_comment function."""
 
@@ -1559,10 +1561,10 @@ class TestGhCallThrottle:
     def _reset_throttle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Reset the per-thread throttle state and force a known rate so tests
         # don't inherit clock state from earlier suite calls.
-        _github_api_module._GH_THROTTLE = __import__("threading").local()
+        client_module._GH_THROTTLE = __import__("threading").local()
         monkeypatch.setenv("GH_RATE_LIMIT_PER_SEC", "5")
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_consecutive_calls_are_paced_to_min_interval(self, mock_run: Any) -> None:
         """Pace consecutive calls to the configured min interval.
 
@@ -1581,7 +1583,7 @@ class TestGhCallThrottle:
         # Allow a small slack below the theoretical 0.2s for clock granularity.
         assert elapsed >= 0.18, f"throttle did not pace; elapsed={elapsed:.3f}s"
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_throttle_disabled_when_rate_zero(
         self, mock_run: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1599,7 +1601,7 @@ class TestGhCallThrottle:
         # 5 calls with no throttle should finish well under one min-interval.
         assert elapsed < 0.05, f"unexpected delay with throttle off; elapsed={elapsed:.3f}s"
 
-    @patch("hephaestus.automation.github_api.run")
+    @patch("hephaestus.github.client.run_subprocess")
     def test_buckets_are_per_thread(self, mock_run: Any) -> None:
         """Each thread has its own bucket.
 
@@ -1677,9 +1679,9 @@ class TestGhCallRateLimitFromStdout:
     """
 
     @patch("hephaestus.github.rate_limit.gh_rate_limit_reset_epoch")
-    @patch("hephaestus.automation.github_api.gh_global_throttle_acquire")
-    @patch("hephaestus.automation.github_api.run")
-    @patch("hephaestus.automation.github_api.wait_until")
+    @patch("hephaestus.github.client.gh_global_throttle_acquire")
+    @patch("hephaestus.github.client.run_subprocess")
+    @patch("hephaestus.github.client.wait_until")
     def test_retries_on_graphql_message_in_stdout(
         self,
         mock_wait: Any,
@@ -1709,10 +1711,10 @@ class TestGhCallRateLimitFromStdout:
         mock_wait.assert_called_once()
 
     @patch("hephaestus.github.rate_limit.gh_rate_limit_reset_epoch")
-    @patch("hephaestus.automation.github_api.gh_global_throttle_acquire")
-    @patch("hephaestus.automation.github_api.run")
-    @patch("hephaestus.automation.github_api.wait_until")
-    @patch("hephaestus.automation.github_api.time.sleep")
+    @patch("hephaestus.github.client.gh_global_throttle_acquire")
+    @patch("hephaestus.github.client.run_subprocess")
+    @patch("hephaestus.github.client.wait_until")
+    @patch("hephaestus.github.client.time.sleep")
     def test_raises_after_exhausting_retries(
         self,
         _mock_sleep: Any,

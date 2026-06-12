@@ -76,9 +76,23 @@ def follow_up_claude_timeout() -> int:
     return _read_int_env("HEPH_FOLLOW_UP_AGENT_TIMEOUT", 7200)
 
 
-def gh_cli_timeout() -> int:
-    """Timeout for individual ``gh`` CLI calls in :mod:`github_api` (default 120s)."""
-    return _read_int_env("HEPH_GH_TIMEOUT", 120)
+# Re-exported from hephaestus.github.client so the gh-adapter timeout lives
+# with the gh adapter; this alias preserves the legacy import path.
+from hephaestus.github.client import gh_cli_timeout  # noqa: E402
+
+__all__ = [
+    "address_review_claude_timeout",
+    "advise_claude_timeout",
+    "ci_driver_claude_timeout",
+    "ci_poll_max_wait",
+    "follow_up_claude_timeout",
+    "gh_cli_timeout",
+    "implementer_claude_timeout",
+    "learn_claude_timeout",
+    "plan_reviewer_claude_timeout",
+    "planner_claude_timeout",
+    "pr_reviewer_claude_timeout",
+]
 
 
 def ci_poll_max_wait() -> int:

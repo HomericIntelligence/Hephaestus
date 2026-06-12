@@ -8,20 +8,21 @@ from unittest.mock import Mock, patch
 import pytest
 
 import hephaestus.automation.github_api as github_api_module
+import hephaestus.github.client as client_module
 
 
 @pytest.fixture(autouse=True)
 def _reset_breaker() -> Generator[None, None, None]:
     """Reset the GitHub API circuit breaker before each test."""
-    github_api_module._GH_BREAKER.reset()
+    client_module._GH_BREAKER.reset()
     yield
-    github_api_module._GH_BREAKER.reset()
+    client_module._GH_BREAKER.reset()
 
 
 class TestGhCallCircuitBreaker:
     """Test CircuitBreaker wrapping of _gh_call."""
 
-    @patch("hephaestus.automation.github_api._gh_call_impl")
+    @patch("hephaestus.github.client._gh_call_impl")
     def test_breaker_transitions_to_open_on_failures(self, mock_impl: Mock) -> None:
         """Circuit breaker transitions from CLOSED to OPEN after 5 consecutive failures."""
         # Simulate 5xx failures
@@ -44,7 +45,7 @@ class TestGhCallCircuitBreaker:
         # Circuit is open: mock should NOT be called again (fail-fast)
         assert mock_impl.call_count == 5
 
-    @patch("hephaestus.automation.github_api._gh_call_impl")
+    @patch("hephaestus.github.client._gh_call_impl")
     def test_circuit_breaker_open_error_is_runtime_error(self, mock_impl: Mock) -> None:
         """GitHubUnavailableError is a RuntimeError subclass (for existing handlers)."""
         mock_impl.side_effect = subprocess.CalledProcessError(
@@ -64,7 +65,7 @@ class TestGhCallCircuitBreaker:
         with pytest.raises(github_api_module.GitHubUnavailableError):
             github_api_module._gh_call(["issue", "list"])
 
-    @patch("hephaestus.automation.github_api._gh_call_impl")
+    @patch("hephaestus.github.client._gh_call_impl")
     def test_circuit_breaker_recovery_after_timeout(self, mock_impl: Mock) -> None:
         """Circuit breaker transitions to HALF_OPEN after recovery_timeout seconds.
 
@@ -112,7 +113,7 @@ class TestGhCallCircuitBreaker:
             result = github_api_module._gh_call(["issue", "list"])
             assert result.returncode == 0
 
-    @patch("hephaestus.automation.github_api._gh_call_impl")
+    @patch("hephaestus.github.client._gh_call_impl")
     def test_breaker_does_not_wrap_successful_calls(self, mock_impl: Mock) -> None:
         """Circuit breaker does not interfere with successful _gh_call invocations."""
         expected_result = subprocess.CompletedProcess(
@@ -128,7 +129,7 @@ class TestGhCallCircuitBreaker:
         # Mock should be called each time (breaker closed)
         assert mock_impl.call_count == 10
 
-    @patch("hephaestus.automation.github_api._gh_call_impl")
+    @patch("hephaestus.github.client._gh_call_impl")
     def test_circuit_breaker_preserves_call_signature(self, mock_impl: Mock) -> None:
         """Circuit breaker correctly forwards all _gh_call_impl arguments."""
         expected_result = subprocess.CompletedProcess(

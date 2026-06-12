@@ -15,13 +15,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from datetime import datetime
 from typing import Any
 
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status, format_output
-from hephaestus.utils.helpers import METADATA_TIMEOUT
+from hephaestus.github.client import gh_call
 
 # ---------------------------------------------------------------------------
 # Data helpers
@@ -55,11 +54,9 @@ def get_current_repo() -> str:
         SystemExit: With code 1 if ``gh repo view`` fails.
 
     """
-    result = subprocess.run(
-        ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
-        capture_output=True,
-        text=True,
-        timeout=METADATA_TIMEOUT,
+    result = gh_call(
+        ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+        check=False,
     )
     if result.returncode != 0:
         print(f"Error: Failed to get repo name: {result.stderr}", file=sys.stderr)
@@ -92,20 +89,17 @@ def get_issues_stats(
         base_parts.append(f"author:{author}")
     base_query = " ".join(base_parts)
 
-    result = subprocess.run(
-        ["gh", "api", "search/issues", "-f", f"q={base_query}", "--jq", ".total_count"],
-        capture_output=True,
-        text=True,
-        timeout=METADATA_TIMEOUT,
+    result = gh_call(
+        ["api", "search/issues", "-f", f"q={base_query}", "--jq", ".total_count"],
+        check=False,
     )
     if result.returncode != 0:
         return {"total": 0, "open": 0, "closed": 0}
 
     total = int(result.stdout.strip())
 
-    result_open = subprocess.run(
+    result_open = gh_call(
         [
-            "gh",
             "api",
             "search/issues",
             "-f",
@@ -113,9 +107,7 @@ def get_issues_stats(
             "--jq",
             ".total_count",
         ],
-        capture_output=True,
-        text=True,
-        timeout=METADATA_TIMEOUT,
+        check=False,
     )
     open_count = int(result_open.stdout.strip()) if result_open.returncode == 0 else 0
 
@@ -146,6 +138,9 @@ def get_prs_stats(start_date: str, end_date: str, author: str | None, repo: str)
         base_parts.append(f"author:{author}")
     base_query = " ".join(base_parts)
 
+    # Single batched GraphQL query (one API call) for total/merged/open counts,
+    # routed through the shared gh_call adapter for circuit-breaker + rate-limit
+    # protection instead of a bare subprocess.run.
     graphql_query = (
         "query($qTotal: String!, $qMerged: String!, $qOpen: String!) {"
         "  total: search(query: $qTotal, type: ISSUE, first: 0) { issueCount }"
@@ -154,9 +149,8 @@ def get_prs_stats(start_date: str, end_date: str, author: str | None, repo: str)
         "}"
     )
 
-    result = subprocess.run(
+    result = gh_call(
         [
-            "gh",
             "api",
             "graphql",
             "-f",
@@ -174,9 +168,7 @@ def get_prs_stats(start_date: str, end_date: str, author: str | None, repo: str)
                 " .data.open.issueCount // 0]"
             ),
         ],
-        capture_output=True,
-        text=True,
-        timeout=METADATA_TIMEOUT,
+        check=False,
     )
     if result.returncode != 0:
         return {"total": 0, "merged": 0, "open": 0, "closed": 0}
@@ -227,7 +219,7 @@ def get_commits_stats(
     if author:
         params += ["-f", f"author={author}"]
 
-    result = subprocess.run(params, capture_output=True, text=True, timeout=METADATA_TIMEOUT)
+    result = gh_call(params[1:], check=False)
     if result.returncode != 0:
         return {"total": 0}
 
