@@ -332,7 +332,7 @@ class TestMain:
         """main() with --json emits ok envelope when no failures occur."""
         from hephaestus.github import fleet_sync
 
-        def fake_process(repo, args, clone_dir):
+        def fake_process(repo, args, clone_dir, *, symbols=None):
             return {
                 "merged": 1,
                 "rebased": 0,
@@ -356,7 +356,7 @@ class TestMain:
         """main() with failures returns 1 and JSON envelope shows error."""
         from hephaestus.github import fleet_sync
 
-        def fake_process(repo, args, clone_dir):
+        def fake_process(repo, args, clone_dir, *, symbols=None):
             return {
                 "merged": 0,
                 "rebased": 0,
@@ -381,7 +381,7 @@ class TestMain:
 
         calls = []
 
-        def fake_process(repo, args, clone_dir):
+        def fake_process(repo, args, clone_dir, *, symbols=None):
             calls.append(repo)
             return {
                 "merged": 0,
@@ -475,6 +475,47 @@ def _pr(number: int, status: PRStatus, head: str = "feat") -> PRInfo:
         ci_state="SUCCESS",
         status=status,
     )
+
+
+@pytest.fixture
+def capture_fleet_sync_logs():
+    r"""Fixture to capture fleet_sync logger messages.
+
+    Context manager that captures log messages from the fleet_sync module logger
+    by attaching a custom handler. Automatically cleans up on exit.
+
+    Yields:
+        list: A list that will be populated with log message strings as they are emitted.
+
+    Usage:
+        with capture_fleet_sync_logs() as messages:
+            # ... code that logs ...
+            assert "expected message" in "\n".join(messages)
+
+    """
+    import logging
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _capture():
+        messages = []
+
+        class _TestHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                messages.append(record.getMessage())
+
+        # Get the underlying logger (ContextLogger wraps a LoggerAdapter)
+        logger_adapter = fleet_sync_module.logger
+        underlying_logger = logger_adapter.logger
+        handler = _TestHandler()
+        underlying_logger.addHandler(handler)
+
+        try:
+            yield messages
+        finally:
+            underlying_logger.removeHandler(handler)
+
+    return _capture()
 
 
 class TestCloneReuseAndWorktrees:
@@ -857,3 +898,109 @@ class TestListPrsAuthorScope:
         prs = fleet_sync_module.list_prs("RepoA")
 
         assert [p.number for p in prs] == [1]
+
+
+class TestAsciiFlag:
+    """--ascii swaps Unicode glyphs in log output for portable ASCII."""
+
+    def test_symbols_dataclass_is_frozen(self) -> None:
+        """Symbols instances are frozen to prevent accidental mutation."""
+        from dataclasses import FrozenInstanceError
+
+        with pytest.raises(FrozenInstanceError):
+            fleet_sync_module.ASCII_SYMBOLS.check = "X"
+
+    def test_presets_have_expected_glyphs(self) -> None:
+        """Unicode and ASCII symbol presets have the correct glyphs."""
+        assert fleet_sync_module.UNICODE_SYMBOLS.check == "✓"
+        assert fleet_sync_module.UNICODE_SYMBOLS.banner == "══"
+        assert fleet_sync_module.UNICODE_SYMBOLS.arrow == "→"
+        assert fleet_sync_module.UNICODE_SYMBOLS.dash == "—"
+        assert fleet_sync_module.ASCII_SYMBOLS.check == "*"
+        assert fleet_sync_module.ASCII_SYMBOLS.banner == "=="
+        assert fleet_sync_module.ASCII_SYMBOLS.arrow == "->"
+        assert fleet_sync_module.ASCII_SYMBOLS.dash == "--"
+
+    def test_process_repo_emits_ascii_banner_when_ascii_symbols_passed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capture_fleet_sync_logs
+    ) -> None:
+        """process_repo logs ASCII banner under ASCII_SYMBOLS — no module state."""
+        monkeypatch.setattr(fleet_sync_module, "list_prs", lambda _repo: [])
+
+        import argparse
+
+        with capture_fleet_sync_logs as logged_messages:
+            args = argparse.Namespace(
+                dry_run=True,
+                skip_conflict_resolution=True,
+                agent="claude",
+                json=False,
+                verbose=False,
+                ascii=True,
+            )
+
+            fleet_sync_module.process_repo(
+                "test-repo", args, tmp_path, symbols=fleet_sync_module.ASCII_SYMBOLS
+            )
+
+            # Check logged messages
+            output = "\n".join(logged_messages)
+            assert "== test-repo ==" in output, f"Expected ASCII banner in: {output}"
+            assert "══" not in output, f"Unexpected Unicode banner in: {output}"
+
+    def test_process_repo_emits_unicode_banner_by_default(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capture_fleet_sync_logs
+    ) -> None:
+        """Default kwarg gives Unicode — backward-compat for existing callers."""
+        monkeypatch.setattr(fleet_sync_module, "list_prs", lambda _repo: [])
+
+        import argparse
+
+        with capture_fleet_sync_logs as logged_messages:
+            args = argparse.Namespace(
+                dry_run=True,
+                skip_conflict_resolution=True,
+                agent="claude",
+                json=False,
+                verbose=False,
+                ascii=False,
+            )
+
+            fleet_sync_module.process_repo("test-repo", args, tmp_path)
+
+            # Check logged messages
+            output = "\n".join(logged_messages)
+            assert "══ test-repo ══" in output, f"Expected Unicode banner in: {output}"
+
+    def test_ascii_flag_registered_on_production_parser(self) -> None:
+        """The real parser registers --ascii as a default-False store_true flag.
+
+        Guards against the flag being dropped from ``main`` without a test
+        failing — the behavioral tests pass ``symbols=`` directly and bypass
+        argparse entirely.
+        """
+        parser = fleet_sync_module._build_parser()
+
+        ascii_action = next((a for a in parser._actions if "--ascii" in a.option_strings), None)
+        assert ascii_action is not None, "--ascii flag is not registered on the parser"
+        assert ascii_action.default is False
+        assert ascii_action.const is True  # store_true
+
+        # Parsing without the flag yields ascii=False; with it, ascii=True.
+        assert parser.parse_args([]).ascii is False
+        assert parser.parse_args(["--ascii"]).ascii is True
+
+    def test_ascii_help_describes_glyph_swap_not_identity_mapping(self) -> None:
+        """--ascii help text describes what it replaces, not ASCII->ASCII noise.
+
+        Regression guard for the self-contradictory ``== for ==`` mapping that
+        conveyed nothing about what the flag swaps.
+        """
+        parser = fleet_sync_module._build_parser()
+        ascii_action = next(a for a in parser._actions if "--ascii" in a.option_strings)
+        help_text = ascii_action.help or ""
+
+        assert "Unicode" in help_text, "help must name what is being replaced"
+        # The garbled self-mapping must not reappear.
+        assert "== for ==" not in help_text
+        assert "* for *" not in help_text

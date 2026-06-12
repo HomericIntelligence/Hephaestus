@@ -43,6 +43,20 @@ from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
 logger = get_logger(__name__)
 
+
+@dataclass(frozen=True)
+class Symbols:
+    """Glyphs used in user-facing log output. Frozen for safe sharing across calls."""
+
+    banner: str
+    check: str
+    arrow: str
+    dash: str
+
+
+UNICODE_SYMBOLS = Symbols(banner="══", check="✓", arrow="→", dash="—")
+ASCII_SYMBOLS = Symbols(banner="==", check="*", arrow="->", dash="--")
+
 ORG = "HomericIntelligence"
 
 
@@ -519,7 +533,13 @@ def merge_pr(pr: PRInfo, dry_run: bool = False) -> bool:
         return False
 
 
-def rebase_and_resign(pr: PRInfo, repo_clone: Path, dry_run: bool = False) -> bool:
+def rebase_and_resign(
+    pr: PRInfo,
+    repo_clone: Path,
+    dry_run: bool = False,
+    *,
+    symbols: Symbols = UNICODE_SYMBOLS,
+) -> bool:
     """Fetch PR branch, rebase it on origin/base, re-sign all commits, push.
 
     Operates in a per-PR worktree off the shared ``repo_clone`` (#1044) rather
@@ -540,12 +560,14 @@ def rebase_and_resign(pr: PRInfo, repo_clone: Path, dry_run: bool = False) -> bo
         )
 
         if result.returncode != 0:
-            logger.warning("  Rebase failed for PR #%d — conflict detected", pr.number)
+            logger.warning(
+                "  Rebase failed for PR #%d %s conflict detected", pr.number, symbols.dash
+            )
             _git(["rebase", "--abort"], cwd=work, dry_run=dry_run, check=False)
             return False
 
         _git(["push", "--force-with-lease", "origin", branch], cwd=work, dry_run=dry_run)
-        logger.info("  ✓ Rebased and re-signed PR #%d", pr.number)
+        logger.info("  %s Rebased and re-signed PR #%d", symbols.check, pr.number)
         return True
 
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
@@ -597,6 +619,8 @@ def resolve_conflict_with_agent(
     repo_clone: Path,
     dry_run: bool = False,
     agent: str = "claude",
+    *,
+    symbols: Symbols = UNICODE_SYMBOLS,
 ) -> bool:
     """Spawn the selected agent to semantically resolve merge conflicts, then re-sign.
 
@@ -710,7 +734,7 @@ Rules:
             timeout=NETWORK_TIMEOUT,
         )
         if branch in verify.stdout:
-            logger.info("  ✓ Conflict resolved and pushed for PR #%d", pr.number)
+            logger.info("  %s Conflict resolved and pushed for PR #%d", symbols.check, pr.number)
             return True
 
         logger.warning("  Agent did not push branch for PR #%d", pr.number)
@@ -729,6 +753,8 @@ def process_repo(
     repo: str,
     args: argparse.Namespace,
     clone_dir: Path,
+    *,
+    symbols: Symbols = UNICODE_SYMBOLS,
 ) -> dict[str, int]:
     """Process all open PRs in one repo. Returns counts by outcome."""
     counts: dict[str, int] = {
@@ -739,7 +765,7 @@ def process_repo(
         "failed": 0,
     }
 
-    logger.info("\n══ %s ══", repo)
+    logger.info("\n%s %s %s", symbols.banner, repo, symbols.banner)
     try:
         prs = list_prs(repo)
     except RuntimeError as e:
@@ -793,12 +819,12 @@ def process_repo(
             counts["merged" if ok else "failed"] += 1
 
         elif pr.status == PRStatus.OUTDATED:
-            ok = rebase_and_resign(pr, _repo_clone(), dry_run=args.dry_run)
+            ok = rebase_and_resign(pr, _repo_clone(), dry_run=args.dry_run, symbols=symbols)
             counts["rebased" if ok else "failed"] += 1
 
         elif pr.status == PRStatus.CONFLICTED:
             if args.skip_conflict_resolution:
-                logger.info("  → Skipping (--skip-conflict-resolution)")
+                logger.info("  %s Skipping (--skip-conflict-resolution)", symbols.arrow)
                 counts["skipped"] += 1
             else:
                 ok = resolve_conflict_with_agent(
@@ -806,18 +832,27 @@ def process_repo(
                     _repo_clone(),
                     dry_run=args.dry_run,
                     agent=args.agent,
+                    symbols=symbols,
                 )
                 counts["conflict_resolved" if ok else "failed"] += 1
 
         else:
-            logger.info("  → Skipping (CI failing or unknown state)")
+            logger.info("  %s Skipping (CI failing or unknown state)", symbols.arrow)
             counts["skipped"] += 1
 
     return counts
 
 
-def main() -> int:
-    """Entry point for hephaestus-fleet-sync."""
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for hephaestus-fleet-sync.
+
+    Extracted from ``main`` so the production parser (including the
+    ``--ascii`` flag) can be inspected directly by unit tests.
+
+    Returns:
+        The fully configured :class:`argparse.ArgumentParser`.
+
+    """
     parser = argparse.ArgumentParser(
         description="Sync all PRs across the HomericIntelligence fleet",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -837,8 +872,23 @@ def main() -> int:
     )
     add_agent_argument(parser)
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
+    parser.add_argument(
+        "--ascii",
+        action="store_true",
+        help=(
+            "Use ASCII fallbacks (==, *, ->, --) instead of Unicode "
+            "box/check/arrow/dash glyphs in log output; use when piping "
+            "stdout to ASCII-only consumers."
+        ),
+    )
     add_json_arg(parser)
     add_version_arg(parser)
+    return parser
+
+
+def main() -> int:
+    """Entry point for hephaestus-fleet-sync."""
+    parser = _build_parser()
     args = parser.parse_args()
     agent = resolve_agent(args.agent)
     args.agent = agent
@@ -851,7 +901,8 @@ def main() -> int:
 
     repos = args.repos
     dry_tag = " [DRY RUN]" if args.dry_run else ""
-    logger.info("Fleet sync — %d repo(s)%s", len(repos), dry_tag)
+    symbols = ASCII_SYMBOLS if args.ascii else UNICODE_SYMBOLS
+    logger.info("Fleet sync %s %d repo(s)%s", symbols.dash, len(repos), dry_tag)
 
     totals: dict[str, int] = {
         "merged": 0,
@@ -864,7 +915,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="hephaestus-fleet-") as tmp:
         clone_dir = Path(tmp)
         for repo in repos:
-            counts = process_repo(repo, args, clone_dir)
+            counts = process_repo(repo, args, clone_dir, symbols=symbols)
             for k, v in counts.items():
                 totals[k] = totals.get(k, 0) + v
 
