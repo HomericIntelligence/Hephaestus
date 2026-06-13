@@ -57,7 +57,7 @@ For local development, use [Pixi](https://pixi.sh) to manage the environment:
 
 ```bash
 pixi install
-pre-commit install
+pixi run pre-commit install
 ```
 
 ## Library vs product layer
