@@ -37,6 +37,7 @@ def test_migration_md_version_does_not_trail_latest_git_tag() -> None:
             "`fetch-depth: 0` and `fetch-tags: true` (see .github/workflows/test.yml). "
             "This test fails loud rather than skipping so the guard is never a no-op."
         )
+        return  # unreachable (pytest.fail raises); narrows canonical to str for mypy
 
     text = MIGRATION_MD.read_text(encoding="utf-8")
     match = _LATEST_RE.search(text)
