@@ -18,7 +18,14 @@ import contextlib
 import json
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
+
+# Ensure the repo root is on sys.path so ``hephaestus`` resolves without a
+# dev-install (``pip install -e .``).  Must precede any ``hephaestus`` import.
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 STAGES = (
     "planning",
