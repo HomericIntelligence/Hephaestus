@@ -42,12 +42,12 @@ def _allowed_tools_kwargs(path: pathlib.Path) -> list[str]:
                 f"{path.name}: invoke_claude_with_session call missing allowed_tools= kwarg"
             )
         val = kwargs["allowed_tools"]
-        if not (isinstance(val, ast.Constant) and isinstance(val.value, str)):
-            pytest.fail(
-                f"{path.name}: allowed_tools must be a string literal "
-                "(this test asserts that contract)"
-            )
-        out.append(val.value)
+        if isinstance(val, ast.Constant) and isinstance(val.value, str):
+            out.append(val.value)
+            continue
+        pytest.fail(
+            f"{path.name}: allowed_tools must be a string literal (this test asserts that contract)"
+        )
     return out
 
 

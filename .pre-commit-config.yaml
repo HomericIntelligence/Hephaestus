@@ -14,7 +14,10 @@
 #                                                      this rev current with it
 #     - markdownlint-cli2 (DavidAnson rev)          ⇄ CI markdownlint-cli2-action
 #     - pre-commit-hooks (pre-commit/pre-commit-hooks rev) ⇄ meta hooks, no pixi pkg
-#   `hephaestus-check-precommit-versions` flags drift for the pixi-backed tools.
+#   The `hephaestus-check-precommit-versions` hook (wired as a local hook below)
+#   flags drift for the pixi-backed mirrored tools — currently `yamllint`, whose
+#   floor pixi.toml owns. markdownlint-cli2 (CI action) and shellcheck (apt) have
+#   no pixi package and so are not version-checked here.
 
 repos:
 
@@ -183,6 +186,21 @@ repos:
         language: system
         pass_filenames: false
         files: ^(pyproject\.toml|pixi\.toml|\.github/workflows/.*\.yml)$
+
+  # Pre-commit rev drift check: mirrored external hook revs (e.g. yamllint)
+  # must stay within their pixi.toml version floors. See the single-source-of-
+  # truth note at the top of this file and issue #1183.
+  - repo: local
+    hooks:
+      - id: hephaestus-check-precommit-versions
+        name: hephaestus check pre-commit rev drift
+        description: Ensure mirrored .pre-commit-config.yaml hook revs match pixi.toml version floors
+        # --environment default is explicit because the pre-commit CI job runs
+        # in the lint env; the hephaestus-* console scripts live in default.
+        entry: pixi run --environment default hephaestus-check-precommit-versions
+        language: system
+        pass_filenames: false
+        files: ^(\.pre-commit-config\.yaml|pixi\.toml)$
 
   # Version single source of truth check
   - repo: local

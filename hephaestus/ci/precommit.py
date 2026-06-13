@@ -49,10 +49,19 @@ else:
 # ---------------------------------------------------------------------------
 
 #: Default mapping from external pre-commit repo URL to pixi.toml package name.
+#:
+#: Only tools that are *pixi-backed* (have a version floor in pixi.toml) belong
+#: here, so the hook can flag local-vs-CI drift. ``yamllint`` is the mirrored
+#: external hook whose floor pixi.toml owns (see the single-source-of-truth note
+#: at the top of ``.pre-commit-config.yaml``). ``mirrors-mypy`` maps to the
+#: ``mypy`` floor for repos that mirror mypy as an external hook. Meta hooks
+#: like ``pre-commit/pre-commit-hooks`` are intentionally absent: they have no
+#: pixi package (they run in pre-commit's own venv), so requiring a pixi entry
+#: would produce a false MISSING finding.
 DEFAULT_HOOK_TO_PIXI_MAP: dict[str, str] = {
     "https://github.com/pre-commit/mirrors-mypy": "mypy",
     "https://github.com/kynan/nbstripout": "nbstripout",
-    "https://github.com/pre-commit/pre-commit-hooks": "pre-commit-hooks",
+    "https://github.com/adrienverge/yamllint": "yamllint",
 }
 
 
