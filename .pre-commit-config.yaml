@@ -19,6 +19,11 @@
 #   floor pixi.toml owns. markdownlint-cli2 (CI action) and shellcheck (apt) have
 #   no pixi package and so are not version-checked here.
 
+# Ensure `pre-commit install` (documented in CONTRIBUTING.md / README.md) wires
+# BOTH the pre-commit and commit-msg stages, so the conventional-commit-msg hook
+# below actually fires without `--hook-type commit-msg`. See issue #1209.
+default_install_hook_types: [pre-commit, commit-msg]
+
 repos:
 
   # Python formatting and linting
@@ -243,6 +248,18 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+
+  # Conventional Commits enforcement (DoD row 5; issue #1209).
+  # commit-msg stage: pre-commit passes the message file path as the only arg.
+  - repo: local
+    hooks:
+      - id: conventional-commit-msg
+        name: Enforce Conventional Commits
+        description: Reject commit subjects that are not type(scope) description
+        entry: python3 scripts/check_conventional_commit.py
+        language: system
+        stages: [commit-msg]
+        pass_filenames: true
 
 
   # Skill merge method check: skills must not hardcode merge flags

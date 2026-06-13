@@ -356,6 +356,18 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
+      # Check 3 invokes scripts/check_conventional_commit.py from the repo tree,
+      # so the source must be on disk. Pin the checkout to the PR head SHA: the
+      # default bare checkout resolves refs/pull/N/merge, which GitHub computes
+      # asynchronously and can lag a fresh push — checking out a merge commit
+      # that predates the validator and so misses the script. The head SHA is an
+      # immutable object id (not an attacker-controllable ref name), and the
+      # validator ships with the PR until it lands on main.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
       - name: "Fetch PR metadata"
         id: fetch
         env:
@@ -379,6 +391,7 @@ jobs:
                     nodes {
                       commit {
                         oid
+                        message
                         signature { isValid state }
                       }
                     }
@@ -438,6 +451,24 @@ jobs:
             exit 1
           fi
           echo "OK: all commits have verified signatures"
+
+      - name: "Check 3: commit subjects follow Conventional Commits"
+        if: always() && steps.fetch.outcome == 'success'
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          # Dependabot subjects are auto-generated; exempt like Check 1 (#1070).
+          if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
+            echo "OK: Dependabot PR — Conventional Commit check is not applicable"
+            exit 0
+          fi
+          # Subject = first line of each commit message (GraphQL .commit.message
+          # verified to resolve). Pipe on stdin, one per line, into the shared
+          # validator (DoD row 5 / issue #1209). Empty set passes by design.
+          jq -r '.data.repository.pullRequest.commits.nodes[]
+                 | .commit.message | split("\n")[0]' commits.json \
+            | python3 scripts/check_conventional_commit.py -
 
   auto-merge-policy:
     name: auto-merge-policy
