@@ -48,3 +48,9 @@ and is quoted in the close comment:
    repo root).
 3. The cited code path has already been removed by an unrelated PR
    (verify with `git log -S<symbol>`).
+
+## Audit history
+
+| Audit label | Date | Tracker | Grade |
+|-------------|------|---------|-------|
+| `audit-2026-05-29` | 2026-05-29 | #708 | A- avg (C- → B+ planning corrected) |
