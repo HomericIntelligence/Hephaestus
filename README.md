@@ -53,12 +53,16 @@ pytest, ruff, and mypy):
 
 ### Development setup
 
-For local development, use [Pixi](https://pixi.sh) to manage the environment:
+For local development, [install Pixi](https://pixi.sh/install/) and
+[`just`](https://just.systems/), then bootstrap the project (installs deps, the
+editable package, and pre-commit hooks in one step):
 
 ```bash
-pixi install
-pixi run pre-commit install
+just bootstrap
 ```
+
+See [CONTRIBUTING.md → Development Setup](CONTRIBUTING.md#development-setup) for
+the full workflow, including the manual fallback if you do not have `just`.
 
 ## Library vs product layer
 
@@ -129,12 +133,12 @@ Install Pixi by following the [official installation guide](https://pixi.sh/inst
 
 ### Setup Development Environment
 
-```bash
-# Install dependencies and create environment
-pixi install
+Bootstrap the project in one step (see
+[CONTRIBUTING.md → Development Setup](CONTRIBUTING.md#development-setup) for the
+full workflow and the no-`just` fallback):
 
-# Activate the environment (optional, as pixi runs commands in the environment automatically)
-pixi shell
+```bash
+just bootstrap
 ```
 
 ### Running Tests
