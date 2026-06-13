@@ -329,3 +329,71 @@ class TestPytestConsistency:
             f"pixi.toml [feature.dev]={pixi_dev_cap}. "
             "Update both together — see issue #785."
         )
+
+
+class TestRuffConsistency:
+    """Tests for ruff floor/cap consistency across pyproject.toml and pixi.toml.
+
+    ruff 0.1.x and 0.15.x enforce different lint rulesets; the pixi-driven CI
+    resolves the cap declared in pixi.toml [feature.shared], so a pip-install
+    user on ``.[dev]`` must see the same floor or they land on an untested
+    ruleset. Tracks issue #1201.
+
+    Comparisons use packaging.version.Version (PEP 440) so that "0.15"
+    and "0.15.0" compare equal semantically.
+
+    Note: reads pixi.toml [feature.shared.dependencies] only — if ruff is ever
+    added under [feature.lint.dependencies], extend this test to check that key.
+    """
+
+    def test_ruff_floor_matches_across_manifests(self, repo_root: Path) -> None:
+        """Ruff floor in pyproject.toml dev extra must equal pixi shared feature."""
+        pyproject_path = repo_root / "pyproject.toml"
+        with open(pyproject_path, "rb") as f:
+            pyproject = tomllib.load(f)
+
+        dev_deps = pyproject["project"]["optional-dependencies"]["dev"]
+        pyproject_spec = TestPytestConsistency._find_dep(dev_deps, "ruff")
+        assert pyproject_spec is not None, "ruff not found in [project.optional-dependencies.dev]"
+
+        pixi_path = repo_root / "pixi.toml"
+        with open(pixi_path, "rb") as f:
+            pixi = tomllib.load(f)
+
+        pixi_shared_spec = pixi["feature"]["shared"]["dependencies"]["ruff"]
+
+        pyproject_floor = Version(_floor(pyproject_spec))
+        pixi_shared_floor = Version(_floor(pixi_shared_spec))
+
+        assert pyproject_floor == pixi_shared_floor, (
+            "ruff floor skew (semantic): "
+            f"pyproject.toml dev={pyproject_floor} vs "
+            f"pixi.toml [feature.shared]={pixi_shared_floor}. "
+            "Update both together — see issue #1201."
+        )
+
+    def test_ruff_upper_cap_matches_across_manifests(self, repo_root: Path) -> None:
+        """Ruff upper-cap in pyproject.toml dev extra must equal pixi shared feature."""
+        pyproject_path = repo_root / "pyproject.toml"
+        with open(pyproject_path, "rb") as f:
+            pyproject = tomllib.load(f)
+
+        dev_deps = pyproject["project"]["optional-dependencies"]["dev"]
+        pyproject_spec = TestPytestConsistency._find_dep(dev_deps, "ruff")
+        assert pyproject_spec is not None, "ruff not found in [project.optional-dependencies.dev]"
+
+        pixi_path = repo_root / "pixi.toml"
+        with open(pixi_path, "rb") as f:
+            pixi = tomllib.load(f)
+
+        pixi_shared_spec = pixi["feature"]["shared"]["dependencies"]["ruff"]
+
+        pyproject_cap = Version(_upper_cap(pyproject_spec))
+        pixi_shared_cap = Version(_upper_cap(pixi_shared_spec))
+
+        assert pyproject_cap == pixi_shared_cap, (
+            "ruff upper-cap skew (semantic): "
+            f"pyproject.toml dev={pyproject_cap} vs "
+            f"pixi.toml [feature.shared]={pixi_shared_cap}. "
+            "Update both together — see issue #1201."
+        )
