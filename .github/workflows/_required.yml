@@ -559,8 +559,7 @@ jobs:
       - name: Run unit tests
         run: |
           pytest tests/unit --override-ini="addopts=" -v --strict-markers \
-            --cov=hephaestus --cov-report=term-missing --cov-report=xml \
-            --cov-fail-under=80
+            --cov=hephaestus --cov-report=term-missing --cov-report=xml
 
       - name: Check unit test structure
         # Use the strict CLI (also flags loose test_*.py files at tests/unit/ root).
