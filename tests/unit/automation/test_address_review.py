@@ -14,7 +14,7 @@ from hephaestus.automation.address_review import (
     resolve_addressed_threads,
     run_address_fix_session,
 )
-from hephaestus.automation.models import AddressReviewOptions
+from hephaestus.automation.models import AddressReviewOptions, ReviewPhase, ReviewState
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -589,3 +589,238 @@ class TestRunAddressFixSessionModuleLevel:
 
         coordinator_prompt = prompts[AGENT_IMPLEMENTER]
         assert "@ a.py Line 7 - hard - rework locking" in coordinator_prompt
+
+
+# ---------------------------------------------------------------------------
+# Extracted helpers: _check_threads_for_address, _setup_address_state,
+# _commit_push_and_resolve (PR #1296 regression tests)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckThreadsForAddress:
+    """Tests for AddressReviewer._check_threads_for_address helper."""
+
+    def test_no_threads_returns_none(self, reviewer: AddressReviewer) -> None:
+        """No unresolved threads → returns None."""
+        with patch(
+            "hephaestus.automation.address_review.gh_pr_list_unresolved_threads",
+            return_value=[],
+        ):
+            result = reviewer._check_threads_for_address(
+                issue_number=123,
+                pr_number=456,
+                thread_id=1,
+            )
+
+        assert result is None
+
+    def test_dry_run_returns_none(self, mock_options: AddressReviewOptions, tmp_path: Path) -> None:
+        """dry_run=True → returns None (caller returns success)."""
+        mock_options.dry_run = True
+
+        with (
+            patch("hephaestus.automation.address_review.get_repo_root", return_value=tmp_path),
+            patch("hephaestus.automation.address_review.WorktreeManager"),
+            patch("hephaestus.automation.address_review.StatusTracker"),
+        ):
+            dry_reviewer = AddressReviewer(mock_options)
+            dry_reviewer.state_dir = tmp_path
+
+        threads_list = [{"id": "thread-1", "path": "file.py", "line": 10, "body": "fix this"}]
+
+        with patch(
+            "hephaestus.automation.address_review.gh_pr_list_unresolved_threads",
+            return_value=threads_list,
+        ):
+            result = dry_reviewer._check_threads_for_address(
+                issue_number=123,
+                pr_number=456,
+                thread_id=1,
+            )
+
+        assert result is None
+
+    def test_threads_present_returns_list(self, reviewer: AddressReviewer) -> None:
+        """Threads exist and not dry-run → returns thread list."""
+        threads_list = [
+            {"id": "thread-1", "path": "file.py", "line": 10, "body": "fix this"},
+            {"id": "thread-2", "path": "file.py", "line": 20, "body": "and this"},
+        ]
+
+        with patch(
+            "hephaestus.automation.address_review.gh_pr_list_unresolved_threads",
+            return_value=threads_list,
+        ):
+            result = reviewer._check_threads_for_address(
+                issue_number=123,
+                pr_number=456,
+                thread_id=1,
+            )
+
+        assert result == threads_list
+        assert len(result) == 2
+
+
+class TestSetupAddressState:
+    """Tests for AddressReviewer._setup_address_state helper."""
+
+    def test_creates_new_review_state_when_none_exists(
+        self, reviewer: AddressReviewer, tmp_path: Path
+    ) -> None:
+        """No existing state → creates new ReviewState."""
+        with (
+            patch.object(reviewer, "_load_impl_session_id", return_value=None),
+            patch.object(reviewer, "_load_review_state", return_value=None),
+            patch.object(
+                reviewer,
+                "_get_or_create_worktree",
+                return_value=tmp_path / "worktree",
+            ),
+            patch.object(reviewer, "_save_review_state"),
+            patch.object(reviewer.status_tracker, "update_slot"),
+        ):
+            session_id, review_state, branch_name, worktree_path = (
+                reviewer._setup_address_state(
+                    issue_number=123,
+                    pr_number=456,
+                    slot_id=0,
+                )
+            )
+
+        assert session_id is None
+        assert review_state.issue_number == 123
+        assert review_state.pr_number == 456
+        assert review_state.branch_name == "123-auto-impl"
+        assert branch_name == "123-auto-impl"
+        assert worktree_path == tmp_path / "worktree"
+
+    def test_updates_pr_number_on_existing_state(
+        self, reviewer: AddressReviewer, tmp_path: Path
+    ) -> None:
+        """Existing state → updates pr_number."""
+        existing_state = ReviewState(
+            issue_number=123,
+            pr_number=400,  # old pr_number
+            branch_name="123-auto-impl",
+        )
+
+        with (
+            patch.object(reviewer, "_load_impl_session_id", return_value="session-123"),
+            patch.object(reviewer, "_load_review_state", return_value=existing_state),
+            patch.object(
+                reviewer,
+                "_get_or_create_worktree",
+                return_value=tmp_path / "worktree",
+            ),
+            patch.object(reviewer, "_save_review_state") as mock_save,
+            patch.object(reviewer.status_tracker, "update_slot"),
+        ):
+            session_id, review_state, _branch_name, _worktree_path = (
+                reviewer._setup_address_state(
+                    issue_number=123,
+                    pr_number=456,
+                    slot_id=0,
+                )
+            )
+
+        # pr_number should be updated to the new value
+        assert review_state.pr_number == 456
+        assert session_id == "session-123"
+        mock_save.assert_called_once()
+
+
+class TestCommitPushAndResolve:
+    """Tests for AddressReviewer._commit_push_and_resolve helper.
+
+    The key regression test (PR #1296): _commit_push_and_resolve must pass
+    the real replies dict (not {}) to _resolve_addressed_threads.
+    """
+
+    def test_passes_real_replies_dict_to_resolve(self, reviewer: AddressReviewer, tmp_path: Path) -> None:  # noqa: E501
+        """The helper must forward the REAL replies dict to _resolve_addressed_threads.
+
+        This is the critical safeguard against the historically-buggy {}
+        sentinel path. The replies dict carries reply text that must be posted
+        as comments on each resolved thread per the review protocol.
+        """
+        review_state = ReviewState(
+            issue_number=123,
+            pr_number=456,
+            branch_name="123-auto-impl",
+        )
+
+        addressed = ["t1", "t2"]
+        replies = {"t1": "Fixed the locking issue.", "t2": "Added the type hint."}
+        threads = [
+            {"id": "t1", "path": "a.py", "line": 10, "body": "fix this"},
+            {"id": "t2", "path": "b.py", "line": 20, "body": "and this"},
+        ]
+
+        with (
+            patch.object(reviewer, "_commit_if_changes"),
+            patch.object(reviewer, "_push_branch"),
+            patch.object(reviewer, "_resolve_addressed_threads") as mock_resolve,
+            patch.object(reviewer, "_save_review_state"),
+            patch.object(reviewer.status_tracker, "update_slot"),
+        ):
+            reviewer._commit_push_and_resolve(
+                issue_number=123,
+                pr_number=456,
+                branch_name="123-auto-impl",
+                worktree_path=tmp_path,
+                addressed=addressed,
+                replies=replies,
+                threads=threads,
+                review_state=review_state,
+                slot_id=0,
+                thread_id=1,
+            )
+
+        # The critical assertion: _resolve_addressed_threads is called with the
+        # REAL replies dict, not an empty dict sentinel.
+        mock_resolve.assert_called_once_with(
+            addressed,
+            replies,
+            {"t1", "t2"},
+        )
+
+    def test_updates_review_state_addressed_threads(
+        self, reviewer: AddressReviewer, tmp_path: Path
+    ) -> None:
+        """The helper updates review_state.addressed_thread_ids."""
+        review_state = ReviewState(
+            issue_number=123,
+            pr_number=456,
+            branch_name="123-auto-impl",
+            addressed_thread_ids=["old-t1"],
+        )
+
+        addressed = ["t1"]
+        replies = {"t1": "Fixed."}
+        threads = [{"id": "t1", "path": "a.py", "line": 10, "body": "fix"}]
+
+        with (
+            patch.object(reviewer, "_commit_if_changes"),
+            patch.object(reviewer, "_push_branch"),
+            patch.object(reviewer, "_resolve_addressed_threads"),
+            patch.object(reviewer, "_save_review_state") as mock_save,
+            patch.object(reviewer.status_tracker, "update_slot"),
+        ):
+            reviewer._commit_push_and_resolve(
+                issue_number=123,
+                pr_number=456,
+                branch_name="123-auto-impl",
+                worktree_path=tmp_path,
+                addressed=addressed,
+                replies=replies,
+                threads=threads,
+                review_state=review_state,
+                slot_id=0,
+                thread_id=1,
+            )
+
+        # Check that the state was updated with the new addressed thread IDs
+        assert "old-t1" in review_state.addressed_thread_ids
+        assert "t1" in review_state.addressed_thread_ids
+        assert review_state.phase == ReviewPhase.COMPLETED
+        mock_save.assert_called_once()
