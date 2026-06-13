@@ -21,7 +21,6 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -79,41 +78,13 @@ class StageContext:
         """Return the lock guarding the state manager's in-memory dict."""
         return self.impl.state_mgr.lock
 
-    @property
-    def impl_module(self) -> ModuleType:
-        """Return the ``hephaestus.automation.implementer`` module.
-
-        Resolves the patchable-symbol surface documented by the "Test-Patch
-        Contract" table in :mod:`.implementer` (``is_plan_review_go``,
-        ``fetch_issue_info``, ``invoke_claude_with_session``, ``get_repo_slug``,
-        ``find_pr_for_issue``, ``review_state``, ``AGENT_IMPLEMENTER``, …) so
-        that tests which ``patch("hephaestus.automation.implementer.X", ...)``
-        keep working after the call sites moved into the phase modules.
-        ``patch("…implementer.X", …)`` intercepts attribute lookup here.
-
-        Cycle constraint: :mod:`.implementer` eagerly imports
-        ``ImplementationPhaseRunner`` (which imports this module) at module top,
-        so a top-level reverse import would create a partial-module crash. The
-        inline ``from . import implementer`` below is therefore required — it
-        fires only at attribute-access time, by which point
-        ``sys.modules["hephaestus.automation.implementer"]`` is fully populated.
-        Return type ``ModuleType`` lets mypy check the property signature;
-        attribute access through the returned module remains ``Any`` (mypy's
-        ``ModuleType.__getattr__`` stub returns ``Any``), which is acceptable
-        here because the patchable surface is enumerated in the docstring
-        table — that table, not mypy, is the contract.
-        """
-        from . import implementer as _impl_mod  # cycle-safe; see docstring
-
-        return _impl_mod
-
 
 class StageMixin:
     """Convenience-accessor mixin for phase classes.
 
     Each phase stores its :class:`StageContext` as ``self.ctx`` and inherits
     the runner's accessor names (``self.options``, ``self.state_dir``,
-    ``self.impl``, ``self._impl_module``, …) so the method bodies that moved
+    ``self.impl``, …) so the method bodies that moved
     out of :class:`ImplementationPhaseRunner` keep reading them unchanged.
     """
 
@@ -158,8 +129,3 @@ class StageMixin:
     def state_lock(self) -> threading.Lock:
         """Return the lock guarding the state manager's in-memory dict."""
         return self.ctx.state_lock
-
-    @property
-    def _impl_module(self) -> Any:
-        """Return the ``hephaestus.automation.implementer`` module."""
-        return self.ctx.impl_module

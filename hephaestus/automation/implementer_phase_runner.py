@@ -31,27 +31,30 @@ import logging
 import subprocess
 import threading
 from pathlib import Path
-from types import ModuleType
 from typing import TYPE_CHECKING, Any, Literal
 
 from hephaestus.agents.runtime import is_codex, run_codex_text
 
+from . import review_state  # noqa: F401  # patch surface — see #714 cycle-break note
 from ._followup_phase import FollowUpPhase
 from ._implement_phase import ImplementPhase, _prepend_advise
 from ._plan_phase import PlanPhase
 from ._pr_create_phase import PRCreatePhase
 from ._review_phase import MAX_REVIEW_ITERATIONS, ReviewPhase
+from ._review_utils import find_pr_for_issue, get_pr_head_branch
 from ._stage_context import StageContext
+from .claude_invoke import invoke_claude_with_session
 from .claude_models import advise_model
 from .claude_timeouts import advise_claude_timeout
 from .git_utils import (
+    get_repo_slug,
     is_clean_working_tree,
     issue_ref,
     pr_ref,
     run,
     sync_worktree_to_remote_branch,
 )
-from .github_api import gh_issue_add_labels
+from .github_api import fetch_issue_info, gh_issue_add_labels
 from .models import (
     ImplementationPhase,
     ImplementationState,
@@ -62,16 +65,23 @@ from .pr_manager import (
     pr_has_implementation_state_label,
 )
 from .prompts import get_dirty_reused_worktree_decision_prompt, get_implementation_prompt
-from .state_labels import STATE_SKIP
+from .review_state import is_plan_review_go
 
-# Patchable collaborators (``is_plan_review_go``, ``fetch_issue_info``,
-# ``find_pr_for_issue``, ``get_pr_head_branch``, ``invoke_claude_with_session``,
-# ``get_repo_slug``, ``AGENT_IMPLEMENTER``, …) are NOT imported here — they are
-# resolved at call time via ``self._impl_module.X`` so that the patch path
-# ``hephaestus.automation.implementer.X`` remains the single source of truth.
-# See the "Test-Patch Contract" table in :mod:`.implementer` for the full list
-# and the rationale (Reverse-Delegation, issue #710 / PR #674). This preserves
-# the test-patch contract after the #597/#712 extractions.
+# Patchable symbols (``find_pr_for_issue``, ``get_pr_head_branch``,
+# ``is_plan_review_go``, ``fetch_issue_info``, ``invoke_claude_with_session``,
+# ``get_repo_slug``, ``AGENT_IMPLEMENTER``, ``AGENT_ADVISE``,
+# ``current_trunk_githash``) are imported top-level from their true source
+# modules and reached by their bare names below. Tests patch them at
+# ``hephaestus.automation.implementer_phase_runner.<X>`` — the module that owns
+# these call sites — instead of through a deferred per-runner module-pointer
+# indirection. This breaks the import cycle the old indirection created with ``implementer``
+# (#714). ``current_trunk_githash`` is patch-only (used by tests).
+from .session_naming import (  # noqa: F401
+    AGENT_ADVISE,
+    AGENT_IMPLEMENTER,
+    current_trunk_githash,
+)
+from .state_labels import STATE_SKIP
 
 if TYPE_CHECKING:
     from .implementer import IssueImplementer
@@ -163,21 +173,6 @@ class ImplementationPhaseRunner:
         """Return the lock guarding the state manager's in-memory dict."""
         return self.impl.state_mgr.lock
 
-    @property
-    def _impl_module(self) -> ModuleType:
-        """Return the :mod:`hephaestus.automation.implementer` module.
-
-        Resolves the patchable-symbol surface documented by the "Test-Patch
-        Contract" table in :mod:`.implementer` (``is_plan_review_go``,
-        ``fetch_issue_info``, ``find_pr_for_issue``, ``get_pr_head_branch``,
-        ``invoke_claude_with_session``, ``get_repo_slug``, ``AGENT_IMPLEMENTER``,
-        …) so tests that ``patch("hephaestus.automation.implementer.X", ...)``
-        keep working after the call sites moved into the phase modules. The
-        cycle-safe inline import lives in :attr:`StageContext.impl_module`,
-        which this property delegates to.
-        """
-        return self.ctx.impl_module
-
     # ------------------------------------------------------------------
     # Top-level per-issue pipeline
     # ------------------------------------------------------------------
@@ -236,13 +231,13 @@ class ImplementationPhaseRunner:
             # ``state:implementation-go`` label that drive-green requires to arm
             # auto-merge. A pre-existing PR that never gets reviewed here would
             # otherwise deadlock: implementer skips it, drive-green only reads
-            # the label and refuses to merge without it. Looked up via
-            # _impl_module so tests can patch
-            # ``hephaestus.automation.implementer.find_pr_for_issue``.
+            # the label and refuses to merge without it. Imported top-level so
+            # tests patch
+            # ``hephaestus.automation.implementer_phase_runner.find_pr_for_issue``.
             self.status_tracker.update_slot(
                 slot_id, f"{issue_ref(issue_number)}: Checking for existing PR"
             )
-            existing_pr = self._impl_module.find_pr_for_issue(issue_number)
+            existing_pr = find_pr_for_issue(issue_number)
             if existing_pr is not None:
                 return self._review_existing_pr(
                     issue_number=issue_number,
@@ -430,7 +425,7 @@ class ImplementationPhaseRunner:
         self.status_tracker.update_slot(
             slot_id, f"{issue_ref(issue_number)}: Checking plan-review verdict"
         )
-        if not self._impl_module.is_plan_review_go(issue_number):
+        if not is_plan_review_go(issue_number):
             impl._log(
                 "info",
                 f"Issue #{issue_number}: latest plan-review verdict is not "
@@ -478,7 +473,7 @@ class ImplementationPhaseRunner:
             state.phase = ImplementationPhase.IMPLEMENTING
         impl._save_state(state)
 
-        issue = self._impl_module.fetch_issue_info(issue_number)
+        issue = fetch_issue_info(issue_number)
 
         # Advise-first (#30): pull prior learnings from ProjectMnemosyne
         # before the implementation session.  For Claude agents the advise
@@ -660,7 +655,7 @@ class ImplementationPhaseRunner:
         # search, so its head branch can be named after a different issue (or a
         # bundle). Fetching the assumed name fails with ``git fetch ... exit 128``.
         # Fall back to the passed-in name only if the lookup fails.
-        pr_branch = self._impl_module.get_pr_head_branch(existing_pr) or branch_name
+        pr_branch = get_pr_head_branch(existing_pr) or branch_name
         if pr_branch != branch_name:
             impl._log(
                 "info",
@@ -708,7 +703,7 @@ class ImplementationPhaseRunner:
             state.phase = ImplementationPhase.REVIEWING
         impl._save_state(state)
 
-        issue = self._impl_module.fetch_issue_info(issue_number)
+        issue = fetch_issue_info(issue_number)
 
         # Advise-first (#30): same two-turn pattern as the fresh-implementation path.
         # For Claude: advise as turn 1 of AGENT_IMPLEMENTER (cwd=worktree_path).
@@ -829,12 +824,11 @@ class ImplementationPhaseRunner:
                 )
                 output = result.stdout or ""
             else:
-                _impl_mod = self._impl_module
-                repo_slug = _impl_mod.get_repo_slug(self.repo_root)
-                output, _ = _impl_mod.invoke_claude_with_session(
+                repo_slug = get_repo_slug(self.repo_root)
+                output, _ = invoke_claude_with_session(
                     repo=repo_slug,
                     issue=issue_number,
-                    agent=_impl_mod.AGENT_ADVISE,
+                    agent=AGENT_ADVISE,
                     prompt=prompt,
                     model=advise_model(),
                     cwd=worktree_path,

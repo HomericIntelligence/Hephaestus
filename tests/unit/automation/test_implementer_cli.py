@@ -1,14 +1,16 @@
-"""Tests for the extracted ``implementer_cli`` module (#468).
+"""Tests for the extracted ``implementer_cli`` module (#468, #714).
 
-The CLI entry point (``_parse_args`` / ``_setup_logging`` / ``main``) was moved
-out of ``implementer.py`` into ``implementer_cli.py`` for SRP. These tests lock
-the contract that makes that move safe:
+Argument parsing and logging setup (``_parse_args`` / ``_setup_logging``) live
+in ``implementer_cli.py`` (SRP — #468) and are re-exported from ``implementer``.
+``main`` itself lives in ``implementer.py`` (relocated in #714 to break the
+import cycle), where it resolves its collaborators through that module's own
+namespace. These tests lock the contract that makes the split safe:
 
-1. The three callables are re-exported from ``implementer`` and are the *same*
-   objects as in ``implementer_cli`` (console script + back-compat imports).
-2. ``main`` resolves its patchable collaborators through the ``implementer``
-   module, so ``patch.object(implementer, ...)`` still intercepts them — this is
-   what keeps the pre-existing ``test_implementer_main`` smoke tests valid.
+1. ``_parse_args`` / ``_setup_logging`` are re-exported from ``implementer`` and
+   are the *same* objects as in ``implementer_cli`` (back-compat imports).
+2. ``main`` is defined on ``implementer`` and observes
+   ``patch.object(implementer, ...)`` on its collaborators — this is what keeps
+   the pre-existing ``test_implementer_main`` smoke tests valid.
 """
 
 from __future__ import annotations
@@ -25,8 +27,11 @@ from hephaestus.automation import implementer, implementer_cli
 class TestReExportIdentity:
     """The re-exports must be the same objects, not copies."""
 
-    def test_main_reexported(self) -> None:
-        assert implementer.main is implementer_cli.main
+    def test_main_defined_on_implementer(self) -> None:
+        # ``main`` was relocated into ``implementer`` (#714); ``implementer_cli``
+        # no longer defines it.
+        assert implementer.main.__module__ == "hephaestus.automation.implementer"
+        assert not hasattr(implementer_cli, "main")
 
     def test_parse_args_reexported(self) -> None:
         assert implementer._parse_args is implementer_cli._parse_args
@@ -43,7 +48,7 @@ class TestPatchRoutingThroughImplementer:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        """Patched implementer deps must be honored by ``implementer_cli.main``.
+        """Patched implementer deps must be honored by ``implementer.main``.
 
         Patching ``implementer.gh_list_open_issues`` / ``get_repo_root`` /
         ``IssueImplementer`` must reach the lookups inside ``main``.
@@ -54,7 +59,7 @@ class TestPatchRoutingThroughImplementer:
             patch.object(implementer, "gh_list_open_issues", return_value=[]) as mock_list,
             patch.object(implementer, "get_repo_root", return_value=tmp_path),
         ):
-            rc = implementer_cli.main()
+            rc = implementer.main()
 
         assert rc == 0
         # Auto-discovery path with no --issues/--epic must consult the patched

@@ -28,16 +28,18 @@ from hephaestus.agents.runtime import (
     run_codex_text,
 )
 
+from . import review_state
 from ._stage_context import StageMixin
 from .address_review import run_address_fix_session
 from .claude_invoke import (
     INFRA_ERROR_REVIEW_TEXT,
     SESSION_EXPIRED_PHRASES,
+    invoke_claude_with_session,
     parse_review_verdict,
 )
 from .claude_models import implementer_model, reviewer_model
 from .claude_timeouts import implementer_claude_timeout
-from .git_utils import issue_ref, pr_ref, run
+from .git_utils import get_repo_slug, issue_ref, pr_ref, run
 from .github_api import (
     gh_current_login,
     gh_issue_add_labels,
@@ -53,6 +55,7 @@ from .pr_manager import (
 from .pr_reviewer import gather_impl_review_context, review_pr_inline
 from .prompts import get_impl_loop_review_prompt, get_impl_resume_feedback_prompt
 from .review_validator import validate_prior_comments_addressed
+from .session_naming import AGENT_IMPLEMENTER, current_trunk_githash  # noqa: F401
 from .state_labels import STATE_SKIP
 
 if TYPE_CHECKING:
@@ -907,14 +910,13 @@ class ReviewPhase(StageMixin):
         :data:`PLAN_COMMENT_MARKER`, skipping comments whose body starts with
         :data:`review_state.PLAN_REVIEW_PREFIX`. The PLAN_REVIEW comment is
         the one whose body starts with ``review_state.PLAN_REVIEW_PREFIX``.
-        Best-effort: any fetch failure yields empty strings (looked up via
-        ``_impl_module`` so tests can patch
-        ``hephaestus.automation.implementer.review_state``).
+        Best-effort: any fetch failure yields empty strings. ``review_state``
+        is imported top-level so tests patch its internals at
+        ``hephaestus.automation._review_phase.review_state``.
         """
         plan_text = ""
         plan_review_text = ""
         try:
-            review_state = self._impl_module.review_state
             comments = review_state._fetch_issue_comments_graphql(issue_number)
             for comment in comments:
                 body = comment.get("body", "")
@@ -1027,13 +1029,12 @@ class ReviewPhase(StageMixin):
         # the Claude path — it's still consumed by the codex branch above.
         # ``recreate_on_resume_failure=False`` propagates the underlying error
         # so we can preserve the "stop iterating on expiry" contract.
-        _impl_mod = self._impl_module
-        repo_slug = _impl_mod.get_repo_slug(self.repo_root)
+        repo_slug = get_repo_slug(self.repo_root)
         try:
-            _impl_mod.invoke_claude_with_session(
+            invoke_claude_with_session(
                 repo=repo_slug,
                 issue=issue_number,
-                agent=_impl_mod.AGENT_IMPLEMENTER,
+                agent=AGENT_IMPLEMENTER,
                 prompt=prompt,
                 model=implementer_model(),
                 cwd=worktree_path,

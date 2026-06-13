@@ -1,18 +1,18 @@
-"""Command-line entry point for the bulk issue implementer.
+"""Argument parsing and logging setup for the bulk issue implementer CLI.
 
-This module holds the argument-parsing, logging-setup, and ``main()`` entry
-point that were previously defined inline in :mod:`.implementer`. They were
-extracted to separate the CLI/entry-point concern from the
+This module holds the argument-parsing and logging-setup helpers that were
+previously defined inline in :mod:`.implementer`. They were extracted to
+separate the CLI plumbing from the
 :class:`~hephaestus.automation.implementer.IssueImplementer` orchestration
 class (SRP — see #468).
 
-``main`` deliberately resolves its patchable collaborators
-(``gh_list_open_issues``, ``get_repo_root``, ``CursesUI``, ``IssueImplementer``)
-through the :mod:`.implementer` module namespace rather than importing them
-directly. This preserves the existing test contract, where tests patch those
-names via ``patch.object(implementer, "...")`` and call ``implementer.main()``
-— the lookup must happen where those tests patch, not where the symbols are
-defined.
+The ``main()`` entry point lives in :mod:`.implementer` (not here): keeping it
+beside ``IssueImplementer`` lets it resolve its collaborators
+(``gh_list_open_issues``, ``get_repo_root``, ``IssueImplementer``) through that
+module's own namespace with no deferred import, which breaks the import cycle
+this module's ``main`` previously required (#714). Tests still patch those
+collaborators at ``hephaestus.automation.implementer.<name>`` and call
+``implementer.main()`` unchanged.
 """
 
 from __future__ import annotations
@@ -21,16 +21,13 @@ import argparse
 import logging
 from pathlib import Path
 
-from hephaestus.agents.runtime import add_agent_argument, resolve_agent
+from hephaestus.agents.runtime import add_agent_argument
 from hephaestus.automation._review_utils import add_max_workers_arg
 from hephaestus.cli.utils import (
     add_dry_run_arg,
     add_json_arg,
     add_version_arg,
-    emit_json_status,
 )
-
-from .models import ImplementerOptions
 
 
 def _setup_logging(verbose: bool = False, log_dir: Path | None = None) -> None:
@@ -171,83 +168,3 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("Cannot specify both --epic and --issues")
 
     return args
-
-
-def main() -> int:
-    """Execute the issue implementation workflow.
-
-    Returns:
-        Exit code: 0 on success, 1 on failure, 130 on keyboard interrupt
-
-    """
-    # Resolve patchable collaborators through the implementer module so that
-    # existing tests patching ``implementer.gh_list_open_issues`` /
-    # ``implementer.get_repo_root`` / ``implementer.CursesUI`` /
-    # ``implementer.IssueImplementer`` continue to intercept these lookups.
-    from . import implementer as _impl
-
-    args = _parse_args()
-    agent = resolve_agent(args.agent)
-
-    state_dir = _impl.get_repo_root() / "build" / ".issue_implementer"
-    _setup_logging(args.verbose, log_dir=state_dir)
-
-    log = logging.getLogger(__name__)
-
-    # Auto-discover all open issues when neither --issues nor --epic is given
-    if not args.health_check and not args.epic and not args.issues:
-        discovered = _impl.gh_list_open_issues()
-        log.info(
-            "No --issues/--epic given; discovered %s open issues: %s", len(discovered), discovered
-        )
-        args.issues = discovered
-
-    options = ImplementerOptions(
-        epic_number=args.epic or 0,
-        issues=args.issues or [],
-        agent=agent,
-        analyze_only=args.analyze,
-        health_check=args.health_check,
-        resume=args.resume,
-        max_workers=args.max_workers,
-        skip_closed=not args.no_skip_closed,
-        auto_merge=not args.no_auto_merge,
-        dry_run=args.dry_run,
-        enable_advise=not args.no_advise,
-        enable_learn=not args.no_learn,
-        enable_follow_up=not args.no_follow_up,
-        enable_ui=not args.no_ui and not args.json,
-        include_nitpicks=args.nitpick,
-    )
-
-    if args.health_check:
-        log.info("Running health check")
-    elif args.issues:
-        log.info("Starting implementation of issues: %s", args.issues)
-    else:
-        log.info("Starting implementation of epic #%s", args.epic)
-
-    from hephaestus.utils.terminal import terminal_guard
-
-    with terminal_guard():
-        try:
-            implementer = _impl.IssueImplementer(options)
-            results = implementer.run()
-
-            if not args.health_check and not args.analyze:
-                failed = [num for num, result in results.items() if not result.success]
-                if failed:
-                    log.error("Failed to implement %s issue(s): %s", len(failed), failed)
-                    if args.json:
-                        emit_json_status(1, issues=args.issues or [], failed=failed)
-                    return 1
-
-            log.info("Complete")
-            if args.json:
-                emit_json_status(0, issues=args.issues or [], epic=args.epic or 0)
-            return 0
-        except KeyboardInterrupt:
-            log.warning("Interrupted by user")
-            if args.json:
-                emit_json_status(130, message="interrupted")
-            return 130
