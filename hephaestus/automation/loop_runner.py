@@ -1692,7 +1692,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
     results = run_loop(cfg, repos)
 
     # Compute actual loops run (may be less than cfg.loops due to early exit)
-    loops_run = max((r.loop_idx for r in results), default=0)
+    loops_run = max((r.loop_idx for r in results if not r.is_post_loop), default=0)
 
     failures = [r for r in results if r.any_failure]
     if failures:

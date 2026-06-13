@@ -711,6 +711,34 @@ class TestMainLoopsRunReporting:
         assert captured["failed_repos"] == []
         assert captured["rc"] == 0
 
+    def test_main_loops_run_excludes_post_loop_records(self) -> None:
+        """Post-loop records (is_post_loop=True) must not inflate loops_run.
+
+        When early exit fires on loop 1 of 5 and _run_post_loop_stages appends a
+        RepoResult with loop_idx=5 and is_post_loop=True, loops_run must still be
+        1, not 5.  The post-loop record is tagged via is_post_loop=True — the
+        dedicated flag documented at loop_runner.py:234 — not merely by having a
+        non-empty post_loop_phases list.
+        """
+        results = [
+            RepoResult(
+                repo="r1",
+                loop_idx=1,
+                phases=[PhaseResult(name="plan", rc=0, work_units=0)],
+            ),
+            RepoResult(
+                repo="r1",
+                loop_idx=5,
+                is_post_loop=True,
+                post_loop_phases=[PhaseResult(name="drive-green", rc=0, work_units=0)],
+            ),
+        ]
+
+        captured = self._run_main_with_results(results, configured_loops=5)
+
+        assert captured["loops_run"] == 1
+        assert captured["rc"] == 0
+
     def test_main_loops_run_all_loops(self) -> None:
         """When all configured loops complete, loops_run==cfg.loops."""
         results = [
