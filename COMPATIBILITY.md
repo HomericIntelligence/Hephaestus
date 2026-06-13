@@ -39,7 +39,7 @@ says nothing about the Python package version and vice versa. See
 
 ## Stability Tiers
 
-ProjectHephaestus ships 19 subpackages with different maturity levels. Only the
+ProjectHephaestus ships 19 documented subpackages with different maturity levels. Only the
 **stable** subpackages below are covered by the [deprecation policy](#deprecation-policy);
 **provisional** subpackages may change without notice, even across minor versions.
 

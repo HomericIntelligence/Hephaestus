@@ -25,7 +25,7 @@ ProjectHephaestus is the shared utilities and tooling repository of the HomericI
 
 ```text
 ProjectHephaestus/
-├── hephaestus/                 # Python source code (19 subpackages)
+├── hephaestus/                 # Python source code (19 documented subpackages)
 │   ├── agents/                 # Agent frontmatter + loader + runtime
 │   ├── automation/             # Issue planning / implementation / PR review pipeline
 │   ├── benchmarks/             # Benchmark comparison utilities
@@ -46,7 +46,7 @@ ProjectHephaestus/
 │   ├── validation/             # README, schema, and structural validation
 │   └── version/                # Version management
 ├── scripts/                    # Automation and maintenance scripts
-├── skills/                     # Claude Code skill definitions (23 entries; kebab-case naming for plugin format)
+├── skills/                     # Claude Code skill definitions (23 SKILL.md skills; kebab-case naming for plugin format)
 ├── tests/                      # Unit and integration tests
 │   ├── unit/                   # Unit tests (mirrors hephaestus/ structure)
 │   └── integration/            # Integration tests
