@@ -17,6 +17,8 @@ modified or redistributed.
   packaging     Apache-2.0 OR BSD-2-Clause
   pyyaml        MIT
   pydantic      MIT
+  tzdata        Apache-2.0 (packaging; bundles public-domain IANA tz database
+                data — installed only on Windows: platform_system == 'Windows')
 
 ================================================================================
 Optional (extras) runtime dependencies
