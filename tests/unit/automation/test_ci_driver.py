@@ -2951,3 +2951,96 @@ class TestScopedDoneGate:
 
         remaining_nums = {pr["number"] for pr in driver.open_prs_remaining}
         assert remaining_nums == {996, 1032}, "unscoped run keeps all open PRs"
+
+
+# ---------------------------------------------------------------------------
+# _poll_ci_until_concluded (issue #1180)
+# ---------------------------------------------------------------------------
+
+
+class TestPollCiUntilConcluded:
+    """Tests for the extracted _poll_ci_until_concluded helper."""
+
+    def test_returns_early_when_no_checks(self, driver: CIDriver) -> None:
+        """No checks found → WorkerResult(success=True)."""
+        with patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[]):
+            result = driver._poll_ci_until_concluded(1, 42, 0, max_wait=60)
+        assert isinstance(result, WorkerResult)
+        assert result.success is True
+        assert result.pr_number == 42
+
+    def test_returns_tuple_when_all_concluded(self, driver: CIDriver) -> None:
+        """All checks completed → returns (checks, required_checks) tuple."""
+        check = _make_check("ci", status="completed", conclusion="success")
+        with patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[check]):
+            result = driver._poll_ci_until_concluded(1, 42, 0, max_wait=60)
+        assert isinstance(result, tuple)
+        _checks, required_checks = result
+        assert len(required_checks) == 1
+
+    def test_times_out_when_checks_pending(self, driver: CIDriver) -> None:
+        """Pending checks that exceed max_wait → WorkerResult(success=True)."""
+        check = _make_check("ci", status="in_progress", conclusion="")
+        with (
+            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[check]),
+            patch("hephaestus.automation.ci_driver.time.sleep"),
+        ):
+            result = driver._poll_ci_until_concluded(1, 42, 0, max_wait=0)
+        assert isinstance(result, WorkerResult)
+        assert result.success is True
+
+    def test_non_required_checks_all_treated_as_required(self, driver: CIDriver) -> None:
+        """When no check has required=True, ALL checks are treated as required."""
+        check = _make_check("lint", status="completed", conclusion="success", required=False)
+        with patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[check]):
+            result = driver._poll_ci_until_concluded(1, 42, 0, max_wait=60)
+        assert isinstance(result, tuple)
+        _, required_checks = result
+        assert check in required_checks
+
+
+# ---------------------------------------------------------------------------
+# _handle_green_pr and _handle_failing_pr (issue #1180)
+# ---------------------------------------------------------------------------
+
+
+class TestHandleGreenPr:
+    """Tests for the extracted _handle_green_pr helper."""
+
+    def test_returns_success_when_no_implementation_go(self, driver: CIDriver) -> None:
+        """Green PR missing state:implementation-go → success without arming."""
+        with patch.object(driver, "_pr_has_implementation_go", return_value=False):
+            result = driver._handle_green_pr(1, 42, 0)
+        assert result.success is True
+        assert result.pr_number == 42
+
+    def test_dry_run_skips_merge(self, driver: CIDriver) -> None:
+        """Dry-run: implementation-go present → returns success without calling merge."""
+        driver.options.dry_run = True
+        with (
+            patch.object(driver, "_pr_has_implementation_go", return_value=True),
+            patch.object(driver, "_enable_auto_merge") as mock_merge,
+        ):
+            result = driver._handle_green_pr(1, 42, 0)
+        mock_merge.assert_not_called()
+        assert result.success is True
+
+
+class TestHandleFailingPr:
+    """Tests for the extracted _handle_failing_pr helper."""
+
+    def test_returns_success_for_cancelled_checks(self, driver: CIDriver) -> None:
+        """No 'failure' conclusion (e.g. cancelled) → success, no fix attempted."""
+        checks = [_make_check("ci", conclusion="cancelled")]
+        with patch.object(driver, "_attempt_ci_fixes") as mock_fix:
+            result = driver._handle_failing_pr(1, 42, 0, checks)
+        mock_fix.assert_not_called()
+        assert result.success is True
+
+    def test_delegates_to_attempt_ci_fixes_on_failure(self, driver: CIDriver) -> None:
+        """Failing check → _attempt_ci_fixes is called."""
+        checks = [_make_check("ci", conclusion="failure")]
+        fix_result = WorkerResult(issue_number=1, success=False, pr_number=42, error="failed")
+        with patch.object(driver, "_attempt_ci_fixes", return_value=fix_result):
+            result = driver._handle_failing_pr(1, 42, 0, checks)
+        assert result.success is False

@@ -728,13 +728,144 @@ class CIDriver:
                 self.shared_pr_issues.setdefault(pr_num, [pr_num])
         return deduped
 
-    def _drive_issue(  # noqa: C901  # orchestration: poll loop + required-check classification + CI-fix path
+    def _poll_ci_until_concluded(
+        self,
+        issue_number: int,
+        pr_number: int,
+        acquired_slot: int,
+        max_wait: int,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | WorkerResult:
+        """Poll CI checks with exponential backoff until all required checks conclude.
+
+        Returns ``(checks, required_checks)`` when all checks have concluded,
+        or a :class:`WorkerResult` (success=True) when no checks exist or the
+        poll deadline is exceeded.
+        """
+        poll_elapsed = 0
+        poll_attempt = 0
+        while True:
+            checks: list[dict[str, Any]] = gh_pr_checks(pr_number, dry_run=self.options.dry_run)
+            if not checks:
+                logger.info("Issue #%s: no CI checks found for PR #%s", issue_number, pr_number)
+                return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+
+            required_checks = [c for c in checks if c.get("required", False)] or checks
+            if all(c["status"] == "completed" for c in required_checks):
+                return checks, required_checks
+
+            sleep_secs = min(2**poll_attempt, 60)
+            if poll_elapsed + sleep_secs > max_wait:
+                logger.warning(
+                    "Issue #%s: CI checks still pending after %ss (limit %ss), "
+                    "treating as not yet failing",
+                    issue_number, poll_elapsed, max_wait,
+                )
+                return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+
+            self.status_tracker.update_slot(
+                acquired_slot,
+                f"{pr_ref(pr_number)}: waiting for CI checks (attempt {poll_attempt + 1}, {poll_elapsed}s elapsed)",  # noqa: E501
+            )
+            logger.debug(
+                "Issue #%s: CI checks pending, sleeping %ss (attempt %s, %ss elapsed)",
+                issue_number, sleep_secs, poll_attempt + 1, poll_elapsed,
+            )
+            time.sleep(sleep_secs)
+            poll_elapsed += sleep_secs
+            poll_attempt += 1
+
+    def _arm_and_wait_for_merge(
+        self, issue_number: int, pr_number: int, acquired_slot: int
+    ) -> WorkerResult:
+        """Enable auto-merge, arm the drive-green record, then block until terminal state.
+
+        If CI goes red post-arm, falls into the fix path. DIRTY/BLOCKED outcomes
+        are delegated to their respective helpers.
+        """
+        self.status_tracker.update_slot(acquired_slot, f"{pr_ref(pr_number)}: enabling auto-merge")
+        if self.options.dry_run:
+            logger.info("[dry_run] Would enable auto-merge for PR #%s (issue #%s)", pr_number, issue_number)  # noqa: E501
+            return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+
+        merge_ok = self._enable_auto_merge(pr_number, is_bot_pr=self._is_bot_pr_mode(issue_number, pr_number))  # noqa: E501
+        if merge_ok:
+            self.status_tracker.update_slot(acquired_slot, f"{pr_ref(pr_number)}: arming for post-merge /learn")  # noqa: E501
+            gh_state = self._gh_pr_state(pr_number)
+            pr_head_sha = (gh_state or {}).get("headRefOid", "") or ""
+            self._arm_drive_green(pr_number, self._get_pr_branch(pr_number), pr_head_sha)
+
+            outcome = self._wait_for_pr_terminal(issue_number, pr_number)
+            if outcome == "FAILING":
+                fix_result = self._attempt_ci_fixes(issue_number, pr_number, acquired_slot)
+                if fix_result is not None and fix_result.success:
+                    rearmed = self._recheck_and_arm_after_fix(issue_number, pr_number, acquired_slot)  # noqa: E501
+                    return rearmed if rearmed is not None else fix_result
+                if fix_result is not None:
+                    return fix_result
+                return WorkerResult(
+                    issue_number=issue_number, success=False, pr_number=pr_number,
+                    error=f"CI fix failed after {self.options.max_fix_iterations} attempt(s)",
+                )
+            if outcome == "DIRTY":
+                return self._resolve_dirty_pr(issue_number, pr_number, acquired_slot)
+            if outcome == "BLOCKED":
+                return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+        return WorkerResult(
+            issue_number=issue_number, success=merge_ok, pr_number=pr_number,
+            error=None if merge_ok else f"auto-merge failed for PR {pr_ref(pr_number)}",
+        )
+
+    def _handle_green_pr(
+        self, issue_number: int, pr_number: int, acquired_slot: int
+    ) -> WorkerResult:
+        """Handle a PR where all required checks are green.
+
+        Short-circuits if the implementation-review GO label is missing (the
+        implementer loop hasn't approved yet). Otherwise enables auto-merge and
+        blocks until terminal.
+        """
+        if not self._pr_has_implementation_go(pr_number):
+            logger.info(
+                "Issue #%s: PR #%s is green but lacks state:implementation-go; "
+                "leaving auto-merge disabled until implementation review approves it",
+                issue_number, pr_number,
+            )
+            return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+        return self._arm_and_wait_for_merge(issue_number, pr_number, acquired_slot)
+
+    def _handle_failing_pr(
+        self, issue_number: int, pr_number: int, acquired_slot: int,
+        required_checks: list[dict[str, Any]],
+    ) -> WorkerResult:
+        """Handle a PR where at least one required check has failed.
+
+        Non-failure conclusions (e.g. cancelled) are treated as no-op.
+        """
+        failing = [c for c in required_checks if c.get("conclusion") == "failure"]
+        if not failing:
+            logger.info(
+                "Issue #%s: PR #%s checks concluded with non-green, non-failure conclusions (e.g. cancelled)",  # noqa: E501
+                issue_number, pr_number,
+            )
+            return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+
+        fix_result = self._attempt_ci_fixes(issue_number, pr_number, acquired_slot)
+        if fix_result is not None and fix_result.success:
+            rearmed = self._recheck_and_arm_after_fix(issue_number, pr_number, acquired_slot)
+            if rearmed is not None:
+                return rearmed
+            return fix_result
+        if fix_result is not None:
+            return fix_result
+        return WorkerResult(
+            issue_number=issue_number, success=False, pr_number=pr_number,
+            error=f"CI fix failed after {self.options.max_fix_iterations} attempt(s)",
+        )
+
+    def _drive_issue(
         self, issue_number: int, pr_number: int, slot_id: int
     ) -> WorkerResult:
         """Drive a single issue's PR toward green CI.
-
-        The pr_number is pre-discovered by run() — no Claude agent is ever launched
-        for issues that have no open PR.
 
         Args:
             issue_number: GitHub issue number.
@@ -747,232 +878,33 @@ class CIDriver:
         """
         acquired_slot: int | None = self.status_tracker.acquire_slot()
         if acquired_slot is None:
-            return WorkerResult(
-                issue_number=issue_number,
-                success=False,
-                error="Failed to acquire worker slot",
-            )
-
-        # Maximum wall-clock seconds to poll for pending CI checks before giving up.
-        _ci_poll_max_wait: int = ci_poll_max_wait()
+            return WorkerResult(issue_number=issue_number, success=False, error="Failed to acquire worker slot")  # noqa: E501
 
         try:
-            # Detected-merge / armed-state short-circuit (#840). If a prior
-            # run armed this issue's PR and GitHub now reports it MERGED,
-            # capture /learn once and return. If it's still OPEN at the
-            # armed SHA, no further drive work is needed. Falls through to
-            # the normal drive only when there's no record, the arming is
-            # stale, or the PR was abandoned without merging.
             armed_result = self._check_arming_on_drive_start(issue_number, pr_number)
             if armed_result is not None:
                 return armed_result
 
-            # 1b. Mechanical rebase first (#871). A PR that is merely behind the
-            # base branch is rebased + pushed here with no agent spend; the push
-            # re-triggers CI, and the poll loop below evaluates the rebased head.
-            # PRs whose rebase hits real conflicts are left untouched and fall
-            # through to the agent path (Claude handles the actual conflict).
             if self.options.enable_mechanical_rebase and not self.options.dry_run:
                 self._attempt_mechanical_rebase(issue_number, pr_number, acquired_slot)
 
             self.status_tracker.update_slot(acquired_slot, f"{pr_ref(pr_number)}: fetching checks")
 
-            # 2. Get CI checks — bounded poll loop for pending state.
-            # The module docstring advertises "Parallel CI check polling" but the
-            # original code returned success=True immediately for pending checks,
-            # which meant stalled PRs were silently declared complete.  We now
-            # wait up to HEPH_CI_POLL_MAX_WAIT seconds (default 600 s) using
-            # exponential backoff before giving up.
-            poll_elapsed = 0
-            poll_attempt = 0
-            checks: list[dict[str, Any]] = []
-            required_checks: list[dict[str, Any]] = []
-            all_green = False
-            failing: list[dict[str, Any]] = []
-
-            while True:
-                checks = gh_pr_checks(pr_number, dry_run=self.options.dry_run)
-                if not checks:
-                    logger.info("Issue #%s: no CI checks found for PR #%s", issue_number, pr_number)
-                    return WorkerResult(
-                        issue_number=issue_number, success=True, pr_number=pr_number
-                    )
-
-                # 3. Classify: required vs non-required
-                required_checks = [c for c in checks if c.get("required", False)]
-                if not required_checks:
-                    # No required checks defined — treat ALL checks as required
-                    required_checks = checks
-
-                # 4. Check if all required checks have a definitive conclusion.
-                # "queued" / "in_progress" / "waiting" / "requested" are pending states.
-                all_concluded = all(c["status"] == "completed" for c in required_checks)
-
-                if all_concluded:
-                    # All checks have a conclusion; evaluate pass/fail below.
-                    break
-
-                # At least one check is still pending.
-                sleep_secs = min(2**poll_attempt, 60)
-                if poll_elapsed + sleep_secs > _ci_poll_max_wait:
-                    logger.warning(
-                        "Issue #%s: CI checks still pending after %ss (limit %ss), "
-                        "treating as not yet failing",
-                        issue_number,
-                        poll_elapsed,
-                        _ci_poll_max_wait,
-                    )
-                    return WorkerResult(
-                        issue_number=issue_number, success=True, pr_number=pr_number
-                    )
-
-                pref = pr_ref(pr_number)
-                self.status_tracker.update_slot(
-                    acquired_slot,
-                    f"{pref}: waiting for CI checks "
-                    f"(attempt {poll_attempt + 1}, {poll_elapsed}s elapsed)",
-                )
-                logger.debug(
-                    "Issue #%s: CI checks pending, sleeping %ss (attempt %s, %ss elapsed)",
-                    issue_number,
-                    sleep_secs,
-                    poll_attempt + 1,
-                    poll_elapsed,
-                )
-                time.sleep(sleep_secs)
-                poll_elapsed += sleep_secs
-                poll_attempt += 1
-
-            all_green = all(
-                c.get("conclusion") in ("success", "skipped", "neutral") for c in required_checks
+            poll_result = self._poll_ci_until_concluded(
+                issue_number, pr_number, acquired_slot, ci_poll_max_wait()
             )
+            if isinstance(poll_result, WorkerResult):
+                return poll_result
+            _checks, required_checks = poll_result
 
+            all_green = all(c.get("conclusion") in ("success", "skipped", "neutral") for c in required_checks)  # noqa: E501
             if all_green:
-                if not self._pr_has_implementation_go(pr_number):
-                    logger.info(
-                        "Issue #%s: PR #%s is green but lacks state:implementation-go; "
-                        "leaving auto-merge disabled until implementation review approves it",
-                        issue_number,
-                        pr_number,
-                    )
-                    return WorkerResult(
-                        issue_number=issue_number,
-                        success=True,
-                        pr_number=pr_number,
-                    )
-
-                self.status_tracker.update_slot(
-                    acquired_slot, f"{pr_ref(pr_number)}: enabling auto-merge"
-                )
-                # DRY-RUN GUARD before auto-merge
-                if self.options.dry_run:
-                    logger.info(
-                        "[dry_run] Would enable auto-merge for PR #%s (issue #%s)",
-                        pr_number,
-                        issue_number,
-                    )
-                    return WorkerResult(
-                        issue_number=issue_number, success=True, pr_number=pr_number
-                    )
-                merge_ok = self._enable_auto_merge(
-                    pr_number, is_bot_pr=self._is_bot_pr_mode(issue_number, pr_number)
-                )
-                if merge_ok:
-                    # PR is green and auto-merge is enabled — but do NOT
-                    # capture /learn here (#840). Auto-merge-armed is not
-                    # the same as merged: CI flake, branch-protection block,
-                    # human cancellation can still keep the PR open. Instead
-                    # write an arming record per sibling issue (#834) and
-                    # let the NEXT run's _check_arming_on_drive_start fire
-                    # /learn once GitHub reports the PR as MERGED.
-                    self.status_tracker.update_slot(
-                        acquired_slot, f"{pr_ref(pr_number)}: arming for post-merge /learn"
-                    )
-                    gh_state = self._gh_pr_state(pr_number)
-                    pr_head_sha = (gh_state or {}).get("headRefOid", "") or ""
-                    pr_head_branch = self._get_pr_branch(pr_number)
-                    self._arm_drive_green(pr_number, pr_head_branch, pr_head_sha)
-
-                    # Block until the armed PR actually finishes instead of
-                    # returning the instant auto-merge is enabled (#838). If CI
-                    # goes red after arming, drop into the fix path; otherwise
-                    # MERGED/CLOSED/TIMEOUT are all "nothing more to drive here".
-                    outcome = self._wait_for_pr_terminal(issue_number, pr_number)
-                    if outcome == "FAILING":
-                        fix_result = self._attempt_ci_fixes(issue_number, pr_number, acquired_slot)
-                        if fix_result is not None and fix_result.success:
-                            rearmed = self._recheck_and_arm_after_fix(
-                                issue_number, pr_number, acquired_slot
-                            )
-                            return rearmed if rearmed is not None else fix_result
-                        if fix_result is not None:
-                            return fix_result
-                        return WorkerResult(
-                            issue_number=issue_number,
-                            success=False,
-                            pr_number=pr_number,
-                            error=(
-                                f"CI fix failed after {self.options.max_fix_iterations} attempt(s)"
-                            ),
-                        )
-                    if outcome == "DIRTY":
-                        return self._resolve_dirty_pr(issue_number, pr_number, acquired_slot)
-                    if outcome == "BLOCKED":
-                        # Branch-protection gate (e.g. unresolved conversations).
-                        # Nothing for the bot to fix — leave armed and yield success.
-                        return WorkerResult(
-                            issue_number=issue_number,
-                            success=True,
-                            pr_number=pr_number,
-                        )
-                return WorkerResult(
-                    issue_number=issue_number,
-                    success=merge_ok,
-                    pr_number=pr_number,
-                    error=None if merge_ok else f"auto-merge failed for PR {pr_ref(pr_number)}",
-                )
-
-            # 5. Some required checks failed
-            failing = [c for c in required_checks if c.get("conclusion") == "failure"]
-            if not failing:
-                # All concluded but none are green and none are "failure" —
-                # e.g. all cancelled.  Nothing for us to fix.
-                logger.info(
-                    "Issue #%s: PR #%s checks concluded with non-green, non-failure conclusions "
-                    "(e.g. cancelled)",
-                    issue_number,
-                    pr_number,
-                )
-                return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
-
-            # 6. Attempt fix iterations
-            fix_result = self._attempt_ci_fixes(issue_number, pr_number, acquired_slot)
-            if fix_result is not None and fix_result.success:
-                # A fix was pushed, which re-triggers CI. The old code returned
-                # success here and walked away, leaving a now-green PR NOT armed
-                # (it never re-polled or enabled auto-merge). Re-enter the
-                # check→arm→wait flow ONCE so the fixed PR actually arms.
-                rearmed = self._recheck_and_arm_after_fix(issue_number, pr_number, acquired_slot)
-                if rearmed is not None:
-                    return rearmed
-                return fix_result
-            if fix_result is not None:
-                return fix_result
-
-            return WorkerResult(
-                issue_number=issue_number,
-                success=False,
-                pr_number=pr_number,
-                error=f"CI fix failed after {self.options.max_fix_iterations} attempt(s)",
-            )
+                return self._handle_green_pr(issue_number, pr_number, acquired_slot)
+            return self._handle_failing_pr(issue_number, pr_number, acquired_slot, required_checks)
 
         except Exception as e:
             logger.error("Issue #%s: unexpected error: %s", issue_number, e)
-            return WorkerResult(
-                issue_number=issue_number,
-                success=False,
-                error=str(e)[:200],
-            )
+            return WorkerResult(issue_number=issue_number, success=False, error=str(e)[:200])
 
         finally:
             self.status_tracker.release_slot(acquired_slot)
@@ -2607,7 +2539,182 @@ class CIDriver:
             return False
         return True
 
-    def _run_ci_fix_session(  # noqa: C901  # orchestration: provider resume/fallback paths are intentionally coupled
+    def _sync_worktree_and_snapshot_sha(
+        self, issue_number: int, worktree_path: Path, pr_head_branch: str
+    ) -> str | None:
+        """Sync worktree to remote PR head and snapshot HEAD SHA.
+
+        Returns the pre-agent SHA string, or ``None`` on any subprocess failure
+        (caller should return ``False`` immediately).
+
+        Syncing before the agent prevents the agent from committing on a stale
+        base and failing the force-with-lease push (#832). Snapshotting the SHA
+        lets the push helper detect sessions that return without committing (#836).
+        """
+        try:
+            sync_worktree_to_remote_branch(worktree_path, pr_head_branch)
+        except subprocess.CalledProcessError as exc:
+            logger.error(
+                "Issue #%s: failed to sync worktree to origin/%s before CI fix: %s",
+                issue_number, pr_head_branch, (exc.stderr or exc.stdout or "")[:300],
+            )
+            return None
+        try:
+            return run(["git", "rev-parse", "HEAD"], cwd=worktree_path).stdout.strip()
+        except subprocess.CalledProcessError as exc:
+            logger.error(
+                "Issue #%s: failed to snapshot HEAD before CI fix session: %s",
+                issue_number, (exc.stderr or exc.stdout or "")[:300],
+            )
+            return None
+
+    def _build_ci_fix_prompt(
+        self, issue_number: int, pr_number: int, worktree_path: Path,
+        ci_logs: str, pr_head_branch: str, advise_findings: str,
+    ) -> str:
+        """Build the CI-fix agent prompt string."""
+        advise_block = ""
+        findings = advise_findings.strip()
+        if findings and not findings.startswith("<!-- advise step skipped"):
+            advise_block = f"## Prior Learnings from Team Knowledge Base\n\n{findings}\n\n---\n\n"
+        review_threads_block = self._format_review_threads_block(pr_number)
+        return (
+            f"{advise_block}{review_threads_block}"
+            f"Fix the CI failures for PR {pr_ref(pr_number)} (issue {issue_ref(issue_number)}).\n\n"
+            f"Working directory: {worktree_path}\n"
+            f"Current branch (DO NOT change): {pr_head_branch}\n\n"
+            f"CI failure logs:\n{ci_logs}\n\n"
+            "Fix the code to make the CI checks pass. After fixing:\n"
+            "1. Run: pixi run python -m pytest tests/ -v\n"
+            "2. Run: pre-commit run --all-files\n"
+            "3. Commit changes (do NOT push) on the current branch — DO NOT run "
+            "`git checkout -b`, `git switch -c`, or any other command that creates "
+            "or switches to a different branch\n"
+            "4. Every commit MUST be cryptographically signed (`git commit -S`); "
+            "NEVER use `--no-verify`.\n\n"
+            f"Commit message: fix: Address CI failures for PR {pr_ref(pr_number)}\n"
+        )
+
+    def _finalize_ci_fix_push(
+        self,
+        issue_number: int,
+        pr_number: int,
+        worktree_path: Path,
+        pr_head_branch: str,
+        pre_agent_sha: str,
+        session_id: str | None,
+    ) -> bool:
+        """Check head advance, retry if needed, then push CI-fix commits.
+
+        Returns ``True`` on a successful push, ``False`` on any failure. Shared
+        by both the Codex and Claude invocation paths to eliminate the verbatim
+        32-line push-tail duplication.
+        """
+        if not self._head_advanced(worktree_path, pre_agent_sha, issue_number):  # noqa: SIM102
+            if not self._retry_no_commit_once(
+                issue_number=issue_number,
+                pr_number=pr_number,
+                worktree_path=worktree_path,
+                pr_head_branch=pr_head_branch,
+                pre_agent_sha=pre_agent_sha,
+                session_id=session_id,
+            ):
+                return False
+        if not self._ci_fix_head_is_pushable(worktree_path, issue_number):
+            return False
+        try:
+            push_current_branch_with_lease_on_divergence(
+                worktree_path, branch=pr_head_branch, push_ref=f"HEAD:{pr_head_branch}",
+            )
+            logger.info("Issue #%s: pushed CI fixes for PR #%s", issue_number, pr_number)
+            return True
+        except Exception as push_err:
+            logger.error("Issue #%s: git push failed after CI fix: %s", issue_number, push_err)
+            return False
+
+    def _invoke_codex_ci_fix(
+        self,
+        issue_number: int,
+        pr_number: int,
+        worktree_path: Path,
+        prompt: str,
+        pr_head_branch: str,
+        pre_agent_sha: str,
+        session_id: str | None,
+    ) -> bool:
+        """Run the Codex agent for a CI fix session and push on success."""
+        try:
+            if session_id:
+                try:
+                    codex_result = resume_codex_session(
+                        session_id, prompt, cwd=worktree_path, timeout=ci_driver_claude_timeout(),
+                    )
+                except subprocess.CalledProcessError as e:
+                    logger.warning(
+                        "Issue #%s: Codex resume session %r failed for PR #%s; falling back to fresh: %s",  # noqa: E501
+                        issue_number, session_id, pr_number, (e.stderr or e.stdout or "")[:300],
+                    )
+                    codex_result = run_codex_session(
+                        prompt, cwd=worktree_path, timeout=ci_driver_claude_timeout(), sandbox="workspace-write",  # noqa: E501
+                    )
+            else:
+                codex_result = run_codex_session(
+                    prompt, cwd=worktree_path, timeout=ci_driver_claude_timeout(), sandbox="workspace-write",  # noqa: E501
+                )
+            logger.debug("Issue #%s: Codex CI fix output: %s", issue_number, codex_result.stdout[:500])  # noqa: E501
+        except subprocess.CalledProcessError as e:
+            logger.error(
+                "Issue #%s: Codex CI fix session returned exit code %s: %s",
+                issue_number, e.returncode, (e.stderr or e.stdout or "")[:300],
+            )
+            return False
+        return self._finalize_ci_fix_push(
+            issue_number, pr_number, worktree_path, pr_head_branch, pre_agent_sha, session_id,
+        )
+
+    def _invoke_claude_ci_fix(
+        self,
+        issue_number: int,
+        pr_number: int,
+        worktree_path: Path,
+        prompt: str,
+        pr_head_branch: str,
+        pre_agent_sha: str,
+        session_id: str | None,
+    ) -> bool:
+        """Run the Claude agent for a CI fix session and push on success."""
+        repo_slug = get_repo_slug(self.repo_root)
+        try:
+            stdout, _ = invoke_claude_with_session(
+                repo=repo_slug,
+                issue=issue_number,
+                agent=AGENT_CI_DRIVER,
+                prompt=prompt,
+                model=implementer_model(),
+                cwd=worktree_path,
+                timeout=ci_driver_claude_timeout(),
+                output_format="json",
+                allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
+                extra_args=["--dangerously-skip-permissions"],
+                input_via_stdin=True,
+            )
+            claude_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")  # noqa: E501
+        except subprocess.CalledProcessError as exc:
+            claude_result = subprocess.CompletedProcess(
+                args=exc.cmd, returncode=exc.returncode,
+                stdout=exc.stdout or "", stderr=exc.stderr or "",
+            )
+        if claude_result.returncode == 0:
+            return self._finalize_ci_fix_push(
+                issue_number, pr_number, worktree_path, pr_head_branch, pre_agent_sha, session_id,
+            )
+        logger.error(
+            "Issue #%s: Claude CI fix session returned exit code %s: %s",
+            issue_number, claude_result.returncode, claude_result.stderr[:300],
+        )
+        return False
+
+    def _run_ci_fix_session(
         self,
         issue_number: int,
         pr_number: int,
@@ -2637,225 +2744,27 @@ class CIDriver:
             True if the fix session succeeded and the branch was pushed.
 
         """
-        # Sync the worktree to the PR's actual remote head BEFORE the agent
-        # runs. WorktreeManager may have reused a stale local branch ref that
-        # pointed at an old ``main`` tip — without this reset the agent would
-        # commit on top of the wrong base and the force-with-lease push would
-        # either no-op or regress the PR (#832).
-        try:
-            sync_worktree_to_remote_branch(worktree_path, pr_head_branch)
-        except subprocess.CalledProcessError as exc:
-            logger.error(
-                "Issue #%s: failed to sync worktree to origin/%s before CI fix: %s",
-                issue_number,
-                pr_head_branch,
-                (exc.stderr or exc.stdout or "")[:300],
-            )
+        pre_agent_sha = self._sync_worktree_and_snapshot_sha(issue_number, worktree_path, pr_head_branch)  # noqa: E501
+        if pre_agent_sha is None:
             return False
 
-        # Snapshot HEAD immediately after the sync. The push helper exits 0
-        # silently when HEAD == origin/<branch> (nothing to push), so without
-        # this guard we logged "pushed CI fixes" for sessions that returned
-        # without committing — the remote was unchanged but the driver
-        # claimed success (#836). The post-agent HEAD is compared below.
-        try:
-            pre_agent_sha = run(["git", "rev-parse", "HEAD"], cwd=worktree_path).stdout.strip()
-        except subprocess.CalledProcessError as exc:
-            logger.error(
-                "Issue #%s: failed to snapshot HEAD before CI fix session: %s",
-                issue_number,
-                (exc.stderr or exc.stdout or "")[:300],
-            )
-            return False
-
-        advise_block = ""
-        findings = advise_findings.strip()
-        if findings and not findings.startswith("<!-- advise step skipped"):
-            advise_block = f"## Prior Learnings from Team Knowledge Base\n\n{findings}\n\n---\n\n"
-        # Inject any unresolved PR review threads at the top of the prompt so
-        # the agent addresses reviewer feedback BEFORE re-running CI — an
-        # unresolved bot/human comment is usually the actual blocker (#846).
-        review_threads_block = self._format_review_threads_block(pr_number)
-        prompt = (
-            f"{advise_block}"
-            f"{review_threads_block}"
-            f"Fix the CI failures for PR {pr_ref(pr_number)} (issue {issue_ref(issue_number)}).\n\n"
-            f"Working directory: {worktree_path}\n"
-            f"Current branch (DO NOT change): {pr_head_branch}\n\n"
-            f"CI failure logs:\n{ci_logs}\n\n"
-            "Fix the code to make the CI checks pass. After fixing:\n"
-            "1. Run: pixi run python -m pytest tests/ -v\n"
-            "2. Run: pre-commit run --all-files\n"
-            "3. Commit changes (do NOT push) on the current branch — DO NOT run "
-            "`git checkout -b`, `git switch -c`, or any other command that creates "
-            "or switches to a different branch\n"
-            "4. Every commit MUST be cryptographically signed (`git commit -S`); "
-            "NEVER use `--no-verify`.\n\n"
-            f"Commit message: fix: Address CI failures for PR {pr_ref(pr_number)}\n"
+        prompt = self._build_ci_fix_prompt(
+            issue_number, pr_number, worktree_path, ci_logs, pr_head_branch, advise_findings,
         )
 
         try:
             if is_codex(self.options.agent):
-                try:
-                    if session_id:
-                        try:
-                            codex_result = resume_codex_session(
-                                session_id,
-                                prompt,
-                                cwd=worktree_path,
-                                timeout=ci_driver_claude_timeout(),
-                            )
-                        except subprocess.CalledProcessError as e:
-                            logger.warning(
-                                "Issue #%s: Codex resume session %r failed for PR #%s; "
-                                "falling back to fresh session: %s",
-                                issue_number,
-                                session_id,
-                                pr_number,
-                                (e.stderr or e.stdout or "")[:300],
-                            )
-                            codex_result = run_codex_session(
-                                prompt,
-                                cwd=worktree_path,
-                                timeout=ci_driver_claude_timeout(),
-                                sandbox="workspace-write",
-                            )
-                    else:
-                        codex_result = run_codex_session(
-                            prompt,
-                            cwd=worktree_path,
-                            timeout=ci_driver_claude_timeout(),
-                            sandbox="workspace-write",
-                        )
-                    logger.debug(
-                        "Issue #%s: Codex CI fix output: %s",
-                        issue_number,
-                        codex_result.stdout[:500],
-                    )
-                except subprocess.CalledProcessError as e:
-                    logger.error(
-                        "Issue #%s: Codex CI fix session returned exit code %s: %s",
-                        issue_number,
-                        e.returncode,
-                        (e.stderr or e.stdout or "")[:300],
-                    )
-                    return False
-
-                # First turn produced no commit → force-engage once on the
-                # same session before giving up (#846). Stays on the same PR +
-                # branch (no new PR, no new branch). Nested two-step keeps the
-                # head-advance check and the retry decision separate for
-                # readability.
-                if not self._head_advanced(  # noqa: SIM102
-                    worktree_path, pre_agent_sha, issue_number
-                ):
-                    if not self._retry_no_commit_once(
-                        issue_number=issue_number,
-                        pr_number=pr_number,
-                        worktree_path=worktree_path,
-                        pr_head_branch=pr_head_branch,
-                        pre_agent_sha=pre_agent_sha,
-                        session_id=session_id,
-                    ):
-                        return False
-                if not self._ci_fix_head_is_pushable(worktree_path, issue_number):
-                    return False
-                try:
-                    push_current_branch_with_lease_on_divergence(
-                        worktree_path,
-                        branch=pr_head_branch,
-                        push_ref=f"HEAD:{pr_head_branch}",
-                    )
-                    logger.info("Issue #%s: pushed CI fixes for PR #%s", issue_number, pr_number)
-                    return True
-                except Exception as push_err:
-                    logger.error(
-                        "Issue #%s: git push failed after CI fix: %s", issue_number, push_err
-                    )
-                    return False
-
-            # drive-green runs its OWN session (Session 3, AGENT_CI_DRIVER),
-            # independent of the implementer's transcript. The first fix call
-            # creates it via --session-id; later calls resume it. The codex
-            # path above instead resumes the raw ``session_id`` it was handed.
-            repo_slug = get_repo_slug(self.repo_root)
-            try:
-                stdout, _ = invoke_claude_with_session(
-                    repo=repo_slug,
-                    issue=issue_number,
-                    agent=AGENT_CI_DRIVER,
-                    prompt=prompt,
-                    model=implementer_model(),
-                    cwd=worktree_path,
-                    timeout=ci_driver_claude_timeout(),
-                    output_format="json",
-                    allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
-                    extra_args=["--dangerously-skip-permissions"],
-                    input_via_stdin=True,
+                return self._invoke_codex_ci_fix(
+                    issue_number, pr_number, worktree_path, prompt, pr_head_branch, pre_agent_sha, session_id,  # noqa: E501
                 )
-                claude_result = subprocess.CompletedProcess(
-                    args=[], returncode=0, stdout=stdout, stderr=""
-                )
-            except subprocess.CalledProcessError as exc:
-                claude_result = subprocess.CompletedProcess(
-                    args=exc.cmd,
-                    returncode=exc.returncode,
-                    stdout=exc.stdout or "",
-                    stderr=exc.stderr or "",
-                )
-
-            if claude_result.returncode == 0:
-                # Push the fixes
-                # First turn produced no commit → force-engage once on the
-                # same session before giving up (#846). Stays on the same PR +
-                # branch (no new PR, no new branch). Nested two-step keeps the
-                # head-advance check and the retry decision separate for
-                # readability.
-                if not self._head_advanced(  # noqa: SIM102
-                    worktree_path, pre_agent_sha, issue_number
-                ):
-                    if not self._retry_no_commit_once(
-                        issue_number=issue_number,
-                        pr_number=pr_number,
-                        worktree_path=worktree_path,
-                        pr_head_branch=pr_head_branch,
-                        pre_agent_sha=pre_agent_sha,
-                        session_id=session_id,
-                    ):
-                        return False
-                if not self._ci_fix_head_is_pushable(worktree_path, issue_number):
-                    return False
-                try:
-                    push_current_branch_with_lease_on_divergence(
-                        worktree_path,
-                        branch=pr_head_branch,
-                        push_ref=f"HEAD:{pr_head_branch}",
-                    )
-                    logger.info("Issue #%s: pushed CI fixes for PR #%s", issue_number, pr_number)
-                    return True
-                except Exception as push_err:
-                    logger.error(
-                        "Issue #%s: git push failed after CI fix: %s", issue_number, push_err
-                    )
-                    return False
-
-            logger.error(
-                "Issue #%s: Claude CI fix session returned exit code %s: %s",
-                issue_number,
-                claude_result.returncode,
-                claude_result.stderr[:300],
+            return self._invoke_claude_ci_fix(
+                issue_number, pr_number, worktree_path, prompt, pr_head_branch, pre_agent_sha, session_id,  # noqa: E501
             )
-            return False
-
         except subprocess.TimeoutExpired:
-            logger.error(
-                "Issue #%s: Claude CI fix session timed out for PR #%s", issue_number, pr_number
-            )
+            logger.error("Issue #%s: Claude CI fix session timed out for PR #%s", issue_number, pr_number)  # noqa: E501
             return False
         except Exception as e:
-            logger.error(
-                "Issue #%s: CI fix session failed for PR #%s: %s", issue_number, pr_number, e
-            )
+            logger.error("Issue #%s: CI fix session failed for PR #%s: %s", issue_number, pr_number, e)  # noqa: E501
             return False
 
     def _enable_auto_merge(self, pr_number: int, is_bot_pr: bool = False) -> bool:

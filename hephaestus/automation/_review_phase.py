@@ -388,30 +388,18 @@ class ReviewPhase(StageMixin):
     ) -> tuple[int, str | None, str | None]:
         """Run the bounded in-loop review + address cycle for an implementation.
 
-        Stage 2 (#28): each iteration runs a FRESH reviewer session
-        (``reviewer_agent(AGENT_PR_REVIEWER, i)``) that posts INLINE PR review
-        threads and returns a verdict; if the verdict is not GO and blocking
-        threads were posted, Session 2 (``AGENT_IMPLEMENTER``) is resumed to
-        address those threads (fix → commit → push → resolve), then the next
-        iteration re-reviews. The loop terminates on GO, on an iteration that
-        posts no blocking threads, or after :data:`MAX_REVIEW_ITERATIONS`.
-
-        When no ``pr_number`` is available (e.g. dry-run or the agent failed to
-        open a PR), the in-loop posting/addressing cannot run; the loop falls
-        back to the diff-only reviewer (no PR writes) so the verdict is still
-        surfaced.
+        Each iteration posts inline PR review threads and returns a verdict; on
+        NOGO the implementer session is resumed to address threads. Terminates on
+        GO, zero blocking threads, or :data:`MAX_REVIEW_ITERATIONS`.
         """
         last_verdict: str | None = None
         last_grade: str | None = None
         prior_review: str | None = None
         iterations_run = 0
-        # Threads the previous iteration's address step was asked to fix, kept so
-        # the next iteration can independently validate they were actually
-        # addressed (and re-open the ones that weren't).
         prior_addressed_threads: list[dict[str, Any]] = []
 
         for iteration in range(MAX_REVIEW_ITERATIONS):
-            reopened, review_text, posted_thread_ids, verdict = self._validate_and_review(
+            last_verdict, last_grade, review_text, posted_thread_ids, go_blocked_by_automation, reopened, should_break = self._process_review_iteration(  # noqa: E501
                 issue_number=issue_number,
                 issue_title=issue_title,
                 issue_body=issue_body,
@@ -427,34 +415,8 @@ class ReviewPhase(StageMixin):
                 advise_findings=advise_findings,
             )
             iterations_run = iteration + 1
-            last_verdict = verdict.verdict
-            last_grade = verdict.grade
-
-            # A GO (or empty) review cannot terminate the loop while the
-            # validator just re-opened prior comments — those unresolved
-            # re-opened threads must still be addressed. Treat the iteration as
-            # NOGO so the address step below runs against them.
-            go_blocked_by_automation = False
-            if reopened:
-                last_verdict = "NOGO"
-            elif verdict.is_go:
-                last_verdict, go_blocked_by_automation, should_break = self._evaluate_go_verdict(
-                    issue_number=issue_number,
-                    pr_number=pr_number,
-                    thread_id=thread_id,
-                )
-                if should_break:
-                    break
-
-            # Converge ONLY on an explicit Verdict: GO (handled above). A non-GO
-            # pass with NO posted threads (and nothing re-opened) must NOT end the
-            # loop here — a single garbage/AMBIGUOUS review would otherwise strand
-            # a fixable PR after R0. There is nothing to address (no threads), so
-            # skip the address step and RE-REVIEW on the next iteration; the loop
-            # is bounded by MAX_REVIEW_ITERATIONS and applies ``state:skip`` only
-            # on TRUE exhaustion (post-loop block). This is the "zero threads !=
-            # GO" rule from the pr-review-loop skill (verified-ci): don't converge
-            # on a zero-thread AMBIGUOUS/NO-GO pass.
+            if should_break:
+                break
             if (
                 pr_number is not None
                 and not posted_thread_ids
@@ -463,20 +425,8 @@ class ReviewPhase(StageMixin):
             ):
                 prior_review = review_text
                 continue
-
-            # Save this review for next iteration's context.
             prior_review = review_text
-
-            # On the final iteration there is no subsequent review to verify a
-            # fix, so addressing would be a wasted Session 2 resume + push.
-            # Stop here and let the warning below flag the non-GO outcome.
-            if iteration == MAX_REVIEW_ITERATIONS - 1:
-                break
-
-            # Address step: resume Session 2 to fix the posted threads. Returns
-            # the snapshot of threads it was asked to fix (for the next
-            # iteration's validator) and whether anything was addressed.
-            prior_addressed_threads, addressed = self._run_address_iteration(
+            address_result = self._run_address_step_if_needed(
                 issue_number=issue_number,
                 pr_number=pr_number,
                 branch_name=branch_name,
@@ -488,19 +438,135 @@ class ReviewPhase(StageMixin):
                 issue_title=issue_title,
                 issue_body=issue_body,
             )
+            if address_result is None:
+                break
+            prior_addressed_threads, addressed = address_result
             if pr_number is None:
                 continue
             if not addressed:
                 break
 
-        self._finalize_review_outcome(
+        self._finalize_review_outcome(issue_number=issue_number, pr_number=pr_number, last_verdict=last_verdict, iterations_run=iterations_run)  # noqa: E501
+        return iterations_run, last_verdict, last_grade
+
+    def _process_review_iteration(
+        self,
+        *,
+        issue_number: int,
+        issue_title: str,
+        issue_body: str,
+        branch_name: str,
+        worktree_path: Path,
+        session_id: str | None,
+        slot_id: int | None,
+        thread_id: int | None,
+        pr_number: int | None,
+        iteration: int,
+        prior_review: str | None,
+        prior_addressed_threads: list[dict[str, Any]],
+        advise_findings: str,
+    ) -> tuple[str | None, str | None, str, list[str], bool, list[str], bool]:
+        """Run one review+verdict iteration.
+
+        Args:
+            issue_number: GitHub issue number.
+            issue_title: Issue title for context.
+            issue_body: Issue body for context.
+            branch_name: Git branch being reviewed.
+            worktree_path: Path to the checked-out worktree.
+            session_id: Optional implementer session ID.
+            slot_id: Worker slot for status tracking.
+            thread_id: Current thread id for logging.
+            pr_number: PR number, or None for diff-only review.
+            iteration: Zero-based iteration index.
+            prior_review: Previous review text for context.
+            prior_addressed_threads: Threads addressed in previous iteration.
+            advise_findings: Prior learnings from the advise step.
+
+        Returns:
+            Tuple of (last_verdict, last_grade, review_text, posted_thread_ids,
+                      go_blocked_by_automation, reopened, should_break).
+
+        """
+        reopened, review_text, posted_thread_ids, verdict = self._validate_and_review(
+            issue_number=issue_number,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            branch_name=branch_name,
+            worktree_path=worktree_path,
+            session_id=session_id,
+            slot_id=slot_id,
+            thread_id=thread_id,
+            pr_number=pr_number,
+            iteration=iteration,
+            prior_review=prior_review,
+            prior_addressed_threads=prior_addressed_threads,
+            advise_findings=advise_findings,
+        )
+        last_verdict = verdict.verdict
+        last_grade = verdict.grade
+
+        go_blocked_by_automation = False
+        should_break = False
+        if reopened:
+            last_verdict = "NOGO"
+        elif verdict.is_go:
+            last_verdict, go_blocked_by_automation, should_break = self._evaluate_go_verdict(
+                issue_number=issue_number,
+                pr_number=pr_number,
+                thread_id=thread_id,
+            )
+
+        return last_verdict, last_grade, review_text, posted_thread_ids, go_blocked_by_automation, reopened, should_break  # noqa: E501
+
+    def _run_address_step_if_needed(
+        self,
+        *,
+        issue_number: int,
+        pr_number: int | None,
+        branch_name: str,
+        worktree_path: Path,
+        iteration: int,
+        session_id: str | None,
+        slot_id: int | None,
+        thread_id: int | None,
+        issue_title: str,
+        issue_body: str,
+    ) -> tuple[list[dict[str, Any]], bool] | None:
+        """Run address iteration if not the final iteration.
+
+        Args:
+            issue_number: GitHub issue number.
+            pr_number: PR number, or None for diff-only mode.
+            branch_name: Git branch name.
+            worktree_path: Path to the checked-out worktree.
+            iteration: Current zero-based iteration index.
+            session_id: Optional implementer session ID.
+            slot_id: Worker slot for status tracking.
+            thread_id: Current thread id for logging.
+            issue_title: Issue title for context.
+            issue_body: Issue body for context.
+
+        Returns:
+            None if this is the final iteration (caller should break).
+            (prior_addressed_threads, addressed) tuple otherwise.
+
+        """
+        if iteration == MAX_REVIEW_ITERATIONS - 1:
+            return None
+        prior_addressed_threads, addressed = self._run_address_iteration(
             issue_number=issue_number,
             pr_number=pr_number,
-            last_verdict=last_verdict,
-            iterations_run=iterations_run,
+            branch_name=branch_name,
+            worktree_path=worktree_path,
+            iteration=iteration,
+            session_id=session_id,
+            slot_id=slot_id,
+            thread_id=thread_id,
+            issue_title=issue_title,
+            issue_body=issue_body,
         )
-
-        return iterations_run, last_verdict, last_grade
+        return prior_addressed_threads, addressed
 
     def _run_address_iteration(
         self,

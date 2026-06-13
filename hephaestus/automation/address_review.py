@@ -474,35 +474,151 @@ class AddressReviewer(BaseReviewer):
         self._print_summary(results)
         return results
 
-    def _address_issue(self, issue_number: int, pr_number: int) -> WorkerResult:
-        """Address unresolved review threads for a single issue.
-
-        The pr_number is pre-discovered by run() — no Claude agent is ever launched
-        for issues that have no open PR.
-
-        Flow:
-        1. Acquire worker slot via StatusTracker
-        2. List unresolved threads
-        3. DRY-RUN GUARD: return before any worktree/state mutations if dry_run
-        4. Load impl session_id from state file
-        5. Load/create review state
-        6. Checkout worktree for the PR branch
-        7. Run Claude fix session
-        8. Commit changes if any
-        9. Push branch
-        10. Resolve addressed threads
-        11. Update review state
-        12. Return WorkerResult
+    def _check_threads_for_address(
+        self,
+        issue_number: int,
+        pr_number: int,
+        thread_id: int,
+    ) -> list[dict[str, Any]] | None:
+        """List unresolved threads; return None if none or dry-run (caller returns success).
 
         Args:
-            issue_number: GitHub issue number
-            pr_number: Pre-discovered open PR number for this issue
+            issue_number: GitHub issue number.
+            pr_number: PR number to check.
+            thread_id: Current thread id for logging.
 
         Returns:
-            WorkerResult
+            None if no threads or dry-run; list of unresolved thread dicts otherwise.
 
         """
-        # Step 1: Acquire slot (mirrors pr_reviewer/_review_pr pattern, fixes A3-005)
+        threads = gh_pr_list_unresolved_threads(pr_number, dry_run=self.options.dry_run)
+        if not threads:
+            self._log(
+                "info",
+                f"No unresolved threads on PR {pr_ref(pr_number)} for issue {issue_ref(issue_number)}",  # noqa: E501
+                thread_id,
+            )
+            return None
+
+        self._log(
+            "info",
+            f"Found {len(threads)} unresolved thread(s) on PR {pr_ref(pr_number)}",
+            thread_id,
+        )
+
+        if self.options.dry_run:
+            self._log(
+                "info",
+                f"[DRY RUN] Would address {len(threads)} unresolved thread(s) "
+                f"and push for PR {pr_ref(pr_number)}",
+                thread_id,
+            )
+            return None
+
+        return threads
+
+    def _setup_address_state(
+        self,
+        issue_number: int,
+        pr_number: int,
+        slot_id: int,
+    ) -> tuple[str | None, ReviewState, str, Path]:
+        """Load session_id, load/create ReviewState, resolve branch, create worktree.
+
+        Args:
+            issue_number: GitHub issue number.
+            pr_number: PR number.
+            slot_id: Worker slot for status tracking.
+
+        Returns:
+            Tuple of (session_id, review_state, branch_name, worktree_path).
+
+        """
+        session_id = self._load_impl_session_id(issue_number)
+        review_state = self._load_review_state(issue_number)
+        if review_state is None:
+            branch_name = f"{issue_number}-auto-impl"
+            review_state = ReviewState(
+                issue_number=issue_number,
+                pr_number=pr_number,
+                branch_name=branch_name,
+            )
+        else:
+            review_state.pr_number = pr_number
+        branch_name = review_state.branch_name or f"{issue_number}-auto-impl"
+
+        self.status_tracker.update_slot(
+            slot_id, f"{issue_ref(issue_number)}: Setting up worktree"
+        )
+        worktree_path = self._get_or_create_worktree(issue_number, branch_name, review_state)
+
+        with self.state_lock:
+            review_state.worktree_path = str(worktree_path)
+            review_state.branch_name = branch_name
+            review_state.phase = ReviewPhase.FIXING
+        self._save_review_state(review_state)
+        return session_id, review_state, branch_name, worktree_path
+
+    def _commit_push_and_resolve(
+        self,
+        *,
+        issue_number: int,
+        pr_number: int,
+        branch_name: str,
+        worktree_path: Path,
+        addressed: list[str],
+        replies: dict[str, str],
+        threads: list[dict[str, Any]],
+        review_state: ReviewState,
+        slot_id: int,
+        thread_id: int,
+    ) -> None:
+        """Commit fixes, push branch, resolve addressed threads, update review state.
+
+        Args:
+            issue_number: GitHub issue number.
+            pr_number: PR number.
+            branch_name: Git branch name.
+            worktree_path: Path to worktree.
+            addressed: Thread IDs the agent addressed.
+            replies: Mapping of thread_id → reply text forwarded to resolve helper.
+            threads: All threads presented to the fix session.
+            review_state: Review state to update.
+            slot_id: Worker slot for status tracking.
+            thread_id: Current thread id for logging.
+
+        """
+        self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Committing")
+        self._commit_if_changes(issue_number, worktree_path)
+
+        self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Pushing")
+        self._push_branch(branch_name, worktree_path)
+
+        self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Resolving threads")
+        presented_thread_ids = {t["id"] for t in threads}
+        # Pass the real replies dict — not {} — so _resolve_addressed_threads can post
+        # reply comments on each resolved thread as required by the review protocol.
+        self._resolve_addressed_threads(addressed, replies, presented_thread_ids)
+
+        with self.state_lock:
+            existing_ids = set(review_state.addressed_thread_ids)
+            for tid in addressed:
+                existing_ids.add(tid)
+            review_state.addressed_thread_ids = list(existing_ids)
+            review_state.phase = ReviewPhase.COMPLETED
+            review_state.completed_at = datetime.now(timezone.utc)
+        self._save_review_state(review_state)
+
+        iref = issue_ref(issue_number)
+        self.status_tracker.update_slot(slot_id, f"{iref}: Done")
+        self._log(
+            "info",
+            f"Address review complete for issue {iref} (PR {pr_ref(pr_number)})",
+            thread_id,
+        )
+
+    def _address_issue(self, issue_number: int, pr_number: int) -> WorkerResult:
+        """Address unresolved review threads for a single issue."""
         slot_id = self.status_tracker.acquire_slot()
         if slot_id is None:
             return WorkerResult(
@@ -513,85 +629,20 @@ class AddressReviewer(BaseReviewer):
 
         thread_id = threading.get_ident()
         self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Starting")
-        self._log(
-            "info",
-            f"Addressing PR {pr_ref(pr_number)} for issue {issue_ref(issue_number)}",
-            thread_id,
-        )
+        self._log("info", f"Addressing PR {pr_ref(pr_number)} for issue {issue_ref(issue_number)}", thread_id)  # noqa: E501
 
         try:
-            # Step 1: List unresolved threads
-            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Listing threads")
-            threads = gh_pr_list_unresolved_threads(pr_number, dry_run=self.options.dry_run)
-            if not threads:
-                iref = issue_ref(issue_number)
-                pref = pr_ref(pr_number)
-                self._log(
-                    "info",
-                    f"No unresolved threads on PR {pref} for issue {iref}",
-                    thread_id,
-                )
+            threads = self._check_threads_for_address(issue_number, pr_number, thread_id)
+            if threads is None:
                 return WorkerResult(
-                    issue_number=issue_number,
-                    success=True,
-                    pr_number=pr_number,
+                    issue_number=issue_number, success=True, pr_number=pr_number
                 )
 
-            self._log(
-                "info",
-                f"Found {len(threads)} unresolved thread(s) on PR {pr_ref(pr_number)}",
-                thread_id,
+            session_id, review_state, branch_name, worktree_path = self._setup_address_state(
+                issue_number, pr_number, slot_id
             )
 
-            # Step 2: DRY-RUN GUARD — must come before any worktree creation or
-            # state mutation so that dry-run leaves no side-effects on disk (#A3-004).
-            if self.options.dry_run:
-                self._log(
-                    "info",
-                    f"[DRY RUN] Would address {len(threads)} unresolved thread(s) "
-                    f"and push for PR {pr_ref(pr_number)}",
-                    thread_id,
-                )
-                return WorkerResult(
-                    issue_number=issue_number,
-                    success=True,
-                    pr_number=pr_number,
-                )
-
-            # Step 3: Load impl session_id
-            session_id = self._load_impl_session_id(issue_number)
-
-            # Step 4: Load or create review state
-            review_state = self._load_review_state(issue_number)
-            if review_state is None:
-                branch_name = f"{issue_number}-auto-impl"
-                review_state = ReviewState(
-                    issue_number=issue_number,
-                    pr_number=pr_number,
-                    branch_name=branch_name,
-                )
-            else:
-                # Update PR number in case it changed
-                review_state.pr_number = pr_number
-
-            branch_name = review_state.branch_name or f"{issue_number}-auto-impl"
-
-            # Step 5: Checkout worktree
-            self.status_tracker.update_slot(
-                slot_id, f"{issue_ref(issue_number)}: Setting up worktree"
-            )
-            worktree_path = self._get_or_create_worktree(issue_number, branch_name, review_state)
-
-            with self.state_lock:
-                review_state.worktree_path = str(worktree_path)
-                review_state.branch_name = branch_name
-                review_state.phase = ReviewPhase.FIXING
-            self._save_review_state(review_state)
-
-            # Step 6: Run Claude fix session
-            self.status_tracker.update_slot(
-                slot_id, f"{issue_ref(issue_number)}: Running Claude fix"
-            )
+            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Running Claude fix")  # noqa: E501
             fix_result = self._run_fix_session(
                 issue_number=issue_number,
                 pr_number=pr_number,
@@ -599,49 +650,21 @@ class AddressReviewer(BaseReviewer):
                 threads=threads,
                 session_id=session_id if self.options.resume_impl_session else None,
             )
-
             addressed: list[str] = fix_result.get("addressed", [])
             replies: dict[str, str] = fix_result.get("replies", {})
-
-            self._log(
-                "info",
-                f"Claude addressed {len(addressed)} thread(s) on PR {pr_ref(pr_number)}",
-                thread_id,
+            self._log("info", f"Claude addressed {len(addressed)} thread(s) on PR {pr_ref(pr_number)}", thread_id)  # noqa: E501
+            self._commit_push_and_resolve(
+                issue_number=issue_number,
+                pr_number=pr_number,
+                branch_name=branch_name,
+                worktree_path=worktree_path,
+                addressed=addressed,
+                replies=replies,
+                threads=threads,
+                review_state=review_state,
+                slot_id=slot_id,
+                thread_id=thread_id,
             )
-
-            # Step 7: Commit changes if any
-            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Committing")
-            self._commit_if_changes(issue_number, worktree_path)
-
-            # Step 8: Push branch
-            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Pushing")
-            self._push_branch(branch_name, worktree_path)
-
-            # Step 9: Resolve addressed threads
-            self.status_tracker.update_slot(
-                slot_id, f"{issue_ref(issue_number)}: Resolving threads"
-            )
-            presented_thread_ids = {t["id"] for t in threads}
-            self._resolve_addressed_threads(addressed, replies, presented_thread_ids)
-
-            # Step 10: Update review state
-            with self.state_lock:
-                existing_ids = set(review_state.addressed_thread_ids)
-                for tid in addressed:
-                    existing_ids.add(tid)
-                review_state.addressed_thread_ids = list(existing_ids)
-                review_state.phase = ReviewPhase.COMPLETED
-                review_state.completed_at = datetime.now(timezone.utc)
-            self._save_review_state(review_state)
-
-            iref = issue_ref(issue_number)
-            self.status_tracker.update_slot(slot_id, f"{iref}: Done")
-            self._log(
-                "info",
-                f"Address review complete for issue {iref} (PR {pr_ref(pr_number)})",
-                thread_id,
-            )
-
             return WorkerResult(
                 issue_number=issue_number,
                 success=True,
