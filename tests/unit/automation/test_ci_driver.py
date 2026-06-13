@@ -318,6 +318,8 @@ def test_codex_ci_fix_session_skips_push_when_head_did_not_advance(
     fresh_result = AgentRunResult(stdout="no changes needed", stderr="", session_id="x")
     # Pre and post snapshots return the SAME SHA → agent made no commit.
     unchanged_sha = MagicMock(stdout="cafef00d\n")
+    # _tracked_worktree_changes also calls run(git status --porcelain).
+    clean_status = MagicMock(stdout="", stderr="", returncode=0)
 
     with (
         patch(
@@ -330,7 +332,7 @@ def test_codex_ci_fix_session_skips_push_when_head_did_not_advance(
         patch("hephaestus.automation.ci_driver.sync_worktree_to_remote_branch"),
         patch(
             "hephaestus.automation.ci_driver.run",
-            side_effect=[unchanged_sha, unchanged_sha],
+            side_effect=[unchanged_sha, unchanged_sha, clean_status],
         ),
         patch(
             "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
@@ -2951,6 +2953,257 @@ class TestScopedDoneGate:
 
         remaining_nums = {pr["number"] for pr in driver.open_prs_remaining}
         assert remaining_nums == {996, 1032}, "unscoped run keeps all open PRs"
+
+
+# ---------------------------------------------------------------------------
+# _invoke_agent_session
+# ---------------------------------------------------------------------------
+
+
+class TestInvokeAgentSession:
+    """Unit tests for CIDriver._invoke_agent_session (provider dispatch helper)."""
+
+    def test_claude_success_returns_rc0(self, driver: CIDriver, tmp_path: Path) -> None:
+        with patch(
+            "hephaestus.automation.ci_driver.invoke_claude_with_session",
+            return_value=("output text", "sess-id"),
+        ) as mock_invoke:
+            result = driver._invoke_agent_session(
+                prompt="fix it",
+                session_id=None,
+                worktree_path=tmp_path,
+                issue_number=1,
+                pr_number=2,
+            )
+        assert result.returncode == 0
+        assert result.stdout == "output text"
+        mock_invoke.assert_called_once()
+
+    def test_claude_error_returns_nonzero_rc(self, driver: CIDriver, tmp_path: Path) -> None:
+        with patch(
+            "hephaestus.automation.ci_driver.invoke_claude_with_session",
+            side_effect=subprocess.CalledProcessError(1, ["claude"], stderr="boom"),
+        ):
+            result = driver._invoke_agent_session(
+                prompt="fix it",
+                session_id=None,
+                worktree_path=tmp_path,
+                issue_number=1,
+                pr_number=2,
+            )
+        assert result.returncode == 1
+        assert "boom" in result.stderr
+
+    def test_codex_resume_success(self, driver: CIDriver, tmp_path: Path) -> None:
+        driver.options.agent = "codex"
+        with (
+            patch(
+                "hephaestus.automation.ci_driver.resume_codex_session",
+                return_value=AgentRunResult(stdout="ok", stderr="", session_id="s"),
+            ) as mock_resume,
+            patch("hephaestus.automation.ci_driver.run_codex_session") as mock_fresh,
+        ):
+            result = driver._invoke_agent_session(
+                prompt="fix it",
+                session_id="existing-session",
+                worktree_path=tmp_path,
+                issue_number=1,
+                pr_number=2,
+            )
+        assert result.returncode == 0
+        mock_resume.assert_called_once()
+        mock_fresh.assert_not_called()
+
+    def test_codex_resume_failure_falls_back_to_fresh_success(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        driver.options.agent = "codex"
+        with (
+            patch(
+                "hephaestus.automation.ci_driver.resume_codex_session",
+                side_effect=subprocess.CalledProcessError(1, ["codex"], stderr="resume-fail"),
+            ),
+            patch(
+                "hephaestus.automation.ci_driver.run_codex_session",
+                return_value=AgentRunResult(stdout="fresh ok", stderr="", session_id="s2"),
+            ) as mock_fresh,
+        ):
+            result = driver._invoke_agent_session(
+                prompt="fix it",
+                session_id="stale-session",
+                worktree_path=tmp_path,
+                issue_number=1,
+                pr_number=2,
+            )
+        assert result.returncode == 0
+        mock_fresh.assert_called_once()
+
+    def test_codex_resume_failure_fresh_also_fails_returns_nonzero_rc(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """Both resume and fresh codex fail → CompletedProcess(returncode!=0), no exception."""
+        driver.options.agent = "codex"
+        with (
+            patch(
+                "hephaestus.automation.ci_driver.resume_codex_session",
+                side_effect=subprocess.CalledProcessError(1, ["codex"], stderr="resume-fail"),
+            ),
+            patch(
+                "hephaestus.automation.ci_driver.run_codex_session",
+                side_effect=subprocess.CalledProcessError(2, ["codex"], stderr="fresh-fail"),
+            ),
+        ):
+            result = driver._invoke_agent_session(
+                prompt="fix it",
+                session_id="stale-session",
+                worktree_path=tmp_path,
+                issue_number=1,
+                pr_number=2,
+            )
+        assert result.returncode == 2
+        assert "fresh-fail" in result.stderr
+
+    def test_codex_no_session_fresh_failure_returns_nonzero_rc(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """No session_id + fresh codex fails → CompletedProcess(returncode!=0), no exception."""
+        driver.options.agent = "codex"
+        with patch(
+            "hephaestus.automation.ci_driver.run_codex_session",
+            side_effect=subprocess.CalledProcessError(3, ["codex"], stderr="fail"),
+        ):
+            result = driver._invoke_agent_session(
+                prompt="fix it",
+                session_id=None,
+                worktree_path=tmp_path,
+                issue_number=1,
+                pr_number=2,
+            )
+        assert result.returncode == 3
+
+    def test_codex_no_session_runs_fresh(self, driver: CIDriver, tmp_path: Path) -> None:
+        driver.options.agent = "codex"
+        with (
+            patch("hephaestus.automation.ci_driver.resume_codex_session") as mock_resume,
+            patch(
+                "hephaestus.automation.ci_driver.run_codex_session",
+                return_value=AgentRunResult(stdout="done", stderr="", session_id="s3"),
+            ) as mock_fresh,
+        ):
+            result = driver._invoke_agent_session(
+                prompt="fix it",
+                session_id=None,
+                worktree_path=tmp_path,
+                issue_number=1,
+                pr_number=2,
+            )
+        assert result.returncode == 0
+        mock_resume.assert_not_called()
+        mock_fresh.assert_called_once()
+
+    def test_timeout_propagates_to_caller(self, driver: CIDriver, tmp_path: Path) -> None:
+        """TimeoutExpired escapes the helper so callers can log a distinct timeout message."""
+        with patch(
+            "hephaestus.automation.ci_driver.invoke_claude_with_session",
+            side_effect=subprocess.TimeoutExpired(cmd=["claude"], timeout=60),
+        ):
+            with pytest.raises(subprocess.TimeoutExpired):
+                driver._invoke_agent_session(
+                    prompt="fix it",
+                    session_id=None,
+                    worktree_path=tmp_path,
+                    issue_number=1,
+                    pr_number=2,
+                )
+
+
+# ---------------------------------------------------------------------------
+# _push_ci_fix
+# ---------------------------------------------------------------------------
+
+
+class TestPushCiFix:
+    """Unit tests for CIDriver._push_ci_fix (post-agent contract helper)."""
+
+    def test_returns_true_when_head_advanced_and_push_succeeds(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        post_sha = MagicMock(stdout="deadbeef\n")
+        clean_status = MagicMock(stdout="", stderr="", returncode=0)
+        # rev-list --count for _ci_fix_head_is_pushable; return "1" (1 commit ahead)
+        ahead_count = MagicMock(stdout="1\n", stderr="", returncode=0)
+        no_untracked = MagicMock(stdout="", returncode=0)
+        with (
+            patch(
+                "hephaestus.automation.ci_driver.run",
+                side_effect=[post_sha, clean_status, no_untracked, ahead_count],
+            ),
+            patch(
+                "hephaestus.automation.ci_driver.push_current_branch_with_lease_on_divergence"
+            ) as mock_push,
+        ):
+            result = driver._push_ci_fix(
+                worktree_path=tmp_path,
+                pre_agent_sha="cafef00d",
+                issue_number=1,
+                pr_number=2,
+                pr_head_branch="1-fix",
+                session_id=None,
+            )
+        assert result is True
+        mock_push.assert_called_once()
+
+    def test_returns_false_when_head_not_advanced_and_retry_fails(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        unchanged = MagicMock(stdout="cafef00d\n")
+        clean_status = MagicMock(stdout="", stderr="", returncode=0)
+        with (
+            patch(
+                "hephaestus.automation.ci_driver.gh_pr_checks",
+                return_value=[_make_check("lint", conclusion="failure")],
+            ),
+            patch(
+                "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+                return_value=[],
+            ),
+            # Agent fails → _retry_no_commit_once returns False immediately
+            patch(
+                "hephaestus.automation.ci_driver.invoke_claude_with_session",
+                side_effect=subprocess.CalledProcessError(1, ["claude"], stderr="err"),
+            ),
+            patch(
+                "hephaestus.automation.ci_driver.run",
+                side_effect=[unchanged, clean_status],
+            ),
+        ):
+            result = driver._push_ci_fix(
+                worktree_path=tmp_path,
+                pre_agent_sha="cafef00d",
+                issue_number=1,
+                pr_number=2,
+                pr_head_branch="1-fix",
+                session_id=None,
+            )
+        assert result is False
+
+    def test_returns_false_when_not_pushable(self, driver: CIDriver, tmp_path: Path) -> None:
+        post_sha = MagicMock(stdout="deadbeef\n")
+        # Unmerged index entries → not pushable
+        unmerged = MagicMock(stdout="UU conflict.py\n", stderr="", returncode=0)
+        with patch(
+            "hephaestus.automation.ci_driver.run",
+            side_effect=[post_sha, unmerged],
+        ):
+            result = driver._push_ci_fix(
+                worktree_path=tmp_path,
+                pre_agent_sha="cafef00d",
+                issue_number=1,
+                pr_number=2,
+                pr_head_branch="1-fix",
+                session_id=None,
+            )
+        assert result is False
 
 
 # ---------------------------------------------------------------------------
