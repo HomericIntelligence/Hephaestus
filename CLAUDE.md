@@ -414,7 +414,6 @@ pre-commit run --all-files
 1. Check existing GitHub issues and discussions
 2. Review documentation in docs/ directory
 3. Post implementation questions as issue comments
-4. Refer to shared documentation in .claude/shared/
 
 ## Key Files and Directories
 
