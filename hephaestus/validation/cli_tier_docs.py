@@ -41,6 +41,7 @@ class TierDocFinding:
     cli: str
     # kind values: "missing-from-docs" | "missing-from-pyproject"
     #              | "invalid-tier" | "parser-found-no-rows"
+    #              | "duplicate-tier" | "conflicting-tier"
     kind: str
     detail: str
 
@@ -62,13 +63,23 @@ def load_pyproject_scripts(pyproject_path: Path) -> dict[str, str]:
     return dict(data.get("project", {}).get("scripts", {}))
 
 
-def load_documented_tiers(compatibility_path: Path) -> dict[str, str]:
+def load_documented_tiers(
+    compatibility_path: Path,
+) -> tuple[dict[str, str], dict[str, list[str]]]:
     """Parse the Console-Script Stability Tiers table.
 
     Skips separator rows (``|---|---|``) and the header row. Stops at the
     next section heading or first non-table line after the table starts.
+
+    Returns:
+        A ``(tiers, occurrences)`` pair. ``tiers`` is the flattened
+        ``{cli: tier}`` mapping (last occurrence wins, used for the
+        membership/valid-value checks). ``occurrences`` is
+        ``{cli: [tier, tier, ...]}`` preserving EVERY parsed row so the
+        caller can detect a CLI documented more than once.
+
     """
-    tiers: dict[str, str] = {}
+    occurrences: dict[str, list[str]] = {}
     in_section = False
     in_table = False
     for line in compatibility_path.read_text(encoding="utf-8").splitlines():
@@ -90,17 +101,62 @@ def load_documented_tiers(compatibility_path: Path) -> dict[str, str]:
                 continue
             m = _TABLE_ROW_RE.match(line)
             if m:
-                tiers[m.group(1)] = m.group(2)
-    return tiers
+                occurrences.setdefault(m.group(1), []).append(m.group(2))
+    tiers = {cli: vals[-1] for cli, vals in occurrences.items()}
+    return tiers, occurrences
 
 
-def find_violations(scripts: dict[str, str], tiers: dict[str, str]) -> list[TierDocFinding]:
+def find_duplicate_tiers(occurrences: dict[str, list[str]]) -> list[TierDocFinding]:
+    """Flag any CLI documented in more than one row of the tier table.
+
+    A CLI with multiple rows of the SAME tier yields a ``duplicate-tier``
+    finding; multiple rows with DIFFERENT tiers yield ``conflicting-tier``
+    (the self-contradiction the validator exists to prevent). Returns an
+    empty list when every CLI appears exactly once.
+    """
+    findings: list[TierDocFinding] = []
+    for cli in sorted(occurrences):
+        vals = occurrences[cli]
+        if len(vals) < 2:
+            continue
+        distinct = sorted(set(vals))
+        if len(distinct) > 1:
+            findings.append(
+                TierDocFinding(
+                    cli,
+                    "conflicting-tier",
+                    f"{cli} is documented {len(vals)} times in COMPATIBILITY.md "
+                    f"with conflicting tiers {distinct}; the table contradicts itself",
+                )
+            )
+        else:
+            findings.append(
+                TierDocFinding(
+                    cli,
+                    "duplicate-tier",
+                    f"{cli} is documented {len(vals)} times in COMPATIBILITY.md "
+                    f"(all tier '{distinct[0]}'); remove the duplicate row",
+                )
+            )
+    return findings
+
+
+def find_violations(
+    scripts: dict[str, str],
+    tiers: dict[str, str],
+    duplicates: list[TierDocFinding] | None = None,
+) -> list[TierDocFinding]:
     """Cross-check *scripts* (from pyproject.toml) against *tiers* (from COMPATIBILITY.md).
+
+    *duplicates* carries findings produced by :func:`find_duplicate_tiers`
+    (a CLI documented more than once). They are surfaced even when the
+    flattened *scripts*/*tiers* alignment is otherwise clean, because the
+    contradiction lives entirely inside COMPATIBILITY.md.
 
     Returns a list of :class:`TierDocFinding` objects describing every
     discrepancy. An empty list means full alignment.
     """
-    findings: list[TierDocFinding] = []
+    findings: list[TierDocFinding] = list(duplicates or [])
     # Guard against silent regex regression (Decision 4): if pyproject has
     # entries but the table parsed zero rows, fail loudly rather than reporting
     # all 44 CLIs as "missing-from-docs".
@@ -170,8 +226,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     repo_root = args.repo_root or get_repo_root()
     scripts = load_pyproject_scripts(repo_root / "pyproject.toml")
-    tiers = load_documented_tiers(repo_root / "COMPATIBILITY.md")
-    findings = find_violations(scripts, tiers)
+    tiers, occurrences = load_documented_tiers(repo_root / "COMPATIBILITY.md")
+    duplicates = find_duplicate_tiers(occurrences)
+    findings = find_violations(scripts, tiers, duplicates)
     print(format_json(findings) if args.json else format_report(findings))
     return 0 if not findings else 1
 

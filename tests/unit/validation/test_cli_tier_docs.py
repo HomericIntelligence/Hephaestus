@@ -8,6 +8,7 @@ import pytest
 
 from hephaestus.utils.helpers import get_repo_root
 from hephaestus.validation.cli_tier_docs import (
+    find_duplicate_tiers,
     find_violations,
     load_documented_tiers,
     load_pyproject_scripts,
@@ -80,8 +81,8 @@ class TestParsing:
             "| `hephaestus-bar` | Provisional | Another |\n"
             "\n## Next Section\n"
         )
-        result = load_documented_tiers(md)
-        assert result == {"hephaestus-foo": "Stable", "hephaestus-bar": "Provisional"}
+        tiers, _ = load_documented_tiers(md)
+        assert tiers == {"hephaestus-foo": "Stable", "hephaestus-bar": "Provisional"}
 
     def test_load_tiers_stops_at_next_section(self, tmp_path: Path) -> None:
         md = tmp_path / "COMPATIBILITY.md"
@@ -93,12 +94,51 @@ class TestParsing:
             "## Other Section\n"
             "| `hephaestus-bar` | Internal | y |\n"  # NOT in scope
         )
-        assert load_documented_tiers(md) == {"hephaestus-foo": "Stable"}
+        tiers, _ = load_documented_tiers(md)
+        assert tiers == {"hephaestus-foo": "Stable"}
 
     def test_load_tiers_missing_section_returns_empty(self, tmp_path: Path) -> None:
         md = tmp_path / "COMPATIBILITY.md"
         md.write_text("# Just a doc\nNo section here.\n")
-        assert load_documented_tiers(md) == {}
+        tiers, _ = load_documented_tiers(md)
+        assert tiers == {}
+
+
+class TestDuplicateDetection:
+    """Tests for find_duplicate_tiers() and the conflict-detection path."""
+
+    def test_conflicting_tiers_are_flagged(self) -> None:
+        v = find_duplicate_tiers({"hephaestus-foo": ["Stable", "Internal"]})
+        assert len(v) == 1 and v[0].kind == "conflicting-tier"
+        assert "Internal" in v[0].detail and "Stable" in v[0].detail
+
+    def test_duplicate_consistent_tiers_are_flagged(self) -> None:
+        v = find_duplicate_tiers({"hephaestus-foo": ["Stable", "Stable"]})
+        assert len(v) == 1 and v[0].kind == "duplicate-tier"
+
+    def test_single_occurrence_is_clean(self) -> None:
+        assert find_duplicate_tiers({"hephaestus-foo": ["Stable"]}) == []
+
+    def test_parser_preserves_all_occurrences(self, tmp_path: Path) -> None:
+        md = tmp_path / "COMPATIBILITY.md"
+        md.write_text(
+            "## Console-Script Stability Tiers\n"
+            "| CLI | Tier | Notes |\n"
+            "|-----|------|-------|\n"
+            "| `hephaestus-foo` | Stable | first |\n"
+            "| `hephaestus-foo` | Internal | contradictory second |\n"
+            "## Next\n"
+        )
+        tiers, occ = load_documented_tiers(md)
+        assert occ == {"hephaestus-foo": ["Stable", "Internal"]}
+        assert tiers == {"hephaestus-foo": "Internal"}  # flattened: last-write-wins
+        assert find_duplicate_tiers(occ)[0].kind == "conflicting-tier"
+
+    def test_find_violations_surfaces_duplicates_when_aligned(self) -> None:
+        """The contradiction is reported even when scripts/tiers align."""
+        dups = find_duplicate_tiers({"hephaestus-foo": ["Stable", "Internal"]})
+        v = find_violations({"hephaestus-foo": "x:y"}, {"hephaestus-foo": "Internal"}, dups)
+        assert any(f.kind == "conflicting-tier" for f in v)
 
 
 class TestRealRepo:
