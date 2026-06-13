@@ -52,6 +52,17 @@ ALLOWED_EXTRA_COPYLEFT: dict[str, frozenset[str]] = {
     "defusedxml": frozenset({"PSF-2.0", "Python-2.0"}),
 }
 
+# Static license fallback for distributed deps whose PEP 508 marker excludes
+# the CI interpreter/platform (tomli: python_version < '3.11'; tzdata:
+# platform_system == 'Windows'). These packages are never installed in the
+# current CI leg so their metadata is not resolvable; licenses are taken from
+# NOTICE, which is the human-maintained authoritative record. Any future
+# incompatible license change MUST update both NOTICE and this map.
+FALLBACK_LICENSES: dict[str, list[str]] = {
+    "tomli": ["MIT"],  # NOTICE: "toml extra / tomli  MIT"
+    "tzdata": ["Apache-2.0"],  # NOTICE: "tzdata  Apache-2.0"
+}
+
 TROVE_TO_SPDX: dict[str, str] = {
     "MIT License": "MIT",
     "BSD License": "BSD-3-Clause",
@@ -246,8 +257,9 @@ def scan(records: dict[str, dict] | None = None) -> list[tuple[str, list[str]]]:
         SystemExit: code 2 if a DECLARED distributed dep that THIS env would
             install has no metadata (an extra was not installed) — a coverage
             hole, not a pass. CI installs .[all] first. Deps absent only because
-            their marker excludes the current interpreter (e.g. tomli on
-            Python >= 3.11) are skipped with a note, not treated as a hole.
+            their marker excludes the current interpreter are classified from
+            FALLBACK_LICENSES; if FALLBACK_LICENSES has no entry for such a dep
+            the gate exits 2 (fail-closed, requires map update).
 
     """
     violations: list[tuple[str, list[str]]] = []
@@ -263,13 +275,22 @@ def scan(records: dict[str, dict] | None = None) -> list[tuple[str, list[str]]]:
                     file=sys.stderr,
                 )
                 sys.exit(2)
+            fallback = FALLBACK_LICENSES.get(pkg)
+            if fallback is None:
+                print(
+                    f"FATAL: distributed dependency {pkg!r} is not installable "
+                    "in this environment (marker excludes it) AND has no entry in "
+                    "FALLBACK_LICENSES. Add its NOTICE-documented license to "
+                    "FALLBACK_LICENSES in scripts/check_license_compatibility.py.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
             print(
-                f"note: skipping {pkg!r} — distributed only under another "
-                "Python/platform (marker excludes this interpreter); it is "
-                "classified on the matching CI matrix row.",
+                f"note: {pkg!r} not installable here (marker excluded); "
+                f"classifying from FALLBACK_LICENSES: {fallback}",
                 file=sys.stderr,
             )
-            continue
+            ids = fallback
         if not is_compatible(pkg, ids):
             violations.append((pkg, ids))
     return violations

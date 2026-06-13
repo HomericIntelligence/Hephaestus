@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
 from check_license_compatibility import (
     ALLOWED_EXTRA_COPYLEFT,
     DIST_NAME,
+    FALLBACK_LICENSES,
     RUNTIME_EXTRAS,
     _FixtureMeta,
     distributed_requirements,
@@ -139,9 +140,8 @@ class TestLoudFailure:
                     scan(None)
         assert exc.value.code == 2
 
-    def test_uninstalled_other_python_dep_skipped_not_failed(self):
-        # installable_now=False (marker excludes this interpreter, e.g. tomli on
-        # Python >= 3.11) => correctly absent => skipped, not a coverage hole.
+    def test_marker_excluded_dep_classified_from_fallback(self):
+        # installable_now=False + dep in FALLBACK_LICENSES => classified (not skipped).
         with patch(
             "check_license_compatibility.distributed_requirements",
             return_value=[("tomli", False)],
@@ -150,7 +150,37 @@ class TestLoudFailure:
                 "check_license_compatibility.md.metadata",
                 side_effect=md.PackageNotFoundError("tomli"),
             ):
-                assert scan(None) == []
+                result = scan(None)
+        # tomli is MIT (permissive) => no violations
+        assert result == []
+
+    def test_marker_excluded_dep_not_in_fallback_exits_nonzero(self):
+        # installable_now=False + dep NOT in FALLBACK_LICENSES => loud exit 2.
+        with patch(
+            "check_license_compatibility.distributed_requirements",
+            return_value=[("unknown-gated-pkg", False)],
+        ):
+            with patch(
+                "check_license_compatibility.md.metadata",
+                side_effect=md.PackageNotFoundError("unknown-gated-pkg"),
+            ):
+                with pytest.raises(SystemExit) as exc:
+                    scan(None)
+        assert exc.value.code == 2
+
+    def test_marker_excluded_dep_with_incompatible_fallback_is_violation(self):
+        # FALLBACK_LICENSES entry with incompatible license surfaces as a violation.
+        with patch.dict("check_license_compatibility.FALLBACK_LICENSES", {"bad-pkg": ["GPL-3.0"]}):
+            with patch(
+                "check_license_compatibility.distributed_requirements",
+                return_value=[("bad-pkg", False)],
+            ):
+                with patch(
+                    "check_license_compatibility.md.metadata",
+                    side_effect=md.PackageNotFoundError("bad-pkg"),
+                ):
+                    result = scan(None)
+        assert result == [("bad-pkg", ["GPL-3.0"])]
 
 
 class TestDistributedScope:
@@ -217,6 +247,52 @@ class TestAllExtraCompleteness:
                 f"pyproject `[all]` aggregate {sorted(aggregated)} — its deps would "
                 "never install and the license gate would skip them."
             )
+
+
+class TestFallbackLicenses:
+    """FALLBACK_LICENSES must cover all marker-excluded distributed deps."""
+
+    def test_fallback_map_entries_are_compatible(self):
+        # Every fallback license must itself be compatible — a broken map entry
+        # would silently pass an incompatible dep on the CI leg that excludes it.
+        for pkg, ids in FALLBACK_LICENSES.items():
+            assert is_compatible(pkg, ids), (
+                f"FALLBACK_LICENSES[{pkg!r}] = {ids} is not compatible; "
+                "update the map or add it to ALLOWED_EXTRA_COPYLEFT."
+            )
+
+    def test_fallback_covers_all_marker_excluded_deps(self):
+        # Any dep in the distributed set that the current interpreter cannot
+        # install must have a FALLBACK_LICENSES entry — otherwise the gate
+        # will exit(2) in CI when run on the leg that excludes it.
+        # On Python < 3.11 tomli is installable, so only tzdata is excluded on Linux.
+        try:
+            excluded = {
+                name
+                for name, installable_now in distributed_requirements(None)
+                if not installable_now
+            }
+        except (md.PackageNotFoundError, SystemExit):
+            pytest.skip("HomericIntelligence-Hephaestus not installed in this env")
+            return
+        missing = excluded - set(FALLBACK_LICENSES)
+        assert not missing, (
+            f"Distributed deps excluded from this interpreter have no FALLBACK_LICENSES "
+            f"entry: {sorted(missing)}. Add each to FALLBACK_LICENSES in "
+            "scripts/check_license_compatibility.py with its NOTICE-documented license."
+        )
+
+    def test_tzdata_in_fallback(self):
+        assert "tzdata" in FALLBACK_LICENSES
+        assert FALLBACK_LICENSES["tzdata"] == ["Apache-2.0"]
+
+    def test_tomli_in_fallback_on_py311_plus(self):
+        # tomli is gated python_version < '3.11'; on 3.11+ it is not installable
+        # and must be in the fallback map.
+        if sys.version_info < (3, 11):
+            pytest.skip("tomli is installable on this interpreter; fallback not exercised")
+        assert "tomli" in FALLBACK_LICENSES
+        assert FALLBACK_LICENSES["tomli"] == ["MIT"]
 
 
 class TestMain:
