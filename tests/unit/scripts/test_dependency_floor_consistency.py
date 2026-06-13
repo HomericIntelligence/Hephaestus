@@ -397,3 +397,56 @@ class TestRuffConsistency:
             f"pixi.toml [feature.shared]={pixi_shared_cap}. "
             "Update both together — see issue #1201."
         )
+
+
+class TestPipPinning:
+    """pip in pixi.toml [dependencies] must carry both a >= floor and a < cap.
+
+    pip is load-bearing for the dev-install editable path and pip-audit flows;
+    an unbounded '*' would permit an untested major to silently land. Tracks
+    issue #1202.
+    """
+
+    def test_pip_has_floor_and_cap(self, repo_root: Path) -> None:
+        """pip spec must be parseable by both _floor() and _upper_cap()."""
+        pixi_path = repo_root / "pixi.toml"
+        with open(pixi_path, "rb") as f:
+            pixi = tomllib.load(f)
+
+        assert "dependencies" in pixi, "No [dependencies] section in pixi.toml"
+        assert "pip" in pixi["dependencies"], "pip not found in [dependencies]"
+
+        spec = pixi["dependencies"]["pip"]
+        # Delegate to the established helpers — raises AssertionError if floor/cap absent.
+        _floor(spec)
+        _upper_cap(spec)
+
+    def test_pip_floor_is_at_least_23(self, repo_root: Path) -> None:
+        """pip floor must be >= 23.0 for stable PEP 660 editable-install support."""
+        pixi_path = repo_root / "pixi.toml"
+        with open(pixi_path, "rb") as f:
+            pixi = tomllib.load(f)
+
+        spec = pixi["dependencies"]["pip"]
+        floor = Version(_floor(spec))
+        assert floor >= Version("23.0"), (
+            f"pip floor too low ({floor}); must be >= 23.0 for PEP 660 editable support"
+        )
+
+    def test_pip_cap_blocks_next_major_only(self, repo_root: Path) -> None:
+        """pip cap must be exactly one major ahead of the installed 26.x series.
+
+        Asserts Version("26") < cap <= Version("27") so the test rejects both
+        a downgrade cap (<= 26) and a permissive cap (>= 28) that would admit
+        untested majors.
+        """
+        pixi_path = repo_root / "pixi.toml"
+        with open(pixi_path, "rb") as f:
+            pixi = tomllib.load(f)
+
+        spec = pixi["dependencies"]["pip"]
+        cap = Version(_upper_cap(spec))
+        assert Version("26") < cap <= Version("27"), (
+            f"pip cap {cap} must be > 26 (no downgrade) and <= 27 (block untested major); "
+            "update when CI tests pip 27.x"
+        )
