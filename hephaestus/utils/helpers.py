@@ -114,7 +114,7 @@ def get_repo_root(start_path: str | Path | None = None) -> Path:
         fallback.
 
     """
-    start_path = Path.cwd() if start_path is None else Path(start_path).resolve()
+    start_path = Path.cwd().resolve() if start_path is None else Path(start_path).resolve()
 
     path = start_path
     while path != path.parent:  # Stop at filesystem root

@@ -137,7 +137,7 @@ class TestGetRepoRoot:
         subdir = mock_git_repo / "src" / "module"
         subdir.mkdir(parents=True)
         result = get_repo_root(subdir)
-        assert result == mock_git_repo
+        assert result == mock_git_repo.resolve()
 
     def test_returns_start_path_when_no_git(self, tmp_path):
         """Returns start_path when no .git found."""
@@ -149,12 +149,13 @@ class TestGetRepoRoot:
     def test_accepts_string_path(self, mock_git_repo):
         """Accepts a string path argument."""
         result = get_repo_root(str(mock_git_repo))
-        assert result == mock_git_repo
+        assert result == mock_git_repo.resolve()
 
     def test_uses_cwd_when_none(self):
         """Uses current working directory when start_path is None."""
         result = get_repo_root(None)
         assert isinstance(result, Path)
+        assert result.is_absolute()
 
     def test_nested_git_stops_at_inner_git(self, tmp_path):
         """Inner .git wins over outer .git — first-match-up (innermost) semantics."""
