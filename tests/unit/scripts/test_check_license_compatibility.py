@@ -163,6 +163,7 @@ class TestDistributedScope:
             return {name for name, _ in distributed_requirements(None)}
         except (md.PackageNotFoundError, SystemExit):
             pytest.skip("HomericIntelligence-Hephaestus not installed in this env")
+            return set()  # unreachable (pytest.skip raises); makes the set return type explicit
 
     def test_dev_tools_never_examined(self):
         dist = self._dist_or_skip()
