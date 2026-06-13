@@ -17,9 +17,12 @@ choose_merge_flag() {
         echo "choose_merge_flag: missing required argument <owner/repo>" >&2
         return 2
     fi
-    local raw flag
-    if ! raw=$(gh api "repos/${repo}" 2>&1); then
-        echo "choose_merge_flag: gh api repos/${repo} failed: ${raw}" >&2
+    local raw flag _err_file
+    _err_file=$(mktemp)
+    # shellcheck disable=SC2064
+    trap "rm -f '$_err_file'" RETURN
+    if ! raw=$(gh api "repos/${repo}" 2>"$_err_file"); then
+        echo "choose_merge_flag: gh api repos/${repo} failed: $(cat "$_err_file")" >&2
         echo "  (check: gh auth status; token needs 'repo' scope; repo exists)" >&2
         return 1
     fi
