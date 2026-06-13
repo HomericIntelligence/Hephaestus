@@ -29,3 +29,22 @@ def _reset_circuit_breakers_for_automation_tests() -> None:
     rate-limit retries.
     """
     reset_all_circuit_breakers()
+
+
+@pytest.fixture(autouse=True)
+def _agents_authenticated_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the agent install+auth pre-flight (#1175) to pass by default.
+
+    ``resolve_agent`` now refuses a ``--agent claude|codex`` selection unless the
+    CLI is installed AND reports authenticated (#1175) — a real guard so an
+    unauthenticated backend cannot silently produce empty output. But neither CLI
+    is installed in CI, so every test that dispatches a named agent (mocking
+    ``run_claude_text``/``run_codex_session``) would otherwise hit
+    ``RuntimeError: Agent '...' is not installed``. Default the pre-flight to
+    "authenticated"; tests exercising the unauthenticated/not-installed path
+    override this with their own monkeypatch.
+    """
+    monkeypatch.setattr(
+        "hephaestus.agents.runtime.is_agent_authenticated",
+        lambda _agent: True,
+    )
