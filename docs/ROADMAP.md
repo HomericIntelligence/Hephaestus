@@ -12,7 +12,7 @@ The strict 2026-04-28 repository audit (Epic #310) is now **closed**. The active
 
 2. **Automation Package Stabilization** — Refactoring and hardening the automation modules (PR review, CI driver, issue implementation) to improve single responsibility, observability, and idempotency. This includes fixing critical bugs in the CI state machine and worktree management.
 
-3. **CLI Tool Coverage Expansion** — Expanding the CLI entry point test suite from 13 of 37 declared tools to full coverage, ensuring all command-line interfaces are properly validated.
+3. **CLI Tool Coverage Expansion** — Expanding the CLI entry point test suite from 13 of 47 declared tools to full coverage, ensuring all command-line interfaces are properly validated.
 
 4. **Test Coverage Hardening** — Bringing 6 excluded automation modules into coverage measurement with mocked unit tests for core orchestration logic.
 
