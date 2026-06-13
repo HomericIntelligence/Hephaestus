@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -596,6 +597,7 @@ class PlanReviewLoop:
             f"{plan}"
         )
         prompt = build_learn_prompt(context)
+        _learn_start = time.monotonic()
         try:
             output = self.planner._call_claude(
                 prompt,
@@ -604,13 +606,17 @@ class PlanReviewLoop:
                 issue_number=issue_number,
                 timeout=learn_claude_timeout(),
             )
-            self._write_planner_learn_record(issue_number, succeeded=True, output=output)
+            self._write_planner_learn_record(
+                issue_number, succeeded=True, output=output, start=_learn_start
+            )
             return output
         except Exception as e:
             logger.warning(
                 "%s: planner-learnings capture failed (non-fatal): %s", issue_ref(issue_number), e
             )
-            self._write_planner_learn_record(issue_number, succeeded=False, error=str(e))
+            self._write_planner_learn_record(
+                issue_number, succeeded=False, error=str(e), start=_learn_start
+            )
             return ""
 
     def _planner_learn_state_dir(self) -> Path:
@@ -625,6 +631,7 @@ class PlanReviewLoop:
         succeeded: bool,
         output: str = "",
         error: str = "",
+        start: float = 0.0,
     ) -> None:
         """Persist explicit planner ``/learn`` attempt evidence.
 
@@ -635,14 +642,14 @@ class PlanReviewLoop:
         try:
             state_dir = self._planner_learn_state_dir()
             timestamp = datetime.now(timezone.utc).isoformat()
-            log_file = state_dir / f"planner-learn-{issue_number}.log"
+            duration = round(time.monotonic() - start, 3) if start else None
             record_file = state_dir / f"planner-learn-{issue_number}.json"
-            log_file.write_text(output if succeeded else f"FAILED: {error}\n")
+            log_file = state_dir / f"planner-learn-{issue_number}.log"
             record = {
                 "issue_number": issue_number,
                 "learn_attempted_at": timestamp,
+                "learn_duration_s": duration,
                 "learn_status": "succeeded" if succeeded else "failed",
-                "learn_succeeded_at": timestamp if succeeded else None,
                 "log_path": str(log_file),
             }
             if succeeded:
@@ -658,6 +665,7 @@ class PlanReviewLoop:
             if error:
                 record["error"] = error
             record_file.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+            log_file.write_text(output if succeeded else f"FAILED: {error}\n")
         except OSError as exc:
             logger.warning(
                 "%s: failed to write planner-learnings state (non-fatal): %s",

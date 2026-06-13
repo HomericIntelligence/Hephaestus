@@ -88,15 +88,15 @@ def _write_learn_record(
 def build_learn_prompt(context: str) -> str:
     """Return the standard automation prompt for the user-facing /learn skill."""
     detail = context.strip()
-    if detail:
-        detail = f" {detail}"
+    suffix = f" {detail}" if detail else ""
     return (
-        f"/learn{detail}"
+        "/learn"
         " EXECUTE the /learn skill-creation workflow for ProjectMnemosyne."
         " Do NOT return a plan. Do NOT ask for approval."
         " Commit the results and create a PR."
         " IMPORTANT: Only push skills to ProjectMnemosyne."
         " Do NOT create files under .claude-plugin/ in this repo."
+        f"{suffix}"
     )
 
 

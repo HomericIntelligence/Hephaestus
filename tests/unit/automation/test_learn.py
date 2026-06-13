@@ -75,9 +75,12 @@ class TestRunLearn:
     def test_build_learn_prompt_uses_user_facing_command(self) -> None:
         prompt = build_learn_prompt("Capture what happened.")
 
-        assert prompt.startswith("/learn Capture what happened.")
+        assert prompt.startswith("/learn EXECUTE")
+        assert "Capture what happened." in prompt
         assert "/skills-registry-commands:learn" not in prompt
         assert "Only push skills to ProjectMnemosyne" in prompt
+        # Directives must appear before the context detail
+        assert prompt.index("Do NOT return a plan") < prompt.index("Capture what happened.")
 
     def test_success_writes_log_and_returns_true(self, tmp_path: Path) -> None:
         """Returns True and writes log on successful claude run."""

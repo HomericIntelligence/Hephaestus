@@ -622,6 +622,9 @@ class TestCapturePlannerLearnings:
         assert "ProjectMnemosyne" in prompt
         assert "/skills-registry-commands:learn" not in prompt
         assert "plan text" in prompt
+        # Directives must appear before the context/plan body (item 4)
+        assert "Do NOT return a plan" in prompt
+        assert prompt.index("Do NOT return a plan") < prompt.index("plan text")
 
     def test_writes_success_record(self, planner: Planner, tmp_path: Any) -> None:
         """A successful planner /learn attempt leaves durable evidence."""
@@ -640,7 +643,9 @@ class TestCapturePlannerLearnings:
         assert record["issue_number"] == 123
         assert record["learn_status"] == "succeeded"
         assert record["learn_attempted_at"]
-        assert record["learn_succeeded_at"] == record["learn_attempted_at"]
+        assert "learn_succeeded_at" not in record
+        assert record["learn_duration_s"] is not None
+        assert record["learn_duration_s"] >= 0.0
         assert record["mnemosyne_update_status"] == "unverified"
         assert record["mnemosyne_update_urls"] == []
         assert record["mnemosyne_update_pr_numbers"] == []
@@ -663,12 +668,30 @@ class TestCapturePlannerLearnings:
         assert record["issue_number"] == 123
         assert record["learn_status"] == "failed"
         assert record["learn_attempted_at"]
-        assert record["learn_succeeded_at"] is None
+        assert "learn_succeeded_at" not in record
+        assert record["learn_duration_s"] is not None
+        assert record["learn_duration_s"] >= 0.0
         assert record["error"] == "claude down"
         assert record["mnemosyne_update_status"] == "failed"
         assert record["mnemosyne_update_urls"] == []
         assert record["mnemosyne_update_pr_numbers"] == []
         assert (state_dir / "planner-learn-123.log").read_text().startswith("FAILED:")
+
+    def test_oswrite_failure_is_nonfatal(self, planner: Planner, tmp_path: Any) -> None:
+        """OSError in record write must not propagate — capture_planner_learnings still returns output."""
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.get_repo_root",
+                return_value=tmp_path,
+            ),
+            patch.object(planner, "_call_claude", return_value="- learning A\n"),
+            patch(
+                "hephaestus.automation.planner_review_loop.Path.write_text",
+                side_effect=OSError("permission denied"),
+            ),
+        ):
+            out = planner._capture_planner_learnings(123, "plan text")
+        assert out == "- learning A\n"
 
 
 class TestRunPlanReview:
