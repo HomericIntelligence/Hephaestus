@@ -15,6 +15,9 @@ FAILS LOUDLY (never silently passes):
     -> coverage hole -> exit 2. CI installs `.[all]` on a setup-python runner first.
   * a license string not in the mapping tables -> exit (PR:1 / main:0) with a
     hint to extend TROVE_TO_SPDX / LICENSE_ALIASES.
+  * a distributed dep whose PEP 508 marker excludes the current interpreter
+    -> classified via FALLBACK_LICENSES (NOTICE-backed); if no entry exists
+    -> exit 2. Add new marker-excluded deps to FALLBACK_LICENSES.
 
 Stdlib only (importlib.metadata + packaging, both already runtime deps); runs
 under plain `python3` once the package + extras are pip-installed.
