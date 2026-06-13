@@ -1421,7 +1421,10 @@ class TestCIPollLoop:
         monkeypatch.setenv("HEPH_CI_POLL_MAX_WAIT", "3600")
         with (
             patch("hephaestus.automation.ci_driver.gh_pr_checks", side_effect=side_effect),
-            patch("hephaestus.automation.ci_check_inspector.gh_pr_checks", return_value=[completed_check]),
+            patch(
+                "hephaestus.automation.ci_check_inspector.gh_pr_checks",
+                return_value=[completed_check],
+            ),
             patch("hephaestus.automation.ci_driver.time.sleep"),
             _impl_go(driver),
             patch.object(driver, "_enable_auto_merge", return_value=True),
@@ -3027,7 +3030,9 @@ class TestRunDriveGreenCompact:
         self, driver: CIDriver, tmp_path: Path
     ) -> None:
         """Verify compact_session uses repo_root when worktree is not available."""
-        with patch.object(driver._post_merge, "_get_worktree_path", side_effect=RuntimeError("No worktree")):
+        with patch.object(
+            driver._post_merge, "_get_worktree_path", side_effect=RuntimeError("No worktree")
+        ):
             with patch(
                 "hephaestus.automation.post_merge_processor.compact_session"
             ) as mock_compact:
