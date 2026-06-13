@@ -13,9 +13,14 @@ are otherwise hard to observe:
 """
 
 from .coredump_handler import (
+    BUNDLE_NOT_RUN,
+    BUNDLE_OK,
+    BUNDLE_RAN_WITH_ERRORS,
     DEFAULT_MAX_BYTES,
     DEFAULT_TARGET_DIRS,
+    VERIFY_SIGNAL_LOST_EXIT,
     resolve_target_dir,
+    verify_crash_bundle,
     write_core,
 )
 from .gdb_runner import (
@@ -25,11 +30,16 @@ from .gdb_runner import (
 )
 
 __all__ = [
+    "BUNDLE_NOT_RUN",
+    "BUNDLE_OK",
+    "BUNDLE_RAN_WITH_ERRORS",
     "DEFAULT_MAX_BYTES",
     "DEFAULT_TARGET_DIRS",
+    "VERIFY_SIGNAL_LOST_EXIT",
     "build_gdb_script",
     "resolve_command",
     "resolve_target_dir",
     "run_under_gdb",
+    "verify_crash_bundle",
     "write_core",
 ]

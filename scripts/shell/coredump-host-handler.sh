@@ -127,6 +127,7 @@ SIZE=$(stat -c %s "$OUT" 2>/dev/null || echo "?")
 
 # Kernel-invoked: if the log append failed (e.g. LOG_DIR is unwritable), there
 # is no safe way to surface the error — the kernel has no channel for our exit
-# code. Failure here is silent by design; a downstream artifact-upload step
-# should surface a missing handler.log as "handler was not invoked".
+# code. Failure here is silent by design. A downstream artifact-upload step
+# MUST enforce the contract by running `hephaestus-coredump-handler --verify
+# --target-dir "$TARGET"` and failing the job when it exits 3 (NOT_RUN).
 true

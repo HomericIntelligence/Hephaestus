@@ -301,3 +301,164 @@ class TestMaxBytesEnvFallback:
         log_path = tmp_path / "handler.log"
         if log_path.exists():
             assert "COREDUMP_MAX_BYTES" not in log_path.read_text(encoding="utf-8")
+
+
+class TestVerifyCrashBundle:
+    """Tests for the executable handler-ran contract (issue #1207)."""
+
+    def test_missing_log_is_not_run(self, tmp_path: Path) -> None:
+        from hephaestus.forensics.coredump_handler import (
+            BUNDLE_NOT_RUN,
+            verify_crash_bundle,
+        )
+
+        verdict, _ = verify_crash_bundle(tmp_path)  # no handler.log present
+        assert verdict == BUNDLE_NOT_RUN
+
+    def test_empty_log_is_not_run(self, tmp_path: Path) -> None:
+        from hephaestus.forensics.coredump_handler import (
+            BUNDLE_NOT_RUN,
+            verify_crash_bundle,
+        )
+
+        (tmp_path / "handler.log").write_text("\n  \n", encoding="utf-8")
+        verdict, _ = verify_crash_bundle(tmp_path)
+        assert verdict == BUNDLE_NOT_RUN
+
+    def test_capture_line_is_ok(self, tmp_path: Path) -> None:
+        from hephaestus.forensics.coredump_handler import (
+            BUNDLE_OK,
+            verify_crash_bundle,
+        )
+
+        (tmp_path / "handler.log").write_text(
+            "2026-06-12T00:00:00+00:00 wrote /x/core.1.p.2.sig11 (10 bytes) signal=11 exe=p\n",
+            encoding="utf-8",
+        )
+        verdict, _ = verify_crash_bundle(tmp_path)
+        assert verdict == BUNDLE_OK
+
+    def test_successful_capture_with_chmod_warning_is_ok(self, tmp_path: Path) -> None:
+        """A `wrote` line + a WARNING (chmod/max_bytes) is still OK, not RAN_WITH_ERRORS."""
+        from hephaestus.forensics.coredump_handler import (
+            BUNDLE_OK,
+            verify_crash_bundle,
+        )
+
+        (tmp_path / "handler.log").write_text(
+            "2026-06-12T00:00:00+00:00 WARNING: chmod 644 /x/core.1 failed "
+            "(EPERM); file may be unreadable\n"
+            "2026-06-12T00:00:00+00:00 wrote /x/core.1 (10 bytes) signal=11 exe=p\n",
+            encoding="utf-8",
+        )
+        verdict, _ = verify_crash_bundle(tmp_path)
+        assert verdict == BUNDLE_OK
+
+    def test_error_without_wrote_is_ran_with_errors(self, tmp_path: Path) -> None:
+        from hephaestus.forensics.coredump_handler import (
+            BUNDLE_RAN_WITH_ERRORS,
+            verify_crash_bundle,
+        )
+
+        (tmp_path / "handler.log").write_text(
+            "2026-06-12T00:00:00+00:00 ERROR: failed to write core to /x/core.1 (disk full)\n",
+            encoding="utf-8",
+        )
+        verdict, _ = verify_crash_bundle(tmp_path)
+        assert verdict == BUNDLE_RAN_WITH_ERRORS
+
+    def test_error_line_with_embedded_wrote_substring_is_not_ok(self, tmp_path: Path) -> None:
+        """An ERROR line whose path embeds the literal ' wrote ' must not be OK.
+
+        The exe basename (%e) can contain spaces, so a failure path like
+        ``/cores/x wrote y`` must not be misclassified as a successful capture.
+        The classifier anchors on the message starting with ``wrote ``, so an
+        ``ERROR:`` message is correctly RAN_WITH_ERRORS.
+        """
+        from hephaestus.forensics.coredump_handler import (
+            BUNDLE_RAN_WITH_ERRORS,
+            verify_crash_bundle,
+        )
+
+        (tmp_path / "handler.log").write_text(
+            "2026-06-12T00:00:00+00:00 ERROR: failed to write core to "
+            "/x/core.1.evil wrote me.0.sig11 (disk full)\n",
+            encoding="utf-8",
+        )
+        verdict, _ = verify_crash_bundle(tmp_path)
+        assert verdict == BUNDLE_RAN_WITH_ERRORS
+
+
+class TestMainVerify:
+    """CLI --verify mode (issue #1207)."""
+
+    def test_verify_missing_bundle_exits_3(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b""))  # never read in verify mode
+        cores = tmp_path / "cores"  # parent (tmp_path) has no handler.log
+        rc = main(["--verify", "--target-dir", str(cores)])
+        assert rc == 3
+
+    def test_verify_present_log_exits_0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b""))
+        cores = tmp_path / "cores"
+        (tmp_path / "handler.log").write_text(
+            "2026-06-12T00:00:00+00:00 wrote /x (5 bytes) signal=11 exe=p\n",
+            encoding="utf-8",
+        )
+        rc = main(["--verify", "--target-dir", str(cores)])
+        assert rc == 0
+
+    def test_verify_does_not_create_target_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify must not fabricate the directory whose absence is the signal."""
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b""))
+        cores = tmp_path / "cores"
+        main(["--verify", "--target-dir", str(cores)])
+        assert not cores.exists()
+
+    def test_verify_json_envelope_on_not_run(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import json
+
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b""))
+        cores = tmp_path / "cores"
+        rc = main(["--verify", "--json", "--target-dir", str(cores)])
+        payload = json.loads(capsys.readouterr().out)
+        assert rc == 3
+        # emit_json_status: status is the string "error" for non-zero, code is in
+        # exit_code, and verdict arrives via **extra (per cli/utils.py).
+        assert payload["status"] == "error"
+        assert payload["exit_code"] == 3
+        assert payload["verdict"] == "NOT_RUN"
+
+
+class TestMainCaptureGuards:
+    """Capture path stays loud after positionals became optional (issue #1207)."""
+
+    def test_missing_positionals_without_verify_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A capture invocation missing kernel tokens must fail loudly, not no-op."""
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b"core-bytes"))
+        rc = main(["--target-dir", str(tmp_path / "cores")])  # no pid/exe/time/sig
+        assert rc == 1
+
+    def test_full_capture_still_writes_core(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: a complete capture invocation still writes the core."""
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b"ELFDATA"))
+        cores = tmp_path / "cores"
+        cores.mkdir()
+        rc = main(["--target-dir", str(cores), "1234", "proc", "1700000000", "11", "5678"])
+        assert rc == 0
+        assert list(cores.glob("core.1234.proc.*.sig11"))

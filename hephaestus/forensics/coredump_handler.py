@@ -37,7 +37,10 @@ maps to), pass it as a literal ``--target-dir`` argument in the
 Exit-code note: the kernel ignores this handler's exit code entirely. Every
 failure path therefore logs to ``handler.log`` next to the core directory
 instead of relying on exit status — a missing ``handler.log`` is the only
-signal that the handler did not run at all.
+signal that the handler did not run at all. This contract is enforced by
+:func:`verify_crash_bundle` (also exposed as ``hephaestus-coredump-handler
+--verify``, which exits 3 on a lost signal); a CI artifact step SHOULD run it
+and fail the job when it reports ``NOT_RUN``.
 """
 
 from __future__ import annotations
@@ -149,6 +152,77 @@ def _log(log_dir: Path, message: str) -> None:
             handle.write(f"{stamp} {message}\n")
 
 
+#: Verdicts returned by :func:`verify_crash_bundle`. ``NOT_RUN`` is the
+#: silent-loss case the handler contract guards against: a missing
+#: ``handler.log`` means the kernel never invoked the handler at all.
+BUNDLE_OK = "OK"
+BUNDLE_RAN_WITH_ERRORS = "RAN_WITH_ERRORS"
+BUNDLE_NOT_RUN = "NOT_RUN"
+
+#: Exit code returned by ``--verify`` when the failure signal was lost
+#: (verdict ``NOT_RUN``). Deliberately NOT 1 or 2: argparse exits 2 on usage
+#: errors and gdb_runner already returns 2, so a distinct code lets a CI gate
+#: tell "signal lost" apart from "bad command line".
+VERIFY_SIGNAL_LOST_EXIT = 3
+
+
+def verify_crash_bundle(log_dir: Path) -> tuple[str, str]:
+    """Enforce the handler's failure-signal contract on a crash bundle.
+
+    The kernel ignores a pipe handler's exit code, so every failure path logs
+    to ``handler.log`` instead (see module docstring). This makes that
+    convention executable: it inspects the bundle directory and classifies
+    whether the handler ran.
+
+    Classification keys off the lines :func:`_log` writes. A ``wrote `` line
+    means the core was captured (verdict :data:`BUNDLE_OK`) even if a WARNING
+    is also present, because a successful capture can still log a chmod or
+    ``COREDUMP_MAX_BYTES`` warning (see :func:`write_core` / :func:`main`). Any
+    other non-empty log means the handler ran but recorded no successful
+    capture (:data:`BUNDLE_RAN_WITH_ERRORS`). A missing/empty/unreadable log
+    means the handler never ran (:data:`BUNDLE_NOT_RUN`) — the silent-loss case.
+
+    Args:
+        log_dir: The directory ``handler.log`` is expected in (the parent of
+            the core ``target_dir``; see :func:`write_core`).
+
+    Returns:
+        A ``(verdict, detail)`` pair. ``verdict`` is one of the ``BUNDLE_*``
+        constants; ``detail`` is a human-readable explanation.
+
+    """
+    log_path = log_dir / "handler.log"
+    if not log_path.is_file():
+        return BUNDLE_NOT_RUN, (
+            f"{log_path} is missing — the handler never ran "
+            "(the kernel cannot report a pipe handler's exit code)"
+        )
+    try:
+        contents = log_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return BUNDLE_NOT_RUN, f"{log_path} is unreadable ({exc})"
+
+    lines = [ln for ln in contents.splitlines() if ln.strip()]
+    if not lines:
+        return BUNDLE_NOT_RUN, f"{log_path} is empty — no handler activity recorded"
+
+    # A `wrote ` line is the authoritative success signal; a successful capture
+    # may also carry a chmod/max-bytes WARNING, so `wrote ` wins over WARNING.
+    # Each kept line is "<iso-timestamp> <message>"; split off the timestamp and
+    # check that the message portion starts with "wrote " so that an ERROR: line
+    # whose path happens to contain the substring " wrote " is not misclassified.
+    def _message_is_wrote(ln: str) -> bool:
+        parts = ln.split(maxsplit=1)
+        return len(parts) == 2 and parts[1].startswith("wrote ")
+
+    if any(_message_is_wrote(ln) for ln in lines):
+        return BUNDLE_OK, f"{log_path} records a successful capture"
+    return BUNDLE_RAN_WITH_ERRORS, (
+        f"{log_path} records handler activity but no successful capture "
+        "(handler ran; inspect the log for the failure)"
+    )
+
+
 def write_core(
     stream: object,
     pid: str,
@@ -221,10 +295,20 @@ def _build_parser() -> argparse.ArgumentParser:
             "when a specific directory (e.g. a CI workspace path) is required."
         ),
     )
-    parser.add_argument("pid", help="PID of the crashing process (%%p)")
-    parser.add_argument("exe", help="executable basename (%%e)")
-    parser.add_argument("crash_time", help="crash time, seconds since epoch (%%t)")
-    parser.add_argument("signal", help="signal number (%%s)")
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help=(
+            "verification mode: do not read stdin. Inspect the resolved bundle "
+            "directory and assert the handler-ran contract (a missing "
+            "handler.log means the handler never ran). Exit 0 if the handler "
+            "ran, 3 if its failure signal was lost. For CI artifact steps."
+        ),
+    )
+    parser.add_argument("pid", nargs="?", help="PID of the crashing process (%%p)")
+    parser.add_argument("exe", nargs="?", help="executable basename (%%e)")
+    parser.add_argument("crash_time", nargs="?", help="crash time, seconds since epoch (%%t)")
+    parser.add_argument("signal", nargs="?", help="signal number (%%s)")
     parser.add_argument(
         "global_pid",
         nargs="?",
@@ -234,6 +318,56 @@ def _build_parser() -> argparse.ArgumentParser:
     add_json_arg(parser)
     add_version_arg(parser)
     return parser
+
+
+def _resolve_candidates(target_dir: str | None) -> list[str]:
+    """Resolve ordered output-directory candidates from CLI/env/default.
+
+    Mirrors the precedence documented on :func:`main`: an explicit
+    ``--target-dir`` wins over ``COREDUMP_TARGET_DIRS`` (colon-separated),
+    which wins over :data:`DEFAULT_TARGET_DIRS`.
+
+    Args:
+        target_dir: The ``--target-dir`` CLI value, or ``None`` if unset.
+
+    Returns:
+        The ordered list of candidate directory paths (may contain empties).
+
+    """
+    if target_dir:
+        return [target_dir]
+    target_dirs = os.environ.get("COREDUMP_TARGET_DIRS")
+    return target_dirs.split(":") if target_dirs else list(DEFAULT_TARGET_DIRS)
+
+
+def _run_verify(target_dir: str | None, as_json: bool) -> int:
+    """Run ``--verify`` mode: assert the handler-ran contract, never read stdin.
+
+    Resolves the bundle directory *read-only* — it deliberately does NOT call
+    :func:`resolve_target_dir`, which would ``mkdir()`` the directory and so
+    fabricate the very directory whose absence is the lost-signal indicator.
+
+    Args:
+        target_dir: The ``--target-dir`` CLI value, or ``None`` if unset.
+        as_json: Whether to emit a JSON status envelope instead of plain text.
+
+    Returns:
+        ``0`` if the handler provably ran (``OK``/``RAN_WITH_ERRORS``), else
+        :data:`VERIFY_SIGNAL_LOST_EXIT` (verdict ``NOT_RUN``).
+
+    """
+    cleaned = [c for c in _resolve_candidates(target_dir) if c]
+    if not cleaned:
+        raise ValueError("no candidate target directories provided")
+    # log_dir is the parent of target_dir (see write_core).
+    target = next((Path(c) for c in cleaned if Path(c).is_dir()), Path(cleaned[-1]))
+    verdict, detail = verify_crash_bundle(target.parent)
+    exit_code = 0 if verdict in (BUNDLE_OK, BUNDLE_RAN_WITH_ERRORS) else VERIFY_SIGNAL_LOST_EXIT
+    if as_json:
+        emit_json_status(exit_code, message=detail, verdict=verdict)
+    else:
+        print(f"{verdict}: {detail}", file=sys.stdout if exit_code == 0 else sys.stderr)
+    return exit_code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -259,6 +393,23 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = _build_parser().parse_args(argv)
 
+    if args.verify:
+        return _run_verify(args.target_dir, args.json)
+
+    # Capture path: positionals are kernel-supplied. They are declared optional
+    # only so --verify can omit them; a real capture invocation missing them is
+    # a malformed core_pattern line and must fail loudly, not silently no-op.
+    missing = [
+        name for name in ("pid", "exe", "crash_time", "signal") if getattr(args, name) is None
+    ]
+    if missing:
+        msg = f"missing required argument(s) for capture: {', '.join(missing)}"
+        if args.json:
+            emit_json_status(1, message=msg)
+        else:
+            print(f"hephaestus-coredump-handler: {msg}", file=sys.stderr)
+        return 1
+
     # TTY guard: when invoked by the kernel, stdin is a pipe carrying the core
     # ELF. When invoked manually on a terminal with no piped input, reading
     # stdin would hang forever — refuse early.
@@ -275,13 +426,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # --target-dir wins over the env var, which wins over the built-in default.
-    if args.target_dir:
-        candidates = [args.target_dir]
-    else:
-        target_dirs = os.environ.get("COREDUMP_TARGET_DIRS")
-        candidates = target_dirs.split(":") if target_dirs else list(DEFAULT_TARGET_DIRS)
-
-    target_dir = resolve_target_dir(candidates)
+    target_dir = resolve_target_dir(_resolve_candidates(args.target_dir))
 
     max_bytes_env = os.environ.get("COREDUMP_MAX_BYTES")
     if max_bytes_env and max_bytes_env.strip():
