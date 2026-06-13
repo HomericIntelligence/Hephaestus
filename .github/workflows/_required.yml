@@ -820,36 +820,48 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install package (for __version__)
-        run: pip install -e "." --no-deps
+      - name: Install package (for __version__ and checker imports)
+        # Install WITH deps: the single-source checker imports
+        # ``hephaestus.utils.helpers``, which imports ``packaging`` (a declared
+        # core dependency). ``--no-deps`` would skip ``packaging`` and the
+        # checker below would ModuleNotFoundError instead of asserting.
+        run: pip install -e "."
 
-      - name: Check version consistency
+      - name: Check version single-source-of-truth (pyproject + pixi.toml)
         run: |
           set -euo pipefail
 
-          # Extract version from pyproject.toml via hatch-vcs (dynamic)
-          DYNAMIC=$(python -c "
-          import tomllib
-          with open('pyproject.toml', 'rb') as f:
-              d = tomllib.load(f)
-          dynamic = d.get('project', {}).get('dynamic', [])
-          print('dynamic' if 'version' in dynamic else 'static')
-          ")
-          echo "Version strategy: $DYNAMIC"
-
-          # Resolve the actual installed version
+          # Diagnostics (informational only).
           PKG_VERSION=$(python -c "import hephaestus; print(hephaestus.__version__)")
           echo "Installed __version__: $PKG_VERSION"
 
-          # If a VERSION file exists, cross-check it
-          if [ -f VERSION ]; then
-            FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
-            echo "VERSION file: $FILE_VERSION"
-            if [ "$PKG_VERSION" != "$FILE_VERSION" ]; then
-              echo "ERROR: __version__ ($PKG_VERSION) does not match VERSION file ($FILE_VERSION)"
-              exit 1
-            fi
-            echo "Version files are in sync."
-          else
-            echo "No VERSION file present — skipping file cross-check."
-          fi
+          # ENFORCEMENT (legs 1+2): the tested checker asserts there is no
+          # static [project].version, that version is in [project].dynamic,
+          # that [tool.hatch.version].source == "vcs", and that pixi.toml has
+          # no [workspace].version. Under `set -e` a non-zero exit fails the
+          # job — this is the live exit-1 path the old dead VERSION-file
+          # branch never provided.
+          #
+          # Invoked as an installed module (-m) rather than the scripts/ shim:
+          # the module form is immune to sys.path[0]/CWD-dependent __file__
+          # resolution, so the checker's get_repo_root() anchors to the
+          # installed package and reads the checked-out pyproject.toml.
+          python -m hephaestus.scripts_lib.check_version_single_source
+
+      - name: Set up pixi (for lockfile sync check)
+        uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11  # v0.9.6
+        with:
+          pixi-version: v0.69.0
+          cache: true
+
+      - name: Check pixi.lock is in sync with pixi.toml
+        run: |
+          set -euo pipefail
+          # ENFORCEMENT (leg 3): the DoD names this job for the full
+          # "pyproject.toml then pixi.toml then pixi.lock" contract
+          # (docs/DEFINITION_OF_DONE.md:28). The checker above covers
+          # pyproject + pixi.toml but never reads pixi.lock. `pixi install
+          # --locked` exits non-zero if pixi.toml changed without re-locking
+          # — the same frozen-verification the pixi-check job uses, and a
+          # command guaranteed available in the repo-pinned pixi v0.69.0.
+          pixi install --locked
