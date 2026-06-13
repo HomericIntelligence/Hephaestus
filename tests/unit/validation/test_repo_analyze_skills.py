@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from hephaestus.validation.repo_analyze_skills import main
@@ -95,3 +96,47 @@ def test_rendered_skill_md_files_use_lf_line_endings() -> None:
     for name in EXPECTED_VARIANTS:
         raw = (SKILLS_DIR / name / "SKILL.md").read_bytes()
         assert b"\r\n" not in raw, f"{name}: CRLF detected"
+
+
+def test_json_flag_emits_valid_json_on_clean_tree(capsys) -> None:
+    """--json on a clean tree emits a parseable ok envelope to stdout, exit 0."""
+    assert main(["--check", "--json"]) == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert payload["status"] == "ok"
+    assert payload["exit_code"] == 0
+    assert payload["drift"] == []
+
+
+def test_json_flag_emits_drift_envelope_on_tampering(capsys) -> None:
+    """--json surfaces drift as a JSON list with exit_code 1, not silent text."""
+    partial = SKILLS_DIR / "_repo_analyze_common" / "principles.md"
+    backup = partial.read_text()
+    try:
+        partial.write_text(backup + "<!-- tamper -->\n")
+        assert main(["--check", "--json"]) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert payload["exit_code"] == 1
+        assert payload["drift"]  # non-empty list of drifted variant names
+        assert set(payload["drift"]).issubset(EXPECTED_VARIANTS)
+    finally:
+        partial.write_text(backup)
+
+
+def test_json_flag_with_write_emits_ok_envelope(capsys) -> None:
+    """--json --write reports success as JSON instead of being ignored."""
+    snapshots: dict[str, bytes] = {}
+    for name in EXPECTED_VARIANTS:
+        skill_md = SKILLS_DIR / name / "SKILL.md"
+        if skill_md.exists():
+            snapshots[name] = skill_md.read_bytes()
+    try:
+        assert main(["--write", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "ok"
+        assert payload["exit_code"] == 0
+        assert payload["drift"] == []
+    finally:
+        for name, content in snapshots.items():
+            (SKILLS_DIR / name / "SKILL.md").write_bytes(content)

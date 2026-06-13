@@ -16,7 +16,7 @@ from string import Template
 
 import yaml
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMMON_DIR = REPO_ROOT / "skills" / "_repo_analyze_common"
@@ -165,14 +165,24 @@ def main(argv: list[str] | None = None) -> int:
             current = target.read_text(encoding="utf-8") if target.exists() else ""
             if current != rendered:
                 drift.append(variant["name"])
-    if drift and not args.write:
-        print(f"Drift detected in: {', '.join(drift)}", file=sys.stderr)
-        print(
-            "Run: pixi run --environment default hephaestus-check-repo-analyze-skills --write",
-            file=sys.stderr,
+    has_drift = bool(drift) and not args.write
+    exit_code = 1 if has_drift else 0
+    remediation = "Run: pixi run --environment default hephaestus-check-repo-analyze-skills --write"
+
+    if args.json:
+        message = f"Drift detected in: {', '.join(drift)}" if has_drift else "No drift detected"
+        emit_json_status(
+            exit_code,
+            message=message,
+            drift=drift,
+            remediation=remediation if has_drift else None,
         )
-        return 1
-    return 0
+        return exit_code
+
+    if has_drift:
+        print(f"Drift detected in: {', '.join(drift)}", file=sys.stderr)
+        print(remediation, file=sys.stderr)
+    return exit_code
 
 
 if __name__ == "__main__":
