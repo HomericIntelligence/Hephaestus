@@ -90,6 +90,11 @@ protection and the `pr-policy` required-check gate
 - `.claude/settings.json` carries project-level plugin enablement.
 - `.claude-plugin/` ships the marketplace manifests (the project itself is a
   Claude Code plugin); see also [`docs/plugin-installation.md`](docs/plugin-installation.md).
+- **MCP** (Model Context Protocol): `.mcp.json` at the repo root is the
+  project-scoped, version-controlled MCP config. Its `mcpServers` map is empty
+  — ecosystem integration runs through plugin marketplaces (Mnemosyne), NATS
+  (`hephaestus/nats/`), and HTTP REST (Agamemnon/Hermes), none of which is MCP.
+  To add a server, edit `.mcp.json`; see [`docs/mcp.md`](docs/mcp.md).
 - The deferred follow-ups for cross-agent abstraction (a formal `AgentProtocol`)
   and for wiring `hephaestus.resilience` into the GitHub call path are tracked
   in issues #468 and #469.

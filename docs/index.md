@@ -45,6 +45,7 @@ See the [README](../README.md) for installation and development setup instructio
 
 - [Plugin Installation Guide](plugin-installation.md) — Install the Claude Code or Codex plugin and enable skills in your project
 - [Audit Reviewer](audit-reviewer.md) — `hephaestus-audit-prs`: coordinator-pattern auditor for ALL open PRs (issue #994)
+- [MCP Configuration](mcp.md) — Project-scoped `.mcp.json` and how to add a Model Context Protocol server
 
 ## Contributing
 
