@@ -678,7 +678,10 @@ class TestCapturePlannerLearnings:
         assert (state_dir / "planner-learn-123.log").read_text().startswith("FAILED:")
 
     def test_oswrite_failure_is_nonfatal(self, planner: Planner, tmp_path: Any) -> None:
-        """OSError in record write must not propagate — capture_planner_learnings still returns output."""
+        """OSError in record write must not propagate.
+
+        capture_planner_learnings still returns output.
+        """
         with (
             patch(
                 "hephaestus.automation.planner_review_loop.get_repo_root",
