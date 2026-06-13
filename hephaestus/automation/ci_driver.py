@@ -344,6 +344,16 @@ class CIDriver:
         for pr in raw_pulls:
             user = pr.get("user") or {}
             if viewer and user.get("login") != viewer:
+                if user.get("login") is None:
+                    logger.warning(
+                        "PR #%s has no user.login; skipping under author filter (#821)",
+                        pr.get("number"),
+                        extra={
+                            "missing_field": "user.login",
+                            "filter": "author",
+                            "pr_number": pr.get("number"),
+                        },
+                    )
                 continue  # #821: hide other-author PRs from the done-gate sweep
             labels = pr.get("labels") or []
             normalised.append(
@@ -490,6 +500,16 @@ class CIDriver:
             if user.get("type") != "Bot":
                 continue
             if viewer and user.get("login") != viewer:
+                if user.get("login") is None:
+                    logger.warning(
+                        "PR #%s has no user.login; skipping under author filter (#821)",
+                        pr.get("number"),
+                        extra={
+                            "missing_field": "user.login",
+                            "filter": "author",
+                            "pr_number": pr.get("number"),
+                        },
+                    )
                 continue  # #821: not viewer-owned and --all not set
             number = pr.get("number")
             if isinstance(number, int):

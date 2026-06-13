@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -48,6 +49,28 @@ def viewer_driver(driver: CIDriver) -> CIDriver:
 
 
 # Mixed-author /pulls payload — note `login` keys on every fixture PR.
+_MISSING_LOGIN_PULLS = [
+    {
+        "number": 200,
+        "user": {"type": "User", "login": None},
+        "auto_merge": None,
+        "title": "malformed-no-login",
+        "head": {"ref": "bx"},
+        "labels": [],
+    },
+]
+
+_MISSING_LOGIN_BOT_PULLS = [
+    {
+        "number": 201,
+        "user": {"type": "Bot", "login": None},
+        "auto_merge": None,
+        "title": "malformed-bot-no-login",
+        "head": {"ref": "by"},
+        "labels": [],
+    },
+]
+
 _MIXED_PULLS = [
     {
         "number": 100,
@@ -231,3 +254,84 @@ class TestAllFlagSkipsViewerResolution:
         ):
             remaining = driver._list_open_prs_remaining()
         assert sorted(pr["number"] for pr in remaining) == [100, 101, 102]
+
+
+class TestMissingUserLogin:
+    """PRs with user.login=None emit a warning instead of silently disappearing (#1152)."""
+
+    def test_list_open_prs_remaining_warns_on_missing_login(
+        self, viewer_driver: CIDriver, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with (
+            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch(
+                "hephaestus.automation.ci_driver._gh_call",
+                return_value=MagicMock(stdout=json.dumps(_MISSING_LOGIN_PULLS)),
+            ),
+            caplog.at_level(logging.WARNING, logger="hephaestus.automation.ci_driver"),
+        ):
+            result = viewer_driver._list_open_prs_remaining()
+
+        assert result == []
+        assert any(
+            "PR #200 has no user.login" in record.message and record.levelname == "WARNING"
+            for record in caplog.records
+        )
+
+    def test_discover_bot_prs_warns_on_missing_login(
+        self, viewer_driver: CIDriver, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with (
+            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch(
+                "hephaestus.automation.ci_driver._gh_call",
+                return_value=MagicMock(stdout=json.dumps(_MISSING_LOGIN_BOT_PULLS)),
+            ),
+            caplog.at_level(logging.WARNING, logger="hephaestus.automation.ci_driver"),
+        ):
+            result = viewer_driver._discover_bot_prs()
+
+        assert result == {}
+        assert any(
+            "PR #201 has no user.login" in record.message and record.levelname == "WARNING"
+            for record in caplog.records
+        )
+
+    def test_list_open_prs_remaining_no_warning_under_all(
+        self, driver: CIDriver, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Warning must NOT fire when --all is set (viewer filter bypassed entirely)."""
+        driver.options.include_all_authors = True
+        with (
+            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch(
+                "hephaestus.automation.ci_driver._gh_call",
+                return_value=MagicMock(stdout=json.dumps(_MISSING_LOGIN_PULLS)),
+            ),
+            caplog.at_level(logging.WARNING, logger="hephaestus.automation.ci_driver"),
+        ):
+            result = driver._list_open_prs_remaining()
+
+        assert any(r["number"] == 200 for r in result), "PR must appear in results under --all"
+        assert not any("has no user.login" in record.message for record in caplog.records), (
+            "Warning must not fire when viewer filter is bypassed"
+        )
+
+    def test_discover_bot_prs_no_warning_under_all(
+        self, driver: CIDriver, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Warning must NOT fire when --all is set (viewer filter bypassed entirely)."""
+        driver.options.include_all_authors = True
+        with (
+            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch(
+                "hephaestus.automation.ci_driver._gh_call",
+                return_value=MagicMock(stdout=json.dumps(_MISSING_LOGIN_BOT_PULLS)),
+            ),
+            caplog.at_level(logging.WARNING, logger="hephaestus.automation.ci_driver"),
+        ):
+            driver._discover_bot_prs()
+
+        assert not any("has no user.login" in record.message for record in caplog.records), (
+            "Warning must not fire when viewer filter is bypassed"
+        )
