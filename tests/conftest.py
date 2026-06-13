@@ -7,6 +7,36 @@ import pytest
 import yaml
 
 
+@pytest.fixture(autouse=True)
+def _agents_authenticated_by_default(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stub the agent install+auth pre-flight (#1175) to pass by default.
+
+    ``resolve_agent`` now refuses a ``--agent claude|codex`` selection unless the
+    CLI is installed AND reports authenticated (#1175) — a real guard so an
+    unauthenticated backend cannot silently produce empty output. But neither CLI
+    is installed in CI, so every test that dispatches a named agent through
+    automation, fleet-sync, tidy, etc. (mocking the actual run_* call) would
+    otherwise hit ``RuntimeError: Agent '...' is not installed``. Default the
+    pre-flight to "authenticated" suite-wide so those mocked-dispatch tests pass.
+
+    EXCEPTION: ``tests/unit/agents/test_runtime.py`` tests the pre-flight machinery
+    itself (``resolve_agent``/``is_agent_authenticated``), driving the real
+    install+auth detection via patched ``shutil.which``/``subprocess.run``. Stubbing
+    ``is_agent_authenticated`` there would short-circuit the very logic under test,
+    so skip the stub for that module — it owns the real behaviour. Other tests that
+    need the unauthenticated path can likewise override this with their own
+    monkeypatch (last-writer-wins).
+    """
+    if request.module.__name__.endswith("agents.test_runtime"):
+        return
+    monkeypatch.setattr(
+        "hephaestus.agents.runtime.is_agent_authenticated",
+        lambda _agent: True,
+    )
+
+
 @pytest.fixture
 def tmp_config_yaml(tmp_path):
     """Create a temporary YAML config file."""

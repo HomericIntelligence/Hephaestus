@@ -74,6 +74,9 @@ def test_run_agent_dispatches_codex_and_logs_session(
         return AgentRunResult(stdout="codex output", stderr="", session_id="session-123")
 
     monkeypatch.setattr(agent_stage, "run_codex_session", fake_run_codex_session)
+    # resolve_agent now pre-flights install+auth (#1175); codex is not on PATH in
+    # CI, so stub the resolution like the other codex stage tests below.
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "codex")
 
     args = _args(tmp_path, agent="codex")
     rc = agent_stage.run_agent(args)

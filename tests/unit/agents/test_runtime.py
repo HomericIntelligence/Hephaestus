@@ -327,9 +327,35 @@ def test_resolve_agent_uses_codex_when_only_codex_is_authenticated() -> None:
 
 
 def test_resolve_agent_explicit_codex_overrides_claude() -> None:
-    """An explicit --agent value wins over auto-detection."""
-    with patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/claude"):
-        assert agent_runtime.resolve_agent("codex") == "codex"
+    """An explicit --agent value wins over auto-detection when authenticated."""
+    with patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/codex"):
+        with patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                ["codex", "login", "status"], 0, stdout="Logged in", stderr=""
+            ),
+        ):
+            assert agent_runtime.resolve_agent("codex") == "codex"
+
+
+def test_resolve_agent_explicit_rejects_uninstalled_agent() -> None:
+    """An explicit --agent for a CLI not on PATH should fail immediately."""
+    with patch("hephaestus.agents.runtime.shutil.which", return_value=None):
+        with pytest.raises(RuntimeError, match="not installed on PATH"):
+            agent_runtime.resolve_agent("codex")
+
+
+def test_resolve_agent_explicit_rejects_unauthenticated_agent() -> None:
+    """An explicit --agent for an installed but unauthenticated CLI should fail."""
+    with patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/codex"):
+        with patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                ["codex", "login", "status"], 1, stdout="", stderr="Not logged in"
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="not authenticated"):
+                agent_runtime.resolve_agent("codex")
 
 
 def test_resolve_agent_errors_when_no_provider_exists() -> None:

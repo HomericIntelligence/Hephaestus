@@ -74,10 +74,27 @@ def resolve_agent(agent: str | None) -> AgentName:
     When the operator omits ``--agent``, choose an installed provider that also
     reports authenticated status. Claude still wins ties when both providers are
     authenticated.
+
+    When the operator explicitly passes ``--agent``, the selected provider must
+    still be installed and authenticated — an unauthenticated backend would
+    silently produce empty output, causing every automation phase to report
+    success while doing no work.
     """
     if agent is not None:
         if agent not in AGENT_CHOICES:
             raise ValueError(f"Unsupported agent: {agent}")
+        if not is_agent_authenticated(agent):
+            if shutil.which(agent) is None:
+                raise RuntimeError(
+                    f"Agent '{agent}' is not installed on PATH. "
+                    f"Install the '{agent}' CLI and try again, "
+                    f"or omit --agent to auto-detect an authenticated backend."
+                )
+            raise RuntimeError(
+                f"Agent '{agent}' is installed but not authenticated. "
+                f"Run `{agent} auth status` (or `{agent} login status`) "
+                f"and log in before running automation."
+            )
         return agent
 
     installed_agents = tuple(agent_name for agent_name in AGENT_CHOICES if shutil.which(agent_name))
