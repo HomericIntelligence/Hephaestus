@@ -44,6 +44,32 @@ class TestDatasetDownloader:
         d = DatasetDownloader("http://example.com", user_agent="TestAgent/1.0")
         assert d.user_agent == "TestAgent/1.0"
 
+    @pytest.mark.parametrize(
+        "bad_url",
+        [
+            "file:///etc/passwd",
+            "ftp://example.com/data",
+            "gopher://example.com",
+            "data:text/plain;base64,AA==",
+            "/etc/passwd",  # no scheme at all
+        ],
+    )
+    def test_init_rejects_non_http_scheme(self, bad_url: str) -> None:
+        """Constructing with a non-http(s) base URL raises ValueError."""
+        with pytest.raises(ValueError, match="non-HTTP"):
+            DatasetDownloader(bad_url)
+
+    def test_download_rejects_non_http_scheme_after_reassignment(self, tmp_path: Path) -> None:
+        """A base_url reassigned to file:// is rejected before urlopen.
+
+        Guards the EMNIST mirror-fallback path, which mutates ``base_url``
+        after construction and would otherwise bypass the constructor check.
+        """
+        downloader = DatasetDownloader("https://example.com")
+        downloader.base_url = "file:///etc"
+        with pytest.raises(ValueError, match="non-HTTP"):
+            downloader.download_with_retry("passwd", tmp_path / "out")
+
     def test_decompress_gz(self, tmp_path: Path) -> None:
         """decompress_gz unpacks a valid gzip file."""
         content = b"hello compressed world"
