@@ -94,6 +94,35 @@ def extract_pixi_workspace_version(content: str) -> str | None:
     return match.group(1) if match else None
 
 
+def extract_pixi_python_ceiling(content: str) -> str | None:
+    """Extract the upper-bound minor from pixi.toml ``[dependencies] python``.
+
+    Parses e.g. ``python = ">=3.10,<3.14"`` and returns the exclusive (``<``)
+    or inclusive (``<=``) upper bound ``"3.14"``. Returns ``None`` if there is
+    no ``python`` key in the base ``[dependencies]`` table, or it carries no
+    ``<``/``<=`` bound.
+
+    The regex is bounded to the base ``[dependencies]`` table (it does not
+    cross into the next ``[`` section header), so a ``python`` pin in a
+    ``[feature.*.dependencies]`` table is intentionally not matched.
+
+    Args:
+        content: The raw text content of a pixi.toml file.
+
+    Returns:
+        The upper-bound ``"major.minor"`` string, or ``None``.
+
+    """
+    match = re.search(
+        r'\[dependencies\]\n(?:(?!\[).+\n)*?python\s*=\s*"([^"]+)"',
+        content,
+    )
+    if not match:
+        return None
+    bound = re.search(r"<=?\s*(\d+\.\d+)", match.group(1))
+    return bound.group(1) if bound else None
+
+
 def extract_classifiers_python_versions(content: str) -> list[str]:
     """Extract Python version strings from pyproject.toml classifiers.
 
@@ -188,6 +217,61 @@ def check_ci_matrix_coverage(repo_root: Path) -> bool:
     return False
 
 
+def check_pixi_python_ceiling(repo_root: Path) -> bool:
+    """Ensure pixi.toml's python upper bound stays within the support matrix.
+
+    The locked dev/lint envs must not resolve above the highest classifier
+    Python version (the support ceiling). An unbounded or too-high pin lets
+    pixi resolve to an untested interpreter — e.g. Python 3.14 free-threaded
+    (cp314t), which is neither in the declared support matrix nor CI-tested
+    (see issue #1184). The accepted upper bound is at most one minor above the
+    highest classifier version (``<3.14`` for a 3.13 ceiling).
+
+    Args:
+        repo_root: Repository root directory.
+
+    Returns:
+        True if the pixi python ceiling is present and within one minor of the
+        highest classifier version (or there is nothing to compare), False if
+        the pin is unbounded or its ceiling exceeds the allowed maximum.
+
+    """
+    from packaging.version import Version
+
+    pyproject_path = repo_root / "pyproject.toml"
+    pixi_path = repo_root / "pixi.toml"
+    if not pyproject_path.exists() or not pixi_path.exists():
+        return True  # nothing to compare
+
+    classifiers = extract_classifiers_python_versions(pyproject_path.read_text())
+    if not classifiers:
+        return True  # no support ceiling declared — nothing to enforce
+
+    highest_supported = max(Version(v) for v in classifiers)
+    # Exclusive cap must be at most one minor above the highest classifier.
+    max_allowed = Version(f"{highest_supported.major}.{highest_supported.minor + 1}")
+
+    ceiling = extract_pixi_python_ceiling(pixi_path.read_text())
+    if ceiling is None:
+        print(
+            "ERROR: pixi.toml [dependencies] python has no upper bound — "
+            "the env may resolve to an untested interpreter (see #1184).\n"
+            f'  Add an upper bound, e.g. python = ">={classifiers[0]},<{max_allowed}".'
+        )
+        return False
+
+    if Version(ceiling) > max_allowed:
+        print(
+            "ERROR: pixi.toml python upper bound is too high!\n"
+            f"  pixi cap: <{ceiling}; highest classifier: {highest_supported}; "
+            f"max allowed cap: <{max_allowed} (one minor above support ceiling)."
+        )
+        return False
+
+    print(f"OK: pixi.toml python ceiling <{ceiling} is within support matrix (<= {max_allowed})")
+    return True
+
+
 def check_project_version_consistency(repo_root: Path) -> bool:
     """Check that pyproject.toml and pixi.toml project versions agree (if both present).
 
@@ -269,8 +353,9 @@ def main() -> int:
 
     project_version_ok = check_project_version_consistency(repo_root)
     ci_matrix_ok = check_ci_matrix_coverage(repo_root)
+    pixi_ceiling_ok = check_pixi_python_ceiling(repo_root)
 
-    if python_ok and project_version_ok and ci_matrix_ok:
+    if python_ok and project_version_ok and ci_matrix_ok and pixi_ceiling_ok:
         return 0
     return 1
 

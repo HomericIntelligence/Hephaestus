@@ -36,7 +36,10 @@ docs = "pdoc hephaestus --output-dir docs/api"
 dev-install = "pip install -e . --no-deps"
 
 [dependencies]
-python = ">=3.10"
+# Upper bound caps the dev/lint envs at the CI-tested 3.13 line and excludes the
+# experimental 3.14 free-threaded build (cp314t), which is outside the support
+# matrix and not CI-tested. See issue #1184.
+python = ">=3.10,<3.14"
 pip = "*"
 pydantic = ">=2.12.5,<3"
 pygments = ">=2.20.0"  # CVE-2026-4539

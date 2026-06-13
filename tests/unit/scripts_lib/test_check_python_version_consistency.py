@@ -10,8 +10,10 @@ import pytest
 
 from hephaestus.scripts_lib.check_python_version_consistency import (
     check_ci_matrix_coverage,
+    check_pixi_python_ceiling,
     extract_ci_matrix_python_versions,
     extract_classifiers_python_versions,
+    extract_pixi_python_ceiling,
     extract_pixi_workspace_version,
     extract_project_version,
     extract_pyproject_versions,
@@ -284,6 +286,107 @@ class TestCheckCiMatrixCoverage:
         workflow_dir.mkdir(parents=True)
         (workflow_dir / "test.yml").write_text('python-version: ["3.10", "3.11", "3.12"]\n')
         assert check_ci_matrix_coverage(tmp_path) is True
+
+
+# ---------------------------------------------------------------------------
+# extract_pixi_python_ceiling
+# ---------------------------------------------------------------------------
+class TestExtractPixiPythonCeiling:
+    """Tests for extract_pixi_python_ceiling()."""
+
+    @pytest.mark.parametrize(
+        ("toml_content", "expected"),
+        [
+            pytest.param(
+                '[dependencies]\npython = ">=3.10,<3.14"\npip = "*"\n',
+                "3.14",
+                id="bounded_exclusive",
+            ),
+            pytest.param(
+                '[dependencies]\npython = ">=3.10,<=3.13"\n',
+                "3.13",
+                id="bounded_inclusive",
+            ),
+            pytest.param(
+                '[dependencies]\nname = "x"\npython = ">=3.11,<3.15"\n',
+                "3.15",
+                id="bound_after_other_key",
+            ),
+        ],
+    )
+    def test_extracts_ceiling(self, toml_content: str, expected: str) -> None:
+        assert extract_pixi_python_ceiling(toml_content) == expected
+
+    @pytest.mark.parametrize(
+        ("toml_content",),
+        [
+            pytest.param('[dependencies]\npython = ">=3.10"\n', id="unbounded"),
+            pytest.param('[dependencies]\npip = "*"\n', id="no_python_key"),
+            pytest.param("", id="empty_content"),
+            pytest.param(
+                '[feature.lint.dependencies]\npython = ">=3.10,<3.14"\n',
+                id="python_only_in_other_section",
+            ),
+        ],
+    )
+    def test_returns_none(self, toml_content: str) -> None:
+        assert extract_pixi_python_ceiling(toml_content) is None
+
+
+# ---------------------------------------------------------------------------
+# check_pixi_python_ceiling
+# ---------------------------------------------------------------------------
+class TestCheckPixiPythonCeiling:
+    """Tests for check_pixi_python_ceiling()."""
+
+    _CLASSIFIERS_313 = (
+        "classifiers = [\n"
+        '    "Programming Language :: Python :: 3.10",\n'
+        '    "Programming Language :: Python :: 3.13",\n'
+        "]\n"
+    )
+
+    def _write(self, tmp_path: Path, pyproject: str, pixi: str) -> None:
+        (tmp_path / "pyproject.toml").write_text(pyproject)
+        (tmp_path / "pixi.toml").write_text(pixi)
+
+    def test_rejects_unbounded(self, tmp_path: Path) -> None:
+        """An unbounded python pin fails — env may resolve to an untested interpreter."""
+        self._write(tmp_path, self._CLASSIFIERS_313, '[dependencies]\npython = ">=3.10"\n')
+        assert check_pixi_python_ceiling(tmp_path) is False
+
+    def test_accepts_next_minor(self, tmp_path: Path) -> None:
+        """A cap one minor above the highest classifier (<3.14 for 3.13) is accepted."""
+        self._write(tmp_path, self._CLASSIFIERS_313, '[dependencies]\npython = ">=3.10,<3.14"\n')
+        assert check_pixi_python_ceiling(tmp_path) is True
+
+    def test_rejects_too_high(self, tmp_path: Path) -> None:
+        """A cap more than one minor above the highest classifier fails."""
+        self._write(tmp_path, self._CLASSIFIERS_313, '[dependencies]\npython = ">=3.10,<3.16"\n')
+        assert check_pixi_python_ceiling(tmp_path) is False
+
+    def test_normalizes_with_version_not_string(self, tmp_path: Path) -> None:
+        """The cap is compared via packaging.Version, not string equality.
+
+        ``<3.14`` exactly equals the allowed cap ``3.14`` for classifier 3.13;
+        a naive string compare of ``"3.14"`` vs a computed ``"3.14"`` would
+        accidentally pass, but the boundary (equal, not greater) must hold.
+        """
+        self._write(tmp_path, self._CLASSIFIERS_313, '[dependencies]\npython = ">=3.10,<3.14"\n')
+        # Equal-to-max-allowed is accepted (not a strict-greater rejection).
+        assert check_pixi_python_ceiling(tmp_path) is True
+
+    def test_returns_true_when_no_pyproject(self, tmp_path: Path) -> None:
+        (tmp_path / "pixi.toml").write_text('[dependencies]\npython = ">=3.10"\n')
+        assert check_pixi_python_ceiling(tmp_path) is True
+
+    def test_returns_true_when_no_pixi(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text(self._CLASSIFIERS_313)
+        assert check_pixi_python_ceiling(tmp_path) is True
+
+    def test_returns_true_when_no_classifiers(self, tmp_path: Path) -> None:
+        self._write(tmp_path, '[project]\nname = "x"\n', '[dependencies]\npython = ">=3.10"\n')
+        assert check_pixi_python_ceiling(tmp_path) is True
 
 
 # ---------------------------------------------------------------------------
