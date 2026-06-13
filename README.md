@@ -312,7 +312,7 @@ config = merge_with_env({}, convert_bools=True)
 <!-- CLI table generated from pyproject.toml [project.scripts]. Keep in sync via
      `python3 scripts/check_cli_table_sync.py` (also enforced in pre-commit). -->
 
-47 console scripts are installed when you install the package.  Run any command
+48 console scripts are installed when you install the package.  Run any command
 with `--help` to see full usage.
 
 ### Automation
@@ -363,6 +363,7 @@ sync (#993).
 |---|---|
 | `hephaestus-fleet-sync` | Sync all PRs across the HomericIntelligence fleet |
 | `hephaestus-github-stats` | GitHub contribution statistics via the `gh` CLI |
+| `hephaestus-label-severity` | Reconcile the `severity:*` label for a GitHub issue from its issue-form Severity answer |
 | `hephaestus-merge-prs` | Merge open PRs with successful CI/CD using GitHub API |
 | `hephaestus-tidy` | Single-repo gh-tidy wrapper with Myrmidon swarm for conflict resolution |
 

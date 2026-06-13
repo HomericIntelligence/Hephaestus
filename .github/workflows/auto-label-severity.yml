@@ -1,0 +1,37 @@
+name: Auto-label severity
+
+# Reconciles the severity:* label from the issue forms' "Severity" answer so the
+# field feeds the documented planning/triage pipeline (#1210). Parsing lives in
+# the unit-tested hephaestus.github.severity_label module; this workflow only
+# binds inputs as env vars (the body is NEVER interpolated into the shell) and
+# invokes it.
+
+on:
+  issues:
+    types: [opened, edited]
+
+# Least-privilege: read repo contents (for checkout), write only to issues for
+# the label-reconcile call.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  label-severity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          environments: default
+      - name: Reconcile severity label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # Server-supplied integer — safe to bind.
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          # Bound as env (NOT interpolated into the shell step) — the body is
+          # only read inside Python via os.environ, matched against fixed strings.
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: pixi run python -m hephaestus.github.severity_label

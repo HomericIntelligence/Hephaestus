@@ -42,3 +42,37 @@ body:
         - hephaestus: 0.3.0
     validations:
       required: false
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: >
+        How impactful is this? Selecting a value auto-applies the matching
+        `severity:*` label via the auto-label-severity workflow, feeding the
+        Epic-and-children planning pipeline (see docs/ROADMAP.md). Audit-section
+        tagging is handled by maintainers, not this form.
+      options:
+        - critical
+        - major
+        - minor
+        - nitpick
+    validations:
+      required: false
+  - type: input
+    id: parent_epic
+    attributes:
+      label: Parent Epic (optional)
+      description: >
+        If this is a child of a tracked Epic (label `epic`), reference it as
+        `#NNN`. Reference only — triage links it; not auto-consumed. Leave
+        blank if unknown.
+      placeholder: "#310"
+    validations:
+      required: false
+  - type: markdown
+    attributes:
+      value: >
+        ℹ️ On submit this issue is automatically labeled `state:needs-plan` (see
+        [auto-label-needs-plan](https://github.com/mvillmow/ProjectHephaestus/blob/main/docs/auto-label-needs-plan.md));
+        the planning pipeline picks it up next loop. You need not set any
+        `state:*` label yourself.

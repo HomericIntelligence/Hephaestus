@@ -31,6 +31,32 @@ jobs:
     uses: HomericIntelligence/ProjectHephaestus/.github/workflows/auto-label-needs-plan.yml@main
 ```
 
+## Issue intake (forms → labels)
+
+The issue forms
+([`feature_request.yml`](../.github/ISSUE_TEMPLATE/feature_request.yml),
+[`bug_report.yml`](../.github/ISSUE_TEMPLATE/bug_report.yml)) feed the pipeline:
+
+- **Severity** — a constrained dropdown (`critical` / `major` / `minor` /
+  `nitpick`). On issue open/edit,
+  [`auto-label-severity.yml`](../.github/workflows/auto-label-severity.yml) runs
+  `hephaestus.github.severity_label`, which parses the rendered answer and
+  **reconciles** the issue's `severity:*` label (removing any stale one). Only
+  the server-controlled issue number and a fixed label string reach the API.
+- **Parent Epic** — an optional `#NNN` reference for the Epic-and-children
+  pattern (`epic` label, see [ROADMAP.md](ROADMAP.md)). **Reference only:**
+  triage links it; it is not auto-consumed (free-text parsing into pipeline
+  state is deliberately avoided).
+- **Audit-section** is intentionally **not** a form field. ProjectHephaestus has
+  no per-audit-section label vocabulary (only `audit-finding`), so maintainers
+  tag audit section during triage rather than via the form — avoiding an inert
+  field with no consumer.
+
+State is **not** a form field: `state:needs-plan` is applied automatically on
+open/reopen (above). Keeping state automation-driven — not a free-text form
+field — is deliberate; a free-text state field drifts off-format and
+mis-routes issues.
+
 ## Rollout
 
 Run [`hephaestus-ensure-state-labels --org HomericIntelligence`](../hephaestus/automation/ensure_state_labels.py)

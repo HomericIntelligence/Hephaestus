@@ -1,0 +1,85 @@
+"""Validate issue forms + severity tagger wiring feed the pipeline (#1210)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import yaml
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+TEMPLATE_DIR = REPO_ROOT / ".github" / "ISSUE_TEMPLATE"
+SEVERITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "auto-label-severity.yml"
+FORMS = ["feature_request.yml", "bug_report.yml"]
+
+SEVERITY_OPTIONS = ["critical", "major", "minor", "nitpick"]
+PROVISIONED_DEFAULT_LABELS = {"enhancement", "bug"}
+
+
+def _load(form: str) -> dict:
+    return yaml.safe_load((TEMPLATE_DIR / form).read_text(encoding="utf-8"))
+
+
+def _field(data: dict, field_id: str) -> dict:
+    for item in data["body"]:
+        if item.get("id") == field_id:
+            return item
+    raise AssertionError(f"missing field id={field_id!r}")
+
+
+def test_forms_are_valid_yaml_with_body() -> None:
+    """Both issue forms parse as YAML with a list-valued ``body``."""
+    for form in FORMS:
+        assert isinstance(_load(form).get("body"), list)
+
+
+def test_severity_dropdown_schema_valid_no_default() -> None:
+    """Severity is an optional dropdown with all four options and no brittle default."""
+    for form in FORMS:
+        sev = _field(_load(form), "severity")
+        assert sev["type"] == "dropdown"
+        opts = sev["attributes"]["options"]
+        assert opts and all(o in opts for o in SEVERITY_OPTIONS)
+        assert "default" not in sev["attributes"]
+        assert sev.get("validations", {}).get("required", False) is False
+
+
+def test_parent_epic_is_optional_input() -> None:
+    """Parent Epic is an optional free-text ``input`` (reference only)."""
+    for form in FORMS:
+        p = _field(_load(form), "parent_epic")
+        assert p["type"] == "input"
+        assert p.get("validations", {}).get("required", False) is False
+
+
+def test_forms_seed_only_existing_labels() -> None:
+    """Forms seed only provisioned default labels (no phantom labels)."""
+    for form in FORMS:
+        for lbl in _load(form).get("labels", []):
+            assert lbl in PROVISIONED_DEFAULT_LABELS, f"{form} seeds unknown {lbl!r}"
+
+
+def test_forms_document_auto_state_label() -> None:
+    """A markdown block documents the automatic ``state:needs-plan`` labelling."""
+    for form in FORMS:
+        md = " ".join(
+            i["attributes"]["value"] for i in _load(form)["body"] if i.get("type") == "markdown"
+        )
+        assert "state:needs-plan" in md
+
+
+def test_severity_workflow_injection_safe() -> None:
+    """The body is bound as env and never interpolated into any shell step."""
+    text = SEVERITY_WORKFLOW.read_text(encoding="utf-8")
+    wf = yaml.safe_load(text)
+    assert wf["permissions"]["issues"] == "write"
+    # Body bound as env, never interpolated into any shell step. Inspect the
+    # parsed run: commands directly (not a naive string split) so a comment
+    # mentioning the body cannot mask a real interpolation.
+    assert "ISSUE_BODY: ${{ github.event.issue.body }}" in text
+    run_commands = [
+        step["run"] for job in wf["jobs"].values() for step in job["steps"] if "run" in step
+    ]
+    assert run_commands, "workflow has no run: steps to check"
+    for command in run_commands:
+        assert "${{ github.event.issue.body }}" not in command
+        assert "${{ github.event.issue.number }}" not in command

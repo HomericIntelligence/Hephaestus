@@ -81,7 +81,7 @@ may change incompatibly in a minor release.
 
 ## Console-Script Stability Tiers
 
-ProjectHephaestus installs 47 console scripts via `[project.scripts]` in
+ProjectHephaestus installs 48 console scripts via `[project.scripts]` in
 `pyproject.toml`. Each is classified into one of three tiers:
 
 - **Stable** — covered by the [deprecation policy](#deprecation-policy). CLI
@@ -118,6 +118,7 @@ bypass a misfiring hook locally use
 | `hephaestus-merge-prs` | Provisional | Wrapper around `gh pr merge` |
 | `hephaestus-fleet-sync` | Provisional | Fleet-wide repo sync helper |
 | `hephaestus-tidy` | Provisional | Local-branch rebase + cleanup helper |
+| `hephaestus-label-severity` | Provisional | Reconciles `severity:*` label from issue-form Severity answer |
 | `hephaestus-system-info` | Provisional | Dispatches to Stable `hephaestus.system` but CLI flags still evolving |
 | `hephaestus-download-dataset` | Provisional | Dataset URL/layout not contracted |
 | `hephaestus-check-python-version` | Internal | Repo CI pre-commit hook |
