@@ -70,15 +70,18 @@ class TestRun:
 class TestGetRepoRoot:
     """Tests for get_repo_root function."""
 
-    @patch("hephaestus.automation.git_utils._get_repo_root")
-    def test_successful_detection(self, mock_get_root: Any) -> None:
-        """Test successful repository root detection."""
-        mock_get_root.return_value = Path("/home/user/repo")
+    @patch("hephaestus.utils.helpers.Path.cwd")
+    def test_successful_detection(self, mock_cwd: Any, tmp_path: Any) -> None:
+        """Test successful repository root detection via the canonical resolver."""
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        sub = repo / "src" / "pkg"
+        sub.mkdir(parents=True)
+        mock_cwd.return_value = sub
 
         root = get_repo_root()
 
-        assert root == Path("/home/user/repo")
-        mock_get_root.assert_called_once()
+        assert root == repo
 
     def test_returns_path(self, tmp_path: Any) -> None:
         """Test that get_repo_root returns a Path object."""

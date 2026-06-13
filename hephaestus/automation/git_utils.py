@@ -11,7 +11,13 @@ import logging
 import subprocess
 from pathlib import Path
 
-from hephaestus.utils.helpers import get_repo_root as _get_repo_root
+# ``get_repo_root`` is re-exported (not redefined) so that the single canonical
+# implementation in ``hephaestus.utils.helpers`` is used everywhere, while
+# ``hephaestus.automation.git_utils.get_repo_root`` remains a stable, patchable
+# import path for the automation package and its tests. The ``X as X`` form
+# marks it an explicit re-export so mypy does not flag ``attr-defined`` at the
+# 13 import sites under --no-implicit-reexport.
+from hephaestus.utils.helpers import get_repo_root as get_repo_root
 from hephaestus.utils.helpers import run_subprocess
 from hephaestus.utils.retry import retry_with_backoff
 
@@ -57,22 +63,6 @@ def run(
         log_on_error=log_errors,
         env=env,
     )
-
-
-def get_repo_root(path: Path | None = None) -> Path:
-    """Find the git repository root directory.
-
-    Args:
-        path: Starting path for search (defaults to cwd)
-
-    Returns:
-        Path to repository root
-
-    Raises:
-        RuntimeError: If not in a git repository
-
-    """
-    return _get_repo_root(path)
 
 
 _repo_info_cache: dict[Path | None, tuple[str, str]] = {}

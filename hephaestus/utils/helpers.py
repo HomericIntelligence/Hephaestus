@@ -97,25 +97,33 @@ def flatten_dict(d: dict[str, Any], parent_key: str = "", sep: str = ".") -> dic
 
 
 def get_repo_root(start_path: str | Path | None = None) -> Path:
-    """Find repository root by looking for .git directory.
+    """Find repository root by walking up to a ``.git`` or ``pyproject.toml`` marker.
+
+    This is the single canonical repository-root resolver for the codebase. It
+    accepts an optional starting path so callers anchored to a file (e.g.
+    ``Path(__file__)``) and callers relying on the current working directory can
+    share one implementation. A directory is treated as the repository root if it
+    contains either a ``.git`` entry (git checkout) or a ``pyproject.toml`` file
+    (project marker), covering both git-based and packaging-based callers.
 
     Args:
         start_path: Starting path to search from. Defaults to current directory.
 
     Returns:
-        Path to repository root if found, otherwise the original start_path as fallback.
+        Path to repository root if found, otherwise the resolved start path as a
+        fallback.
 
     """
     start_path = Path.cwd() if start_path is None else Path(start_path).resolve()
 
     path = start_path
     while path != path.parent:  # Stop at filesystem root
-        if (path / ".git").exists():
+        if (path / ".git").exists() or (path / "pyproject.toml").exists():
             return path
         path = path.parent
 
-    # If we get here, we didn't find a .git directory
-    # Return the original start path as fallback
+    # No marker found anywhere on the path to the filesystem root; fall back to
+    # the original start path.
     return start_path
 
 

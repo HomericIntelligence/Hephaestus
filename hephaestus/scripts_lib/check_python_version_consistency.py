@@ -12,15 +12,17 @@ import re
 import sys
 from pathlib import Path
 
+from hephaestus.utils.helpers import get_repo_root as _get_repo_root
+
 
 def get_repo_root() -> Path:
-    """Find repository root by looking for pyproject.toml."""
-    path = Path(__file__).resolve().parent.parent.parent
-    while path != path.parent:
-        if (path / "pyproject.toml").exists():
-            return path
-        path = path.parent
-    return Path(__file__).resolve().parent.parent.parent
+    """Find repository root, anchored to this module's location.
+
+    Delegates to the canonical :func:`hephaestus.utils.helpers.get_repo_root`,
+    seeding the search from this file so resolution is independent of the
+    current working directory (this script may run from anywhere).
+    """
+    return _get_repo_root(Path(__file__).resolve().parent)
 
 
 def extract_pyproject_versions(content: str) -> dict[str, str]:
