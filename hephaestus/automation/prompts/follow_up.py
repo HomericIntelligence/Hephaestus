@@ -1,8 +1,12 @@
 """Follow-up prompt: identify in-scope follow-ups discovered during implementation."""
 
+from ._shared import _TERSE_OUTPUT_DIRECTIVE
+
 FOLLOW_UP_PROMPT = """
 Review your work on issue #{issue_number} and identify follow-up items
 **discovered during implementation** that fall within strict scope.
+
+{terse_output_directive}
 
 ## Scope (HARD GUARDRAIL)
 
@@ -108,4 +112,7 @@ def get_follow_up_prompt(issue_number: int) -> str:
         Formatted follow-up prompt
 
     """
-    return FOLLOW_UP_PROMPT.format(issue_number=issue_number)
+    return FOLLOW_UP_PROMPT.format(
+        issue_number=issue_number,
+        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
+    )

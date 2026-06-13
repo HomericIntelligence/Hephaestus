@@ -94,6 +94,7 @@ class PlannerClaudeRunner:
                 cwd=repo_root,
                 timeout=timeout,
                 system_prompt_file=self.options.system_prompt_file,
+                allowed_tools="Read,Glob,Grep,Bash",
                 extra_args=extra_args,
             )
             response = stdout.strip()

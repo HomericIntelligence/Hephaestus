@@ -25,6 +25,7 @@ importers continue to work unchanged.
 # previously did ``from hephaestus.automation.prompts import _fence_untrusted``
 # or ``prompts._STRICT_GRADING_AND_ANTI_INFLATION``. The ``as`` aliases tell
 # ruff these are intentional re-exports, not unused imports.
+from ._shared import _TERSE_OUTPUT_DIRECTIVE as _TERSE_OUTPUT_DIRECTIVE
 from ._shared import _UNTRUSTED_NOTICE as _UNTRUSTED_NOTICE
 from ._shared import _fence_untrusted as _fence_untrusted
 from ._shared import _iteration_guidance as _iteration_guidance

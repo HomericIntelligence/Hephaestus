@@ -7,6 +7,7 @@ review prompt, and the resume-after-NOGO feedback prompt.
 import secrets
 
 from ._shared import (
+    _TERSE_OUTPUT_DIRECTIVE,
     _UNTRUSTED_NOTICE,
     _fence_untrusted,
     _iteration_guidance,
@@ -49,6 +50,8 @@ Implement GitHub issue #{issue_number}.
 - Run `gh issue view {issue_number} --comments` to read the full plan and its
   plan review, plus any comments
 - Follow the project's Python conventions and type hint all function signatures
+
+{terse_output_directive}
 
 **Critical Requirements:**
 1. Read the issue description and any existing plan carefully
@@ -132,6 +135,8 @@ below. Judge the diff against the TASK and that approved PLAN. Post your
 concrete findings as inline PR review threads on the changed lines, then end
 with the single Grade/Verdict line defined at the bottom of this prompt.
 
+{terse_output_directive}
+
 {untrusted_notice}
 
 **Issue Title (untrusted):** {issue_title}
@@ -179,6 +184,8 @@ after the review loop terminates.
 
 When done, summarize what you changed in 3-5 bullet points so the next
 review can verify the fixes were applied.
+
+{terse_output_directive}
 """
 
 
@@ -243,6 +250,7 @@ def get_implementation_prompt(
         branch_name=branch_name,
         worktree_path=safe_worktree_path,
         untrusted_notice=_UNTRUSTED_NOTICE,
+        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )
 
 
@@ -287,6 +295,7 @@ def get_impl_loop_review_prompt(
         full_sweep_suffix=full_sweep_suffix,
         output_format=_STRICT_REVIEW_OUTPUT_FORMAT.strip(),
         untrusted_notice=_UNTRUSTED_NOTICE,
+        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )
 
 
@@ -354,4 +363,5 @@ def get_impl_resume_feedback_prompt(
         prev_iteration=prev_iteration,
         verdict=verdict,
         review_text=review_text,
+        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )

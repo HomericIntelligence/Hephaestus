@@ -1110,6 +1110,7 @@ class CIDriver:
                 cwd=self.repo_root,
                 timeout=advise_claude_timeout(),
                 output_format="text",
+                allowed_tools="Read,Glob,Grep,Bash",
             )
             return (stdout or "").strip()
 

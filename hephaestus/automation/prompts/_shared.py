@@ -97,3 +97,22 @@ def _prior_review_block(prior_review: str | None) -> str:
         "\n---\n\n**Prior review (from previous iteration) — verify these findings "
         f"have been addressed:**\n\n{prior_review}\n"
     )
+
+
+# Token-reduction directive (#1082). Composed into every agent prompt via
+# `.format(terse_output_directive=_TERSE_OUTPUT_DIRECTIVE)`. The GitHub-output
+# carve-out MUST stay the first line so brevity never truncates pr-policy
+# artifacts (see learn-agents-fabricate-closes-issue-numbers.md). The
+# no-early-exit clause is bounded to *transient* external state so agents do
+# NOT spin on permanent failures (auth, 4xx) — see
+# swarm-agents-quit-early-on-polling.md.
+_TERSE_OUTPUT_DIRECTIVE: str = """\
+GitHub-posted review bodies, PR descriptions, and issue comments retain full detail required by pr-policy and reviewers. The directives below apply to your reasoning, console output, and intermediate results — NOT to the final artifact posted to GitHub.
+
+## Output discipline (token budget)
+
+- Skip preamble, postamble, restating the task, narrating tool calls, or end-of-turn summaries.
+- Return verdicts as a single line: `Verdict: <result> | Reason: <one line>`.
+- Prefer bullet lists over prose; cite `file.py:line` instead of quoting blocks; reference issue/PR numbers, not their bodies.
+- Do NOT exit early while a *transient* external dependency is still in progress (CI runs queued/in_progress, auto-merge waiting on green). On permanent failures (4xx, auth errors, missing required reviews), return immediately with the failure reason.
+"""  # noqa: E501

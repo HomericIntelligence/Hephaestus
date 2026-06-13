@@ -6,7 +6,7 @@ plain PR description template.
 
 import secrets
 
-from ._shared import _UNTRUSTED_NOTICE, _fence_untrusted
+from ._shared import _TERSE_OUTPUT_DIRECTIVE, _UNTRUSTED_NOTICE, _fence_untrusted
 from ._strict_rubric import _PR_STRICT_RUBRIC
 
 PR_REVIEW_ANALYSIS_PROMPT = """
@@ -32,6 +32,8 @@ Analyze PR #{pr_number} linked to issue #{issue_number}.
 ---
 
 {strict_rubric}
+
+{terse_output_directive}
 
 ---
 
@@ -155,6 +157,7 @@ def get_pr_review_analysis_prompt(
         untrusted_notice=_UNTRUSTED_NOTICE,
         strict_rubric=_PR_STRICT_RUBRIC.strip(),
         nitpick_directive=nitpick_directive,
+        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )
 
 
@@ -165,6 +168,8 @@ You are VALIDATING whether prior review comments on PR #{pr_number}
 You are NOT performing a fresh review. Do not raise new concerns. Your ONLY
 job is, for each PRIOR review comment below, to decide whether the CURRENT
 diff actually resolves it.
+
+{terse_output_directive}
 
 {untrusted_notice}
 
@@ -261,10 +266,13 @@ def get_review_validation_prompt(
         prior_comments_block=_fence_untrusted("PRIOR_COMMENTS", prior_comments_json, nonce),
         diff_block=_fence_untrusted("DIFF", diff_text, nonce),
         untrusted_notice=_UNTRUSTED_NOTICE,
+        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )
 
 
 COMMENT_DIFFICULTY_PROMPT = """
+{terse_output_directive}
+
 You are CLASSIFYING the difficulty of unresolved PR review comments on issue
 #{issue_number}, so the right model tier can be assigned to fix each one.
 
@@ -327,6 +335,7 @@ def get_comment_difficulty_prompt(
         issue_number=issue_number,
         comments_block=_fence_untrusted("REVIEW_COMMENTS", comments_json, nonce),
         untrusted_notice=_UNTRUSTED_NOTICE,
+        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )
 
 

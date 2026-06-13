@@ -834,6 +834,7 @@ class ImplementationPhaseRunner:
                     cwd=worktree_path,
                     timeout=advise_claude_timeout(),
                     output_format="text",
+                    allowed_tools="Read,Glob,Grep,Bash",
                 )
             decision = _parse_dirty_reused_worktree_decision(output)
         except Exception as e:

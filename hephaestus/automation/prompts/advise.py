@@ -4,7 +4,7 @@ from collections.abc import Callable
 
 from hephaestus.agents.runtime import is_codex
 
-from ._shared import _relativize_path
+from ._shared import _TERSE_OUTPUT_DIRECTIVE, _relativize_path
 
 ADVISE_PROMPT = """
 Search the team knowledge base for relevant prior learnings before planning this issue.
@@ -14,6 +14,8 @@ Search the team knowledge base for relevant prior learnings before planning this
 {issue_body}
 
 ---
+
+{terse_output_directive}
 
 **Your task:**
 1. Read the skills marketplace: {marketplace_path}
@@ -59,6 +61,8 @@ Issue #{issue_number}: {issue_title}
 Body:
 {issue_body}
 
+{terse_output_directive}
+
 Return the advise findings only, in markdown. Do not implement or modify files.
 """
 
@@ -91,6 +95,7 @@ def get_advise_prompt(
         issue_title=issue_title,
         issue_body=issue_body,
         marketplace_path=safe_marketplace_path,
+        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )
 
 
@@ -113,6 +118,7 @@ def get_codex_advise_prompt(
         issue_number=issue_number,
         issue_title=issue_title,
         issue_body=issue_body,
+        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )
 
 

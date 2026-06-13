@@ -2,7 +2,7 @@
 
 import secrets
 
-from ._shared import _UNTRUSTED_NOTICE, _fence_untrusted
+from ._shared import _TERSE_OUTPUT_DIRECTIVE, _UNTRUSTED_NOTICE, _fence_untrusted
 
 ADDRESS_REVIEW_PROMPT = """
 You are the COORDINATOR for addressing the review threads on PR #{pr_number}
@@ -14,6 +14,8 @@ the current diff so the same implement session can re-review and converge.
 These threads live on the PR, not on the issue.
 
 **Working Directory:** {worktree_path}
+
+{terse_output_directive}
 
 {untrusted_notice}
 {context_block}
@@ -184,4 +186,5 @@ def get_address_review_prompt(
         todo_block=_fence_untrusted("TODO_LIST", todo_block or "_(no todo lines)_", nonce),
         untrusted_notice=_UNTRUSTED_NOTICE,
         context_block=_build_context_block(task_block, task_review_block, diff_text, nonce),
+        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )

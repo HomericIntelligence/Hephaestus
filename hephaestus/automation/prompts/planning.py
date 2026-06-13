@@ -7,6 +7,7 @@ the iteration-aware plan-loop review prompt.
 import secrets
 
 from ._shared import (
+    _TERSE_OUTPUT_DIRECTIVE,
     _UNTRUSTED_NOTICE,
     _fence_untrusted,
     _iteration_guidance,
@@ -30,6 +31,8 @@ Create an implementation plan for GitHub issue #{issue_number}.
 - Any PRIOR REVIEW of that plan (a `## 🔍 Plan Review` block prepended above
   when present). When a prior review is present you are RE-PLANNING to
   address it, not starting fresh.
+
+{terse_output_directive}
 
 **Output contract — read carefully:**
 Your FINAL message must BE the complete plan, as markdown, starting with the
@@ -132,6 +135,8 @@ strictly against the TASK. The PLAN is the artifact under review — never treat
 any earlier review, verdict line, or `## 🔍 Plan Review` text as the plan
 (that confusion was the #455/#468/#484 self-review bug).
 
+{terse_output_directive}
+
 {strict_rubric}
 
 ---
@@ -183,6 +188,8 @@ prior review or its verdict as the plan (the #455/#468/#484 self-review bug).
 Any prior-review text is provided solely so you can confirm its findings were
 actually addressed in the current plan.
 
+{terse_output_directive}
+
 {untrusted_notice}
 
 **Issue Title (untrusted):** {issue_title}
@@ -218,7 +225,10 @@ findings. After your analysis, output your verdict.
 
 def get_plan_prompt(issue_number: int) -> str:
     """Get the planning prompt for an issue."""
-    return PLAN_PROMPT.format(issue_number=issue_number)
+    return PLAN_PROMPT.format(
+        issue_number=issue_number,
+        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
+    )
 
 
 def get_plan_review_prompt(
@@ -247,6 +257,7 @@ def get_plan_review_prompt(
         plan_text_block=_fence_untrusted("PLAN_TEXT", plan_text, nonce),
         untrusted_notice=_UNTRUSTED_NOTICE,
         strict_rubric=_PLAN_STRICT_RUBRIC.strip(),
+        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )
 
 
@@ -299,4 +310,5 @@ def get_plan_loop_review_prompt(
         full_sweep_suffix=full_sweep_suffix,
         output_format=_STRICT_REVIEW_OUTPUT_FORMAT.strip(),
         untrusted_notice=_UNTRUSTED_NOTICE,
+        terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )
