@@ -156,6 +156,50 @@ class TestGetRepoRoot:
         result = get_repo_root(None)
         assert isinstance(result, Path)
 
+    def test_nested_git_stops_at_inner_git(self, tmp_path):
+        """Inner .git wins over outer .git — first-match-up (innermost) semantics."""
+        outer = tmp_path / "outer"
+        inner = outer / "inner"
+        (outer / ".git").mkdir(parents=True)
+        (inner / ".git").mkdir(parents=True)
+        seed = inner / "src" / "module"
+        seed.mkdir(parents=True)
+        assert get_repo_root(seed) == inner.resolve()
+
+    def test_nested_pyproject_stops_at_inner_pyproject(self, tmp_path):
+        """Inner pyproject.toml wins over outer pyproject.toml."""
+        outer = tmp_path / "outer"
+        inner = outer / "inner"
+        outer.mkdir(parents=True)
+        inner.mkdir(parents=True)
+        (outer / "pyproject.toml").write_text("[project]\n")
+        (inner / "pyproject.toml").write_text("[project]\n")
+        seed = inner / "src"
+        seed.mkdir(parents=True)
+        assert get_repo_root(seed) == inner.resolve()
+
+    def test_nested_pyproject_stops_at_inner_when_outer_has_git(self, tmp_path):
+        """Inner pyproject.toml wins over outer .git."""
+        outer = tmp_path / "outer"
+        inner = outer / "inner"
+        (outer / ".git").mkdir(parents=True)
+        inner.mkdir(parents=True)
+        (inner / "pyproject.toml").write_text("[project]\n")
+        seed = inner / "src"
+        seed.mkdir(parents=True)
+        assert get_repo_root(seed) == inner.resolve()
+
+    def test_nested_git_stops_at_inner_when_outer_has_pyproject(self, tmp_path):
+        """Inner .git wins over outer pyproject.toml."""
+        outer = tmp_path / "outer"
+        inner = outer / "inner"
+        outer.mkdir(parents=True)
+        (outer / "pyproject.toml").write_text("[project]\n")
+        (inner / ".git").mkdir(parents=True)
+        seed = inner / "src"
+        seed.mkdir(parents=True)
+        assert get_repo_root(seed) == inner.resolve()
+
 
 class TestRunSubprocess:
     """Tests for run_subprocess."""
