@@ -34,6 +34,7 @@ from hephaestus.cli.utils import add_dry_run_arg, add_json_arg, emit_json_status
 
 from ._review_utils import add_max_workers_arg, find_pr_for_issue
 from .advise_runner import run_advise
+from .arming_state import ArmingStateStore
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import advise_model, implementer_model
 from .claude_timeouts import (
@@ -118,6 +119,7 @@ class CIDriver:
         self.repo_root = get_repo_root()
         self.state_dir = self.repo_root / "build" / ".issue_implementer"
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        self._arming_store = ArmingStateStore(lambda: self.state_dir)
 
         self.worktree_manager = WorktreeManager()
         self.status_tracker = StatusTracker(options.max_workers)
@@ -1505,45 +1507,18 @@ class CIDriver:
     # ------------------------------------------------------------------
 
     def _arming_state_path(self, issue_number: int) -> Path:
-        return self.state_dir / f"drive-green-armed-{issue_number}.json"
+        return self._arming_store.path(issue_number)
 
     def _load_arming_state(self, issue_number: int) -> dict[str, Any] | None:
         """Return the parsed arming record for ``issue_number`` or ``None``."""
-        path = self._arming_state_path(issue_number)
-        if not path.exists():
-            return None
-        try:
-            return dict(json.loads(path.read_text()))
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning(
-                "Could not read arming record for issue #%s: %s; ignoring",
-                issue_number,
-                exc,
-            )
-            return None
+        return self._arming_store.load(issue_number)
 
     def _save_arming_state(self, issue_number: int, record: dict[str, Any]) -> None:
         """Persist the arming record. Best-effort; logs and swallows IO errors."""
-        path = self._arming_state_path(issue_number)
-        try:
-            path.write_text(json.dumps(record, indent=2, sort_keys=True))
-        except OSError as exc:
-            logger.warning(
-                "Could not write arming record for issue #%s: %s",
-                issue_number,
-                exc,
-            )
+        self._arming_store.save(issue_number, record)
 
     def _clear_arming_state(self, issue_number: int) -> None:
-        path = self._arming_state_path(issue_number)
-        try:
-            path.unlink(missing_ok=True)
-        except OSError as exc:
-            logger.warning(
-                "Could not delete arming record for issue #%s: %s",
-                issue_number,
-                exc,
-            )
+        self._arming_store.clear(issue_number)
 
     @staticmethod
     def _learn_record_terminal(record: dict[str, Any]) -> bool:
