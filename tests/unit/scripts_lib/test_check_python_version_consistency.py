@@ -319,8 +319,7 @@ class TestCheckCiMatrixCoverage:
         """check_ci_matrix_coverage reads sequence-format python-version correctly."""
         pyproject = tmp_path / "pyproject.toml"
         pyproject.write_text(
-            '"Programming Language :: Python :: 3.10",\n'
-            '"Programming Language :: Python :: 3.11",\n'
+            '"Programming Language :: Python :: 3.10",\n"Programming Language :: Python :: 3.11",\n'
         )
         workflow_dir = tmp_path / ".github" / "workflows"
         workflow_dir.mkdir(parents=True)

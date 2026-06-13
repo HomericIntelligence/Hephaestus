@@ -27,7 +27,7 @@ def test_shell_helper_errors_on_missing_arg() -> None:
     assert "missing required argument" in out.stderr
 
 
-def _run_with_mock_gh(json_body: str, repo: str = "owner/repo") -> subprocess.CompletedProcess:  # type: ignore[type-arg]
+def _run_with_mock_gh(json_body: str, repo: str = "owner/repo") -> subprocess.CompletedProcess[str]:
     """Run choose_merge_flag with a mock gh function returning json_body."""
     script = f"""
 gh() {{
@@ -52,12 +52,15 @@ def test_shell_helper_handles_gh_stderr_noise() -> None:
 
     Regression guard for the safety fix: fails against the unfixed 2>&1 version.
     """
+    merge_settings = (
+        '{"allow_rebase_merge":true,"allow_squash_merge":true,"allow_merge_commit":true}'
+    )
     script = f"""
 gh() {{
     case "$1" in
         api)
             printf '%s\\n' 'warning: new gh release available' >&2
-            printf '%s\\n' '{{"allow_rebase_merge":true,"allow_squash_merge":true,"allow_merge_commit":true}}'
+            printf '%s\\n' '{merge_settings}'
             ;;
         *) command gh "$@" ;;
     esac
