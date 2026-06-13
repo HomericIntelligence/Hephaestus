@@ -53,4 +53,4 @@ and is quoted in the close comment:
 
 | Audit label | Date | Tracker | Grade |
 |-------------|------|---------|-------|
-| `audit-2026-05-29` | 2026-05-29 | #708 | A- avg (C- → B+ planning corrected) |
+| `audit-2026-05-29` | 2026-05-29 | #708 (closed) | A- avg (C- → B+ planning corrected) |
