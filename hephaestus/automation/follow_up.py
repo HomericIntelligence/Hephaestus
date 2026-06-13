@@ -335,7 +335,7 @@ def _persist_rejected(
         path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
-def run_follow_up_issues(  # noqa: C901  # quota-check + parse + file paths are unavoidably coupled
+def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + file paths are unavoidably coupled
     session_id: str,
     worktree_path: Path,
     issue_number: int,

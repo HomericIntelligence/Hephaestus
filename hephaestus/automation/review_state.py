@@ -422,7 +422,7 @@ def fetch_all_issue_labels_graphql(
     return result_map
 
 
-def is_plan_review_go(  # noqa: C901  # labels-first gate with comment-scan backfill
+def is_plan_review_go(  # noqa: C901  # validation: labels-first gate with comment-scan backfill; many independent rule checks
     issue_number: int,
     comments: list[dict[str, Any]] | None = None,
     issue_labels: list[str] | None = None,

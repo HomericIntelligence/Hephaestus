@@ -1605,7 +1605,7 @@ def _resolve_org_and_repos(
     return (detected_org, [detected_repo], None)
 
 
-def main(argv: list[str] | None = None) -> int:  # noqa: C901
+def main(argv: list[str] | None = None) -> int:
     """Console-script entry point. Returns the process exit code."""
     args = _parse_args(argv)
     _setup_logging(args.verbose)
