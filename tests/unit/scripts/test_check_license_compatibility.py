@@ -7,8 +7,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-import tomllib
 from packaging.requirements import Requirement
+
+from hephaestus.io.toml import import_tomllib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
 
@@ -193,6 +194,12 @@ class TestAllExtraCompleteness:
     """Coverage depends on `[all]` aggregating every runtime extra (Finding 3)."""
 
     def test_all_extra_covers_runtime_extras(self):
+        # tomllib is stdlib only on 3.11+; the helper falls back to the tomli
+        # backport on 3.10 (the floor of the CI matrix) so this test runs there.
+        tomllib = import_tomllib()
+        if tomllib is None:
+            pytest.skip("tomllib/tomli not available to parse pyproject.toml")
+            return  # unreachable (pytest.skip raises); narrows tomllib for mypy
         data = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text())
         optional = data["project"]["optional-dependencies"]
         # all_specs is list[str], e.g.
