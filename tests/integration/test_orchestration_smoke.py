@@ -6,7 +6,7 @@ console entry points work correctly.
 
 Module enumeration and entry-point discovery verified at plan time:
 - All 12 modules are importable (guards against import regressions)
-- 4 modules have console scripts: implementer, planner, loop_runner, pr_reviewer
+- 5 modules have console scripts: implementer, planner, loop_runner, pr_reviewer, audit_reviewer
 - 2 modules are script-less but have main(): address_review, ci_driver
 - 5 modules lack main() entirely: implementer_cli (only argument parsing /
     logging setup since #714 relocated main() to implementer),

@@ -3,5 +3,10 @@
 minimum = 80
 
 # Per-module coverage floors
+# Paths must match Cobertura XML <class filename="..."> attribute exactly.
+# CI enforcer uses branch_rate if > 0, else line_rate (coverage.py:262).
 [coverage.modules]
 "validation/schema.py" = { minimum = 80 }
+"automation/models.py" = { minimum = 65 }
+"automation/dependency_resolver.py" = { minimum = 74 }
+"automation/arming_state.py" = { minimum = 98 }
