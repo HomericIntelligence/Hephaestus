@@ -52,4 +52,4 @@ We also capture session learnings in ProjectMnemosyne via the `/learn` skill, pr
 
 This roadmap is reviewed and updated at the end of each release cycle (typically monthly). As new Epics are created or project priorities shift, the roadmap is refreshed to reflect current focus areas. To propose changes, open an issue and reference this document.
 
-Last updated: 2026-05-28
+Last updated: 2026-06-12

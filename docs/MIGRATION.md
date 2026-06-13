@@ -1,6 +1,6 @@
 # Migration Guide
 
-> **Status (as of 2026-05-28):** The latest released version is **0.9.2** (tag-driven
+> **Status (as of 2026-06-12):** The latest released version is **0.9.5** (tag-driven
 > via hatch-vcs). **1.0 has not been released yet** — the section below is the
 > *forthcoming* 1.0 migration guidance, published ahead of the cut so consumers can
 > prepare. There are currently **no breaking changes between 0.9.x releases**: upgrading
