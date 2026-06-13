@@ -6,7 +6,7 @@
 
 ## Context
 
-`hephaestus/automation/` is 19,726 LoC of the 41,034-LoC source tree (48%). It
+`hephaestus/automation/` is 26,125 LoC of the 48,498-LoC source tree (53.9%, as of 2026-06-13). It
 implements the full Claude/Codex automation pipeline: Planner, Implementer,
 CIDriver, PRReviewer, PlanReviewer, AddressReviewer, AuditReviewer,
 loop_runner, curses TUI, GitHub adapter, prompt assembly. The rest of

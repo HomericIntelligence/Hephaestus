@@ -59,7 +59,7 @@ Claude Code plugin format. All Python packages use lowercase_snake_case.
 
 ## Library vs product layer
 
-`hephaestus/automation/` is a **product layer** (19.7k LoC, 48% of the
+`hephaestus/automation/` is a **product layer** (26.1k LoC, 53.9% of the
 codebase) co-located with the utility library. It is gated behind the
 `HomericIntelligence-Hephaestus[automation]` optional extra. The base
 `import hephaestus` surface MUST NOT pull `curses`, `fcntl`, `pydantic`,
