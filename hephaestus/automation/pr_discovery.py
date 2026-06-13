@@ -150,6 +150,16 @@ class PRDiscovery:
             if user.get("type") != "Bot":
                 continue
             if viewer and user.get("login") != viewer:
+                if user.get("login") is None:
+                    logger.warning(
+                        "PR #%s has no user.login; skipping under author filter (#821)",
+                        pr.get("number"),
+                        extra={
+                            "missing_field": "user.login",
+                            "filter": "author",
+                            "pr_number": pr.get("number"),
+                        },
+                    )
                 continue  # #821: not viewer-owned and --all not set
             number = pr.get("number")
             if isinstance(number, int):
