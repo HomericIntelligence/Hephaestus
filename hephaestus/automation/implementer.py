@@ -1,66 +1,10 @@
-r"""Bulk issue implementation using the selected coding agent in parallel worktrees.
+"""Bulk issue implementation using the selected coding agent in parallel worktrees.
 
 Provides:
 - Dependency-aware parallel implementation
 - Git worktree isolation
 - State persistence and resume
 - CI fix automation
-
-Test-Patch Contract
--------------------
-This module is the **single patch surface** for the bulk-implementation
-pipeline's external collaborators. The phase runner
-(:mod:`.implementer_phase_runner`) resolves these symbols at call time via
-``self._impl_module.X`` (see
-:meth:`.implementer_phase_runner.ImplementationPhaseRunner._impl_module`),
-so a single ``unittest.mock.patch("hephaestus.automation.implementer.X", …)``
-intercepts both direct call sites in this module AND runner-side dispatch.
-
-Patchable surface (every symbol the test suite patches at the
-``hephaestus.automation.implementer.<name>`` path — keep this table in sync
-with ``grep -rn 'patch.*hephaestus\.automation\.implementer\.' tests/``):
-
-  Symbol                          Defining module           Mechanism
-  ------------------------------- ------------------------- -----------------------------
-  review_state (submodule)        .review_state             from . import review_state
-  find_pr_for_issue               ._review_utils            re-export (noqa: F401)
-  invoke_claude_with_session      .claude_invoke            re-export (noqa: F401)
-  get_repo_root                   .git_utils                re-export (``as`` alias)
-  get_repo_slug                   .git_utils                re-export (noqa: F401)
-  fetch_issue_info                .github_api               direct import (used in body)
-  gh_list_open_issues             .github_api               re-export (``as`` alias)
-  is_plan_review_go               .review_state             re-export (noqa: F401)
-  current_trunk_githash           .session_naming           re-export (noqa: F401)
-  AGENT_IMPLEMENTER (constant)    .session_naming           re-export (noqa: F401)
-  AGENT_ADVISE (constant)         .session_naming           re-export (noqa: F401)
-  _parse_args                     .implementer_cli          re-export (``as`` alias)
-  _setup_logging                  .implementer_cli          re-export (``as`` alias)
-  main                            .implementer_cli          re-export (``as`` alias)
-  subprocess.run                  ``import subprocess``     stdlib import (top-level
-                                                            ``import subprocess``);
-                                                            patched via dotted-path
-                                                            traversal at
-                                                            ``…implementer.subprocess.run``
-
-When adding a new patchable dependency:
-
-  1. Import it here. Use ``from .module import name as name`` (mypy
-     ``implicit_reexport=false``) for callable re-exports, or
-     ``from .module import name  # noqa: F401`` if the symbol is not used
-     in this module's body.
-  2. Add a row to the table above (and update the grep keep-in-sync comment
-     if the surface grows).
-  3. In :mod:`.implementer_phase_runner`, look the symbol up via
-     ``self._impl_module.X`` — NOT a direct import — so the patch path stays
-     the single source of truth.
-
-Why this pattern instead of constructor DI: this module exists to be patched
-by 18 existing test call sites across ``tests/unit/automation/test_implementer.py``
-and ``tests/unit/automation/test_implementer_loop.py``. Converting to
-constructor-injected collaborators would force editing every one — see issue
-#710's tradeoff analysis and the team's
-``python-module-decomposition-and-refactor-patterns`` skill, Phase 11
-(Reverse-Delegation), validated by PR #674.
 """
 
 from __future__ import annotations
@@ -79,90 +23,45 @@ from hephaestus.agents.runtime import (
 )
 
 # ---------------------------------------------------------------------------
-# Test-patch contract (load-bearing — DO NOT remove a shim without checking
-# the call site AND every test it intercepts; see #710 for the refactor plan
-# that will eventually replace this with dependency injection).
+# Test-patch contract (load-bearing). The symbols below are real call sites in
+# THIS module's own body (``IssueImplementer`` + ``main``) and double as patch
+# surfaces: tests ``patch("hephaestus.automation.implementer.<X>", ...)`` to
+# intercept them.
 #
-# Why these re-exports exist:
-#   - ``implementer_phase_runner`` (the runtime call site) deliberately does
-#     NOT import these symbols directly. Instead, it dynamically looks them
-#     up via the ``ImplementationPhaseRunner._impl_module`` property (see
-#     :mod:`.implementer_phase_runner`), which returns *this* module.
-#   - That indirection means a test calling
-#     ``patch("hephaestus.automation.implementer.X", ...)`` intercepts the
-#     runtime call inside the phase runner too — without the runner needing
-#     a constructor-injected collaborator.
-#   - When the shim is removed or renamed, the patch silently no-ops and
-#     tests that depended on it will start exercising real network / disk.
-#
-# Maintenance rule: each shim below lists (1) the runtime call site that
-# reaches it via ``_impl_module``, and (2) the tests that patch it. Update
-# both columns when you add, remove, or rename a shim. Line citations are
-# correct as of the commit that introduced them; if they have drifted,
-# re-run ``grep -rn 'patch.*implementer\.<symbol>' tests/``.
+# Symbols that the per-issue phase runner calls (``find_pr_for_issue``,
+# ``is_plan_review_go``, ``fetch_issue_info``, ``invoke_claude_with_session``,
+# ``get_repo_slug``, ``AGENT_IMPLEMENTER``, ``AGENT_ADVISE``,
+# ``current_trunk_githash``, ``review_state``) are NO LONGER re-exported here.
+# Since #714 the runner imports them directly from their source modules and
+# tests patch them at ``hephaestus.automation.implementer_phase_runner.<X>``.
+# Re-exporting them here would be a dead shim whose silent no-op patches would
+# let tests hit real network/disk.
 # ---------------------------------------------------------------------------
-# NOTE: ``review_state`` is accessed as a *module reference*, not patched via
-# ``patch("implementer.review_state")``.  Re-exporting it here ensures the
-# runtime lookup at ``implementer_phase_runner.py:1199``
-# (``_impl_module.review_state``) resolves to the real module object.
-# Tests control ``review_state`` behaviour by patching its internal functions
-# directly (not by replacing the module reference):
-#   monkeypatch.setattr(review_state_mod, "_fetch_issue_comments_graphql", …)
-#   → test_implementer_loop.py:{865,879}
-from . import (  # noqa: F401  # test-patch shim — see contract above
-    review_state,
-)
-
-# Both re-exported as test-patch shims, reached at runtime via ``_impl_module``:
-#   - ``find_pr_for_issue``: locate the open PR for an issue.
-#       Patched by: tests/unit/automation/test_implementer.py:{274,354,390,435,460};
-#                   tests/unit/automation/test_implementer_loop.py:559
-#   - ``get_pr_head_branch``: resolve a PR's REAL head branch so
-#       ``_review_existing_pr`` never assumes ``{issue}-auto-impl`` (the assumption
-#       makes ``git fetch`` fail with exit 128 when the PR lives on another branch).
-# Runtime call site: ``implementer_phase_runner.py`` (via ``_impl_module``).
-from ._review_utils import (
-    find_pr_for_issue,  # noqa: F401  # test-patch shim
-    get_pr_head_branch,  # noqa: F401  # test-patch shim
-)
-
-# Patched by: tests/unit/automation/test_implementer_loop.py:{324,346,366,388}
-# Runtime call site: ``implementer_phase_runner.py:{855,1305,1580}`` (via ``_impl_module``)
-from .claude_invoke import invoke_claude_with_session  # noqa: F401  # test-patch shim
 from .curses_ui import CursesUI, ThreadLogManager
 from .dependency_resolver import CyclicDependencyError, DependencyResolver
 
 # ``get_repo_root`` is re-exported with an explicit ``as`` alias so that
-# ``implementer_cli.main`` (which resolves it via this module) and tests
-# patching ``implementer.get_repo_root`` share one lookup site.
+# ``main`` (defined below) and tests patching ``implementer.get_repo_root``
+# share one lookup site.
 #
-# Patched by: tests/unit/automation/test_implementer.py:{91,161,197,250,427,518,539,563};
-#             tests/unit/automation/test_implementer_loop.py:30
-# Runtime call site: ``implementer.py:134`` (``IssueImplementer.__init__``)
-#                    + ``implementer_cli.main``
+# Patched by: tests/unit/automation/test_implementer.py;
+#             tests/unit/automation/test_implementer_loop.py
+# Runtime call site: ``IssueImplementer.__init__`` + ``main``
 from .git_utils import (
     get_repo_root as get_repo_root,
 )
 
-# Patched by: tests/unit/automation/test_implementer_loop.py:316
-# Runtime call site: ``implementer_phase_runner.py:{854,1303,1577}`` (via ``_impl_module``)
-# ``run`` is a real call site (not just a shim) for ``IssueImplementer._health_check``
-# (see ``implementer.py:294,301``); it does double duty as a patch surface.
-from .git_utils import (
-    get_repo_slug,  # noqa: F401  # test-patch shim
-    run,
-)
+# ``run`` is a real call site for ``IssueImplementer._health_check``; it does
+# double duty as a patch surface.
+from .git_utils import run
 
-# ``fetch_issue_info`` is a real call site (``IssueImplementer._load_issues``
-# at ``implementer.py:270``), not a shim.
+# ``fetch_issue_info`` is a real call site (``IssueImplementer._load_issues``),
+# not a shim.
 from .github_api import fetch_issue_info
 
 # ``gh_list_open_issues`` is re-exported with an explicit ``as`` alias so
-# ``implementer_cli.main`` (which looks it up here) and tests patching
-# ``implementer.gh_list_open_issues`` share one lookup site.
-#
-# Patched by: indirectly via ``implementer_cli.main``'s auto-discovery path
-# Runtime call site: ``implementer_cli.main`` (lazy lookup through this module)
+# ``main`` (defined below) and tests patching ``implementer.gh_list_open_issues``
+# share one lookup site.
 from .github_api import (
     gh_list_open_issues as gh_list_open_issues,
 )
@@ -172,27 +71,18 @@ from .github_api import (
 # in :class:`ImplementationPhaseRunner` uses. Single source of truth lives
 # in ``implementer_phase_runner``.
 #
-# The CLI entry point (argument parsing, logging setup, and ``main``) lives
-# in ``implementer_cli`` (extracted for SRP — see #468). Re-exported here
-# with explicit ``as`` aliases (required by mypy) for two reasons:
-#   1. Console script: ``hephaestus-implement-issues`` is wired to
-#      ``hephaestus.automation.implementer:main`` in ``pyproject.toml``
-#      (verified at tests/integration/test_orchestration_smoke.py:37).
-#   2. Test compatibility: existing tests call ``implementer.main()`` /
-#      ``implementer._parse_args()`` and patch dependencies at
-#      ``implementer.<dep>`` paths.
-# ``main`` imports this module lazily (inside its body) so this top-level
-# import is cycle-safe.
-# Patched by: tests/unit/automation/test_implementer.py (various)
-# Runtime call site: console script entry point ``hephaestus-implement-issues``
+# Argument parsing and logging setup live in ``implementer_cli`` (extracted
+# for SRP — see #468). Re-exported here with explicit ``as`` aliases (required
+# by mypy) so existing tests calling ``implementer._parse_args()`` and patching
+# ``implementer.<dep>`` continue to work unchanged. ``main`` itself is defined
+# in THIS module (not re-imported from ``implementer_cli``) so the console
+# script ``hephaestus.automation.implementer:main`` resolves directly and no
+# deferred import is needed to break the cycle (#714).
 from .implementer_cli import (
     _parse_args as _parse_args,
 )
 from .implementer_cli import (
     _setup_logging as _setup_logging,
-)
-from .implementer_cli import (
-    main as main,
 )
 from .implementer_phase_runner import MAX_REVIEW_ITERATIONS, ImplementationPhaseRunner
 from .implementer_state import ImplementationStateManager
@@ -203,17 +93,6 @@ from .models import (
     WorkerResult,
 )
 from .pr_manager import commit_changes, create_pr
-
-# Patched by: tests/unit/automation/test_implementer.py:{278,358,394,467};
-#             tests/unit/automation/test_implementer_loop.py:560
-# Runtime call site: ``implementer_phase_runner.py:314`` (via ``_impl_module``)
-from .review_state import is_plan_review_go  # noqa: F401  # test-patch shim
-
-# Patched by: tests/unit/automation/test_implementer_loop.py:{316,318};
-#             see comment at tests/unit/automation/test_phase_agent_wiring.py:51
-# Runtime call site: phase runner agent dispatch + session naming, both via
-# ``_impl_module``
-from .session_naming import AGENT_ADVISE, AGENT_IMPLEMENTER, current_trunk_githash  # noqa: F401
 from .state_labels import is_skipped
 from .status_tracker import StatusTracker
 from .worktree_manager import WorktreeManager
@@ -905,6 +784,90 @@ class IssueImplementer:
     def _print_summary(self, results: dict[int, WorkerResult]) -> None:
         """Print implementation summary."""
         ImplementationSummaryPrinter(self.worktree_manager).print(results)
+
+
+def main() -> int:
+    """Execute the issue implementation workflow.
+
+    Relocated from :mod:`.implementer_cli` to break the deferred-import cycle
+    (#714): ``main`` resolves ``gh_list_open_issues``, ``get_repo_root``, and
+    ``IssueImplementer`` directly through this module's namespace instead of
+    importing ``implementer`` lazily from ``implementer_cli``. The console-script
+    entry point ``hephaestus.automation.implementer:main`` (declared in
+    pyproject.toml) continues to resolve unchanged, and tests patching
+    ``implementer.<dep>`` still intercept these lookups.
+
+    Returns:
+        Exit code: 0 on success, 1 on failure, 130 on keyboard interrupt
+
+    """
+    from hephaestus.agents.runtime import resolve_agent
+    from hephaestus.cli.utils import emit_json_status
+    from hephaestus.utils.terminal import terminal_guard
+
+    args = _parse_args()
+    agent = resolve_agent(args.agent)
+
+    state_dir = get_repo_root() / "build" / ".issue_implementer"
+    _setup_logging(args.verbose, log_dir=state_dir)
+
+    log = logging.getLogger(__name__)
+
+    # Auto-discover all open issues when neither --issues nor --epic is given
+    if not args.health_check and not args.epic and not args.issues:
+        discovered = gh_list_open_issues()
+        log.info(
+            "No --issues/--epic given; discovered %s open issues: %s", len(discovered), discovered
+        )
+        args.issues = discovered
+
+    options = ImplementerOptions(
+        epic_number=args.epic or 0,
+        issues=args.issues or [],
+        agent=agent,
+        analyze_only=args.analyze,
+        health_check=args.health_check,
+        resume=args.resume,
+        max_workers=args.max_workers,
+        skip_closed=not args.no_skip_closed,
+        auto_merge=not args.no_auto_merge,
+        dry_run=args.dry_run,
+        enable_advise=not args.no_advise,
+        enable_learn=not args.no_learn,
+        enable_follow_up=not args.no_follow_up,
+        enable_ui=not args.no_ui and not args.json,
+        include_nitpicks=args.nitpick,
+    )
+
+    if args.health_check:
+        log.info("Running health check")
+    elif args.issues:
+        log.info("Starting implementation of issues: %s", args.issues)
+    else:
+        log.info("Starting implementation of epic #%s", args.epic)
+
+    with terminal_guard():
+        try:
+            implementer = IssueImplementer(options)
+            results = implementer.run()
+
+            if not args.health_check and not args.analyze:
+                failed = [num for num, result in results.items() if not result.success]
+                if failed:
+                    log.error("Failed to implement %s issue(s): %s", len(failed), failed)
+                    if args.json:
+                        emit_json_status(1, issues=args.issues or [], failed=failed)
+                    return 1
+
+            log.info("Complete")
+            if args.json:
+                emit_json_status(0, issues=args.issues or [], epic=args.epic or 0)
+            return 0
+        except KeyboardInterrupt:
+            log.warning("Interrupted by user")
+            if args.json:
+                emit_json_status(130, message="interrupted")
+            return 130
 
 
 if __name__ == "__main__":

@@ -943,15 +943,17 @@ class TestResumeImplWithFeedback:
 
     @pytest.fixture(autouse=True)
     def _repo_lookup(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("hephaestus.automation.implementer.get_repo_slug", lambda _: "TestRepo")
         monkeypatch.setattr(
-            "hephaestus.automation.implementer.current_trunk_githash", lambda _: "abc1234"
+            "hephaestus.automation._review_phase.get_repo_slug", lambda _: "TestRepo"
+        )
+        monkeypatch.setattr(
+            "hephaestus.automation._review_phase.current_trunk_githash", lambda _: "abc1234"
         )
 
     def test_resume_uses_session_id_and_prompt(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
-        with patch("hephaestus.automation.implementer.invoke_claude_with_session") as mock_invoke:
+        with patch("hephaestus.automation._review_phase.invoke_claude_with_session") as mock_invoke:
             mock_invoke.return_value = ("ok", "uuid")
             ok = implementer._resume_impl_with_feedback(
                 session_id="abc",
@@ -973,7 +975,7 @@ class TestResumeImplWithFeedback:
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
         with patch(
-            "hephaestus.automation.implementer.invoke_claude_with_session",
+            "hephaestus.automation._review_phase.invoke_claude_with_session",
             side_effect=RuntimeError("resume down"),
         ):
             ok = implementer._resume_impl_with_feedback(
@@ -993,7 +995,9 @@ class TestResumeImplWithFeedback:
         err = subprocess.CalledProcessError(1, ["claude"], stderr="session not found")
         state = ImplementationState(issue_number=1)
 
-        with patch("hephaestus.automation.implementer.invoke_claude_with_session", side_effect=err):
+        with patch(
+            "hephaestus.automation._review_phase.invoke_claude_with_session", side_effect=err
+        ):
             ok = implementer._resume_impl_with_feedback(
                 session_id="ses123",
                 worktree_path=tmp_path,
@@ -1015,7 +1019,9 @@ class TestResumeImplWithFeedback:
         err = subprocess.CalledProcessError(1, ["claude"], stderr="network timeout")
         state = ImplementationState(issue_number=1)
 
-        with patch("hephaestus.automation.implementer.invoke_claude_with_session", side_effect=err):
+        with patch(
+            "hephaestus.automation._review_phase.invoke_claude_with_session", side_effect=err
+        ):
             ok = implementer._resume_impl_with_feedback(
                 session_id="ses999",
                 worktree_path=tmp_path,
@@ -1181,8 +1187,14 @@ class TestImplementationAutoMergeGate:
             ),
             patch.object(implementer, "_has_plan", return_value=True),
             patch.object(implementer, "_save_state"),
-            patch("hephaestus.automation.implementer.find_pr_for_issue", return_value=None),
-            patch("hephaestus.automation.implementer.is_plan_review_go", return_value=True),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.find_pr_for_issue",
+                return_value=None,
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.is_plan_review_go",
+                return_value=True,
+            ),
             patch.object(implementer, "_run_advise_as_implementer_turn"),
             patch.object(implementer, "_run_claude_code", return_value="session-1"),
             patch.object(implementer, "_finalize_pr", return_value=456),
@@ -1190,7 +1202,7 @@ class TestImplementationAutoMergeGate:
                 implementer, "_run_impl_review_loop", return_value=(1, review_verdict, "A")
             ),
             patch.object(implementer, "_run_post_pr_followup"),
-            patch("hephaestus.automation.implementer.fetch_issue_info") as mock_issue,
+            patch("hephaestus.automation.implementer_phase_runner.fetch_issue_info") as mock_issue,
         ):
             mock_issue.return_value.title = "title"
             mock_issue.return_value.body = "body"
@@ -1695,7 +1707,7 @@ class TestReviewExistingPrShortCircuit:
             ),
             patch.object(implementer.status_tracker, "update_slot"),
             patch(
-                "hephaestus.automation.implementer.get_pr_head_branch",
+                "hephaestus.automation.implementer_phase_runner.get_pr_head_branch",
                 return_value="real-pr-branch",
             ),
             patch.object(
@@ -1709,7 +1721,7 @@ class TestReviewExistingPrShortCircuit:
                 "hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"
             ) as mock_sync,
             patch.object(implementer, "_save_state"),
-            patch("hephaestus.automation.implementer.fetch_issue_info") as mock_issue,
+            patch("hephaestus.automation.implementer_phase_runner.fetch_issue_info") as mock_issue,
             patch.object(implementer, "_run_advise_as_implementer_turn"),
             patch.object(
                 implementer, "_run_impl_review_loop", return_value=(1, "GO", "A")
@@ -1784,7 +1796,10 @@ class TestReviewExistingPrShortCircuit:
                 return_value=(False, False),
             ),
             patch.object(implementer.status_tracker, "update_slot"),
-            patch("hephaestus.automation.implementer.get_pr_head_branch", return_value="b"),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.get_pr_head_branch",
+                return_value="b",
+            ),
             patch.object(
                 implementer.worktree_manager, "create_worktree", return_value=worktree_path
             ),
@@ -1794,7 +1809,7 @@ class TestReviewExistingPrShortCircuit:
             ),
             patch("hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"),
             patch.object(implementer, "_save_state"),
-            patch("hephaestus.automation.implementer.fetch_issue_info") as mock_issue,
+            patch("hephaestus.automation.implementer_phase_runner.fetch_issue_info") as mock_issue,
             patch.object(
                 implementer, "_run_advise", return_value="prior team finding"
             ) as mock_advise,
@@ -1842,7 +1857,10 @@ class TestReviewExistingPrShortCircuit:
                 return_value=(False, False),
             ),
             patch.object(implementer.status_tracker, "update_slot"),
-            patch("hephaestus.automation.implementer.get_pr_head_branch", return_value="b"),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.get_pr_head_branch",
+                return_value="b",
+            ),
             patch.object(
                 implementer.worktree_manager, "create_worktree", return_value=worktree_path
             ),
@@ -1852,7 +1870,7 @@ class TestReviewExistingPrShortCircuit:
             ),
             patch("hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"),
             patch.object(implementer, "_save_state"),
-            patch("hephaestus.automation.implementer.fetch_issue_info") as mock_issue,
+            patch("hephaestus.automation.implementer_phase_runner.fetch_issue_info") as mock_issue,
             patch.object(implementer, "_run_advise"),
             patch.object(implementer, "_run_impl_review_loop", return_value=(1, "GO", "A")),
             patch.object(implementer.phase_runner, "_apply_impl_review_verdict"),
@@ -1887,7 +1905,10 @@ class TestReviewExistingPrShortCircuit:
                 return_value=(False, True),
             ),
             patch.object(implementer.status_tracker, "update_slot"),
-            patch("hephaestus.automation.implementer.get_pr_head_branch", return_value=None),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.get_pr_head_branch",
+                return_value=None,
+            ),
             patch.object(
                 implementer.worktree_manager, "create_worktree", return_value=worktree_path
             ),
@@ -1899,7 +1920,7 @@ class TestReviewExistingPrShortCircuit:
                 "hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"
             ) as mock_sync,
             patch.object(implementer, "_save_state"),
-            patch("hephaestus.automation.implementer.fetch_issue_info") as mock_issue,
+            patch("hephaestus.automation.implementer_phase_runner.fetch_issue_info") as mock_issue,
             patch.object(implementer, "_run_advise_as_implementer_turn"),
             patch.object(implementer, "_run_impl_review_loop", return_value=(1, "GO", "A")),
             patch.object(implementer.phase_runner, "_apply_impl_review_verdict"),
@@ -1933,7 +1954,10 @@ class TestResolveDirtyReusedWorktree:
                 return_value=(False, True),
             ),
             patch.object(implementer.status_tracker, "update_slot"),
-            patch("hephaestus.automation.implementer.get_pr_head_branch", return_value="b"),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.get_pr_head_branch",
+                return_value="b",
+            ),
             patch.object(implementer.worktree_manager, "create_worktree", return_value=wt),
             patch(
                 "hephaestus.automation.implementer_phase_runner.is_clean_working_tree",
@@ -1944,7 +1968,7 @@ class TestResolveDirtyReusedWorktree:
             ) as mock_resolve,
             patch("hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"),
             patch.object(implementer, "_save_state"),
-            patch("hephaestus.automation.implementer.fetch_issue_info") as mock_issue,
+            patch("hephaestus.automation.implementer_phase_runner.fetch_issue_info") as mock_issue,
             patch.object(implementer, "_run_advise_as_implementer_turn"),
             patch.object(implementer, "_run_impl_review_loop", return_value=(1, "GO", "A")),
             patch.object(implementer.phase_runner, "_apply_impl_review_verdict"),
@@ -1974,7 +1998,10 @@ class TestResolveDirtyReusedWorktree:
                 return_value=(False, True),
             ),
             patch.object(implementer.status_tracker, "update_slot"),
-            patch("hephaestus.automation.implementer.get_pr_head_branch", return_value="b"),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.get_pr_head_branch",
+                return_value="b",
+            ),
             patch.object(implementer.worktree_manager, "create_worktree", return_value=wt),
             patch(
                 "hephaestus.automation.implementer_phase_runner.is_clean_working_tree",
@@ -1991,7 +2018,7 @@ class TestResolveDirtyReusedWorktree:
             ) as mock_restore,
             patch.object(implementer.phase_runner, "_push_branch") as mock_push,
             patch.object(implementer, "_save_state"),
-            patch("hephaestus.automation.implementer.fetch_issue_info") as mock_issue,
+            patch("hephaestus.automation.implementer_phase_runner.fetch_issue_info") as mock_issue,
             patch.object(implementer, "_run_advise_as_implementer_turn"),
             patch.object(implementer, "_run_impl_review_loop", return_value=(1, "GO", "A")),
             patch.object(implementer.phase_runner, "_apply_impl_review_verdict"),
@@ -2032,7 +2059,10 @@ class TestResolveDirtyReusedWorktree:
                 return_value=(False, True),
             ),
             patch.object(implementer.status_tracker, "update_slot"),
-            patch("hephaestus.automation.implementer.get_pr_head_branch", return_value="b"),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.get_pr_head_branch",
+                return_value="b",
+            ),
             patch.object(implementer.worktree_manager, "create_worktree", return_value=wt),
             patch(
                 "hephaestus.automation.implementer_phase_runner.is_clean_working_tree",
@@ -2082,13 +2112,13 @@ class TestResolveDirtyReusedWorktree:
         wt.mkdir(exist_ok=True)
         implementer.options.agent = "claude"
         with (
-            patch.object(
-                implementer.phase_runner._impl_module,
-                "invoke_claude_with_session",
+            patch(
+                "hephaestus.automation.implementer_phase_runner.invoke_claude_with_session",
                 return_value=("reasoning...\nCOMMIT", None),
             ),
-            patch.object(
-                implementer.phase_runner._impl_module, "get_repo_slug", return_value="o/r"
+            patch(
+                "hephaestus.automation.implementer_phase_runner.get_repo_slug",
+                return_value="o/r",
             ),
             patch("hephaestus.automation.implementer_phase_runner.run") as mock_run,
         ):
@@ -2124,13 +2154,13 @@ class TestResolveDirtyReusedWorktree:
             return MagicMock(stdout="", returncode=0)
 
         with (
-            patch.object(
-                implementer.phase_runner._impl_module,
-                "invoke_claude_with_session",
+            patch(
+                "hephaestus.automation.implementer_phase_runner.invoke_claude_with_session",
                 return_value=("reasoning...\nSTASH", None),
             ),
-            patch.object(
-                implementer.phase_runner._impl_module, "get_repo_slug", return_value="o/r"
+            patch(
+                "hephaestus.automation.implementer_phase_runner.get_repo_slug",
+                return_value="o/r",
             ),
             patch("hephaestus.automation.implementer_phase_runner.run", side_effect=fake_run),
         ):

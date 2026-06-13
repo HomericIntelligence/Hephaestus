@@ -7,10 +7,10 @@ console entry points work correctly.
 Module enumeration and entry-point discovery verified at plan time:
 - All 11 modules are importable (guards against import regressions)
 - 4 modules have console scripts: implementer, planner, loop_runner, pr_reviewer
-- 3 modules are script-less but have main(): address_review, ci_driver,
-    implementer_cli (its main() backs the implementer console script via re-export)
-- 4 modules lack main() entirely: implementer_phase_runner, implementer_summary,
-    curses_ui, github_api
+- 2 modules are script-less but have main(): address_review, ci_driver
+- 5 modules lack main() entirely: implementer_cli (only argument parsing /
+    logging setup since #714 relocated main() to implementer),
+    implementer_phase_runner, implementer_summary, curses_ui, github_api
 """
 
 import subprocess
@@ -43,13 +43,12 @@ CONSOLE_SCRIPTS = [
 ]
 
 # Modules with main() but no console script of their own.
-# implementer_cli.main() is exposed as the ``hephaestus-implement-issues`` script
-# via re-export from ``hephaestus.automation.implementer`` — it has no separate
-# entry point, so it is verified here for callability rather than via --help.
+# ``implementer.main()`` backs the ``hephaestus-implement-issues`` script and is
+# covered by CONSOLE_SCRIPTS; since #714, ``implementer_cli`` holds only the
+# argument-parsing / logging helpers and no longer defines main().
 MAIN_ONLY_MODULES = [
     "hephaestus.automation.address_review",
     "hephaestus.automation.ci_driver",
-    "hephaestus.automation.implementer_cli",
 ]
 
 

@@ -28,11 +28,13 @@ from hephaestus.github.rate_limit import wait_until
 
 from ._stage_context import StageMixin
 from .advise_runner import run_advise
+from .claude_invoke import invoke_claude_with_session
 from .claude_models import advise_model, implementer_model
 from .claude_timeouts import advise_claude_timeout, implementer_claude_timeout
 from .git_utils import get_repo_slug
 from .learn import compact_session
 from .prompts import get_advise_prompt_builder
+from .session_naming import AGENT_ADVISE, AGENT_IMPLEMENTER
 
 if TYPE_CHECKING:
     from ._stage_context import StageContext
@@ -90,7 +92,6 @@ class ImplementPhase(StageMixin):
         the *first turn* of the implementer's own session so the findings live in
         the transcript and inform the implementation turn directly.
         """
-        _impl_mod = self._impl_module
 
         def _invoke(prompt: str) -> str:
             if is_codex(self.options.agent):
@@ -101,11 +102,11 @@ class ImplementPhase(StageMixin):
                     sandbox="read-only",
                 )
                 return (result.stdout or "").strip()
-            repo_slug = _impl_mod.get_repo_slug(self.repo_root)
-            stdout, _ = _impl_mod.invoke_claude_with_session(
+            repo_slug = get_repo_slug(self.repo_root)
+            stdout, _ = invoke_claude_with_session(
                 repo=repo_slug,
                 issue=issue_number,
-                agent=_impl_mod.AGENT_ADVISE,
+                agent=AGENT_ADVISE,
                 prompt=prompt,
                 model=advise_model(),
                 cwd=self.repo_root,
@@ -151,8 +152,7 @@ class ImplementPhase(StageMixin):
         Any failure degrades gracefully inside ``run_advise`` and returns an
         empty string, so the caller can still proceed to the implementation turn.
         """
-        _impl_mod = self._impl_module
-        repo_slug = _impl_mod.get_repo_slug(self.repo_root)
+        repo_slug = get_repo_slug(self.repo_root)
 
         # Fetch plan and plan-review from GitHub comments to give advise the full
         # context of what's been planned (same anchored selection as
@@ -178,10 +178,10 @@ class ImplementPhase(StageMixin):
             return f"{plan_block}\n\n---\n\n{base_prompt}"
 
         def _invoke(prompt: str) -> str:
-            stdout, _ = _impl_mod.invoke_claude_with_session(
+            stdout, _ = invoke_claude_with_session(
                 repo=repo_slug,
                 issue=issue_number,
-                agent=_impl_mod.AGENT_IMPLEMENTER,
+                agent=AGENT_IMPLEMENTER,
                 prompt=prompt,
                 model=implementer_model(),
                 cwd=worktree_path,
@@ -204,7 +204,7 @@ class ImplementPhase(StageMixin):
         compact_session(
             repo=repo_slug,
             issue=issue_number,
-            agent=self._impl_module.AGENT_IMPLEMENTER,
+            agent=AGENT_IMPLEMENTER,
             cwd=worktree_path,
             model=implementer_model(),
         )
@@ -231,14 +231,13 @@ class ImplementPhase(StageMixin):
         prompt_file = worktree_path / f".claude-prompt-{issue_number}.md"
         prompt_file.write_text(prompt)
 
-        _impl_mod = self._impl_module
-        repo_slug = _impl_mod.get_repo_slug(self.repo_root)
+        repo_slug = get_repo_slug(self.repo_root)
 
         try:
-            stdout, _ = _impl_mod.invoke_claude_with_session(
+            stdout, _ = invoke_claude_with_session(
                 repo=repo_slug,
                 issue=issue_number,
-                agent=_impl_mod.AGENT_IMPLEMENTER,
+                agent=AGENT_IMPLEMENTER,
                 prompt=prompt,
                 model=implementer_model(),
                 cwd=worktree_path,

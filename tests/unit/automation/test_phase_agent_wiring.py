@@ -47,10 +47,10 @@ AUTOMATION_DIR = Path(automation_pkg.__file__).parent
 # in #597, and #712 further split the runner into single-responsibility phase
 # modules (``_implement_phase.py`` / ``_review_phase.py`` hold the
 # ``invoke_claude_with_session`` callsites). All of these files participate in
-# the implementer's session and must be inspected together. The
-# ``AGENT_IMPLEMENTER`` constant is referenced through the implementer
-# module's namespace (``_impl_mod.AGENT_IMPLEMENTER``) so test patches at
-# ``implementer.AGENT_IMPLEMENTER`` still take effect.
+# the implementer's session and must be inspected together. Since #714 the
+# ``AGENT_IMPLEMENTER`` constant is imported and referenced directly in each of
+# those modules (no longer through the implementer module's namespace), so test
+# patches target ``<module>.AGENT_IMPLEMENTER``.
 SELF_AGENT_PHASES: list[tuple[str, str, tuple[str, ...]]] = [
     (
         "implementer.py",
@@ -125,11 +125,10 @@ def test_self_agent_phase_passes_expected_agent_kwarg(
     """Each self-agent phase passes its AGENT_* constant via ``agent=``.
 
     The implementer module dispatches the actual call through
-    ``implementer_phase_runner`` and references the constant as
-    ``_impl_mod.AGENT_IMPLEMENTER`` so test patches at
-    ``hephaestus.automation.implementer.AGENT_IMPLEMENTER`` continue to
-    work. The pattern below accepts both the bare ``AGENT_IMPLEMENTER``
-    form and the namespaced ``X.AGENT_IMPLEMENTER`` form.
+    ``implementer_phase_runner`` and the phase modules, which since #714 import
+    the constant directly and reference it as the bare ``AGENT_IMPLEMENTER``.
+    The pattern below accepts both the bare ``AGENT_IMPLEMENTER`` form and the
+    namespaced ``X.AGENT_IMPLEMENTER`` form for resilience.
     """
     src = _read_phase_sources(module_file, companions)
     kwarg_pattern = re.compile(rf"\bagent\s*=\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?{expected_agent}\b")

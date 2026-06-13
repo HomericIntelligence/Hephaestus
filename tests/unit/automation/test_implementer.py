@@ -273,11 +273,11 @@ class TestPlanReviewVerdictGate:
             patch.object(impl, "_save_state"),
             # The existing-PR skip guard runs before this gate; no PR by default.
             patch(
-                "hephaestus.automation.implementer.find_pr_for_issue",
+                "hephaestus.automation.implementer_phase_runner.find_pr_for_issue",
                 return_value=None,
             ),
             patch(
-                "hephaestus.automation.implementer.is_plan_review_go",
+                "hephaestus.automation.implementer_phase_runner.is_plan_review_go",
                 return_value=gate_return,
             ),
             # Everything past the gate — only reached when gate returns True.
@@ -294,7 +294,7 @@ class TestPlanReviewVerdictGate:
             patch("hephaestus.automation._review_phase.mark_pr_implementation_go"),
             patch("hephaestus.automation._review_phase.enable_auto_merge_after_implementation_go"),
             patch(
-                "hephaestus.automation.implementer.fetch_issue_info",
+                "hephaestus.automation.implementer_phase_runner.fetch_issue_info",
                 return_value=MagicMock(title="t", body="b"),
             ),
         ):
@@ -350,11 +350,11 @@ class TestPlanReviewVerdictGate:
             patch.object(impl, "_generate_plan") as gen_plan,
             patch.object(impl, "_save_state"),
             patch(
-                "hephaestus.automation.implementer.find_pr_for_issue",
+                "hephaestus.automation.implementer_phase_runner.find_pr_for_issue",
                 return_value=None,
             ),
             patch(
-                "hephaestus.automation.implementer.is_plan_review_go",
+                "hephaestus.automation.implementer_phase_runner.is_plan_review_go",
                 return_value=False,
             ),
         ):
@@ -386,11 +386,11 @@ class TestPlanReviewVerdictGate:
             patch.object(impl, "_has_plan", return_value=True),
             patch.object(impl, "_save_state", side_effect=_record_save),
             patch(
-                "hephaestus.automation.implementer.find_pr_for_issue",
+                "hephaestus.automation.implementer_phase_runner.find_pr_for_issue",
                 return_value=None,
             ),
             patch(
-                "hephaestus.automation.implementer.is_plan_review_go",
+                "hephaestus.automation.implementer_phase_runner.is_plan_review_go",
                 return_value=False,
             ),
         ):
@@ -436,7 +436,7 @@ class TestExistingPrEntersReviewLoop:
 
         with (
             patch(
-                "hephaestus.automation.implementer.find_pr_for_issue",
+                "hephaestus.automation.implementer_phase_runner.find_pr_for_issue",
                 return_value=777,
             ),
             patch(
@@ -444,7 +444,7 @@ class TestExistingPrEntersReviewLoop:
                 return_value=(False, False),
             ),
             patch(
-                "hephaestus.automation.implementer.get_pr_head_branch",
+                "hephaestus.automation.implementer_phase_runner.get_pr_head_branch",
                 return_value="1-auto-impl",
             ),
             patch(
@@ -463,7 +463,7 @@ class TestExistingPrEntersReviewLoop:
             patch.object(impl, "_finalize_pr") as finalize_pr,
             patch.object(impl, "_run_impl_review_loop", return_value=(1, "GO", "A")) as review_loop,
             patch(
-                "hephaestus.automation.implementer.fetch_issue_info",
+                "hephaestus.automation.implementer_phase_runner.fetch_issue_info",
                 return_value=MagicMock(title="t", body="b"),
             ),
             patch.object(impl, "_run_advise_as_implementer_turn"),
@@ -496,7 +496,7 @@ class TestExistingPrEntersReviewLoop:
     ) -> None:
         with (
             patch(
-                "hephaestus.automation.implementer.find_pr_for_issue",
+                "hephaestus.automation.implementer_phase_runner.find_pr_for_issue",
                 return_value=777,
             ),
             patch(
@@ -528,7 +528,7 @@ class TestExistingPrEntersReviewLoop:
         worktree_path.mkdir(exist_ok=True)
         with (
             patch(
-                "hephaestus.automation.implementer.find_pr_for_issue",
+                "hephaestus.automation.implementer_phase_runner.find_pr_for_issue",
                 return_value=777,
             ),
             patch(
@@ -536,7 +536,7 @@ class TestExistingPrEntersReviewLoop:
                 return_value=(False, True),
             ),
             patch(
-                "hephaestus.automation.implementer.get_pr_head_branch",
+                "hephaestus.automation.implementer_phase_runner.get_pr_head_branch",
                 return_value="708-auto-impl",
             ),
             patch(
@@ -551,7 +551,7 @@ class TestExistingPrEntersReviewLoop:
             ),
             patch.object(impl, "_save_state"),
             patch(
-                "hephaestus.automation.implementer.fetch_issue_info",
+                "hephaestus.automation.implementer_phase_runner.fetch_issue_info",
                 return_value=MagicMock(title="t", body="b"),
             ),
             patch.object(impl, "_run_advise_as_implementer_turn"),
@@ -583,7 +583,7 @@ class TestExistingPrEntersReviewLoop:
 
         with (
             patch(
-                "hephaestus.automation.implementer.find_pr_for_issue",
+                "hephaestus.automation.implementer_phase_runner.find_pr_for_issue",
                 return_value=777,
             ),
             patch(
@@ -591,7 +591,7 @@ class TestExistingPrEntersReviewLoop:
                 return_value=(False, False),
             ),
             patch(
-                "hephaestus.automation.implementer.get_pr_head_branch",
+                "hephaestus.automation.implementer_phase_runner.get_pr_head_branch",
                 return_value="1-auto-impl",
             ),
             patch("hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"),
@@ -604,7 +604,7 @@ class TestExistingPrEntersReviewLoop:
             patch.object(impl, "_run_claude_code") as run_agent,
             patch.object(impl, "_run_impl_review_loop", return_value=(3, "NOGO", "D")),
             patch(
-                "hephaestus.automation.implementer.fetch_issue_info",
+                "hephaestus.automation.implementer_phase_runner.fetch_issue_info",
                 return_value=MagicMock(title="t", body="b"),
             ),
             patch.object(impl, "_run_advise_as_implementer_turn"),
@@ -626,14 +626,14 @@ class TestExistingPrEntersReviewLoop:
 
         with (
             patch(
-                "hephaestus.automation.implementer.find_pr_for_issue",
+                "hephaestus.automation.implementer_phase_runner.find_pr_for_issue",
                 return_value=None,
             ),
             patch.object(impl.worktree_manager, "create_worktree", return_value=worktree_path),
             patch.object(impl, "_has_plan", return_value=True),
             patch.object(impl, "_save_state"),
             patch(
-                "hephaestus.automation.implementer.is_plan_review_go",
+                "hephaestus.automation.implementer_phase_runner.is_plan_review_go",
                 return_value=True,
             ),
             patch.object(impl, "_run_advise_as_implementer_turn"),
@@ -645,7 +645,7 @@ class TestExistingPrEntersReviewLoop:
             patch("hephaestus.automation._review_phase.enable_auto_merge_after_implementation_go"),
             patch.object(impl, "_run_post_pr_followup"),
             patch(
-                "hephaestus.automation.implementer.fetch_issue_info",
+                "hephaestus.automation.implementer_phase_runner.fetch_issue_info",
                 return_value=MagicMock(title="t", body="b"),
             ),
         ):
@@ -844,14 +844,17 @@ class TestNoChangesProducedAppliesStateSkip:
         )
         with (
             patch(
-                "hephaestus.automation.implementer.find_pr_for_issue",
+                "hephaestus.automation.implementer_phase_runner.find_pr_for_issue",
                 return_value=None,
             ),
             patch.object(impl.worktree_manager, "create_worktree", return_value=worktree_path),
             patch.object(impl, "_save_state"),
             patch.object(impl, "_has_plan", return_value=True),
-            patch("hephaestus.automation.implementer.is_plan_review_go", return_value=True),
-            patch("hephaestus.automation.implementer.fetch_issue_info"),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.is_plan_review_go",
+                return_value=True,
+            ),
+            patch("hephaestus.automation.implementer_phase_runner.fetch_issue_info"),
             patch.object(impl, "_run_advise_as_implementer_turn"),
             patch.object(impl, "_run_claude_code", return_value="session-id"),
             patch.object(impl, "_finalize_pr", side_effect=no_changes_error),
@@ -910,7 +913,7 @@ class TestAdviseAsImplementerTurn:
 
         with (
             patch(
-                "hephaestus.automation.implementer.invoke_claude_with_session",
+                "hephaestus.automation._implement_phase.invoke_claude_with_session",
                 side_effect=_fake_invoke_with_session,
             ),
             patch(

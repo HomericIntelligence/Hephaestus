@@ -64,8 +64,6 @@ def test_stage_context_accessors_delegate_to_impl(tmp_path: Path) -> None:
     assert ctx.state_dir == tmp_path
     assert ctx.repo_root == tmp_path
     assert ctx.state_lock is ctx.impl.state_mgr.lock
-    # impl_module is the live implementer module (used for patchable lookups).
-    assert ctx.impl_module.__name__ == "hephaestus.automation.implementer"
 
 
 def test_stage_mixin_exposes_runner_and_impl(tmp_path: Path) -> None:
