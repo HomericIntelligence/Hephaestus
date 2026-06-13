@@ -18,7 +18,7 @@ name: Test
 #
 # The authoritative required gate is `.github/workflows/_required.yml`: it runs
 # lint (ruff/yamllint/mypy), the canonical unit-tests + integration-tests jobs
-# (Python 3.12, with --cov-fail-under=80 + per-module coverage floors), the
+# (Python 3.12, coverage gated by [tool.coverage.report].fail_under in pyproject.toml + per-module coverage floors), the
 # build smoke test, and the security/schema/pr-policy gates.
 #
 # To fix the DRY violation (and ~2x runner cost) flagged in #687, this workflow
