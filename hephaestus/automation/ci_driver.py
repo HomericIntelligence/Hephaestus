@@ -734,12 +734,11 @@ class CIDriver:
         pr_number: int,
         acquired_slot: int,
         max_wait: int,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | WorkerResult:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
         """Poll CI checks with exponential backoff until all required checks conclude.
 
         Returns ``(checks, required_checks)`` when all checks have concluded,
-        or a :class:`WorkerResult` (success=True) when no checks exist or the
-        poll deadline is exceeded.
+        or None when no checks exist or the poll deadline is exceeded.
         """
         poll_elapsed = 0
         poll_attempt = 0
@@ -747,7 +746,7 @@ class CIDriver:
             checks: list[dict[str, Any]] = gh_pr_checks(pr_number, dry_run=self.options.dry_run)
             if not checks:
                 logger.info("Issue #%s: no CI checks found for PR #%s", issue_number, pr_number)
-                return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+                return None
 
             required_checks = [c for c in checks if c.get("required", False)] or checks
             if all(c["status"] == "completed" for c in required_checks):
@@ -760,7 +759,7 @@ class CIDriver:
                     "treating as not yet failing",
                     issue_number, poll_elapsed, max_wait,
                 )
-                return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+                return None
 
             self.status_tracker.update_slot(
                 acquired_slot,
@@ -893,8 +892,8 @@ class CIDriver:
             poll_result = self._poll_ci_until_concluded(
                 issue_number, pr_number, acquired_slot, ci_poll_max_wait()
             )
-            if isinstance(poll_result, WorkerResult):
-                return poll_result
+            if poll_result is None:
+                return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
             _checks, required_checks = poll_result
 
             all_green = all(c.get("conclusion") in ("success", "skipped", "neutral") for c in required_checks)  # noqa: E501

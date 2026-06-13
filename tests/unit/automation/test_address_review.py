@@ -14,7 +14,7 @@ from hephaestus.automation.address_review import (
     resolve_addressed_threads,
     run_address_fix_session,
 )
-from hephaestus.automation.models import AddressReviewOptions
+from hephaestus.automation.models import AddressReviewOptions, ReviewPhase, ReviewState
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -698,8 +698,6 @@ class TestSetupAddressState:
         self, reviewer: AddressReviewer, tmp_path: Path
     ) -> None:
         """Existing state → updates pr_number."""
-        from hephaestus.automation.models import ReviewState
-
         existing_state = ReviewState(
             issue_number=123,
             pr_number=400,  # old pr_number
@@ -717,7 +715,7 @@ class TestSetupAddressState:
             patch.object(reviewer, "_save_review_state") as mock_save,
             patch.object(reviewer.status_tracker, "update_slot"),
         ):
-            session_id, review_state, branch_name, worktree_path = (
+            session_id, review_state, _branch_name, _worktree_path = (
                 reviewer._setup_address_state(
                     issue_number=123,
                     pr_number=456,
@@ -738,15 +736,13 @@ class TestCommitPushAndResolve:
     the real replies dict (not {}) to _resolve_addressed_threads.
     """
 
-    def test_passes_real_replies_dict_to_resolve(self, reviewer: AddressReviewer, tmp_path: Path) -> None:
+    def test_passes_real_replies_dict_to_resolve(self, reviewer: AddressReviewer, tmp_path: Path) -> None:  # noqa: E501
         """The helper must forward the REAL replies dict to _resolve_addressed_threads.
 
         This is the critical safeguard against the historically-buggy {}
         sentinel path. The replies dict carries reply text that must be posted
         as comments on each resolved thread per the review protocol.
         """
-        from hephaestus.automation.models import ReviewState, ReviewPhase
-
         review_state = ReviewState(
             issue_number=123,
             pr_number=456,
@@ -792,8 +788,6 @@ class TestCommitPushAndResolve:
         self, reviewer: AddressReviewer, tmp_path: Path
     ) -> None:
         """The helper updates review_state.addressed_thread_ids."""
-        from hephaestus.automation.models import ReviewState, ReviewPhase
-
         review_state = ReviewState(
             issue_number=123,
             pr_number=456,

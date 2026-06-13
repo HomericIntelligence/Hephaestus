@@ -2962,12 +2962,10 @@ class TestPollCiUntilConcluded:
     """Tests for the extracted _poll_ci_until_concluded helper."""
 
     def test_returns_early_when_no_checks(self, driver: CIDriver) -> None:
-        """No checks found → WorkerResult(success=True)."""
+        """No checks found → None."""
         with patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[]):
             result = driver._poll_ci_until_concluded(1, 42, 0, max_wait=60)
-        assert isinstance(result, WorkerResult)
-        assert result.success is True
-        assert result.pr_number == 42
+        assert result is None
 
     def test_returns_tuple_when_all_concluded(self, driver: CIDriver) -> None:
         """All checks completed → returns (checks, required_checks) tuple."""
@@ -2979,15 +2977,14 @@ class TestPollCiUntilConcluded:
         assert len(required_checks) == 1
 
     def test_times_out_when_checks_pending(self, driver: CIDriver) -> None:
-        """Pending checks that exceed max_wait → WorkerResult(success=True)."""
+        """Pending checks that exceed max_wait → None."""
         check = _make_check("ci", status="in_progress", conclusion="")
         with (
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[check]),
             patch("hephaestus.automation.ci_driver.time.sleep"),
         ):
             result = driver._poll_ci_until_concluded(1, 42, 0, max_wait=0)
-        assert isinstance(result, WorkerResult)
-        assert result.success is True
+        assert result is None
 
     def test_non_required_checks_all_treated_as_required(self, driver: CIDriver) -> None:
         """When no check has required=True, ALL checks are treated as required."""
