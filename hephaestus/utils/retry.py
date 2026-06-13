@@ -62,12 +62,14 @@ def _compute_backoff_delay(
         attempt: Zero-based attempt index (0 for the first retry).
         initial_delay: Initial delay in seconds before first retry.
         backoff_factor: Multiplier for delay between retries.
-        max_delay: Optional cap (applied *before* jitter so the actual sleep
-            value can reach max_delay * 1.25 at most when jitter=True).
+        max_delay: Optional hard cap on the sleep value. Applied *after* jitter
+            so the returned delay never exceeds max_delay (subject to the 0.1s
+            minimum floor below).
         jitter: If True, perturb the delay by ±25 %.
 
     Returns:
-        Sleep duration in seconds (always >= 0.1).
+        Sleep duration in seconds (always >= 0.1, and <= max_delay when a cap
+        is set and max_delay >= 0.1).
 
     """
     delay: float = initial_delay * (backoff_factor**attempt)
@@ -75,6 +77,11 @@ def _compute_backoff_delay(
         delay = min(delay, max_delay)
     if jitter:
         delay = float(delay + random.uniform(-0.25 * delay, 0.25 * delay))
+    # Re-apply the cap *after* jitter so max_delay is a hard ceiling, not an
+    # advisory target. Without this, +25% jitter could push the sleep to
+    # max_delay * 1.25 (see issue #1206).
+    if max_delay is not None:
+        delay = min(delay, max_delay)
     return max(0.1, delay)
 
 
@@ -97,7 +104,8 @@ def retry_with_backoff(
         jitter: Add random jitter to delay times (default: True)
         retry_on: Tuple of exception types to retry on (default: all exceptions)
         logger: Optional logging function for retry attempts
-        max_delay: Maximum delay cap in seconds (default: None, no cap)
+        max_delay: Maximum delay cap in seconds — a hard ceiling honored even
+            with jitter enabled (default: None, no cap)
         retry_predicate: Optional callable applied *after* the ``retry_on``
             isinstance check. If provided and the predicate returns ``False``
             for the raised exception, the exception is re-raised immediately

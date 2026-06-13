@@ -167,6 +167,34 @@ class TestRetryWithBackoff:
         for call in mock_sleep.call_args_list:
             assert call[0][0] <= 2.0
 
+    @patch("hephaestus.utils.retry.random.uniform")
+    @patch("time.sleep")
+    def test_max_delay_hard_ceiling_with_jitter(self, mock_sleep, mock_uniform):
+        """max_delay is a hard ceiling even when jitter pushes the delay up (#1206)."""
+        # Force jitter to its maximum positive value (+25% of the delay).
+        mock_uniform.side_effect = lambda lo, hi: hi
+
+        call_count = 0
+
+        def flaky():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 4:
+                raise ValueError("fail")
+            return "ok"
+
+        decorated = retry_with_backoff(
+            max_retries=4,
+            initial_delay=1.0,
+            backoff_factor=10,
+            jitter=True,
+            max_delay=2.0,
+        )(flaky)
+        assert decorated() == "ok"
+        # Pre-fix, max jitter would yield 2.0 * 1.25 = 2.5; the cap must hold.
+        for call in mock_sleep.call_args_list:
+            assert call[0][0] <= 2.0
+
 
 class TestRetryOnNetworkError:
     """Tests for retry_on_network_error convenience decorator."""
@@ -258,9 +286,9 @@ class TestRetryWithJitter:
 
         with pytest.warns(DeprecationWarning, match="retry_with_jitter"):
             retry_with_jitter(flaky, max_retries=4, base_delay=1.0, max_delay=2.0)
-        # All sleep calls should be <= max_delay * 1.25 (jitter upper bound)
+        # max_delay is a hard ceiling — jitter must not push the sleep above it.
         for c in mock_sleep.call_args_list:
-            assert c[0][0] <= 2.0 * 1.25 + 0.1
+            assert c[0][0] <= 2.0
 
     def test_emits_deprecation_warning(self):
         """retry_with_jitter() always emits DeprecationWarning."""
