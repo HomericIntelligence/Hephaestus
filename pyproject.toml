@@ -241,7 +241,7 @@ omit = [
     "*/__init__.py",
     # Full orchestration loops require a live claude/gh CLI — integration test territory.
     # Pure-function helpers in these modules are tested in tests/unit/automation/ instead.
-    # The allowlist of these 11 modules is frozen in tests/unit/validation/test_omit_allowlist.py
+    # The allowlist of these 12 modules is frozen in tests/unit/validation/test_omit_allowlist.py
     # to prevent silent growth of the omit list, and their importability is guarded by
     # tests/integration/test_orchestration_smoke.py.
     "hephaestus/automation/implementer.py",

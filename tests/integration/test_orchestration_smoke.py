@@ -1,11 +1,11 @@
 """Smoke tests for omitted orchestration modules — integration backstop.
 
-These tests validate that the 11 automation modules omitted from coverage
+These tests validate that the 12 automation modules omitted from coverage
 (per pyproject.toml[tool.coverage.run].omit) remain importable and their
 console entry points work correctly.
 
 Module enumeration and entry-point discovery verified at plan time:
-- All 11 modules are importable (guards against import regressions)
+- All 12 modules are importable (guards against import regressions)
 - 4 modules have console scripts: implementer, planner, loop_runner, pr_reviewer
 - 2 modules are script-less but have main(): address_review, ci_driver
 - 5 modules lack main() entirely: implementer_cli (only argument parsing /
@@ -18,7 +18,7 @@ import sys
 
 import pytest
 
-# All 11 omitted orchestration modules
+# All 12 omitted orchestration modules
 OMITTED_MODULES = [
     "hephaestus.automation.implementer",
     "hephaestus.automation.implementer_cli",
