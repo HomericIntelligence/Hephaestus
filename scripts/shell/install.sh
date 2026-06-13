@@ -97,11 +97,11 @@ should_check_control() { [[ "$ROLE" == "all" || "$ROLE" == "control" ]]; }
 # *.sha256 artifact on each project's GitHub Release page, or computed from
 # the release tarball. Mirrors the gitleaks pattern at
 # .github/workflows/_required.yml:574-576.
-readonly PIXI_VERSION="0.34.0"
-readonly PIXI_SHA256_LINUX_X86_64="fbdec98dff8b522c4ceb12d76e3fdc177b55620a33451b350c94eae37b3803c8"
-readonly PIXI_SHA256_LINUX_AARCH64="037f2513419127a3c19c129c9396973a146beee1231404f4f0d4699d2e3101d1"
-readonly PIXI_SHA256_DARWIN_X86_64="fa44bc52aa20350cefcd00938ea2269d172c00a0de9a0159d7d80e75b3495a73"
-readonly PIXI_SHA256_DARWIN_AARCH64="dc4b686d97d095687e6ef7ac0107863d1ae8a2d4d15374db9540971133f1c07d"
+readonly PIXI_VERSION="0.69.0"
+readonly PIXI_SHA256_LINUX_X86_64="285e021a8dd81d151e1dd03541ef6525a8205e0e6422aae3dfe17772b20cdd41"
+readonly PIXI_SHA256_LINUX_AARCH64="8e05e2f3c79bcfdde5656d6e021062a2d1275bd0b4115360bef4560fc3fb1974"
+readonly PIXI_SHA256_DARWIN_X86_64="daa582b13f45b6acaf049005b98ea111749ac2e9c5385c4a3d6731bc6a68ef5d"
+readonly PIXI_SHA256_DARWIN_AARCH64="640de30196141d6b67c745675cec6d6b784fb42df34b02ee25fde2bb2b542aac"
 
 readonly DAGGER_VERSION="0.13.3"
 readonly DAGGER_SHA256_LINUX_X86_64="787307925b10c0b9b04c0fd814716abe339c53b6aa250a8ba25321a934d14a67"
