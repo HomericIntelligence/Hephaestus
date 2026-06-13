@@ -93,3 +93,11 @@ def test_shell_helper_exits_1_when_no_methods_allowed() -> None:
     result = _run_with_mock_gh(body)
     assert result.returncode == 1
     assert "allows no merge methods" in result.stderr
+
+
+def test_shell_helper_selects_merge_when_rebase_and_squash_disallowed() -> None:
+    """Falls back to merge commit when both rebase and squash are not permitted."""
+    body = '{"allow_rebase_merge":false,"allow_squash_merge":false,"allow_merge_commit":true}'
+    result = _run_with_mock_gh(body)
+    assert result.returncode == 0
+    assert result.stdout.strip() == "--merge"
