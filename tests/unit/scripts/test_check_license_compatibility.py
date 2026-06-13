@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.io.toml import import_tomllib
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
 
 from check_license_compatibility import (
@@ -192,17 +194,23 @@ class TestAllExtraCompleteness:
     """Coverage depends on `[all]` aggregating every runtime extra (Finding 3)."""
 
     def test_all_extra_covers_runtime_extras(self):
-        text = (_REPO_ROOT / "pyproject.toml").read_text()
-        # Extract the inner aggregate list from the `[all]` extra, e.g.
-        # all = ["HomericIntelligence-Hephaestus[automation,github,nats,toml,xml,schema]"]
-        # The `[all = [...]` TOML wrapper itself contains the aggregate `[...]`, so
-        # anchor on `all = [` then capture the bracket group that follows the dist name.
-        m = re.search(
-            r"^all\s*=\s*\[.*?\[([^\]]+)\].*?\]",
-            text,
-            re.MULTILINE | re.DOTALL,
+        # Parse pyproject.toml properly rather than regex-scraping it: a hand-rolled
+        # pattern breaks the moment `[all]` is reformatted (multi-line array, a
+        # comment, or the dist-name placement shifts). tomllib gives the structured
+        # value; we then pull the extras out of the single aggregate requirement,
+        # e.g. "HomericIntelligence-Hephaestus[automation,github,nats,toml,xml,schema]".
+        tomllib = import_tomllib()
+        if tomllib is None:
+            pytest.skip("tomllib/tomli not available to parse pyproject.toml")
+            return  # unreachable (pytest.skip raises); narrows tomllib for mypy
+        with (_REPO_ROOT / "pyproject.toml").open("rb") as fh:
+            pyproject = tomllib.load(fh)
+        all_specs = pyproject["project"]["optional-dependencies"]["all"]
+        m = re.search(r"\[([^\]]+)\]", " ".join(all_specs))
+        assert m, (
+            "could not find the bracketed extras aggregate in the `all` extra "
+            f"{all_specs!r} of pyproject.toml"
         )
-        assert m, "could not find the `all` aggregate in pyproject.toml"
         aggregated = {e.strip() for e in m.group(1).split(",")}
         # Every runtime extra except the self-referential `all` must be aggregated.
         for extra in RUNTIME_EXTRAS - {"all"}:
