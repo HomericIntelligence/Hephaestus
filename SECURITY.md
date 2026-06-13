@@ -2,7 +2,9 @@
 
 ## Supported Versions
 
-As of the 0.9.x release line. Python >= 3.10 required.
+ProjectHephaestus supports **Python 3.10–3.13** (`requires-python = ">=3.10"` in
+`pyproject.toml`; CI exercises 3.10, 3.11, 3.12, and 3.13). See
+[COMPATIBILITY.md](COMPATIBILITY.md) for the full compatibility policy.
 
 | Version | Supported       |
 |---------|-----------------|
