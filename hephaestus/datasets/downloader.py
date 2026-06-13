@@ -36,12 +36,45 @@ import time
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.logging.utils import get_logger
 
 logger = get_logger(__name__)
+
+# Network schemes permitted for dataset downloads. Restricting to http(s)
+# blocks ``file://``, ``ftp://``, and other ``urlopen``-supported schemes that
+# would otherwise turn an attacker-controlled ``base_url`` into a local-file or
+# SSRF read (CWE-918 / CWE-22). This guard is what makes the ``nosec B310``
+# annotation on the ``urlopen`` call below accurate.
+_ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+
+
+def _validate_url_scheme(url: str) -> str:
+    """Return *url* unchanged if its scheme is an allowed http(s) scheme.
+
+    Args:
+        url: The fully-qualified URL whose scheme should be validated.
+
+    Returns:
+        The original *url* when its scheme is permitted.
+
+    Raises:
+        ValueError: If *url* uses any scheme other than ``http``/``https``
+            (e.g. ``file://``, ``ftp://``), which could be abused for local
+            file disclosure or SSRF.
+
+    """
+    scheme = urlparse(url).scheme.lower()
+    if scheme not in _ALLOWED_URL_SCHEMES:
+        raise ValueError(
+            f"Refusing non-HTTP(S) dataset URL: {url!r} "
+            f"(scheme {scheme!r}; allowed: {sorted(_ALLOWED_URL_SCHEMES)})"
+        )
+    return url
+
 
 # Per-file MD5 checksums for integrity verification. Values are the
 # upstream-published MD5s used by torchvision; they detect MITM tampering and
@@ -113,7 +146,7 @@ class DatasetDownloader:
             retry_delays: Delay times between retries (exponential backoff)
 
         """
-        self.base_url = base_url.rstrip("/")
+        self.base_url = _validate_url_scheme(base_url.rstrip("/"))
         self.user_agent = user_agent
         self.max_retries = max_retries
         self.retry_delays = retry_delays or [1.0, 2.0, 4.0]
@@ -132,7 +165,10 @@ class DatasetDownloader:
             True if successful, False otherwise
 
         """
-        url = f"{self.base_url}/{filename}"
+        # Re-validate the fully-constructed URL: ``self.base_url`` may have been
+        # reassigned after construction (e.g. EMNIST mirror fallback), so the
+        # constructor-time check is not sufficient on its own.
+        url = _validate_url_scheme(f"{self.base_url}/{filename}")
         max_retries = max_retries if max_retries is not None else self.max_retries
         last_error = None
 
@@ -144,7 +180,7 @@ class DatasetDownloader:
 
             try:
                 request = Request(url, headers={"User-Agent": self.user_agent})
-                with urlopen(request) as response:  # nosec B310 - base_url is always a hardcoded HTTPS dataset URL; file:// and custom schemes are not accepted
+                with urlopen(request) as response:  # nosec B310 - url scheme validated to http(s) via _validate_url_scheme above; file://, ftp:// and other schemes raise ValueError before this call
                     total_size = int(response.headers.get("Content-Length", 0))
                     downloaded = 0
                     block_size = 8192
@@ -564,7 +600,7 @@ class EMNISTDownloader(DatasetDownloader):
             logger.info("Downloading EMNIST %s split...", split)
             downloaded = False
             for base_url in [self.base_url, *self._fallback_urls]:
-                self.base_url = base_url
+                self.base_url = _validate_url_scheme(base_url)
                 if self.download_with_retry(zip_name, zip_path):
                     downloaded = True
                     break
