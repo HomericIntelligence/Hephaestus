@@ -40,7 +40,7 @@ The final summary block (`install.sh:968–988`) aggregates results from **all s
 
 ## What the Script Is *Not*
 
-The entry-point guard at `install.sh:137–141` returns early when the script is
+The entry-point guard at `install.sh:178–180` returns early when the script is
 sourced rather than executed (its inline comment anticipates Odysseus phase
 scripts as the intended sourcing consumer).
 

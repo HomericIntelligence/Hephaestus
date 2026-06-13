@@ -2,7 +2,7 @@
 # Regression tests for scripts/shell/install.sh — the four if-block rewrites
 # that replaced broken `A || B && C || D` short-circuit chains (issue #788).
 #
-# Each test sources the script (the entry-point guard at install.sh:127-129
+# Each test sources the script (the entry-point guard at install.sh:178-180
 # returns before argument parsing), resets the counters, stubs apt_install/pip3
 # to return a chosen rc, then re-runs the rewritten if-block and asserts that
 # exactly one of _PASS / _FAIL advanced by exactly 1.
@@ -17,7 +17,7 @@ setup() {
     INSTALL=true
 }
 
-# ── Harness sanity: sourcing guard at install.sh:127-129 worked; helpers loaded ──
+# ── Harness sanity: sourcing guard at install.sh:178-180 worked; helpers loaded ──
 @test "sourcing guard exposes helpers and counters" {
     declare -F check_pass >/dev/null
     declare -F check_fail >/dev/null
