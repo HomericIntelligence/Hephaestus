@@ -67,15 +67,30 @@ from .pr_manager import (
 from .prompts import get_dirty_reused_worktree_decision_prompt, get_implementation_prompt
 from .review_state import is_plan_review_go
 
-# Patchable symbols (``find_pr_for_issue``, ``get_pr_head_branch``,
-# ``is_plan_review_go``, ``fetch_issue_info``, ``invoke_claude_with_session``,
-# ``get_repo_slug``, ``AGENT_IMPLEMENTER``, ``AGENT_ADVISE``,
-# ``current_trunk_githash``) are imported top-level from their true source
-# modules and reached by their bare names below. Tests patch them at
-# ``hephaestus.automation.implementer_phase_runner.<X>`` — the module that owns
-# these call sites — instead of through a deferred per-runner module-pointer
-# indirection. This breaks the import cycle the old indirection created with ``implementer``
-# (#714). ``current_trunk_githash`` is patch-only (used by tests).
+# Test-Patch Contract — patchable symbols owned by this module.
+# All symbols below are imported top-level from their true source modules so
+# that tests patch them at ``hephaestus.automation.implementer_phase_runner.<X>``.
+# This is the pattern established by #714 (which removed the old deferred
+# per-runner ``from . import implementer`` back-pointer that caused an import
+# cycle with :mod:`.implementer`).
+#
+#   Symbol                    Patched by
+#   ------------------------- ----------------------------------------------------
+#   find_pr_for_issue         test_implementer.py (TestReviewExistingPR)
+#   get_pr_head_branch        test_implementer.py (TestReviewExistingPR)
+#   is_plan_review_go         test_implementer.py / test_implementer_loop.py
+#   fetch_issue_info          test_implementer.py / test_implementer_loop.py
+#   invoke_claude_with_session test_implementer.py / test_implementer_loop.py
+#   get_repo_slug             test_implementer.py
+#   AGENT_IMPLEMENTER         test_implementer.py / test_implementer_loop.py
+#   AGENT_ADVISE              test_implementer.py / test_implementer_loop.py
+#   current_trunk_githash     test_implementer.py (patch-only; not used at runtime)
+#   review_state (submodule)  test_implementer.py (via ``from . import review_state``)
+#   run                       test_implementer_loop.py (health-check)
+#   sync_worktree_to_remote_branch  test_implementer_loop.py
+#   ensure_pr_auto_merge_deferred   test_implementer.py
+#
+# Keep in sync: grep -rn 'patch.*hephaestus\.automation\.implementer_phase_runner\.' tests/
 from .session_naming import (  # noqa: F401
     AGENT_ADVISE,
     AGENT_IMPLEMENTER,

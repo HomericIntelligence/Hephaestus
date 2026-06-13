@@ -1,10 +1,54 @@
-"""Bulk issue implementation using the selected coding agent in parallel worktrees.
+r"""Bulk issue implementation using the selected coding agent in parallel worktrees.
 
 Provides:
 - Dependency-aware parallel implementation
 - Git worktree isolation
 - State persistence and resume
 - CI fix automation
+
+Test-Patch Contract
+-------------------
+This module owns a **minimal** patch surface.  After the #714 extraction, most
+patchable collaborators moved to :mod:`.implementer_phase_runner` (see its
+top-level comment block for the full list).  Only two patch paths still target
+``hephaestus.automation.implementer.<name>`` in the test suite:
+
+  Symbol            Mechanism                Notes
+  ----------------- ------------------------ ----------------------------------------
+  get_repo_root     direct import + ``as``   Used by ``IssueImplementer.__init__``
+                    alias (mypy re-export)   and ``main``; patched in every test that
+                                             constructs an ``IssueImplementer``.
+  subprocess.run    stdlib top-level         Patched at the dotted path
+                    ``import subprocess``    ``…implementer.subprocess.run`` via
+                                             Python's standard attribute-traversal
+                                             during ``patch()``.
+
+Keep-in-sync command (run when adding a new patch surface here):
+
+    grep -rn 'patch.*hephaestus\\.automation\\.implementer\\.' tests/ \\
+      | grep -v 'implementer_phase_runner\\|implementer_cli\\|implementer_state'
+
+When adding a new patchable dependency to *this* module:
+
+  1. Import it here using ``from .module import name as name`` (mypy
+     ``implicit_reexport=false``) so the re-export is explicit.
+  2. Add a row to the table above.
+  3. If the dependency is also called from :mod:`.implementer_phase_runner`,
+     add it there with a top-level import instead — do NOT bridge it back
+     through this module (that recreates the #714 cycle).
+
+For the full list of patchable symbols in the phase-runner (``fetch_issue_info``,
+``find_pr_for_issue``, ``is_plan_review_go``, ``invoke_claude_with_session``,
+``get_repo_slug``, ``AGENT_IMPLEMENTER``, ``AGENT_ADVISE``,
+``current_trunk_githash``, ``review_state``, …) see the comment block in
+:mod:`.implementer_phase_runner` above its ``from .session_naming import`` line.
+
+Why not constructor-injected collaborators: this module is patched by 16+
+existing test call sites across ``test_implementer.py`` and
+``test_implementer_loop.py``.  Converting to DI would require editing every
+one.  See issue #710's tradeoff analysis and the team's
+``python-module-decomposition-and-refactor-patterns`` skill, Phase 11
+(Reverse-Delegation), validated by PR #674.
 """
 
 from __future__ import annotations
@@ -22,62 +66,27 @@ from hephaestus.agents.runtime import (
     is_codex,
 )
 
-# ---------------------------------------------------------------------------
-# Test-patch contract (load-bearing). The symbols below are real call sites in
-# THIS module's own body (``IssueImplementer`` + ``main``) and double as patch
-# surfaces: tests ``patch("hephaestus.automation.implementer.<X>", ...)`` to
-# intercept them.
-#
-# Symbols that the per-issue phase runner calls (``find_pr_for_issue``,
-# ``is_plan_review_go``, ``fetch_issue_info``, ``invoke_claude_with_session``,
-# ``get_repo_slug``, ``AGENT_IMPLEMENTER``, ``AGENT_ADVISE``,
-# ``current_trunk_githash``, ``review_state``) are NO LONGER re-exported here.
-# Since #714 the runner imports them directly from their source modules and
-# tests patch them at ``hephaestus.automation.implementer_phase_runner.<X>``.
-# Re-exporting them here would be a dead shim whose silent no-op patches would
-# let tests hit real network/disk.
-# ---------------------------------------------------------------------------
+# Imports for the Test-Patch Contract — see module docstring for the full table.
+# Each symbol here is either a real call site in IssueImplementer/main or an
+# explicit re-export required by tests or the public API.
 from .curses_ui import CursesUI, ThreadLogManager
 from .dependency_resolver import CyclicDependencyError, DependencyResolver
 
-# ``get_repo_root`` is re-exported with an explicit ``as`` alias so that
-# ``main`` (defined below) and tests patching ``implementer.get_repo_root``
-# share one lookup site.
-#
-# Patched by: tests/unit/automation/test_implementer.py;
-#             tests/unit/automation/test_implementer_loop.py
-# Runtime call site: ``IssueImplementer.__init__`` + ``main``
+# Patched at ``hephaestus.automation.implementer.get_repo_root`` by every test
+# that constructs an IssueImplementer.  Explicit ``as`` alias satisfies mypy
+# ``implicit_reexport=false`` and makes the re-export intentional.
 from .git_utils import (
     get_repo_root as get_repo_root,
 )
-
-# ``run`` is a real call site for ``IssueImplementer._health_check``; it does
-# double duty as a patch surface.
 from .git_utils import run
-
-# ``fetch_issue_info`` is a real call site (``IssueImplementer._load_issues``),
-# not a shim.
 from .github_api import fetch_issue_info
-
-# ``gh_list_open_issues`` is re-exported with an explicit ``as`` alias so
-# ``main`` (defined below) and tests patching ``implementer.gh_list_open_issues``
-# share one lookup site.
 from .github_api import (
     gh_list_open_issues as gh_list_open_issues,
 )
 
-# ``MAX_REVIEW_ITERATIONS`` is re-exported so tests that import it via
-# ``hephaestus.automation.implementer`` see the same value the runtime loop
-# in :class:`ImplementationPhaseRunner` uses. Single source of truth lives
-# in ``implementer_phase_runner``.
-#
-# Argument parsing and logging setup live in ``implementer_cli`` (extracted
-# for SRP — see #468). Re-exported here with explicit ``as`` aliases (required
-# by mypy) so existing tests calling ``implementer._parse_args()`` and patching
-# ``implementer.<dep>`` continue to work unchanged. ``main`` itself is defined
-# in THIS module (not re-imported from ``implementer_cli``) so the console
-# script ``hephaestus.automation.implementer:main`` resolves directly and no
-# deferred import is needed to break the cycle (#714).
+# _parse_args / _setup_logging live in implementer_cli (SRP extraction #468).
+# Re-exported with explicit ``as`` aliases so tests calling
+# ``implementer._parse_args()`` continue to work unchanged.
 from .implementer_cli import (
     _parse_args as _parse_args,
 )
