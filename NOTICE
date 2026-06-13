@@ -14,6 +14,14 @@ The following packages are installed as runtime dependencies when you install
 compatible with BSD 3-Clause distribution because they are imported, not
 modified or redistributed.
 
+These determinations are machine-enforced on every PR by the `license-scan`
+CI job (scripts/check_license_compatibility.py), which installs the package
+with all runtime extras (`pip install -e .[all]`) and scans the DISTRIBUTED
+dependency set (base + runtime extras, not dev tooling). A new distributed
+dependency under an incompatible license, an unrecognized license string, or a
+missing runtime extra fails CI. When you add a non-vendored copyleft extra
+here, also add it to that script's ALLOWED_EXTRA_COPYLEFT map.
+
   packaging     Apache-2.0 OR BSD-2-Clause
   pyyaml        MIT
   pydantic      MIT

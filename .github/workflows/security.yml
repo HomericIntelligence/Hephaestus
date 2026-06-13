@@ -93,3 +93,45 @@ jobs:
               echo "Security issues detected — see job logs for details."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  license-scan:
+    name: License compatibility scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          fetch-depth: 0  # hatch-vcs needs full history to compute the version
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.13"
+          cache: pip  # cache wheels so a PyPI hiccup does not flake the gate
+
+      # Install the package + ALL runtime extras (with deps) on a bare runner,
+      # exactly like the unit-test jobs (test.yml). NOT inside pixi: pip and
+      # pixi co-managing site-packages causes lockfile churn (pixi.toml).
+      - name: Install package with all runtime extras
+        run: pip install -e ".[all]"
+
+      - name: Run license scan
+        id: license-scan
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: python3 scripts/check_license_compatibility.py
+
+      - name: Post license-scan summary
+        if: always()
+        env:
+          LICENSE_OUTCOME: ${{ steps.license-scan.outcome }}
+        run: |
+          {
+            echo "## License Compatibility Scan"
+            echo ""
+            if [ "$LICENSE_OUTCOME" = "success" ]; then
+              echo "All distributed dependency licenses compatible with BSD-3-Clause (see NOTICE)."
+            else
+              echo "Non-compatible license or coverage gap detected — see job logs and NOTICE."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
