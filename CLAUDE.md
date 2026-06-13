@@ -25,7 +25,7 @@ ProjectHephaestus is the shared utilities and tooling repository of the HomericI
 
 ```text
 ProjectHephaestus/
-├── hephaestus/                 # Python source code (19 documented subpackages)
+├── hephaestus/                 # Python source code (20 documented subpackages)
 │   ├── agents/                 # Agent frontmatter + loader + runtime
 │   ├── automation/             # Issue planning / implementation / PR review pipeline
 │   ├── benchmarks/             # Benchmark comparison utilities

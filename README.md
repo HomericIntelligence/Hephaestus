@@ -106,6 +106,7 @@ ProjectHephaestus/
 │   ├── markdown/      # Markdown linting and link fixing
 │   ├── nats/          # NATS JetStream subscriber (event-driven workflows)
 │   ├── resilience/    # Circuit breaker + retry + subprocess resilience primitives
+│   ├── scripts_lib/   # Standalone consistency-check scripts (CLI table, version)
 │   ├── system/        # System information collection
 │   ├── utils/         # General utility functions (slugify, retry, subprocess)
 │   ├── validation/    # README, schema, and structural validation
