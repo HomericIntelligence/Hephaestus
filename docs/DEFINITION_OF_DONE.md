@@ -34,6 +34,12 @@ A piece of work is **done** when every item below is true.
 | 21 | Pre-commit hooks pass on the diff | CI job `pre-commit` |
 | 22 | Every review thread is resolved (including bot-authored threads) | Org ruleset `required_review_thread_resolution` |
 
+> **Which of these actually block the merge button?** All of the CI jobs above
+> are aggregated into a single required status check, `required-checks-gate`.
+> See [`docs/ci/required-checks.md`](ci/required-checks.md) for the exact
+> required-context list, why a single aggregator is used, and how to (re-)apply
+> branch protection.
+
 ## For new features
 
 In addition to the universal checklist:
