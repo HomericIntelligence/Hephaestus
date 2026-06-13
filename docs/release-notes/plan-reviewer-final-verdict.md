@@ -21,7 +21,10 @@ Two correctness fixes ride along:
 1. **Last-line-wins verdict parsing.** The gate now extracts every line
    matching `^**Verdict: (APPROVED|REVISE|BLOCK)**$` from the review body
    (regex, multiline) and uses the LAST match — matching the contract the
-   prompt gives Claude (`prompts.py:474-475`). The previous substring `in`
+   prompt gives Claude (the "last matching line" rule documented in
+   `hephaestus/automation/prompts/__init__.py`; the former single-file
+   `prompts.py` was split into the `hephaestus/automation/prompts/`
+   package). The previous substring `in`
    check could mis-fire True on a body that quoted the marker in prose or
    discussed APPROVED before settling on BLOCK.
 
