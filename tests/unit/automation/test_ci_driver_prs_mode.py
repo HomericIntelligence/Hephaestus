@@ -56,9 +56,11 @@ class TestDiscoverPrsDirectMode:
 
         # Mock _validate_pr_open to return True for these PRs
         # Also mock _discover_failing_prs: empty issues triggers the failing-PR path (#819)
-        with patch.object(driver, "_validate_pr_open", return_value=True) as mock_validate:
-            with patch.object(driver, "_find_pr_for_issue", return_value=None):
-                with patch.object(driver, "_discover_failing_prs", return_value={}):
+        with patch.object(
+            driver._pr_discovery, "_validate_pr_open", return_value=True
+        ) as mock_validate:
+            with patch.object(driver._pr_discovery, "_find_pr_for_issue", return_value=None):
+                with patch.object(driver._pr_discovery, "_discover_failing_prs", return_value={}):
                     result = driver._discover_prs([])
 
         assert 661 in result.values()
@@ -75,9 +77,9 @@ class TestDiscoverPrsDirectMode:
         """Direct PRs populate shared_pr_issues[pr] = [pr]."""
         driver.options.prs = [661]
 
-        with patch.object(driver, "_validate_pr_open", return_value=True):
-            with patch.object(driver, "_find_pr_for_issue", return_value=None):
-                with patch.object(driver, "_discover_failing_prs", return_value={}):
+        with patch.object(driver._pr_discovery, "_validate_pr_open", return_value=True):
+            with patch.object(driver._pr_discovery, "_find_pr_for_issue", return_value=None):
+                with patch.object(driver._pr_discovery, "_discover_failing_prs", return_value={}):
                     driver._discover_prs([])
 
         assert driver.shared_pr_issues.get(661) == [661]
@@ -89,12 +91,14 @@ class TestDiscoverPrsDirectMode:
 
         # Mock find_pr_for_issue to return 661 for issue 918
         with patch.object(
-            driver,
+            driver._pr_discovery,
             "_find_pr_for_issue",
             return_value=661,
         ):
-            with patch.object(driver, "_validate_pr_open", return_value=True) as mock_validate:
-                with patch.object(driver, "_discover_failing_prs", return_value={}):
+            with patch.object(
+                driver._pr_discovery, "_validate_pr_open", return_value=True
+            ) as mock_validate:
+                with patch.object(driver._pr_discovery, "_discover_failing_prs", return_value={}):
                     result = driver._discover_prs([918])
 
         # PR 661 should appear exactly once, keyed by issue 918 (from issue path)
@@ -112,12 +116,12 @@ class TestDiscoverPrsDirectMode:
 
         # Issue 918 maps to PR 999
         with patch.object(
-            driver,
+            driver._pr_discovery,
             "_find_pr_for_issue",
             return_value=999,
         ):
-            with patch.object(driver, "_validate_pr_open", return_value=True):
-                with patch.object(driver, "_discover_failing_prs", return_value={}):
+            with patch.object(driver._pr_discovery, "_validate_pr_open", return_value=True):
+                with patch.object(driver._pr_discovery, "_discover_failing_prs", return_value={}):
                     result = driver._discover_prs([918])
 
         # Issue 918 should map to PR 999
@@ -135,9 +139,11 @@ class TestDiscoverPrsDirectMode:
         def validate_side_effect(pr_num):
             return pr_num != 662  # 662 is closed/non-existent
 
-        with patch.object(driver, "_validate_pr_open", side_effect=validate_side_effect):
-            with patch.object(driver, "_find_pr_for_issue", return_value=None):
-                with patch.object(driver, "_discover_failing_prs", return_value={}):
+        with patch.object(
+            driver._pr_discovery, "_validate_pr_open", side_effect=validate_side_effect
+        ):
+            with patch.object(driver._pr_discovery, "_find_pr_for_issue", return_value=None):
+                with patch.object(driver._pr_discovery, "_discover_failing_prs", return_value={}):
                     result = driver._discover_prs([])
 
         # Valid PRs included
@@ -151,9 +157,9 @@ class TestDiscoverPrsDirectMode:
         driver.options.prs = [661]
         driver.options.include_bot_prs = False
 
-        with patch.object(driver, "_validate_pr_open", return_value=True):
-            with patch.object(driver, "_find_pr_for_issue", return_value=None):
-                with patch.object(driver, "_discover_failing_prs", return_value={}):
+        with patch.object(driver._pr_discovery, "_validate_pr_open", return_value=True):
+            with patch.object(driver._pr_discovery, "_find_pr_for_issue", return_value=None):
+                with patch.object(driver._pr_discovery, "_discover_failing_prs", return_value={}):
                     result = driver._discover_prs([])
 
         assert result.get(661) == 661
@@ -163,9 +169,9 @@ class TestDiscoverPrsDirectMode:
         driver.options.prs = [661]
         driver.options.include_bot_prs = False
 
-        with patch.object(driver, "_validate_pr_open", return_value=True):
-            with patch.object(driver, "_find_pr_for_issue", return_value=None):
-                with patch.object(driver, "_discover_failing_prs", return_value={}):
+        with patch.object(driver._pr_discovery, "_validate_pr_open", return_value=True):
+            with patch.object(driver._pr_discovery, "_find_pr_for_issue", return_value=None):
+                with patch.object(driver._pr_discovery, "_discover_failing_prs", return_value={}):
                     result = driver._discover_prs([])
 
         assert result.get(661) == 661

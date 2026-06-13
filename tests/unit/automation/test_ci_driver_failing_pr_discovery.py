@@ -146,9 +146,9 @@ class TestDiscoverFailingPrs:
                 "mergeStateStatus": "CLEAN",
             },
         ]
-        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+        with patch("hephaestus.automation.pr_discovery.get_repo_info") as mock_repo_info:
             mock_repo_info.return_value = ("MyOrg", "MyRepo")
-            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+            with patch("hephaestus.automation.pr_discovery._gh_call") as mock_gh_call:
                 mock_gh_call.return_value = Mock(stdout=json.dumps(mock_output))
                 result = ci_driver._discover_failing_prs()
         assert result == {1: 1}
@@ -164,9 +164,9 @@ class TestDiscoverFailingPrs:
                 "mergeStateStatus": "BLOCKED",
             },
         ]
-        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+        with patch("hephaestus.automation.pr_discovery.get_repo_info") as mock_repo_info:
             mock_repo_info.return_value = ("MyOrg", "MyRepo")
-            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+            with patch("hephaestus.automation.pr_discovery._gh_call") as mock_gh_call:
                 mock_gh_call.return_value = Mock(stdout=json.dumps(mock_output))
                 result = ci_driver._discover_failing_prs()
         assert result == {3: 3}
@@ -181,9 +181,9 @@ class TestDiscoverFailingPrs:
                 "mergeStateStatus": "CLEAN",
             },
         ]
-        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+        with patch("hephaestus.automation.pr_discovery.get_repo_info") as mock_repo_info:
             mock_repo_info.return_value = ("MyOrg", "MyRepo")
-            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+            with patch("hephaestus.automation.pr_discovery._gh_call") as mock_gh_call:
                 mock_gh_call.return_value = Mock(stdout=json.dumps(mock_output))
                 result = ci_driver._discover_failing_prs()
         assert result == {}
@@ -192,9 +192,9 @@ class TestDiscoverFailingPrs:
         """Discovery returns empty dict on gh command failure."""
         import subprocess
 
-        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+        with patch("hephaestus.automation.pr_discovery.get_repo_info") as mock_repo_info:
             mock_repo_info.return_value = ("MyOrg", "MyRepo")
-            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+            with patch("hephaestus.automation.pr_discovery._gh_call") as mock_gh_call:
                 mock_gh_call.side_effect = subprocess.CalledProcessError(1, "gh")
                 result = ci_driver._discover_failing_prs()
         assert result == {}
@@ -203,9 +203,9 @@ class TestDiscoverFailingPrs:
         """Discovery returns empty dict when gh pr list times out (docstring contract)."""
         import subprocess
 
-        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+        with patch("hephaestus.automation.pr_discovery.get_repo_info") as mock_repo_info:
             mock_repo_info.return_value = ("MyOrg", "MyRepo")
-            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+            with patch("hephaestus.automation.pr_discovery._gh_call") as mock_gh_call:
                 mock_gh_call.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=30)
                 result = ci_driver._discover_failing_prs()
         assert result == {}
@@ -214,9 +214,9 @@ class TestDiscoverFailingPrs:
         self, ci_driver: CIDriver
     ) -> None:
         """Discovery returns empty dict when the gh binary is missing/unexecutable."""
-        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+        with patch("hephaestus.automation.pr_discovery.get_repo_info") as mock_repo_info:
             mock_repo_info.return_value = ("MyOrg", "MyRepo")
-            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+            with patch("hephaestus.automation.pr_discovery._gh_call") as mock_gh_call:
                 mock_gh_call.side_effect = FileNotFoundError(2, "No such file or directory", "gh")
                 result = ci_driver._discover_failing_prs()
         assert result == {}
@@ -232,20 +232,20 @@ class TestDiscoverFailingPrs:
             }
             for i in range(1, 1001)
         ]
-        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+        with patch("hephaestus.automation.pr_discovery.get_repo_info") as mock_repo_info:
             mock_repo_info.return_value = ("MyOrg", "MyRepo")
-            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+            with patch("hephaestus.automation.pr_discovery._gh_call") as mock_gh_call:
                 mock_gh_call.return_value = Mock(stdout=json.dumps(mock_output))
-                with patch("hephaestus.automation.ci_driver.logger") as mock_logger:
+                with patch("hephaestus.automation.pr_discovery.logger") as mock_logger:
                     result = ci_driver._discover_failing_prs()
         assert len(result) == 1000
         mock_logger.warning.assert_called()
 
     def test_discover_failing_prs_returns_empty_on_invalid_json(self, ci_driver: CIDriver) -> None:
         """Discovery returns empty dict on invalid JSON."""
-        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+        with patch("hephaestus.automation.pr_discovery.get_repo_info") as mock_repo_info:
             mock_repo_info.return_value = ("MyOrg", "MyRepo")
-            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+            with patch("hephaestus.automation.pr_discovery._gh_call") as mock_gh_call:
                 mock_gh_call.return_value = Mock(stdout="not-json")
                 result = ci_driver._discover_failing_prs()
         assert result == {}
@@ -261,11 +261,11 @@ class TestDiscoverPrsUnion:
         ci_driver.options.issues = []
         ci_driver.options.include_bot_prs = True
 
-        with patch.object(ci_driver, "_discover_bot_prs") as mock_bot:
+        with patch.object(ci_driver._pr_discovery, "_discover_bot_prs") as mock_bot:
             mock_bot.return_value = {10: 10}
-            with patch.object(ci_driver, "_discover_failing_prs") as mock_failing:
+            with patch.object(ci_driver._pr_discovery, "_discover_failing_prs") as mock_failing:
                 mock_failing.return_value = {20: 20}
-                with patch.object(ci_driver, "_find_pr_for_issue") as mock_find:
+                with patch.object(ci_driver._pr_discovery, "_find_pr_for_issue") as mock_find:
                     mock_find.return_value = None
                     result = ci_driver._discover_prs([])
         assert result == {10: 10, 20: 20}
@@ -281,10 +281,10 @@ class TestDiscoverPrsUnion:
         ci_driver.options.issues = [100]
         ci_driver.options.include_bot_prs = True  # default-on, must be suppressed when scoped
 
-        with patch.object(ci_driver, "_discover_failing_prs") as mock_failing:
-            with patch.object(ci_driver, "_find_pr_for_issue") as mock_find:
+        with patch.object(ci_driver._pr_discovery, "_discover_failing_prs") as mock_failing:
+            with patch.object(ci_driver._pr_discovery, "_find_pr_for_issue") as mock_find:
                 mock_find.return_value = 200
-                with patch.object(ci_driver, "_discover_bot_prs") as mock_bot:
+                with patch.object(ci_driver._pr_discovery, "_discover_bot_prs") as mock_bot:
                     mock_bot.return_value = {999: 999}  # would leak in if not suppressed
                     result = ci_driver._discover_prs([100])
         mock_failing.assert_not_called()
@@ -296,11 +296,11 @@ class TestDiscoverPrsUnion:
         ci_driver.options.issues = []
         ci_driver.options.include_bot_prs = True
 
-        with patch.object(ci_driver, "_discover_bot_prs") as mock_bot:
+        with patch.object(ci_driver._pr_discovery, "_discover_bot_prs") as mock_bot:
             mock_bot.return_value = {15: 15}
-            with patch.object(ci_driver, "_discover_failing_prs") as mock_failing:
+            with patch.object(ci_driver._pr_discovery, "_discover_failing_prs") as mock_failing:
                 mock_failing.return_value = {15: 15, 25: 25}
-                with patch.object(ci_driver, "_find_pr_for_issue") as mock_find:
+                with patch.object(ci_driver._pr_discovery, "_find_pr_for_issue") as mock_find:
                     mock_find.return_value = None
                     result = ci_driver._discover_prs([])
         assert result == {15: 15, 25: 25}

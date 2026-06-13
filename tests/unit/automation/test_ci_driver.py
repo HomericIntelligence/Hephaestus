@@ -174,8 +174,8 @@ class TestReplyAndResolveBotThreads:
             {"id": "T_human", "path": "b.py", "line": 2, "body": "?", "author": "alice"},
         ]
         with (
-            patch.object(driver, "_list_unresolved_threads_safe", return_value=threads),
-            patch("hephaestus.automation.ci_driver.gh_pr_resolve_thread") as resolve,
+            patch.object(driver._ci_check, "_list_unresolved_threads_safe", return_value=threads),
+            patch("hephaestus.automation.ci_check_inspector.gh_pr_resolve_thread") as resolve,
         ):
             count = driver._reply_and_resolve_bot_threads(999)
 
@@ -184,8 +184,8 @@ class TestReplyAndResolveBotThreads:
 
     def test_no_threads_is_noop(self, driver: CIDriver) -> None:
         with (
-            patch.object(driver, "_list_unresolved_threads_safe", return_value=[]),
-            patch("hephaestus.automation.ci_driver.gh_pr_resolve_thread") as resolve,
+            patch.object(driver._ci_check, "_list_unresolved_threads_safe", return_value=[]),
+            patch("hephaestus.automation.ci_check_inspector.gh_pr_resolve_thread") as resolve,
         ):
             assert driver._reply_and_resolve_bot_threads(999) == 0
         resolve.assert_not_called()
@@ -193,8 +193,8 @@ class TestReplyAndResolveBotThreads:
     def test_dry_run_is_noop(self, driver: CIDriver) -> None:
         driver.options.dry_run = True
         with (
-            patch.object(driver, "_list_unresolved_threads_safe") as lister,
-            patch("hephaestus.automation.ci_driver.gh_pr_resolve_thread") as resolve,
+            patch.object(driver._ci_check, "_list_unresolved_threads_safe") as lister,
+            patch("hephaestus.automation.ci_check_inspector.gh_pr_resolve_thread") as resolve,
         ):
             assert driver._reply_and_resolve_bot_threads(999) == 0
         lister.assert_not_called()
@@ -206,9 +206,9 @@ class TestReplyAndResolveBotThreads:
             {"id": "T_bot2", "path": "b", "line": 2, "body": "y", "author": "b[bot]"},
         ]
         with (
-            patch.object(driver, "_list_unresolved_threads_safe", return_value=threads),
+            patch.object(driver._ci_check, "_list_unresolved_threads_safe", return_value=threads),
             patch(
-                "hephaestus.automation.ci_driver.gh_pr_resolve_thread",
+                "hephaestus.automation.ci_check_inspector.gh_pr_resolve_thread",
                 side_effect=[RuntimeError("boom"), None],
             ) as resolve,
         ):
@@ -272,17 +272,26 @@ def test_codex_ci_fix_session_falls_back_to_fresh_on_resume_failure(
     ]
 
     with (
-        patch("hephaestus.automation.ci_driver.resume_codex_session", side_effect=resume_error),
         patch(
-            "hephaestus.automation.ci_driver.run_codex_session",
+            "hephaestus.automation.ci_fix_orchestrator.resume_codex_session",
+            side_effect=resume_error,
+        ),
+        patch(
+            "hephaestus.automation.ci_fix_orchestrator.run_codex_session",
             return_value=fresh_result,
         ) as mock_fresh,
         patch(
-            "hephaestus.automation.ci_driver.push_current_branch_with_lease_on_divergence"
+            "hephaestus.automation.ci_fix_orchestrator.push_current_branch_with_lease_on_divergence"
         ) as mock_push,
-        patch("hephaestus.automation.ci_driver.sync_worktree_to_remote_branch") as mock_sync,
-        patch.object(driver, "_ci_fix_head_is_pushable", return_value=True),
-        patch("hephaestus.automation.ci_driver.run", side_effect=pre_post_sequence),
+        patch(
+            "hephaestus.automation.ci_fix_orchestrator.sync_worktree_to_remote_branch"
+        ) as mock_sync,
+        patch.object(driver._ci_fix, "_ci_fix_head_is_pushable", return_value=True),
+        patch("hephaestus.automation.ci_fix_orchestrator.run", side_effect=pre_post_sequence),
+        patch(
+            "hephaestus.automation.ci_check_inspector.gh_pr_list_unresolved_threads",
+            return_value=[],
+        ),
     ):
         result = driver._run_ci_fix_session(
             issue_number=123,
@@ -321,19 +330,19 @@ def test_codex_ci_fix_session_skips_push_when_head_did_not_advance(
 
     with (
         patch(
-            "hephaestus.automation.ci_driver.run_codex_session",
+            "hephaestus.automation.ci_fix_orchestrator.run_codex_session",
             return_value=fresh_result,
         ),
         patch(
-            "hephaestus.automation.ci_driver.push_current_branch_with_lease_on_divergence"
+            "hephaestus.automation.ci_fix_orchestrator.push_current_branch_with_lease_on_divergence"
         ) as mock_push,
-        patch("hephaestus.automation.ci_driver.sync_worktree_to_remote_branch"),
+        patch("hephaestus.automation.ci_fix_orchestrator.sync_worktree_to_remote_branch"),
         patch(
-            "hephaestus.automation.ci_driver.run",
+            "hephaestus.automation.ci_fix_orchestrator.run",
             side_effect=[unchanged_sha, unchanged_sha],
         ),
         patch(
-            "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+            "hephaestus.automation.ci_check_inspector.gh_pr_list_unresolved_threads",
             return_value=[],
         ),
         patch(
@@ -363,7 +372,7 @@ def test_ci_fix_head_not_pushable_with_unmerged_index(
 ) -> None:
     """A semantic conflict resolution is not pushable until the index is merged."""
     with patch(
-        "hephaestus.automation.ci_driver.run",
+        "hephaestus.automation.ci_fix_orchestrator.run",
         return_value=MagicMock(
             stdout="hephaestus/automation/loop_runner.py\n",
             stderr="",
@@ -383,7 +392,7 @@ def test_ci_fix_head_not_pushable_when_head_is_base_only(
         MagicMock(stdout="?? uv.lock\n", stderr="", returncode=0),  # generated untracked file
         MagicMock(stdout="0\n", stderr="", returncode=0),  # no commits ahead of origin/main
     ]
-    with patch("hephaestus.automation.ci_driver.run", side_effect=responses):
+    with patch("hephaestus.automation.ci_fix_orchestrator.run", side_effect=responses):
         assert driver._ci_fix_head_is_pushable(tmp_path, 993) is False
 
 
@@ -397,7 +406,7 @@ def test_ci_fix_head_pushable_with_clean_committed_pr_head(
         MagicMock(stdout="?? uv.lock\n", stderr="", returncode=0),
         MagicMock(stdout="1\n", stderr="", returncode=0),
     ]
-    with patch("hephaestus.automation.ci_driver.run", side_effect=responses):
+    with patch("hephaestus.automation.ci_fix_orchestrator.run", side_effect=responses):
         assert driver._ci_fix_head_is_pushable(tmp_path, 993) is True
 
 
@@ -407,10 +416,12 @@ def test_codex_ci_advise_uses_codex_prompt_builder(driver: CIDriver) -> None:
 
     with (
         patch(
-            "hephaestus.automation.ci_driver.gh_issue_json",
+            "hephaestus.automation.ci_fix_orchestrator.gh_issue_json",
             return_value={"title": "Test Issue", "body": "Issue body"},
         ),
-        patch("hephaestus.automation.ci_driver.run_advise", return_value="findings") as run,
+        patch(
+            "hephaestus.automation.ci_fix_orchestrator.run_advise", return_value="findings"
+        ) as run,
     ):
         result = driver._run_advise(123)
 
@@ -428,7 +439,7 @@ class TestDiscoverPrsDedupe:
 
     def test_single_issue_per_pr_unchanged(self, driver: CIDriver) -> None:
         """The 1:1 mapping case is unchanged: every input issue resolves to a PR."""
-        with patch.object(driver, "_find_pr_for_issue", side_effect=[100, 101, 102]):
+        with patch.object(driver._pr_discovery, "_find_pr_for_issue", side_effect=[100, 101, 102]):
             result = driver._discover_prs([1, 2, 3])
         assert result == {1: 100, 2: 101, 3: 102}
 
@@ -438,7 +449,7 @@ class TestDiscoverPrsDedupe:
         # Without dedupe the driver would race nine workers against the same
         # branch and the eight losers would fail `git worktree add`.
         with patch.object(
-            driver,
+            driver._pr_discovery,
             "_find_pr_for_issue",
             side_effect=[103] * 9,
         ):
@@ -450,7 +461,7 @@ class TestDiscoverPrsDedupe:
         """Mix of shared and unique PRs: each PR appears once, shared via lowest issue."""
         # 1,2 → PR 100 (shared); 3 → PR 200 (unique); 4,5 → PR 300 (shared)
         with patch.object(
-            driver,
+            driver._pr_discovery,
             "_find_pr_for_issue",
             side_effect=[100, 100, 200, 300, 300],
         ):
@@ -460,7 +471,7 @@ class TestDiscoverPrsDedupe:
     def test_no_pr_skipped_separately_from_shared(self, driver: CIDriver) -> None:
         """Issues with no PR are dropped; remaining issues still get deduped."""
         # 1 → PR 100; 2 → no PR; 3 → PR 100 (shared with 1)
-        with patch.object(driver, "_find_pr_for_issue", side_effect=[100, None, 100]):
+        with patch.object(driver._pr_discovery, "_find_pr_for_issue", side_effect=[100, None, 100]):
             result = driver._discover_prs([1, 2, 3])
         assert result == {1: 100}
 
@@ -472,7 +483,7 @@ class TestDiscoverPrsDedupe:
         # /learn on merge and the other 8 lose their lessons.
         siblings_for_103 = [12, 22, 23, 28, 29, 37, 39, 59, 64]
         side_effect = [103] * len(siblings_for_103) + [200]
-        with patch.object(driver, "_find_pr_for_issue", side_effect=side_effect):
+        with patch.object(driver._pr_discovery, "_find_pr_for_issue", side_effect=side_effect):
             driver._discover_prs([*siblings_for_103, 99])
         assert driver.shared_pr_issues[103] == siblings_for_103
         assert driver.shared_pr_issues[200] == [99]
@@ -622,10 +633,12 @@ class TestAllRequiredGreen:
             _make_check("lint", required=True),
         ]
         with (
+            patch.object(driver, "_attempt_mechanical_rebase", return_value=False),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
             _impl_go(driver),
             patch.object(driver, "_enable_auto_merge") as mock_merge,
             patch.object(driver, "_run_drive_green_learnings"),
+            patch.object(driver, "_gh_pr_state", return_value={"headRefOid": "abc"}),
             patch.object(driver, "_wait_for_pr_terminal", return_value="MERGED"),
         ):
             result = driver._drive_issue(123, 456, 0)
@@ -637,6 +650,7 @@ class TestAllRequiredGreen:
         """Green CI is not enough; implementation review must mark the PR GO."""
         checks = [_make_check("test", required=True)]
         with (
+            patch.object(driver, "_attempt_mechanical_rebase", return_value=False),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
             patch.object(driver, "_pr_has_implementation_go", return_value=False),
             patch.object(driver, "_enable_auto_merge") as mock_merge,
@@ -691,10 +705,12 @@ class TestRequiredVsNonRequired:
             _make_check("lint", required=False, conclusion="success"),
         ]
         with (
+            patch.object(driver, "_attempt_mechanical_rebase", return_value=False),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
             _impl_go(driver),
             patch.object(driver, "_enable_auto_merge") as mock_merge,
             patch.object(driver, "_run_drive_green_learnings"),
+            patch.object(driver, "_gh_pr_state", return_value={"headRefOid": "abc"}),
             patch.object(driver, "_wait_for_pr_terminal", return_value="MERGED"),
         ):
             result = driver._drive_issue(123, 456, 0)
@@ -711,10 +727,12 @@ class TestRequiredVsNonRequired:
             _make_check("optional-lint", required=False, conclusion="failure"),
         ]
         with (
+            patch.object(driver, "_attempt_mechanical_rebase", return_value=False),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
             _impl_go(driver),
             patch.object(driver, "_enable_auto_merge") as mock_merge,
             patch.object(driver, "_run_drive_green_learnings"),
+            patch.object(driver, "_gh_pr_state", return_value={"headRefOid": "abc"}),
             patch.object(driver, "_wait_for_pr_terminal", return_value="MERGED"),
         ):
             result = driver._drive_issue(123, 456, 0)
@@ -729,11 +747,15 @@ class TestRequiredVsNonRequired:
         ]
         with (
             patch.object(driver, "_find_pr_for_issue", return_value=42),
+            patch.object(driver, "_attempt_mechanical_rebase", return_value=False),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
-            patch.object(driver, "_get_failing_ci_logs", return_value="error log"),
-            patch.object(driver, "_load_impl_session_id", return_value=None),
+            patch.object(driver._ci_fix, "_get_failing_ci_logs", return_value="error log"),
+            patch.object(driver._ci_fix, "_load_impl_session_id", return_value=None),
             patch.object(driver, "_get_worktree_path", return_value=Path("/tmp/wt")),
-            patch.object(driver, "_run_ci_fix_session", return_value=True) as mock_fix,
+            patch.object(driver._ci_fix, "_run_ci_fix_session", return_value=True) as mock_fix,
+            # _recheck_and_arm_after_fix calls ci_fix_orchestrator.gh_pr_checks; mock it
+            # to prevent live network calls from the re-arm step after a pushed fix.
+            patch("hephaestus.automation.ci_fix_orchestrator.gh_pr_checks", return_value=[]),
         ):
             result = driver._drive_issue(123, 456, 0)
 
@@ -751,7 +773,7 @@ class TestRequiredVsNonRequired:
         with (
             patch.object(driver, "_find_pr_for_issue", return_value=42),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
-            patch.object(driver, "_run_ci_fix_session") as mock_fix,
+            patch.object(driver._ci_fix, "_run_ci_fix_session") as mock_fix,
         ):
             result = driver._drive_issue(123, 456, 0)
 
@@ -771,13 +793,13 @@ class TestCiDriverAdvise:
         """enable_advise=True → _run_advise is called and its findings reach the fix session."""
         driver.options.enable_advise = True
         with (
-            patch.object(driver, "_get_failing_ci_logs", return_value="error log"),
-            patch.object(driver, "_load_impl_session_id", return_value=None),
+            patch.object(driver._ci_fix, "_get_failing_ci_logs", return_value="error log"),
+            patch.object(driver._ci_fix, "_load_impl_session_id", return_value=None),
             patch.object(driver, "_get_worktree_path", return_value=Path("/tmp/wt")),
             patch.object(
-                driver, "_run_advise", return_value="## Findings\n- mind X"
+                driver._ci_fix, "_run_advise", return_value="## Findings\n- mind X"
             ) as mock_advise,
-            patch.object(driver, "_run_ci_fix_session", return_value=True) as mock_fix,
+            patch.object(driver._ci_fix, "_run_ci_fix_session", return_value=True) as mock_fix,
         ):
             driver._attempt_ci_fixes(123, 456, 0)
 
@@ -789,11 +811,11 @@ class TestCiDriverAdvise:
         """enable_advise=False → _run_advise is never called and findings are empty."""
         driver.options.enable_advise = False
         with (
-            patch.object(driver, "_get_failing_ci_logs", return_value="error log"),
-            patch.object(driver, "_load_impl_session_id", return_value=None),
+            patch.object(driver._ci_fix, "_get_failing_ci_logs", return_value="error log"),
+            patch.object(driver._ci_fix, "_load_impl_session_id", return_value=None),
             patch.object(driver, "_get_worktree_path", return_value=Path("/tmp/wt")),
-            patch.object(driver, "_run_advise") as mock_advise,
-            patch.object(driver, "_run_ci_fix_session", return_value=True) as mock_fix,
+            patch.object(driver._ci_fix, "_run_advise") as mock_advise,
+            patch.object(driver._ci_fix, "_run_ci_fix_session", return_value=True) as mock_fix,
         ):
             driver._attempt_ci_fixes(123, 456, 0)
 
@@ -825,10 +847,10 @@ class TestDryRunWithFailingChecks:
         with (
             patch.object(dry_driver, "_find_pr_for_issue", return_value=42),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
-            patch.object(dry_driver, "_get_failing_ci_logs", return_value="log"),
-            patch.object(dry_driver, "_load_impl_session_id", return_value=None),
+            patch.object(dry_driver._ci_fix, "_get_failing_ci_logs", return_value="log"),
+            patch.object(dry_driver._ci_fix, "_load_impl_session_id", return_value=None),
             patch.object(dry_driver, "_get_worktree_path", return_value=tmp_path),
-            patch.object(dry_driver, "_run_ci_fix_session") as mock_fix,
+            patch.object(dry_driver._ci_fix, "_run_ci_fix_session") as mock_fix,
         ):
             result = dry_driver._drive_issue(123, 456, 0)
 
@@ -847,7 +869,10 @@ class TestNoCiChecks:
 
     def test_no_checks_returns_success(self, driver: CIDriver) -> None:
         """No CI checks for PR → returns WorkerResult(success=True)."""
-        with patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[]):
+        with (
+            patch.object(driver, "_attempt_mechanical_rebase", return_value=False),
+            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[]),
+        ):
             result = driver._drive_issue(123, 456, 0)
 
         assert result.success is True
@@ -864,7 +889,7 @@ class TestEnableAutoMerge:
 
     def test_squash_success_returns_true(self, driver: CIDriver) -> None:
         """Successful --auto --squash returns True (squash-only repo)."""
-        with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh:
+        with patch("hephaestus.automation.post_merge_processor._gh_call") as mock_gh:
             result = driver._enable_auto_merge(99)
 
         assert result is True
@@ -878,7 +903,7 @@ class TestEnableAutoMerge:
         """--auto --squash fails; force_merge_on_stall=False → returns False, no fallback."""
         driver.options.force_merge_on_stall = False
         with patch(
-            "hephaestus.automation.ci_driver._gh_call",
+            "hephaestus.automation.post_merge_processor._gh_call",
             side_effect=subprocess.CalledProcessError(1, "gh"),
         ) as mock_gh:
             result = driver._enable_auto_merge(99)
@@ -894,7 +919,9 @@ class TestEnableAutoMerge:
             subprocess.CalledProcessError(1, "gh"),  # first call: --auto fails
             MagicMock(),  # second call: squash succeeds
         ]
-        with patch("hephaestus.automation.ci_driver._gh_call", side_effect=call_results) as mock_gh:
+        with patch(
+            "hephaestus.automation.post_merge_processor._gh_call", side_effect=call_results
+        ) as mock_gh:
             result = driver._enable_auto_merge(99)
 
         assert result is True
@@ -906,7 +933,7 @@ class TestEnableAutoMerge:
         """Both --auto and --squash fail → returns False."""
         driver.options.force_merge_on_stall = True
         with patch(
-            "hephaestus.automation.ci_driver._gh_call",
+            "hephaestus.automation.post_merge_processor._gh_call",
             side_effect=subprocess.CalledProcessError(1, "gh"),
         ):
             result = driver._enable_auto_merge(99)
@@ -920,6 +947,7 @@ class TestEnableAutoMerge:
         """
         checks = [_make_check("test", required=True)]
         with (
+            patch.object(driver, "_attempt_mechanical_rebase", return_value=False),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
             _impl_go(driver),
             patch.object(driver, "_enable_auto_merge", return_value=False),
@@ -957,6 +985,7 @@ class TestDriveGreenLearnings:
         # set it up directly with a single-issue PR.
         driver.shared_pr_issues = {456: [123]}
         with (
+            patch.object(driver, "_attempt_mechanical_rebase", return_value=False),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
             _impl_go(driver),
             patch.object(driver, "_enable_auto_merge", return_value=True),
@@ -967,7 +996,7 @@ class TestDriveGreenLearnings:
                 return_value={"state": "OPEN", "headRefOid": "abc1234"},
             ),
             patch(
-                "hephaestus.automation.ci_driver.invoke_claude_with_session",
+                "hephaestus.automation.post_merge_processor.invoke_claude_with_session",
                 return_value=("ok", "sid"),
             ) as mock_invoke,
             # Don't block on the post-arm wait loop; we only assert the
@@ -1050,7 +1079,7 @@ class TestDriveGreenLearnings:
         )
         with (
             patch.object(
-                driver,
+                driver._ci_check,
                 "_gh_pr_state",
                 return_value={
                     "state": "MERGED",
@@ -1058,7 +1087,9 @@ class TestDriveGreenLearnings:
                     "mergedAt": "2026-01-02T00:00:00Z",
                 },
             ),
-            patch.object(driver, "_run_drive_green_learnings", return_value=True) as mock_learn,
+            patch.object(
+                driver._ci_check, "_run_drive_green_learnings_fn", return_value=True
+            ) as mock_learn,
         ):
             result = driver._check_arming_on_drive_start(42, 500)
 
@@ -1090,8 +1121,8 @@ class TestDriveGreenLearnings:
             },
         )
         with (
-            patch.object(driver, "_gh_pr_state") as mock_state,
-            patch.object(driver, "_run_drive_green_learnings") as mock_learn,
+            patch.object(driver._ci_check, "_gh_pr_state") as mock_state,
+            patch.object(driver._ci_check, "_run_drive_green_learnings_fn") as mock_learn,
         ):
             result = driver._check_arming_on_drive_start(42, 500)
 
@@ -1117,8 +1148,8 @@ class TestDriveGreenLearnings:
             },
         )
         with (
-            patch.object(driver, "_gh_pr_state") as mock_state,
-            patch.object(driver, "_run_drive_green_learnings") as mock_learn,
+            patch.object(driver._ci_check, "_gh_pr_state") as mock_state,
+            patch.object(driver._ci_check, "_run_drive_green_learnings_fn") as mock_learn,
         ):
             result = driver._check_arming_on_drive_start(42, 500)
 
@@ -1149,13 +1180,13 @@ class TestDriveGreenLearnings:
         )
         with (
             patch.object(
-                driver,
+                driver._ci_check,
                 "_gh_pr_state",
                 return_value={"state": "OPEN", "headRefOid": "abc1234"},
             ),
-            patch.object(driver, "_run_drive_green_learnings") as mock_learn,
+            patch.object(driver._ci_check, "_run_drive_green_learnings_fn") as mock_learn,
             # The PR never resolves within the budget → TIMEOUT (still pending).
-            patch.object(driver, "_wait_for_pr_terminal", return_value="TIMEOUT"),
+            patch.object(driver._ci_check, "_wait_for_pr_terminal", return_value="TIMEOUT"),
         ):
             result = driver._check_arming_on_drive_start(42, 500)
 
@@ -1182,12 +1213,12 @@ class TestDriveGreenLearnings:
         )
         with (
             patch.object(
-                driver,
+                driver._ci_check,
                 "_gh_pr_state",
                 return_value={"state": "OPEN", "headRefOid": "abc1234"},
             ),
-            patch.object(driver, "_run_drive_green_learnings") as mock_learn,
-            patch.object(driver, "_wait_for_pr_terminal", return_value="MERGED"),
+            patch.object(driver._ci_check, "_run_drive_green_learnings_fn") as mock_learn,
+            patch.object(driver._ci_check, "_wait_for_pr_terminal", return_value="MERGED"),
         ):
             result = driver._check_arming_on_drive_start(42, 500)
 
@@ -1220,7 +1251,7 @@ class TestDriveGreenLearnings:
             },
         )
         with patch.object(
-            driver,
+            driver._ci_check,
             "_gh_pr_state",
             return_value={"state": "OPEN", "headRefOid": "fffffff"},
         ):
@@ -1250,11 +1281,11 @@ class TestDriveGreenLearnings:
         )
         with (
             patch.object(
-                driver,
+                driver._ci_check,
                 "_gh_pr_state",
                 return_value={"state": "CLOSED", "headRefOid": "abc1234"},
             ),
-            patch.object(driver, "_run_drive_green_learnings") as mock_learn,
+            patch.object(driver._ci_check, "_run_drive_green_learnings_fn") as mock_learn,
         ):
             result = driver._check_arming_on_drive_start(42, 500)
 
@@ -1287,11 +1318,11 @@ class TestDriveGreenLearnings:
         )
         with (
             patch.object(
-                driver,
+                driver._ci_check,
                 "_gh_pr_state",
                 return_value={"state": "MERGED", "headRefOid": "abc1234"},
             ),
-            patch.object(driver, "_run_drive_green_learnings", return_value=False),
+            patch.object(driver._ci_check, "_run_drive_green_learnings_fn", return_value=False),
         ):
             result = driver._check_arming_on_drive_start(42, 500)
 
@@ -1316,10 +1347,12 @@ class TestDriveGreenLearnings:
         with (
             patch.object(driver, "_get_worktree_path", return_value=tmp_path),
             patch(
-                "hephaestus.automation.ci_driver.run_codex_session",
+                "hephaestus.automation.post_merge_processor.run_codex_session",
                 return_value=mock_codex_result,
             ) as mock_codex,
-            patch("hephaestus.automation.ci_driver.invoke_claude_with_session") as mock_invoke,
+            patch(
+                "hephaestus.automation.post_merge_processor.invoke_claude_with_session"
+            ) as mock_invoke,
         ):
             result = driver._run_drive_green_learnings(123, 456)
 
@@ -1331,7 +1364,10 @@ class TestDriveGreenLearnings:
         assert "Only push skills to ProjectMnemosyne" in prompt
         assert mock_codex.call_args.kwargs["cwd"] == tmp_path
         mock_invoke.assert_not_called()
-        assert driver._last_drive_green_learn_evidence["mnemosyne_update_status"] == "confirmed"
+        assert (
+            driver._post_merge._last_drive_green_learn_evidence["mnemosyne_update_status"]
+            == "confirmed"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1361,11 +1397,13 @@ class TestCIPollLoop:
 
         monkeypatch.setenv("HEPH_CI_POLL_MAX_WAIT", "3600")
         with (
+            patch.object(driver, "_attempt_mechanical_rebase", return_value=False),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", side_effect=side_effect),
             patch("hephaestus.automation.ci_driver.time.sleep"),
             _impl_go(driver),
             patch.object(driver, "_enable_auto_merge", return_value=True),
             patch.object(driver, "_run_drive_green_learnings"),
+            patch.object(driver, "_gh_pr_state", return_value={"headRefOid": "abc"}),
             patch.object(driver, "_wait_for_pr_terminal", return_value="MERGED"),
         ):
             result = driver._drive_issue(123, 456, 0)
@@ -1381,6 +1419,7 @@ class TestCIPollLoop:
 
         monkeypatch.setenv("HEPH_CI_POLL_MAX_WAIT", "0")
         with (
+            patch.object(driver, "_attempt_mechanical_rebase", return_value=False),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=[pending_check]),
             patch("hephaestus.automation.ci_driver.time.sleep"),
         ):
@@ -1496,7 +1535,7 @@ class TestGetFailingCiLogs:
         driver.options.dry_run = False
         with (
             patch.object(driver, "_get_pr_branch", return_value="123-auto-impl"),
-            patch("hephaestus.automation.ci_driver._gh_call") as mock_gh,
+            patch("hephaestus.automation.ci_check_inspector._gh_call") as mock_gh,
         ):
             mock_gh.return_value = MagicMock(stdout="[]")
             driver._get_failing_ci_logs(pr_number=456)
@@ -1509,7 +1548,7 @@ class TestGetFailingCiLogs:
         """``gh run list`` must NOT be called without a ``--branch`` filter."""
         with (
             patch.object(driver, "_get_pr_branch", return_value="my-branch"),
-            patch("hephaestus.automation.ci_driver._gh_call") as mock_gh,
+            patch("hephaestus.automation.ci_check_inspector._gh_call") as mock_gh,
         ):
             mock_gh.return_value = MagicMock(stdout="[]")
             driver._get_failing_ci_logs(pr_number=10)
@@ -1582,7 +1621,8 @@ class TestReviewThreadInjection:
     ) -> None:
         """No unresolved threads → no block injected (avoid prompt noise)."""
         with patch(
-            "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads", return_value=[]
+            "hephaestus.automation.ci_check_inspector.gh_pr_list_unresolved_threads",
+            return_value=[],
         ):
             result = driver._format_review_threads_block(pr_number=999)
         assert result == ""
@@ -1594,7 +1634,7 @@ class TestReviewThreadInjection:
             {"id": "t2", "path": "src/b.py", "line": None, "body": "Magic constant."},
         ]
         with patch(
-            "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+            "hephaestus.automation.ci_check_inspector.gh_pr_list_unresolved_threads",
             return_value=threads,
         ):
             block = driver._format_review_threads_block(pr_number=42)
@@ -1608,7 +1648,7 @@ class TestReviewThreadInjection:
     def test_graphql_failure_is_swallowed(self, driver: CIDriver, tmp_path: Path) -> None:
         """A gh failure must not block the drive — empty string + info log only."""
         with patch(
-            "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+            "hephaestus.automation.ci_check_inspector.gh_pr_list_unresolved_threads",
             side_effect=RuntimeError("graphql down"),
         ):
             assert driver._format_review_threads_block(pr_number=7) == ""
@@ -1619,7 +1659,7 @@ class TestFailingRequiredCheckNames:
 
     def test_all_green_returns_empty(self, driver: CIDriver) -> None:
         checks = [_make_check("lint", conclusion="success")]
-        with patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks):
+        with patch("hephaestus.automation.ci_check_inspector.gh_pr_checks", return_value=checks):
             assert driver._failing_required_check_names(pr_number=1) == []
 
     def test_one_required_failure_returned(self, driver: CIDriver) -> None:
@@ -1628,7 +1668,7 @@ class TestFailingRequiredCheckNames:
             _make_check("test", conclusion="failure"),
             _make_check("non-req", conclusion="failure", required=False),
         ]
-        with patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks):
+        with patch("hephaestus.automation.ci_check_inspector.gh_pr_checks", return_value=checks):
             names = driver._failing_required_check_names(pr_number=1)
         assert names == ["test"]
 
@@ -1637,13 +1677,13 @@ class TestFailingRequiredCheckNames:
         checks = [
             _make_check("only-check", conclusion="failure", required=False),
         ]
-        with patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks):
+        with patch("hephaestus.automation.ci_check_inspector.gh_pr_checks", return_value=checks):
             assert driver._failing_required_check_names(pr_number=1) == ["only-check"]
 
     def test_gh_failure_returns_empty(self, driver: CIDriver) -> None:
         """A gh blip must not promote the no-commit to a retry — empty list = skip."""
         with patch(
-            "hephaestus.automation.ci_driver.gh_pr_checks",
+            "hephaestus.automation.ci_check_inspector.gh_pr_checks",
             side_effect=RuntimeError("api down"),
         ):
             assert driver._failing_required_check_names(pr_number=1) == []
@@ -1723,16 +1763,18 @@ class TestNoCommitRetry:
         """No-commit + green CI + clean tracked tree → no retry."""
         with (
             patch(
-                "hephaestus.automation.ci_driver.gh_pr_checks",
+                "hephaestus.automation.ci_check_inspector.gh_pr_checks",
                 return_value=[_make_check("lint", conclusion="success")],
             ),
-            patch("hephaestus.automation.ci_driver.invoke_claude_with_session") as mock_invoke,
             patch(
-                "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+                "hephaestus.automation.ci_fix_orchestrator.invoke_claude_with_session"
+            ) as mock_invoke,
+            patch(
+                "hephaestus.automation.ci_check_inspector.gh_pr_list_unresolved_threads",
                 return_value=[],
             ),
             patch(
-                "hephaestus.automation.ci_driver.run",
+                "hephaestus.automation.ci_fix_orchestrator.run",
                 return_value=MagicMock(stdout="?? uv.lock\n", stderr="", returncode=0),
             ),
         ):
@@ -1761,18 +1803,18 @@ class TestNoCommitRetry:
         post_sha = MagicMock(stdout="deadbeef\n", stderr="", returncode=0)
         with (
             patch(
-                "hephaestus.automation.ci_driver.gh_pr_checks",
+                "hephaestus.automation.ci_check_inspector.gh_pr_checks",
                 return_value=[_make_check("lint", conclusion="success")],
             ),
             patch(
-                "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+                "hephaestus.automation.ci_check_inspector.gh_pr_list_unresolved_threads",
                 return_value=[],
             ),
             patch(
-                "hephaestus.automation.ci_driver.invoke_claude_with_session",
+                "hephaestus.automation.ci_fix_orchestrator.invoke_claude_with_session",
                 return_value=("done", "sess"),
             ) as mock_invoke,
-            patch("hephaestus.automation.ci_driver.run", side_effect=[status, post_sha]),
+            patch("hephaestus.automation.ci_fix_orchestrator.run", side_effect=[status, post_sha]),
         ):
             result = driver._retry_no_commit_once(
                 issue_number=993,
@@ -1799,18 +1841,21 @@ class TestNoCommitRetry:
         clean_status = MagicMock(stdout="", stderr="", returncode=0)
         with (
             patch(
-                "hephaestus.automation.ci_driver.gh_pr_checks",
+                "hephaestus.automation.ci_check_inspector.gh_pr_checks",
                 return_value=[_make_check("lint", conclusion="failure")],
             ),
             patch(
-                "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+                "hephaestus.automation.ci_check_inspector.gh_pr_list_unresolved_threads",
                 return_value=[],
             ),
             patch(
-                "hephaestus.automation.ci_driver.invoke_claude_with_session",
+                "hephaestus.automation.ci_fix_orchestrator.invoke_claude_with_session",
                 return_value=("done", "sess"),
             ) as mock_invoke,
-            patch("hephaestus.automation.ci_driver.run", side_effect=[clean_status, post_sha]),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.run",
+                side_effect=[clean_status, post_sha],
+            ),
         ):
             result = driver._retry_no_commit_once(
                 issue_number=1,
@@ -1836,19 +1881,19 @@ class TestNoCommitRetry:
         clean_status = MagicMock(stdout="", stderr="", returncode=0)
         with (
             patch(
-                "hephaestus.automation.ci_driver.gh_pr_checks",
+                "hephaestus.automation.ci_check_inspector.gh_pr_checks",
                 return_value=[_make_check("lint", conclusion="failure")],
             ),
             patch(
-                "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+                "hephaestus.automation.ci_check_inspector.gh_pr_list_unresolved_threads",
                 return_value=[],
             ),
             patch(
-                "hephaestus.automation.ci_driver.invoke_claude_with_session",
+                "hephaestus.automation.ci_fix_orchestrator.invoke_claude_with_session",
                 return_value=("nope", "sess"),
             ) as mock_invoke,
             patch(
-                "hephaestus.automation.ci_driver.run",
+                "hephaestus.automation.ci_fix_orchestrator.run",
                 side_effect=[clean_status, unchanged, clean_status, unchanged],
             ),
         ):
@@ -1878,15 +1923,15 @@ class TestNoCommitRetry:
         """A subprocess error during retry → False, no marker (could not prove repeated)."""
         with (
             patch(
-                "hephaestus.automation.ci_driver.gh_pr_checks",
+                "hephaestus.automation.ci_check_inspector.gh_pr_checks",
                 return_value=[_make_check("lint", conclusion="failure")],
             ),
             patch(
-                "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+                "hephaestus.automation.ci_check_inspector.gh_pr_list_unresolved_threads",
                 return_value=[],
             ),
             patch(
-                "hephaestus.automation.ci_driver.invoke_claude_with_session",
+                "hephaestus.automation.ci_fix_orchestrator.invoke_claude_with_session",
                 side_effect=subprocess.CalledProcessError(1, ["claude"], stderr="boom"),
             ),
         ):
@@ -1910,19 +1955,22 @@ class TestNoCommitRetry:
         clean_status = MagicMock(stdout="", stderr="", returncode=0)
         with (
             patch(
-                "hephaestus.automation.ci_driver.gh_pr_checks",
+                "hephaestus.automation.ci_check_inspector.gh_pr_checks",
                 return_value=[_make_check("lint", conclusion="failure")],
             ),
             patch(
-                "hephaestus.automation.ci_driver.gh_pr_list_unresolved_threads",
+                "hephaestus.automation.ci_check_inspector.gh_pr_list_unresolved_threads",
                 return_value=[],
             ),
             patch(
-                "hephaestus.automation.ci_driver.resume_codex_session",
+                "hephaestus.automation.ci_fix_orchestrator.resume_codex_session",
                 return_value=AgentRunResult(stdout="ok", stderr="", session_id="s"),
             ) as mock_resume,
-            patch("hephaestus.automation.ci_driver.run_codex_session") as mock_fresh,
-            patch("hephaestus.automation.ci_driver.run", side_effect=[clean_status, post_sha]),
+            patch("hephaestus.automation.ci_fix_orchestrator.run_codex_session") as mock_fresh,
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.run",
+                side_effect=[clean_status, post_sha],
+            ),
         ):
             result = driver._retry_no_commit_once(
                 issue_number=1,
@@ -1950,11 +1998,11 @@ class TestBotPrDiscovery:
         driver.options.include_all_authors = True
         with (
             patch(
-                "hephaestus.automation.ci_driver.get_repo_info",
+                "hephaestus.automation.pr_discovery.get_repo_info",
                 return_value=("o", "r"),
             ),
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.pr_discovery._gh_call",
                 return_value=MagicMock(stdout="[]"),
             ),
         ):
@@ -1970,11 +2018,11 @@ class TestBotPrDiscovery:
         ]
         with (
             patch(
-                "hephaestus.automation.ci_driver.get_repo_info",
+                "hephaestus.automation.pr_discovery.get_repo_info",
                 return_value=("o", "r"),
             ),
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.pr_discovery._gh_call",
                 return_value=MagicMock(stdout=json.dumps(raw)),
             ),
         ):
@@ -1987,11 +2035,11 @@ class TestBotPrDiscovery:
         driver.options.include_all_authors = True
         with (
             patch(
-                "hephaestus.automation.ci_driver.get_repo_info",
+                "hephaestus.automation.pr_discovery.get_repo_info",
                 return_value=("o", "r"),
             ),
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.pr_discovery._gh_call",
                 side_effect=subprocess.CalledProcessError(1, ["gh"], stderr="boom"),
             ),
         ):
@@ -2001,11 +2049,11 @@ class TestBotPrDiscovery:
         """Discovery returns empty dict when gh api times out (docstring contract)."""
         with (
             patch(
-                "hephaestus.automation.ci_driver.get_repo_info",
+                "hephaestus.automation.pr_discovery.get_repo_info",
                 return_value=("o", "r"),
             ),
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.pr_discovery._gh_call",
                 side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=30),
             ),
         ):
@@ -2015,11 +2063,11 @@ class TestBotPrDiscovery:
         """Discovery returns empty dict when the gh binary is missing/unexecutable."""
         with (
             patch(
-                "hephaestus.automation.ci_driver.get_repo_info",
+                "hephaestus.automation.pr_discovery.get_repo_info",
                 return_value=("o", "r"),
             ),
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.pr_discovery._gh_call",
                 side_effect=FileNotFoundError(2, "No such file or directory", "gh"),
             ),
         ):
@@ -2036,11 +2084,13 @@ class TestBotPrDiscovery:
         """
         driver.options.issues = []  # unscoped — bot PRs are in scope
         with (
-            patch.object(driver, "_find_pr_for_issue", return_value=500),
-            patch.object(driver, "_discover_bot_prs", return_value={900: 900, 901: 901}),
+            patch.object(driver._pr_discovery, "_find_pr_for_issue", return_value=500),
+            patch.object(
+                driver._pr_discovery, "_discover_bot_prs", return_value={900: 900, 901: 901}
+            ),
             # failing-PR discovery also runs on an unscoped run; keep it empty
             # so this test isolates the bot-PR union.
-            patch.object(driver, "_discover_failing_prs", return_value={}),
+            patch.object(driver._pr_discovery, "_discover_failing_prs", return_value={}),
         ):
             result = driver._discover_prs([42])
         # issue 42 → PR 500 PLUS the two bot PRs as self-keyed entries.
@@ -2051,8 +2101,8 @@ class TestBotPrDiscovery:
     ) -> None:
         driver.options.include_bot_prs = False
         with (
-            patch.object(driver, "_find_pr_for_issue", return_value=500),
-            patch.object(driver, "_discover_bot_prs") as mock_bots,
+            patch.object(driver._pr_discovery, "_find_pr_for_issue", return_value=500),
+            patch.object(driver._pr_discovery, "_discover_bot_prs") as mock_bots,
         ):
             result = driver._discover_prs([42])
         assert result == {42: 500}
@@ -2064,9 +2114,9 @@ class TestBotPrDiscovery:
         """A bot-PR collision with an issue-driven PR must not displace the issue key."""
         driver.options.issues = []  # unscoped so bot discovery actually runs
         with (
-            patch.object(driver, "_find_pr_for_issue", return_value=900),
-            patch.object(driver, "_discover_bot_prs", return_value={900: 900}),
-            patch.object(driver, "_discover_failing_prs", return_value={}),
+            patch.object(driver._pr_discovery, "_find_pr_for_issue", return_value=900),
+            patch.object(driver._pr_discovery, "_discover_bot_prs", return_value={900: 900}),
+            patch.object(driver._pr_discovery, "_discover_failing_prs", return_value={}),
         ):
             result = driver._discover_prs([42])
         # Issue 42 already drives PR 900; bot enumeration must not add a
@@ -2123,8 +2173,10 @@ class TestArmingSweep:
     ) -> None:
         self._write_record(driver, issue=841, pr_number=843)
         with (
-            patch.object(driver, "_gh_pr_state", return_value={"state": "MERGED"}),
-            patch.object(driver, "_run_drive_green_learnings", return_value=True) as mock_learn,
+            patch.object(driver._ci_check, "_gh_pr_state", return_value={"state": "MERGED"}),
+            patch.object(
+                driver._ci_check, "_run_drive_green_learnings_fn", return_value=True
+            ) as mock_learn,
         ):
             driver._sweep_orphaned_arming_records()
         mock_learn.assert_called_once_with(841, 843)
@@ -2138,8 +2190,8 @@ class TestArmingSweep:
     def test_closed_not_merged_orphan_dropped(self, driver: CIDriver, tmp_path: Path) -> None:
         path = self._write_record(driver, issue=841, pr_number=843)
         with (
-            patch.object(driver, "_gh_pr_state", return_value={"state": "CLOSED"}),
-            patch.object(driver, "_run_drive_green_learnings") as mock_learn,
+            patch.object(driver._ci_check, "_gh_pr_state", return_value={"state": "CLOSED"}),
+            patch.object(driver._ci_check, "_run_drive_green_learnings_fn") as mock_learn,
         ):
             driver._sweep_orphaned_arming_records()
         mock_learn.assert_not_called()
@@ -2148,8 +2200,8 @@ class TestArmingSweep:
     def test_open_record_left_alone(self, driver: CIDriver, tmp_path: Path) -> None:
         path = self._write_record(driver, issue=841, pr_number=843)
         with (
-            patch.object(driver, "_gh_pr_state", return_value={"state": "OPEN"}),
-            patch.object(driver, "_run_drive_green_learnings") as mock_learn,
+            patch.object(driver._ci_check, "_gh_pr_state", return_value={"state": "OPEN"}),
+            patch.object(driver._ci_check, "_run_drive_green_learnings_fn") as mock_learn,
         ):
             driver._sweep_orphaned_arming_records()
         mock_learn.assert_not_called()
@@ -2166,8 +2218,8 @@ class TestArmingSweep:
             learn_succeeded_at="2026-05-31T00:00:00Z",
         )
         with (
-            patch.object(driver, "_gh_pr_state") as mock_state,
-            patch.object(driver, "_run_drive_green_learnings") as mock_learn,
+            patch.object(driver._ci_check, "_gh_pr_state") as mock_state,
+            patch.object(driver._ci_check, "_run_drive_green_learnings_fn") as mock_learn,
         ):
             driver._sweep_orphaned_arming_records()
         mock_state.assert_not_called()
@@ -2184,8 +2236,8 @@ class TestArmingSweep:
             learn_succeeded_at=None,
         )
         with (
-            patch.object(driver, "_gh_pr_state") as mock_state,
-            patch.object(driver, "_run_drive_green_learnings") as mock_learn,
+            patch.object(driver._ci_check, "_gh_pr_state") as mock_state,
+            patch.object(driver._ci_check, "_run_drive_green_learnings_fn") as mock_learn,
         ):
             driver._sweep_orphaned_arming_records()
         mock_state.assert_not_called()
@@ -2197,8 +2249,8 @@ class TestArmingSweep:
     def test_unknown_gh_state_left_alone(self, driver: CIDriver, tmp_path: Path) -> None:
         path = self._write_record(driver, issue=841, pr_number=843)
         with (
-            patch.object(driver, "_gh_pr_state", return_value=None),
-            patch.object(driver, "_run_drive_green_learnings") as mock_learn,
+            patch.object(driver._ci_check, "_gh_pr_state", return_value=None),
+            patch.object(driver._ci_check, "_run_drive_green_learnings_fn") as mock_learn,
         ):
             driver._sweep_orphaned_arming_records()
         mock_learn.assert_not_called()
@@ -2210,10 +2262,10 @@ class TestArmingSweep:
         """Unexpected exceptions leave the record unclaimed and retryable."""
         self._write_record(driver, issue=841, pr_number=843)
         with (
-            patch.object(driver, "_gh_pr_state", return_value={"state": "MERGED"}),
+            patch.object(driver._ci_check, "_gh_pr_state", return_value={"state": "MERGED"}),
             patch.object(
-                driver,
-                "_run_drive_green_learnings",
+                driver._ci_check,
+                "_run_drive_green_learnings_fn",
                 side_effect=RuntimeError("boom"),
             ),
         ):
@@ -2233,8 +2285,10 @@ class TestArmingSweep:
         """A best-effort /learn failure is terminal but not recorded as captured."""
         self._write_record(driver, issue=841, pr_number=843)
         with (
-            patch.object(driver, "_gh_pr_state", return_value={"state": "MERGED"}),
-            patch.object(driver, "_run_drive_green_learnings", return_value=False) as mock_learn,
+            patch.object(driver._ci_check, "_gh_pr_state", return_value={"state": "MERGED"}),
+            patch.object(
+                driver._ci_check, "_run_drive_green_learnings_fn", return_value=False
+            ) as mock_learn,
         ):
             driver._sweep_orphaned_arming_records()
         mock_learn.assert_called_once_with(841, 843)
@@ -2274,12 +2328,12 @@ class TestAdviseBotShortCircuit:
     def test_bot_mode_skips_advise(self, driver: CIDriver) -> None:
         driver.options.enable_advise = True
         with (
-            patch.object(driver, "_get_failing_ci_logs", return_value="failed"),
-            patch.object(driver, "_load_impl_session_id", return_value=None),
+            patch.object(driver._ci_fix, "_get_failing_ci_logs", return_value="failed"),
+            patch.object(driver._ci_fix, "_load_impl_session_id", return_value=None),
             patch.object(driver, "_get_worktree_path", return_value=Path("/tmp/x")),
             patch.object(driver, "_get_pr_branch", return_value="dep-branch"),
-            patch.object(driver, "_run_ci_fix_session", return_value=True),
-            patch.object(driver, "_run_advise") as mock_advise,
+            patch.object(driver._ci_fix, "_run_ci_fix_session", return_value=True),
+            patch.object(driver._ci_fix, "_run_advise") as mock_advise,
             patch.object(driver, "_enable_auto_merge", return_value=True),
         ):
             driver._attempt_ci_fixes(issue_number=900, pr_number=900, acquired_slot=0)
@@ -2288,12 +2342,12 @@ class TestAdviseBotShortCircuit:
     def test_non_bot_mode_calls_advise(self, driver: CIDriver) -> None:
         driver.options.enable_advise = True
         with (
-            patch.object(driver, "_get_failing_ci_logs", return_value="failed"),
-            patch.object(driver, "_load_impl_session_id", return_value=None),
+            patch.object(driver._ci_fix, "_get_failing_ci_logs", return_value="failed"),
+            patch.object(driver._ci_fix, "_load_impl_session_id", return_value=None),
             patch.object(driver, "_get_worktree_path", return_value=Path("/tmp/x")),
             patch.object(driver, "_get_pr_branch", return_value="42-fix"),
-            patch.object(driver, "_run_ci_fix_session", return_value=True),
-            patch.object(driver, "_run_advise", return_value="") as mock_advise,
+            patch.object(driver._ci_fix, "_run_ci_fix_session", return_value=True),
+            patch.object(driver._ci_fix, "_run_advise", return_value="") as mock_advise,
             patch.object(driver, "_enable_auto_merge", return_value=True),
         ):
             driver._attempt_ci_fixes(issue_number=42, pr_number=900, acquired_slot=0)
@@ -2332,16 +2386,18 @@ class TestMechanicalRebase:
         """A BEHIND PR rebases cleanly → pushes with lease, returns True."""
         with (
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.ci_fix_orchestrator._gh_call",
                 return_value=self._pr_state("BEHIND"),
             ),
             patch.object(driver, "_get_worktree_path", return_value=tmp_path),
-            patch("hephaestus.automation.ci_driver.sync_worktree_to_remote_branch") as mock_sync,
             patch(
-                "hephaestus.automation.ci_driver.rebase_worktree_onto", return_value=True
+                "hephaestus.automation.ci_fix_orchestrator.sync_worktree_to_remote_branch"
+            ) as mock_sync,
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.rebase_worktree_onto", return_value=True
             ) as mock_rebase,
             patch(
-                "hephaestus.automation.ci_driver.push_current_branch_with_lease_on_divergence"
+                "hephaestus.automation.ci_fix_orchestrator.push_current_branch_with_lease_on_divergence"
             ) as mock_push,
         ):
             result = driver._attempt_mechanical_rebase(
@@ -2357,14 +2413,16 @@ class TestMechanicalRebase:
         """A DIRTY PR whose rebase conflicts must NOT push — it returns False."""
         with (
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.ci_fix_orchestrator._gh_call",
                 return_value=self._pr_state("DIRTY"),
             ),
             patch.object(driver, "_get_worktree_path", return_value=tmp_path),
-            patch("hephaestus.automation.ci_driver.sync_worktree_to_remote_branch"),
-            patch("hephaestus.automation.ci_driver.rebase_worktree_onto", return_value=False),
+            patch("hephaestus.automation.ci_fix_orchestrator.sync_worktree_to_remote_branch"),
             patch(
-                "hephaestus.automation.ci_driver.push_current_branch_with_lease_on_divergence"
+                "hephaestus.automation.ci_fix_orchestrator.rebase_worktree_onto", return_value=False
+            ),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.push_current_branch_with_lease_on_divergence"
             ) as mock_push,
         ):
             result = driver._attempt_mechanical_rebase(
@@ -2378,12 +2436,12 @@ class TestMechanicalRebase:
         """A CLEAN/BLOCKED PR is already on its base — no rebase, no push."""
         with (
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.ci_fix_orchestrator._gh_call",
                 return_value=self._pr_state("CLEAN"),
             ),
-            patch("hephaestus.automation.ci_driver.rebase_worktree_onto") as mock_rebase,
+            patch("hephaestus.automation.ci_fix_orchestrator.rebase_worktree_onto") as mock_rebase,
             patch(
-                "hephaestus.automation.ci_driver.push_current_branch_with_lease_on_divergence"
+                "hephaestus.automation.ci_fix_orchestrator.push_current_branch_with_lease_on_divergence"
             ) as mock_push,
         ):
             result = driver._attempt_mechanical_rebase(
@@ -2398,10 +2456,10 @@ class TestMechanicalRebase:
         """BLOCKED (green, waiting on review) is on-base — must not be rebased."""
         with (
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.ci_fix_orchestrator._gh_call",
                 return_value=self._pr_state("BLOCKED"),
             ),
-            patch("hephaestus.automation.ci_driver.rebase_worktree_onto") as mock_rebase,
+            patch("hephaestus.automation.ci_fix_orchestrator.rebase_worktree_onto") as mock_rebase,
         ):
             result = driver._attempt_mechanical_rebase(
                 issue_number=5, pr_number=50, acquired_slot=0
@@ -2414,15 +2472,17 @@ class TestMechanicalRebase:
         """The rebase targets the PR's actual baseRefName, not a hardcoded main."""
         with (
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.ci_fix_orchestrator._gh_call",
                 return_value=self._pr_state("BEHIND", base="develop"),
             ),
             patch.object(driver, "_get_worktree_path", return_value=tmp_path),
-            patch("hephaestus.automation.ci_driver.sync_worktree_to_remote_branch"),
+            patch("hephaestus.automation.ci_fix_orchestrator.sync_worktree_to_remote_branch"),
             patch(
-                "hephaestus.automation.ci_driver.rebase_worktree_onto", return_value=True
+                "hephaestus.automation.ci_fix_orchestrator.rebase_worktree_onto", return_value=True
             ) as mock_rebase,
-            patch("hephaestus.automation.ci_driver.push_current_branch_with_lease_on_divergence"),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.push_current_branch_with_lease_on_divergence"
+            ),
         ):
             driver._attempt_mechanical_rebase(issue_number=5, pr_number=50, acquired_slot=0)
 
@@ -2434,10 +2494,10 @@ class TestMechanicalRebase:
         """A bad/empty gh response must be swallowed → False, never raise."""
         with (
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.ci_fix_orchestrator._gh_call",
                 return_value=MagicMock(stdout="not json"),
             ),
-            patch("hephaestus.automation.ci_driver.rebase_worktree_onto") as mock_rebase,
+            patch("hephaestus.automation.ci_fix_orchestrator.rebase_worktree_onto") as mock_rebase,
         ):
             result = driver._attempt_mechanical_rebase(
                 issue_number=5, pr_number=50, acquired_slot=0
@@ -2471,18 +2531,18 @@ class TestWaitForPrTerminal:
     """``_wait_for_pr_terminal`` blocks until a real terminal state (#838)."""
 
     def test_merged_returns_merged(self, driver: CIDriver) -> None:
-        with patch.object(driver, "_gh_pr_state", return_value={"state": "MERGED"}):
+        with patch.object(driver._ci_check, "_gh_pr_state", return_value={"state": "MERGED"}):
             assert driver._wait_for_pr_terminal(1, 2) == "MERGED"
 
     def test_closed_returns_closed(self, driver: CIDriver) -> None:
-        with patch.object(driver, "_gh_pr_state", return_value={"state": "CLOSED"}):
+        with patch.object(driver._ci_check, "_gh_pr_state", return_value={"state": "CLOSED"}):
             assert driver._wait_for_pr_terminal(1, 2) == "CLOSED"
 
     def test_open_with_red_required_check_returns_failing(self, driver: CIDriver) -> None:
         # OPEN but a required check is red → react immediately, don't wait it out.
         with (
-            patch.object(driver, "_gh_pr_state", return_value={"state": "OPEN"}),
-            patch.object(driver, "_failing_required_check_names", return_value=["lint"]),
+            patch.object(driver._ci_check, "_gh_pr_state", return_value={"state": "OPEN"}),
+            patch.object(driver._ci_check, "_failing_required_check_names", return_value=["lint"]),
         ):
             assert driver._wait_for_pr_terminal(1, 2) == "FAILING"
 
@@ -2491,11 +2551,11 @@ class TestWaitForPrTerminal:
         # don't wait out the full timeout on an unmergeable armed PR (#838).
         with (
             patch.object(
-                driver,
+                driver._ci_check,
                 "_gh_pr_state",
                 return_value={"state": "OPEN", "mergeStateStatus": "DIRTY"},
             ),
-            patch.object(driver, "_failing_required_check_names", return_value=[]),
+            patch.object(driver._ci_check, "_failing_required_check_names", return_value=[]),
         ):
             assert driver._wait_for_pr_terminal(1, 2) == "DIRTY"
 
@@ -2505,8 +2565,8 @@ class TestWaitForPrTerminal:
         # OPEN, no failing checks, never merges → bounded by HEPH_PR_MERGE_MAX_WAIT.
         monkeypatch.setenv("HEPH_PR_MERGE_MAX_WAIT", "0")
         with (
-            patch.object(driver, "_gh_pr_state", return_value={"state": "OPEN"}),
-            patch.object(driver, "_failing_required_check_names", return_value=[]),
+            patch.object(driver._ci_check, "_gh_pr_state", return_value={"state": "OPEN"}),
+            patch.object(driver._ci_check, "_failing_required_check_names", return_value=[]),
             patch("hephaestus.automation.ci_driver.time.sleep") as mock_sleep,
         ):
             assert driver._wait_for_pr_terminal(1, 2) == "TIMEOUT"
@@ -2518,12 +2578,12 @@ class TestWaitForPrTerminal:
         # failing and no pending CI checks → branch-protection gate, exit immediately.
         with (
             patch.object(
-                driver,
+                driver._ci_check,
                 "_gh_pr_state",
                 return_value={"state": "OPEN", "mergeStateStatus": "BLOCKED"},
             ),
-            patch.object(driver, "_failing_required_check_names", return_value=[]),
-            patch.object(driver, "_pending_required_check_names", return_value=[]),
+            patch.object(driver._ci_check, "_failing_required_check_names", return_value=[]),
+            patch.object(driver._ci_check, "_pending_required_check_names", return_value=[]),
             patch("hephaestus.automation.ci_driver.time.sleep") as mock_sleep,
         ):
             assert driver._wait_for_pr_terminal(1, 2) == "BLOCKED"
@@ -2537,11 +2597,11 @@ class TestWaitForPrTerminal:
         # takes priority — return FAILING, not BLOCKED.
         with (
             patch.object(
-                driver,
+                driver._ci_check,
                 "_gh_pr_state",
                 return_value={"state": "OPEN", "mergeStateStatus": "BLOCKED"},
             ),
-            patch.object(driver, "_failing_required_check_names", return_value=["lint"]),
+            patch.object(driver._ci_check, "_failing_required_check_names", return_value=["lint"]),
         ):
             assert driver._wait_for_pr_terminal(1, 2) == "FAILING"
 
@@ -2555,12 +2615,14 @@ class TestWaitForPrTerminal:
         monkeypatch.setenv("HEPH_PR_MERGE_MAX_WAIT", "0")
         with (
             patch.object(
-                driver,
+                driver._ci_check,
                 "_gh_pr_state",
                 return_value={"state": "OPEN", "mergeStateStatus": "BLOCKED"},
             ),
-            patch.object(driver, "_failing_required_check_names", return_value=[]),
-            patch.object(driver, "_pending_required_check_names", return_value=["ci/build"]),
+            patch.object(driver._ci_check, "_failing_required_check_names", return_value=[]),
+            patch.object(
+                driver._ci_check, "_pending_required_check_names", return_value=["ci/build"]
+            ),
             patch("hephaestus.automation.ci_driver.time.sleep"),
         ):
             assert driver._wait_for_pr_terminal(1, 2) == "TIMEOUT"
@@ -2577,7 +2639,7 @@ class TestWaitForPrTerminal:
             d = CIDriver(mock_options)
             d.state_dir = tmp_path
         # Must not touch the network in dry-run.
-        with patch.object(d, "_gh_pr_state") as mock_state:
+        with patch.object(d._ci_check, "_gh_pr_state") as mock_state:
             assert d._wait_for_pr_terminal(1, 2) == "TIMEOUT"
         mock_state.assert_not_called()
 
@@ -2588,13 +2650,15 @@ class TestRecheckAndArmAfterFix:
     def test_green_after_fix_arms_and_waits(self, driver: CIDriver) -> None:
         green = [_make_check("test", required=True, conclusion="success")]
         with (
-            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=green),
-            _impl_go(driver),
+            patch("hephaestus.automation.ci_fix_orchestrator.gh_pr_checks", return_value=green),
+            patch.object(driver._ci_fix, "_pr_has_implementation_go_fn", return_value=True),
             patch.object(driver, "_enable_auto_merge", return_value=True) as mock_arm,
-            patch.object(driver, "_gh_pr_state", return_value={"headRefOid": "abc"}),
+            patch.object(driver._ci_fix, "_gh_pr_state_fn", return_value={"headRefOid": "abc"}),
             patch.object(driver, "_get_pr_branch", return_value="b"),
-            patch.object(driver, "_arm_drive_green") as mock_record,
-            patch.object(driver, "_wait_for_pr_terminal", return_value="MERGED") as mock_wait,
+            patch.object(driver._ci_fix, "_arm_drive_green_fn") as mock_record,
+            patch.object(
+                driver._ci_fix, "_wait_for_pr_terminal_fn", return_value="MERGED"
+            ) as mock_wait,
         ):
             result = driver._recheck_and_arm_after_fix(1, 2, 0)
         assert result is not None and result.success is True
@@ -2610,7 +2674,7 @@ class TestRecheckAndArmAfterFix:
         monkeypatch.setenv("HEPH_CI_POLL_MAX_WAIT", "0")
         pending = [_make_check("test", status="in_progress", conclusion="", required=True)]
         with (
-            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=pending),
+            patch("hephaestus.automation.ci_fix_orchestrator.gh_pr_checks", return_value=pending),
             patch("hephaestus.automation.ci_driver.time.sleep"),
             patch.object(driver, "_enable_auto_merge") as mock_arm,
         ):
@@ -2620,7 +2684,7 @@ class TestRecheckAndArmAfterFix:
     def test_still_red_after_fix_returns_none(self, driver: CIDriver) -> None:
         red = [_make_check("test", required=True, conclusion="failure")]
         with (
-            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=red),
+            patch("hephaestus.automation.ci_fix_orchestrator.gh_pr_checks", return_value=red),
             patch.object(driver, "_enable_auto_merge") as mock_arm,
         ):
             assert driver._recheck_and_arm_after_fix(1, 2, 0) is None
@@ -2632,9 +2696,11 @@ class TestResolveDirtyPr:
 
     def test_clean_mechanical_rebase_then_arm(self, driver: CIDriver) -> None:
         with (
-            patch.object(driver, "_attempt_mechanical_rebase", return_value=True) as mock_rb,
             patch.object(
-                driver,
+                driver._ci_fix, "_attempt_mechanical_rebase", return_value=True
+            ) as mock_rb,
+            patch.object(
+                driver._ci_fix,
                 "_recheck_and_arm_after_fix",
                 return_value=WorkerResult(issue_number=1, success=True, pr_number=2),
             ) as mock_rearm,
@@ -2646,18 +2712,18 @@ class TestResolveDirtyPr:
 
     def test_conflict_routes_to_agent_with_context(self, driver: CIDriver) -> None:
         with (
-            patch.object(driver, "_attempt_mechanical_rebase", return_value=False),
+            patch.object(driver._ci_fix, "_attempt_mechanical_rebase", return_value=False),
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.ci_fix_orchestrator._gh_call",
                 return_value=MagicMock(stdout='{"baseRefName":"main"}'),
             ),
             patch.object(
-                driver,
+                driver._ci_fix,
                 "_attempt_ci_fixes",
                 return_value=WorkerResult(issue_number=1, success=True, pr_number=2),
             ) as mock_fix,
             patch.object(
-                driver,
+                driver._ci_fix,
                 "_recheck_and_arm_after_fix",
                 return_value=WorkerResult(issue_number=1, success=True, pr_number=2),
             ),
@@ -2670,9 +2736,12 @@ class TestResolveDirtyPr:
 
     def test_unresolved_conflict_returns_failure(self, driver: CIDriver) -> None:
         with (
-            patch.object(driver, "_attempt_mechanical_rebase", return_value=False),
-            patch("hephaestus.automation.ci_driver._gh_call", return_value=MagicMock(stdout="{}")),
-            patch.object(driver, "_attempt_ci_fixes", return_value=None),
+            patch.object(driver._ci_fix, "_attempt_mechanical_rebase", return_value=False),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator._gh_call",
+                return_value=MagicMock(stdout="{}"),
+            ),
+            patch.object(driver._ci_fix, "_attempt_ci_fixes", return_value=None),
         ):
             result = driver._resolve_dirty_pr(1, 2, 0)
         assert result.success is False
@@ -2692,7 +2761,7 @@ class TestEnableAutoMergeBotRetry:
                 raise subprocess.CalledProcessError(1, args, stderr="squash disabled")
             return MagicMock(stdout="")
 
-        with patch("hephaestus.automation.ci_driver._gh_call", side_effect=fake_gh):
+        with patch("hephaestus.automation.post_merge_processor._gh_call", side_effect=fake_gh):
             ok = driver._enable_auto_merge(2, is_bot_pr=True)
         assert ok is True
         # Exactly two arming attempts: --squash then strategy-agnostic --auto.
@@ -2702,7 +2771,7 @@ class TestEnableAutoMergeBotRetry:
     def test_non_bot_pr_does_not_get_extra_retry(self, driver: CIDriver) -> None:
         # force_merge_on_stall is False by default → no fallback for human PRs.
         with patch(
-            "hephaestus.automation.ci_driver._gh_call",
+            "hephaestus.automation.post_merge_processor._gh_call",
             side_effect=subprocess.CalledProcessError(1, ["gh"], stderr="nope"),
         ) as mock_gh:
             ok = driver._enable_auto_merge(2, is_bot_pr=False)
@@ -2837,7 +2906,7 @@ class TestRunDriveGreenCompact:
         self, driver: CIDriver, tmp_path: Path
     ) -> None:
         """Verify /compact runs exactly once and respects learn_captured_at gate."""
-        with patch("hephaestus.automation.ci_driver.compact_session") as mock_compact:
+        with patch("hephaestus.automation.post_merge_processor.compact_session") as mock_compact:
             mock_compact.return_value = True
 
             # First pass: should call compact_session
@@ -2852,7 +2921,7 @@ class TestRunDriveGreenCompact:
         self, driver: CIDriver, tmp_path: Path
     ) -> None:
         """Verify compact failure is non-fatal (returns False but doesn't raise)."""
-        with patch("hephaestus.automation.ci_driver.compact_session") as mock_compact:
+        with patch("hephaestus.automation.post_merge_processor.compact_session") as mock_compact:
             mock_compact.return_value = False
 
             # Should return False but not raise
@@ -2863,14 +2932,16 @@ class TestRunDriveGreenCompact:
         """Verify compact is skipped for codex (no persisted session)."""
         driver.options.agent = "codex"
 
-        with patch("hephaestus.automation.ci_driver.compact_session") as mock_compact:
+        with patch("hephaestus.automation.post_merge_processor.compact_session") as mock_compact:
             driver._run_drive_green_compact(842, 100)
             mock_compact.assert_not_called()
 
     def test_drive_green_compact_uses_worktree_path(self, driver: CIDriver, tmp_path: Path) -> None:
         """Verify compact_session is called with the worktree path."""
         with patch.object(driver, "_get_worktree_path", return_value=tmp_path):
-            with patch("hephaestus.automation.ci_driver.compact_session") as mock_compact:
+            with patch(
+                "hephaestus.automation.post_merge_processor.compact_session"
+            ) as mock_compact:
                 mock_compact.return_value = True
 
                 driver._run_drive_green_compact(842, 100)
@@ -2884,7 +2955,9 @@ class TestRunDriveGreenCompact:
     ) -> None:
         """Verify compact_session uses repo_root when worktree is not available."""
         with patch.object(driver, "_get_worktree_path", side_effect=RuntimeError("No worktree")):
-            with patch("hephaestus.automation.ci_driver.compact_session") as mock_compact:
+            with patch(
+                "hephaestus.automation.post_merge_processor.compact_session"
+            ) as mock_compact:
                 mock_compact.return_value = True
 
                 driver._run_drive_green_compact(842, 100)

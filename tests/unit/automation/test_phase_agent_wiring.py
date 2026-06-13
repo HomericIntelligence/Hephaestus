@@ -63,7 +63,12 @@ SELF_AGENT_PHASES: list[tuple[str, str, tuple[str, ...]]] = [
     ),
     # ci_driver owns Session 3 (AGENT_CI_DRIVER): its fix sessions and its
     # post-green learnings run on a transcript independent of the implementer.
-    ("ci_driver.py", "AGENT_CI_DRIVER", ()),
+    # #1289: session calls moved to collaborator modules; include them as companions.
+    (
+        "ci_driver.py",
+        "AGENT_CI_DRIVER",
+        ("ci_fix_orchestrator.py", "post_merge_processor.py"),
+    ),
 ]
 
 
@@ -281,7 +286,8 @@ ADVISE_FIRST_STAGES_ADVISE_AGENT: list[tuple[str, tuple[str, ...]]] = [
     # Stage 1: the planner runs advise once before the plan loop.
     ("planner.py", ("planner_review_loop.py",)),
     # Stage 3: the CI driver runs advise before the fix loop.
-    ("ci_driver.py", ()),
+    # #1289: advise call moved to ci_fix_orchestrator.py companion.
+    ("ci_driver.py", ("ci_fix_orchestrator.py",)),
 ]
 
 
