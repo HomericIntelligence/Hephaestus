@@ -3,11 +3,11 @@
 import importlib.metadata as md
 import json
 import sys
-import tomllib
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import tomllib
 from packaging.requirements import Requirement
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
@@ -195,7 +195,9 @@ class TestAllExtraCompleteness:
     def test_all_extra_covers_runtime_extras(self):
         data = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text())
         optional = data["project"]["optional-dependencies"]
-        all_specs = optional["all"]  # list[str], e.g. ["HomericIntelligence-Hephaestus[automation,github,nats,toml,xml,schema]"]
+        # all_specs is list[str], e.g.
+        # ["HomericIntelligence-Hephaestus[automation,github,nats,toml,xml,schema]"]
+        all_specs = optional["all"]
         # Union the extras from every spec in `all` using the PEP 508 parser —
         # formatting-immune and handles multi-line arrays, comments, and name shifts.
         aggregated: set[str] = set()
