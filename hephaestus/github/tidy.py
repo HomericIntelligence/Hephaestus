@@ -510,7 +510,7 @@ def _print_summary(results: dict[str, str]) -> int:
     return 0 if not failed else 1
 
 
-def main() -> int:  # noqa: C901
+def main() -> int:  # noqa: C901  # CLI dispatch: many command branches for tidy workflow stages
     """Entry point for hephaestus-tidy."""
     args = _build_arg_parser().parse_args()
     agent = resolve_agent(args.agent)

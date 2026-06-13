@@ -140,7 +140,7 @@ class CIDriver:
         # stays empty so a broken `gh auth` does not block --all runs.
         self._viewer_login: str = ""
 
-    def run(self) -> dict[int, WorkerResult]:  # noqa: C901  # thread pool + finally + preserve report
+    def run(self) -> dict[int, WorkerResult]:  # noqa: C901  # orchestration: thread pool + finally + preserve report across exception paths
         """Run the CI driver on all configured issues.
 
         Returns:
@@ -604,7 +604,7 @@ class CIDriver:
         """
         return issue_number == pr_number
 
-    def _discover_prs(self, issue_numbers: list[int]) -> dict[int, int]:  # noqa: C901
+    def _discover_prs(self, issue_numbers: list[int]) -> dict[int, int]:  # noqa: C901  # orchestration: multi-PR dedup with fallback discovery across issue/PR mappings
         """Pre-discover open PRs for all issues, deduped by PR.
 
         When a single PR closes multiple issues (a legitimate ``pr-policy``
@@ -728,7 +728,7 @@ class CIDriver:
                 self.shared_pr_issues.setdefault(pr_num, [pr_num])
         return deduped
 
-    def _drive_issue(  # noqa: C901  # poll loop + required-check classification + fix path
+    def _drive_issue(  # noqa: C901  # orchestration: poll loop + required-check classification + CI-fix path
         self, issue_number: int, pr_number: int, slot_id: int
     ) -> WorkerResult:
         """Drive a single issue's PR toward green CI.
@@ -1780,7 +1780,7 @@ class CIDriver:
             elapsed += sleep_secs
             attempt += 1
 
-    def _sweep_orphaned_arming_records(self) -> None:  # noqa: C901  # one record loop with three state branches; splitting it just hides the contract
+    def _sweep_orphaned_arming_records(self) -> None:
         """Drop CLOSED records and capture missed ``/learn`` for MERGED orphans (#848).
 
         The per-issue ``_check_arming_on_drive_start`` only fires when the
@@ -2607,7 +2607,7 @@ class CIDriver:
             return False
         return True
 
-    def _run_ci_fix_session(  # noqa: C901  # provider resume/fallback paths are intentionally coupled
+    def _run_ci_fix_session(  # noqa: C901  # orchestration: provider resume/fallback paths are intentionally coupled
         self,
         issue_number: int,
         pr_number: int,

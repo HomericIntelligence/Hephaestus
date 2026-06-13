@@ -262,7 +262,7 @@ class VersionManager:
         for init_file in self.init_files:
             self.update_init_file(init_file, version, verbose=verbose)
 
-    def verify(self, version: str, verbose: bool = True) -> bool:  # noqa: C901
+    def verify(self, version: str, verbose: bool = True) -> bool:  # noqa: C901  # validation: many independent version-file consistency checks
         """Verify that all version files are consistent.
 
         Args:

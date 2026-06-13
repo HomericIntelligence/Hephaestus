@@ -182,7 +182,7 @@ class IssueImplementer:
         ui_msg = f"{prefix}: {msg}" if prefix else msg
         self.log_manager.log(tid, ui_msg)
 
-    def run(self) -> dict[int, WorkerResult]:  # noqa: C901  # branchy orchestration body is intentionally linear
+    def run(self) -> dict[int, WorkerResult]:
         """Run the implementer.
 
         Returns:
@@ -369,7 +369,7 @@ class IssueImplementer:
 
         return {}
 
-    def _implement_all(self) -> dict[int, WorkerResult]:  # noqa: C901  # orchestration with many retry/outcome paths
+    def _implement_all(self) -> dict[int, WorkerResult]:  # noqa: C901  # orchestration: many retry/outcome paths
         """Implement all issues with dependency awareness.
 
         Returns:

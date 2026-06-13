@@ -202,7 +202,7 @@ def handle_merge_result(result: Any, pr_number: int, base_branch: str) -> None:
         logger.error("  Failed to merge PR #%d. API message: %s", pr_number, message)
 
 
-def main() -> int:  # noqa: C901
+def main() -> int:  # noqa: C901  # CLI dispatch: many command branches + retry paths for PR merge automation
     """Serve as the main entry point for PR merge automation."""
     parser = argparse.ArgumentParser(
         description="Merge open PRs with successful CI/CD into main (squash via PR API)"
