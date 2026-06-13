@@ -234,6 +234,90 @@ class TestBuildPrompt:
         with pytest.raises(ValueError, match="Unknown stage"):
             build_prompt("bogus", 1, "owner/repo")
 
+    @patch("scripts.show_prompt.fetch_issue")
+    @patch("scripts.show_prompt._extract_plan_from_issue_data")
+    def test_plan_review_falls_back_to_body_when_no_plan_comment(
+        self, mock_extract: MagicMock, mock_issue: MagicMock
+    ) -> None:
+        """When no plan comment is found, the issue body is used as plan text."""
+        mock_issue.return_value = {"title": "T", "body": "The issue body", "comments": []}
+        mock_extract.return_value = None
+        with patch("hephaestus.automation.prompts.planning.get_plan_review_prompt") as mock_prompt:
+            mock_prompt.return_value = "prompt"
+            build_prompt("plan-review", 1, "owner/repo")
+            mock_prompt.assert_called_once()
+            assert mock_prompt.call_args.kwargs["plan_text"] == "The issue body"
+
+    @patch("scripts.show_prompt.fetch_issue")
+    @patch("scripts.show_prompt._extract_plan_from_issue_data")
+    def test_plan_review_falls_back_to_title_when_no_body(
+        self, mock_extract: MagicMock, mock_issue: MagicMock
+    ) -> None:
+        """When no plan comment and no body, the issue title is used as plan text."""
+        mock_issue.return_value = {"title": "The issue title", "body": "", "comments": []}
+        mock_extract.return_value = None
+        with patch("hephaestus.automation.prompts.planning.get_plan_review_prompt") as mock_prompt:
+            mock_prompt.return_value = "prompt"
+            build_prompt("plan-review", 1, "owner/repo")
+            mock_prompt.assert_called_once()
+            assert mock_prompt.call_args.kwargs["plan_text"] == "The issue title"
+
+    @patch("scripts.show_prompt.fetch_issue")
+    @patch("scripts.show_prompt._extract_plan_from_issue_data")
+    def test_plan_review_uses_plan_comment_over_body(
+        self, mock_extract: MagicMock, mock_issue: MagicMock
+    ) -> None:
+        """A plan comment takes precedence over the issue body."""
+        mock_issue.return_value = {"title": "T", "body": "The issue body", "comments": []}
+        mock_extract.return_value = "# Implementation Plan\nSteps"
+        with patch("hephaestus.automation.prompts.planning.get_plan_review_prompt") as mock_prompt:
+            mock_prompt.return_value = "prompt"
+            build_prompt("plan-review", 1, "owner/repo")
+            assert mock_prompt.call_args.kwargs["plan_text"] == "# Implementation Plan\nSteps"
+
+    @patch("scripts.show_prompt.fetch_issue")
+    @patch("scripts.show_prompt._extract_plan_from_issue_data")
+    def test_plan_loop_review_falls_back_to_body_then_title(
+        self, mock_extract: MagicMock, mock_issue: MagicMock
+    ) -> None:
+        """plan-loop-review uses the same fallback chain: plan > body > title."""
+        mock_issue.return_value = {"title": "My Title", "body": "", "comments": []}
+        mock_extract.return_value = None
+        with patch(
+            "hephaestus.automation.prompts.planning.get_plan_loop_review_prompt"
+        ) as mock_prompt:
+            mock_prompt.return_value = "prompt"
+            build_prompt("plan-loop-review", 1, "owner/repo", iteration=0)
+            assert mock_prompt.call_args.kwargs["plan_text"] == "My Title"
+
+    @patch("scripts.show_prompt.fetch_issue")
+    @patch("scripts.show_prompt._extract_plan_from_issue_data")
+    def test_plan_review_falls_back_to_placeholder_when_all_empty(
+        self, mock_extract: MagicMock, mock_issue: MagicMock
+    ) -> None:
+        """When all sources are empty, the placeholder is used."""
+        mock_issue.return_value = {"title": "", "body": "", "comments": []}
+        mock_extract.return_value = None
+        with patch("hephaestus.automation.prompts.planning.get_plan_review_prompt") as mock_prompt:
+            mock_prompt.return_value = "prompt"
+            build_prompt("plan-review", 1, "owner/repo")
+            assert mock_prompt.call_args.kwargs["plan_text"] == "(no plan found)"
+
+    @patch("scripts.show_prompt.fetch_issue")
+    @patch("scripts.show_prompt._extract_plan_from_issue_data")
+    def test_plan_loop_review_falls_back_to_placeholder_when_all_empty(
+        self, mock_extract: MagicMock, mock_issue: MagicMock
+    ) -> None:
+        """When all sources are empty, plan-loop-review uses the placeholder."""
+        mock_issue.return_value = {"title": "", "body": "", "comments": []}
+        mock_extract.return_value = None
+        with patch(
+            "hephaestus.automation.prompts.planning.get_plan_loop_review_prompt"
+        ) as mock_prompt:
+            mock_prompt.return_value = "prompt"
+            build_prompt("plan-loop-review", 1, "owner/repo", iteration=0)
+            assert mock_prompt.call_args.kwargs["plan_text"] == "(no plan found)"
+
 
 # ---------------------------------------------------------------------------
 # main() integration tests
