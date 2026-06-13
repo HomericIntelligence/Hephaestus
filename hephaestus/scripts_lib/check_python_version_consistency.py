@@ -14,6 +14,12 @@ from pathlib import Path
 
 from hephaestus.utils.helpers import get_repo_root as _get_repo_root
 
+_CI_MATRIX_BRACKET_RE = re.compile(r"python-version:\s*\[([^\]]+)\]")
+_CI_MATRIX_SEQUENCE_RE = re.compile(
+    r"python-version:\s*\n((?:[ \t]+-\s*[\"']?\d+\.\d+[\"']?(?=\n|$)\n?)+)"
+)
+_CI_VERSION_RE = re.compile(r'["\']?(\d+\.\d+)["\']?')
+
 
 def get_repo_root() -> Path:
     """Find repository root, anchored to this module's location.
@@ -146,9 +152,15 @@ def extract_classifiers_python_versions(content: str) -> list[str]:
 def extract_ci_matrix_python_versions(content: str) -> list[str]:
     """Extract Python version strings from a GitHub Actions workflow file.
 
-    Looks for a ``python-version`` matrix key with an inline list, e.g.::
+    Supports two formats::
 
         python-version: ["3.10", "3.11", "3.12"]
+
+    and multi-line YAML sequence format::
+
+        python-version:
+          - "3.10"
+          - "3.11"
 
     Args:
         content: The raw YAML text of a GitHub Actions workflow file.
@@ -158,12 +170,17 @@ def extract_ci_matrix_python_versions(content: str) -> list[str]:
         if no ``python-version`` matrix key is found.
 
     """
-    match = re.search(r"python-version:\s*\[([^\]]+)\]", content)
-    if not match:
-        return []
-    raw = match.group(1)
-    versions = re.findall(r'["\']?(\d+\.\d+)["\']?', raw)
-    return sorted(set(versions))
+    bracket_match = _CI_MATRIX_BRACKET_RE.search(content)
+    if bracket_match:
+        versions = _CI_VERSION_RE.findall(bracket_match.group(1))
+        return sorted(set(versions))
+
+    sequence_match = _CI_MATRIX_SEQUENCE_RE.search(content)
+    if sequence_match:
+        versions = _CI_VERSION_RE.findall(sequence_match.group(1))
+        return sorted(set(versions))
+
+    return []
 
 
 def check_ci_matrix_coverage(repo_root: Path) -> bool:
