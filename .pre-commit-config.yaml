@@ -231,6 +231,18 @@ repos:
         language: system
         pass_filenames: false
         files: ^SECURITY\.md$
+      - id: check-build-dir-untracked
+        name: build/ must stay untracked (gitignored automation scratch)
+        description: >
+          build/ is the sanctioned, gitignored scratch dir for the automation
+          loop. Its name collides with the packaging-output convention, so a
+          stray `git add build/...` or a widened sdist allowlist could sweep
+          automation logs into a distribution. Fail if anything is tracked
+          under build/. See issue #1214.
+        entry: python3 scripts/check_build_dir_untracked.py
+        language: system
+        pass_filenames: false
+        always_run: true
 
 
   # Skill merge method check: skills must not hardcode merge flags

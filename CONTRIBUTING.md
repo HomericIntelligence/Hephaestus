@@ -96,6 +96,17 @@ wheel into a plain virtualenv (`pip install -e '.[dev]'`) — pixi tooling is
 not available there, and any subpackage with POSIX-only assumptions is out
 of scope for this project's supported development environment (track those separately).
 
+### The `build/` directory
+
+`build/` is gitignored **automation scratch**, not packaging output. The
+automation loop writes work reports, loop logs, and audit artifacts there
+(see `hephaestus/automation/loop_runner.py`). Despite the name, no build or
+distribution artifacts come from it — the sdist `only-include` allowlist in
+`pyproject.toml` excludes it. Never `git add` anything under `build/`; the
+`check-build-dir-untracked` pre-commit hook enforces this (issue #1214). To
+clear local scratch, stop any running automation loop first, then
+`git clean -fdX build/` (removes only ignored files).
+
 ## Code Style
 
 We follow these style guidelines:
