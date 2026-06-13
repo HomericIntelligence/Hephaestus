@@ -214,6 +214,34 @@ class TestExtractCiMatrixPythonVersions:
         content = 'python-version: ["3.12", "3.10", "3.12"]\n'
         assert extract_ci_matrix_python_versions(content) == ["3.10", "3.12"]
 
+    def test_extracts_sequence_format_double_quoted(self) -> None:
+        content = 'python-version:\n  - "3.10"\n  - "3.11"\n  - "3.12"\n'
+        assert extract_ci_matrix_python_versions(content) == ["3.10", "3.11", "3.12"]
+
+    def test_extracts_sequence_format_unquoted(self) -> None:
+        content = "python-version:\n  - 3.10\n  - 3.11\n"
+        assert extract_ci_matrix_python_versions(content) == ["3.10", "3.11"]
+
+    def test_extracts_sequence_format_single_quoted(self) -> None:
+        content = "python-version:\n  - '3.10'\n  - '3.12'\n"
+        assert extract_ci_matrix_python_versions(content) == ["3.10", "3.12"]
+
+    def test_extracts_sequence_format_deduplicates_and_sorts(self) -> None:
+        content = 'python-version:\n  - "3.12"\n  - "3.10"\n  - "3.12"\n'
+        assert extract_ci_matrix_python_versions(content) == ["3.10", "3.12"]
+
+    def test_bracket_format_takes_precedence_when_both_present(self) -> None:
+        content = 'python-version: ["3.11"]\npython-version:\n  - "3.10"\n'
+        assert extract_ci_matrix_python_versions(content) == ["3.11"]
+
+    def test_sequence_format_with_4_space_indent(self) -> None:
+        content = 'python-version:\n    - "3.10"\n    - "3.11"\n'
+        assert extract_ci_matrix_python_versions(content) == ["3.10", "3.11"]
+
+    def test_sequence_format_no_trailing_newline(self) -> None:
+        content = 'python-version:\n  - "3.10"\n  - "3.11"'
+        assert extract_ci_matrix_python_versions(content) == ["3.10", "3.11"]
+
 
 # ---------------------------------------------------------------------------
 # check_ci_matrix_coverage
@@ -285,6 +313,18 @@ class TestCheckCiMatrixCoverage:
         workflow_dir = tmp_path / ".github" / "workflows"
         workflow_dir.mkdir(parents=True)
         (workflow_dir / "test.yml").write_text('python-version: ["3.10", "3.11", "3.12"]\n')
+        assert check_ci_matrix_coverage(tmp_path) is True
+
+    def test_sequence_format_workflow_is_parsed(self, tmp_path: Path) -> None:
+        """check_ci_matrix_coverage reads sequence-format python-version correctly."""
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(
+            '"Programming Language :: Python :: 3.10",\n'
+            '"Programming Language :: Python :: 3.11",\n'
+        )
+        workflow_dir = tmp_path / ".github" / "workflows"
+        workflow_dir.mkdir(parents=True)
+        (workflow_dir / "test.yml").write_text("python-version:\n  - '3.10'\n  - '3.11'\n")
         assert check_ci_matrix_coverage(tmp_path) is True
 
 
