@@ -39,7 +39,15 @@ from .claude_invoke import (
 )
 from .claude_models import implementer_model, reviewer_model
 from .claude_timeouts import implementer_claude_timeout
-from .git_utils import get_repo_slug, issue_ref, pr_ref, run
+from .git_utils import (
+    get_repo_slug,
+    issue_ref,
+    pr_ref,
+    push_current_branch_with_lease_on_divergence,
+    rebase_worktree_onto,
+    run,
+    sync_worktree_to_remote_branch,
+)
 from .github_api import (
     gh_current_login,
     gh_issue_add_labels,
@@ -371,6 +379,188 @@ class ReviewPhase(StageMixin):
         impl._save_review_iteration_state(issue_number, iteration + 1, review_text)
         return reopened, review_text, posted_thread_ids, verdict
 
+    # ------------------------------------------------------------------
+    # Pre-review conflict gate (#1328)
+    # ------------------------------------------------------------------
+
+    def _pr_merge_state(self, pr_number: int) -> tuple[str, str]:
+        """Return ``(mergeStateStatus, mergeable)`` upper-cased for *pr_number*.
+
+        Mirrors the merge-state query the CI driver uses
+        (``ci_driver._gh_pr_state`` / ``_attempt_mechanical_rebase``). Returns
+        empty strings on any query failure so an unknown merge-state is never
+        misread as CONFLICTING.
+        """
+        try:
+            result = run(
+                ["gh", "pr", "view", str(pr_number), "--json", "mergeStateStatus,mergeable"],
+                cwd=self.repo_root,
+                capture_output=True,
+            )
+            state = dict(json.loads(result.stdout or "{}"))
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "#%d: could not fetch PR %s merge-state for conflict gate: %s",
+                pr_number,
+                pr_ref(pr_number),
+                exc,
+            )
+            return "", ""
+        return (
+            str(state.get("mergeStateStatus") or "").upper(),
+            str(state.get("mergeable") or "").upper(),
+        )
+
+    def _resolve_conflict_before_review(
+        self,
+        *,
+        issue_number: int,
+        pr_number: int,
+        worktree_path: Path,
+        branch_name: str,
+        session_id: str | None,
+        slot_id: int | None,
+        thread_id: int | None,
+        state: ImplementationState | None,
+    ) -> bool:
+        """Ensure *pr_number* is conflict-free before the review iterations (#1328).
+
+        Reviewing a PR that has a merge conflict with its base is pointless — a
+        conflicted PR can never merge, so any GO verdict would be wasted spend.
+        Per the user's instruction this resolves the conflict with the
+        IMPLEMENTATION agent BEFORE the first review iteration.
+
+        The flow reuses the SAME primitives the CI driver's ``_resolve_dirty_pr``
+        uses (``rebase_worktree_onto`` / ``push_current_branch_with_lease_on_divergence``
+        from :mod:`git_utils`, and the implementer-session resume in
+        ``_resume_impl_with_feedback``), rather than reinventing conflict
+        resolution. ``ReviewPhase`` runs under ``IssueImplementer`` — a different
+        object than ``CIDriver`` — so the helper cannot be called directly; this
+        is the smallest seam that reuses the underlying rebase/agent primitives.
+
+        Steps:
+
+        1. Query merge-state. If NOT DIRTY/CONFLICTING, return ``True`` (nothing
+           to do — proceed straight to review). An unknown merge-state also
+           returns ``True`` so a transient gh failure never strands a healthy PR.
+        2. Mechanical rebase onto the base. A clean rebase + lease-push
+           re-triggers CI; return ``True`` once the merge-state clears.
+        3. Still conflicting → dispatch the implementation agent with explicit
+           conflict-resolution instructions, commit + push, then re-check.
+        4. Return ``True`` only if the PR is conflict-free afterwards; ``False``
+           if the conflict could not be resolved (caller returns early so the PR
+           is treated as not-GO rather than reviewed).
+
+        Returns:
+            ``True`` if the PR is conflict-free (review may proceed); ``False``
+            if an unresolved merge conflict remains.
+
+        """
+        if self.options.dry_run:
+            return True
+
+        merge_state, mergeable = self._pr_merge_state(pr_number)
+        if merge_state not in ("DIRTY", "CONFLICTING") and mergeable != "CONFLICTING":
+            return True
+
+        impl = self.impl
+        impl._log(
+            "warning",
+            f"{issue_ref(issue_number)}: {pr_ref(pr_number)} is {merge_state or 'CONFLICTING'} "
+            "(merge conflict) before review — resolving with the implementation agent "
+            "before any review iteration",
+            thread_id,
+        )
+        if slot_id is not None:
+            self.status_tracker.update_slot(
+                slot_id, f"{pr_ref(pr_number)}: resolving merge conflict"
+            )
+
+        # Resolve the base branch once for both the rebase target and the agent
+        # prompt. Best-effort: default to ``main`` like ``_resolve_dirty_pr``.
+        base_branch = "main"
+        try:
+            base_result = run(
+                ["gh", "pr", "view", str(pr_number), "--json", "baseRefName"],
+                cwd=self.repo_root,
+                capture_output=True,
+            )
+            base_branch = dict(json.loads(base_result.stdout or "{}")).get("baseRefName") or "main"
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            logger.debug(
+                "#%d: failed to determine base branch for %s; defaulting to 'main': %s",
+                issue_number,
+                pr_ref(pr_number),
+                exc,
+            )
+
+        # 1. Cheap path: mechanical rebase. A clean rebase resolves a PR that is
+        #    merely behind / non-overlapping with no agent spend.
+        with contextlib.suppress(subprocess.CalledProcessError):
+            sync_worktree_to_remote_branch(worktree_path, branch_name)
+            if rebase_worktree_onto(worktree_path, base_branch):
+                push_current_branch_with_lease_on_divergence(
+                    worktree_path,
+                    branch=branch_name,
+                    push_ref=f"HEAD:{branch_name}",
+                )
+                logger.info(
+                    "#%d: mechanically rebased %s onto %s (no agent) for conflict gate",
+                    issue_number,
+                    pr_ref(pr_number),
+                    base_branch,
+                )
+                cleared_state, cleared_mergeable = self._pr_merge_state(pr_number)
+                if cleared_state not in ("DIRTY", "CONFLICTING") and (
+                    cleared_mergeable != "CONFLICTING"
+                ):
+                    return True
+
+        # 2. Rebase still conflicts → the implementation agent resolves it. Reuse
+        #    the same conflict_context wording as ci_driver._resolve_dirty_pr.
+        if session_id is None:
+            # Without an implementer session to resume there is no agent seam in
+            # this phase to drive a code-level conflict resolution; bail so the
+            # PR is treated as not-GO rather than reviewed-while-conflicted.
+            impl._log(
+                "warning",
+                f"{issue_ref(issue_number)}: {pr_ref(pr_number)} still conflicts after rebase and "
+                "has no implementer session to resume — skipping review (not-GO)",
+                thread_id,
+            )
+            return False
+
+        conflict_context = (
+            f"This PR has a MERGE CONFLICT with `origin/{base_branch}` "
+            f"(mergeStateStatus=DIRTY) — it cannot merge until the conflict is "
+            f"resolved. Rebase the PR head branch onto `origin/{base_branch}` and "
+            f"resolve every conflict, keeping both the PR's intent and the latest "
+            f"base changes. Then commit the resolution (signed). There may be NO "
+            f"failing CI checks — the conflict itself is the blocker."
+        )
+        resolved = self._resume_impl_with_feedback(
+            session_id=session_id,
+            worktree_path=worktree_path,
+            issue_number=issue_number,
+            review_text=conflict_context,
+            prev_iteration=-1,
+            verdict="CONFLICT",
+            state=state,
+        )
+        if resolved and self.runner._commit_if_changes(issue_number, worktree_path):
+            self.runner._push_branch(branch_name, worktree_path)
+
+        final_state, final_mergeable = self._pr_merge_state(pr_number)
+        if final_state in ("DIRTY", "CONFLICTING") or final_mergeable == "CONFLICTING":
+            impl._log(
+                "warning",
+                f"{issue_ref(issue_number)}: {pr_ref(pr_number)} still has an unresolved merge "
+                "conflict after agent resolution — skipping review (not-GO)",
+                thread_id,
+            )
+            return False
+        return True
+
     def _run_impl_review_loop(
         self,
         *,
@@ -391,12 +581,38 @@ class ReviewPhase(StageMixin):
         Each iteration posts inline PR review threads and returns a verdict; on
         NOGO the implementer session is resumed to address threads. Terminates on
         GO, zero blocking threads, or :data:`MAX_REVIEW_ITERATIONS`.
+
+        #1328: before the FIRST review iteration, a PR with a merge conflict is
+        rebased / handed to the implementation agent to resolve. A conflicted PR
+        can never merge, so reviewing it would be wasted spend; if the conflict
+        cannot be resolved the loop returns early with a non-GO verdict so the PR
+        is treated as needs-action instead of being reviewed.
         """
         last_verdict: str | None = None
         last_grade: str | None = None
         prior_review: str | None = None
         iterations_run = 0
         prior_addressed_threads: list[dict[str, Any]] = []
+
+        # #1328: resolve any merge conflict BEFORE reviewing. Never review a
+        # conflicted PR — it cannot merge regardless of the verdict.
+        if pr_number is not None and not self._resolve_conflict_before_review(
+            issue_number=issue_number,
+            pr_number=pr_number,
+            worktree_path=worktree_path,
+            branch_name=branch_name,
+            session_id=session_id,
+            slot_id=slot_id,
+            thread_id=thread_id,
+            state=state,
+        ):
+            self._finalize_review_outcome(
+                issue_number=issue_number,
+                pr_number=pr_number,
+                last_verdict="NOGO",
+                iterations_run=0,
+            )
+            return 0, "NOGO", None
 
         for iteration in range(MAX_REVIEW_ITERATIONS):
             (

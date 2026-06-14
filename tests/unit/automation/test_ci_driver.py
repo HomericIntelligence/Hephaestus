@@ -527,6 +527,8 @@ class TestOpenPrsRemaining:
         with (
             patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
             patch("hephaestus.automation.ci_driver._gh_call", return_value=result_mock),
+            # #1328: merge-state is fetched per-PR via a separate gh pr view.
+            patch.object(driver, "_pr_merge_state", side_effect=[("CLEAN", "MERGEABLE"), ("", "")]),
         ):
             remaining = driver._list_open_prs_remaining()
         assert remaining == [
@@ -535,6 +537,8 @@ class TestOpenPrsRemaining:
                 "title": "first",
                 "headRefName": "branch-1",
                 "autoMergeRequest": {"enabled_by": {"login": "bot"}},
+                "mergeStateStatus": "CLEAN",
+                "mergeable": "MERGEABLE",
                 "isBot": False,
                 "labels": ["state:implementation-go"],
             },
@@ -543,10 +547,38 @@ class TestOpenPrsRemaining:
                 "title": "second",
                 "headRefName": "branch-2",
                 "autoMergeRequest": None,
+                "mergeStateStatus": "",
+                "mergeable": "",
                 "isBot": True,
                 "labels": [],
             },
         ]
+
+    def test_pr_merge_state_returns_upper_cased_pair(self, driver: CIDriver) -> None:
+        """#1328: ``_pr_merge_state`` forces a per-PR merge-state computation."""
+        result_mock = MagicMock(
+            stdout=json.dumps({"mergeStateStatus": "dirty", "mergeable": "conflicting"})
+        )
+        with patch("hephaestus.automation.ci_driver._gh_call", return_value=result_mock) as mock_gh:
+            merge_state, mergeable = driver._pr_merge_state(42)
+        assert (merge_state, mergeable) == ("DIRTY", "CONFLICTING")
+        cmd = mock_gh.call_args[0][0]
+        assert cmd[:3] == ["pr", "view", "42"]
+        assert "mergeStateStatus,mergeable" in cmd
+
+    def test_pr_merge_state_unknown_marker_skips_query(self, driver: CIDriver) -> None:
+        """#1328: the -1 unknown sentinel must not trigger a gh call."""
+        with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh:
+            assert driver._pr_merge_state(-1) == ("", "")
+        mock_gh.assert_not_called()
+
+    def test_pr_merge_state_gh_failure_returns_unknown(self, driver: CIDriver) -> None:
+        """#1328: a failed merge-state query degrades to unknown, never CONFLICTING."""
+        with patch(
+            "hephaestus.automation.ci_driver._gh_call",
+            side_effect=subprocess.CalledProcessError(1, "gh"),
+        ):
+            assert driver._pr_merge_state(7) == ("", "")
 
     def test_gh_failure_returns_unknown_marker(self, driver: CIDriver) -> None:
         """If gh fails we treat the state as unknown — repo is NOT done."""
@@ -2811,6 +2843,63 @@ class TestEvaluateRunResult:
     def test_failed_issue_is_one(self) -> None:
         results = {1: WorkerResult(issue_number=1, success=False, pr_number=10)}
         assert _evaluate_run_result(results, [], issues=[1], as_json=False) == 1
+
+    def test_armed_but_conflicting_is_needs_action(self) -> None:
+        # #1328: an armed PR with a permanent merge conflict can NEVER merge
+        # while armed; reporting it as "armed and still merging" is a
+        # false-green. It must be reclassified into needs_action → rc=1.
+        results = {1: WorkerResult(issue_number=1, success=True, pr_number=10)}
+        remaining = [
+            {
+                "number": 10,
+                "autoMergeRequest": {"enabledAt": "now"},
+                "mergeStateStatus": "CONFLICTING",
+                "mergeable": "CONFLICTING",
+            }
+        ]
+        assert _evaluate_run_result(results, remaining, issues=[1], as_json=False) == 1
+
+    def test_armed_but_dirty_is_needs_action(self) -> None:
+        # #1328: DIRTY is the gh-CLI spelling of the same conflict state.
+        results = {1: WorkerResult(issue_number=1, success=True, pr_number=10)}
+        remaining = [
+            {
+                "number": 10,
+                "autoMergeRequest": {"enabledAt": "now"},
+                "mergeStateStatus": "DIRTY",
+                "mergeable": "",
+            }
+        ]
+        assert _evaluate_run_result(results, remaining, issues=[1], as_json=False) == 1
+
+    def test_armed_and_clean_stays_armed_pending(self) -> None:
+        # #1328: a genuinely-merging armed PR (CLEAN merge-state) must stay in
+        # armed_pending and keep rc=0 — the conflict reclassification must not
+        # red-flag healthy PRs.
+        results = {1: WorkerResult(issue_number=1, success=True, pr_number=10)}
+        remaining = [
+            {
+                "number": 10,
+                "autoMergeRequest": {"enabledAt": "now"},
+                "mergeStateStatus": "CLEAN",
+                "mergeable": "MERGEABLE",
+            }
+        ]
+        assert _evaluate_run_result(results, remaining, issues=[1], as_json=False) == 0
+
+    def test_armed_and_blocked_on_ci_stays_armed_pending(self) -> None:
+        # #1328: BLOCKED (branch-protection / in-flight CI) is NOT a conflict —
+        # such PRs are still merging on their own and stay armed_pending (rc=0).
+        results = {1: WorkerResult(issue_number=1, success=True, pr_number=10)}
+        remaining = [
+            {
+                "number": 10,
+                "autoMergeRequest": {"enabledAt": "now"},
+                "mergeStateStatus": "BLOCKED",
+                "mergeable": "MERGEABLE",
+            }
+        ]
+        assert _evaluate_run_result(results, remaining, issues=[1], as_json=False) == 0
 
 
 class TestRunDriveGreenCompact:

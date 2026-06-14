@@ -303,8 +303,11 @@ class CIDriver:
 
         Returns:
             One dict per open PR with keys ``number``, ``title``,
-            ``headRefName``, and ``autoMergeRequest`` (None or the auto-merge
-            metadata blob). Empty list iff the repo is clean.
+            ``headRefName``, ``autoMergeRequest`` (None or the auto-merge
+            metadata blob), and ``mergeStateStatus`` / ``mergeable`` (the
+            per-PR merge-state, fetched separately because the REST list
+            endpoint does not populate ``mergeable`` reliably — see #1328).
+            Empty list iff the repo is clean.
 
         """
         try:
@@ -356,12 +359,16 @@ class CIDriver:
                     )
                 continue  # #821: hide other-author PRs from the done-gate sweep
             labels = pr.get("labels") or []
+            number = pr.get("number")
+            merge_state, mergeable = self._pr_merge_state(number)
             normalised.append(
                 {
-                    "number": pr.get("number"),
+                    "number": number,
                     "title": pr.get("title", ""),
                     "headRefName": (pr.get("head") or {}).get("ref", ""),
                     "autoMergeRequest": pr.get("auto_merge"),
+                    "mergeStateStatus": merge_state,
+                    "mergeable": mergeable,
                     "labels": [
                         label.get("name", "") for label in labels if isinstance(label, dict)
                     ],
@@ -369,6 +376,52 @@ class CIDriver:
                 }
             )
         return normalised
+
+    def _pr_merge_state(self, pr_number: Any) -> tuple[str, str]:
+        """Return ``(mergeStateStatus, mergeable)`` for a single PR (#1328).
+
+        The REST ``/pulls`` list endpoint does NOT populate ``mergeable`` /
+        ``mergeable_state`` reliably (GitHub computes the merge-state lazily and
+        omits it from list responses), so the done-gate cannot tell a
+        permanently-CONFLICTING armed PR apart from one that is genuinely still
+        merging. A per-PR ``gh pr view`` forces GitHub to compute the merge
+        state, matching how the rest of this module queries merge-state
+        (``_attempt_mechanical_rebase`` / ``_gh_pr_state``).
+
+        Args:
+            pr_number: PR number to query.
+
+        Returns:
+            ``(mergeStateStatus, mergeable)`` upper-cased. Empty strings when the
+            number is the unknown-marker sentinel or the query fails — an unknown
+            merge-state must never be misread as CONFLICTING.
+
+        """
+        if not isinstance(pr_number, int) or pr_number < 0:
+            return "", ""
+        try:
+            result = _gh_call(
+                [
+                    "pr",
+                    "view",
+                    str(pr_number),
+                    "--json",
+                    "mergeStateStatus,mergeable",
+                ],
+                check=False,
+            )
+            state = dict(json.loads(result.stdout or "{}"))
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "Could not fetch PR #%s merge-state for done-gate; treating as unknown: %s",
+                pr_number,
+                exc,
+            )
+            return "", ""
+        return (
+            str(state.get("mergeStateStatus") or "").upper(),
+            str(state.get("mergeable") or "").upper(),
+        )
 
     def _arm_all_unarmed_open_prs(self, open_prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Arm auto-merge on every implementation-GO un-armed open PR (#882).
@@ -3257,10 +3310,19 @@ def _evaluate_run_result(
     own) vs ``needs_action`` (un-armed, genuinely stuck) and only fail on the
     latter (or on per-issue failures).
 
+    An armed PR is only "merging on its own" while its merge-state is benign
+    (CLEAN, or BLOCKED/UNSTABLE on in-flight CI). An armed PR whose merge-state
+    is ``DIRTY`` / ``CONFLICTING`` has a permanent merge conflict with its base
+    — it can NEVER merge while armed, so reporting it as "armed and still
+    merging" is a false-green (#1328). Such PRs are reclassified OUT of
+    ``armed_pending`` and INTO ``needs_action`` so the gate returns rc=1 and the
+    JSON status surfaces them. This mirrors ``_wait_for_armed_merge``'s terminal
+    handling, which already treats DIRTY/CONFLICTING as a stop-and-resolve case.
+
     Args:
         results: Per-issue worker results from ``CIDriver.run()``.
         open_prs_remaining: Open PRs left on the repo (each carries
-            ``number`` and ``autoMergeRequest``).
+            ``number``, ``autoMergeRequest``, and ``mergeStateStatus``).
         issues: The input issue list (echoed into JSON status).
         as_json: Whether to emit a machine-readable status line.
 
@@ -3271,8 +3333,29 @@ def _evaluate_run_result(
     """
     log = logging.getLogger(__name__)
     failed = [num for num, result in results.items() if not result.success]
-    armed_pending = [pr.get("number") for pr in open_prs_remaining if pr.get("autoMergeRequest")]
-    needs_action = [pr.get("number") for pr in open_prs_remaining if not pr.get("autoMergeRequest")]
+
+    # Terminal-state vocabulary shared with ``_wait_for_armed_merge``: a PR in
+    # one of these merge-states has a real conflict with its base and can never
+    # merge while armed — it needs manual/agent action, not more waiting.
+    conflict_states = {"DIRTY", "CONFLICTING"}
+
+    def _is_conflicting(pr: dict[str, Any]) -> bool:
+        merge_state = str(pr.get("mergeStateStatus") or "").upper()
+        mergeable = str(pr.get("mergeable") or "").upper()
+        return merge_state in conflict_states or mergeable == "CONFLICTING"
+
+    # Armed AND merge-state benign → genuinely merging on its own (rc=0). Armed
+    # but CONFLICTING → false-green; demote to needs_action below.
+    armed_pending = [
+        pr.get("number")
+        for pr in open_prs_remaining
+        if pr.get("autoMergeRequest") and not _is_conflicting(pr)
+    ]
+    needs_action = [
+        pr.get("number")
+        for pr in open_prs_remaining
+        if not pr.get("autoMergeRequest") or _is_conflicting(pr)
+    ]
     if armed_pending:
         log.warning(
             "%s PR(s) armed and still merging (waited; not a failure): %s",
