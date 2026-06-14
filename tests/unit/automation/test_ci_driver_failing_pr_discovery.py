@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
 
@@ -317,3 +319,68 @@ class TestIsBotPrModeForSyntheticKey:
     def test_is_bot_pr_mode_false_for_real_issue(self, ci_driver: CIDriver) -> None:
         """Real issue-PR mappings return False."""
         assert not ci_driver._is_bot_pr_mode(100, 200)
+
+
+class TestFailingCheckPredicateSingleDefinition:
+    """Regression guard: FAILING_CHECK_CONCLUSIONS and _pr_is_failing must not be duplicated.
+
+    The DRY goal is satisfied when there is exactly one assignment to
+    FAILING_CHECK_CONCLUSIONS and exactly one function named _pr_is_failing
+    across the entire automation package.  This test catches future drift that
+    would re-introduce the three-copy situation described in issue #1345.
+    """
+
+    _AUTOMATION_DIR = Path(__file__).parents[3] / "hephaestus" / "automation"
+
+    def _count_assignments(self, target: str) -> list[Path]:
+        """Return paths of automation modules that assign to *target* at module level."""
+        hits: list[Path] = []
+        for py_file in self._AUTOMATION_DIR.rglob("*.py"):
+            try:
+                tree = ast.parse(py_file.read_text(encoding="utf-8"))
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    for t in node.targets:
+                        if isinstance(t, ast.Name) and t.id == target:
+                            hits.append(py_file)
+                elif isinstance(node, ast.AnnAssign):
+                    if isinstance(node.target, ast.Name) and node.target.id == target:
+                        hits.append(py_file)
+        return hits
+
+    def _count_function_defs(self, name: str) -> list[Path]:
+        """Return paths of automation modules that define a function named *name*."""
+        hits: list[Path] = []
+        for py_file in self._AUTOMATION_DIR.rglob("*.py"):
+            try:
+                tree = ast.parse(py_file.read_text(encoding="utf-8"))
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name == name:
+                    hits.append(py_file)
+        return hits
+
+    def test_failing_check_conclusions_defined_exactly_once(self) -> None:
+        """FAILING_CHECK_CONCLUSIONS must have a single canonical definition."""
+        hits = self._count_assignments("FAILING_CHECK_CONCLUSIONS")
+        assert len(hits) == 1, (
+            f"Expected exactly 1 definition of FAILING_CHECK_CONCLUSIONS, "
+            f"found {len(hits)}: {[str(p) for p in hits]}"
+        )
+        assert hits[0].name == "ci_driver.py", (
+            f"Canonical definition must be in ci_driver.py, not {hits[0].name}"
+        )
+
+    def test_pr_is_failing_defined_exactly_once(self) -> None:
+        """_pr_is_failing must have a single canonical definition."""
+        hits = self._count_function_defs("_pr_is_failing")
+        assert len(hits) == 1, (
+            f"Expected exactly 1 definition of _pr_is_failing, "
+            f"found {len(hits)}: {[str(p) for p in hits]}"
+        )
+        assert hits[0].name == "ci_driver.py", (
+            f"Canonical definition must be in ci_driver.py, not {hits[0].name}"
+        )
