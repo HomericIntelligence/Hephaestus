@@ -547,9 +547,7 @@ class AddressReviewer(BaseReviewer):
             review_state.pr_number = pr_number
         branch_name = review_state.branch_name or f"{issue_number}-auto-impl"
 
-        self.status_tracker.update_slot(
-            slot_id, f"{issue_ref(issue_number)}: Setting up worktree"
-        )
+        self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Setting up worktree")
         worktree_path = self._get_or_create_worktree(issue_number, branch_name, review_state)
 
         with self.state_lock:
@@ -629,20 +627,24 @@ class AddressReviewer(BaseReviewer):
 
         thread_id = threading.get_ident()
         self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Starting")
-        self._log("info", f"Addressing PR {pr_ref(pr_number)} for issue {issue_ref(issue_number)}", thread_id)  # noqa: E501
+        self._log(
+            "info",
+            f"Addressing PR {pr_ref(pr_number)} for issue {issue_ref(issue_number)}",
+            thread_id,
+        )
 
         try:
             threads = self._check_threads_for_address(issue_number, pr_number, thread_id)
             if threads is None:
-                return WorkerResult(
-                    issue_number=issue_number, success=True, pr_number=pr_number
-                )
+                return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
             session_id, review_state, branch_name, worktree_path = self._setup_address_state(
                 issue_number, pr_number, slot_id
             )
 
-            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Running Claude fix")  # noqa: E501
+            self.status_tracker.update_slot(
+                slot_id, f"{issue_ref(issue_number)}: Running Claude fix"
+            )
             fix_result = self._run_fix_session(
                 issue_number=issue_number,
                 pr_number=pr_number,
@@ -652,7 +654,11 @@ class AddressReviewer(BaseReviewer):
             )
             addressed: list[str] = fix_result.get("addressed", [])
             replies: dict[str, str] = fix_result.get("replies", {})
-            self._log("info", f"Claude addressed {len(addressed)} thread(s) on PR {pr_ref(pr_number)}", thread_id)  # noqa: E501
+            self._log(
+                "info",
+                f"Claude addressed {len(addressed)} thread(s) on PR {pr_ref(pr_number)}",
+                thread_id,
+            )
             self._commit_push_and_resolve(
                 issue_number=issue_number,
                 pr_number=pr_number,

@@ -112,6 +112,32 @@ Agent(description="Create skill C", prompt="...skill C content...")
    grep -l "<keyword>" "$MNEMOSYNE_DIR/skills/"*.md 2>/dev/null | head -20
    ```
 
+   **CRITICAL — Check for an OPEN PR already amending this skill (amend-lock):**
+
+   Searching only the local `main` clone is NOT enough. Multiple agents run `/learn` in
+   parallel; if each forks a fresh `origin/main` branch to amend the **same** skill, every
+   branch edits the same `.md`/`.history` and they all become mutually conflicting (DIRTY).
+   This is the #1 cause of the duplicate-PR pileup. Before creating any branch:
+
+   ```bash
+   # (a) Open PRs whose title names the skill
+   gh pr list --repo HomericIntelligence/ProjectMnemosyne --state open \
+     --search "<name> in:title" --json number,headRefName,title
+   # (b) Open PRs that touch the file even if the title differs
+   gh pr list --repo HomericIntelligence/ProjectMnemosyne --state open \
+     --json number,headRefName,files \
+     --jq '.[] | select(.files[].path == "skills/<name>.md") | {number, headRefName}'
+   ```
+
+   **Decision rule:**
+
+   - **An open PR already amends this skill** → do **NOT** fork a new `origin/main` branch.
+     Either (a) add your learning to that PR's existing `headRefName` (check it out, amend,
+     push), or (b) if that branch is unavailable, create your worktree branch **from** it
+     (`git worktree add <dir> -b skill/<name>-followup origin/<headRefName>`) so your change
+     **stacks** on theirs instead of conflicting. Reference the existing PR number.
+   - **No open PR** → proceed with the normal worktree-from-`origin/main` flow (Step 5).
+
    **If an existing skill covers the same topic → AMEND it** (don't create a new file):
 
    a. Read the existing skill to understand its current state
@@ -181,14 +207,39 @@ Agent(description="Create skill C", prompt="...skill C content...")
 
    Before writing the "Verified Workflow" section, answer these questions honestly:
    - Was the workflow actually executed end-to-end? (Not just pre-commit hooks — the actual tests/code)
-   - Did CI pass with these changes? If not, the section MUST be titled "Proposed Workflow" not "Verified Workflow"
+   - Did CI pass with these changes? If not, convey that **inside** the section (see below) — do
+     NOT rename the header.
    - Were the results observed in CI, or only locally? If only locally, state: "Verified locally only — CI validation pending"
+
+   **CRITICAL — the section header MUST stay `## Verified Workflow` regardless of verification
+   level.** `validate_plugins.py` requires the literal string `## Verified Workflow` (it does a
+   plain substring check for it); renaming it to `## Proposed Workflow` causes a hard
+   `validate` failure: `Missing required section: ## Verified Workflow`. For an unverified or
+   `verified-precommit` skill, keep the header and add a status note as the first line of the
+   section instead (see Step 6).
 
    **Verification levels** (must be stated in the skill):
    - `verified-ci`: Tests pass in CI (highest confidence)
    - `verified-local`: Tests pass locally but not confirmed in CI
    - `verified-precommit`: Only pre-commit hooks pass (formatting, linting)
    - `unverified`: Approach is theoretically sound but never executed
+
+   **CRITICAL — `verified-ci` is a claim about THIS PR's gate, not about local checks.**
+   You may write `verified-ci` **only after** the skill PR's required gate
+   (`validate` **and** `markdownlint`) is observed **green** on the open PR:
+
+   ```bash
+   gh pr view <PR> --repo HomericIntelligence/ProjectMnemosyne \
+     --json mergeStateStatus,statusCheckRollup \
+     --jq '{state: .mergeStateStatus, failing: [.statusCheckRollup[] | select(.conclusion=="FAILURE") | .name]}'
+   ```
+
+   Passing `validate_plugins.py` + markdownlint **locally is `verified-local`, not
+   `verified-ci`** — local runs do not exercise the full CI gate (ruff, mypy, pytest). Set
+   the skill to `verified-local` at creation time, and only bump it to `verified-ci` once you
+   have seen the gate go green. Do **not** label a skill `verified-ci` while its own PR is
+   `BLOCKED`/`DIRTY` with a red `validate`/`markdownlint` — that is the overclaim that made the
+   backlog's verification levels untrustworthy.
 
    Add this as a frontmatter field:
 
@@ -212,13 +263,38 @@ Agent(description="Create skill C", prompt="...skill C content...")
        # Clone fresh
        mkdir -p "$HOME/.agent-brain"
        gh repo clone HomericIntelligence/ProjectMnemosyne "$MNEMOSYNE_DIR"
+       ( cd "$MNEMOSYNE_DIR" && ensure_precommit_installed )  # see helper below
      fi
 
      # Always update to latest main before starting
      git -C "$MNEMOSYNE_DIR" fetch origin
      git -C "$MNEMOSYNE_DIR" checkout main
      git -C "$MNEMOSYNE_DIR" pull --ff-only origin main
+
+     # Verify pre-commit is genuinely installed; (re)install if not.
+     ( cd "$MNEMOSYNE_DIR" && ensure_precommit_installed )
    fi
+   ```
+
+   **Robust pre-commit check (`ensure_precommit_installed`).** Do NOT test
+   `[ -f "$DIR/.git/hooks/pre-commit" ]`: it is wrong two ways — (1) in a **worktree**, `.git`
+   is a *file* (a `gitdir:` pointer), not a directory, so the path never exists even when hooks
+   are installed; (2) a stray `core.hooksPath` (e.g. pointing back at the default `.git/hooks`)
+   can make the file exist while `pre-commit install` was never run. Ask the resolved hook for
+   the pre-commit signature instead (define this helper before the setup block above):
+
+   ```bash
+   ensure_precommit_installed() {
+     # Resolve the hooks dir git actually uses (honors core.hooksPath and worktrees)
+     local hooks_dir; hooks_dir="$(git rev-parse --git-path hooks)"
+     # The pre-commit-managed hook contains a recognizable marker line.
+     if ! grep -qs 'pre-commit' "$hooks_dir/pre-commit"; then
+       pre-commit install --install-hooks
+     fi
+     # Final sanity check: config parses and a hook actually fires.
+     pre-commit validate-config >/dev/null 2>&1 \
+       || echo "WARNING: pre-commit config invalid — run 'pre-commit install --install-hooks' here"
+   }
 
    # Create a worktree for branch isolation (never checkout branches in the base repo)
    WORKTREE_DIR="/tmp/mnemosyne-skill-<name>"
@@ -304,7 +380,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
    - `category`: one of 9 valid categories (no "refactoring" — use "architecture")
    - All required fields in frontmatter: name, description, category, date, version, verification
    - All required markdown sections: Overview, When to Use, Verified Workflow, Failed Attempts, Results & Parameters
-   - **If verification is `unverified` or `verified-precommit`**: rename the section to "Proposed Workflow" instead of "Verified Workflow" and add a warning: "> **Warning:** This workflow has not been validated end-to-end. Treat as a hypothesis until CI confirms."
+   - **If verification is `unverified` or `verified-precommit`**: **keep the `## Verified Workflow` header** (the validator requires that literal string — renaming to "Proposed Workflow" causes `Missing required section: ## Verified Workflow`). Instead, make the **first line of the section** a warning blockquote: "> **Warning:** This workflow has not been validated end-to-end. Treat as a hypothesis until CI confirms." Optionally add a `> _(Proposed — not yet verified)_` subtitle under the header.
 
    **File 2: `skills/<name>.notes.md`** (optional):
    - Raw session details, code snippets, debugging logs
@@ -331,12 +407,57 @@ Agent(description="Create skill C", prompt="...skill C content...")
    | 5 | Markdown has all 5 sections: Overview, When to Use, Verified Workflow, Failed Attempts, Results & Parameters | "Missing required section" |
    | 6 | `## Failed Attempts` has pipe-delimited table | "Failed Attempts table missing required columns" |
    | 7 | `## Quick Reference` is subsection `### Quick Reference` (under Verified Workflow) | "Quick Reference should use ###" |
+   | 8 | **Every markdown table's header pipe-count equals each body row's pipe-count**; a literal `\|` inside cell text is escaped | markdownlint `MD056/table-column-count` (CI-only gate, NOT caught by `validate_plugins.py`) |
+
+   > **#8 is the single most common CI failure for skill PRs.** The Overview, Failed Attempts,
+   > and Results tables are the usual offenders: an unescaped `|` inside a cell (e.g. a regex,
+   > a shell pipe, or `a\|b`) is read as a column separator, so the row has more cells than the
+   > header. Write inline pipes as `\|`. `validate_plugins.py` does **not** check this — only
+   > the markdownlint gate does, so you MUST run markdownlint locally (below).
+
+   Run **all three** checks from the worktree root before committing, in this order
+   (markdownlint first — it is the gate most skill PRs fail on):
 
    ```bash
+   # 0) Required-section self-check — guarantees validate_plugins.py won't fail with
+   #    "Missing required section". Generate the file FROM the full template (Step 6) so all
+   #    five headers exist by construction, then prove it before anything else:
+   for sec in "## Overview" "## When to Use" "## Verified Workflow" \
+              "## Failed Attempts" "## Results & Parameters"; do
+     grep -qF "$sec" "skills/<name>.md" || echo "MISSING SECTION: $sec"
+   done
+   #    The header is ALWAYS literally "## Verified Workflow" — even for unverified skills the
+   #    validator requires that exact string, so never rename it to "## Proposed Workflow"
+   #    (that itself triggers "Missing required section: ## Verified Workflow"). Convey
+   #    unverified status with a warning blockquote inside the section (Step 6), not the header.
+   #    Any "MISSING SECTION" line = the validate gate WILL fail. Add the section before
+   #    committing. This is the exact defect behind PRs that ADD a skill missing 4 sections.
+
+   # 1) markdownlint — EXACTLY as CI runs it. It checks ALL rules, not just tables:
+   #    MD056 (table-column-count) AND e.g. MD012 (no-multiple-blanks), MD013, MD040, etc.
+   #    Run from the worktree root so it picks up the repo's .markdownlint.yaml.
+   npx --yes markdownlint-cli2 --config .markdownlint.yaml "skills/<name>.md" "skills/<name>.history"
+   #    Must exit 0. Fix every MDxxx error it reports — do not assume MD056 is the only one.
+   #    Common offenders: MD056 (unbalanced table pipes), MD012 (≥2 consecutive blank lines).
+   #    Do NOT add a markdownlint-disable comment to silence an error — the forbid-suppressions
+   #    gate rejects blanket disables, and the defect is real. Fix the markdown instead.
+
+   # 2) plugin validator — note this lints the ENTIRE skills/ dir, not just your file (see below)
    python3 scripts/validate_plugins.py
+
+   # 3) pre-commit — runs the hooks CI also relies on (ruff, ruff-format, signed-commit check)
+   pre-commit run --files "skills/<name>.md" "skills/<name>.history"
    ```
 
-   If validation fails, fix errors and re-run. Do NOT commit until it passes.
+   If any of the three fails, fix errors and re-run. Do NOT commit until all pass.
+
+   **Whole-repo validation (`validate_plugins.py` lints all of `skills/`):** if step 2 reports
+   errors in files you did **not** touch, the `validate` gate is **already red on `main`** and
+   your PR will inherit the red gate through no fault of your change. Likewise, run markdownlint
+   over the whole dir (`npx --yes markdownlint-cli2 --config .markdownlint.yaml "skills/*.md"`)
+   if your PR's `markdownlint` gate fails on a file you didn't edit. In either case: do **not**
+   claim `verified-ci`, and surface the pre-existing breakage to the user — it needs its own
+   fix PR; your amendment did not cause it.
 
 8. **Commit and push**:
 
@@ -443,16 +564,34 @@ Agent(description="Create skill C", prompt="...skill C content...")
     git -C "$MNEMOSYNE_DIR" worktree prune
     ```
 
+11. **Report honest status — enabling auto-merge is NOT "done":**
+
+    The PR merges only when the required gate (`validate` + `markdownlint`) goes green. Until
+    then it is `BLOCKED`. When reporting status, report the **actual** state and any failing
+    checks — never assume success because auto-merge was armed:
+
+    ```bash
+    gh pr view "$PR_NUMBER" --repo HomericIntelligence/ProjectMnemosyne \
+      --json mergeStateStatus,statusCheckRollup \
+      --jq '{state: .mergeStateStatus, failing: [.statusCheckRollup[] | select(.conclusion=="FAILURE") | .name]}'
+    ```
+
+    If `failing` is non-empty, the skill is at best `verified-local` — fix the checks (re-run
+    markdownlint/validate locally per Step 7) before claiming completion. (Mirrors the
+    auto-merge-after-go discipline: arming `--auto` does not by itself merge anything.)
+
 ## Amendment Workflow Summary
 
 ```text
 Existing skill found?
-├─ YES → Amend workflow:
-│   1. Read existing skill
-│   2. Create/append to <name>.history with previous version snapshot
-│   3. Update <name>.md in-place (new data, bump version, update date)
-│   4. Add history frontmatter field if first amendment
-│   5. Commit both files
+├─ YES → Open PR already amends it? (gh pr list search, Step 2)
+│   ├─ YES → Stack on that PR's branch (push to it, or branch FROM it). Do NOT fork main.
+│   └─ NO  → Amend workflow:
+│       1. Read existing skill
+│       2. Create/append to <name>.history with previous version snapshot
+│       3. Update <name>.md in-place (new data, bump version, update date)
+│       4. Add history frontmatter field if first amendment
+│       5. Commit both files
 │
 └─ NO → New skill workflow:
     1. Create <name>.md with full template
@@ -460,6 +599,11 @@ Existing skill found?
     3. No history file needed yet
     4. Commit
 ```
+
+> **Lesson (from the 2026-06-13 Mnemosyne backlog):** forking a fresh `origin/main` branch
+> while ~8 other open PRs already amended the same skill (`python-module-decomposition`,
+> `stale-documentation-audit`) produced ~35 mutually-DIRTY PRs — modify/modify conflicts on
+> the same `.md`/`.history`. Always run the open-PR check in Step 2 and stack instead of fork.
 
 ## Common Issues & Solutions
 
@@ -474,6 +618,11 @@ Existing skill found?
 | "Failed Attempts table missing required columns" | Table format incorrect | Use: \| Attempt \| What Was Tried \| Why It Failed \| Lesson Learned \| |
 | "Quick Reference should use ###" | Using `## Quick Reference` instead of `###` | Demote to `### Quick Reference` (subsection of Verified Workflow) |
 | Skill not in marketplace | File not committed or in wrong location | Verify in `skills/<name>.md` (root of skills dir, not nested) |
+| markdownlint `MD056/table-column-count` "Too many cells" | An unescaped literal `\|` inside a table cell (regex, shell pipe, `a\|b`) is parsed as a column separator | Escape inline pipes as `\|`, or balance the row so its cell count matches the header. **Not caught by `validate_plugins.py`** — only the CI `markdownlint` gate; run markdownlint locally first |
+| markdownlint `MD012/no-multiple-blanks` | Two or more consecutive blank lines (often left between generated sections) | Collapse to a single blank line. Run markdownlint locally — it flags **all** rules (MD012, MD040, …), not just MD056 |
+| `validate` "Missing required section: ## X" on **your own new file** | `/learn` generated the skill without all 5 required sections | Generate from the full Step 6 template; run the Step 7 required-section self-check (grep for all 5 `##` headers) before committing |
+| `validate` "Missing required section: ## Verified Workflow" despite the section looking present | The header was renamed to `## Proposed Workflow` for an unverified skill — but `validate_plugins.py` substring-matches the literal `## Verified Workflow` | Always keep the `## Verified Workflow` header; put the "not yet verified" warning as a blockquote inside the section, never in the header |
+| `validate`/`markdownlint` red on a file you didn't touch | A pre-existing broken file on `main` (the validator/linter scans the whole `skills/` dir) | Not your bug — surface it to the user as a separate fix PR; do not claim `verified-ci` while the gate is red |
 
 ### Issue: PR already exists
 

@@ -679,12 +679,10 @@ class TestSetupAddressState:
             patch.object(reviewer, "_save_review_state"),
             patch.object(reviewer.status_tracker, "update_slot"),
         ):
-            session_id, review_state, branch_name, worktree_path = (
-                reviewer._setup_address_state(
-                    issue_number=123,
-                    pr_number=456,
-                    slot_id=0,
-                )
+            session_id, review_state, branch_name, worktree_path = reviewer._setup_address_state(
+                issue_number=123,
+                pr_number=456,
+                slot_id=0,
             )
 
         assert session_id is None
@@ -715,12 +713,10 @@ class TestSetupAddressState:
             patch.object(reviewer, "_save_review_state") as mock_save,
             patch.object(reviewer.status_tracker, "update_slot"),
         ):
-            session_id, review_state, _branch_name, _worktree_path = (
-                reviewer._setup_address_state(
-                    issue_number=123,
-                    pr_number=456,
-                    slot_id=0,
-                )
+            session_id, review_state, _branch_name, _worktree_path = reviewer._setup_address_state(
+                issue_number=123,
+                pr_number=456,
+                slot_id=0,
             )
 
         # pr_number should be updated to the new value
@@ -736,7 +732,9 @@ class TestCommitPushAndResolve:
     the real replies dict (not {}) to _resolve_addressed_threads.
     """
 
-    def test_passes_real_replies_dict_to_resolve(self, reviewer: AddressReviewer, tmp_path: Path) -> None:  # noqa: E501
+    def test_passes_real_replies_dict_to_resolve(
+        self, reviewer: AddressReviewer, tmp_path: Path
+    ) -> None:
         """The helper must forward the REAL replies dict to _resolve_addressed_threads.
 
         This is the critical safeguard against the historically-buggy {}

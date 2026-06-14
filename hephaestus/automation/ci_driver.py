@@ -757,7 +757,9 @@ class CIDriver:
                 logger.warning(
                     "Issue #%s: CI checks still pending after %ss (limit %ss), "
                     "treating as not yet failing",
-                    issue_number, poll_elapsed, max_wait,
+                    issue_number,
+                    poll_elapsed,
+                    max_wait,
                 )
                 return None
 
@@ -767,7 +769,10 @@ class CIDriver:
             )
             logger.debug(
                 "Issue #%s: CI checks pending, sleeping %ss (attempt %s, %ss elapsed)",
-                issue_number, sleep_secs, poll_attempt + 1, poll_elapsed,
+                issue_number,
+                sleep_secs,
+                poll_attempt + 1,
+                poll_elapsed,
             )
             time.sleep(sleep_secs)
             poll_elapsed += sleep_secs
@@ -783,12 +788,18 @@ class CIDriver:
         """
         self.status_tracker.update_slot(acquired_slot, f"{pr_ref(pr_number)}: enabling auto-merge")
         if self.options.dry_run:
-            logger.info("[dry_run] Would enable auto-merge for PR #%s (issue #%s)", pr_number, issue_number)  # noqa: E501
+            logger.info(
+                "[dry_run] Would enable auto-merge for PR #%s (issue #%s)", pr_number, issue_number
+            )
             return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
-        merge_ok = self._enable_auto_merge(pr_number, is_bot_pr=self._is_bot_pr_mode(issue_number, pr_number))  # noqa: E501
+        merge_ok = self._enable_auto_merge(
+            pr_number, is_bot_pr=self._is_bot_pr_mode(issue_number, pr_number)
+        )
         if merge_ok:
-            self.status_tracker.update_slot(acquired_slot, f"{pr_ref(pr_number)}: arming for post-merge /learn")  # noqa: E501
+            self.status_tracker.update_slot(
+                acquired_slot, f"{pr_ref(pr_number)}: arming for post-merge /learn"
+            )
             gh_state = self._gh_pr_state(pr_number)
             pr_head_sha = (gh_state or {}).get("headRefOid", "") or ""
             self._arm_drive_green(pr_number, self._get_pr_branch(pr_number), pr_head_sha)
@@ -797,12 +808,16 @@ class CIDriver:
             if outcome == "FAILING":
                 fix_result = self._attempt_ci_fixes(issue_number, pr_number, acquired_slot)
                 if fix_result is not None and fix_result.success:
-                    rearmed = self._recheck_and_arm_after_fix(issue_number, pr_number, acquired_slot)  # noqa: E501
+                    rearmed = self._recheck_and_arm_after_fix(
+                        issue_number, pr_number, acquired_slot
+                    )
                     return rearmed if rearmed is not None else fix_result
                 if fix_result is not None:
                     return fix_result
                 return WorkerResult(
-                    issue_number=issue_number, success=False, pr_number=pr_number,
+                    issue_number=issue_number,
+                    success=False,
+                    pr_number=pr_number,
                     error=f"CI fix failed after {self.options.max_fix_iterations} attempt(s)",
                 )
             if outcome == "DIRTY":
@@ -810,7 +825,9 @@ class CIDriver:
             if outcome == "BLOCKED":
                 return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
         return WorkerResult(
-            issue_number=issue_number, success=merge_ok, pr_number=pr_number,
+            issue_number=issue_number,
+            success=merge_ok,
+            pr_number=pr_number,
             error=None if merge_ok else f"auto-merge failed for PR {pr_ref(pr_number)}",
         )
 
@@ -827,13 +844,17 @@ class CIDriver:
             logger.info(
                 "Issue #%s: PR #%s is green but lacks state:implementation-go; "
                 "leaving auto-merge disabled until implementation review approves it",
-                issue_number, pr_number,
+                issue_number,
+                pr_number,
             )
             return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
         return self._arm_and_wait_for_merge(issue_number, pr_number, acquired_slot)
 
     def _handle_failing_pr(
-        self, issue_number: int, pr_number: int, acquired_slot: int,
+        self,
+        issue_number: int,
+        pr_number: int,
+        acquired_slot: int,
         required_checks: list[dict[str, Any]],
     ) -> WorkerResult:
         """Handle a PR where at least one required check has failed.
@@ -844,7 +865,8 @@ class CIDriver:
         if not failing:
             logger.info(
                 "Issue #%s: PR #%s checks concluded with non-green, non-failure conclusions (e.g. cancelled)",  # noqa: E501
-                issue_number, pr_number,
+                issue_number,
+                pr_number,
             )
             return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
@@ -857,13 +879,13 @@ class CIDriver:
         if fix_result is not None:
             return fix_result
         return WorkerResult(
-            issue_number=issue_number, success=False, pr_number=pr_number,
+            issue_number=issue_number,
+            success=False,
+            pr_number=pr_number,
             error=f"CI fix failed after {self.options.max_fix_iterations} attempt(s)",
         )
 
-    def _drive_issue(
-        self, issue_number: int, pr_number: int, slot_id: int
-    ) -> WorkerResult:
+    def _drive_issue(self, issue_number: int, pr_number: int, slot_id: int) -> WorkerResult:
         """Drive a single issue's PR toward green CI.
 
         Args:
@@ -877,7 +899,9 @@ class CIDriver:
         """
         acquired_slot: int | None = self.status_tracker.acquire_slot()
         if acquired_slot is None:
-            return WorkerResult(issue_number=issue_number, success=False, error="Failed to acquire worker slot")  # noqa: E501
+            return WorkerResult(
+                issue_number=issue_number, success=False, error="Failed to acquire worker slot"
+            )
 
         try:
             armed_result = self._check_arming_on_drive_start(issue_number, pr_number)
@@ -896,7 +920,9 @@ class CIDriver:
                 return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
             _checks, required_checks = poll_result
 
-            all_green = all(c.get("conclusion") in ("success", "skipped", "neutral") for c in required_checks)  # noqa: E501
+            all_green = all(
+                c.get("conclusion") in ("success", "skipped", "neutral") for c in required_checks
+            )
             if all_green:
                 return self._handle_green_pr(issue_number, pr_number, acquired_slot)
             return self._handle_failing_pr(issue_number, pr_number, acquired_slot, required_checks)
@@ -2555,7 +2581,9 @@ class CIDriver:
         except subprocess.CalledProcessError as exc:
             logger.error(
                 "Issue #%s: failed to sync worktree to origin/%s before CI fix: %s",
-                issue_number, pr_head_branch, (exc.stderr or exc.stdout or "")[:300],
+                issue_number,
+                pr_head_branch,
+                (exc.stderr or exc.stdout or "")[:300],
             )
             return None
         try:
@@ -2563,13 +2591,19 @@ class CIDriver:
         except subprocess.CalledProcessError as exc:
             logger.error(
                 "Issue #%s: failed to snapshot HEAD before CI fix session: %s",
-                issue_number, (exc.stderr or exc.stdout or "")[:300],
+                issue_number,
+                (exc.stderr or exc.stdout or "")[:300],
             )
             return None
 
     def _build_ci_fix_prompt(
-        self, issue_number: int, pr_number: int, worktree_path: Path,
-        ci_logs: str, pr_head_branch: str, advise_findings: str,
+        self,
+        issue_number: int,
+        pr_number: int,
+        worktree_path: Path,
+        ci_logs: str,
+        pr_head_branch: str,
+        advise_findings: str,
     ) -> str:
         """Build the CI-fix agent prompt string."""
         advise_block = ""
@@ -2623,7 +2657,9 @@ class CIDriver:
             return False
         try:
             push_current_branch_with_lease_on_divergence(
-                worktree_path, branch=pr_head_branch, push_ref=f"HEAD:{pr_head_branch}",
+                worktree_path,
+                branch=pr_head_branch,
+                push_ref=f"HEAD:{pr_head_branch}",
             )
             logger.info("Issue #%s: pushed CI fixes for PR #%s", issue_number, pr_number)
             return True
@@ -2646,29 +2682,50 @@ class CIDriver:
             if session_id:
                 try:
                     codex_result = resume_codex_session(
-                        session_id, prompt, cwd=worktree_path, timeout=ci_driver_claude_timeout(),
+                        session_id,
+                        prompt,
+                        cwd=worktree_path,
+                        timeout=ci_driver_claude_timeout(),
                     )
                 except subprocess.CalledProcessError as e:
                     logger.warning(
                         "Issue #%s: Codex resume session %r failed for PR #%s; falling back to fresh: %s",  # noqa: E501
-                        issue_number, session_id, pr_number, (e.stderr or e.stdout or "")[:300],
+                        issue_number,
+                        session_id,
+                        pr_number,
+                        (e.stderr or e.stdout or "")[:300],
                     )
                     codex_result = run_codex_session(
-                        prompt, cwd=worktree_path, timeout=ci_driver_claude_timeout(), sandbox="workspace-write",  # noqa: E501
+                        prompt,
+                        cwd=worktree_path,
+                        timeout=ci_driver_claude_timeout(),
+                        sandbox="workspace-write",
                     )
             else:
                 codex_result = run_codex_session(
-                    prompt, cwd=worktree_path, timeout=ci_driver_claude_timeout(), sandbox="workspace-write",  # noqa: E501
+                    prompt,
+                    cwd=worktree_path,
+                    timeout=ci_driver_claude_timeout(),
+                    sandbox="workspace-write",
                 )
-            logger.debug("Issue #%s: Codex CI fix output: %s", issue_number, codex_result.stdout[:500])  # noqa: E501
+            logger.debug(
+                "Issue #%s: Codex CI fix output: %s", issue_number, codex_result.stdout[:500]
+            )
         except subprocess.CalledProcessError as e:
             logger.error(
                 "Issue #%s: Codex CI fix session returned exit code %s: %s",
-                issue_number, e.returncode, (e.stderr or e.stdout or "")[:300],
+                issue_number,
+                e.returncode,
+                (e.stderr or e.stdout or "")[:300],
             )
             return False
         return self._finalize_ci_fix_push(
-            issue_number, pr_number, worktree_path, pr_head_branch, pre_agent_sha, session_id,
+            issue_number,
+            pr_number,
+            worktree_path,
+            pr_head_branch,
+            pre_agent_sha,
+            session_id,
         )
 
     def _invoke_claude_ci_fix(
@@ -2697,19 +2754,30 @@ class CIDriver:
                 extra_args=["--dangerously-skip-permissions"],
                 input_via_stdin=True,
             )
-            claude_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")  # noqa: E501
+            claude_result = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=stdout, stderr=""
+            )
         except subprocess.CalledProcessError as exc:
             claude_result = subprocess.CompletedProcess(
-                args=exc.cmd, returncode=exc.returncode,
-                stdout=exc.stdout or "", stderr=exc.stderr or "",
+                args=exc.cmd,
+                returncode=exc.returncode,
+                stdout=exc.stdout or "",
+                stderr=exc.stderr or "",
             )
         if claude_result.returncode == 0:
             return self._finalize_ci_fix_push(
-                issue_number, pr_number, worktree_path, pr_head_branch, pre_agent_sha, session_id,
+                issue_number,
+                pr_number,
+                worktree_path,
+                pr_head_branch,
+                pre_agent_sha,
+                session_id,
             )
         logger.error(
             "Issue #%s: Claude CI fix session returned exit code %s: %s",
-            issue_number, claude_result.returncode, claude_result.stderr[:300],
+            issue_number,
+            claude_result.returncode,
+            claude_result.stderr[:300],
         )
         return False
 
@@ -2743,27 +2811,50 @@ class CIDriver:
             True if the fix session succeeded and the branch was pushed.
 
         """
-        pre_agent_sha = self._sync_worktree_and_snapshot_sha(issue_number, worktree_path, pr_head_branch)  # noqa: E501
+        pre_agent_sha = self._sync_worktree_and_snapshot_sha(
+            issue_number, worktree_path, pr_head_branch
+        )
         if pre_agent_sha is None:
             return False
 
         prompt = self._build_ci_fix_prompt(
-            issue_number, pr_number, worktree_path, ci_logs, pr_head_branch, advise_findings,
+            issue_number,
+            pr_number,
+            worktree_path,
+            ci_logs,
+            pr_head_branch,
+            advise_findings,
         )
 
         try:
             if is_codex(self.options.agent):
                 return self._invoke_codex_ci_fix(
-                    issue_number, pr_number, worktree_path, prompt, pr_head_branch, pre_agent_sha, session_id,  # noqa: E501
+                    issue_number,
+                    pr_number,
+                    worktree_path,
+                    prompt,
+                    pr_head_branch,
+                    pre_agent_sha,
+                    session_id,
                 )
             return self._invoke_claude_ci_fix(
-                issue_number, pr_number, worktree_path, prompt, pr_head_branch, pre_agent_sha, session_id,  # noqa: E501
+                issue_number,
+                pr_number,
+                worktree_path,
+                prompt,
+                pr_head_branch,
+                pre_agent_sha,
+                session_id,
             )
         except subprocess.TimeoutExpired:
-            logger.error("Issue #%s: Claude CI fix session timed out for PR #%s", issue_number, pr_number)  # noqa: E501
+            logger.error(
+                "Issue #%s: Claude CI fix session timed out for PR #%s", issue_number, pr_number
+            )
             return False
         except Exception as e:
-            logger.error("Issue #%s: CI fix session failed for PR #%s: %s", issue_number, pr_number, e)  # noqa: E501
+            logger.error(
+                "Issue #%s: CI fix session failed for PR #%s: %s", issue_number, pr_number, e
+            )
             return False
 
     def _enable_auto_merge(self, pr_number: int, is_bot_pr: bool = False) -> bool:

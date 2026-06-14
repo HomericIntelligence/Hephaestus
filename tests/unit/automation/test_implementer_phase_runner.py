@@ -10,7 +10,6 @@ import pytest
 from hephaestus.automation.implementer import IssueImplementer
 from hephaestus.automation.models import ImplementerOptions, WorkerResult
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -131,9 +130,7 @@ class TestPrepareWorktreeForExistingPr:
                 "hephaestus.automation.implementer_phase_runner.is_clean_working_tree",
                 return_value=True,
             ),
-            patch(
-                "hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"
-            ),
+            patch("hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"),
         ):
             worktree_path, pr_branch = runner._prepare_worktree_for_existing_pr(
                 issue_number=1,
@@ -169,9 +166,7 @@ class TestPrepareWorktreeForExistingPr:
                 "hephaestus.automation.implementer_phase_runner.is_clean_working_tree",
                 return_value=True,
             ),
-            patch(
-                "hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"
-            ),
+            patch("hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"),
         ):
             _worktree_path, pr_branch = runner._prepare_worktree_for_existing_pr(
                 issue_number=1,

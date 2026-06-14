@@ -399,7 +399,15 @@ class ReviewPhase(StageMixin):
         prior_addressed_threads: list[dict[str, Any]] = []
 
         for iteration in range(MAX_REVIEW_ITERATIONS):
-            last_verdict, last_grade, review_text, posted_thread_ids, go_blocked_by_automation, reopened, should_break = self._process_review_iteration(  # noqa: E501
+            (
+                last_verdict,
+                last_grade,
+                review_text,
+                posted_thread_ids,
+                go_blocked_by_automation,
+                reopened,
+                should_break,
+            ) = self._process_review_iteration(
                 issue_number=issue_number,
                 issue_title=issue_title,
                 issue_body=issue_body,
@@ -446,7 +454,12 @@ class ReviewPhase(StageMixin):
             if not addressed:
                 break
 
-        self._finalize_review_outcome(issue_number=issue_number, pr_number=pr_number, last_verdict=last_verdict, iterations_run=iterations_run)  # noqa: E501
+        self._finalize_review_outcome(
+            issue_number=issue_number,
+            pr_number=pr_number,
+            last_verdict=last_verdict,
+            iterations_run=iterations_run,
+        )
         return iterations_run, last_verdict, last_grade
 
     def _process_review_iteration(
@@ -517,7 +530,15 @@ class ReviewPhase(StageMixin):
                 thread_id=thread_id,
             )
 
-        return last_verdict, last_grade, review_text, posted_thread_ids, go_blocked_by_automation, reopened, should_break  # noqa: E501
+        return (
+            last_verdict,
+            last_grade,
+            review_text,
+            posted_thread_ids,
+            go_blocked_by_automation,
+            reopened,
+            should_break,
+        )
 
     def _run_address_step_if_needed(
         self,

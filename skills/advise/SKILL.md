@@ -39,13 +39,26 @@ When the user invokes this command:
        # Clone fresh
        mkdir -p "$HOME/.agent-brain"
        gh repo clone HomericIntelligence/ProjectMnemosyne "$MNEMOSYNE_DIR"
+       ( cd "$MNEMOSYNE_DIR" && ensure_precommit_installed )  # so any later /learn has hooks
      fi
 
      # Always update to latest main before searching
      git -C "$MNEMOSYNE_DIR" fetch origin
      git -C "$MNEMOSYNE_DIR" checkout main
      git -C "$MNEMOSYNE_DIR" pull --ff-only origin main
+
+     # Verify pre-commit is genuinely installed; (re)install if not.
+     ( cd "$MNEMOSYNE_DIR" && ensure_precommit_installed )
    fi
+
+   # ensure_precommit_installed: do NOT test [ -f .git/hooks/pre-commit ] — in a worktree .git
+   # is a file, and a stray core.hooksPath can fake the path. Ask the resolved hook instead:
+   ensure_precommit_installed() {
+     local hooks_dir; hooks_dir="$(git rev-parse --git-path hooks)"
+     grep -qs 'pre-commit' "$hooks_dir/pre-commit" || pre-commit install --install-hooks
+     pre-commit validate-config >/dev/null 2>&1 \
+       || echo "WARNING: pre-commit config invalid — run 'pre-commit install --install-hooks' here"
+   }
    ```
 
 2. **Parse the user's goal** from $ARGUMENTS
@@ -109,7 +122,23 @@ If the user wants more detail, read the full skill `.md` file and its `.history`
 for the most relevant matches.
 
 > **Note**: If the user's goal involves **creating or fixing skills**, remind them to run
-> `/learn` which captures session learnings and creates or amends a skill file.
+> `/learn` which captures session learnings and creates or amends a skill file. Before they
+> do, run the **open-PR check** for any skill you matched above and warn if one is already
+> being amended — this catches duplication at the advise stage, before any work starts:
+>
+> ```bash
+> # For each matched skill <name>, surface open PRs already amending it:
+> gh pr list --repo HomericIntelligence/ProjectMnemosyne --state open \
+>   --search "<name> in:title" --json number,headRefName,title
+> gh pr list --repo HomericIntelligence/ProjectMnemosyne --state open \
+>   --json number,headRefName,files \
+>   --jq '.[] | select(.files[].path == "skills/<name>.md") | {number, headRefName}'
+> ```
+>
+> If an open PR already amends the skill, tell the user to **stack on that PR's branch**
+> rather than open a new one (see `/learn` Step 2 amend-lock rule). Forking a fresh
+> `origin/main` branch for an already-in-flight skill is what produced the duplicate,
+> mutually-conflicting PR pileup.
 
 ## Output Format
 

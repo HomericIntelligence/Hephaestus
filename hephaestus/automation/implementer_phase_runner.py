@@ -223,7 +223,9 @@ class ImplementationPhaseRunner:
                 f"create PR for #{issue_number}",
                 thread_id,
             )
-            return WorkerResult(issue_number=issue_number, success=True, branch_name=branch_name, worktree_path=None)  # noqa: E501
+            return WorkerResult(
+                issue_number=issue_number, success=True, branch_name=branch_name, worktree_path=None
+            )
 
         # When an open PR already exists for this issue, skip the
         # plan/implement steps (the PR is already opened) but STILL drive it
@@ -231,7 +233,9 @@ class ImplementationPhaseRunner:
         # ``state:implementation-go`` label that drive-green requires to arm
         # auto-merge. Imported top-level so tests patch
         # ``hephaestus.automation.implementer_phase_runner.find_pr_for_issue``.
-        self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Checking for existing PR")  # noqa: E501
+        self.status_tracker.update_slot(
+            slot_id, f"{issue_ref(issue_number)}: Checking for existing PR"
+        )
         existing_pr = find_pr_for_issue(issue_number)
         if existing_pr is not None:
             return self._review_existing_pr(
@@ -283,7 +287,9 @@ class ImplementationPhaseRunner:
         impl = self.impl
         slot_id = self.status_tracker.acquire_slot()
         if slot_id is None:
-            return WorkerResult(issue_number=issue_number, success=False, error="Failed to acquire worker slot")  # noqa: E501
+            return WorkerResult(
+                issue_number=issue_number, success=False, error="Failed to acquire worker slot"
+            )
 
         thread_id = threading.get_ident()
 
@@ -297,21 +303,27 @@ class ImplementationPhaseRunner:
         except subprocess.TimeoutExpired as e:
             error_msg = f"Timeout: {' '.join(e.cmd[:3])} exceeded {e.timeout}s"
             impl._log("error", error_msg, thread_id)
-            return self._record_issue_failure(issue_number, slot_id, thread_id, error_msg, persist_error=error_msg)  # noqa: E501
+            return self._record_issue_failure(
+                issue_number, slot_id, thread_id, error_msg, persist_error=error_msg
+            )
 
         except subprocess.CalledProcessError as e:
             error_msg = f"Command failed (exit {e.returncode}): {' '.join(e.cmd[:3])}"
             impl._log("error", error_msg, thread_id)
             if e.stderr:
                 impl._log("error", f"stderr: {e.stderr[:300]}", thread_id)
-            return self._record_issue_failure(issue_number, slot_id, thread_id, error_msg, persist_error=str(e))  # noqa: E501
+            return self._record_issue_failure(
+                issue_number, slot_id, thread_id, error_msg, persist_error=str(e)
+            )
 
         except RuntimeError as e:
             return self._handle_runtime_error(issue_number, slot_id, thread_id, e)
 
         except Exception as e:  # broad catch: top-level worker boundary, must not crash thread pool
             impl._log("error", f"Unexpected {type(e).__name__}: {e}", thread_id)
-            return self._record_issue_failure(issue_number, slot_id, thread_id, str(e)[:80], persist_error=str(e))  # noqa: E501
+            return self._record_issue_failure(
+                issue_number, slot_id, thread_id, str(e)[:80], persist_error=str(e)
+            )
 
         finally:
             self.status_tracker.release_slot(slot_id)
@@ -484,7 +496,9 @@ class ImplementationPhaseRunner:
                 issue_number, issue.title, issue.body, worktree_path
             )
 
-        self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Running {self.options.agent}")  # noqa: E501
+        self.status_tracker.update_slot(
+            slot_id, f"{issue_ref(issue_number)}: Running {self.options.agent}"
+        )
         codex_advise_findings = ""
         if self.options.enable_advise and is_codex(self.options.agent):
             self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Advising")
@@ -654,7 +668,9 @@ class ImplementationPhaseRunner:
                 thread_id,
             )
 
-        self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Preparing worktree for existing PR")  # noqa: E501
+        self.status_tracker.update_slot(
+            slot_id, f"{issue_ref(issue_number)}: Preparing worktree for existing PR"
+        )
         worktree_path = self.worktree_manager.create_worktree(issue_number, pr_branch)
         # ``create_worktree`` may REUSE a worktree with uncommitted changes from
         # another session; ``reset --hard`` would silently discard them. Only when
@@ -749,7 +765,9 @@ class ImplementationPhaseRunner:
         """
         impl = self.impl
 
-        self.status_tracker.update_slot(slot_id, f"{pr_ref(existing_pr)}: Checking implementation-review label")  # noqa: E501
+        self.status_tracker.update_slot(
+            slot_id, f"{pr_ref(existing_pr)}: Checking implementation-review label"
+        )
         has_go, has_no_go = pr_has_implementation_state_label(existing_pr)
         if has_go:
             impl._log(
@@ -763,8 +781,11 @@ class ImplementationPhaseRunner:
                 state.phase = ImplementationPhase.CREATING_PR
             impl._save_state(state)
             return WorkerResult(
-                issue_number=issue_number, success=True, pr_number=existing_pr,
-                branch_name=branch_name, already_has_pr=True,
+                issue_number=issue_number,
+                success=True,
+                pr_number=existing_pr,
+                branch_name=branch_name,
+                already_has_pr=True,
             )
         if has_no_go:
             impl._log(
@@ -800,8 +821,12 @@ class ImplementationPhaseRunner:
             thread_id,
         )
         return WorkerResult(
-            issue_number=issue_number, success=True, pr_number=existing_pr,
-            branch_name=pr_branch, worktree_path=str(worktree_path), already_has_pr=True,
+            issue_number=issue_number,
+            success=True,
+            pr_number=existing_pr,
+            branch_name=pr_branch,
+            worktree_path=str(worktree_path),
+            already_has_pr=True,
         )
 
     # ------------------------------------------------------------------
