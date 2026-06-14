@@ -625,13 +625,14 @@ class TestCheckThreadsForAddress:
         """dry_run=True → returns None (caller returns success)."""
         mock_options.dry_run = True
 
-        with (
-            patch("hephaestus.automation.address_review.get_repo_root", return_value=tmp_path),
-            patch("hephaestus.automation.address_review.WorktreeManager"),
-            patch("hephaestus.automation.address_review.StatusTracker"),
-        ):
-            dry_reviewer = AddressReviewer(mock_options)
-            dry_reviewer.state_dir = tmp_path
+        dry_reviewer = AddressReviewer(
+            mock_options,
+            get_repo_root=lambda: tmp_path,
+            worktree_manager_factory=MagicMock(return_value=MagicMock()),
+            status_tracker_factory=MagicMock(return_value=MagicMock()),
+            log_manager_factory=MagicMock(return_value=MagicMock()),
+        )
+        dry_reviewer.state_dir = tmp_path
 
         threads_list = [{"id": "thread-1", "path": "file.py", "line": 10, "body": "fix this"}]
 
