@@ -541,14 +541,64 @@ class TestGlobalThrottle:
         assert (tmp_path / "hephaestus_gh_rate.json").exists()
 
     def test_rapid_calls_eventually_throttle(self, monkeypatch, tmp_path) -> None:
-        """With burst=2 and rate=10/sec, the third call must wait ~0.1s."""
+        """With burst=2 and rate=10/sec, the third call must request a sleep >= 0.1s.
+
+        The throttle contract: when the token bucket is exhausted, ``time.sleep``
+        is called with ``(1 - tokens) / rate`` seconds. We verify the *contract*
+        deterministically by mocking ``time.sleep`` and ``time.monotonic`` in the
+        production module, rather than measuring real wall-clock elapsed time
+        (which is flaky on fast CI runners).
+
+        ``time.monotonic`` is driven by a scripted sequence:
+
+        * Calls 1 and 2 each consume one iteration of the while-loop; monotonic
+          returns the same ``t0`` for both so zero time appears to pass and no
+          refill occurs between them.
+        * Call 3's first loop iteration also sees ``t0`` → bucket is empty →
+          the throttle records ``wait = 0.1s`` and calls ``time.sleep(0.1)``.
+        * Call 3's *retry* iteration sees ``t0 + 0.2`` → the bucket has refilled
+          by ``0.2 * 10 = 2 tokens``, which is enough to consume one token and
+          return. This lets the loop terminate so the test completes.
+
+        The sleep-call list is the observable contract: we assert that at least
+        one call requested >= 0.09s (not a loose zero-threshold; the expected
+        value is exactly ``(1.0 - 0) / 10 = 0.1s``).
+        """
+        import unittest.mock
+
         monkeypatch.setenv("HEPHAESTUS_GH_GLOBAL_RATE", "10")
         monkeypatch.setenv("HEPHAESTUS_GH_GLOBAL_BURST", "2")
         monkeypatch.setenv("HEPHAESTUS_RATE_DIR", str(tmp_path))
-        gh_global_throttle_acquire()
-        gh_global_throttle_acquire()
-        before = time.monotonic()
-        gh_global_throttle_acquire()
-        elapsed = time.monotonic() - before
-        # Refilling 1 token at 10/sec costs ~0.1s. Accept generous bounds for CI noise.
-        assert elapsed >= 0.05
+
+        sleep_calls: list[float] = []
+
+        # Scripted monotonic sequence:
+        #   t0        – iteration for call 1 (succeeds, 2→1 tokens)
+        #   t0        – iteration for call 2 (succeeds, 1→0 tokens)
+        #   t0        – first iteration for call 3 (empty bucket → sleep queued)
+        #   t0 + 0.2  – retry iteration for call 3 (0.2s of refill → 2 tokens → succeed)
+        #   (extra values guard against off-by-one in the iteration count)
+        t0 = 1_000.0
+        mono_values = iter([t0, t0, t0, t0 + 0.2, t0 + 0.2, t0 + 0.2])
+
+        with (
+            unittest.mock.patch(
+                "hephaestus.github.rate_limit.time.sleep",
+                side_effect=lambda s: sleep_calls.append(s),
+            ),
+            unittest.mock.patch(
+                "hephaestus.github.rate_limit.time.monotonic",
+                side_effect=mono_values,
+            ),
+        ):
+            gh_global_throttle_acquire()  # consumes token 1 (burst=2 → 1 left)
+            gh_global_throttle_acquire()  # consumes token 2 (1 → 0 left)
+            gh_global_throttle_acquire()  # bucket empty → must sleep and retry
+
+        # The throttle must have called sleep at least once with a wait that
+        # reflects the cost of refilling 1 token at 10/sec (= 0.1s).
+        assert sleep_calls, "throttle must call time.sleep when bucket is exhausted"
+        assert sleep_calls[0] >= 0.09, (
+            f"throttle sleep was {sleep_calls[0]:.4f}s; expected >= 0.09s "
+            f"(1 token at 10/sec costs 0.1s)"
+        )
