@@ -842,3 +842,67 @@ jobs:
           # — the same frozen-verification the pixi-check job uses, and a
           # command guaranteed available in the repo-pinned pixi v0.69.0.
           pixi install --locked
+
+  # required-checks-gate is the SINGLE branch-protection required status check
+  # for this workflow (alongside the two `test (...)` contexts from test.yml).
+  # It fans in every gating job above so that branch protection never has to
+  # enumerate them individually — add a new gating job to the `needs:` list and
+  # protection keeps working with no GitHub-side change. See
+  # docs/ci/required-checks.md and the guard test
+  # tests/unit/ci/test_required_checks_gate.py.
+  #
+  # `if: always()` is mandatory: the heavy jobs skip on label / auto-merge PR
+  # actions (they gate on changes-gate.code_event), so without always() this job
+  # would itself skip and report neither success nor failure — deadlocking a
+  # required check. The step below PASSES when every needed job is `success` or
+  # `skipped` (skipped = legitimately gated off) and FAILS on `failure` /
+  # `cancelled`. auto-merge-policy is intentionally EXCLUDED — it is advisory
+  # (see the comment on that job) and must not gate merges.
+  required-checks-gate:
+    name: required-checks-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    if: always()
+    needs:
+      - changes-gate
+      - forbid-suppressions
+      - lint
+      - markdownlint
+      - pixi-check
+      - justfile-check
+      - symlink-check
+      - shellcheck
+      - pr-policy
+      - unit-tests
+      - integration-tests
+      - shell-tests
+      - build
+      - security-dependency-scan
+      - security-secrets-scan
+      - security-sast-scan
+      - schema-validation
+      - deps-version-sync
+    steps:
+      - name: Verify no required job failed or was cancelled
+        env:
+          # `needs` is a GitHub-controlled object; passed via env and parsed by
+          # the stdlib json module — never interpolated into the shell, so this
+          # is injection-safe.
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$RESULTS" | python3 -c '
+          import json
+          import sys
+
+          needs = json.load(sys.stdin)
+          bad = {
+              name: outcome["result"]
+              for name, outcome in needs.items()
+              if outcome["result"] not in ("success", "skipped")
+          }
+          if bad:
+              print("Required jobs not green:", json.dumps(bad, sort_keys=True))
+              sys.exit(1)
+          print("All required jobs green or legitimately skipped.")
+          '

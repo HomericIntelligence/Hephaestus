@@ -31,8 +31,14 @@ A piece of work is **done** when every item below is true.
 | 18 | Markdownlint passes on all `.md` changes | CI job `markdownlint` |
 | 19 | Shellcheck passes on all shell scripts | CI job `shellcheck` |
 | 20 | Yamllint passes on all YAML changes | CI job `lint` |
-| 21 | Pre-commit hooks pass on the diff | CI job `pre-commit` |
+| 21 | Pre-commit hooks pass on the diff | CI job `lint` (pre-commit suite folded into `lint` per #1173) |
 | 22 | Every review thread is resolved (including bot-authored threads) | Org ruleset `required_review_thread_resolution` |
+
+> **Which of these actually block the merge button?** All of the CI jobs above
+> are aggregated into a single required status check, `required-checks-gate`.
+> See [`docs/ci/required-checks.md`](ci/required-checks.md) for the exact
+> required-context list, why a single aggregator is used, and how to (re-)apply
+> branch protection.
 
 ## For new features
 
