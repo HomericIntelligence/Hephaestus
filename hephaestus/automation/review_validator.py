@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,103 @@ from .protocol import WONT_FIX_MARKER
 from .session_naming import AGENT_PR_REVIEWER, reviewer_agent
 
 logger = logging.getLogger(__name__)
+
+# Number of source lines on EACH side of a comment's line to scan for a
+# documenting comment/docstring when deciding whether a recurring re-open is
+# an accepted by-design decision (#1329). Kept small and local so the heuristic
+# only honours documentation that sits AT the cited code, not a stray comment
+# elsewhere in the file.
+_SOURCE_DOC_WINDOW = 6
+
+# Phrases that, when present in a code comment/docstring near the cited line,
+# signal the reviewer's suggestion was intentionally NOT taken (#1329). The
+# match is case-insensitive and deliberately conservative — a recurring re-open
+# is suppressed only when the SOURCE itself documents the design decision.
+_BY_DESIGN_PHRASES = (
+    "by design",
+    "intentional",
+    "intentionally",
+    "on purpose",
+    "deliberate",
+    "deliberately",
+    "wont-fix",
+    "won't fix",
+    "wont fix",
+    "do not change",
+    "do not remove",
+    "keep this",
+    "noqa",
+    "nosec",
+    "type: ignore",
+)
+
+
+def _thread_key(*, path: Any, line: Any, body: Any) -> str:
+    """Build a stable cross-round identity for a prior review thread (#1329).
+
+    Keying on ``path:line`` plus a normalized body lets the loop recognize when
+    the SAME finding is being re-opened round after round (the GraphQL
+    ``thread_id`` changes every time the validator posts a fresh re-open thread,
+    so it cannot identify recurrence on its own). Whitespace is collapsed and
+    the body lower-cased so cosmetic differences between a reviewer's original
+    text and the validator's echo do not defeat the match.
+
+    Args:
+        path: File path the comment targets (may be empty for PR-level).
+        line: Line number (int or None).
+        body: The comment / original_body text.
+
+    Returns:
+        A normalized ``"path:line:body"`` key string.
+
+    """
+    norm_body = re.sub(r"\s+", " ", str(body or "")).strip().lower()
+    line_part = "" if line is None else str(line)
+    return f"{path or ''!s}:{line_part}:{norm_body}"
+
+
+def _source_documents_decision(worktree_path: Path, path: str, line: Any) -> bool:
+    """Return True when the source at *path*:*line* documents a by-design choice.
+
+    The "documented in source" heuristic for #1329: when a recurring re-open
+    keeps flagging the same spot, read the current source in the worktree around
+    the cited line and look for a code comment / docstring that justifies why
+    the reviewer's suggestion was intentionally not taken. If such a marker sits
+    within :data:`_SOURCE_DOC_WINDOW` lines of the cited line, the decision is
+    treated as accepted-by-design and the comment is NOT re-added.
+
+    Deliberately simple and conservative: only an explicit by-design phrase
+    (see :data:`_BY_DESIGN_PHRASES`) counts, and only when it sits next to the
+    cited code — a generic comment elsewhere in the file does not qualify. Any
+    read error (missing file, bad path, non-int line) returns False so a genuine
+    unaddressed finding is never silently suppressed.
+
+    Args:
+        worktree_path: Worktree root the cited path is relative to.
+        path: File path the comment targets.
+        line: 1-based line number the comment pointed at.
+
+    Returns:
+        True when a by-design marker is found at/near the cited line.
+
+    """
+    if not path or not isinstance(line, int) or line < 1:
+        return False
+    try:
+        # Guard against path traversal / absolute paths escaping the worktree.
+        source = (worktree_path / path).resolve()
+        if not source.is_relative_to(worktree_path.resolve()):
+            return False
+        text = source.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return False
+    lines = text.splitlines()
+    if not lines:
+        return False
+    lo = max(0, line - 1 - _SOURCE_DOC_WINDOW)
+    hi = min(len(lines), line + _SOURCE_DOC_WINDOW)
+    window = "\n".join(lines[lo:hi]).lower()
+    return any(phrase in window for phrase in _BY_DESIGN_PHRASES)
 
 
 def _run_validation_session(
@@ -138,7 +236,8 @@ def validate_prior_comments_addressed(
     iteration: int,
     state_dir: Path,
     dry_run: bool = False,
-) -> tuple[list[str], bool]:
+    prior_reopened_keys: set[str] | None = None,
+) -> tuple[list[str], bool, set[str]]:
     """Re-open prior review comments the current diff does not address.
 
     Runs a fresh read-only sub-agent that compares each ``prior_threads`` comment
@@ -146,6 +245,15 @@ def validate_prior_comments_addressed(
     inline review thread on the same path/line citing the original comment, then
     reports the validation as not-clean so the caller drives another address
     iteration.
+
+    Convergence (#1329): an unaddressed finding that was ALREADY re-opened in a
+    prior round (same :func:`_thread_key`) is treated as RECURRING. A recurring
+    finding is accepted-by-design and NOT re-added when either (a) the validator
+    marked it won't-fix, or (b) the current source at its ``path``:``line``
+    documents the design decision (:func:`_source_documents_decision`). Only a
+    genuinely unaddressed AND undocumented finding still re-opens — converting
+    the formerly unwinnable re-open loop into convergence so the review loop can
+    reach GO.
 
     Args:
         pr_number: GitHub PR number.
@@ -158,20 +266,27 @@ def validate_prior_comments_addressed(
         iteration: Zero-based review-loop iteration (selects a fresh token).
         state_dir: Directory for the validation log file.
         dry_run: When True, skip the agent call and posting.
+        prior_reopened_keys: Stable keys (:func:`_thread_key`) of findings the
+            validator re-opened in EARLIER rounds, threaded forward by the loop
+            so recurrence can be detected. ``None`` on the first round.
 
     Returns:
-        ``(reopened_thread_ids, is_clean)``. ``is_clean`` is True when nothing
-        was re-opened (every prior comment is addressed, or there was nothing to
-        validate); False when at least one comment was re-opened. As a side
+        ``(reopened_thread_ids, is_clean, reopened_keys)``. ``is_clean`` is True
+        when nothing was re-opened (every prior comment is addressed, dismissed
+        as documented-by-design, or there was nothing to validate); False when
+        at least one comment was re-opened. ``reopened_keys`` is the set of
+        stable keys re-opened across this and all prior rounds — the caller
+        passes it back in as ``prior_reopened_keys`` next round. As a side
         effect, every prior thread the validator confirms addressed is resolved
         in place (#1083).
 
     """
+    seen_keys: set[str] = set(prior_reopened_keys or set())
     if not prior_threads:
-        return [], True
+        return [], True, seen_keys
     if dry_run:
         logger.info("[DRY RUN] Would validate prior comments on PR #%s", pr_number)
-        return [], True
+        return [], True, seen_keys
 
     prior_comments_json = json.dumps(
         [
@@ -222,48 +337,96 @@ def validate_prior_comments_addressed(
     _resolve_addressed_prior_threads(prior_threads, unaddressed_ids | wont_fix_ids)
 
     if not unaddressed:
-        return [], True
+        return [], True, seen_keys
 
     comments: list[dict[str, Any]] = []
+    pathless: list[dict[str, Any]] = []
+    new_keys: set[str] = set()
     for item in unaddressed:
         path = item.get("path") or ""
-        if not path:
-            # Inline threads require a path; skip PR-level re-opens (the reviewer
-            # will resurface those on its next pass).
-            continue
+        line = item.get("line")
         original = (item.get("original_body") or "").strip()
+        # Stable cross-round identity (#1329): a finding re-opened last round
+        # carries the SAME key even though its GraphQL thread_id was renewed.
+        key = _thread_key(path=path, line=line, body=original or item.get("detail"))
+        recurring = key in seen_keys
+
+        if recurring and _source_documents_decision(worktree_path, path, line):
+            # The same finding was re-opened before AND the current source at
+            # that location documents why the reviewer's suggestion was
+            # intentionally not taken — accept the design decision and stop
+            # re-adding it, so a documented by-design choice no longer makes the
+            # loop unwinnable (#1329). The key stays in ``seen_keys`` (carried
+            # forward) so any later round keeps recognising it as
+            # recurring-and-documented and keeps suppressing it.
+            logger.info(
+                "PR %s R%s: recurring finding at %s:%s is documented as by-design "
+                "in source — not re-adding (accepted design decision)",
+                pr_ref(pr_number),
+                iteration,
+                path or "(PR-level)",
+                line if isinstance(line, int) else "?",
+            )
+            continue
+
         detail = (item.get("detail") or "").strip() or "prior review comment not addressed"
-        body = f"Re-opening: prior review comment not addressed — {detail}"
+        prefix = (
+            "Still unaddressed (recurring; not documented as by-design)"
+            if recurring
+            else "prior review comment not addressed"
+        )
+        body = f"Re-opening: {prefix} — {detail}"
         if original:
             quoted = "\n".join(f"> {ln}" for ln in original.splitlines())
             body = f"{body}\n\n{quoted}"
+
+        new_keys.add(key)
+        if not path:
+            # PR-level (pathless) findings cannot be inline threads. Rather than
+            # silently dropping them (#1329), surface them at PR level in the
+            # review summary so the loop still treats the pass as not-clean and
+            # the finding stays visible.
+            pathless.append({"body": body})
+            continue
+
         comment: dict[str, Any] = {"path": path, "body": body, "side": "RIGHT"}
-        line = item.get("line")
         if isinstance(line, int):
             comment["line"] = line
         comments.append(comment)
 
-    if not comments:
-        return [], True
+    if not comments and not pathless:
+        # Everything unaddressed was a documented-by-design recurrence → clean.
+        return [], True, seen_keys
+
+    summary_parts = []
+    if comments:
+        summary_parts.append(
+            f"Re-opening {len(comments)} prior review comment(s) the current diff does not address."
+        )
+    if pathless:
+        # Append the PR-level findings to the summary so they are not lost.
+        bullets = "\n".join(f"- {p['body']}" for p in pathless)
+        summary_parts.append(
+            f"{len(pathless)} unaddressed PR-level review comment(s) remain:\n{bullets}"
+        )
 
     thread_ids = gh_pr_review_post(
         pr_number=pr_number,
         comments=comments,
-        summary=(
-            f"Re-opening {len(comments)} prior review comment(s) the current diff does not address."
-        ),
+        summary="\n\n".join(summary_parts),
         dry_run=False,
         # #1083: if the line already carries a bot comment, edit it in place
         # rather than stacking a duplicate re-open thread.
         dedupe_existing=True,
     )
     logger.info(
-        "PR %s R%s: re-opened %s unaddressed review comment(s)",
+        "PR %s R%s: re-opened %s inline + %s PR-level unaddressed review comment(s)",
         pr_ref(pr_number),
         iteration,
         len(thread_ids),
+        len(pathless),
     )
-    return thread_ids, False
+    return thread_ids, False, seen_keys | new_keys
 
 
 def _dismiss_wont_fix_prior_threads(

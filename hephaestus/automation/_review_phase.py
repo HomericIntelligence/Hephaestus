@@ -168,19 +168,26 @@ class ReviewPhase(StageMixin):
         prior_threads: list[dict[str, Any]],
         iteration: int,
         thread_id: int | None,
-    ) -> list[str]:
+        prior_reopened_keys: set[str],
+    ) -> tuple[list[str], bool, set[str]]:
         """Re-open prior review comments the current diff does not address.
 
         Runs the read-only validation sub-agent
         (:func:`review_validator.validate_prior_comments_addressed`) against the
-        previous iteration's threads. Returns the IDs of any threads it
-        re-opened (empty when there is no PR, no prior threads, on the first
-        iteration, in dry-run, or when everything was addressed).
+        previous iteration's threads.
+
+        Returns ``(reopened_ids, is_clean, reopened_keys)``: the IDs of any
+        inline threads it re-opened (empty when there is no PR, no prior threads,
+        on the first iteration, in dry-run, or when everything was addressed);
+        ``is_clean`` False when at least one finding was re-opened (including
+        PR-level findings that produce no inline thread id, #1329); and the
+        cumulative set of stable re-open keys to thread forward (#1329) so a
+        documented by-design recurrence is accepted once and never re-added.
         """
         if pr_number is None or not prior_threads or self.options.dry_run:
-            return []
+            return [], True, prior_reopened_keys
         diff_text = self.impl._collect_diff(worktree_path, branch_name)
-        reopened, is_clean = validate_prior_comments_addressed(
+        reopened, is_clean, reopened_keys = validate_prior_comments_addressed(
             pr_number=pr_number,
             issue_number=issue_number,
             worktree_path=worktree_path,
@@ -190,6 +197,7 @@ class ReviewPhase(StageMixin):
             iteration=iteration,
             state_dir=self.state_dir,
             dry_run=False,
+            prior_reopened_keys=prior_reopened_keys,
         )
         if not is_clean:
             self.impl._log(
@@ -198,7 +206,7 @@ class ReviewPhase(StageMixin):
                 f"{len(reopened)} prior review comment(s) the diff did not address",
                 thread_id,
             )
-        return reopened
+        return reopened, is_clean, reopened_keys
 
     # ------------------------------------------------------------------
     # Strict review loop
@@ -294,8 +302,9 @@ class ReviewPhase(StageMixin):
         iteration: int,
         prior_review: str | None,
         prior_addressed_threads: list[dict[str, Any]],
+        prior_reopened_keys: set[str],
         advise_findings: str,
-    ) -> tuple[list[str], str, list[str], Any]:
+    ) -> tuple[list[str], str, list[str], Any, bool, set[str]]:
         """Validate prior threads, run one review, and parse the verdict.
 
         Step 1 (#1152): before the fresh review, verify (via the read-only
@@ -314,8 +323,11 @@ class ReviewPhase(StageMixin):
         there would wrongly validate not-yet-addressed comments against an empty
         diff.
 
-        Returns ``(reopened, review_text, posted_thread_ids, verdict)`` for the
-        caller to drive convergence on.
+        Returns ``(reopened, review_text, posted_thread_ids, verdict,
+        validator_clean, reopened_keys)`` for the caller to drive convergence
+        on. ``validator_clean`` is False whenever the validator re-opened a
+        finding (inline OR PR-level), and ``reopened_keys`` threads the
+        recurrence state forward across rounds (#1329).
         """
         impl = self.impl
         threads_to_validate = prior_addressed_threads
@@ -327,7 +339,7 @@ class ReviewPhase(StageMixin):
         ):
             with contextlib.suppress(Exception):
                 threads_to_validate = gh_pr_list_unresolved_threads(pr_number, dry_run=False)
-        reopened = self.runner._validate_prior_threads(
+        reopened, validator_clean, reopened_keys = self.runner._validate_prior_threads(
             issue_number=issue_number,
             pr_number=pr_number,
             branch_name=branch_name,
@@ -335,6 +347,7 @@ class ReviewPhase(StageMixin):
             prior_threads=threads_to_validate,
             iteration=iteration,
             thread_id=thread_id,
+            prior_reopened_keys=prior_reopened_keys,
         )
 
         # Review step: a fresh reviewer session posts inline PR threads and
@@ -369,7 +382,7 @@ class ReviewPhase(StageMixin):
         # already-completed iterations.  Persist BEFORE the caller may break out
         # so the final iteration's data is always on disk.
         impl._save_review_iteration_state(issue_number, iteration + 1, review_text)
-        return reopened, review_text, posted_thread_ids, verdict
+        return reopened, review_text, posted_thread_ids, verdict, validator_clean, reopened_keys
 
     def _run_impl_review_loop(
         self,
@@ -397,6 +410,10 @@ class ReviewPhase(StageMixin):
         prior_review: str | None = None
         iterations_run = 0
         prior_addressed_threads: list[dict[str, Any]] = []
+        # #1329: stable keys of findings the validator re-opened, carried across
+        # rounds so a re-open recurring on an already-documented design decision
+        # is accepted once and never re-added (converging the loop toward GO).
+        prior_reopened_keys: set[str] = set()
 
         for iteration in range(MAX_REVIEW_ITERATIONS):
             (
@@ -407,6 +424,8 @@ class ReviewPhase(StageMixin):
                 go_blocked_by_automation,
                 reopened,
                 should_break,
+                prior_reopened_keys,
+                validator_clean,
             ) = self._process_review_iteration(
                 issue_number=issue_number,
                 issue_title=issue_title,
@@ -420,16 +439,23 @@ class ReviewPhase(StageMixin):
                 iteration=iteration,
                 prior_review=prior_review,
                 prior_addressed_threads=prior_addressed_threads,
+                prior_reopened_keys=prior_reopened_keys,
                 advise_findings=advise_findings,
             )
             iterations_run = iteration + 1
             if should_break:
                 break
+            # An unclean validator pass (#1329) — including a PR-level-only
+            # re-open that posts no inline thread id — means a prior comment is
+            # still unaddressed and must run the address step. This is distinct
+            # from a zero-thread REVIEWER non-GO (validator clean), which must
+            # simply re-review (the loop's zero-thread convergence contract).
             if (
                 pr_number is not None
                 and not posted_thread_ids
                 and not reopened
                 and not go_blocked_by_automation
+                and validator_clean
             ):
                 prior_review = review_text
                 continue
@@ -477,8 +503,9 @@ class ReviewPhase(StageMixin):
         iteration: int,
         prior_review: str | None,
         prior_addressed_threads: list[dict[str, Any]],
+        prior_reopened_keys: set[str],
         advise_findings: str,
-    ) -> tuple[str | None, str | None, str, list[str], bool, list[str], bool]:
+    ) -> tuple[str | None, str | None, str, list[str], bool, list[str], bool, set[str], bool]:
         """Run one review+verdict iteration.
 
         Args:
@@ -494,14 +521,24 @@ class ReviewPhase(StageMixin):
             iteration: Zero-based iteration index.
             prior_review: Previous review text for context.
             prior_addressed_threads: Threads addressed in previous iteration.
+            prior_reopened_keys: Stable keys re-opened in earlier rounds, threaded
+                forward so a documented by-design recurrence is accepted (#1329).
             advise_findings: Prior learnings from the advise step.
 
         Returns:
             Tuple of (last_verdict, last_grade, review_text, posted_thread_ids,
-                      go_blocked_by_automation, reopened, should_break).
+                      go_blocked_by_automation, reopened, should_break,
+                      reopened_keys, validator_clean).
 
         """
-        reopened, review_text, posted_thread_ids, verdict = self._validate_and_review(
+        (
+            reopened,
+            review_text,
+            posted_thread_ids,
+            verdict,
+            validator_clean,
+            reopened_keys,
+        ) = self._validate_and_review(
             issue_number=issue_number,
             issue_title=issue_title,
             issue_body=issue_body,
@@ -514,6 +551,7 @@ class ReviewPhase(StageMixin):
             iteration=iteration,
             prior_review=prior_review,
             prior_addressed_threads=prior_addressed_threads,
+            prior_reopened_keys=prior_reopened_keys,
             advise_findings=advise_findings,
         )
         last_verdict = verdict.verdict
@@ -521,7 +559,10 @@ class ReviewPhase(StageMixin):
 
         go_blocked_by_automation = False
         should_break = False
-        if reopened:
+        # A validator re-open (inline thread id present) OR an unclean pass with
+        # only PR-level findings (#1329, no thread id) both mean prior comments
+        # are unaddressed → force NOGO so the address step runs.
+        if reopened or not validator_clean:
             last_verdict = "NOGO"
         elif verdict.is_go:
             last_verdict, go_blocked_by_automation, should_break = self._evaluate_go_verdict(
@@ -538,6 +579,8 @@ class ReviewPhase(StageMixin):
             go_blocked_by_automation,
             reopened,
             should_break,
+            reopened_keys,
+            validator_clean,
         )
 
     def _run_address_step_if_needed(
@@ -1259,7 +1302,12 @@ class ReviewPhase(StageMixin):
             logger.warning("diff collection failed for %s: %s", branch_name, e)
             return ""
 
-        max_chars = 200_000
+        # #1329: a 200k cap routinely truncated the diff the validator inspects,
+        # so it could not SEE the fix/documentation at a later hunk and re-opened
+        # comments it judged "unaddressed" — an unwinnable loop. Raise the cap an
+        # order of magnitude so the whole diff is normally fed; only a genuinely
+        # huge diff is still bounded (to protect the model context window).
+        max_chars = 2_000_000
         if len(diff) > max_chars:
             diff = diff[:max_chars] + f"\n\n[... diff truncated at {max_chars} chars ...]\n"
         return diff

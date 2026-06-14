@@ -25,7 +25,7 @@ class TestValidatePriorCommentsAddressed:
 
     def test_no_prior_threads_is_clean_noop(self, tmp_path: Path) -> None:
         with patch.object(review_validator, "gh_pr_review_post") as post:
-            reopened, is_clean = review_validator.validate_prior_comments_addressed(
+            reopened, is_clean, _ = review_validator.validate_prior_comments_addressed(
                 pr_number=1,
                 issue_number=1,
                 worktree_path=tmp_path,
@@ -44,7 +44,7 @@ class TestValidatePriorCommentsAddressed:
             patch.object(review_validator, "_run_validation_session") as run,
             patch.object(review_validator, "gh_pr_review_post") as post,
         ):
-            reopened, is_clean = review_validator.validate_prior_comments_addressed(
+            reopened, is_clean, _ = review_validator.validate_prior_comments_addressed(
                 pr_number=1,
                 issue_number=1,
                 worktree_path=tmp_path,
@@ -70,7 +70,7 @@ class TestValidatePriorCommentsAddressed:
             patch.object(review_validator, "gh_pr_review_post") as post,
             patch.object(review_validator, "gh_pr_resolve_thread") as resolve,
         ):
-            reopened, is_clean = review_validator.validate_prior_comments_addressed(
+            reopened, is_clean, _ = review_validator.validate_prior_comments_addressed(
                 pr_number=1,
                 issue_number=1,
                 worktree_path=tmp_path,
@@ -111,7 +111,7 @@ class TestValidatePriorCommentsAddressed:
             patch.object(review_validator, "gh_pr_review_post", return_value=["NEW"]),
             patch.object(review_validator, "gh_pr_resolve_thread") as resolve,
         ):
-            reopened, is_clean = review_validator.validate_prior_comments_addressed(
+            reopened, is_clean, _ = review_validator.validate_prior_comments_addressed(
                 pr_number=42,
                 issue_number=1,
                 worktree_path=tmp_path,
@@ -207,7 +207,7 @@ class TestValidatePriorCommentsAddressed:
             # real gh call (which would trip the github-api circuit breaker).
             patch.object(review_validator, "gh_pr_resolve_thread"),
         ):
-            reopened, is_clean = review_validator.validate_prior_comments_addressed(
+            reopened, is_clean, _ = review_validator.validate_prior_comments_addressed(
                 pr_number=42,
                 issue_number=1,
                 worktree_path=tmp_path,
@@ -230,19 +230,27 @@ class TestValidatePriorCommentsAddressed:
         # The original comment is quoted into the re-open body.
         assert "> guard the null case" in posted[0]["body"]
 
-    def test_pr_level_unaddressed_without_path_is_skipped(self, tmp_path: Path) -> None:
-        """An item with no path can't be an inline thread → skipped, stays clean."""
+    def test_pr_level_unaddressed_without_path_is_surfaced_not_dropped(
+        self, tmp_path: Path
+    ) -> None:
+        """#1329: a pathless (PR-level) unaddressed item is surfaced, not dropped.
+
+        Previously a pathless item was silently skipped and the pass stayed
+        "clean". Now it is surfaced at PR level via a summary-only review (no
+        inline comment), and the pass is reported NOT clean so the loop addresses
+        it.
+        """
         unaddressed = [{"path": "", "line": None, "original_body": "x", "detail": "y"}]
         with (
             patch.object(
                 review_validator, "_run_validation_session", return_value=(unaddressed, [])
             ),
-            patch.object(review_validator, "gh_pr_review_post") as post,
+            patch.object(review_validator, "gh_pr_review_post", return_value=[]) as post,
             # Both real threads are "addressed" (the unaddressed item has no
             # path) → the validator resolves them; mock to avoid real gh calls.
             patch.object(review_validator, "gh_pr_resolve_thread"),
         ):
-            reopened, is_clean = review_validator.validate_prior_comments_addressed(
+            reopened, is_clean, _ = review_validator.validate_prior_comments_addressed(
                 pr_number=42,
                 issue_number=1,
                 worktree_path=tmp_path,
@@ -252,9 +260,14 @@ class TestValidatePriorCommentsAddressed:
                 iteration=1,
                 state_dir=tmp_path,
             )
+        # No inline thread id (summary-only review), but NOT clean — the loop
+        # still treats the pass as having unaddressed work.
         assert reopened == []
-        assert is_clean is True
-        post.assert_not_called()
+        assert is_clean is False
+        post.assert_called_once()
+        # Posted with no inline comments; the PR-level finding rides the summary.
+        assert post.call_args.kwargs["comments"] == []
+        assert "PR-level" in post.call_args.kwargs["summary"]
 
     def test_wont_fix_dismisses_with_marker_reply_and_no_reopen(self, tmp_path: Path) -> None:
         """#1163: a won't-fix finding resolves with the marker reply, never re-opens.
@@ -272,7 +285,7 @@ class TestValidatePriorCommentsAddressed:
             patch.object(review_validator, "gh_pr_review_post") as post,
             patch.object(review_validator, "gh_pr_resolve_thread") as resolve,
         ):
-            reopened, is_clean = review_validator.validate_prior_comments_addressed(
+            reopened, is_clean, _ = review_validator.validate_prior_comments_addressed(
                 pr_number=1,
                 issue_number=1,
                 worktree_path=tmp_path,
@@ -292,6 +305,176 @@ class TestValidatePriorCommentsAddressed:
         assert calls["T1"] is not None and calls["T1"].startswith(WONT_FIX_MARKER)
         assert "NotImplementedError by design" in calls["T1"]
         assert calls["T2"] is None  # addressed → bare resolve
+
+
+class TestRecurringByDesignConvergence:
+    """#1329: a recurring re-open documented as by-design in source is not re-added."""
+
+    def _unaddressed(self) -> list[dict[str, object]]:
+        return [
+            {
+                "thread_id": "T1",
+                "path": "a.py",
+                "line": 3,
+                "original_body": "guard the null case",
+                "detail": "still dereferences x",
+            }
+        ]
+
+    def test_recurring_documented_in_source_is_not_readded(self, tmp_path: Path) -> None:
+        """Round N+1: same finding, source now documents it by-design → no re-open.
+
+        The finding's key was re-opened in a prior round (passed in via
+        ``prior_reopened_keys``); the worktree source at a.py:3 carries a
+        by-design comment. The validator must NOT re-add the comment and the pass
+        is clean — converging the loop.
+        """
+        (tmp_path / "a.py").write_text(
+            "def f(x):\n"
+            "    # We intentionally skip the null guard here by design: callers\n"
+            "    return x.value  # noqa — see contract in docstring\n"
+        )
+        prior_key = review_validator._thread_key(path="a.py", line=3, body="guard the null case")
+        with (
+            patch.object(
+                review_validator,
+                "_run_validation_session",
+                return_value=(self._unaddressed(), []),
+            ),
+            patch.object(review_validator, "gh_pr_review_post") as post,
+            patch.object(review_validator, "gh_pr_resolve_thread"),
+        ):
+            reopened, is_clean, keys = review_validator.validate_prior_comments_addressed(
+                pr_number=42,
+                issue_number=1,
+                worktree_path=tmp_path,
+                prior_threads=_threads(),
+                diff_text="diff",
+                agent="claude",
+                iteration=2,
+                state_dir=tmp_path,
+                prior_reopened_keys={prior_key},
+            )
+        assert reopened == []
+        assert is_clean is True
+        post.assert_not_called()  # documented by-design → not re-added
+        # The key stays in the carried set so later rounds keep suppressing it.
+        assert prior_key in keys
+
+    def test_recurring_undocumented_still_reopens(self, tmp_path: Path) -> None:
+        """Round N+1: same finding, but source does NOT document it → still re-opens."""
+        (tmp_path / "a.py").write_text("def f(x):\n    return x.value\n")
+        prior_key = review_validator._thread_key(path="a.py", line=3, body="guard the null case")
+        with (
+            patch.object(
+                review_validator,
+                "_run_validation_session",
+                return_value=(self._unaddressed(), []),
+            ),
+            patch.object(review_validator, "gh_pr_review_post", return_value=["NEW"]) as post,
+            patch.object(review_validator, "gh_pr_resolve_thread"),
+        ):
+            reopened, is_clean, keys = review_validator.validate_prior_comments_addressed(
+                pr_number=42,
+                issue_number=1,
+                worktree_path=tmp_path,
+                prior_threads=_threads(),
+                diff_text="diff",
+                agent="claude",
+                iteration=2,
+                state_dir=tmp_path,
+                prior_reopened_keys={prior_key},
+            )
+        assert reopened == ["NEW"]
+        assert is_clean is False
+        post.assert_called_once()
+        # The recurring body is marked as such in the re-open.
+        assert "recurring" in post.call_args.kwargs["comments"][0]["body"].lower()
+        # The key is carried forward so a later documented round can converge.
+        assert prior_key in keys
+
+    def test_first_round_documented_source_still_reopens(self, tmp_path: Path) -> None:
+        """A FIRST-round finding (not yet recurring) still re-opens even if documented.
+
+        The by-design source-skip only applies to RECURRING re-opens — on the
+        first occurrence the comment is posted so the implementer/reviewer gets a
+        chance to engage. (Without a prior key the finding isn't recurring.)
+        """
+        (tmp_path / "a.py").write_text(
+            "def f(x):\n    # intentional by design\n    return x.value\n"
+        )
+        with (
+            patch.object(
+                review_validator,
+                "_run_validation_session",
+                return_value=(self._unaddressed(), []),
+            ),
+            patch.object(review_validator, "gh_pr_review_post", return_value=["NEW"]) as post,
+            patch.object(review_validator, "gh_pr_resolve_thread"),
+        ):
+            reopened, is_clean, keys = review_validator.validate_prior_comments_addressed(
+                pr_number=42,
+                issue_number=1,
+                worktree_path=tmp_path,
+                prior_threads=_threads(),
+                diff_text="diff",
+                agent="claude",
+                iteration=0,
+                state_dir=tmp_path,
+                prior_reopened_keys=set(),
+            )
+        assert reopened == ["NEW"]
+        assert is_clean is False
+        post.assert_called_once()
+        # Its key is recorded so a NEXT round can recognise the recurrence.
+        assert review_validator._thread_key(path="a.py", line=3, body="guard the null case") in keys
+
+
+class TestThreadKey:
+    """#1329: stable cross-round identity for prior review threads."""
+
+    def test_normalizes_whitespace_and_case(self) -> None:
+        a = review_validator._thread_key(path="a.py", line=3, body="Guard  the\nnull case")
+        b = review_validator._thread_key(path="a.py", line=3, body="guard the null case")
+        assert a == b
+
+    def test_distinguishes_path_and_line(self) -> None:
+        a = review_validator._thread_key(path="a.py", line=3, body="x")
+        b = review_validator._thread_key(path="b.py", line=3, body="x")
+        c = review_validator._thread_key(path="a.py", line=4, body="x")
+        assert a != b
+        assert a != c
+
+    def test_none_line_is_stable(self) -> None:
+        a = review_validator._thread_key(path="", line=None, body="pr level")
+        b = review_validator._thread_key(path="", line=None, body="pr level")
+        assert a == b
+
+
+class TestSourceDocumentsDecision:
+    """#1329: the 'documented in source' heuristic reads source near the line."""
+
+    def test_finds_by_design_marker_near_line(self, tmp_path: Path) -> None:
+        (tmp_path / "a.py").write_text(
+            "line1\nline2\n# this is intentional by design\nline4\nline5\n"
+        )
+        assert review_validator._source_documents_decision(tmp_path, "a.py", 4) is True
+
+    def test_marker_far_from_line_does_not_count(self, tmp_path: Path) -> None:
+        body = "\n".join(["# by design"] + [f"code{i}" for i in range(30)])
+        (tmp_path / "a.py").write_text(body + "\n")
+        # The marker is at line 1, the cited line is 25 — outside the window.
+        assert review_validator._source_documents_decision(tmp_path, "a.py", 25) is False
+
+    def test_missing_file_returns_false(self, tmp_path: Path) -> None:
+        assert review_validator._source_documents_decision(tmp_path, "missing.py", 1) is False
+
+    def test_pathless_or_bad_line_returns_false(self, tmp_path: Path) -> None:
+        assert review_validator._source_documents_decision(tmp_path, "", 1) is False
+        assert review_validator._source_documents_decision(tmp_path, "a.py", None) is False
+
+    def test_path_traversal_returns_false(self, tmp_path: Path) -> None:
+        assert review_validator._source_documents_decision(tmp_path, "../escape.py", 1) is False
 
 
 class TestDismissWontFixPriorThreads:

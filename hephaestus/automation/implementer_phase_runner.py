@@ -1281,7 +1281,8 @@ class ImplementationPhaseRunner:
         prior_threads: list[dict[str, Any]],
         iteration: int,
         thread_id: int | None,
-    ) -> list[str]:
+        prior_reopened_keys: set[str] | None = None,
+    ) -> tuple[list[str], bool, set[str]]:
         """Delegate to :meth:`ReviewPhase._validate_prior_threads`."""
         return self.review_phase._validate_prior_threads(
             issue_number=issue_number,
@@ -1291,6 +1292,7 @@ class ImplementationPhaseRunner:
             prior_threads=prior_threads,
             iteration=iteration,
             thread_id=thread_id,
+            prior_reopened_keys=prior_reopened_keys or set(),
         )
 
     def _count_unresolved_threads_blocking_go(

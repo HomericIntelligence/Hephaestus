@@ -98,7 +98,7 @@ class TestRunImplReviewLoop:
             ),
             patch(
                 "hephaestus.automation._review_phase.validate_prior_comments_addressed",
-                return_value=([], True),
+                return_value=([], True, set()),
             ),
             patch(
                 "hephaestus.automation._review_phase.gh_issue_add_labels",
@@ -725,6 +725,58 @@ class TestRunImplReviewLoop:
         mock_addr.assert_not_called()
         assert mock_rev.call_count == 3
 
+    def test_documented_by_design_recurrence_converges_to_go(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """#1329: once the validator accepts a documented by-design finding, GO stands.
+
+        R0 the validator re-opens a finding (NO-GO → address). R1 the validator
+        accepts it as documented-by-design (clean, nothing re-opened) and the
+        reviewer says GO with a clean board → the loop converges to GO instead of
+        spinning to exhaustion and labeling state:skip.
+        """
+        with (
+            patch.object(implementer, "_collect_diff", return_value="diff"),
+            patch.object(
+                implementer,
+                "_run_impl_review_step",
+                side_effect=[(_nogo("D"), []), (_go(), [])],
+            ) as mock_rev,
+            patch.object(implementer, "_run_address_review_step", return_value=True) as mock_addr,
+            patch(
+                "hephaestus.automation._review_phase.gh_pr_list_unresolved_threads",
+                return_value=[],
+            ),
+            patch("hephaestus.automation.github_api.gh_pr_resolve_thread"),
+            patch("hephaestus.automation._review_phase.gh_issue_add_labels") as mock_label,
+            # R0: re-opens the finding (unclean). R1: documented by-design now →
+            # clean, nothing re-opened, key dropped.
+            patch.object(
+                implementer.phase_runner,
+                "_validate_prior_threads",
+                side_effect=[(["RE1"], False, {"k1"}), ([], True, set())],
+            ) as mock_validate,
+        ):
+            iters, verdict, _ = implementer._run_impl_review_loop(
+                issue_number=1,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=42,
+            )
+
+        assert verdict == "GO"
+        assert iters == 2
+        assert mock_rev.call_count == 2
+        # Addressed only after R0's re-open; R1 converged clean.
+        assert mock_addr.call_count == 1
+        assert mock_validate.call_count == 2
+        mock_label.assert_not_called()  # converged to GO → no state:skip
+
     def test_no_session_id_still_addresses(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
@@ -832,11 +884,12 @@ class TestRunImplReviewLoop:
                 return_value="mvillmow",
             ),
             patch("hephaestus.automation.github_api.gh_pr_resolve_thread"),
-            # R0 clean, R1 re-opens (overrides GO), R2 clean.
+            # R0 clean, R1 re-opens (overrides GO), R2 clean. Each pass returns
+            # the new (reopened_ids, is_clean, reopened_keys) tuple (#1329).
             patch.object(
                 implementer.phase_runner,
                 "_validate_prior_threads",
-                side_effect=[[], ["RE1"], []],
+                side_effect=[([], True, set()), (["RE1"], False, {"k1"}), ([], True, {"k1"})],
             ) as mock_validate,
         ):
             iters, verdict, _ = implementer._run_impl_review_loop(
