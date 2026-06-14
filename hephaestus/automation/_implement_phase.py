@@ -58,21 +58,14 @@ def _prepend_advise(advise_findings: str, prompt: str) -> str:
 def _claude_quota_reset_epoch(*texts: str) -> int | None:
     """Find a quota-reset epoch across one or more output streams.
 
-    Kept local to the implementation path so the agent-call paths don't
-    import back through the coordinator module.
+    Thin wrapper over the single common resolver
+    :func:`hephaestus.github.rate_limit.resolve_quota_reset_epoch` (#1321) so
+    every agent-call path shares one detection surface — including the Claude
+    session-limit 429 phrasing that the older two-detector logic missed.
     """
-    from hephaestus.github.rate_limit import detect_claude_usage_cap, detect_rate_limit
+    from hephaestus.github.rate_limit import resolve_quota_reset_epoch
 
-    for text in texts:
-        if not text:
-            continue
-        epoch = detect_rate_limit(text)
-        if epoch is not None:
-            return epoch
-        epoch = detect_claude_usage_cap(text)
-        if epoch is not None:
-            return epoch
-    return None
+    return resolve_quota_reset_epoch(*texts)
 
 
 class ImplementPhase(StageMixin):

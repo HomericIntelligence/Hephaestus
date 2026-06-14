@@ -514,8 +514,9 @@ class TestRunFollowUpIsErrorHandling:
         worktree_path = tmp_path / "worktree"
         worktree_path.mkdir()
 
-        # Simulate a usage-cap message that detect_claude_usage_cap would parse.
-        # We patch detect_claude_usage_cap to return a future epoch.
+        # Simulate a quota message the common resolver would parse. We patch
+        # resolve_quota_reset_epoch (the single detection surface, #1321) to
+        # return a future epoch.
         import time
 
         future_epoch = int(time.time()) + 3600
@@ -528,7 +529,7 @@ class TestRunFollowUpIsErrorHandling:
         with (
             patch("hephaestus.automation.follow_up.run", return_value=mock_result),
             patch(
-                "hephaestus.automation.follow_up.detect_claude_usage_cap",
+                "hephaestus.automation.follow_up.resolve_quota_reset_epoch",
                 return_value=future_epoch,
             ),
             patch("hephaestus.automation.follow_up.wait_until") as mock_wait,

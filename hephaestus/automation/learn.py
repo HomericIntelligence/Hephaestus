@@ -11,11 +11,14 @@ import json
 import logging
 import re
 import subprocess
+import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import resume_codex_session, session_agent_matches
+from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 
 from .claude_models import learn_model
 from .claude_timeouts import learn_claude_timeout
@@ -23,6 +26,16 @@ from .git_utils import run
 from .session_naming import session_uuid
 
 logger = logging.getLogger(__name__)
+
+# Bound the wait-and-retry loop in :func:`run_learn`. A rate-limited ``/learn``
+# must wait for the quota reset and re-invoke rather than silently dropping the
+# learning (#1331), but a misdetected rate-limit message must not spin forever.
+_LEARN_RATE_LIMIT_MAX_RETRIES = 5
+
+# Fixed back-off (seconds) applied when ``resolve_quota_reset_epoch`` returns the
+# ``0`` "rate-limited, reset unknown" sentinel. Waiting a few minutes lets a
+# transient/secondary limit clear without busy-looping on an unknown deadline.
+_LEARN_UNKNOWN_RESET_BACKOFF_SECONDS = 300
 
 _MNEMOSYNE_URL_RE = re.compile(
     r"https://github\.com/HomericIntelligence/ProjectMnemosyne/(?:pull|commit)/[A-Za-z0-9._/-]+"
@@ -100,6 +113,65 @@ def build_learn_prompt(context: str) -> str:
     )
 
 
+def _record_learn_failure(
+    state_dir: Path, issue_number: int, log_file: Path, *, log_text: str, error: str
+) -> None:
+    """Write the FAILED: log + record for a non-recoverable ``/learn`` failure."""
+    logger.warning("Learn failed for issue #%s: %s", issue_number, error)
+    log_file.write_text(log_text)
+    _write_learn_record(
+        state_dir,
+        issue_number,
+        succeeded=False,
+        log_file=log_file,
+        error=error,
+    )
+
+
+def _record_learn_success(
+    state_dir: Path, issue_number: int, log_file: Path, *, stdout: str
+) -> None:
+    """Write the log + record for a successful ``/learn`` run."""
+    log_file.write_text(stdout)
+    _write_learn_record(
+        state_dir,
+        issue_number,
+        succeeded=True,
+        log_file=log_file,
+        output=stdout,
+    )
+    logger.info("Learn completed for issue #%s", issue_number)
+    logger.info("Learn log: %s", log_file)
+
+
+def _wait_for_quota_reset(reset_epoch: int, issue_number: int) -> None:
+    """Block until a detected quota reset, handling the ``0`` unknown sentinel.
+
+    ``resolve_quota_reset_epoch`` returns ``0`` when a rate-limit message is
+    present but carries no parseable reset time. For that sentinel we back off a
+    fixed interval rather than busy-looping on an unknown deadline; otherwise we
+    wait until the concrete reset epoch.
+
+    Args:
+        reset_epoch: Reset epoch from :func:`resolve_quota_reset_epoch` (may be
+            ``0`` for an unknown reset).
+        issue_number: Issue number, for logging.
+
+    """
+    if reset_epoch > 0:
+        logger.warning(
+            "Learn rate-limited for issue #%s; waiting for reset before retry", issue_number
+        )
+        wait_until(reset_epoch)
+    else:
+        logger.warning(
+            "Learn rate-limited for issue #%s with unknown reset; backing off %ds before retry",
+            issue_number,
+            _LEARN_UNKNOWN_RESET_BACKOFF_SECONDS,
+        )
+        wait_until(int(time.time()) + _LEARN_UNKNOWN_RESET_BACKOFF_SECONDS)
+
+
 def run_learn(
     session_id: str,
     worktree_path: Path,
@@ -149,35 +221,21 @@ def run_learn(
         return False
 
     if agent == "codex":
-        try:
-            codex_result = resume_codex_session(
-                session_id,
-                build_learn_prompt(""),
-                cwd=worktree_path,
-                timeout=learn_claude_timeout(),
+
+        def _invoke_codex() -> str:
+            return (
+                resume_codex_session(
+                    session_id,
+                    build_learn_prompt(""),
+                    cwd=worktree_path,
+                    timeout=learn_claude_timeout(),
+                ).stdout
+                or ""
             )
-            log_file.write_text(codex_result.stdout)
-            _write_learn_record(
-                state_dir,
-                issue_number,
-                succeeded=True,
-                log_file=log_file,
-                output=codex_result.stdout or "",
-            )
-            logger.info("Learn completed for issue #%s", issue_number)
-            logger.info("Learn log: %s", log_file)
-            return True
-        except Exception as e:  # broad catch: external agent process; non-blocking
-            logger.warning("Learn failed for issue #%s: %s", issue_number, e)
-            log_file.write_text(f"FAILED: {e}\n")
-            _write_learn_record(
-                state_dir,
-                issue_number,
-                succeeded=False,
-                log_file=log_file,
-                error=str(e),
-            )
-            return False
+
+        return _run_learn_with_retry(
+            _invoke_codex, state_dir=state_dir, issue_number=issue_number, log_file=log_file
+        )
 
     # /learn is a SIMPLE-complexity task (summarization + file writes), so we
     # use the configured learn model (default: Haiku) but accept operator
@@ -186,56 +244,102 @@ def run_learn(
     # We can't route through `call_claude` here because we need `--resume`
     # semantics with full Bash/Edit tools; instead we add the model flag directly.
     effective_model = model if model is not None else learn_model()
-    try:
-        result = run(
-            [
-                "claude",
-                "--resume",
-                session_id,
-                build_learn_prompt(""),
-                "--print",
-                "--model",
-                effective_model,
-                "--permission-mode",
-                "dontAsk",
-                "--allowedTools",
-                "Read,Write,Edit,Glob,Grep,Bash",
-            ],
-            cwd=worktree_path,
-            timeout=learn_claude_timeout(),
-        )
-        # Write output to log file
-        log_file.write_text(result.stdout or "")
-        _write_learn_record(
-            state_dir,
-            issue_number,
-            succeeded=True,
-            log_file=log_file,
-            output=result.stdout or "",
-        )
-        logger.info("Learn completed for issue #%s", issue_number)
-        logger.info("Learn log: %s", log_file)
+    learn_command = [
+        "claude",
+        "--resume",
+        session_id,
+        build_learn_prompt(""),
+        "--print",
+        "--model",
+        effective_model,
+        "--permission-mode",
+        "dontAsk",
+        "--allowedTools",
+        "Read,Write,Edit,Glob,Grep,Bash",
+    ]
+
+    def _invoke_claude() -> str:
+        return run(learn_command, cwd=worktree_path, timeout=learn_claude_timeout()).stdout or ""
+
+    return _run_learn_with_retry(
+        _invoke_claude, state_dir=state_dir, issue_number=issue_number, log_file=log_file
+    )
+
+
+def _run_learn_with_retry(
+    invoke: Callable[[], str],
+    *,
+    state_dir: Path,
+    issue_number: int,
+    log_file: Path,
+) -> bool:
+    """Invoke a ``/learn`` agent command, waiting + retrying on a rate limit.
+
+    /learn is ALWAYS attempted. When the invocation is rate-limited (e.g. right
+    after a 429 session-limit) — detected via the single common resolver
+    :func:`resolve_quota_reset_epoch` on the agent's stdout/stderr — we wait for
+    the reset window and re-invoke the SAME command instead of dropping the
+    learning (#1331). The agent CLI may signal a limit either by returning
+    success with the message in stdout OR by raising with it in stdout/stderr,
+    so both are inspected. A genuine non-rate-limit failure records ``FAILED:``
+    and returns ``False``. The loop is bounded by
+    :data:`_LEARN_RATE_LIMIT_MAX_RETRIES` so a misdetected message can't spin
+    forever.
+
+    Args:
+        invoke: Zero-arg callable that runs the agent command and returns its
+            stdout. Raises (with optional ``stdout``/``stderr`` attributes) on
+            subprocess failure.
+        state_dir: Directory for state/log files.
+        issue_number: Issue number.
+        log_file: Path to the ``learn-{issue}.log`` file.
+
+    Returns:
+        True if learn completed successfully, False otherwise.
+
+    """
+    for _attempt in range(_LEARN_RATE_LIMIT_MAX_RETRIES + 1):
+        try:
+            stdout = invoke()
+        except Exception as e:  # broad catch: external agent process; non-blocking
+            err_stdout = getattr(e, "stdout", "") or ""
+            err_stderr = getattr(e, "stderr", "") or ""
+            error_output = f"FAILED: {e}\n"
+            if hasattr(e, "stdout"):
+                error_output += f"\nSTDOUT:\n{err_stdout}"
+            if hasattr(e, "stderr"):
+                error_output += f"\nSTDERR:\n{err_stderr}"
+            # A rate-limit/session-limit failure is recoverable: wait for the
+            # reset and re-invoke. Only a genuine failure records FAILED:.
+            reset_epoch = resolve_quota_reset_epoch(err_stderr, err_stdout, str(e))
+            if reset_epoch is not None:
+                log_file.write_text(error_output)
+                _wait_for_quota_reset(reset_epoch, issue_number)
+                continue
+            _record_learn_failure(
+                state_dir, issue_number, log_file, log_text=error_output, error=str(e)
+            )
+            # Non-blocking: never re-raise
+            return False
+
+        # The agent CLI can exit 0 while emitting its 429/session-limit message
+        # in the stdout payload. Detect it and wait/retry rather than recording
+        # a bogus success.
+        reset_epoch = resolve_quota_reset_epoch(stdout)
+        if reset_epoch is not None:
+            log_file.write_text(stdout)
+            _wait_for_quota_reset(reset_epoch, issue_number)
+            continue
+        _record_learn_success(state_dir, issue_number, log_file, stdout=stdout)
         return True
-    except Exception as e:  # broad catch: external claude process; non-blocking, must not propagate
-        logger.warning("Learn failed for issue #%s: %s", issue_number, e)
 
-        # Save failure output to log file
-        error_output = f"FAILED: {e}\n"
-        if hasattr(e, "stdout"):
-            error_output += f"\nSTDOUT:\n{e.stdout or ''}"
-        if hasattr(e, "stderr"):
-            error_output += f"\nSTDERR:\n{e.stderr or ''}"
-        log_file.write_text(error_output)
-        _write_learn_record(
-            state_dir,
-            issue_number,
-            succeeded=False,
-            log_file=log_file,
-            error=str(e),
-        )
-
-        # Non-blocking: never re-raise
-        return False
+    # Retry budget exhausted while still rate-limited: record a failure so the
+    # learn is re-run later rather than silently marked complete.
+    message = f"rate-limited after {_LEARN_RATE_LIMIT_MAX_RETRIES} retries; learn not completed"
+    _record_learn_failure(
+        state_dir, issue_number, log_file, log_text=f"FAILED: {message}\n", error=message
+    )
+    return False
 
 
 def learn_needs_rerun(issue_number: int, state_dir: Path) -> bool:

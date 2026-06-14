@@ -1,10 +1,12 @@
 """Tests for the learn module."""
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from hephaestus.automation.learn import (
+    _LEARN_RATE_LIMIT_MAX_RETRIES,
     build_learn_prompt,
     learn_needs_rerun,
     mnemosyne_update_evidence,
@@ -250,3 +252,165 @@ class TestRunLearn:
         cmd_args = mock_run.call_args[0][0]
         model_idx = cmd_args.index("--model")
         assert cmd_args[model_idx + 1] == "claude-opus-4-7"
+
+
+class TestRunLearnRateLimitRetry:
+    """Tests for the wait-and-retry behavior on a rate-limited /learn (#1331)."""
+
+    # A Claude session-limit 429 message carrying a parseable reset time; the
+    # common resolver (resolve_quota_reset_epoch) parses this to a future epoch.
+    _RATE_LIMIT_MSG = "You've hit your session limit · resets 11:59pm (America/Los_Angeles)"
+
+    def test_rate_limited_stdout_waits_then_retries_and_succeeds(self, tmp_path: Path) -> None:
+        """A rate-limit message in stdout triggers wait_until + a second invocation."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+
+        first = MagicMock()
+        first.stdout = self._RATE_LIMIT_MSG
+        second = MagicMock()
+        second.stdout = "Learn complete. PR created."
+
+        with (
+            patch("hephaestus.automation.learn.run", side_effect=[first, second]) as mock_run,
+            patch("hephaestus.automation.learn.wait_until") as mock_wait,
+        ):
+            result = run_learn("session-abc", worktree_path, 42, tmp_path)
+
+        assert result is True
+        # Two invocations: the rate-limited one and the successful retry.
+        assert mock_run.call_count == 2
+        mock_wait.assert_called_once()
+        # The retry re-issues the SAME command.
+        assert mock_run.call_args_list[0].args[0] == mock_run.call_args_list[1].args[0]
+        log_file = tmp_path / "learn-42.log"
+        assert not log_file.read_text().startswith("FAILED:")
+        record = json.loads((tmp_path / "learn-42.json").read_text())
+        assert record["learn_status"] == "succeeded"
+
+    def test_rate_limited_exception_waits_then_retries_and_succeeds(self, tmp_path: Path) -> None:
+        """A rate-limit message in a raised CalledProcessError triggers wait + retry."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+
+        err = subprocess.CalledProcessError(
+            returncode=1, cmd=["claude"], output="", stderr=self._RATE_LIMIT_MSG
+        )
+        success = MagicMock()
+        success.stdout = "Learn complete."
+
+        with (
+            patch("hephaestus.automation.learn.run", side_effect=[err, success]) as mock_run,
+            patch("hephaestus.automation.learn.wait_until") as mock_wait,
+        ):
+            result = run_learn("session-abc", worktree_path, 42, tmp_path)
+
+        assert result is True
+        assert mock_run.call_count == 2
+        mock_wait.assert_called_once()
+        log_file = tmp_path / "learn-42.log"
+        assert not log_file.read_text().startswith("FAILED:")
+        record = json.loads((tmp_path / "learn-42.json").read_text())
+        assert record["learn_status"] == "succeeded"
+
+    def test_unknown_reset_sentinel_backs_off_fixed_interval(self, tmp_path: Path) -> None:
+        """A rate-limit message with no reset time (epoch 0) backs off a fixed interval."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+
+        # Session-limit phrasing WITHOUT a "resets ..." clause -> resolver yields 0.
+        first = MagicMock()
+        first.stdout = "You've hit your session limit"
+        second = MagicMock()
+        second.stdout = "Learn complete."
+
+        with (
+            patch("hephaestus.automation.learn.run", side_effect=[first, second]),
+            patch("hephaestus.automation.learn.wait_until") as mock_wait,
+            patch("hephaestus.automation.learn.time.time", return_value=1_000_000),
+        ):
+            result = run_learn("session-abc", worktree_path, 42, tmp_path)
+
+        assert result is True
+        # Backed off a fixed interval (now + backoff), not epoch 0.
+        mock_wait.assert_called_once_with(1_000_000 + 300)
+
+    def test_persistent_rate_limit_respects_retry_bound(self, tmp_path: Path) -> None:
+        """A message that always parses as rate-limited stops after the retry bound."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+
+        always = MagicMock()
+        always.stdout = self._RATE_LIMIT_MSG
+
+        with (
+            patch("hephaestus.automation.learn.run", return_value=always) as mock_run,
+            patch("hephaestus.automation.learn.wait_until") as mock_wait,
+        ):
+            result = run_learn("session-abc", worktree_path, 42, tmp_path)
+
+        assert result is False
+        # Bounded: max_retries + 1 attempts, then give up (no infinite loop).
+        assert mock_run.call_count == _LEARN_RATE_LIMIT_MAX_RETRIES + 1
+        assert mock_wait.call_count == _LEARN_RATE_LIMIT_MAX_RETRIES + 1
+        log_file = tmp_path / "learn-42.log"
+        assert log_file.read_text().startswith("FAILED:")
+        record = json.loads((tmp_path / "learn-42.json").read_text())
+        assert record["learn_status"] == "failed"
+        assert "rate-limited after" in record["error"]
+
+    def test_genuine_failure_records_failed_without_retry(self, tmp_path: Path) -> None:
+        """A non-rate-limit failure records FAILED: and returns False without retrying."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+
+        with (
+            patch(
+                "hephaestus.automation.learn.run",
+                side_effect=RuntimeError("disk full"),
+            ) as mock_run,
+            patch("hephaestus.automation.learn.wait_until") as mock_wait,
+        ):
+            result = run_learn("session-abc", worktree_path, 42, tmp_path)
+
+        assert result is False
+        # Genuine failure: a single attempt, no wait, no retry.
+        assert mock_run.call_count == 1
+        mock_wait.assert_not_called()
+        log_file = tmp_path / "learn-42.log"
+        assert log_file.read_text().startswith("FAILED:")
+        record = json.loads((tmp_path / "learn-42.json").read_text())
+        assert record["learn_status"] == "failed"
+        assert record["error"] == "disk full"
+
+    def test_codex_rate_limited_waits_then_retries(self, tmp_path: Path) -> None:
+        """Codex /learn also waits and retries on a rate-limit message (#1331)."""
+        worktree_path = tmp_path / "worktree"
+        worktree_path.mkdir()
+
+        first = MagicMock()
+        first.stdout = self._RATE_LIMIT_MSG
+        second = MagicMock()
+        second.stdout = "learned"
+
+        with (
+            patch(
+                "hephaestus.automation.learn.resume_codex_session",
+                side_effect=[first, second],
+            ) as mock_resume,
+            patch("hephaestus.automation.learn.wait_until") as mock_wait,
+        ):
+            result = run_learn(
+                "session-abc",
+                worktree_path,
+                42,
+                tmp_path,
+                agent="codex",
+                session_agent="codex",
+            )
+
+        assert result is True
+        assert mock_resume.call_count == 2
+        mock_wait.assert_called_once()
+        record = json.loads((tmp_path / "learn-42.json").read_text())
+        assert record["learn_status"] == "succeeded"

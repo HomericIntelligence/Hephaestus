@@ -16,9 +16,11 @@ from hephaestus.github.rate_limit import (
     detect_claude_usage_limit,
     detect_rate_limit,
     detect_secondary_rate_limit,
+    detect_session_limit,
     gh_global_throttle_acquire,
     gh_rate_limit_reset_epoch,
     parse_reset_epoch,
+    resolve_quota_reset_epoch,
     wait_until,
 )
 
@@ -345,6 +347,88 @@ class TestDetectClaudeUsageCap:
         assert epoch is not None
 
 
+class TestDetectSessionLimit:
+    """Tests for detect_session_limit (#1321).
+
+    The Claude CLI emits ``"You've hit your session limit · resets 4:20am"`` on
+    a 429 — crucially WITHOUT the parenthesized timezone that
+    detect_claude_usage_cap requires. The old two-detector logic missed it, so
+    the orchestrator hard-failed instead of waiting for the reset.
+    """
+
+    def test_returns_none_for_unrelated_text(self) -> None:
+        assert detect_session_limit("Normal output, nothing wrong") is None
+
+    def test_parses_time_without_timezone(self) -> None:
+        epoch = detect_session_limit("You've hit your session limit \xb7 resets 4:20am")
+        assert epoch is not None
+        assert epoch > int(time.time())
+
+    def test_parses_time_with_timezone(self) -> None:
+        text = "You've hit your session limit \xb7 resets 9pm (America/Los_Angeles)"
+        epoch = detect_session_limit(text)
+        assert epoch is not None
+        assert epoch > int(time.time())
+
+    def test_bare_message_returns_zero_sentinel(self) -> None:
+        """A session-limit message with no parseable reset time yields 0.
+
+        ``0`` means "rate-limited, reset unknown" — callers must back off
+        rather than treat it as "no limit" (which ``None`` signals).
+        """
+        assert detect_session_limit("You've hit your session limit") == 0
+
+    def test_finds_message_inside_json_payload(self) -> None:
+        json_blob = (
+            '{"is_error": true, "api_error_status": 429, '
+            '"result": "You\'ve hit your session limit \xb7 resets 4:20am"}'
+        )
+        epoch = detect_session_limit(json_blob)
+        assert epoch is not None
+        assert epoch > int(time.time())
+
+
+class TestResolveQuotaResetEpoch:
+    """Tests for the single common resolver resolve_quota_reset_epoch (#1321).
+
+    Every agent-invocation path routes through this one function, so it must
+    recognize all three quota phrasings (GitHub limit, Claude usage cap, Claude
+    session limit) and preserve the ``0`` unknown-reset sentinel.
+    """
+
+    def test_resolves_session_limit_without_timezone(self) -> None:
+        epoch = resolve_quota_reset_epoch("You've hit your session limit \xb7 resets 4:20am")
+        assert epoch is not None
+        assert epoch > int(time.time())
+
+    def test_resolves_github_rest_limit(self) -> None:
+        epoch = resolve_quota_reset_epoch("Limit reached ... resets 2:30pm (America/Los_Angeles)")
+        assert epoch is not None
+        assert epoch > 0
+
+    def test_resolves_claude_usage_cap(self) -> None:
+        epoch = resolve_quota_reset_epoch(
+            "Claude usage limit reached \xb7 resets 9pm (America/Los_Angeles)"
+        )
+        assert epoch is not None
+        assert epoch > 0
+
+    def test_returns_none_when_no_quota_message(self) -> None:
+        assert resolve_quota_reset_epoch("nothing", "to see", "here") is None
+
+    def test_skips_empty_streams_and_scans_all(self) -> None:
+        epoch = resolve_quota_reset_epoch(
+            "", "clean output", "You've hit your session limit \xb7 resets 4:20am"
+        )
+        assert epoch is not None
+        assert epoch > int(time.time())
+
+    def test_preserves_zero_unknown_reset_sentinel(self) -> None:
+        # A bare session-limit message resolves to 0, which must be returned
+        # (not skipped as falsy) so callers back off.
+        assert resolve_quota_reset_epoch("You've hit your session limit") == 0
+
+
 class TestGraphQLRateLimit:
     """Tests for the GraphQL rate-limit code path in detect_rate_limit()."""
 
@@ -457,14 +541,64 @@ class TestGlobalThrottle:
         assert (tmp_path / "hephaestus_gh_rate.json").exists()
 
     def test_rapid_calls_eventually_throttle(self, monkeypatch, tmp_path) -> None:
-        """With burst=2 and rate=10/sec, the third call must wait ~0.1s."""
+        """With burst=2 and rate=10/sec, the third call must request a sleep >= 0.1s.
+
+        The throttle contract: when the token bucket is exhausted, ``time.sleep``
+        is called with ``(1 - tokens) / rate`` seconds. We verify the *contract*
+        deterministically by mocking ``time.sleep`` and ``time.monotonic`` in the
+        production module, rather than measuring real wall-clock elapsed time
+        (which is flaky on fast CI runners).
+
+        ``time.monotonic`` is driven by a scripted sequence:
+
+        * Calls 1 and 2 each consume one iteration of the while-loop; monotonic
+          returns the same ``t0`` for both so zero time appears to pass and no
+          refill occurs between them.
+        * Call 3's first loop iteration also sees ``t0`` → bucket is empty →
+          the throttle records ``wait = 0.1s`` and calls ``time.sleep(0.1)``.
+        * Call 3's *retry* iteration sees ``t0 + 0.2`` → the bucket has refilled
+          by ``0.2 * 10 = 2 tokens``, which is enough to consume one token and
+          return. This lets the loop terminate so the test completes.
+
+        The sleep-call list is the observable contract: we assert that at least
+        one call requested >= 0.09s (not a loose zero-threshold; the expected
+        value is exactly ``(1.0 - 0) / 10 = 0.1s``).
+        """
+        import unittest.mock
+
         monkeypatch.setenv("HEPHAESTUS_GH_GLOBAL_RATE", "10")
         monkeypatch.setenv("HEPHAESTUS_GH_GLOBAL_BURST", "2")
         monkeypatch.setenv("HEPHAESTUS_RATE_DIR", str(tmp_path))
-        gh_global_throttle_acquire()
-        gh_global_throttle_acquire()
-        before = time.monotonic()
-        gh_global_throttle_acquire()
-        elapsed = time.monotonic() - before
-        # Refilling 1 token at 10/sec costs ~0.1s. Accept generous bounds for CI noise.
-        assert elapsed >= 0.05
+
+        sleep_calls: list[float] = []
+
+        # Scripted monotonic sequence:
+        #   t0        – iteration for call 1 (succeeds, 2→1 tokens)
+        #   t0        – iteration for call 2 (succeeds, 1→0 tokens)
+        #   t0        – first iteration for call 3 (empty bucket → sleep queued)
+        #   t0 + 0.2  – retry iteration for call 3 (0.2s of refill → 2 tokens → succeed)
+        #   (extra values guard against off-by-one in the iteration count)
+        t0 = 1_000.0
+        mono_values = iter([t0, t0, t0, t0 + 0.2, t0 + 0.2, t0 + 0.2])
+
+        with (
+            unittest.mock.patch(
+                "hephaestus.github.rate_limit.time.sleep",
+                side_effect=lambda s: sleep_calls.append(s),
+            ),
+            unittest.mock.patch(
+                "hephaestus.github.rate_limit.time.monotonic",
+                side_effect=mono_values,
+            ),
+        ):
+            gh_global_throttle_acquire()  # consumes token 1 (burst=2 → 1 left)
+            gh_global_throttle_acquire()  # consumes token 2 (1 → 0 left)
+            gh_global_throttle_acquire()  # bucket empty → must sleep and retry
+
+        # The throttle must have called sleep at least once with a wait that
+        # reflects the cost of refilling 1 token at 10/sec (= 0.1s).
+        assert sleep_calls, "throttle must call time.sleep when bucket is exhausted"
+        assert sleep_calls[0] >= 0.09, (
+            f"throttle sleep was {sleep_calls[0]:.4f}s; expected >= 0.09s "
+            f"(1 token at 10/sec costs 0.1s)"
+        )

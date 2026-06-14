@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hephaestus.automation.session_naming import session_jsonl_path, session_name
-from hephaestus.github.rate_limit import detect_claude_usage_cap, detect_rate_limit
+from hephaestus.github.rate_limit import resolve_quota_reset_epoch
 
 logger = logging.getLogger(__name__)
 
@@ -189,17 +189,15 @@ def invoke_claude_with_session(
 def scan_quota_reset(*texts: str) -> int | None:
     """Find a quota-reset epoch across one or more output streams.
 
-    Inspects each text for either form of rate-limit message — the GitHub-CLI
-    "Limit reached ..." form or the Claude-CLI "out of extra usage · resets
-    ..." form. ``is not None`` chaining preserves an epoch of ``0`` (rate-
-    limited, reset time unknown) instead of confusing it with "no rate limit".
+    Thin wrapper over the single common resolver
+    :func:`hephaestus.github.rate_limit.resolve_quota_reset_epoch` (#1321), so
+    the planner and plan-reviewer agent paths share one detection surface with
+    the implementer — including the Claude session-limit 429 phrasing the older
+    two-detector logic missed. ``is not None`` chaining preserves an epoch of
+    ``0`` (rate-limited, reset time unknown) instead of confusing it with "no
+    rate limit".
     """
-    for text in texts:
-        for detect in (detect_rate_limit, detect_claude_usage_cap):
-            epoch = detect(text)
-            if epoch is not None:
-                return epoch
-    return None
+    return resolve_quota_reset_epoch(*texts)
 
 
 @dataclass(frozen=True)

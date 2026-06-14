@@ -84,6 +84,21 @@ CLAUDE_USAGE_CAP_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Regex matching Claude CLI session-limit messages, e.g.:
+#   "You've hit your session limit · resets 4:20am"
+#   "You've hit your session limit · resets 9pm (America/Los_Angeles)"
+# Unlike CLAUDE_USAGE_CAP_RE, the parenthesized timezone is OPTIONAL here:
+# the session-limit phrasing emitted by ``claude -p`` on a 429 frequently
+# omits it (#1321). The optional ``resets <time>`` is captured when present;
+# when the whole "resets ..." clause is absent the message still matches so
+# callers can fall back to a probe / unknown-reset sentinel.
+CLAUDE_SESSION_LIMIT_RE = re.compile(
+    r"(?:hit your |reached your |you'?ve hit your |)session limit"
+    r"(?:.*?resets\s+(?P<time>\d{1,2}(?::\d{2})?(?:am|pm)?)"
+    r"\s*(?:\((?P<tz>[^)]+)\))?)?",
+    re.IGNORECASE,
+)
+
 # Months for parsing date-prefixed usage-cap messages
 _MONTHS = {
     "jan": 1,
@@ -424,6 +439,77 @@ def detect_claude_usage_cap(text: str) -> int | None:
     if date_str:
         return _parse_reset_with_date(date_str, time_str, tz)
     return parse_reset_epoch(time_str, tz)
+
+
+def detect_session_limit(text: str) -> int | None:
+    """Detect a Claude CLI session-limit message and return the reset epoch.
+
+    Recognizes the 429 phrasing ``claude -p`` emits when the per-session quota
+    is exhausted, e.g.::
+
+        You've hit your session limit · resets 4:20am
+
+    Crucially this form often omits the parenthesized timezone that
+    :func:`detect_claude_usage_cap` requires, so that detector misses it and
+    the orchestrator hard-fails instead of waiting (#1321). When a ``resets
+    <time>`` clause is present the epoch is parsed (defaulting the timezone via
+    :func:`parse_reset_epoch`'s ``America/Los_Angeles`` fallback and its
+    today/tomorrow logic). When the message matches but carries no reset time,
+    ``0`` is returned as the "rate-limited, reset unknown" sentinel so callers
+    back off rather than treating it as "no limit".
+
+    Args:
+        text: Text to search (CLI stderr, or the stdout JSON ``result`` field
+            of an ``is_error: true`` response).
+
+    Returns:
+        Unix timestamp when the session limit resets, ``0`` if a session-limit
+        message is present without a parseable reset time, or ``None`` if no
+        session-limit message is found.
+
+    """
+    m = CLAUDE_SESSION_LIMIT_RE.search(text)
+    if not m:
+        return None
+    time_str = m.group("time")
+    if not time_str:
+        return 0
+    # tz is optional; parse_reset_epoch falls back to America/Los_Angeles when
+    # tz is empty/unknown, and to tomorrow when the time is already past.
+    return parse_reset_epoch(time_str, m.group("tz") or "")
+
+
+def resolve_quota_reset_epoch(*texts: str) -> int | None:
+    """Find a quota-reset epoch across one or more output streams.
+
+    This is the **single common resolver** for every agent-invocation path
+    (implement, review, plan, follow-up/``/learn``). It runs all quota
+    detectors so a phrasing gap is fixed once here rather than in each call
+    site (#1321):
+
+    * :func:`detect_rate_limit` — ``gh`` REST / GraphQL limit messages.
+    * :func:`detect_claude_usage_cap` — Claude usage-cap messages (with tz).
+    * :func:`detect_session_limit` — Claude session-limit 429s (tz optional).
+
+    ``is not None`` chaining preserves an epoch of ``0`` (rate-limited, reset
+    unknown) instead of confusing it with "no rate limit".
+
+    Args:
+        *texts: One or more output streams to inspect (stderr and/or stdout).
+
+    Returns:
+        The first reset epoch found (possibly ``0`` for unknown-reset), or
+        ``None`` if no quota message is present in any stream.
+
+    """
+    for text in texts:
+        if not text:
+            continue
+        for detect in (detect_rate_limit, detect_claude_usage_cap, detect_session_limit):
+            epoch = detect(text)
+            if epoch is not None:
+                return epoch
+    return None
 
 
 def _countdown_loop(epoch: int, is_interrupted: Callable[[], bool]) -> None:

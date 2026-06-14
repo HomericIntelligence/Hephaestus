@@ -43,7 +43,9 @@ from hephaestus.github.rate_limit import (
     detect_claude_usage_cap,
     detect_claude_usage_limit,
     detect_rate_limit,
+    detect_session_limit,
     parse_reset_epoch,
+    resolve_quota_reset_epoch,
     wait_until,
 )
 from hephaestus.github.stats import (
@@ -65,6 +67,7 @@ __all__ = [
     "detect_claude_usage_limit",
     "detect_rate_limit",
     "detect_repo_from_remote",
+    "detect_session_limit",
     "format_stats_table",
     "get_commits_stats",
     "get_current_repo",
@@ -73,6 +76,7 @@ __all__ = [
     "gh_call",
     "local_branch_exists",
     "parse_reset_epoch",
+    "resolve_quota_reset_epoch",
     "validate_date",
     "wait_until",
 ]

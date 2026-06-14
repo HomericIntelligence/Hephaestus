@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import codex_json_stdout, resume_codex_session, session_agent_matches
-from hephaestus.github.rate_limit import detect_claude_usage_cap, wait_until
+from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 
 from .claude_timeouts import follow_up_claude_timeout
 from .git_utils import issue_ref, run
@@ -414,7 +414,7 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
         # IssueImplementer._run_claude_code.
         if isinstance(data, dict) and data.get("is_error"):
             err_text = str(data.get("result") or "")
-            reset_epoch = detect_claude_usage_cap(err_text)
+            reset_epoch = resolve_quota_reset_epoch(err_text)
             if reset_epoch is not None and reset_epoch > 0:
                 logger.error(
                     "Claude usage cap hit during follow-up for issue #%d; waiting for reset",
