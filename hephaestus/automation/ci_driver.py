@@ -2031,7 +2031,6 @@ class CIDriver:
             pr_head_branch=pr_head_branch,
         )
 
-
     def _enable_auto_merge(self, pr_number: int, is_bot_pr: bool = False) -> bool:
         """Enable auto-merge for the given PR using squash strategy.
 
