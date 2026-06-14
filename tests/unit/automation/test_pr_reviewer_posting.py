@@ -80,14 +80,20 @@ def mock_options() -> ReviewerOptions:
 
 
 @pytest.fixture
-def reviewer(mock_options: ReviewerOptions, tmp_path: Path) -> PRReviewer:
-    """Create PRReviewer with mocked repo root and state dir."""
-    with (
-        patch("hephaestus.automation.pr_reviewer.get_repo_root", return_value=tmp_path),
-        patch("hephaestus.automation.pr_reviewer.WorktreeManager"),
-        patch("hephaestus.automation.pr_reviewer.StatusTracker"),
-    ):
-        return PRReviewer(mock_options)
+def base_deps(tmp_path: Path) -> dict:
+    """Return constructor injection kwargs for PRReviewer / AddressReviewer."""
+    return {
+        "get_repo_root": lambda: tmp_path,
+        "worktree_manager_factory": MagicMock(return_value=MagicMock()),
+        "status_tracker_factory": MagicMock(return_value=MagicMock()),
+        "log_manager_factory": MagicMock(return_value=MagicMock()),
+    }
+
+
+@pytest.fixture
+def reviewer(mock_options: ReviewerOptions, base_deps: dict) -> PRReviewer:
+    """Create PRReviewer with mocked collaborators."""
+    return PRReviewer(mock_options, **base_deps)
 
 
 # ---------------------------------------------------------------------------
@@ -163,16 +169,15 @@ class TestDryRunSkipsPost:
         """dry_run=True → gh_pr_review_post not called."""
         mock_options.dry_run = True
 
-        with (
-            patch("hephaestus.automation.pr_reviewer.get_repo_root", return_value=tmp_path),
-            patch("hephaestus.automation.pr_reviewer.WorktreeManager") as mock_wm_cls,
-            patch("hephaestus.automation.pr_reviewer.StatusTracker"),
-        ):
-            mock_wm = MagicMock()
-            mock_wm.create_worktree.return_value = tmp_path
-            mock_wm_cls.return_value = mock_wm
-
-            dry_reviewer = PRReviewer(mock_options)
+        mock_wm = MagicMock()
+        mock_wm.create_worktree.return_value = tmp_path
+        dry_reviewer = PRReviewer(
+            mock_options,
+            get_repo_root=lambda: tmp_path,
+            worktree_manager_factory=MagicMock(return_value=mock_wm),
+            status_tracker_factory=MagicMock(return_value=MagicMock()),
+            log_manager_factory=MagicMock(return_value=MagicMock()),
+        )
 
         analysis = {"comments": [{"path": "a.py", "line": 1, "body": "fix this"}], "summary": "ok"}
         with (
@@ -191,12 +196,13 @@ class TestDryRunSkipsPost:
         """_run_analysis_session returns placeholder dict when dry_run=True."""
         mock_options.dry_run = True
 
-        with (
-            patch("hephaestus.automation.pr_reviewer.get_repo_root", return_value=tmp_path),
-            patch("hephaestus.automation.pr_reviewer.WorktreeManager"),
-            patch("hephaestus.automation.pr_reviewer.StatusTracker"),
-        ):
-            dry_reviewer = PRReviewer(mock_options)
+        dry_reviewer = PRReviewer(
+            mock_options,
+            get_repo_root=lambda: tmp_path,
+            worktree_manager_factory=MagicMock(return_value=MagicMock()),
+            status_tracker_factory=MagicMock(return_value=MagicMock()),
+            log_manager_factory=MagicMock(return_value=MagicMock()),
+        )
 
         result = dry_reviewer._run_analysis_session(
             pr_number=42,
@@ -224,14 +230,14 @@ class TestIdempotencyGuard:
         completed_state = ReviewState(issue_number=123, pr_number=42, phase=ReviewPhase.COMPLETED)
         (state_dir / "review-123.json").write_text(completed_state.model_dump_json())
 
-        with (
-            patch("hephaestus.automation.pr_reviewer.get_repo_root", return_value=tmp_path),
-            patch("hephaestus.automation.pr_reviewer.WorktreeManager") as mock_wm_cls,
-            patch("hephaestus.automation.pr_reviewer.StatusTracker"),
-        ):
-            mock_wm = MagicMock()
-            mock_wm_cls.return_value = mock_wm
-            live_reviewer = PRReviewer(mock_options)
+        mock_wm = MagicMock()
+        live_reviewer = PRReviewer(
+            mock_options,
+            get_repo_root=lambda: tmp_path,
+            worktree_manager_factory=MagicMock(return_value=mock_wm),
+            status_tracker_factory=MagicMock(return_value=MagicMock()),
+            log_manager_factory=MagicMock(return_value=MagicMock()),
+        )
 
         with patch("hephaestus.automation.pr_reviewer.gh_pr_review_post") as mock_post:
             result = live_reviewer._review_pr(issue_number=123, pr_number=42)
@@ -249,15 +255,15 @@ class TestIdempotencyGuard:
         state_dir.mkdir(parents=True)
         (state_dir / "review-123.json").write_text("{not valid json!!!}")
 
-        with (
-            patch("hephaestus.automation.pr_reviewer.get_repo_root", return_value=tmp_path),
-            patch("hephaestus.automation.pr_reviewer.WorktreeManager") as mock_wm_cls,
-            patch("hephaestus.automation.pr_reviewer.StatusTracker"),
-        ):
-            mock_wm = MagicMock()
-            mock_wm.create_worktree.return_value = tmp_path
-            mock_wm_cls.return_value = mock_wm
-            live_reviewer = PRReviewer(mock_options)
+        mock_wm = MagicMock()
+        mock_wm.create_worktree.return_value = tmp_path
+        live_reviewer = PRReviewer(
+            mock_options,
+            get_repo_root=lambda: tmp_path,
+            worktree_manager_factory=MagicMock(return_value=mock_wm),
+            status_tracker_factory=MagicMock(return_value=MagicMock()),
+            log_manager_factory=MagicMock(return_value=MagicMock()),
+        )
 
         analysis = {"comments": [], "summary": "clean"}
         with (
@@ -278,16 +284,15 @@ class TestReviewPostsInlineComments:
         self, mock_options: ReviewerOptions, tmp_path: Path
     ) -> None:
         """Analysis returns valid JSON → gh_pr_review_post called with correct args."""
-        with (
-            patch("hephaestus.automation.pr_reviewer.get_repo_root", return_value=tmp_path),
-            patch("hephaestus.automation.pr_reviewer.WorktreeManager") as mock_wm_cls,
-            patch("hephaestus.automation.pr_reviewer.StatusTracker"),
-        ):
-            mock_wm = MagicMock()
-            mock_wm.create_worktree.return_value = tmp_path
-            mock_wm_cls.return_value = mock_wm
-
-            live_reviewer = PRReviewer(mock_options)
+        mock_wm = MagicMock()
+        mock_wm.create_worktree.return_value = tmp_path
+        live_reviewer = PRReviewer(
+            mock_options,
+            get_repo_root=lambda: tmp_path,
+            worktree_manager_factory=MagicMock(return_value=mock_wm),
+            status_tracker_factory=MagicMock(return_value=MagicMock()),
+            log_manager_factory=MagicMock(return_value=MagicMock()),
+        )
 
         comments = [{"path": "foo.py", "line": 5, "body": "Consider renaming this variable"}]
         analysis = {"comments": comments, "summary": "Looks mostly good"}

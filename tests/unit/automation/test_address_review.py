@@ -34,16 +34,24 @@ def mock_options() -> AddressReviewOptions:
 
 
 @pytest.fixture
-def reviewer(mock_options: AddressReviewOptions, tmp_path: Path) -> AddressReviewer:
-    """Create an AddressReviewer with mocked repo root pointing to tmp_path."""
-    with (
-        patch("hephaestus.automation.address_review.get_repo_root", return_value=tmp_path),
-        patch("hephaestus.automation.address_review.WorktreeManager"),
-        patch("hephaestus.automation.address_review.StatusTracker"),
-    ):
-        ar = AddressReviewer(mock_options)
-        ar.state_dir = tmp_path  # point state writes to tmp
-        return ar
+def base_deps(tmp_path: Path) -> dict:
+    """Return constructor injection kwargs for AddressReviewer / PRReviewer."""
+    return {
+        "get_repo_root": lambda: tmp_path,
+        "worktree_manager_factory": MagicMock(return_value=MagicMock()),
+        "status_tracker_factory": MagicMock(return_value=MagicMock()),
+        "log_manager_factory": MagicMock(return_value=MagicMock()),
+    }
+
+
+@pytest.fixture
+def reviewer(
+    mock_options: AddressReviewOptions, base_deps: dict, tmp_path: Path
+) -> AddressReviewer:
+    """Create an AddressReviewer with mocked collaborators pointing to tmp_path."""
+    ar = AddressReviewer(mock_options, **base_deps)
+    ar.state_dir = tmp_path  # point state writes to tmp
+    return ar
 
 
 # ---------------------------------------------------------------------------
@@ -266,13 +274,14 @@ class TestResolveAddressedThreads:
         """dry_run=True → gh_pr_resolve_thread is called with dry_run=True."""
         mock_options.dry_run = True
 
-        with (
-            patch("hephaestus.automation.address_review.get_repo_root", return_value=tmp_path),
-            patch("hephaestus.automation.address_review.WorktreeManager"),
-            patch("hephaestus.automation.address_review.StatusTracker"),
-        ):
-            dry_reviewer = AddressReviewer(mock_options)
-            dry_reviewer.state_dir = tmp_path
+        dry_reviewer = AddressReviewer(
+            mock_options,
+            get_repo_root=lambda: tmp_path,
+            worktree_manager_factory=MagicMock(return_value=MagicMock()),
+            status_tracker_factory=MagicMock(return_value=MagicMock()),
+            log_manager_factory=MagicMock(return_value=MagicMock()),
+        )
+        dry_reviewer.state_dir = tmp_path
 
         addressed = ["thread-1"]
         replies: dict[str, str] = {"thread-1": "Fixed"}
@@ -335,17 +344,16 @@ class TestAddressIssue:
         """dry_run=True → no worktree creation, no resolve, no push calls."""
         mock_options.dry_run = True
 
-        with (
-            patch("hephaestus.automation.address_review.get_repo_root", return_value=tmp_path),
-            patch("hephaestus.automation.address_review.WorktreeManager") as mock_wm_cls,
-            patch("hephaestus.automation.address_review.StatusTracker"),
-        ):
-            mock_wm = MagicMock()
-            mock_wm.create_worktree.return_value = tmp_path
-            mock_wm_cls.return_value = mock_wm
-
-            dry_reviewer = AddressReviewer(mock_options)
-            dry_reviewer.state_dir = tmp_path
+        mock_wm = MagicMock()
+        mock_wm.create_worktree.return_value = tmp_path
+        dry_reviewer = AddressReviewer(
+            mock_options,
+            get_repo_root=lambda: tmp_path,
+            worktree_manager_factory=MagicMock(return_value=mock_wm),
+            status_tracker_factory=MagicMock(return_value=MagicMock()),
+            log_manager_factory=MagicMock(return_value=MagicMock()),
+        )
+        dry_reviewer.state_dir = tmp_path
 
         # Dry-run guard now fires BEFORE worktree creation, so we only need
         # gh_pr_list_unresolved_threads to return some threads (the guard
@@ -398,17 +406,16 @@ class TestAddressReviewerPreservedReporting:
         preserved: list,
     ) -> tuple["AddressReviewer", MagicMock]:
         """Create an AddressReviewer with a MagicMock WorktreeManager."""
-        with (
-            patch("hephaestus.automation.address_review.get_repo_root", return_value=tmp_path),
-            patch("hephaestus.automation.address_review.StatusTracker"),
-        ):
-            mock_wm = MagicMock()
-            mock_wm.preserved = preserved
-            with patch(
-                "hephaestus.automation.address_review.WorktreeManager", return_value=mock_wm
-            ):
-                ar = AddressReviewer(mock_options)
-                ar.state_dir = tmp_path
+        mock_wm = MagicMock()
+        mock_wm.preserved = preserved
+        ar = AddressReviewer(
+            mock_options,
+            get_repo_root=lambda: tmp_path,
+            worktree_manager_factory=MagicMock(return_value=mock_wm),
+            status_tracker_factory=MagicMock(return_value=MagicMock()),
+            log_manager_factory=MagicMock(return_value=MagicMock()),
+        )
+        ar.state_dir = tmp_path
         return ar, mock_wm
 
     def test_preserved_worktrees_logged_after_cleanup(
@@ -618,13 +625,14 @@ class TestCheckThreadsForAddress:
         """dry_run=True → returns None (caller returns success)."""
         mock_options.dry_run = True
 
-        with (
-            patch("hephaestus.automation.address_review.get_repo_root", return_value=tmp_path),
-            patch("hephaestus.automation.address_review.WorktreeManager"),
-            patch("hephaestus.automation.address_review.StatusTracker"),
-        ):
-            dry_reviewer = AddressReviewer(mock_options)
-            dry_reviewer.state_dir = tmp_path
+        dry_reviewer = AddressReviewer(
+            mock_options,
+            get_repo_root=lambda: tmp_path,
+            worktree_manager_factory=MagicMock(return_value=MagicMock()),
+            status_tracker_factory=MagicMock(return_value=MagicMock()),
+            log_manager_factory=MagicMock(return_value=MagicMock()),
+        )
+        dry_reviewer.state_dir = tmp_path
 
         threads_list = [{"id": "thread-1", "path": "file.py", "line": 10, "body": "fix this"}]
 

@@ -41,21 +41,12 @@ from ._reviewer_base import BaseReviewer
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import reviewer_model
 from .claude_timeouts import pr_reviewer_claude_timeout
-
-# Re-exports honor BaseReviewer's test-seam contract (#710); see
-# BaseReviewer._PATCHABLE_DEPENDENCIES.  Tests patch these via
-# ``patch("hephaestus.automation.pr_reviewer.<Name>")``;
-# __all__ declares the intent so static-analysis tools do not flag them unused.
-__all__ = ["StatusTracker", "ThreadLogManager", "WorktreeManager", "get_repo_root"]
-
-from .curses_ui import CursesUI, ThreadLogManager
+from .curses_ui import CursesUI
 from .git_utils import get_repo_root, get_repo_slug, issue_ref, pr_ref
 from .github_api import _gh_call, fetch_issue_info, gh_pr_review_post
 from .models import ReviewerOptions, ReviewPhase, ReviewState, WorkerResult
 from .prompts import get_pr_review_analysis_prompt
 from .session_naming import AGENT_PR_REVIEWER, reviewer_agent
-from .status_tracker import StatusTracker
-from .worktree_manager import WorktreeManager
 
 logger = logging.getLogger(__name__)
 
@@ -376,14 +367,17 @@ class PRReviewer(BaseReviewer):
 
     options: ReviewerOptions
 
-    def __init__(self, options: ReviewerOptions):
+    def __init__(self, options: ReviewerOptions, **kwargs: Any) -> None:
         """Initialize PR reviewer.
 
         Args:
             options: Reviewer configuration options
+            **kwargs: Forwarded to :class:`BaseReviewer` for dependency
+                injection (``get_repo_root``, ``worktree_manager_factory``,
+                ``status_tracker_factory``, ``log_manager_factory``).
 
         """
-        super().__init__(options)
+        super().__init__(options, **kwargs)
 
     def _log(self, level: str, msg: str, thread_id: int | None = None) -> None:
         """Log to both standard logger and UI thread buffer.

@@ -11,14 +11,15 @@ Subclasses own only the work-specific methods (``_review_pr`` for
 
 from __future__ import annotations
 
-import importlib
 import logging
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from ._review_utils import instance_log
 from .curses_ui import CursesUI, ThreadLogManager
+from .git_utils import get_repo_root as _default_get_repo_root
 from .git_utils import issue_ref
 from .github_api import write_secure
 from .models import ReviewPhase, ReviewState, WorkerResult
@@ -28,50 +29,13 @@ from .worktree_manager import WorktreeManager
 logger = logging.getLogger(__name__)
 
 
-_MISSING = object()
-
-
-def _resolve_from_subclass_module(cls: type, name: str) -> Any:
-    """Look up ``name`` from the module that defines ``cls``.
-
-    Implements the test-seam contract documented on
-    :class:`BaseReviewer` (see :attr:`BaseReviewer._PATCHABLE_DEPENDENCIES`).
-    Tracked for removal under issue #710 (constructor-injection refactor).
-
-    Raises:
-        TypeError: If the subclass module does not re-export ``name``. The
-            error names the offending subclass, module, and the test-seam
-            contract so a future author of a third ``BaseReviewer`` subclass
-            gets an actionable message instead of a bare ``AttributeError``.
-
-    """
-    module = importlib.import_module(cls.__module__)
-    obj = getattr(module, name, _MISSING)
-    if obj is _MISSING:
-        raise TypeError(
-            f"{cls.__qualname__} must re-export {name!r} in its own module "
-            f"({cls.__module__}) for BaseReviewer's test-seam contract "
-            f"(see BaseReviewer._PATCHABLE_DEPENDENCIES, issue #710). "
-            f"Add `from .<source_module> import {name}  # noqa: F401` "
-            f"to {cls.__module__}."
-        )
-    return obj
-
-
 class BaseReviewer:
     """Shared scaffolding for the reviewer CLIs.
 
-    Test-seam contract (see issues #806, #710):
-        Concrete subclasses MUST re-export every symbol in
-        :attr:`_PATCHABLE_DEPENDENCIES` from their own module so unit tests
-        can patch them via ``patch("hephaestus.automation.<subclass>.<Name>")``.
-        ``__init__`` resolves these symbols dynamically from the subclass
-        module to honor that patch surface.
-
-        This inverts the natural ``base → subclass`` import direction; it is
-        accepted as a deliberate test-seam until the dependency-injection
-        refactor in #710 lands. Adding a fourth subclass? Re-export the four
-        names below and you are done.
+    Collaborators are injected via constructor parameters (DIP-compliant).
+    Each defaults to the real production implementation so production call
+    sites need no change.  Tests pass lightweight fakes directly without
+    monkeypatching module globals.
 
     Owns:
         - ``options``: subclass-specific options model (duck-typed; must expose
@@ -87,34 +51,39 @@ class BaseReviewer:
     Concrete subclasses override the work-specific methods only.
     """
 
-    # TODO(#710): replace this dynamic test-seam with constructor injection.
-    _PATCHABLE_DEPENDENCIES: tuple[str, ...] = (
-        "get_repo_root",
-        "WorktreeManager",
-        "StatusTracker",
-        "ThreadLogManager",
-    )
-
-    def __init__(self, options: Any) -> None:
+    def __init__(
+        self,
+        options: Any,
+        *,
+        get_repo_root: Callable[[], Any] = _default_get_repo_root,
+        worktree_manager_factory: Callable[[], WorktreeManager] = WorktreeManager,
+        status_tracker_factory: Callable[[int], StatusTracker] = StatusTracker,
+        log_manager_factory: Callable[[], ThreadLogManager] = ThreadLogManager,
+    ) -> None:
         """Initialize the shared reviewer scaffolding.
 
         Args:
             options: A subclass-specific options model. Must expose
                 ``max_workers`` (other attributes are read by subclasses).
+            get_repo_root: Callable returning the repo root path. Defaults to
+                :func:`.git_utils.get_repo_root`.
+            worktree_manager_factory: Zero-arg callable returning a
+                :class:`WorktreeManager`. Defaults to :class:`WorktreeManager`.
+            status_tracker_factory: One-arg callable accepting ``num_slots``
+                and returning a :class:`StatusTracker`. Defaults to
+                :class:`StatusTracker`.
+            log_manager_factory: Zero-arg callable returning a
+                :class:`ThreadLogManager`. Defaults to :class:`ThreadLogManager`.
 
         """
         self.options = options
-        resolved = {
-            name: _resolve_from_subclass_module(type(self), name)
-            for name in self._PATCHABLE_DEPENDENCIES
-        }
-        self.repo_root: Path = Path(resolved["get_repo_root"]())
+        self.repo_root: Path = Path(get_repo_root())
         self.state_dir: Path = self.repo_root / "build" / ".issue_implementer"
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
-        self.worktree_manager: WorktreeManager = resolved["WorktreeManager"]()
-        self.status_tracker: StatusTracker = resolved["StatusTracker"](options.max_workers)
-        self.log_manager: ThreadLogManager = resolved["ThreadLogManager"]()
+        self.worktree_manager: WorktreeManager = worktree_manager_factory()
+        self.status_tracker: StatusTracker = status_tracker_factory(options.max_workers)
+        self.log_manager: ThreadLogManager = log_manager_factory()
 
         self.states: dict[int, ReviewState] = {}
         self.state_lock = threading.Lock()

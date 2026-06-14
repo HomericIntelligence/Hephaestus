@@ -47,16 +47,8 @@ from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
 from .claude_timeouts import address_review_claude_timeout
 from .comment_difficulty import classify_comments, format_todo_line
-
-# Re-exports honor BaseReviewer's test-seam contract (#710); see
-# BaseReviewer._PATCHABLE_DEPENDENCIES.  Tests patch these via
-# ``patch("hephaestus.automation.address_review.<Name>")``;
-# __all__ declares the intent so static-analysis tools do not flag them unused.
-__all__ = ["StatusTracker", "ThreadLogManager", "WorktreeManager", "get_repo_root"]
-
-from .curses_ui import CursesUI, ThreadLogManager
+from .curses_ui import CursesUI
 from .git_utils import (
-    get_repo_root,
     get_repo_slug,
     issue_ref,
     pr_ref,
@@ -69,8 +61,6 @@ from .github_api import (
 from .models import AddressReviewOptions, ReviewPhase, ReviewState, WorkerResult
 from .prompts import get_address_review_prompt
 from .session_naming import AGENT_IMPLEMENTER
-from .status_tracker import StatusTracker
-from .worktree_manager import WorktreeManager
 
 logger = logging.getLogger(__name__)
 
@@ -330,14 +320,17 @@ class AddressReviewer(BaseReviewer):
 
     options: AddressReviewOptions
 
-    def __init__(self, options: AddressReviewOptions) -> None:
+    def __init__(self, options: AddressReviewOptions, **kwargs: Any) -> None:
         """Initialize address reviewer.
 
         Args:
             options: Reviewer configuration options
+            **kwargs: Forwarded to :class:`BaseReviewer` for dependency
+                injection (``get_repo_root``, ``worktree_manager_factory``,
+                ``status_tracker_factory``, ``log_manager_factory``).
 
         """
-        super().__init__(options)
+        super().__init__(options, **kwargs)
 
     def _log(self, level: str, msg: str, thread_id: int | None = None) -> None:
         """Log to both standard logger and UI thread buffer.
