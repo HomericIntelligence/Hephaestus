@@ -396,12 +396,26 @@ Agent(description="Create skill C", prompt="...skill C content...")
    (markdownlint first — it is the gate most skill PRs fail on):
 
    ```bash
-   # 1) markdownlint — EXACTLY as CI runs it (catches MD056 table-column-count, etc.)
+   # 0) Required-section self-check — guarantees validate_plugins.py won't fail with
+   #    "Missing required section". Generate the file FROM the full template (Step 6) so all
+   #    five headers exist by construction, then prove it before anything else:
+   for sec in "## Overview" "## When to Use" "## Verified Workflow" \
+              "## Failed Attempts" "## Results & Parameters"; do
+     grep -qF "$sec" "skills/<name>.md" || echo "MISSING SECTION: $sec"
+   done
+   #    (For an unverified/verified-precommit skill, "## Verified Workflow" is renamed
+   #    "## Proposed Workflow" — accept either: grep -qE '## (Verified|Proposed) Workflow'.)
+   #    Any "MISSING SECTION" line = the validate gate WILL fail. Add the section before
+   #    committing. This is the exact defect behind PRs that ADD a skill missing 4 sections.
+
+   # 1) markdownlint — EXACTLY as CI runs it. It checks ALL rules, not just tables:
+   #    MD056 (table-column-count) AND e.g. MD012 (no-multiple-blanks), MD013, MD040, etc.
    #    Run from the worktree root so it picks up the repo's .markdownlint.yaml.
    npx --yes markdownlint-cli2 --config .markdownlint.yaml "skills/<name>.md" "skills/<name>.history"
-   #    Must exit 0. Fix every MDxxx error. Do NOT add a markdownlint-disable comment to
-   #    silence MD056 — the forbid-suppressions gate rejects blanket disables, and a broken
-   #    table is a real defect. Balance the pipes or escape the inline `|` instead.
+   #    Must exit 0. Fix every MDxxx error it reports — do not assume MD056 is the only one.
+   #    Common offenders: MD056 (unbalanced table pipes), MD012 (≥2 consecutive blank lines).
+   #    Do NOT add a markdownlint-disable comment to silence an error — the forbid-suppressions
+   #    gate rejects blanket disables, and the defect is real. Fix the markdown instead.
 
    # 2) plugin validator — note this lints the ENTIRE skills/ dir, not just your file (see below)
    python3 scripts/validate_plugins.py
@@ -580,6 +594,8 @@ Existing skill found?
 | "Quick Reference should use ###" | Using `## Quick Reference` instead of `###` | Demote to `### Quick Reference` (subsection of Verified Workflow) |
 | Skill not in marketplace | File not committed or in wrong location | Verify in `skills/<name>.md` (root of skills dir, not nested) |
 | markdownlint `MD056/table-column-count` "Too many cells" | An unescaped literal `\|` inside a table cell (regex, shell pipe, `a\|b`) is parsed as a column separator | Escape inline pipes as `\|`, or balance the row so its cell count matches the header. **Not caught by `validate_plugins.py`** — only the CI `markdownlint` gate; run markdownlint locally first |
+| markdownlint `MD012/no-multiple-blanks` | Two or more consecutive blank lines (often left between generated sections) | Collapse to a single blank line. Run markdownlint locally — it flags **all** rules (MD012, MD040, …), not just MD056 |
+| `validate` "Missing required section: ## X" on **your own new file** | `/learn` generated the skill without all 5 required sections | Generate from the full Step 6 template; run the Step 7 required-section self-check (grep for all 5 `##` headers) before committing |
 | `validate`/`markdownlint` red on a file you didn't touch | A pre-existing broken file on `main` (the validator/linter scans the whole `skills/` dir) | Not your bug — surface it to the user as a separate fix PR; do not claim `verified-ci` while the gate is red |
 
 ### Issue: PR already exists
