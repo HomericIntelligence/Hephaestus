@@ -40,7 +40,10 @@ dev-install = "pip install -e . --no-deps"
 # experimental 3.14 free-threaded build (cp314t), which is outside the support
 # matrix and not CI-tested. See issue #1184.
 python = ">=3.10,<3.14"
-pip = "*"
+# Load-bearing for `dev-install` (pip install -e . --no-deps) and pip-audit.
+# Floor 23.0: first stable PEP 660 editable-install release; cap blocks the
+# next untested major (installed 26.x in CI). Bump cap after testing 27.x.
+pip = ">=23.0,<27"
 pydantic = ">=2.12.5,<3"
 pygments = ">=2.20.0"  # CVE-2026-4539
 pygithub = ">=2.9.1,<3"
