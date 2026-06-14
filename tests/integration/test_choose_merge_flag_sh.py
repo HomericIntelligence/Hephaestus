@@ -47,33 +47,6 @@ choose_merge_flag {repo}
     )
 
 
-def test_shell_helper_handles_gh_stderr_noise() -> None:
-    """Stderr from gh (warnings, banners) must not corrupt jq input.
-
-    Regression guard for the safety fix: fails against the unfixed 2>&1 version.
-    """
-    merge_settings = (
-        '{"allow_rebase_merge":true,"allow_squash_merge":true,"allow_merge_commit":true}'
-    )
-    script = f"""
-gh() {{
-    case "$1" in
-        api)
-            printf '%s\\n' 'warning: new gh release available' >&2
-            printf '%s\\n' '{merge_settings}'
-            ;;
-        *) command gh "$@" ;;
-    esac
-}}
-export -f gh
-. {SNIPPET}
-choose_merge_flag owner/repo
-"""
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
-    assert result.returncode == 0, f"stderr noise broke jq parse: stderr={result.stderr!r}"
-    assert result.stdout.strip() == "--rebase"
-
-
 def test_shell_helper_selects_rebase_when_all_allowed() -> None:
     """Preference order: rebase wins when all three methods are allowed."""
     body = '{"allow_rebase_merge":true,"allow_squash_merge":true,"allow_merge_commit":true}'
@@ -104,3 +77,30 @@ def test_shell_helper_selects_merge_when_rebase_and_squash_disallowed() -> None:
     result = _run_with_mock_gh(body)
     assert result.returncode == 0
     assert result.stdout.strip() == "--merge"
+
+
+def test_shell_helper_handles_gh_stderr_noise() -> None:
+    """Stderr from gh (warnings, banners) must not corrupt jq input.
+
+    Regression guard for the safety fix: fails against the unfixed 2>&1 version.
+    """
+    merge_settings = (
+        '{"allow_rebase_merge":true,"allow_squash_merge":true,"allow_merge_commit":true}'
+    )
+    script = f"""
+gh() {{
+    case "$1" in
+        api)
+            printf '%s\\n' 'warning: new gh release available' >&2
+            printf '%s\\n' '{merge_settings}'
+            ;;
+        *) command gh "$@" ;;
+    esac
+}}
+export -f gh
+. {SNIPPET}
+choose_merge_flag owner/repo
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, f"stderr noise broke jq parse: stderr={result.stderr!r}"
+    assert result.stdout.strip() == "--rebase"
