@@ -135,3 +135,24 @@ class TestGhCallPublicExports:
         assert github_pkg.GitHubRateLimitError is GitHubRateLimitError
         assert github_pkg.GitHubUnavailableError is GitHubUnavailableError
         assert github_pkg.ClaudeUsageCapError is ClaudeUsageCapError
+
+
+class TestNonTransientErrorClassification:
+    """_is_non_transient_error: deterministic gh failures must not be retried."""
+
+    def test_body_not_editable_is_non_transient(self) -> None:
+        """#1327: editing a foreign-owned comment never succeeds on retry.
+
+        Without this classification the deterministic "Body is not editable"
+        rejection was retried ~6× per finding (66× in one observed run) before
+        the caller could fall back to posting its own editable comment.
+        """
+        from hephaestus.github.client import _is_non_transient_error
+
+        assert _is_non_transient_error("gh: Body is not editable") is True
+
+    def test_transient_5xx_is_not_non_transient(self) -> None:
+        """A 500 is retryable, so it must NOT be flagged non-transient."""
+        from hephaestus.github.client import _is_non_transient_error
+
+        assert _is_non_transient_error("Internal Server Error (HTTP 500)") is False

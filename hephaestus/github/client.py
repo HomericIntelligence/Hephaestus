@@ -159,6 +159,10 @@ _NON_TRANSIENT_PATTERNS = [
         # unused variable can never succeed on retry (#1040).
         r"doesn't accept argument",
         r"is declared by .* but not used",
+        # "Body is not editable": editing a review comment owned by another
+        # app/account (Copilot, CodeQL) is forbidden and never succeeds on
+        # retry. Fail fast so the caller posts its own editable comment (#1327).
+        r"not editable",
     )
 ]
 _NON_TRANSIENT_PATTERNS.append(_TOKEN_SCOPE_PATTERN)

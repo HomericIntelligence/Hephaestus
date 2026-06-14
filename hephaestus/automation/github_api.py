@@ -1121,7 +1121,7 @@ def _fetch_pr_inline_review_thread_nodes(pr_number: int) -> list[dict[str, Any]]
         "    pullRequest(number:$number){"
         "      reviewThreads(first:100){"
         "        nodes{ isResolved path line side:diffSide "
-        "comments(first:20){ nodes{ id body } } }"
+        "comments(first:20){ nodes{ id body viewerCanUpdate } } }"
         "      }"
         "    }"
         "  }"
@@ -1160,20 +1160,26 @@ def _fetch_pr_inline_review_thread_nodes(pr_number: int) -> list[dict[str, Any]]
     return [node for node in nodes if isinstance(node, dict)]
 
 
-def gh_pr_inline_comment_index(pr_number: int) -> dict[ReviewCommentIndexKey, tuple[str, str]]:
-    """Map ``(path, line)`` → ``(comment_node_id, body)`` for unresolved bot threads.
+def gh_pr_inline_comment_index(
+    pr_number: int,
+) -> dict[ReviewCommentIndexKey, tuple[str, str, bool]]:
+    """Map ``(path, line)`` → ``(comment_node_id, body, editable)`` for unresolved threads.
 
-    Returns the GraphQL node id AND current body of the FIRST comment of each
-    unresolved review thread, keyed by its ``(path, line)``. Used by
-    :func:`gh_pr_review_post` to detect a line that already has a comment so the
-    new content can be **appended** to the existing body in place rather than
-    posted as a duplicate (#1083). The body is required because the
-    ``updatePullRequestReviewComment`` mutation REPLACES the body — the caller
-    must concatenate ``existing + new`` or the original comment is lost (#1085).
-    Fails open: returns ``{}`` on any API/parse error so the caller posts
-    everything as before.
+    Returns the GraphQL node id, current body, AND ``viewerCanUpdate`` flag of
+    the FIRST comment of each unresolved review thread, keyed by its
+    ``(path, line)``. Used by :func:`gh_pr_review_post` to detect a line that
+    already has a comment so the new content can be **appended** to the existing
+    body in place rather than posted as a duplicate (#1083). The body is required
+    because the ``updatePullRequestReviewComment`` mutation REPLACES the body —
+    the caller must concatenate ``existing + new`` or the original comment is
+    lost (#1085). The ``editable`` flag (``viewerCanUpdate``) is required because
+    the first comment of a thread may belong to another app/account (Copilot,
+    CodeQL); GitHub rejects an in-place edit of such a comment with
+    ``Body is not editable``, so the caller must post its OWN editable shadow
+    comment instead (#1327). Fails open: returns ``{}`` on any API/parse error so
+    the caller posts everything as before.
     """
-    index: dict[ReviewCommentIndexKey, tuple[str, str]] = {}
+    index: dict[ReviewCommentIndexKey, tuple[str, str, bool]] = {}
     for node in _fetch_pr_inline_review_thread_nodes(pr_number):
         if node.get("isResolved"):
             continue
@@ -1184,13 +1190,16 @@ def gh_pr_inline_comment_index(pr_number: int) -> dict[ReviewCommentIndexKey, tu
         if not comment_id:
             continue
         body = comment_nodes[0].get("body") or ""
+        # Default to editable when the field is absent so behaviour is unchanged
+        # for callers/tests that predate the ``viewerCanUpdate`` selection.
+        editable = bool(comment_nodes[0].get("viewerCanUpdate", True))
         path = node.get("path") or ""
         line = node.get("line")
         side = node.get("side") or "RIGHT"
-        index[(path, line, side)] = (comment_id, body)
+        index[(path, line, side)] = (comment_id, body, editable)
         # Preserve the older key shape for callers/tests that predate diff-side
         # support, and as a fallback if GitHub ever omits ``diffSide``.
-        index.setdefault((path, line), (comment_id, body))
+        index.setdefault((path, line), (comment_id, body, editable))
     return index
 
 
@@ -1251,6 +1260,12 @@ def gh_pr_update_review_comment(comment_node_id: str, body: str) -> None:
         ]
     )
 
+
+# GitHub rejects ``updatePullRequestReviewComment`` on a comment the current
+# token does not own ("gh: Body is not editable"). The first comment of a thread
+# may belong to another app (Copilot, CodeQL), so this string is matched as a
+# fallback signal when ``viewerCanUpdate`` was unavailable/stale (#1327).
+_BODY_NOT_EDITABLE_MARKER = "not editable"
 
 _ADDITIONAL_REVIEW_NOTE_DELIMITER = "\n\n---\n_Additional review note (same line):_\n\n"
 
@@ -1354,6 +1369,62 @@ def _review_comment_already_covers(existing_body: str, new_body: str) -> bool:
     return False
 
 
+def _post_shadow_review_comment(pr_number: int, comment: dict[str, Any]) -> tuple[str, str] | None:
+    """Post OUR OWN editable inline comment shadowing a foreign (uneditable) one.
+
+    The first comment of a thread can belong to another app/account (Copilot,
+    CodeQL); GitHub forbids editing it ("Body is not editable"). Rather than
+    silently drop the finding, we post a brand-new inline comment at the same
+    ``(path, line, side)`` that WE own and can edit on every later run (#1327).
+
+    Posting reuses :func:`gh_pr_review_post` with ``dedupe_existing=False`` so it
+    does NOT re-enter the dedupe path (which would re-detect the same foreign
+    comment and loop). ``gh_pr_review_post`` returns thread ids, not the inline
+    comment node id, so we re-fetch the inline-comment index to recover the new
+    comment's editable node id for subsequent same-line updates.
+
+    Returns ``(new_comment_node_id, posted_body)`` on success, or ``None`` if the
+    post or the follow-up lookup failed (the caller then falls back to posting the
+    finding fresh).
+    """
+    path = comment.get("path") or ""
+    line = comment.get("line")
+    side = comment.get("side") or "RIGHT"
+    body = comment.get("body") or ""
+    try:
+        gh_pr_review_post(
+            pr_number,
+            [{"path": path, "line": line, "side": side, "body": body}],
+            summary="",
+            dedupe_existing=False,
+        )
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "PR #%s: could not post editable shadow comment on %s:%s (%s): %s",
+            pr_number,
+            path,
+            line,
+            side,
+            exc,
+        )
+        return None
+    # Re-fetch the index to discover OUR new comment's editable node id. Prefer an
+    # editable entry for this exact line; that is the comment we just posted.
+    refreshed = gh_pr_inline_comment_index(pr_number)
+    entry = refreshed.get((path, line, side)) or refreshed.get((path, line))
+    if entry is None or not entry[2]:
+        logger.warning(
+            "PR #%s: posted editable shadow comment on %s:%s (%s) but could not relocate "
+            "its editable node id",
+            pr_number,
+            path,
+            line,
+            side,
+        )
+        return None
+    return entry[0], entry[1]
+
+
 def _edit_or_keep_comments(pr_number: int, comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Edit comments whose line already has an UNRESOLVED bot comment; keep the rest.
 
@@ -1361,6 +1432,13 @@ def _edit_or_keep_comments(pr_number: int, comments: list[dict[str, Any]]) -> li
     thread, skip it if the existing body already covers the same finding, else
     rewrite that thread's comment to ``existing_body + new_body`` (a single edit
     preserving the original text, #1085) and drop it from the returned list.
+
+    When the existing thread's first comment is NOT editable — it belongs to
+    another app/account such as Copilot or CodeQL (``viewerCanUpdate`` is false,
+    or the update mutation reports "Body is not editable") — we do NOT silently
+    keep the foreign comment. Instead we post OUR OWN editable shadow comment on
+    the same line and from then on edit THAT comment for every re-raise of the
+    finding (#1327). The foreign comment is left untouched.
 
     Findings on fresh lines — including lines whose only prior comment is a
     RESOLVED thread — are returned unchanged for posting. Dedup is deliberately
@@ -1403,10 +1481,7 @@ def _edit_or_keep_comments(pr_number: int, comments: list[dict[str, Any]]) -> li
         if editable is None:
             fresh.append(c)
             continue
-        # #1085: updatePullRequestReviewComment REPLACES the body, so concatenate
-        # the existing body + the new note. Passing only the suffix would destroy
-        # the original comment.
-        existing_id, existing_body = editable
+        existing_id, existing_body, can_update = editable
         if _review_comment_already_covers(existing_body, body):
             logger.info(
                 "PR #%s: skipped duplicate same-line review comment on %s:%s (%s)",
@@ -1416,9 +1491,36 @@ def _edit_or_keep_comments(pr_number: int, comments: list[dict[str, Any]]) -> li
                 side,
             )
             continue
+
+        # #1327: the existing comment belongs to another app/account and is not
+        # editable. Post our OWN editable shadow comment on the same line, index
+        # it, and edit THAT comment on every later re-raise. Leave the foreign
+        # comment untouched. ``viewerCanUpdate`` is the primary signal.
+        if not can_update:
+            shadow = _post_shadow_review_comment(pr_number, c)
+            if shadow is None:
+                fresh.append(c)
+                continue
+            new_id, new_body = shadow
+            editable_index[(path, line, side)] = (new_id, new_body, True)
+            editable_index[(path, line)] = (new_id, new_body, True)
+            logger.info(
+                "PR #%s: posted editable shadow comment on %s:%s (%s); foreign comment left intact",
+                pr_number,
+                path,
+                line,
+                side,
+            )
+            continue
+
+        # #1085: updatePullRequestReviewComment REPLACES the body, so concatenate
+        # the existing body + the new note. Passing only the suffix would destroy
+        # the original comment.
         combined = f"{existing_body}{_ADDITIONAL_REVIEW_NOTE_DELIMITER}{body}"
         try:
             gh_pr_update_review_comment(existing_id, combined)
+            editable_index[(path, line, side)] = (existing_id, combined, True)
+            editable_index[(path, line)] = (existing_id, combined, True)
             logger.info(
                 "PR #%s: edited existing comment on %s:%s (%s) instead of duplicating",
                 pr_number,
@@ -1427,7 +1529,24 @@ def _edit_or_keep_comments(pr_number: int, comments: list[dict[str, Any]]) -> li
                 side,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            # If the edit fails, fall back to posting the comment fresh.
+            # A deterministic "Body is not editable" means viewerCanUpdate was
+            # stale/unavailable; recover by posting our own editable shadow
+            # comment (#1327). Any other edit error falls back to posting fresh.
+            if _BODY_NOT_EDITABLE_MARKER in str(exc).lower():
+                shadow = _post_shadow_review_comment(pr_number, c)
+                if shadow is not None:
+                    new_id, new_body = shadow
+                    editable_index[(path, line, side)] = (new_id, new_body, True)
+                    editable_index[(path, line)] = (new_id, new_body, True)
+                    logger.info(
+                        "PR #%s: edit reported not-editable on %s:%s (%s); posted editable "
+                        "shadow comment instead",
+                        pr_number,
+                        path,
+                        line,
+                        side,
+                    )
+                    continue
             logger.warning(
                 "PR #%s: edit-in-place failed for %s:%s (%s): %s; posting fresh",
                 pr_number,

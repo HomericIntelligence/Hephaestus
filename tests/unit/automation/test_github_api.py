@@ -2206,7 +2206,7 @@ class TestGhPrReviewPost:
         )
         # a.py:2 already has a bot comment (id + existing body); a.py:3 does not.
         mock_index.return_value = {
-            ("a.py", 2): ("COMMENT_NODE_A2", "original note on line 2"),
+            ("a.py", 2): ("COMMENT_NODE_A2", "original note on line 2", True),
         }
 
         gh_pr_review_post(
@@ -2255,6 +2255,7 @@ class TestGhPrReviewPost:
                 "COMMENT_NODE_A2",
                 "This regression coverage only exercises the Claude result-envelope path. "
                 "The production diff also changed the Codex stdout path, so add a Codex test.",
+                True,
             ),
         }
 
@@ -2312,6 +2313,7 @@ class TestGhPrReviewPost:
                 "test where `summary` lacks a verdict and `review_text`/stdout contains "
                 "`Verdict: GO` or `Verdict: NOGO`; otherwise the second producer path can "
                 "regress without this suite catching it.",
+                True,
             ),
         }
 
@@ -2419,6 +2421,7 @@ class TestGhPrReviewPost:
                 "test where `summary` lacks a verdict and `review_text`/stdout contains "
                 "`Verdict: GO` or `Verdict: NOGO`; otherwise the second producer path can "
                 "regress without this suite catching it.",
+                True,
             ),
         }
 
@@ -2493,6 +2496,7 @@ class TestGhPrReviewPost:
                 "`summary` as the review body. Capture this mock and assert "
                 '`gh_pr_review_post(..., summary="a defect (no verdict token here)")` so a '
                 "future regression cannot post the full verdict prose.",
+                True,
             ),
         }
 
@@ -2566,7 +2570,7 @@ class TestGhPrReviewPost:
         mock_gh_call.side_effect = self._gh_call_side_effect(
             "REVIEW_1", [], diff_text=self._SAMPLE_DIFF
         )
-        mock_index.return_value = {("a.py", 2): ("NODE", "old body")}
+        mock_index.return_value = {("a.py", 2): ("NODE", "old body", True)}
         mock_update.side_effect = OSError("network down")
 
         gh_pr_review_post(
@@ -2579,6 +2583,120 @@ class TestGhPrReviewPost:
         mock_update.assert_called_once()
         # Edit failed → the comment is posted as a fresh inline comment.
         assert {c["body"] for c in self._posted_comments(mock_write)} == {"retry me"}
+
+
+class TestEditOrKeepUneditableComment:
+    """#1327: a foreign (uneditable) first comment triggers an editable shadow post.
+
+    When the first comment of an unresolved thread belongs to another app/account
+    (Copilot, CodeQL), GitHub forbids editing it. ``_edit_or_keep_comments`` must
+    NOT silently keep the foreign comment — it posts OUR OWN editable comment on
+    the same line, indexes it, and edits THAT comment on every later re-raise.
+    """
+
+    @patch("hephaestus.automation.github_api.gh_pr_wont_fix_line_index", return_value=set())
+    @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
+    @patch("hephaestus.automation.github_api.gh_pr_review_post")
+    @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
+    def test_uneditable_viewer_flag_posts_new_editable_shadow_comment(
+        self,
+        mock_index: Any,
+        mock_post: Any,
+        mock_update: Any,
+        _mock_wont_fix: Any,
+    ) -> None:
+        from hephaestus.automation.github_api import _edit_or_keep_comments
+
+        # First fetch: foreign comment (viewerCanUpdate False). Re-fetch after the
+        # shadow post: our own editable comment now occupies the line.
+        mock_index.side_effect = [
+            {("a.py", 2, "RIGHT"): ("FOREIGN_NODE", "copilot finding", False)},
+            {("a.py", 2, "RIGHT"): ("OUR_NODE", "our finding", True)},
+        ]
+
+        kept = _edit_or_keep_comments(
+            7, [{"path": "a.py", "line": 2, "side": "RIGHT", "body": "our finding"}]
+        )
+
+        # A NEW editable comment was posted (not silently skipped)...
+        mock_post.assert_called_once()
+        posted_comments = mock_post.call_args.args[1]
+        assert posted_comments == [
+            {"path": "a.py", "line": 2, "side": "RIGHT", "body": "our finding"}
+        ]
+        # ...with dedupe disabled so it does not re-enter the dedupe loop.
+        assert mock_post.call_args.kwargs["dedupe_existing"] is False
+        # The foreign comment was left untouched (no edit mutation).
+        mock_update.assert_not_called()
+        # The finding was consumed (edited via shadow), not returned for re-post.
+        assert kept == []
+
+    @patch("hephaestus.automation.github_api.gh_pr_wont_fix_line_index", return_value=set())
+    @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
+    @patch("hephaestus.automation.github_api.gh_pr_review_post")
+    @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
+    def test_subsequent_same_line_finding_edits_the_new_shadow_comment(
+        self,
+        mock_index: Any,
+        mock_post: Any,
+        mock_update: Any,
+        _mock_wont_fix: Any,
+    ) -> None:
+        """After shadowing a foreign comment, a second same-line finding edits OUR node."""
+        from hephaestus.automation.github_api import _edit_or_keep_comments
+
+        mock_index.side_effect = [
+            {("a.py", 2, "RIGHT"): ("FOREIGN_NODE", "copilot finding", False)},
+            {("a.py", 2, "RIGHT"): ("OUR_NODE", "first our note", True)},
+        ]
+
+        _edit_or_keep_comments(
+            7,
+            [
+                {"path": "a.py", "line": 2, "side": "RIGHT", "body": "first our note"},
+                {"path": "a.py", "line": 2, "side": "RIGHT", "body": "a wholly different note"},
+            ],
+        )
+
+        # The shadow was posted once for the first finding; the second finding was
+        # an in-place edit of OUR newly-indexed editable comment, not the foreign.
+        mock_post.assert_called_once()
+        mock_update.assert_called_once()
+        assert mock_update.call_args.args[0] == "OUR_NODE"
+        edited_body = mock_update.call_args.args[1]
+        assert "first our note" in edited_body
+        assert "a wholly different note" in edited_body
+
+    @patch("hephaestus.automation.github_api.gh_pr_wont_fix_line_index", return_value=set())
+    @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
+    @patch("hephaestus.automation.github_api.gh_pr_review_post")
+    @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
+    def test_not_editable_mutation_error_falls_back_to_shadow_post(
+        self,
+        mock_index: Any,
+        mock_post: Any,
+        mock_update: Any,
+        _mock_wont_fix: Any,
+    ) -> None:
+        """A "Body is not editable" mutation error (stale viewer flag) shadow-posts."""
+        from hephaestus.automation.github_api import _edit_or_keep_comments
+
+        # viewerCanUpdate optimistically True, but the edit mutation rejects it.
+        mock_index.side_effect = [
+            {("a.py", 2, "RIGHT"): ("FOREIGN_NODE", "copilot finding", True)},
+            {("a.py", 2, "RIGHT"): ("OUR_NODE", "our finding", True)},
+        ]
+        mock_update.side_effect = subprocess.SubprocessError("gh: Body is not editable")
+
+        kept = _edit_or_keep_comments(
+            7, [{"path": "a.py", "line": 2, "side": "RIGHT", "body": "our finding"}]
+        )
+
+        # The edit was attempted (probe) then a shadow comment was posted.
+        mock_update.assert_called_once()
+        mock_post.assert_called_once()
+        # The finding was consumed by the shadow comment, not re-posted fresh.
+        assert kept == []
 
 
 class TestGhPrInlineCommentIndex:
@@ -2600,7 +2718,30 @@ class TestGhPrInlineCommentIndex:
                                         "path": "a.py",
                                         "line": 2,
                                         "side": "RIGHT",
-                                        "comments": {"nodes": [{"id": "N1", "body": "keep me"}]},
+                                        "comments": {
+                                            "nodes": [
+                                                {
+                                                    "id": "N1",
+                                                    "body": "keep me",
+                                                    "viewerCanUpdate": True,
+                                                }
+                                            ]
+                                        },
+                                    },
+                                    {  # unresolved but foreign (Copilot) → not editable
+                                        "isResolved": False,
+                                        "path": "c.py",
+                                        "line": 4,
+                                        "side": "RIGHT",
+                                        "comments": {
+                                            "nodes": [
+                                                {
+                                                    "id": "N3",
+                                                    "body": "copilot note",
+                                                    "viewerCanUpdate": False,
+                                                }
+                                            ]
+                                        },
                                     },
                                     {
                                         "isResolved": True,
@@ -2619,10 +2760,14 @@ class TestGhPrInlineCommentIndex:
 
         index = gh_pr_inline_comment_index(7)
 
-        # Unresolved thread is indexed with id + body; resolved one is excluded.
+        # Unresolved threads are indexed with id + body + viewerCanUpdate; the
+        # resolved thread is excluded. The foreign (Copilot) comment carries
+        # editable=False so the caller posts its own shadow comment (#1327).
         assert index == {
-            ("a.py", 2): ("N1", "keep me"),
-            ("a.py", 2, "RIGHT"): ("N1", "keep me"),
+            ("a.py", 2): ("N1", "keep me", True),
+            ("a.py", 2, "RIGHT"): ("N1", "keep me", True),
+            ("c.py", 4): ("N3", "copilot note", False),
+            ("c.py", 4, "RIGHT"): ("N3", "copilot note", False),
         }
 
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
