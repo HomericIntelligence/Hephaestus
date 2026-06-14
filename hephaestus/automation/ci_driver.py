@@ -2250,7 +2250,144 @@ class CIDriver:
                 exc,
             )
 
-    def _retry_no_commit_once(  # codex/claude branches stay coupled to keep one retry path
+    def _invoke_agent_session(
+        self,
+        *,
+        prompt: str,
+        session_id: str | None,
+        worktree_path: Path,
+        issue_number: int,
+        pr_number: int,
+    ) -> subprocess.CompletedProcess[str]:
+        """Dispatch a prompt to the configured agent (codex or claude).
+
+        Returns a CompletedProcess whose returncode signals success or failure:
+        - returncode == 0: agent ran successfully (stdout has output)
+        - returncode != 0: agent failed (stderr has details)
+
+        For codex, returncode is synthetic — AgentRunResult has no returncode
+        field; success is "no CalledProcessError" (hephaestus/agents/runtime.py).
+        For claude, returncode comes from the subprocess exit code.
+
+        CalledProcessError is absorbed from all codex paths into a non-zero
+        CompletedProcess. TimeoutExpired propagates to the caller so it can
+        log a distinct timeout message.
+        """
+        if is_codex(self.options.agent):
+            if session_id:
+                try:
+                    result = resume_codex_session(
+                        session_id,
+                        prompt,
+                        cwd=worktree_path,
+                        timeout=ci_driver_claude_timeout(),
+                    )
+                except subprocess.CalledProcessError as exc:
+                    logger.warning(
+                        "Issue #%s: Codex resume session %r failed for PR #%s; "
+                        "falling back to fresh session: %s",
+                        issue_number,
+                        session_id,
+                        pr_number,
+                        (exc.stderr or exc.stdout or "")[:300],
+                    )
+                    try:
+                        result = run_codex_session(
+                            prompt,
+                            cwd=worktree_path,
+                            timeout=ci_driver_claude_timeout(),
+                            sandbox="workspace-write",
+                        )
+                    except subprocess.CalledProcessError as fresh_exc:
+                        return subprocess.CompletedProcess(
+                            args=fresh_exc.cmd,
+                            returncode=fresh_exc.returncode,
+                            stdout=fresh_exc.stdout or "",
+                            stderr=fresh_exc.stderr or "",
+                        )
+            else:
+                try:
+                    result = run_codex_session(
+                        prompt,
+                        cwd=worktree_path,
+                        timeout=ci_driver_claude_timeout(),
+                        sandbox="workspace-write",
+                    )
+                except subprocess.CalledProcessError as exc:
+                    return subprocess.CompletedProcess(
+                        args=exc.cmd,
+                        returncode=exc.returncode,
+                        stdout=exc.stdout or "",
+                        stderr=exc.stderr or "",
+                    )
+            return subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=result.stdout, stderr=result.stderr or ""
+            )
+
+        repo_slug = get_repo_slug(self.repo_root)
+        try:
+            stdout, _ = invoke_claude_with_session(
+                repo=repo_slug,
+                issue=issue_number,
+                agent=AGENT_CI_DRIVER,
+                prompt=prompt,
+                model=implementer_model(),
+                cwd=worktree_path,
+                timeout=ci_driver_claude_timeout(),
+                output_format="json",
+                allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
+                extra_args=["--dangerously-skip-permissions"],
+                input_via_stdin=True,
+            )
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+        except subprocess.CalledProcessError as exc:
+            return subprocess.CompletedProcess(
+                args=exc.cmd,
+                returncode=exc.returncode,
+                stdout=exc.stdout or "",
+                stderr=exc.stderr or "",
+            )
+
+    def _push_ci_fix(
+        self,
+        *,
+        worktree_path: Path,
+        pre_agent_sha: str,
+        issue_number: int,
+        pr_number: int,
+        pr_head_branch: str,
+        session_id: str | None,
+    ) -> bool:
+        """Check head advancement, retry if needed, then push CI fixes.
+
+        Shared post-agent contract for both codex and claude providers (#846).
+        Returns True if fixes were pushed, False on any failure or no-commit.
+        """
+        if not self._head_advanced(worktree_path, pre_agent_sha, issue_number):  # noqa: SIM102
+            if not self._retry_no_commit_once(
+                issue_number=issue_number,
+                pr_number=pr_number,
+                worktree_path=worktree_path,
+                pr_head_branch=pr_head_branch,
+                pre_agent_sha=pre_agent_sha,
+                session_id=session_id,
+            ):
+                return False
+        if not self._ci_fix_head_is_pushable(worktree_path, issue_number):
+            return False
+        try:
+            push_current_branch_with_lease_on_divergence(
+                worktree_path,
+                branch=pr_head_branch,
+                push_ref=f"HEAD:{pr_head_branch}",
+            )
+            logger.info("Issue #%s: pushed CI fixes for PR #%s", issue_number, pr_number)
+            return True
+        except Exception as push_err:
+            logger.error("Issue #%s: git push failed after CI fix: %s", issue_number, push_err)
+            return False
+
+    def _retry_no_commit_once(
         self,
         *,
         issue_number: int,
@@ -2329,64 +2466,27 @@ class CIDriver:
             )
 
             try:
-                if is_codex(self.options.agent):
-                    if session_id:
-                        try:
-                            resume_codex_session(
-                                session_id,
-                                retry_prompt,
-                                cwd=worktree_path,
-                                timeout=ci_driver_claude_timeout(),
-                            )
-                        except subprocess.CalledProcessError as exc:
-                            logger.warning(
-                                "Issue #%s: Codex retry resume failed for PR #%s; "
-                                "falling back to fresh session: %s",
-                                issue_number,
-                                pr_number,
-                                (exc.stderr or exc.stdout or "")[:300],
-                            )
-                            run_codex_session(
-                                retry_prompt,
-                                cwd=worktree_path,
-                                timeout=ci_driver_claude_timeout(),
-                                sandbox="workspace-write",
-                            )
-                    else:
-                        run_codex_session(
-                            retry_prompt,
-                            cwd=worktree_path,
-                            timeout=ci_driver_claude_timeout(),
-                            sandbox="workspace-write",
-                        )
-                else:
-                    repo_slug = get_repo_slug(self.repo_root)
-                    invoke_claude_with_session(
-                        repo=repo_slug,
-                        issue=issue_number,
-                        agent=AGENT_CI_DRIVER,
-                        prompt=retry_prompt,
-                        model=implementer_model(),
-                        cwd=worktree_path,
-                        timeout=ci_driver_claude_timeout(),
-                        output_format="json",
-                        allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
-                        extra_args=["--dangerously-skip-permissions"],
-                        input_via_stdin=True,
-                    )
-            except subprocess.CalledProcessError as exc:
-                logger.error(
-                    "Issue #%s: no-commit retry session failed for PR #%s: %s",
-                    issue_number,
-                    pr_number,
-                    (exc.stderr or exc.stdout or "")[:300],
+                retry_result = self._invoke_agent_session(
+                    prompt=retry_prompt,
+                    session_id=session_id,
+                    worktree_path=worktree_path,
+                    issue_number=issue_number,
+                    pr_number=pr_number,
                 )
-                return False
             except subprocess.TimeoutExpired:
                 logger.error(
                     "Issue #%s: no-commit retry session timed out for PR #%s",
                     issue_number,
                     pr_number,
+                )
+                return False
+
+            if retry_result.returncode != 0:
+                logger.error(
+                    "Issue #%s: no-commit retry session failed for PR #%s: %s",
+                    issue_number,
+                    pr_number,
+                    (retry_result.stderr or "")[:300],
                 )
                 return False
 
@@ -2628,159 +2728,6 @@ class CIDriver:
             f"Commit message: fix: Address CI failures for PR {pr_ref(pr_number)}\n"
         )
 
-    def _finalize_ci_fix_push(
-        self,
-        issue_number: int,
-        pr_number: int,
-        worktree_path: Path,
-        pr_head_branch: str,
-        pre_agent_sha: str,
-        session_id: str | None,
-    ) -> bool:
-        """Check head advance, retry if needed, then push CI-fix commits.
-
-        Returns ``True`` on a successful push, ``False`` on any failure. Shared
-        by both the Codex and Claude invocation paths to eliminate the verbatim
-        32-line push-tail duplication.
-        """
-        if not self._head_advanced(worktree_path, pre_agent_sha, issue_number):  # noqa: SIM102
-            if not self._retry_no_commit_once(
-                issue_number=issue_number,
-                pr_number=pr_number,
-                worktree_path=worktree_path,
-                pr_head_branch=pr_head_branch,
-                pre_agent_sha=pre_agent_sha,
-                session_id=session_id,
-            ):
-                return False
-        if not self._ci_fix_head_is_pushable(worktree_path, issue_number):
-            return False
-        try:
-            push_current_branch_with_lease_on_divergence(
-                worktree_path,
-                branch=pr_head_branch,
-                push_ref=f"HEAD:{pr_head_branch}",
-            )
-            logger.info("Issue #%s: pushed CI fixes for PR #%s", issue_number, pr_number)
-            return True
-        except Exception as push_err:
-            logger.error("Issue #%s: git push failed after CI fix: %s", issue_number, push_err)
-            return False
-
-    def _invoke_codex_ci_fix(
-        self,
-        issue_number: int,
-        pr_number: int,
-        worktree_path: Path,
-        prompt: str,
-        pr_head_branch: str,
-        pre_agent_sha: str,
-        session_id: str | None,
-    ) -> bool:
-        """Run the Codex agent for a CI fix session and push on success."""
-        try:
-            if session_id:
-                try:
-                    codex_result = resume_codex_session(
-                        session_id,
-                        prompt,
-                        cwd=worktree_path,
-                        timeout=ci_driver_claude_timeout(),
-                    )
-                except subprocess.CalledProcessError as e:
-                    logger.warning(
-                        "Issue #%s: Codex resume session %r failed for PR #%s; falling back to fresh: %s",  # noqa: E501
-                        issue_number,
-                        session_id,
-                        pr_number,
-                        (e.stderr or e.stdout or "")[:300],
-                    )
-                    codex_result = run_codex_session(
-                        prompt,
-                        cwd=worktree_path,
-                        timeout=ci_driver_claude_timeout(),
-                        sandbox="workspace-write",
-                    )
-            else:
-                codex_result = run_codex_session(
-                    prompt,
-                    cwd=worktree_path,
-                    timeout=ci_driver_claude_timeout(),
-                    sandbox="workspace-write",
-                )
-            logger.debug(
-                "Issue #%s: Codex CI fix output: %s", issue_number, codex_result.stdout[:500]
-            )
-        except subprocess.CalledProcessError as e:
-            logger.error(
-                "Issue #%s: Codex CI fix session returned exit code %s: %s",
-                issue_number,
-                e.returncode,
-                (e.stderr or e.stdout or "")[:300],
-            )
-            return False
-        return self._finalize_ci_fix_push(
-            issue_number,
-            pr_number,
-            worktree_path,
-            pr_head_branch,
-            pre_agent_sha,
-            session_id,
-        )
-
-    def _invoke_claude_ci_fix(
-        self,
-        issue_number: int,
-        pr_number: int,
-        worktree_path: Path,
-        prompt: str,
-        pr_head_branch: str,
-        pre_agent_sha: str,
-        session_id: str | None,
-    ) -> bool:
-        """Run the Claude agent for a CI fix session and push on success."""
-        repo_slug = get_repo_slug(self.repo_root)
-        try:
-            stdout, _ = invoke_claude_with_session(
-                repo=repo_slug,
-                issue=issue_number,
-                agent=AGENT_CI_DRIVER,
-                prompt=prompt,
-                model=implementer_model(),
-                cwd=worktree_path,
-                timeout=ci_driver_claude_timeout(),
-                output_format="json",
-                allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
-                extra_args=["--dangerously-skip-permissions"],
-                input_via_stdin=True,
-            )
-            claude_result = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout=stdout, stderr=""
-            )
-        except subprocess.CalledProcessError as exc:
-            claude_result = subprocess.CompletedProcess(
-                args=exc.cmd,
-                returncode=exc.returncode,
-                stdout=exc.stdout or "",
-                stderr=exc.stderr or "",
-            )
-        if claude_result.returncode == 0:
-            return self._finalize_ci_fix_push(
-                issue_number,
-                pr_number,
-                worktree_path,
-                pr_head_branch,
-                pre_agent_sha,
-                session_id,
-            )
-        logger.error(
-            "Issue #%s: Claude CI fix session returned exit code %s: %s",
-            issue_number,
-            claude_result.returncode,
-            claude_result.stderr[:300],
-        )
-        return False
-
     def _run_ci_fix_session(
         self,
         issue_number: int,
@@ -2827,35 +2774,40 @@ class CIDriver:
         )
 
         try:
-            if is_codex(self.options.agent):
-                return self._invoke_codex_ci_fix(
-                    issue_number,
-                    pr_number,
-                    worktree_path,
-                    prompt,
-                    pr_head_branch,
-                    pre_agent_sha,
-                    session_id,
-                )
-            return self._invoke_claude_ci_fix(
-                issue_number,
-                pr_number,
-                worktree_path,
-                prompt,
-                pr_head_branch,
-                pre_agent_sha,
-                session_id,
+            agent_result = self._invoke_agent_session(
+                prompt=prompt,
+                session_id=session_id,
+                worktree_path=worktree_path,
+                issue_number=issue_number,
+                pr_number=pr_number,
             )
         except subprocess.TimeoutExpired:
-            logger.error(
-                "Issue #%s: Claude CI fix session timed out for PR #%s", issue_number, pr_number
-            )
+            logger.error("Issue #%s: CI fix session timed out for PR #%s", issue_number, pr_number)
             return False
         except Exception as e:
             logger.error(
                 "Issue #%s: CI fix session failed for PR #%s: %s", issue_number, pr_number, e
             )
             return False
+
+        if agent_result.returncode != 0:
+            logger.error(
+                "Issue #%s: CI fix session returned exit code %s: %s",
+                issue_number,
+                agent_result.returncode,
+                (agent_result.stderr or "")[:300],
+            )
+            return False
+
+        logger.debug("Issue #%s: CI fix output: %s", issue_number, agent_result.stdout[:500])
+        return self._push_ci_fix(
+            worktree_path=worktree_path,
+            pre_agent_sha=pre_agent_sha,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            pr_head_branch=pr_head_branch,
+            session_id=session_id,
+        )
 
     def _enable_auto_merge(self, pr_number: int, is_bot_pr: bool = False) -> bool:
         """Enable auto-merge for the given PR using squash strategy.
