@@ -19,10 +19,10 @@ from typing import Any
 import pytest
 import yaml
 
+from hephaestus.ci.required_checks_gate import GATE_JOB, _unwired_jobs
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 REQUIRED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "_required.yml"
-
-GATE_JOB = "required-checks-gate"
 
 # Jobs intentionally NOT gated by required-checks-gate:
 #   - auto-merge-policy: advisory only (see its comment in _required.yml); must
@@ -55,17 +55,13 @@ class TestRequiredChecksGate:
             "branch-protection required check; see docs/ci/required-checks.md"
         )
 
-    def test_gate_needs_every_non_exempt_job(self, jobs: dict[str, Any]) -> None:
+    def test_gate_needs_every_non_exempt_job(self, workflow: dict[str, Any]) -> None:
         """Every job except the exempt set must be in the gate's needs list.
 
         This is the core invariant: add a job to _required.yml and you MUST add
         it to required-checks-gate.needs, or it stops gating merges.
         """
-        gate_needs = set(jobs[GATE_JOB]["needs"])
-        all_jobs = set(jobs)
-        expected = all_jobs - EXEMPT_JOBS
-
-        missing = expected - gate_needs
+        missing = _unwired_jobs(workflow, EXEMPT_JOBS)
         assert not missing, (
             f"These jobs are not gated by {GATE_JOB}.needs and would not block "
             f"merges: {sorted(missing)}. Add them to the gate's needs list in "
@@ -103,31 +99,28 @@ class TestRequiredChecksGate:
     def test_gate_assertion_fires_on_unwired_job(self) -> None:
         """Negative-path: the invariant check must flag a job absent from needs:.
 
-        Construct a synthetic jobs dict that introduces a new gating job not
-        listed in required-checks-gate.needs and verify the gap is detected.
-        This guards against the invariant check itself silently passing when
-        it should fail — exactly the failure mode that let a red lint job reach
-        main (issue #1315).
+        Drive the SAME ``_unwired_jobs()`` helper the real guard uses with a
+        synthetic workflow that introduces a gating job not listed in
+        ``required-checks-gate.needs``, and verify the gap is detected. Sharing
+        the helper guards against the guard and its test silently diverging
+        (issues #1315, #1338).
         """
-        # Minimal synthetic workflow jobs: a gate that only needs "job-a",
-        # plus an additional "job-b" that is unwired (not in needs).
-        synthetic_jobs: dict[str, Any] = {
-            GATE_JOB: {
-                "needs": ["job-a"],
-                "if": "always()",
-                "runs-on": "ubuntu-24.04",
-                "steps": [],
-            },
-            "job-a": {"runs-on": "ubuntu-24.04", "steps": []},
-            "job-b": {"runs-on": "ubuntu-24.04", "steps": []},  # intentionally unwired
+        synthetic_wf: dict[str, Any] = {
+            "jobs": {
+                GATE_JOB: {
+                    "needs": ["job-a"],
+                    "if": "always()",
+                    "runs-on": "ubuntu-24.04",
+                    "steps": [],
+                },
+                "job-a": {"runs-on": "ubuntu-24.04", "steps": []},
+                "job-b": {"runs-on": "ubuntu-24.04", "steps": []},  # intentionally unwired
+            }
         }
 
-        gate_needs = set(synthetic_jobs[GATE_JOB]["needs"])
-        all_jobs = set(synthetic_jobs)
-        expected = all_jobs - EXEMPT_JOBS
-        missing = expected - gate_needs
+        missing = _unwired_jobs(synthetic_wf, EXEMPT_JOBS)
 
         assert "job-b" in missing, (
-            "Expected the invariant check to detect 'job-b' as unwired from "
+            "Expected _unwired_jobs() to detect 'job-b' as unwired from "
             f"{GATE_JOB}.needs, but missing={sorted(missing)}"
         )
