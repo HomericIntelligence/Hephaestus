@@ -471,8 +471,9 @@ def test_review_loop_resolves_conflict_before_first_review(tmp_path: Path) -> No
 
     def _iter(**_kwargs: Any) -> tuple[Any, ...]:
         call_order.append("review")
-        # verdict, grade, review_text, posted_thread_ids, go_blocked, reopened, should_break
-        return "GO", "A", "ok", [], False, [], True
+        # verdict, grade, review_text, posted_thread_ids, go_blocked, reopened,
+        # should_break, reopened_keys, validator_clean
+        return "GO", "A", "ok", [], False, [], True, set(), True
 
     with (
         mock.patch.object(phase, "_resolve_conflict_before_review", side_effect=_gate) as gate,
