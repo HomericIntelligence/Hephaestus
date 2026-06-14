@@ -121,6 +121,7 @@ class TestDefaultScopedDiscovery:
                 "hephaestus.automation.ci_driver._gh_call",
                 return_value=MagicMock(stdout=json.dumps(_MIXED_PULLS)),
             ),
+            patch.object(viewer_driver, "_pr_merge_state", return_value=("CLEAN", "MERGEABLE")),
         ):
             remaining = viewer_driver._list_open_prs_remaining()
         assert [pr["number"] for pr in remaining] == [100]
@@ -148,6 +149,7 @@ class TestAllFlagScopedDiscovery:
                 "hephaestus.automation.ci_driver._gh_call",
                 return_value=MagicMock(stdout=json.dumps(_MIXED_PULLS)),
             ),
+            patch.object(driver, "_pr_merge_state", return_value=("CLEAN", "MERGEABLE")),
         ):
             remaining = driver._list_open_prs_remaining()
         assert sorted(pr["number"] for pr in remaining) == [100, 101, 102]
@@ -251,6 +253,7 @@ class TestAllFlagSkipsViewerResolution:
                 "hephaestus.automation.ci_driver._gh_call",
                 return_value=MagicMock(stdout=json.dumps(_MIXED_PULLS)),
             ),
+            patch.object(driver, "_pr_merge_state", return_value=("CLEAN", "MERGEABLE")),
         ):
             remaining = driver._list_open_prs_remaining()
         assert sorted(pr["number"] for pr in remaining) == [100, 101, 102]
@@ -308,6 +311,7 @@ class TestMissingUserLogin:
                 "hephaestus.automation.ci_driver._gh_call",
                 return_value=MagicMock(stdout=json.dumps(_MISSING_LOGIN_PULLS)),
             ),
+            patch.object(driver, "_pr_merge_state", return_value=("CLEAN", "MERGEABLE")),
             caplog.at_level(logging.WARNING, logger="hephaestus.automation.ci_driver"),
         ):
             result = driver._list_open_prs_remaining()
