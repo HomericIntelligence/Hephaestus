@@ -1155,7 +1155,7 @@ class CIDriver:
         )
 
     def _recheck_and_arm_after_fix(
-        self, issue_number: int, pr_number: int, acquired_slot: int
+        self, issue_number: int, pr_number: int, acquired_slot: int, *, resolve_dirty: bool = True
     ) -> WorkerResult | None:
         """After a CI fix is pushed, re-poll checks and arm if now green.
 
@@ -1164,6 +1164,18 @@ class CIDriver:
         now-green PR sat ``NOT armed`` forever (observed: ProjectHermes #645,
         which ended ``CLEAN`` but un-armed). This re-enters the
         check→arm→wait flow ONCE.
+
+        Args:
+            issue_number: GitHub issue number.
+            pr_number: GitHub PR number.
+            acquired_slot: Worker slot ID for status tracking.
+            resolve_dirty: When True (the default, used by the primary fix paths)
+                an armed PR that goes ``DIRTY`` while we wait is routed to
+                ``_resolve_dirty_pr`` (#1347). ``_resolve_dirty_pr`` calls this
+                method back after a rebase/agent fix; those callbacks pass
+                ``resolve_dirty=False`` so a still-DIRTY PR does NOT re-dispatch
+                into ``_resolve_dirty_pr`` — breaking the
+                resolve→recheck→resolve recursion at depth one.
 
         Returns:
             A terminal ``WorkerResult`` if the PR armed (and we waited on it), or
@@ -1231,7 +1243,14 @@ class CIDriver:
         pr_head_sha = (gh_state or {}).get("headRefOid", "") or ""
         pr_head_branch = self._get_pr_branch(pr_number)
         self._arm_drive_green(pr_number, pr_head_branch, pr_head_sha)
-        self._wait_for_pr_terminal(issue_number, pr_number)
+        outcome = self._wait_for_pr_terminal(issue_number, pr_number)
+        # An armed PR can go DIRTY (merge conflict) after the fix push. Mirror
+        # the primary arm path (_arm_and_wait_for_merge) and route it to the
+        # conflict resolver instead of silently reporting success (#1347).
+        # ``resolve_dirty`` gates this so the resolver's own callback into this
+        # method cannot re-trigger resolution and recurse indefinitely.
+        if resolve_dirty and outcome == "DIRTY":
+            return self._resolve_dirty_pr(issue_number, pr_number, acquired_slot)
         return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
     def _resolve_dirty_pr(
@@ -1256,7 +1275,9 @@ class CIDriver:
         # 1. Cheap path: mechanical rebase. Returns True only on a clean
         #    rebase+push, in which case re-poll and arm the rebased head.
         if self._attempt_mechanical_rebase(issue_number, pr_number, acquired_slot):
-            rearmed = self._recheck_and_arm_after_fix(issue_number, pr_number, acquired_slot)
+            rearmed = self._recheck_and_arm_after_fix(
+                issue_number, pr_number, acquired_slot, resolve_dirty=False
+            )
             if rearmed is not None:
                 return rearmed
             return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
@@ -1284,7 +1305,9 @@ class CIDriver:
             issue_number, pr_number, acquired_slot, extra_context=conflict_context
         )
         if fix_result is not None and fix_result.success:
-            rearmed = self._recheck_and_arm_after_fix(issue_number, pr_number, acquired_slot)
+            rearmed = self._recheck_and_arm_after_fix(
+                issue_number, pr_number, acquired_slot, resolve_dirty=False
+            )
             return rearmed if rearmed is not None else fix_result
         return WorkerResult(
             issue_number=issue_number,
