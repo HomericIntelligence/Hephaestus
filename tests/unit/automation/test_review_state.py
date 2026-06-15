@@ -480,9 +480,14 @@ class TestFetchAllIssueLabelsGraphql:
         assert "'HomericIntelligence'" not in query_arg
         assert "'ProjectHephaestus'" not in query_arg
         # owner/name supplied as declared variables, passed via -F.
+        assert query_arg.startswith("query=query($owner:String!,$name:String!")
         assert "$owner" in query_arg and "$name" in query_arg
         assert "owner=HomericIntelligence" in argv
         assert "name=ProjectHephaestus" in argv
+        # Issue numbers are GraphQL variables too, not interpolated inline.
+        assert "owner:'" not in query_arg
+        assert "n0=10" in argv and "n1=11" in argv
+        assert "issue(number:$n0)" in query_arg
 
     def test_comments_owner_name_passed_as_graphql_variables(self) -> None:
         """Same regression guard for the batched comments fetch."""
@@ -504,6 +509,11 @@ class TestFetchAllIssueLabelsGraphql:
         argv = mock_gh.call_args.args[0]
         query_arg = next(a for a in argv if a.startswith("query="))
         assert "'HomericIntelligence'" not in query_arg
+        assert query_arg.startswith("query=query($owner:String!,$name:String!")
         assert "$owner" in query_arg and "$name" in query_arg
         assert "owner=HomericIntelligence" in argv
         assert "name=ProjectHephaestus" in argv
+        # Issue number passed as a variable, not interpolated inline.
+        assert "owner:'" not in query_arg
+        assert "n0=10" in argv
+        assert "issue(number:$n0)" in query_arg

@@ -159,6 +159,12 @@ _NON_TRANSIENT_PATTERNS = [
         # unused variable can never succeed on retry (#1040).
         r"doesn't accept argument",
         r"is declared by .* but not used",
+        # A malformed GraphQL query (e.g. a single-quoted string literal from a
+        # stray repr) is a syntax error that can never parse on retry. gh surfaces
+        # these as "Expected VALUE, actual: UNKNOWN_CHAR" / "Parse error" (#1350).
+        r"Expected VALUE",
+        r"UNKNOWN_CHAR",
+        r"Parse error",
         # "Body is not editable": editing a review comment owned by another
         # app/account (Copilot, CodeQL) is forbidden and never succeeds on
         # retry. Fail fast so the caller posts its own editable comment (#1327).

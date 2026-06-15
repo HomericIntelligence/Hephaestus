@@ -156,3 +156,20 @@ class TestNonTransientErrorClassification:
         from hephaestus.github.client import _is_non_transient_error
 
         assert _is_non_transient_error("Internal Server Error (HTTP 500)") is False
+
+    def test_graphql_syntax_error_is_non_transient(self) -> None:
+        """#1350: a malformed GraphQL query is a parse error, never retryable.
+
+        A stray ``repr()`` once emitted single-quoted string literals
+        (``owner:'H...'``), which gh rejected with
+        ``Expected VALUE, actual: UNKNOWN_CHAR``. Such syntax errors can never
+        succeed on retry, so they must fail fast instead of being retried ~6×.
+        """
+        from hephaestus.github.client import _is_non_transient_error
+
+        assert (
+            _is_non_transient_error(
+                'gh: Expected VALUE, actual: UNKNOWN_CHAR ("H") at [1, 24]',
+            )
+            is True
+        )
