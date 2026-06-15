@@ -27,6 +27,9 @@ def _make_deps(tmp_path: Path) -> dict:
 class ConcreteReviewer(_reviewer_base.BaseReviewer):
     """Minimal concrete subclass for testing BaseReviewer's injection contract."""
 
+    def run(self) -> None:
+        """Stub implementation to satisfy the ABC abstractmethod contract."""
+
 
 def test_injection_wires_repo_root(tmp_path: Path) -> None:
     """Constructor injection must wire repo_root from the get_repo_root callable."""

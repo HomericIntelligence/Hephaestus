@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,7 @@ from .worktree_manager import WorktreeManager
 logger = logging.getLogger(__name__)
 
 
-class BaseReviewer:
+class BaseReviewer(ABC):
     """Shared scaffolding for the reviewer CLIs.
 
     Collaborators are injected via constructor parameters (DIP-compliant).
@@ -163,3 +164,7 @@ class BaseReviewer:
             subclass_logger = logging.getLogger(type(self).__module__)
             subclass_logger.warning("Malformed review state for issue #%d (%s)", issue_number, exc)
             return None
+
+    @abstractmethod
+    def run(self) -> Any:
+        """Execute the review loop and return per-issue results."""
