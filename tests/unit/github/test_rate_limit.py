@@ -11,6 +11,7 @@ from hephaestus.github.rate_limit import (
     GRAPHQL_RATE_LIMIT_RE,
     RATE_LIMIT_RE,
     SECONDARY_RATE_LIMIT_RE,
+    _countdown_loop,
     _rate_limit_probe_cache,
     detect_claude_usage_cap,
     detect_claude_usage_limit,
@@ -602,3 +603,87 @@ class TestGlobalThrottle:
             f"throttle sleep was {sleep_calls[0]:.4f}s; expected >= 0.09s "
             f"(1 token at 10/sec costs 0.1s)"
         )
+
+
+class TestCountdownThrottle:
+    """Tests for _countdown_loop TTY vs non-TTY emission throttling (#1330)."""
+
+    @patch("hephaestus.github.rate_limit.logger")
+    @patch("hephaestus.github.rate_limit.print")
+    @patch("hephaestus.github.rate_limit.sys.stdout")
+    @patch("hephaestus.github.rate_limit.time.monotonic")
+    @patch("hephaestus.github.rate_limit.time.sleep")
+    @patch("hephaestus.github.rate_limit.time.time")
+    def test_non_tty_throttles_to_ten_minute_emissions(
+        self,
+        mock_time: object,
+        mock_sleep: object,
+        mock_monotonic: object,
+        mock_stdout: object,
+        mock_print: object,
+        mock_logger: object,
+    ) -> None:
+        """Non-TTY: a ~30-minute wait logs ~3 lines (one per 10 min), not ~1800."""
+        import unittest.mock
+
+        assert isinstance(mock_time, unittest.mock.MagicMock)
+        assert isinstance(mock_monotonic, unittest.mock.MagicMock)
+        assert isinstance(mock_stdout, unittest.mock.MagicMock)
+        assert isinstance(mock_logger, unittest.mock.MagicMock)
+        assert isinstance(mock_print, unittest.mock.MagicMock)
+
+        mock_stdout.isatty.return_value = False
+
+        # Wall-clock and monotonic both advance 1 second per iteration so the
+        # 600s throttle window maps cleanly onto a 1800-iteration countdown.
+        target = 1800
+        mock_time.side_effect = list(range(0, target + 2))
+        mock_monotonic.side_effect = [float(i) for i in range(0, target + 2)]
+
+        _countdown_loop(target, lambda: False)
+
+        # Non-TTY must never use the \r spinner.
+        mock_print.assert_not_called()
+        # Emissions at t=0, 600, 1200 → exactly 3 over a 30-minute wait.
+        info_calls = list(mock_logger.info.call_args_list)
+        assert len(info_calls) == 3, f"expected 3 throttled emissions, got {len(info_calls)}"
+
+    @patch("hephaestus.github.rate_limit.logger")
+    @patch("hephaestus.github.rate_limit.print")
+    @patch("hephaestus.github.rate_limit.sys.stdout")
+    @patch("hephaestus.github.rate_limit.time.sleep")
+    @patch("hephaestus.github.rate_limit.time.time")
+    def test_tty_uses_one_hz_spinner(
+        self,
+        mock_time: object,
+        mock_sleep: object,
+        mock_stdout: object,
+        mock_print: object,
+        mock_logger: object,
+    ) -> None:
+        r"""TTY mode prints the \r spinner per tick and does not log progress."""
+        import unittest.mock
+
+        assert isinstance(mock_time, unittest.mock.MagicMock)
+        assert isinstance(mock_stdout, unittest.mock.MagicMock)
+        assert isinstance(mock_print, unittest.mock.MagicMock)
+        assert isinstance(mock_logger, unittest.mock.MagicMock)
+
+        mock_stdout.isatty.return_value = True
+
+        target = 1000
+        # now, now, now, then past-epoch → two spinner ticks then return.
+        mock_time.side_effect = [997, 998, 999, 1001]
+
+        _countdown_loop(target, lambda: False)
+
+        # Spinner printed each tick (plus the trailing newline on completion).
+        assert mock_print.call_count >= 2
+        spinner_calls = [
+            c
+            for c in mock_print.call_args_list
+            if c.args and "Rate limit resets in" in str(c.args[0])
+        ]
+        assert spinner_calls, "expected at least one \\r spinner print on a TTY"
+        # TTY mode must not emit throttled INFO progress lines.
+        mock_logger.info.assert_not_called()

@@ -20,6 +20,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -512,8 +513,18 @@ def resolve_quota_reset_epoch(*texts: str) -> int | None:
     return None
 
 
+# Non-TTY progress is throttled to this interval (seconds) so a redirected
+# log file gets one line per 10 minutes instead of one line per 1Hz tick.
+_NON_TTY_EMIT_INTERVAL_S = 600
+
+
 def _countdown_loop(epoch: int, is_interrupted: Callable[[], bool]) -> None:
-    """Print a 1Hz countdown until ``epoch``, or until ``is_interrupted`` is true.
+    r"""Display a countdown until ``epoch``, or until ``is_interrupted`` is true.
+
+    On an interactive terminal (``sys.stdout.isatty()``), a 1Hz ``\\r``
+    spinner is printed. When stdout is redirected to a non-TTY (e.g. a log
+    file), the spinner is suppressed and a progress line is logged at most
+    once every 10 minutes to avoid flooding the log with one line per tick.
 
     Args:
         epoch: Target Unix timestamp to wait for.
@@ -532,21 +543,34 @@ def _countdown_loop(epoch: int, is_interrupted: Callable[[], bool]) -> None:
     iterations = 0
     iteration_cap = 100_000  # ~27hrs at 1Hz; well above any real countdown
 
+    is_tty = sys.stdout.isatty()
+    # Track last non-TTY emission with the monotonic clock; ``time.time`` is
+    # heavily mocked in tests, so monotonic keeps the throttle honest. ``None``
+    # forces an emission on the first iteration so even a short wait logs once.
+    last_emit_mono: float | None = None
+
     while True:
         if is_interrupted():
             print("\n[INFO] Wait interrupted by user")
             raise KeyboardInterrupt
         remaining = epoch - int(time.time())
         if remaining <= 0:
-            print()
+            if is_tty:
+                print()
             return
         h, r = divmod(remaining, 3600)
         m, s = divmod(r, 60)
-        print(
-            f"\r[INFO] Rate limit resets in {h:02d}:{m:02d}:{s:02d}",
-            end="",
-            flush=True,
-        )
+        if is_tty:
+            print(
+                f"\r[INFO] Rate limit resets in {h:02d}:{m:02d}:{s:02d}",
+                end="",
+                flush=True,
+            )
+        else:
+            now_mono = time.monotonic()
+            if last_emit_mono is None or now_mono - last_emit_mono >= _NON_TTY_EMIT_INTERVAL_S:
+                logger.info("Rate limit resets in %02d:%02d:%02d", h, m, s)
+                last_emit_mono = now_mono
         time.sleep(1)
         iterations += 1
         if iterations >= iteration_cap:
@@ -554,7 +578,8 @@ def _countdown_loop(epoch: int, is_interrupted: Callable[[], bool]) -> None:
             # either way, stop spinning and let the caller proceed.
             elapsed_s = (time.monotonic_ns() - start_mono) / 1e9
             logger.warning("wait_until iteration cap reached after %.2fs; bailing out", elapsed_s)
-            print()
+            if is_tty:
+                print()
             return
 
 
