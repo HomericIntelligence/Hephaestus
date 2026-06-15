@@ -184,6 +184,9 @@ ignore = [
     "RUF003", # Intentional Unicode in comments
 ]
 
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
 [tool.ruff.lint.mccabe]
 max-complexity = 12
 
@@ -241,7 +244,7 @@ omit = [
     "*/__init__.py",
     # Full orchestration loops require a live claude/gh CLI — integration test territory.
     # Pure-function helpers in these modules are tested in tests/unit/automation/ instead.
-    # The allowlist of these 16 modules is frozen in tests/unit/validation/test_omit_allowlist.py
+    # The allowlist of these 17 modules is frozen in tests/unit/validation/test_omit_allowlist.py
     # to prevent silent growth of the omit list, and their importability is guarded by
     # tests/integration/test_orchestration_smoke.py.
     "hephaestus/automation/implementer.py",
@@ -261,6 +264,9 @@ omit = [
     "hephaestus/automation/ci_fix_orchestrator.py",
     "hephaestus/automation/post_merge_processor.py",
     "hephaestus/automation/loop_runner.py",
+    # loop_repo_manager.py: repo-management cluster extracted from loop_runner.py (#1360/refs #1179).
+    # All functions shell out to gh/git CLI; their pure-function helpers are unit-tested.
+    "hephaestus/automation/loop_repo_manager.py",
     # curses_ui.py uses a live terminal; cannot be unit-tested without a real TTY
     "hephaestus/automation/curses_ui.py",
     # github_api.py shells out to gh CLI for every call; fully integration-only

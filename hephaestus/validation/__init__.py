@@ -10,21 +10,13 @@ from hephaestus.validation.coverage import check_coverage, parse_coverage_report
 from hephaestus.validation.doc_config import check_doc_config_consistency
 from hephaestus.validation.doc_policy import (
     Finding as DocPolicyFinding,
-)
-from hephaestus.validation.doc_policy import (
     Severity,
-)
-from hephaestus.validation.doc_policy import (
     scan_file as scan_doc_policy,
-)
-from hephaestus.validation.doc_policy import (
     scan_repository as scan_doc_policy_repository,
 )
 from hephaestus.validation.docstrings import (
     FragmentFinding,
     is_genuine_fragment,
-)
-from hephaestus.validation.docstrings import (
     scan_file as scan_docstrings,
 )
 from hephaestus.validation.markdown import (
@@ -70,8 +62,7 @@ from hephaestus.validation.test_structure import (
     check_test_directory_mirrors,
     check_test_structure,
 )
-from hephaestus.validation.tier_labels import TierLabelFinding
-from hephaestus.validation.tier_labels import scan_repository as scan_tier_labels
+from hephaestus.validation.tier_labels import TierLabelFinding, scan_repository as scan_tier_labels
 from hephaestus.validation.type_aliases import detect_shadowing, is_shadowing_pattern
 
 __all__ = [

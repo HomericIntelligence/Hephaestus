@@ -33,8 +33,6 @@ from .models import PLAN_COMMENT_MARKER, PlanReviewerOptions, WorkerResult
 from .prompts import get_plan_review_prompt
 from .review_state import (
     PLAN_REVIEW_PREFIX as _REVIEW_PREFIX_SHARED,
-)
-from .review_state import (
     is_plan_review_go,
 )
 from .session_naming import AGENT_PLAN_REVIEWER

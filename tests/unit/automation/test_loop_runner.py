@@ -767,7 +767,7 @@ def test_gh_list_repos_filters_forks_and_archived() -> None:
         '{"name":"drop-archived","isFork":false,"isArchived":true},'
         '{"name":"Odysseus","isFork":false,"isArchived":false}]'
     )
-    with patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run:
+    with patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout=payload, stderr=""
         )
@@ -786,7 +786,7 @@ def test_gh_list_repos_does_not_filter_by_name() -> None:
         '{"name":"Hephaestus","isFork":false,"isArchived":false},'
         '{"name":"AnyName","isFork":false,"isArchived":false}]'
     )
-    with patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run:
+    with patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout=payload, stderr=""
         )
@@ -800,7 +800,7 @@ def test_list_open_issue_numbers_returns_all_open_sorted() -> None:
     def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args=argv, returncode=0, stdout="12\n7\n10\n", stderr="")
 
-    with patch("hephaestus.automation.loop_runner.subprocess.run", side_effect=fake_run):
+    with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
         nums = loop_runner._list_open_issue_numbers("MyOrg", "MyRepo")
     assert nums == [7, 10, 12]
 
@@ -817,7 +817,7 @@ def test_list_open_issue_numbers_queries_all_open_no_me_filter() -> None:
         seen_argv.extend(argv)
         return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
 
-    with patch("hephaestus.automation.loop_runner.subprocess.run", side_effect=fake_run):
+    with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
         loop_runner._list_open_issue_numbers("Org", "Repo")
     assert "--author" not in seen_argv
     assert "--assignee" not in seen_argv
@@ -969,7 +969,7 @@ def test_detect_cwd_repo_parses_ssh_url() -> None:
             args=argv, returncode=0, stdout="git@github.com:MyOrg/MyRepo.git\n", stderr=""
         )
 
-    with patch("hephaestus.automation.loop_runner.subprocess.run", side_effect=fake_run):
+    with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
         org, repo = loop_runner._detect_cwd_repo()
     assert org == "MyOrg"
     assert repo == "MyRepo"
@@ -987,7 +987,7 @@ def test_detect_cwd_repo_parses_https_url() -> None:
             args=argv, returncode=0, stdout="https://github.com/HOrg/R.git\n", stderr=""
         )
 
-    with patch("hephaestus.automation.loop_runner.subprocess.run", side_effect=fake_run):
+    with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
         org, repo = loop_runner._detect_cwd_repo()
     assert org == "HOrg"
     assert repo == "R"
@@ -996,7 +996,7 @@ def test_detect_cwd_repo_parses_https_url() -> None:
 def test_detect_cwd_repo_returns_none_when_not_git() -> None:
     """``git rev-parse`` failure → ``(None, None)``."""
     with patch(
-        "hephaestus.automation.loop_runner.subprocess.run",
+        "hephaestus.automation.loop_repo_manager.subprocess.run",
         side_effect=subprocess.CalledProcessError(128, ["git"]),
     ):
         org, repo = loop_runner._detect_cwd_repo()
@@ -1097,14 +1097,14 @@ class TestSubprocessTimeouts:
 
     def test_gh_list_repos_passes_timeout(self) -> None:
         """``gh repo list`` is a network op bounded by gh_cli_timeout()."""
-        with patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run:
+        with patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run:
             mock_run.return_value = _completed(stdout="[]")
             loop_runner._gh_list_repos("MyOrg")
         assert mock_run.call_args.kwargs["timeout"] == gh_cli_timeout()
 
     def test_gh_issue_numbers_passes_timeout(self) -> None:
         """``gh issue list`` is bounded by gh_cli_timeout()."""
-        with patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run:
+        with patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run:
             mock_run.return_value = _completed(stdout="1\n2\n")
             loop_runner._list_open_issue_numbers("Org", "Repo")
         assert mock_run.call_args.kwargs["timeout"] == gh_cli_timeout()
@@ -1127,8 +1127,8 @@ class TestSubprocessTimeouts:
     def test_rebase_main_git_ops_pass_metadata_timeout(self, tmp_path: Path) -> None:
         """The local git ops in _rebase_main carry METADATA_TIMEOUT."""
         with (
-            patch("hephaestus.automation.loop_runner.resilient_call") as mock_resilient,
-            patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run,
+            patch("hephaestus.automation.loop_repo_manager.resilient_call") as mock_resilient,
+            patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run,
         ):
             mock_resilient.return_value = _completed()
 
@@ -1150,14 +1150,14 @@ class TestSubprocessTimeouts:
 
     def test_gh_list_repos_timeout_raises_systemexit(self) -> None:
         """A timed-out ``gh repo list`` surfaces as a clean SystemExit."""
-        with patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run:
+        with patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=120)
             with pytest.raises(SystemExit, match="timed out"):
                 loop_runner._gh_list_repos("MyOrg")
 
     def test_gh_issue_numbers_timeout_returns_empty_list(self) -> None:
         """A timed-out issue query degrades to an empty list, not a crash."""
-        with patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run:
+        with patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=120)
             assert loop_runner._list_open_issue_numbers("Org", "Repo") == []
 
@@ -1168,7 +1168,7 @@ class TestResilientCallAdoption:
     def test_ensure_clone_uses_resilient_call_with_network_timeout(self, tmp_path: Path) -> None:
         """``_ensure_clone`` delegates the clone to resilient_call."""
         dest = tmp_path / "Repo"
-        with patch("hephaestus.automation.loop_runner.resilient_call") as mock_resilient:
+        with patch("hephaestus.automation.loop_repo_manager.resilient_call") as mock_resilient:
             mock_resilient.return_value = _completed(returncode=0)
             _ensure_clone("Org", "Repo", dest)
         assert mock_resilient.call_count == 1
@@ -1180,8 +1180,8 @@ class TestResilientCallAdoption:
     def test_rebase_main_fetch_uses_resilient_call(self, tmp_path: Path) -> None:
         """``_rebase_main`` routes the network fetch through resilient_call."""
         with (
-            patch("hephaestus.automation.loop_runner.resilient_call") as mock_resilient,
-            patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run,
+            patch("hephaestus.automation.loop_repo_manager.resilient_call") as mock_resilient,
+            patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run,
         ):
             mock_resilient.return_value = _completed()
 
@@ -1216,7 +1216,7 @@ class TestResilientCallAdoption:
         def _hang(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
             raise subprocess.TimeoutExpired(cmd="gh repo clone", timeout=120)
 
-        with patch("hephaestus.automation.loop_runner.subprocess.run", side_effect=_hang):
+        with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=_hang):
             with pytest.raises(subprocess.TimeoutExpired):
                 _ensure_clone("Org", "Repo", dest)
 
@@ -1231,9 +1231,9 @@ class TestResilientCallAdoption:
             raise subprocess.TimeoutExpired(cmd="git fetch", timeout=120)
 
         with (
-            patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run,
+            patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run,
             patch(
-                "hephaestus.automation.loop_runner.resilient_call",
+                "hephaestus.automation.loop_repo_manager.resilient_call",
                 side_effect=_hang,
             ),
         ):
@@ -1254,9 +1254,10 @@ class TestResilientCallAdoption:
                 return _completed(stdout="def5678")
             return _completed()
 
+        _lrm = "hephaestus.automation.loop_repo_manager"
         with (
-            patch("hephaestus.automation.loop_runner.resilient_call", return_value=_completed()),
-            patch("hephaestus.automation.loop_runner.subprocess.run", side_effect=fake_run),
+            patch(f"{_lrm}.resilient_call", return_value=_completed()),
+            patch(f"{_lrm}.subprocess.run", side_effect=fake_run),
         ):
             sha, fetch_ok = _rebase_main("Repo", tmp_path)
 
@@ -1290,9 +1291,10 @@ class TestResilientCallAdoption:
                 return _completed(stdout="local12\n")
             return _completed()
 
+        _lrm = "hephaestus.automation.loop_repo_manager"
         with (
-            patch("hephaestus.automation.loop_runner.resilient_call", return_value=_completed()),
-            patch("hephaestus.automation.loop_runner.subprocess.run", side_effect=fake_run),
+            patch(f"{_lrm}.resilient_call", return_value=_completed()),
+            patch(f"{_lrm}.subprocess.run", side_effect=fake_run),
         ):
             sha, fetch_ok = _rebase_main("Repo", tmp_path)
 
@@ -1323,11 +1325,11 @@ class TestResilientCallAdoption:
 
         with (
             patch(
-                "hephaestus.automation.loop_runner.resilient_call",
+                "hephaestus.automation.loop_repo_manager.resilient_call",
                 return_value=fetch_failure,
             ),
-            patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run,
-            caplog.at_level("WARNING", logger="hephaestus.automation.loop_runner"),
+            patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run,
+            caplog.at_level("WARNING", logger="hephaestus.automation.loop_repo_manager"),
         ):
             mock_run.return_value = _completed(stdout="abc1234")
             sha, fetch_ok = _rebase_main("Repo", tmp_path)
@@ -1342,10 +1344,10 @@ class TestResilientCallAdoption:
         """A zero-rc fetch returns ``fetch_ok=True`` and the unmodified SHA."""
         with (
             patch(
-                "hephaestus.automation.loop_runner.resilient_call",
+                "hephaestus.automation.loop_repo_manager.resilient_call",
                 return_value=_completed(returncode=0),
             ),
-            patch("hephaestus.automation.loop_runner.subprocess.run") as mock_run,
+            patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run,
         ):
             mock_run.return_value = _completed(stdout="abc1234")
             sha, fetch_ok = _rebase_main("Repo", tmp_path)

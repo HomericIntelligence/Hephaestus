@@ -20,8 +20,7 @@ from typing import Any
 
 from ._review_utils import instance_log
 from .curses_ui import CursesUI, ThreadLogManager
-from .git_utils import get_repo_root as _default_get_repo_root
-from .git_utils import issue_ref
+from .git_utils import get_repo_root as _default_get_repo_root, issue_ref
 from .github_api import write_secure
 from .models import ReviewPhase, ReviewState, WorkerResult
 from .status_tracker import StatusTracker

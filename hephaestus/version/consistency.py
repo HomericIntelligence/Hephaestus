@@ -27,8 +27,7 @@ import argparse
 import re
 import subprocess
 import sys
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as _dist_version
+from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
 
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status, format_output

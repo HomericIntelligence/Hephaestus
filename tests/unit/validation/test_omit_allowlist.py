@@ -32,7 +32,7 @@ class TestOmitAllowlist:
 
         omit_list = pyproject.get("tool", {}).get("coverage", {}).get("run", {}).get("omit", [])
 
-        # Expected omit list: test globs + 16 automation modules
+        # Expected omit list: test globs + 17 automation modules
         expected_globs = {
             "*/tests/*",
             "*/__init__.py",
@@ -51,6 +51,8 @@ class TestOmitAllowlist:
             "hephaestus/automation/ci_fix_orchestrator.py",
             "hephaestus/automation/post_merge_processor.py",
             "hephaestus/automation/loop_runner.py",
+            # loop_repo_manager.py: repo-management cluster extracted from loop_runner.py
+            "hephaestus/automation/loop_repo_manager.py",
             "hephaestus/automation/curses_ui.py",
             "hephaestus/automation/github_api.py",
             "hephaestus/automation/pr_reviewer.py",

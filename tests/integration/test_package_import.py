@@ -82,8 +82,7 @@ class TestTopLevelImports:
         PyPI distribution name ("HomericIntelligence-Hephaestus"), not the import name
         ("hephaestus"), which it does not normalize to the same key.
         """
-        from importlib.metadata import PackageNotFoundError
-        from importlib.metadata import version as pkg_version
+        from importlib.metadata import PackageNotFoundError, version as pkg_version
 
         import hephaestus
 

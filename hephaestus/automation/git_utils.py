@@ -17,8 +17,7 @@ from pathlib import Path
 # import path for the automation package and its tests. The ``X as X`` form
 # marks it an explicit re-export so mypy does not flag ``attr-defined`` at the
 # 13 import sites under --no-implicit-reexport.
-from hephaestus.utils.helpers import get_repo_root as get_repo_root
-from hephaestus.utils.helpers import run_subprocess
+from hephaestus.utils.helpers import get_repo_root as get_repo_root, run_subprocess
 from hephaestus.utils.retry import retry_with_backoff
 
 logger = logging.getLogger(__name__)

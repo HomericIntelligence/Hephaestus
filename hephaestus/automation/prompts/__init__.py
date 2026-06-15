@@ -25,24 +25,28 @@ importers continue to work unchanged.
 # previously did ``from hephaestus.automation.prompts import _fence_untrusted``
 # or ``prompts._STRICT_GRADING_AND_ANTI_INFLATION``. The ``as`` aliases tell
 # ruff these are intentional re-exports, not unused imports.
-from ._shared import _TERSE_OUTPUT_DIRECTIVE as _TERSE_OUTPUT_DIRECTIVE
-from ._shared import _UNTRUSTED_NOTICE as _UNTRUSTED_NOTICE
-from ._shared import _fence_untrusted as _fence_untrusted
-from ._shared import _iteration_guidance as _iteration_guidance
-from ._shared import _iteration_label as _iteration_label
-from ._shared import _prior_review_block as _prior_review_block
-from ._shared import _prompts_logger as _prompts_logger
-from ._shared import _relativize_path as _relativize_path
-from ._strict_rubric import _FULL_SWEEP_SUFFIX as _FULL_SWEEP_SUFFIX
-from ._strict_rubric import _IMPL_LOOP_STRICT_RUBRIC as _IMPL_LOOP_STRICT_RUBRIC
-from ._strict_rubric import _PLAN_LOOP_STRICT_RUBRIC as _PLAN_LOOP_STRICT_RUBRIC
-from ._strict_rubric import _PLAN_STRICT_RUBRIC as _PLAN_STRICT_RUBRIC
-from ._strict_rubric import _PR_STRICT_RUBRIC as _PR_STRICT_RUBRIC
-from ._strict_rubric import _PR_STRICT_RUBRIC_DIMENSIONS as _PR_STRICT_RUBRIC_DIMENSIONS
-from ._strict_rubric import _SEVEN_PRINCIPLES_DIMENSIONS as _SEVEN_PRINCIPLES_DIMENSIONS
-from ._strict_rubric import _STRICT_GRADING_AND_ANTI_INFLATION as _STRICT_GRADING_AND_ANTI_INFLATION
-from ._strict_rubric import _STRICT_REVIEW_OUTPUT_FORMAT as _STRICT_REVIEW_OUTPUT_FORMAT
-from ._strict_rubric import _STRICT_REVIEW_RUBRIC as _STRICT_REVIEW_RUBRIC
+from ._shared import (
+    _TERSE_OUTPUT_DIRECTIVE as _TERSE_OUTPUT_DIRECTIVE,
+    _UNTRUSTED_NOTICE as _UNTRUSTED_NOTICE,
+    _fence_untrusted as _fence_untrusted,
+    _iteration_guidance as _iteration_guidance,
+    _iteration_label as _iteration_label,
+    _prior_review_block as _prior_review_block,
+    _prompts_logger as _prompts_logger,
+    _relativize_path as _relativize_path,
+)
+from ._strict_rubric import (
+    _FULL_SWEEP_SUFFIX as _FULL_SWEEP_SUFFIX,
+    _IMPL_LOOP_STRICT_RUBRIC as _IMPL_LOOP_STRICT_RUBRIC,
+    _PLAN_LOOP_STRICT_RUBRIC as _PLAN_LOOP_STRICT_RUBRIC,
+    _PLAN_STRICT_RUBRIC as _PLAN_STRICT_RUBRIC,
+    _PR_STRICT_RUBRIC as _PR_STRICT_RUBRIC,
+    _PR_STRICT_RUBRIC_DIMENSIONS as _PR_STRICT_RUBRIC_DIMENSIONS,
+    _SEVEN_PRINCIPLES_DIMENSIONS as _SEVEN_PRINCIPLES_DIMENSIONS,
+    _STRICT_GRADING_AND_ANTI_INFLATION as _STRICT_GRADING_AND_ANTI_INFLATION,
+    _STRICT_REVIEW_OUTPUT_FORMAT as _STRICT_REVIEW_OUTPUT_FORMAT,
+    _STRICT_REVIEW_RUBRIC as _STRICT_REVIEW_RUBRIC,
+)
 from .address_review import ADDRESS_REVIEW_PROMPT, get_address_review_prompt
 from .advise import (
     ADVISE_PROMPT,

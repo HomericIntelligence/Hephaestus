@@ -34,8 +34,7 @@ from typing import Any
 from .git_utils import get_repo_info, get_repo_root, issue_ref
 from .github_api import _gh_call, gh_issue_add_labels, gh_issue_json
 from .protocol import PLAN_REVIEW_PREFIX as PLAN_REVIEW_PREFIX
-from .state_labels import STATE_PLAN_GO, STATE_PLAN_NO_GO
-from .state_labels import is_plan_go as labels_are_plan_go
+from .state_labels import STATE_PLAN_GO, STATE_PLAN_NO_GO, is_plan_go as labels_are_plan_go
 
 logger = logging.getLogger(__name__)
 

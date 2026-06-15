@@ -7,8 +7,7 @@ leaf module so importers do not need to evaluate `hephaestus/__init__.py`.
 
 from __future__ import annotations
 
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as _pkg_version
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 # The PyPI distribution name is "HomericIntelligence-Hephaestus", which
 # importlib.metadata does NOT normalize to the import name "hephaestus".

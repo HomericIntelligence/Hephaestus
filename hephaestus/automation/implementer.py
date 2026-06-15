@@ -77,10 +77,10 @@ from .dependency_resolver import CyclicDependencyError, DependencyResolver
 # ``implicit_reexport=false`` and makes the re-export intentional.
 from .git_utils import (
     get_repo_root as get_repo_root,
+    run,
 )
-from .git_utils import run
-from .github_api import fetch_issue_info
 from .github_api import (
+    fetch_issue_info,
     gh_list_open_issues as gh_list_open_issues,
 )
 
@@ -89,8 +89,6 @@ from .github_api import (
 # ``implementer._parse_args()`` continue to work unchanged.
 from .implementer_cli import (
     _parse_args as _parse_args,
-)
-from .implementer_cli import (
     _setup_logging as _setup_logging,
 )
 from .implementer_phase_runner import MAX_REVIEW_ITERATIONS, ImplementationPhaseRunner

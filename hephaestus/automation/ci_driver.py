@@ -38,8 +38,10 @@ from .address_review import (
 )
 from .advise_runner import run_advise
 from .arming_state import ArmingStateStore
-from .ci_check_inspector import FAILING_CHECK_CONCLUSIONS as FAILING_CHECK_CONCLUSIONS  # re-export
-from .ci_check_inspector import CICheckInspector
+from .ci_check_inspector import (
+    FAILING_CHECK_CONCLUSIONS as FAILING_CHECK_CONCLUSIONS,  # re-export
+    CICheckInspector,
+)
 from .ci_fix_orchestrator import CIFixOrchestrator
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import advise_model
