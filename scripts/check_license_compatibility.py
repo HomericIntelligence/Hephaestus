@@ -15,9 +15,9 @@ FAILS LOUDLY (never silently passes):
     -> coverage hole -> exit 2. CI installs `.[all]` on a setup-python runner first.
   * a license string not in the mapping tables -> exit (PR:1 / main:0) with a
     hint to extend TROVE_TO_SPDX / LICENSE_ALIASES.
-  * a distributed dep whose PEP 508 marker excludes the current interpreter
-    -> classified via FALLBACK_LICENSES (NOTICE-backed); if no entry exists
-    -> exit 2. Add new marker-excluded deps to FALLBACK_LICENSES.
+  * a markered-out dep (installable_now=False) with no entry in
+    STATIC_FALLBACK_LICENSES -> exit 2. Add the package + SPDX id from NOTICE,
+    then update the cross-check tests in tests/unit/scripts/.
 
 Stdlib only (importlib.metadata + packaging, both already runtime deps); runs
 under plain `python3` once the package + extras are pip-installed.
@@ -55,15 +55,15 @@ ALLOWED_EXTRA_COPYLEFT: dict[str, frozenset[str]] = {
     "defusedxml": frozenset({"PSF-2.0", "Python-2.0"}),
 }
 
-# Static license fallback for distributed deps whose PEP 508 marker excludes
-# the CI interpreter/platform (tomli: python_version < '3.11'; tzdata:
-# platform_system == 'Windows'). These packages are never installed in the
-# current CI leg so their metadata is not resolvable; licenses are taken from
-# NOTICE, which is the human-maintained authoritative record. Any future
-# incompatible license change MUST update both NOTICE and this map.
-FALLBACK_LICENSES: dict[str, list[str]] = {
-    "tomli": ["MIT"],  # NOTICE: "toml extra / tomli  MIT"
-    "tzdata": ["Apache-2.0"],  # NOTICE: "tzdata  Apache-2.0"
+# Static license fallback for deps whose markers exclude the current interpreter
+# or platform. These are never installed in this CI leg (Python 3.13 / Linux)
+# so importlib.metadata cannot reach them. Values are SPDX IDs taken from NOTICE
+# (the authoritative human-readable analysis). Keep in sync with NOTICE — the
+# test suite cross-checks both keys and values against NOTICE and against real
+# installed metadata when the dep is actually installable.
+STATIC_FALLBACK_LICENSES: dict[str, list[str]] = {
+    "tomli": ["MIT"],  # python_version < '3.11'; NOTICE:58
+    "tzdata": ["Apache-2.0"],  # platform_system == 'Windows'; NOTICE:28
 }
 
 TROVE_TO_SPDX: dict[str, str] = {
@@ -278,19 +278,19 @@ def scan(records: dict[str, dict] | None = None) -> list[tuple[str, list[str]]]:
                     file=sys.stderr,
                 )
                 sys.exit(2)
-            fallback = FALLBACK_LICENSES.get(pkg)
+            fallback = STATIC_FALLBACK_LICENSES.get(pkg)
             if fallback is None:
                 print(
-                    f"FATAL: distributed dependency {pkg!r} is not installable "
-                    "in this environment (marker excludes it) AND has no entry in "
-                    "FALLBACK_LICENSES. Add its NOTICE-documented license to "
-                    "FALLBACK_LICENSES in scripts/check_license_compatibility.py.",
+                    f"FATAL: {pkg!r} is distributed (marker holds on another "
+                    "Python/platform) but not installed here and has no entry "
+                    "in STATIC_FALLBACK_LICENSES. Add it with its SPDX license "
+                    "from NOTICE, then update the cross-check tests.",
                     file=sys.stderr,
                 )
                 sys.exit(2)
             print(
-                f"note: {pkg!r} not installable here (marker excluded); "
-                f"classifying from FALLBACK_LICENSES: {fallback}",
+                f"note: {pkg!r} excluded by marker in this env; "
+                f"classifying via static fallback from NOTICE: {fallback}",
                 file=sys.stderr,
             )
             ids = fallback
