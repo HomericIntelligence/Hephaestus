@@ -34,9 +34,23 @@ from hephaestus.validation.python_version import (
 from hephaestus.validation.python_version import (
     extract_project_version as extract_project_version,
 )
-from hephaestus.validation.python_version import (  # noqa: F401
+from hephaestus.validation.python_version import (
     extract_pyproject_versions_str as extract_pyproject_versions,
 )
 from hephaestus.validation.python_version import (
     main as main,
 )
+
+__all__ = [
+    "check_ci_matrix_coverage",
+    "check_pixi_python_ceiling",
+    "check_project_version_consistency",
+    "check_python_version_consistency",
+    "extract_ci_matrix_python_versions",
+    "extract_classifiers_python_versions",
+    "extract_pixi_python_ceiling",
+    "extract_pixi_workspace_version",
+    "extract_project_version",
+    "extract_pyproject_versions",
+    "main",
+]
