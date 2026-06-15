@@ -69,17 +69,20 @@ def load_documented_tiers(
 ) -> tuple[dict[str, str], dict[str, list[str]], int]:
     """Parse the Console-Script Stability Tiers table.
 
-    Skips separator rows (``|---|---|``) and the header row. Continues past
-    non-target H2 headings so that a SECOND ``## Console-Script Stability
-    Tiers`` section later in the file is also parsed (and detected as a
-    duplicate-section violation by :func:`find_duplicate_sections`).
+    Skips separator rows (``|---|---|``) and the header row. Stops at the
+    next section heading or first non-table line after the table starts.
+    Accumulates rows from ALL ``## Console-Script Stability Tiers`` sections
+    into the same ``occurrences`` dict so cross-section contradictions are
+    detected.
 
     Returns:
         A ``(tiers, occurrences, section_count)`` triple. ``tiers`` is the
-        flattened ``{cli: tier}`` mapping (last occurrence wins). ``occurrences``
-        is ``{cli: [tier, tier, ...]}`` preserving EVERY row across ALL matching
-        sections. ``section_count`` is the number of ``## Console-Script
-        Stability Tiers`` headers found; >1 means a duplicate-section violation.
+        flattened ``{cli: tier}`` mapping (last occurrence wins, used for the
+        membership/valid-value checks). ``occurrences`` is
+        ``{cli: [tier, tier, ...]}`` preserving EVERY parsed row so the
+        caller can detect a CLI documented more than once. ``section_count``
+        is the number of ``## Console-Script Stability Tiers`` headers found;
+        >1 indicates a duplicate section.
 
     """
     occurrences: dict[str, list[str]] = {}
@@ -92,9 +95,8 @@ def load_documented_tiers(
             in_table = False
             section_count += 1
             continue
-        if line.startswith("## ") and not _SECTION_HEADER_RE.match(line):
-            # A different H2: exit the current section but keep scanning.
-            in_section = False
+        if in_section and line.startswith("## ") and not _SECTION_HEADER_RE.match(line):
+            in_section = False  # exit section; keep scanning for another tier section
             in_table = False
             continue
         if not in_section:
@@ -148,27 +150,6 @@ def find_duplicate_tiers(occurrences: dict[str, list[str]]) -> list[TierDocFindi
                 )
             )
     return findings
-
-
-def find_duplicate_sections(section_count: int) -> list[TierDocFinding]:
-    """Emit a finding when the target section header appears more than once.
-
-    A document with two ``## Console-Script Stability Tiers`` sections is
-    self-contradictory regardless of whether individual rows conflict.
-    """
-    if section_count <= 1:
-        return []
-    return [
-        TierDocFinding(
-            cli="<section>",
-            kind="duplicate-section",
-            detail=(
-                f"COMPATIBILITY.md contains {section_count} "
-                f"'## Console-Script Stability Tiers' sections; "
-                "remove all but one to eliminate cross-section contradictions"
-            ),
-        )
-    ]
 
 
 def find_violations(
@@ -257,7 +238,19 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = args.repo_root or get_repo_root()
     scripts = load_pyproject_scripts(repo_root / "pyproject.toml")
     tiers, occurrences, section_count = load_documented_tiers(repo_root / "COMPATIBILITY.md")
-    duplicates = find_duplicate_sections(section_count) + find_duplicate_tiers(occurrences)
+    duplicates = find_duplicate_tiers(occurrences)
+    if section_count > 1:
+        duplicates.append(
+            TierDocFinding(
+                cli="<section>",
+                kind="duplicate-section",
+                detail=(
+                    f"COMPATIBILITY.md contains {section_count} "
+                    "'## Console-Script Stability Tiers' sections; "
+                    "merge them into one to prevent cross-section contradictions"
+                ),
+            )
+        )
     findings = find_violations(scripts, tiers, duplicates)
     print(format_json(findings) if args.json else format_report(findings))
     return 0 if not findings else 1
