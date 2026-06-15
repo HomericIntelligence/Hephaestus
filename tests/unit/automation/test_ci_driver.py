@@ -2786,6 +2786,135 @@ class TestResolveDirtyPr:
         assert "conflict" in (result.error or "").lower()
 
 
+class TestResolveBlockedPr:
+    """A green-but-BLOCKED PR addresses its unresolved review threads (#1348).
+
+    Before #1348 the BLOCKED branch yielded success without ever touching the
+    threads, so a PR gated by ``required_review_thread_resolution`` sat armed
+    but unmergeable forever. The handler now dispatches the address-review
+    engine for human+bot threads, with a progress guard that bounds attempts.
+    """
+
+    @staticmethod
+    def _thread(thread_id: str) -> dict[str, Any]:
+        return {
+            "id": thread_id,
+            "path": "hephaestus/foo.py",
+            "line": 1,
+            "body": "please fix",
+            "author": "human-reviewer",
+        }
+
+    def test_no_threads_yields_armed_without_dispatch(self, driver: CIDriver) -> None:
+        """BLOCKED with no unresolved threads is gated elsewhere — keep armed yield."""
+        with (
+            patch.object(driver, "_list_unresolved_threads_safe", return_value=[]),
+            patch("hephaestus.automation.ci_driver.run_address_fix_session") as mock_session,
+            patch.object(driver, "_recheck_and_arm_after_fix") as mock_rearm,
+        ):
+            result = driver._resolve_blocked_pr(1, 2, 0)
+        assert result.success is True
+        mock_session.assert_not_called()
+        mock_rearm.assert_not_called()
+
+    def test_threads_dispatch_address_and_rearm(self, driver: CIDriver, tmp_path: Path) -> None:
+        """BLOCKED with threads → run session, resolve, then re-enter arm flow."""
+        # First list: one open thread; after addressing: empty (fully resolved).
+        list_results = [[self._thread("T1")], []]
+        with (
+            patch.object(driver, "_list_unresolved_threads_safe", side_effect=list_results),
+            patch.object(driver, "_get_worktree_path", return_value=tmp_path),
+            patch.object(driver, "_get_pr_branch", return_value="b"),
+            patch.object(driver, "_sync_worktree_and_snapshot_sha", return_value="sha0"),
+            patch.object(driver, "_push_ci_fix", return_value=True),
+            patch(
+                "hephaestus.automation.ci_driver.run_address_fix_session",
+                return_value={"addressed": ["T1"], "replies": {}},
+            ) as mock_session,
+            patch("hephaestus.automation.ci_driver.resolve_addressed_threads") as mock_resolve,
+            patch.object(
+                driver,
+                "_recheck_and_arm_after_fix",
+                return_value=WorkerResult(issue_number=1, success=True, pr_number=2),
+            ) as mock_rearm,
+        ):
+            result = driver._resolve_blocked_pr(1, 2, 0)
+        assert result.success is True
+        mock_session.assert_called_once()
+        # Only the presented thread id (T1) may reach the resolver.
+        resolve_args = mock_resolve.call_args
+        assert resolve_args.args[0] == ["T1"]
+        assert resolve_args.args[2] == {"T1"}
+        mock_rearm.assert_called_once()
+
+    def test_progress_guard_stops_when_no_threads_resolved(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """When a pass resolves nothing new, the session is NOT re-dispatched."""
+        # Same unresolved set before and after the pass → no progress → stop.
+        list_results = [[self._thread("T1")], [self._thread("T1")]]
+        with (
+            patch.object(driver, "_list_unresolved_threads_safe", side_effect=list_results),
+            patch.object(driver, "_get_worktree_path", return_value=tmp_path),
+            patch.object(driver, "_get_pr_branch", return_value="b"),
+            patch.object(driver, "_sync_worktree_and_snapshot_sha", return_value="sha0"),
+            patch.object(driver, "_push_ci_fix", return_value=True),
+            patch(
+                "hephaestus.automation.ci_driver.run_address_fix_session",
+                return_value={"addressed": [], "replies": {}},
+            ) as mock_session,
+            patch("hephaestus.automation.ci_driver.resolve_addressed_threads"),
+            patch.object(driver, "_recheck_and_arm_after_fix") as mock_rearm,
+        ):
+            result = driver._resolve_blocked_pr(1, 2, 0)
+        # Exactly one address pass (bounded — no infinite loop on unsatisfiable
+        # threads), PR left armed, and never re-entered the arm flow.
+        assert result.success is True
+        assert mock_session.call_count == 1
+        mock_rearm.assert_not_called()
+
+    def test_dry_run_yields_without_dispatch(
+        self, mock_options: CIDriverOptions, tmp_path: Path
+    ) -> None:
+        """Dry-run leaves the armed yield and never touches the address engine."""
+        mock_options.dry_run = True
+        with (
+            patch("hephaestus.automation.ci_driver.get_repo_root", return_value=tmp_path),
+            patch("hephaestus.automation.ci_driver.WorktreeManager"),
+            patch("hephaestus.automation.ci_driver.StatusTracker"),
+        ):
+            d = CIDriver(mock_options)
+            d.state_dir = tmp_path
+        with (
+            patch.object(d, "_list_unresolved_threads_safe") as mock_list,
+            patch("hephaestus.automation.ci_driver.run_address_fix_session") as mock_session,
+        ):
+            result = d._resolve_blocked_pr(1, 2, 0)
+        assert result.success is True
+        mock_list.assert_not_called()
+        mock_session.assert_not_called()
+
+    def test_blocked_outcome_routes_through_resolver(self, driver: CIDriver) -> None:
+        """``_arm_and_wait_for_merge`` BLOCKED outcome now calls the resolver."""
+        with (
+            _impl_go(driver),
+            patch.object(driver, "_enable_auto_merge", return_value=True),
+            patch.object(driver, "_is_bot_pr_mode", return_value=False),
+            patch.object(driver, "_gh_pr_state", return_value={"headRefOid": "abc"}),
+            patch.object(driver, "_get_pr_branch", return_value="b"),
+            patch.object(driver, "_arm_drive_green"),
+            patch.object(driver, "_wait_for_pr_terminal", return_value="BLOCKED"),
+            patch.object(
+                driver,
+                "_resolve_blocked_pr",
+                return_value=WorkerResult(issue_number=1, success=True, pr_number=2),
+            ) as mock_resolve,
+        ):
+            result = driver._arm_and_wait_for_merge(1, 2, 0)
+        assert result.success is True
+        mock_resolve.assert_called_once_with(1, 2, 0)
+
+
 class TestEnableAutoMergeBotRetry:
     """Bot PRs get a strategy-agnostic ``--auto`` retry before giving up (#848)."""
 

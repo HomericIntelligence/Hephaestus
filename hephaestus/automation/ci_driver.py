@@ -33,6 +33,11 @@ from hephaestus.agents.runtime import (
 from hephaestus.cli.utils import add_dry_run_arg, add_json_arg, emit_json_status
 
 from ._review_utils import add_max_workers_arg, find_pr_for_issue
+from .address_review import (
+    _parse_addressed_block,
+    resolve_addressed_threads,
+    run_address_fix_session,
+)
 from .advise_runner import run_advise
 from .arming_state import ArmingStateStore
 from .claude_invoke import invoke_claude_with_session
@@ -77,6 +82,13 @@ logger = logging.getLogger(__name__)
 # explicitly excluded. Shared with loop_runner._count_failing_prs so the
 # SKIP gate and the actual work list never drift (#819).
 FAILING_CHECK_CONCLUSIONS: frozenset[str] = frozenset({"FAILURE", "CANCELLED", "TIMED_OUT"})
+
+# Max address-review passes for a green-but-BLOCKED PR before leaving it armed
+# (#1348). The progress guard stops earlier whenever a pass resolves no new
+# threads; this cap bounds the case where each pass keeps making *some* progress
+# but never fully clears the set, so an unsatisfiable thread can never spin
+# forever.
+_BLOCKED_ADDRESS_MAX_ATTEMPTS = 2
 
 
 def _pr_is_failing(pr: dict[str, Any]) -> bool:
@@ -876,7 +888,7 @@ class CIDriver:
             if outcome == "DIRTY":
                 return self._resolve_dirty_pr(issue_number, pr_number, acquired_slot)
             if outcome == "BLOCKED":
-                return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+                return self._resolve_blocked_pr(issue_number, pr_number, acquired_slot)
         return WorkerResult(
             issue_number=issue_number,
             success=merge_ok,
@@ -1315,6 +1327,149 @@ class CIDriver:
             pr_number=pr_number,
             error=f"PR {pr_ref(pr_number)} has an unresolved merge conflict",
         )
+
+    def _resolve_blocked_pr(
+        self, issue_number: int, pr_number: int, acquired_slot: int
+    ) -> WorkerResult:
+        """Address unresolved review threads on a green-but-BLOCKED PR (#1348).
+
+        ``_wait_for_pr_terminal`` returns ``"BLOCKED"`` when CI is green but
+        branch protection still gates the merge. With
+        ``required_review_thread_resolution: true`` the most common cause is
+        unresolved review threads: the PR is armed (auto-merge enabled) but can
+        never merge while a thread stays open. The old BLOCKED branch yielded
+        success without ever addressing the threads, so the same
+        "Found N unresolved thread(s)" recurred every loop and the PR sat
+        armed-but-unmergeable forever.
+
+        This dispatches the existing address-review engine — the same
+        :func:`run_address_fix_session` → push → :func:`resolve_addressed_threads`
+        sequence the fresh-implementation loop uses (#28/#1083). A progress
+        guard bounds the work: each attempt snapshots the unresolved-thread set,
+        and if an address pass does not SHRINK that set (no real progress, e.g.
+        a thread the agent cannot satisfy) we stop rather than spin. Attempts
+        are capped at ``_BLOCKED_ADDRESS_MAX_ATTEMPTS`` so an unsatisfiable
+        thread never loops forever. When there are no unresolved threads, the
+        BLOCK is from something else and we keep the armed yield (nothing to do).
+
+        Returns a terminal ``WorkerResult``; the PR is left armed on any
+        non-progress / failure path so a later run (or a reviewer) can finish it.
+        """
+        armed_yield = WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+        if self.options.dry_run:
+            return armed_yield
+
+        threads = self._list_unresolved_threads_safe(pr_number)
+        if not threads:
+            # BLOCKED but no unresolved threads — gated by something else
+            # (e.g. a still-pending required check or a missing approval).
+            # Leave it armed; this path made no false promise of progress.
+            return armed_yield
+
+        addressed_any = False
+        for attempt in range(1, _BLOCKED_ADDRESS_MAX_ATTEMPTS + 1):
+            prior_ids = {t["id"] for t in threads if t.get("id")}
+            self.status_tracker.update_slot(
+                acquired_slot,
+                f"{pr_ref(pr_number)}: addressing review threads [A{attempt}]",
+            )
+            progressed = self._address_threads_once(issue_number, pr_number, threads)
+            addressed_any = addressed_any or progressed
+
+            threads = self._list_unresolved_threads_safe(pr_number)
+            remaining_ids = {t["id"] for t in threads if t.get("id")}
+            if not remaining_ids:
+                # Everything resolved — re-enter check→arm→wait so the now
+                # unblocked PR can proceed to merge.
+                break
+            # PROGRESS GUARD (#1348): if the unresolved set did not SHRINK,
+            # this attempt made no headway. Do not loop again — a thread the
+            # agent cannot satisfy would otherwise spin forever.
+            if not (prior_ids - remaining_ids):
+                logger.info(
+                    "Issue #%s: PR #%s address attempt %s resolved no new threads "
+                    "(%s still unresolved); leaving armed for review",
+                    issue_number,
+                    pr_number,
+                    attempt,
+                    len(remaining_ids),
+                )
+                return armed_yield
+
+        if not addressed_any:
+            return armed_yield
+
+        # Threads were addressed + pushed; re-enter the check→arm→wait flow so
+        # the now-resolved PR can move toward merge (mirrors the CI-fix path).
+        rearmed = self._recheck_and_arm_after_fix(issue_number, pr_number, acquired_slot)
+        return rearmed if rearmed is not None else armed_yield
+
+    def _address_threads_once(
+        self, issue_number: int, pr_number: int, threads: list[dict[str, Any]]
+    ) -> bool:
+        """Run one address-review fix session over *threads*, then push + resolve.
+
+        Mirrors the implementer loop's in-loop address step
+        (:meth:`ReviewPhase._run_address_review_step`): syncs the PR worktree,
+        runs :func:`run_address_fix_session`, pushes the resulting commit via
+        the shared CI-fix push contract (head-advancement + lease), then resolves
+        only the threads the agent explicitly reported as addressed (with the
+        hallucination guard inside :func:`resolve_addressed_threads`).
+
+        Returns ``True`` iff a real commit was pushed (the agent made progress).
+        """
+        worktree_path = self._get_worktree_path(issue_number, pr_number)
+        pr_head_branch = self._get_pr_branch(pr_number)
+        pre_agent_sha = self._sync_worktree_and_snapshot_sha(
+            issue_number, worktree_path, pr_head_branch
+        )
+        if pre_agent_sha is None:
+            return False
+
+        log_file = self.state_dir / f"address-review-blocked-{issue_number}.log"
+        try:
+            fix_result = run_address_fix_session(
+                issue_number=issue_number,
+                pr_number=pr_number,
+                worktree_path=worktree_path,
+                threads=threads,
+                agent=self.options.agent,
+                repo_root=self.repo_root,
+                parse_fn=_parse_addressed_block,
+                log_file=log_file,
+                dry_run=self.options.dry_run,
+            )
+        except RuntimeError as exc:
+            logger.warning(
+                "Issue #%s: address-review session failed for PR #%s: %s",
+                issue_number,
+                pr_number,
+                exc,
+            )
+            return False
+
+        # Gate on a REAL pushed commit, exactly like the CI-fix path: the
+        # agent's self-reported ``addressed`` list is untrusted, so only a
+        # head-advancing, pushable worktree counts as progress.
+        pushed = self._push_ci_fix(
+            worktree_path=worktree_path,
+            pre_agent_sha=pre_agent_sha,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            pr_head_branch=pr_head_branch,
+            session_id=None,
+        )
+        if not pushed:
+            return False
+
+        presented_ids = {t["id"] for t in threads if t.get("id")}
+        resolve_addressed_threads(
+            fix_result.get("addressed", []),
+            fix_result.get("replies", {}),
+            presented_ids,
+            dry_run=self.options.dry_run,
+        )
+        return True
 
     def _attempt_ci_fixes(
         self,
