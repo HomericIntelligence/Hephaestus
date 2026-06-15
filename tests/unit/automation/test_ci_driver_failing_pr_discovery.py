@@ -345,9 +345,12 @@ class TestFailingCheckPredicateSingleDefinition:
                     for t in node.targets:
                         if isinstance(t, ast.Name) and t.id == target:
                             hits.append(py_file)
-                elif isinstance(node, ast.AnnAssign):
-                    if isinstance(node.target, ast.Name) and node.target.id == target:
-                        hits.append(py_file)
+                elif (
+                    isinstance(node, ast.AnnAssign)
+                    and isinstance(node.target, ast.Name)
+                    and node.target.id == target
+                ):
+                    hits.append(py_file)
         return hits
 
     def _count_function_defs(self, name: str) -> list[Path]:
