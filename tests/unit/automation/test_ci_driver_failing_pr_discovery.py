@@ -148,9 +148,9 @@ class TestDiscoverFailingPrs:
                 "mergeStateStatus": "CLEAN",
             },
         ]
-        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+        with patch("hephaestus.automation.pr_discovery.get_repo_info") as mock_repo_info:
             mock_repo_info.return_value = ("MyOrg", "MyRepo")
-            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+            with patch("hephaestus.automation.pr_discovery._gh_call") as mock_gh_call:
                 mock_gh_call.return_value = Mock(stdout=json.dumps(mock_output))
                 result = ci_driver._discover_failing_prs()
         assert result == {1: 1}
@@ -166,9 +166,9 @@ class TestDiscoverFailingPrs:
                 "mergeStateStatus": "BLOCKED",
             },
         ]
-        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+        with patch("hephaestus.automation.pr_discovery.get_repo_info") as mock_repo_info:
             mock_repo_info.return_value = ("MyOrg", "MyRepo")
-            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+            with patch("hephaestus.automation.pr_discovery._gh_call") as mock_gh_call:
                 mock_gh_call.return_value = Mock(stdout=json.dumps(mock_output))
                 result = ci_driver._discover_failing_prs()
         assert result == {3: 3}
@@ -183,9 +183,9 @@ class TestDiscoverFailingPrs:
                 "mergeStateStatus": "CLEAN",
             },
         ]
-        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+        with patch("hephaestus.automation.pr_discovery.get_repo_info") as mock_repo_info:
             mock_repo_info.return_value = ("MyOrg", "MyRepo")
-            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+            with patch("hephaestus.automation.pr_discovery._gh_call") as mock_gh_call:
                 mock_gh_call.return_value = Mock(stdout=json.dumps(mock_output))
                 result = ci_driver._discover_failing_prs()
         assert result == {}
@@ -194,9 +194,9 @@ class TestDiscoverFailingPrs:
         """Discovery returns empty dict on gh command failure."""
         import subprocess
 
-        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+        with patch("hephaestus.automation.pr_discovery.get_repo_info") as mock_repo_info:
             mock_repo_info.return_value = ("MyOrg", "MyRepo")
-            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+            with patch("hephaestus.automation.pr_discovery._gh_call") as mock_gh_call:
                 mock_gh_call.side_effect = subprocess.CalledProcessError(1, "gh")
                 result = ci_driver._discover_failing_prs()
         assert result == {}
@@ -205,9 +205,9 @@ class TestDiscoverFailingPrs:
         """Discovery returns empty dict when gh pr list times out (docstring contract)."""
         import subprocess
 
-        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+        with patch("hephaestus.automation.pr_discovery.get_repo_info") as mock_repo_info:
             mock_repo_info.return_value = ("MyOrg", "MyRepo")
-            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+            with patch("hephaestus.automation.pr_discovery._gh_call") as mock_gh_call:
                 mock_gh_call.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=30)
                 result = ci_driver._discover_failing_prs()
         assert result == {}
@@ -216,9 +216,9 @@ class TestDiscoverFailingPrs:
         self, ci_driver: CIDriver
     ) -> None:
         """Discovery returns empty dict when the gh binary is missing/unexecutable."""
-        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+        with patch("hephaestus.automation.pr_discovery.get_repo_info") as mock_repo_info:
             mock_repo_info.return_value = ("MyOrg", "MyRepo")
-            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+            with patch("hephaestus.automation.pr_discovery._gh_call") as mock_gh_call:
                 mock_gh_call.side_effect = FileNotFoundError(2, "No such file or directory", "gh")
                 result = ci_driver._discover_failing_prs()
         assert result == {}
@@ -234,20 +234,20 @@ class TestDiscoverFailingPrs:
             }
             for i in range(1, 1001)
         ]
-        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+        with patch("hephaestus.automation.pr_discovery.get_repo_info") as mock_repo_info:
             mock_repo_info.return_value = ("MyOrg", "MyRepo")
-            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+            with patch("hephaestus.automation.pr_discovery._gh_call") as mock_gh_call:
                 mock_gh_call.return_value = Mock(stdout=json.dumps(mock_output))
-                with patch("hephaestus.automation.ci_driver.logger") as mock_logger:
+                with patch("hephaestus.automation.pr_discovery.logger") as mock_logger:
                     result = ci_driver._discover_failing_prs()
         assert len(result) == 1000
         mock_logger.warning.assert_called()
 
     def test_discover_failing_prs_returns_empty_on_invalid_json(self, ci_driver: CIDriver) -> None:
         """Discovery returns empty dict on invalid JSON."""
-        with patch("hephaestus.automation.ci_driver.get_repo_info") as mock_repo_info:
+        with patch("hephaestus.automation.pr_discovery.get_repo_info") as mock_repo_info:
             mock_repo_info.return_value = ("MyOrg", "MyRepo")
-            with patch("hephaestus.automation.ci_driver._gh_call") as mock_gh_call:
+            with patch("hephaestus.automation.pr_discovery._gh_call") as mock_gh_call:
                 mock_gh_call.return_value = Mock(stdout="not-json")
                 result = ci_driver._discover_failing_prs()
         assert result == {}
@@ -367,14 +367,22 @@ class TestFailingCheckPredicateSingleDefinition:
         return hits
 
     def test_failing_check_conclusions_defined_exactly_once(self) -> None:
-        """FAILING_CHECK_CONCLUSIONS must have a single canonical definition."""
+        """FAILING_CHECK_CONCLUSIONS must have a single canonical definition.
+
+        The canonical home moved from ci_driver.py to ci_check_inspector.py in
+        the CIDriver decomposition (#1357 / refs #1179, #1289): the constant
+        belongs to the check-inspector that queries CI check state. ci_driver.py
+        re-exports it (an import, not an assignment) for backward compatibility,
+        so the DRY guard from #1345 still holds — exactly one assignment, no
+        drift across the automation package.
+        """
         hits = self._count_assignments("FAILING_CHECK_CONCLUSIONS")
         assert len(hits) == 1, (
             f"Expected exactly 1 definition of FAILING_CHECK_CONCLUSIONS, "
             f"found {len(hits)}: {[str(p) for p in hits]}"
         )
-        assert hits[0].name == "ci_driver.py", (
-            f"Canonical definition must be in ci_driver.py, not {hits[0].name}"
+        assert hits[0].name == "ci_check_inspector.py", (
+            f"Canonical definition must be in ci_check_inspector.py, not {hits[0].name}"
         )
 
     def test_pr_is_failing_defined_exactly_once(self) -> None:

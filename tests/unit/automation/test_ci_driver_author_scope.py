@@ -44,7 +44,9 @@ def driver(mock_options: CIDriverOptions, tmp_path: Path) -> CIDriver:
 @pytest.fixture
 def viewer_driver(driver: CIDriver) -> CIDriver:
     """Driver with viewer login pre-cached to 'mvillmow' so filter is deterministic."""
-    driver._viewer_login = "mvillmow"
+    # Viewer-login cache moved into PRDiscovery in the CIDriver decomposition
+    # (#1357 / refs #1179, #1289).
+    driver._pr_discovery._viewer_login = "mvillmow"
     return driver
 
 
@@ -105,9 +107,9 @@ class TestDefaultScopedDiscovery:
     def test_bot_pr_discovery_filters_to_viewer(self, viewer_driver: CIDriver) -> None:
         viewer_driver.options.include_all_authors = False
         with (
-            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.pr_discovery._gh_call",
                 return_value=MagicMock(stdout=json.dumps(_MIXED_PULLS)),
             ),
         ):
@@ -116,12 +118,14 @@ class TestDefaultScopedDiscovery:
     def test_open_prs_remaining_filters_to_viewer(self, viewer_driver: CIDriver) -> None:
         viewer_driver.options.include_all_authors = False
         with (
-            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.pr_discovery._gh_call",
                 return_value=MagicMock(stdout=json.dumps(_MIXED_PULLS)),
             ),
-            patch.object(viewer_driver, "_pr_merge_state", return_value=("CLEAN", "MERGEABLE")),
+            patch.object(
+                viewer_driver._pr_discovery, "pr_merge_state", return_value=("CLEAN", "MERGEABLE")
+            ),
         ):
             remaining = viewer_driver._list_open_prs_remaining()
         assert [pr["number"] for pr in remaining] == [100]
@@ -133,9 +137,9 @@ class TestAllFlagScopedDiscovery:
     def test_bot_pr_discovery_returns_all_bots(self, driver: CIDriver) -> None:
         driver.options.include_all_authors = True
         with (
-            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.pr_discovery._gh_call",
                 return_value=MagicMock(stdout=json.dumps(_MIXED_PULLS)),
             ),
         ):
@@ -144,12 +148,14 @@ class TestAllFlagScopedDiscovery:
     def test_open_prs_remaining_returns_all_prs(self, driver: CIDriver) -> None:
         driver.options.include_all_authors = True
         with (
-            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.pr_discovery._gh_call",
                 return_value=MagicMock(stdout=json.dumps(_MIXED_PULLS)),
             ),
-            patch.object(driver, "_pr_merge_state", return_value=("CLEAN", "MERGEABLE")),
+            patch.object(
+                driver._pr_discovery, "pr_merge_state", return_value=("CLEAN", "MERGEABLE")
+            ),
         ):
             remaining = driver._list_open_prs_remaining()
         assert sorted(pr["number"] for pr in remaining) == [100, 101, 102]
@@ -171,33 +177,36 @@ class TestResolveViewerLogin:
     """Viewer login resolution is lazy, cached, and fails CLOSED."""
 
     def test_resolve_caches_value(self, driver: CIDriver) -> None:
-        driver._viewer_login = ""  # reset
+        driver._pr_discovery._viewer_login = ""  # reset
         with patch(
-            "hephaestus.automation.ci_driver._gh_call", return_value=MagicMock(stdout="mvillmow\n")
+            "hephaestus.automation.pr_discovery._gh_call",
+            return_value=MagicMock(stdout="mvillmow\n"),
         ) as mock_gh:
             assert driver._resolve_viewer_login() == "mvillmow"
             assert driver._resolve_viewer_login() == "mvillmow"
         assert mock_gh.call_count == 1
 
     def test_resolve_failure_raises_runtimeerror(self, driver: CIDriver) -> None:
-        driver._viewer_login = ""
+        driver._pr_discovery._viewer_login = ""
         with patch(
-            "hephaestus.automation.ci_driver._gh_call",
+            "hephaestus.automation.pr_discovery._gh_call",
             side_effect=subprocess.CalledProcessError(1, ["gh"]),
         ):
             with pytest.raises(RuntimeError, match="Could not resolve viewer login"):
                 driver._resolve_viewer_login()
 
     def test_resolve_empty_stdout_raises(self, driver: CIDriver) -> None:
-        driver._viewer_login = ""
-        with patch("hephaestus.automation.ci_driver._gh_call", return_value=MagicMock(stdout="")):
+        driver._pr_discovery._viewer_login = ""
+        with patch(
+            "hephaestus.automation.pr_discovery._gh_call", return_value=MagicMock(stdout="")
+        ):
             with pytest.raises(RuntimeError, match="Could not resolve viewer login"):
                 driver._resolve_viewer_login()
 
     def test_resolve_gh_not_installed_raises(self, driver: CIDriver) -> None:
-        driver._viewer_login = ""
+        driver._pr_discovery._viewer_login = ""
         with patch(
-            "hephaestus.automation.ci_driver._gh_call",
+            "hephaestus.automation.pr_discovery._gh_call",
             side_effect=FileNotFoundError("gh not on PATH"),
         ):
             with pytest.raises(RuntimeError, match="Could not resolve viewer login"):
@@ -210,9 +219,9 @@ class TestResolveViewerLogin:
         to a ``RuntimeError`` carrying the `gh auth login` / --all guidance
         rather than propagating raw (#821).
         """
-        driver._viewer_login = ""
+        driver._pr_discovery._viewer_login = ""
         with patch(
-            "hephaestus.automation.ci_driver._gh_call",
+            "hephaestus.automation.pr_discovery._gh_call",
             side_effect=GitHubUnavailableError("circuit breaker open"),
         ):
             with pytest.raises(RuntimeError, match="Could not resolve viewer login"):
@@ -226,13 +235,13 @@ class TestAllFlagSkipsViewerResolution:
         driver.options.include_all_authors = True
         with (
             patch.object(
-                driver,
-                "_resolve_viewer_login",
+                driver._pr_discovery,
+                "resolve_viewer_login",
                 side_effect=RuntimeError("should not be called"),
             ),
-            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.pr_discovery._gh_call",
                 return_value=MagicMock(stdout=json.dumps(_MIXED_PULLS)),
             ),
         ):
@@ -248,12 +257,14 @@ class TestAllFlagSkipsViewerResolution:
                 "_resolve_viewer_login",
                 side_effect=RuntimeError("should not be called"),
             ),
-            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.pr_discovery._gh_call",
                 return_value=MagicMock(stdout=json.dumps(_MIXED_PULLS)),
             ),
-            patch.object(driver, "_pr_merge_state", return_value=("CLEAN", "MERGEABLE")),
+            patch.object(
+                driver._pr_discovery, "pr_merge_state", return_value=("CLEAN", "MERGEABLE")
+            ),
         ):
             remaining = driver._list_open_prs_remaining()
         assert sorted(pr["number"] for pr in remaining) == [100, 101, 102]
@@ -266,12 +277,12 @@ class TestMissingUserLogin:
         self, viewer_driver: CIDriver, caplog: pytest.LogCaptureFixture
     ) -> None:
         with (
-            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.pr_discovery._gh_call",
                 return_value=MagicMock(stdout=json.dumps(_MISSING_LOGIN_PULLS)),
             ),
-            caplog.at_level(logging.WARNING, logger="hephaestus.automation.ci_driver"),
+            caplog.at_level(logging.WARNING, logger="hephaestus.automation.pr_discovery"),
         ):
             result = viewer_driver._list_open_prs_remaining()
 
@@ -285,12 +296,12 @@ class TestMissingUserLogin:
         self, viewer_driver: CIDriver, caplog: pytest.LogCaptureFixture
     ) -> None:
         with (
-            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.pr_discovery._gh_call",
                 return_value=MagicMock(stdout=json.dumps(_MISSING_LOGIN_BOT_PULLS)),
             ),
-            caplog.at_level(logging.WARNING, logger="hephaestus.automation.ci_driver"),
+            caplog.at_level(logging.WARNING, logger="hephaestus.automation.pr_discovery"),
         ):
             result = viewer_driver._discover_bot_prs()
 
@@ -306,13 +317,15 @@ class TestMissingUserLogin:
         """Warning must NOT fire when --all is set (viewer filter bypassed entirely)."""
         driver.options.include_all_authors = True
         with (
-            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.pr_discovery._gh_call",
                 return_value=MagicMock(stdout=json.dumps(_MISSING_LOGIN_PULLS)),
             ),
-            patch.object(driver, "_pr_merge_state", return_value=("CLEAN", "MERGEABLE")),
-            caplog.at_level(logging.WARNING, logger="hephaestus.automation.ci_driver"),
+            patch.object(
+                driver._pr_discovery, "pr_merge_state", return_value=("CLEAN", "MERGEABLE")
+            ),
+            caplog.at_level(logging.WARNING, logger="hephaestus.automation.pr_discovery"),
         ):
             result = driver._list_open_prs_remaining()
 
@@ -327,12 +340,12 @@ class TestMissingUserLogin:
         """Warning must NOT fire when --all is set (viewer filter bypassed entirely)."""
         driver.options.include_all_authors = True
         with (
-            patch("hephaestus.automation.ci_driver.get_repo_info", return_value=("o", "r")),
+            patch("hephaestus.automation.pr_discovery.get_repo_info", return_value=("o", "r")),
             patch(
-                "hephaestus.automation.ci_driver._gh_call",
+                "hephaestus.automation.pr_discovery._gh_call",
                 return_value=MagicMock(stdout=json.dumps(_MISSING_LOGIN_BOT_PULLS)),
             ),
-            caplog.at_level(logging.WARNING, logger="hephaestus.automation.ci_driver"),
+            caplog.at_level(logging.WARNING, logger="hephaestus.automation.pr_discovery"),
         ):
             driver._discover_bot_prs()
 

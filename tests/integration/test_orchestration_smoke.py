@@ -1,16 +1,18 @@
 """Smoke tests for omitted orchestration modules — integration backstop.
 
-These tests validate that the 12 automation modules omitted from coverage
+These tests validate that the 16 automation modules omitted from coverage
 (per pyproject.toml[tool.coverage.run].omit) remain importable and their
 console entry points work correctly.
 
 Module enumeration and entry-point discovery verified at plan time:
-- All 12 modules are importable (guards against import regressions)
+- All 16 modules are importable (guards against import regressions)
 - 5 modules have console scripts: implementer, planner, loop_runner, pr_reviewer, audit_reviewer
 - 2 modules are script-less but have main(): address_review, ci_driver
-- 5 modules lack main() entirely: implementer_cli (only argument parsing /
+- 9 modules lack main() entirely: implementer_cli (only argument parsing /
     logging setup since #714 relocated main() to implementer),
-    implementer_phase_runner, implementer_summary, curses_ui, github_api
+    implementer_phase_runner, implementer_summary, curses_ui, github_api,
+    and the 4 CIDriver collaborators extracted in #1357 (pr_discovery,
+    ci_check_inspector, ci_fix_orchestrator, post_merge_processor)
 """
 
 import subprocess
@@ -18,7 +20,7 @@ import sys
 
 import pytest
 
-# All 12 omitted orchestration modules
+# All 16 omitted orchestration modules
 OMITTED_MODULES = [
     "hephaestus.automation.implementer",
     "hephaestus.automation.implementer_cli",
@@ -27,6 +29,10 @@ OMITTED_MODULES = [
     "hephaestus.automation.planner",
     "hephaestus.automation.address_review",
     "hephaestus.automation.ci_driver",
+    "hephaestus.automation.pr_discovery",
+    "hephaestus.automation.ci_check_inspector",
+    "hephaestus.automation.ci_fix_orchestrator",
+    "hephaestus.automation.post_merge_processor",
     "hephaestus.automation.loop_runner",
     "hephaestus.automation.curses_ui",
     "hephaestus.automation.github_api",
