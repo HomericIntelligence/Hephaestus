@@ -156,6 +156,82 @@ class TestCallClaude:
             assert result == "Success"
             assert mock_run.call_count == 2
 
+    def test_529_overloaded_retries_with_backoff(self, planner: Any) -> None:
+        """A transient 529 Overloaded is retried with backoff, not fatal (#1374).
+
+        Reproduces output.log L30/L414: the first call raises
+        ``API Error: 529 Overloaded`` (a CalledProcessError), the retry
+        succeeds. Asserts the overload backoff sleep fired and no fatal
+        ``Claude failed`` RuntimeError propagated.
+        """
+        with (
+            self._patch_repo(),
+            patch("hephaestus.automation.claude_invoke.subprocess.run") as mock_run,
+            patch("hephaestus.automation.planner_claude.time.sleep") as mock_sleep,
+        ):
+            mock_run.side_effect = [
+                subprocess.CalledProcessError(
+                    1, "claude", stderr="Claude failed: API Error: 529 Overloaded"
+                ),
+                MagicMock(stdout="Recovered plan", returncode=0),
+            ]
+            result = planner._call_claude(
+                "Test prompt",
+                model="claude-opus-4-7",
+                agent="planner",
+                issue_number=1357,
+                max_retries=3,
+            )
+
+            assert result == "Recovered plan"
+            assert mock_run.call_count == 2
+            # Backoff fired exactly once (one retry), with a positive base delay.
+            mock_sleep.assert_called_once()
+            (delay,) = mock_sleep.call_args[0]
+            assert delay > 0
+
+    def test_529_overloaded_exhausts_retries_then_raises(self, planner: Any) -> None:
+        """A persistent 529 raises ``Claude failed`` only after retries exhaust."""
+        with (
+            self._patch_repo(),
+            patch("hephaestus.automation.claude_invoke.subprocess.run") as mock_run,
+            patch("hephaestus.automation.planner_claude.time.sleep"),
+        ):
+            mock_run.side_effect = subprocess.CalledProcessError(
+                1, "claude", stderr="API Error: 529 Overloaded"
+            )
+            with pytest.raises(RuntimeError, match="Claude failed"):
+                planner._call_claude(
+                    "p",
+                    model="claude-opus-4-7",
+                    agent="planner",
+                    issue_number=1357,
+                    max_retries=2,
+                )
+            # Initial attempt + 2 retries = 3 invocations.
+            assert mock_run.call_count == 3
+
+    def test_fatal_error_not_retried(self, planner: Any) -> None:
+        """A genuinely fatal 400 error is NOT retried — raises immediately."""
+        with (
+            self._patch_repo(),
+            patch("hephaestus.automation.claude_invoke.subprocess.run") as mock_run,
+            patch("hephaestus.automation.planner_claude.time.sleep") as mock_sleep,
+        ):
+            mock_run.side_effect = subprocess.CalledProcessError(
+                1, "claude", stderr="API Error: 400 Bad Request"
+            )
+            with pytest.raises(RuntimeError, match="Claude failed"):
+                planner._call_claude(
+                    "p",
+                    model="claude-opus-4-7",
+                    agent="planner",
+                    issue_number=1,
+                    max_retries=3,
+                )
+            assert mock_run.call_count == 1
+            mock_sleep.assert_not_called()
+
     def test_claude_usage_cap_in_stdout_triggers_wait(self, planner: Any) -> None:
         usage_json = (
             '{"is_error": true, "api_error_status": 429, '

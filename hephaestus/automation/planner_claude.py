@@ -11,18 +11,30 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 from typing import TYPE_CHECKING
 
 from hephaestus.agents.runtime import is_codex, run_codex_text
 from hephaestus.github.rate_limit import wait_until
 
-from .claude_invoke import invoke_claude_with_session, scan_quota_reset
+from .claude_invoke import detect_server_overload, invoke_claude_with_session, scan_quota_reset
 from .git_utils import get_repo_root, get_repo_slug
 
 if TYPE_CHECKING:
     from .models import PlannerOptions
 
 logger = logging.getLogger(__name__)
+
+# Base delay (seconds) for the exponential backoff applied to transient
+# server-overload (529 / 5xx) retries. The Nth retry (counting down from the
+# default ``max_retries=3``) waits ``_OVERLOAD_BACKOFF_BASE_S * 2 ** (3 -
+# max_retries)`` seconds, i.e. 5s, 10s, 20s. Unlike a 429 quota cap there is no
+# reset epoch to wait on, so a bounded exponential backoff is the correct
+# policy (#1374).
+_OVERLOAD_BACKOFF_BASE_S = 5.0
+# Default retry budget the backoff schedule is anchored to; used only to size
+# the per-attempt delay so it grows monotonically as retries are consumed.
+_OVERLOAD_BACKOFF_ANCHOR_RETRIES = 3
 
 
 class PlannerClaudeRunner:
@@ -115,9 +127,33 @@ class PlannerClaudeRunner:
                 if reset_epoch > 0:
                     wait_until(reset_epoch)
                 else:
-                    import time
-
                     time.sleep(5)
+                return self.call_claude(
+                    prompt,
+                    model=model,
+                    agent=agent,
+                    issue_number=issue_number,
+                    max_retries=max_retries - 1,
+                    timeout=timeout,
+                    extra_args=extra_args,
+                )
+
+            # A transient server-overload (529 Overloaded / generic 5xx) carries
+            # no reset epoch, so scan_quota_reset misses it. It used to fall
+            # straight through to the fatal raise below, surfacing a recoverable
+            # blip as ``phase plan FAILED rc=1`` (#1374). Retry it with bounded
+            # exponential backoff up to ``max_retries``.
+            if detect_server_overload(stderr, stdout) and max_retries > 0:
+                # Exponent grows as retries are consumed (clamped at 0 so an
+                # over-budget caller never gets a fractional/negative delay).
+                exponent = max(0, _OVERLOAD_BACKOFF_ANCHOR_RETRIES - max_retries)
+                delay = _OVERLOAD_BACKOFF_BASE_S * (2**exponent)
+                logger.warning(
+                    "Claude server overloaded (transient); retrying in %.0fs (%d retries left)",
+                    delay,
+                    max_retries,
+                )
+                time.sleep(delay)
                 return self.call_claude(
                     prompt,
                     model=model,

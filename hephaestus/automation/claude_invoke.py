@@ -200,6 +200,61 @@ def scan_quota_reset(*texts: str) -> int | None:
     return resolve_quota_reset_epoch(*texts)
 
 
+# Substrings (and a 5xx-status regex) the Claude/Anthropic API surfaces when the
+# upstream model service is transiently overloaded. A ``529 Overloaded`` is a
+# *server* error (the service is busy), not a quota cap — so it carries no reset
+# epoch and is missed by :func:`scan_quota_reset`. It is safe to retry with
+# exponential backoff. The status regex matches the documented overload statuses
+# (500/502/503/504/529) without over-matching unrelated digit runs: it anchors
+# on the literal "API Error" / "status" context the CLI emits (e.g.
+# ``API Error: 529 Overloaded``) (#1374).
+_SERVER_OVERLOAD_PHRASES: tuple[str, ...] = (
+    "overloaded",
+    "service unavailable",
+    "internal server error",
+    "bad gateway",
+    "gateway timeout",
+)
+_SERVER_OVERLOAD_STATUS_RE = re.compile(
+    r"(?:api\s+error|status(?:\s+code)?)\s*[:=]?\s*(?:5(?:00|02|03|04)|529)\b",
+    re.IGNORECASE,
+)
+
+
+def detect_server_overload(*texts: str) -> bool:
+    """Return True if any stream indicates a transient server-overload error.
+
+    Recognizes the ``529 Overloaded`` (and generic 5xx-overload) responses the
+    Claude/Anthropic API returns when the upstream model service is transiently
+    busy, e.g.::
+
+        API Error: 529 Overloaded
+        529 {"type":"error","error":{"type":"overloaded_error", ...}}
+        Service Unavailable (503)
+
+    Unlike a 429 quota cap (handled by :func:`scan_quota_reset`), these carry no
+    reset epoch — the correct response is a bounded exponential backoff and
+    retry, not a wait-until-reset. Detection lives here so every agent-call path
+    shares one classifier surface (#1374).
+
+    Args:
+        *texts: One or more output streams to inspect (stderr and/or stdout).
+
+    Returns:
+        True if a server-overload signal is present in any stream.
+
+    """
+    for text in texts:
+        if not text:
+            continue
+        lowered = text.lower()
+        if any(phrase in lowered for phrase in _SERVER_OVERLOAD_PHRASES):
+            return True
+        if _SERVER_OVERLOAD_STATUS_RE.search(text):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class ReviewVerdict:
     """Parsed verdict from a review response.

@@ -5,8 +5,54 @@ from __future__ import annotations
 from hephaestus.automation.claude_invoke import (
     INFRA_ERROR_REVIEW_TEXT,
     ReviewVerdict,
+    detect_server_overload,
     parse_review_verdict,
 )
+
+
+class TestDetectServerOverload:
+    """Tests for the transient server-overload classifier (#1374)."""
+
+    def test_529_overloaded_api_error(self) -> None:
+        """The exact phrasing from output.log L30/L414 is retryable."""
+        assert detect_server_overload("Claude failed: API Error: 529 Overloaded") is True
+
+    def test_overloaded_word_alone(self) -> None:
+        """A bare ``Overloaded`` token is recognized."""
+        assert detect_server_overload("", "the service is Overloaded right now") is True
+
+    def test_overloaded_error_json(self) -> None:
+        """The Anthropic ``overloaded_error`` JSON payload is recognized."""
+        assert detect_server_overload('{"error":{"type":"overloaded_error"}}') is True
+
+    def test_5xx_statuses_retryable(self) -> None:
+        """Generic 5xx overload statuses are retryable."""
+        assert detect_server_overload("API Error: 503 Service Unavailable") is True
+        assert detect_server_overload("status code: 502 Bad Gateway") is True
+        assert detect_server_overload("status 504") is True
+        assert detect_server_overload("API Error: 500 Internal Server Error") is True
+
+    def test_scans_multiple_streams(self) -> None:
+        """Detection spans both stderr and stdout streams."""
+        assert detect_server_overload("clean stderr", "API Error: 529 Overloaded") is True
+
+    def test_quota_429_not_overload(self) -> None:
+        """A 429 quota cap is NOT an overload (handled by scan_quota_reset)."""
+        assert detect_server_overload("API Error: 429 rate limit exceeded") is False
+
+    def test_fatal_4xx_not_overload(self) -> None:
+        """Genuinely fatal client errors stay fatal — no over-broad retry."""
+        assert detect_server_overload("API Error: 400 Bad Request") is False
+        assert detect_server_overload("API Error: 401 Unauthorized") is False
+
+    def test_unrelated_529_digits_not_matched(self) -> None:
+        """A bare ``529`` without an error/status context is not matched."""
+        assert detect_server_overload("processed 529 files successfully") is False
+
+    def test_empty_and_none_streams(self) -> None:
+        """Empty or falsy streams are skipped without error."""
+        assert detect_server_overload("", "") is False
+        assert detect_server_overload() is False
 
 
 class TestParseReviewVerdict:

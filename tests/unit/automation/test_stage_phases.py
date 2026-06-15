@@ -118,6 +118,41 @@ def test_plan_phase_generate_uses_entry_point(tmp_path: Path) -> None:
     assert "--issues" in args and "7" in args
 
 
+def test_plan_phase_generate_uses_centralized_timeout(tmp_path: Path) -> None:
+    """_generate bounds the subprocess by planner_claude_timeout, not 600s (#1374).
+
+    output.log L834 showed ``Command timed out after 600s:
+    hephaestus-plan-issues --issues 1357`` — the heavy issue exhausted a
+    hard-coded 600s wrapper while the planner's own budget is 7200s. The call
+    must now route through the centralized helper.
+    """
+    phase = PlanPhase(_make_ctx(tmp_path))
+    with (
+        mock.patch("shutil.which", return_value="/usr/bin/hpi"),
+        mock.patch("hephaestus.automation._plan_phase.run") as mock_run,
+        mock.patch(
+            "hephaestus.automation._plan_phase.planner_claude_timeout",
+            return_value=7200,
+        ),
+    ):
+        phase._generate(1357)
+    assert mock_run.call_args.kwargs["timeout"] == 7200
+
+
+def test_plan_phase_generate_timeout_respects_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The HEPH_PLANNER_AGENT_TIMEOUT override flows through to the subprocess."""
+    monkeypatch.setenv("HEPH_PLANNER_AGENT_TIMEOUT", "9000")
+    phase = PlanPhase(_make_ctx(tmp_path))
+    with (
+        mock.patch("shutil.which", return_value="/usr/bin/hpi"),
+        mock.patch("hephaestus.automation._plan_phase.run") as mock_run,
+    ):
+        phase._generate(1357)
+    assert mock_run.call_args.kwargs["timeout"] == 9000
+
+
 # ---------------------------------------------------------------------------
 # ImplementPhase
 # ---------------------------------------------------------------------------
