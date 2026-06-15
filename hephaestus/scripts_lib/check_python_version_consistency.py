@@ -1,381 +1,56 @@
 #!/usr/bin/env python3
-"""Check Python version consistency across project config files.
+"""Delegation shim — canonical implementation lives in ``hephaestus.validation.python_version``.
 
-Verifies that requires-python in pyproject.toml, python_version in mypy config,
-and target-version in ruff config are all consistent.
-
-Usage:
-    python scripts/check_python_version_consistency.py
+All business logic has been consolidated into the canonical module.
+This shim exists so ``scripts/check_python_version_consistency.py`` and
+existing callers that use the string-signature ``extract_pyproject_versions``
+continue to work without changes.
 """
 
-import re
-import sys
-from pathlib import Path
-
-from hephaestus.utils.helpers import get_repo_root as _get_repo_root
-
-_CI_MATRIX_BRACKET_RE = re.compile(r"python-version:\s*\[([^\]]+)\]")
-_CI_MATRIX_SEQUENCE_RE = re.compile(
-    r"python-version:\s*\n((?:[ \t]+-\s*[\"']?\d+\.\d+[\"']?(?=\n|$)\n?)+)"
+from hephaestus.validation.python_version import (
+    check_ci_matrix_coverage as check_ci_matrix_coverage,
 )
-_CI_VERSION_RE = re.compile(r'["\']?(\d+\.\d+)["\']?')
-
-
-def get_repo_root() -> Path:
-    """Find repository root, anchored to this module's location.
-
-    Delegates to the canonical :func:`hephaestus.utils.helpers.get_repo_root`,
-    seeding the search from this file so resolution is independent of the
-    current working directory (this script may run from anywhere).
-    """
-    return _get_repo_root(Path(__file__).resolve().parent)
-
-
-def extract_pyproject_versions(content: str) -> dict[str, str]:
-    """Extract version strings from pyproject.toml content."""
-    versions = {}
-
-    # requires-python = ">=3.10"
-    match = re.search(r'requires-python\s*=\s*"([^"]+)"', content)
-    if match:
-        # Normalize to major.minor (e.g., ">=3.10" -> "3.10")
-        raw = match.group(1)
-        ver_match = re.search(r"(\d+\.\d+)", raw)
-        if ver_match:
-            versions["requires-python"] = ver_match.group(1)
-
-    # [tool.mypy] python_version = "3.10"
-    match = re.search(
-        r'\[tool\.mypy\]\n(?:(?!\[).+\n)*?python_version\s*=\s*"([^"]+)"',
-        content,
-    )
-    if match:
-        versions["mypy.python_version"] = match.group(1)
-
-    # [tool.ruff] target-version = "py310"
-    match = re.search(r'target-version\s*=\s*"py(\d)(\d+)"', content)
-    if match:
-        versions["ruff.target-version"] = f"{match.group(1)}.{match.group(2)}"
-
-    return versions
-
-
-def extract_project_version(content: str) -> str | None:
-    """Extract version from the [project] section in pyproject.toml content.
-
-    Uses a section-bounded regex with negative lookahead to prevent matching
-    version keys that belong to a different TOML section.
-
-    Args:
-        content: The raw text content of a pyproject.toml file.
-
-    Returns:
-        The version string if found within [project], or None.
-
-    """
-    match = re.search(
-        r'\[project\]\n(?:(?!\[).+\n)*?version\s*=\s*"([^"]+)"',
-        content,
-    )
-    return match.group(1) if match else None
-
-
-def extract_pixi_workspace_version(content: str) -> str | None:
-    """Extract version from the [workspace] section in pixi.toml content.
-
-    Uses a section-bounded regex with negative lookahead to prevent matching
-    version keys that belong to a different TOML section.
-
-    Args:
-        content: The raw text content of a pixi.toml file.
-
-    Returns:
-        The version string if found within [workspace], or None.
-
-    """
-    match = re.search(
-        r'\[workspace\]\n(?:(?!\[).+\n)*?version\s*=\s*"([^"]+)"',
-        content,
-    )
-    return match.group(1) if match else None
-
-
-def extract_pixi_python_ceiling(content: str) -> str | None:
-    """Extract the upper-bound minor from pixi.toml ``[dependencies] python``.
-
-    Parses e.g. ``python = ">=3.10,<3.14"`` and returns the exclusive (``<``)
-    or inclusive (``<=``) upper bound ``"3.14"``. Returns ``None`` if there is
-    no ``python`` key in the base ``[dependencies]`` table, or it carries no
-    ``<``/``<=`` bound.
-
-    The regex is bounded to the base ``[dependencies]`` table (it does not
-    cross into the next ``[`` section header), so a ``python`` pin in a
-    ``[feature.*.dependencies]`` table is intentionally not matched.
-
-    Args:
-        content: The raw text content of a pixi.toml file.
-
-    Returns:
-        The upper-bound ``"major.minor"`` string, or ``None``.
-
-    """
-    match = re.search(
-        r'\[dependencies\]\n(?:(?!\[).+\n)*?python\s*=\s*"([^"]+)"',
-        content,
-    )
-    if not match:
-        return None
-    bound = re.search(r"<=?\s*(\d+\.\d+)", match.group(1))
-    return bound.group(1) if bound else None
-
-
-def extract_classifiers_python_versions(content: str) -> list[str]:
-    """Extract Python version strings from pyproject.toml classifiers.
-
-    Looks for entries of the form:
-        "Programming Language :: Python :: 3.10"
-
-    Args:
-        content: The raw text content of a pyproject.toml file.
-
-    Returns:
-        Sorted list of version strings (e.g. ["3.10", "3.11"]).
-
-    """
-    versions = re.findall(
-        r'"Programming Language :: Python :: (\d+\.\d+)"',
-        content,
-    )
-    return sorted(set(versions))
-
-
-def extract_ci_matrix_python_versions(content: str) -> list[str]:
-    """Extract Python version strings from a GitHub Actions workflow file.
-
-    Supports two formats::
-
-        python-version: ["3.10", "3.11", "3.12"]
-
-    and multi-line YAML sequence format::
-
-        python-version:
-          - "3.10"
-          - "3.11"
-
-    Args:
-        content: The raw YAML text of a GitHub Actions workflow file.
-
-    Returns:
-        Sorted list of version strings (e.g. ["3.10", "3.11"]), or empty list
-        if no ``python-version`` matrix key is found.
-
-    """
-    bracket_match = _CI_MATRIX_BRACKET_RE.search(content)
-    if bracket_match:
-        versions = _CI_VERSION_RE.findall(bracket_match.group(1))
-        return sorted(set(versions))
-
-    sequence_match = _CI_MATRIX_SEQUENCE_RE.search(content)
-    if sequence_match:
-        versions = _CI_VERSION_RE.findall(sequence_match.group(1))
-        return sorted(set(versions))
-
-    return []
-
-
-def check_ci_matrix_coverage(repo_root: Path) -> bool:
-    """Check that the CI python-version matrix covers all classifier versions.
-
-    Parses pyproject.toml classifiers and .github/workflows/test.yml matrix
-    and reports any classifier versions absent from the CI matrix.
-
-    Args:
-        repo_root: Repository root directory.
-
-    Returns:
-        True if CI matrix covers all classifier versions (or no data to compare),
-        False if any classifier version is missing from the CI matrix.
-
-    """
-    pyproject_path = repo_root / "pyproject.toml"
-    if not pyproject_path.exists():
-        return True  # nothing to check
-
-    classifier_versions = extract_classifiers_python_versions(pyproject_path.read_text())
-
-    if not classifier_versions:
-        # No classifier versions — nothing to cross-check
-        return True
-
-    ci_workflow = repo_root / ".github" / "workflows" / "test.yml"
-    if not ci_workflow.exists():
-        print(f"INFO: CI workflow not found at {ci_workflow} — skipping matrix check")
-        return True
-
-    matrix_versions = extract_ci_matrix_python_versions(ci_workflow.read_text())
-
-    if not matrix_versions:
-        print(f"INFO: No python-version matrix found in {ci_workflow} — skipping matrix check")
-        return True
-
-    missing = sorted(set(classifier_versions) - set(matrix_versions))
-    extra = sorted(set(matrix_versions) - set(classifier_versions))
-
-    if not missing:
-        print(f"OK: CI matrix covers all classifier Python versions: {matrix_versions}")
-        return True
-
-    print("ERROR: CI matrix is missing Python versions listed in pyproject.toml classifiers!")
-    print(f"  Classifiers: {classifier_versions}")
-    print(f"  CI matrix:   {matrix_versions}")
-    print(f"  Missing from CI matrix: {missing}")
-    if extra:
-        print(f"  In CI matrix but not in classifiers: {extra}")
-    return False
-
-
-def check_pixi_python_ceiling(repo_root: Path) -> bool:
-    """Ensure pixi.toml's python upper bound stays within the support matrix.
-
-    The locked dev/lint envs must not resolve above the highest classifier
-    Python version (the support ceiling). An unbounded or too-high pin lets
-    pixi resolve to an untested interpreter — e.g. Python 3.14 free-threaded
-    (cp314t), which is neither in the declared support matrix nor CI-tested
-    (see issue #1184). The accepted upper bound is at most one minor above the
-    highest classifier version (``<3.14`` for a 3.13 ceiling).
-
-    Args:
-        repo_root: Repository root directory.
-
-    Returns:
-        True if the pixi python ceiling is present and within one minor of the
-        highest classifier version (or there is nothing to compare), False if
-        the pin is unbounded or its ceiling exceeds the allowed maximum.
-
-    """
-    from packaging.version import Version
-
-    pyproject_path = repo_root / "pyproject.toml"
-    pixi_path = repo_root / "pixi.toml"
-    if not pyproject_path.exists() or not pixi_path.exists():
-        return True  # nothing to compare
-
-    classifiers = extract_classifiers_python_versions(pyproject_path.read_text())
-    if not classifiers:
-        return True  # no support ceiling declared — nothing to enforce
-
-    highest_supported = max(Version(v) for v in classifiers)
-    # Exclusive cap must be at most one minor above the highest classifier.
-    max_allowed = Version(f"{highest_supported.major}.{highest_supported.minor + 1}")
-
-    ceiling = extract_pixi_python_ceiling(pixi_path.read_text())
-    if ceiling is None:
-        print(
-            "ERROR: pixi.toml [dependencies] python has no upper bound — "
-            "the env may resolve to an untested interpreter (see #1184).\n"
-            f'  Add an upper bound, e.g. python = ">={classifiers[0]},<{max_allowed}".'
-        )
-        return False
-
-    if Version(ceiling) > max_allowed:
-        print(
-            "ERROR: pixi.toml python upper bound is too high!\n"
-            f"  pixi cap: <{ceiling}; highest classifier: {highest_supported}; "
-            f"max allowed cap: <{max_allowed} (one minor above support ceiling)."
-        )
-        return False
-
-    print(f"OK: pixi.toml python ceiling <{ceiling} is within support matrix (<= {max_allowed})")
-    return True
-
-
-def check_project_version_consistency(repo_root: Path) -> bool:
-    """Check that pyproject.toml and pixi.toml project versions agree (if both present).
-
-    Reads the [project].version from pyproject.toml and the [workspace].version
-    from pixi.toml (if it exists) and verifies they match.  If pixi.toml has no
-    version field the check passes — that is the expected state for this project.
-
-    Args:
-        repo_root: Repository root directory.
-
-    Returns:
-        True if versions are consistent (or pixi.toml has no version), False otherwise.
-
-    """
-    pyproject_path = repo_root / "pyproject.toml"
-    if not pyproject_path.exists():
-        return True  # nothing to compare against
-
-    project_version = extract_project_version(pyproject_path.read_text())
-
-    pixi_path = repo_root / "pixi.toml"
-    if not pixi_path.exists():
-        if project_version:
-            print(f"OK: pyproject.toml project version = {project_version!r} (no pixi.toml)")
-        return True
-
-    pixi_version = extract_pixi_workspace_version(pixi_path.read_text())
-
-    if pixi_version is None:
-        # pixi.toml exists but has no version — expected state
-        if project_version:
-            print(f"OK: pyproject.toml project version = {project_version!r}")
-        print("OK: pixi.toml has no [workspace].version (as expected)")
-        return True
-
-    # Both files have a version — they must match
-    if project_version == pixi_version:
-        print(f"OK: project version is consistent at {project_version!r}")
-        return True
-
-    print("ERROR: project version mismatch between pyproject.toml and pixi.toml!")
-    print(f"  pyproject.toml [project].version = {project_version!r}")
-    print(f"  pixi.toml [workspace].version    = {pixi_version!r}")
-    print("  pyproject.toml is the single source of truth — update pixi.toml to match.")
-    return False
-
-
-def main() -> int:
-    """Check Python version consistency. Returns 0 if OK, 1 if inconsistent."""
-    repo_root = get_repo_root()
-    pyproject_path = repo_root / "pyproject.toml"
-
-    if not pyproject_path.exists():
-        print(f"ERROR: pyproject.toml not found at {pyproject_path}")
-        return 1
-
-    content = pyproject_path.read_text()
-    versions = extract_pyproject_versions(content)
-
-    if len(versions) < 2:
-        print(f"WARNING: Could only find {len(versions)} version spec(s) in pyproject.toml")
-        for key, val in versions.items():
-            print(f"  {key}: {val}")
-        python_ok = True
-    else:
-        unique_versions = set(versions.values())
-        if len(unique_versions) == 1:
-            version = next(iter(unique_versions))
-            print(f"OK: Python version is consistent at {version}")
-            for key, val in versions.items():
-                print(f"  {key}: {val}")
-            python_ok = True
-        else:
-            print("ERROR: Python version inconsistency detected!")
-            for key, val in versions.items():
-                print(f"  {key}: {val}")
-            print("\nAll version specifications must agree on the same Python version.")
-            python_ok = False
-
-    project_version_ok = check_project_version_consistency(repo_root)
-    ci_matrix_ok = check_ci_matrix_coverage(repo_root)
-    pixi_ceiling_ok = check_pixi_python_ceiling(repo_root)
-
-    if python_ok and project_version_ok and ci_matrix_ok and pixi_ceiling_ok:
-        return 0
-    return 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+from hephaestus.validation.python_version import (
+    check_pixi_python_ceiling as check_pixi_python_ceiling,
+)
+from hephaestus.validation.python_version import (
+    check_project_version_consistency as check_project_version_consistency,
+)
+from hephaestus.validation.python_version import (
+    check_python_version_consistency as check_python_version_consistency,
+)
+from hephaestus.validation.python_version import (
+    extract_ci_matrix_python_versions as extract_ci_matrix_python_versions,
+)
+from hephaestus.validation.python_version import (
+    extract_classifiers_python_versions as extract_classifiers_python_versions,
+)
+from hephaestus.validation.python_version import (
+    extract_pixi_python_ceiling as extract_pixi_python_ceiling,
+)
+from hephaestus.validation.python_version import (
+    extract_pixi_workspace_version as extract_pixi_workspace_version,
+)
+from hephaestus.validation.python_version import (
+    extract_project_version as extract_project_version,
+)
+from hephaestus.validation.python_version import (
+    extract_pyproject_versions_str as extract_pyproject_versions,
+)
+from hephaestus.validation.python_version import (
+    main as main,
+)
+
+__all__ = [
+    "check_ci_matrix_coverage",
+    "check_pixi_python_ceiling",
+    "check_project_version_consistency",
+    "check_python_version_consistency",
+    "extract_ci_matrix_python_versions",
+    "extract_classifiers_python_versions",
+    "extract_pixi_python_ceiling",
+    "extract_pixi_workspace_version",
+    "extract_project_version",
+    "extract_pyproject_versions",
+    "main",
+]

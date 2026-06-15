@@ -471,8 +471,8 @@ def test_review_loop_resolves_conflict_before_first_review(tmp_path: Path) -> No
 
     def _iter(**_kwargs: Any) -> tuple[Any, ...]:
         call_order.append("review")
-        # verdict, grade, review_text, posted_thread_ids, go_blocked, reopened,
-        # should_break, reopened_keys, validator_clean
+        # verdict, grade, review_text, posted_thread_ids, go_blocked, reopened, should_break,
+        # prior_reopened_keys, validator_clean
         return "GO", "A", "ok", [], False, [], True, set(), True
 
     with (
