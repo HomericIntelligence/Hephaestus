@@ -596,3 +596,88 @@ class TestEnsureMnemosyne:
         call_kwargs = mock_run.call_args.kwargs
         assert "timeout" in call_kwargs, "subprocess.run for clone must pass timeout="
         assert call_kwargs["timeout"] == 120
+
+
+class TestPrCoverageSkip:
+    """FM1 idempotency guard: skip planning issues already covered by a PR.
+
+    Regression for the 2026-06-15 loop run that re-planned #1357/#1289/#1179
+    while their PRs were open (and again after PR #1358 merged but the issue
+    stayed OPEN), burning ~5.5h on duplicate/zombie PRs (#1359, #1365).
+    """
+
+    def test_skips_when_open_pr_covers_issue(self, planner: Any) -> None:
+        """find_pr_for_issue returns a PR → skip, no agent call, no plan post."""
+        with (
+            patch(
+                "hephaestus.automation.planner.find_merged_closing_pr",
+                return_value=None,
+            ),
+            patch(
+                "hephaestus.automation.planner.find_pr_for_issue",
+                return_value=42,
+            ),
+            patch.object(planner, "_run_plan_review_loop") as mock_loop,
+            patch.object(planner, "_post_plan") as mock_post,
+            patch.object(planner, "_call_claude") as mock_claude,
+        ):
+            result = planner._plan_issue(123)
+
+        assert result.success is True
+        assert result.plan_already_exists is True
+        mock_loop.assert_not_called()
+        mock_post.assert_not_called()
+        mock_claude.assert_not_called()
+
+    def test_closes_issue_when_merged_pr_covers_and_skips(self, planner: Any) -> None:
+        """Merged closing PR + open issue → close issue, skip, no re-plan."""
+        with (
+            patch(
+                "hephaestus.automation.planner.find_merged_closing_pr",
+                return_value=1358,
+            ),
+            patch(
+                "hephaestus.automation.planner.close_issue_as_covered",
+            ) as mock_close,
+            patch(
+                "hephaestus.automation.planner.find_pr_for_issue",
+            ) as mock_open_pr,
+            patch.object(planner, "_run_plan_review_loop") as mock_loop,
+            patch.object(planner, "_post_plan") as mock_post,
+            patch.object(planner, "_call_claude") as mock_claude,
+        ):
+            result = planner._plan_issue(1357)
+
+        assert result.success is True
+        assert result.plan_already_exists is True
+        mock_close.assert_called_once_with(1357, 1358)
+        # Merged-PR gate short-circuits before the open-PR lookup.
+        mock_open_pr.assert_not_called()
+        mock_loop.assert_not_called()
+        mock_post.assert_not_called()
+        mock_claude.assert_not_called()
+
+    def test_plans_when_no_pr_covers_issue(self, planner: Any) -> None:
+        """No open/merged PR → planning proceeds normally."""
+        with (
+            patch(
+                "hephaestus.automation.planner.find_merged_closing_pr",
+                return_value=None,
+            ),
+            patch(
+                "hephaestus.automation.planner.find_pr_for_issue",
+                return_value=None,
+            ),
+            patch.object(planner, "_has_existing_plan", return_value=False),
+            patch.object(
+                planner,
+                "_run_plan_review_loop",
+                return_value=("# Plan", "GO review", 1, True),
+            ),
+            patch.object(planner, "_post_plan") as mock_post,
+        ):
+            result = planner._plan_issue(123)
+
+        assert result.success is True
+        assert result.plan_already_exists is False
+        mock_post.assert_called_once()

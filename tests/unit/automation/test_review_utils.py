@@ -9,6 +9,8 @@ import pytest
 
 from hephaestus.automation._review_utils import (
     add_max_workers_arg,
+    close_issue_as_covered,
+    find_merged_closing_pr,
     find_pr_for_issue,
     get_pr_head_branch,
     parse_json_block,
@@ -315,3 +317,119 @@ class TestAddMaxWorkersArg:
         add_max_workers_arg(parser, default=8)
         args = parser.parse_args([])
         assert args.max_workers == 8
+
+
+# ---------------------------------------------------------------------------
+# find_merged_closing_pr
+# ---------------------------------------------------------------------------
+
+
+class TestFindMergedClosingPr:
+    """Tests for find_merged_closing_pr — the merged-PR coverage gate (FM1)."""
+
+    def test_finds_merged_pr_with_exact_closes_line(self) -> None:
+        """A merged PR whose body has ``Closes #N`` on its own line is returned."""
+        captured: dict[str, list[str]] = {}
+
+        def _side_effect(args: list[str], **kw: Any) -> MagicMock:
+            captured["args"] = args
+            return _make_gh_result([{"number": 1358, "body": "Summary.\n\nCloses #1357\n"}])
+
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            side_effect=_side_effect,
+        ):
+            result = find_merged_closing_pr(1357)
+
+        assert result == 1358
+        # Must search the MERGED state, not open.
+        assert "--state" in captured["args"]
+        assert "merged" in captured["args"]
+
+    def test_rejects_substring_match(self) -> None:
+        """``Closes #1234`` must NOT match a query for issue #12."""
+
+        def _side_effect(args: list[str], **kw: Any) -> MagicMock:
+            return _make_gh_result([{"number": 9999, "body": "Closes #1234\n"}])
+
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            side_effect=_side_effect,
+        ):
+            result = find_merged_closing_pr(12)
+
+        assert result is None
+
+    def test_rejects_grouped_closes(self) -> None:
+        """A grouped one-line ``Closes #12, #18, #28`` does not match #28."""
+
+        def _side_effect(args: list[str], **kw: Any) -> MagicMock:
+            return _make_gh_result([{"number": 5000, "body": "Closes #12, #18, #28, #29\n"}])
+
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            side_effect=_side_effect,
+        ):
+            result = find_merged_closing_pr(28)
+
+        assert result is None
+
+    def test_returns_none_when_no_merged_pr(self) -> None:
+        """No merged PR found → None."""
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            return_value=_make_gh_result([]),
+        ):
+            result = find_merged_closing_pr(1357)
+
+        assert result is None
+
+    def test_gh_failure_returns_none(self) -> None:
+        """A gh failure is swallowed and returns None (no crash)."""
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            side_effect=RuntimeError("gh boom"),
+        ):
+            result = find_merged_closing_pr(1357)
+
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# close_issue_as_covered
+# ---------------------------------------------------------------------------
+
+
+class TestCloseIssueAsCovered:
+    """Tests for close_issue_as_covered."""
+
+    def test_runs_gh_issue_close_with_comment(self) -> None:
+        """Closes the issue with a comment citing the merged PR."""
+        captured: dict[str, list[str]] = {}
+
+        def _side_effect(args: list[str], **kw: Any) -> MagicMock:
+            captured["args"] = args
+            return MagicMock()
+
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            side_effect=_side_effect,
+        ):
+            result = close_issue_as_covered(1357, 1358)
+
+        assert result is True
+        assert captured["args"][:3] == ["issue", "close", "1357"]
+        assert "--comment" in captured["args"]
+        comment = captured["args"][captured["args"].index("--comment") + 1]
+        assert "PR #1358" in comment
+        assert "Closes #1357" in comment
+
+    def test_gh_failure_returns_false(self) -> None:
+        """A gh failure is swallowed and returns False (no crash)."""
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            side_effect=RuntimeError("gh boom"),
+        ):
+            result = close_issue_as_covered(1357, 1358)
+
+        assert result is False

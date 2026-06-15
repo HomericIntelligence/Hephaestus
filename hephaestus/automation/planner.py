@@ -24,6 +24,11 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 
+from ._review_utils import (
+    close_issue_as_covered,
+    find_merged_closing_pr,
+    find_pr_for_issue,
+)
 from .advise_runner import advise_skipped, ensure_mnemosyne, run_advise
 from .claude_models import advise_model
 from .claude_timeouts import advise_claude_timeout
@@ -138,6 +143,72 @@ class Planner:
         cached_labels = self.state_mgr.get_cached_labels(issue_number)
         return is_plan_review_go(issue_number, issue_labels=cached_labels)
 
+    def _pr_coverage_skip(self, issue_number: int, slot_id: int) -> PlanResult | None:
+        """Skip planning when a PR already covers the issue (FM1 idempotency guard).
+
+        Two gaps closed here, both observed in the 2026-06-15 automation-loop run:
+
+        1. **Open PR exists** — an open PR already closes this issue, so planning
+           it again wastes an agent call and risks a duplicate/zombie PR. Mirrors
+           the implementer's existing open-PR skip via the shared
+           :func:`find_pr_for_issue` (branch-name → review-state → ``Closes #N``
+           body search with the exact ``^Closes #N`` post-filter).
+        2. **Merged closing PR, issue still OPEN** — a closing PR merged with a
+           valid ``Closes #N`` line yet the issue never auto-closed. Close the
+           issue (idempotently) and skip rather than re-implement landed work.
+
+        The merged-PR gate is checked first: a merged PR is the stronger signal
+        (work has landed), and closing the issue prevents the loop from churning
+        on it next run.
+
+        Args:
+            issue_number: Issue under consideration.
+            slot_id: Worker slot for status-tracker updates.
+
+        Returns:
+            A ``PlanResult`` (success, ``plan_already_exists=True``) when the
+            issue should be skipped, or ``None`` when planning should proceed.
+
+        """
+        # Gate A: a merged PR already closed (or should have closed) this issue.
+        merged_pr = find_merged_closing_pr(issue_number)
+        if merged_pr is not None:
+            logger.info(
+                "Issue #%s: merged PR #%s already closes it — closing issue and skipping plan",
+                issue_number,
+                merged_pr,
+            )
+            close_issue_as_covered(issue_number, merged_pr)
+            self.status_tracker.update_slot(
+                slot_id,
+                f"{issue_ref(issue_number)}: merged PR #{merged_pr} covers it, closed + skipped",
+            )
+            return PlanResult(
+                issue_number=issue_number,
+                success=True,
+                plan_already_exists=True,
+            )
+
+        # Gate B: an open PR already covers this issue.
+        open_pr = find_pr_for_issue(issue_number)
+        if open_pr is not None:
+            logger.info(
+                "Issue #%s: open PR #%s already covers it — skipping plan",
+                issue_number,
+                open_pr,
+            )
+            self.status_tracker.update_slot(
+                slot_id,
+                f"{issue_ref(issue_number)}: open PR #{open_pr} covers it, skipped",
+            )
+            return PlanResult(
+                issue_number=issue_number,
+                success=True,
+                plan_already_exists=True,
+            )
+
+        return None
+
     def _plan_issue(self, issue_number: int) -> PlanResult:
         """Plan a single issue.
 
@@ -157,6 +228,18 @@ class Planner:
             )
 
         try:
+            # Idempotency guard (FM1): never (re-)plan an issue whose work is
+            # already covered by a PR. Runs BEFORE the existing-plan/force gates
+            # because an open/merged closing PR makes planning pure churn — the
+            # 2026-06-15 loop burned ~5.5h re-planning #1357/#1289/#1179 while
+            # their PRs were open (and again after they merged). This mirrors the
+            # implementer phase's "Skipped (open PR already exists)" semantics so
+            # plan and implement agree on what to skip. Localized to this guard
+            # block (no _call_claude changes) for FM3 retry-logic coordination.
+            covered = self._pr_coverage_skip(issue_number, slot_id)
+            if covered is not None:
+                return covered
+
             # Skip-if-already-planned moved here from _filter_issues (#548) so
             # the check runs inside the thread pool (parallel, overlapped with
             # actual planning work) instead of as a serial pre-pass that

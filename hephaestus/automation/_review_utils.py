@@ -309,6 +309,101 @@ def find_pr_for_issue(
     return None
 
 
+def find_merged_closing_pr(issue_number: int) -> int | None:
+    """Find a MERGED PR that closes ``issue_number`` via an exact ``Closes #N`` line.
+
+    Mirrors Strategy 3 of :func:`find_pr_for_issue` but searches *merged* PRs
+    instead of open ones. This catches the failure mode where a closing PR has
+    already merged with a valid ``Closes #N`` line yet the issue stayed OPEN
+    (GitHub does not always auto-close), causing the loop to re-plan and
+    re-implement an issue whose work has already landed.
+
+    The same exact-line regex discipline as :func:`find_pr_for_issue` applies:
+    GitHub's full-text search returns substring matches, so a merged PR whose
+    body says ``Closes #1234`` must NOT match a query for #12, and a grouped
+    ``Closes #12, #18`` must not match either — only PRs that follow the
+    ``pr-policy`` exact-line format (``^Closes #<N>`` on its own line) match.
+
+    Args:
+        issue_number: GitHub issue number.
+
+    Returns:
+        The merged PR number if one genuinely closes the issue, ``None``
+        otherwise.
+
+    """
+    try:
+        result = _gh_call(
+            [
+                "pr",
+                "list",
+                "--state",
+                "merged",
+                "--search",
+                f"Closes #{issue_number} in:body",
+                "--json",
+                "number,body",
+                "--limit",
+                "10",
+            ],
+            check=False,
+        )
+        pr_data = json.loads(result.stdout or "[]")
+        closes_pattern = re.compile(rf"^Closes #{issue_number}\b", re.MULTILINE)
+        for candidate in pr_data:
+            body = candidate.get("body") or ""
+            if closes_pattern.search(body):
+                pr_number = int(candidate["number"])
+                logger.info(
+                    "Found merged PR #%d closing issue #%d via body search",
+                    pr_number,
+                    issue_number,
+                )
+                return pr_number
+    except Exception as e:
+        logger.debug("Merged-PR body search failed for issue #%d: %s", issue_number, e)
+
+    return None
+
+
+def close_issue_as_covered(issue_number: int, pr_number: int) -> bool:
+    """Close an OPEN issue already covered by a merged closing PR (idempotent).
+
+    Used after :func:`find_merged_closing_pr` confirms ``pr_number`` merged with
+    an exact ``Closes #N`` line but the issue stayed OPEN. ``gh issue close`` is
+    a no-op when the issue is already closed, so this is safe to call
+    unconditionally.
+
+    Args:
+        issue_number: GitHub issue number to close.
+        pr_number: The merged PR that closes it (cited in the close comment).
+
+    Returns:
+        True if the close command ran without error, False otherwise.
+
+    """
+    try:
+        _gh_call(
+            [
+                "issue",
+                "close",
+                str(issue_number),
+                "--comment",
+                f"Closed by merged PR #{pr_number} (Closes #{issue_number}).",
+            ],
+            check=False,
+        )
+        logger.info(
+            "Closed issue #%d — covered by merged PR #%d",
+            issue_number,
+            pr_number,
+        )
+        return True
+    except Exception as e:
+        logger.warning("Failed to close issue #%d (merged PR #%d): %s", issue_number, pr_number, e)
+        return False
+
+
 def get_pr_head_branch(pr_number: int) -> str | None:
     """Return the real head branch of ``pr_number`` via ``gh pr view``.
 
