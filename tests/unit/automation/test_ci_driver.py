@@ -2660,6 +2660,79 @@ class TestRecheckAndArmAfterFix:
             assert driver._recheck_and_arm_after_fix(1, 2, 0) is None
         mock_arm.assert_not_called()
 
+    def test_dirty_after_fix_routes_to_resolve_dirty_pr(self, driver: CIDriver) -> None:
+        # A PR that arms green post-fix but then goes DIRTY (merge conflict)
+        # while we wait must be routed to _resolve_dirty_pr, not reported as a
+        # silent success (#1347).
+        green = [_make_check("test", required=True, conclusion="success")]
+        dirty_result = WorkerResult(issue_number=1, success=False, pr_number=2, error="dirty")
+        with (
+            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=green),
+            _impl_go(driver),
+            patch.object(driver, "_enable_auto_merge", return_value=True),
+            patch.object(driver, "_gh_pr_state", return_value={"headRefOid": "abc"}),
+            patch.object(driver, "_get_pr_branch", return_value="b"),
+            patch.object(driver, "_arm_drive_green"),
+            patch.object(driver, "_wait_for_pr_terminal", return_value="DIRTY"),
+            patch.object(driver, "_resolve_dirty_pr", return_value=dirty_result) as mock_resolve,
+        ):
+            result = driver._recheck_and_arm_after_fix(1, 2, 0)
+        assert result is dirty_result
+        mock_resolve.assert_called_once_with(1, 2, 0)
+
+    def test_dirty_with_resolve_dirty_false_does_not_recurse(self, driver: CIDriver) -> None:
+        # _resolve_dirty_pr calls this method back with resolve_dirty=False. A
+        # PR that is STILL DIRTY on that callback must NOT re-dispatch into
+        # _resolve_dirty_pr, otherwise resolve->recheck->resolve recurses
+        # unboundedly (#1347).
+        green = [_make_check("test", required=True, conclusion="success")]
+        with (
+            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=green),
+            _impl_go(driver),
+            patch.object(driver, "_enable_auto_merge", return_value=True),
+            patch.object(driver, "_gh_pr_state", return_value={"headRefOid": "abc"}),
+            patch.object(driver, "_get_pr_branch", return_value="b"),
+            patch.object(driver, "_arm_drive_green"),
+            patch.object(driver, "_wait_for_pr_terminal", return_value="DIRTY"),
+            patch.object(driver, "_resolve_dirty_pr") as mock_resolve,
+        ):
+            result = driver._recheck_and_arm_after_fix(1, 2, 0, resolve_dirty=False)
+        # No re-dispatch; falls back to the success WorkerResult.
+        mock_resolve.assert_not_called()
+        assert result is not None and result.success is True
+
+    def test_resolve_dirty_pr_recursion_is_bounded_when_pr_stays_dirty(
+        self, driver: CIDriver
+    ) -> None:
+        # End-to-end recursion guard: enter via _resolve_dirty_pr with a clean
+        # mechanical rebase that re-arms, but the re-armed PR stays DIRTY. The
+        # callback uses resolve_dirty=False, so _resolve_dirty_pr is entered
+        # exactly once -- no resolve->recheck->resolve loop.
+        green = [_make_check("test", required=True, conclusion="success")]
+        real_resolve = driver._resolve_dirty_pr
+        call_count = {"n": 0}
+
+        def counting_resolve(*args: object, **kwargs: object) -> WorkerResult:
+            call_count["n"] += 1
+            assert call_count["n"] <= 2, "recursion guard failed: _resolve_dirty_pr re-entered"
+            return real_resolve(*args, **kwargs)  # type: ignore[arg-type]
+
+        with (
+            patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=green),
+            _impl_go(driver),
+            patch.object(driver, "_enable_auto_merge", return_value=True),
+            patch.object(driver, "_gh_pr_state", return_value={"headRefOid": "abc"}),
+            patch.object(driver, "_get_pr_branch", return_value="b"),
+            patch.object(driver, "_arm_drive_green"),
+            patch.object(driver, "_attempt_mechanical_rebase", return_value=True),
+            patch.object(driver, "_wait_for_pr_terminal", return_value="DIRTY"),
+            patch.object(driver, "_resolve_dirty_pr", side_effect=counting_resolve),
+        ):
+            result = driver._resolve_dirty_pr(1, 2, 0)
+        # Entered once (the outer call); the re-arm callback did NOT recurse.
+        assert call_count["n"] == 1
+        assert result is not None and result.success is True
+
 
 class TestResolveDirtyPr:
     """An armed-but-DIRTY PR is rebased, then handed to the agent if still conflicting."""
