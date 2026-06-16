@@ -298,6 +298,7 @@ def _gh_call_impl(
     check: bool = True,
     retry_on_rate_limit: bool = True,
     max_retries: int = 6,
+    log_on_error: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Implement gh CLI call with rate limit handling (circuit breaker will wrap this).
 
@@ -306,6 +307,10 @@ def _gh_call_impl(
         check: Whether to raise on non-zero exit
         retry_on_rate_limit: Whether to retry on rate limit
         max_retries: Maximum retry attempts
+        log_on_error: If False, suppress ERROR-level logs when the command
+            fails.  Pass ``False`` when the failure is expected and already
+            handled by the caller (e.g. ``updatePullRequestReviewComment`` on a
+            foreign-authored comment that the caller recovers via a shadow post).
 
     Returns:
         CompletedProcess instance
@@ -324,6 +329,7 @@ def _gh_call_impl(
                 ["gh", *args],
                 check=check,
                 timeout=gh_cli_timeout(),
+                log_on_error=log_on_error,
             )
             return result
         except subprocess.CalledProcessError as e:
@@ -342,7 +348,8 @@ def _gh_call_impl(
                 continue
 
             if _is_non_transient_error(stderr):
-                logger.error("Non-transient error detected: %s", stderr[:200])
+                if log_on_error:
+                    logger.error("Non-transient error detected: %s", stderr[:200])
                 if _is_token_scope_error(stderr):
                     _log_token_scope_remediation(args, stderr)
                 raise
@@ -394,6 +401,7 @@ def _gh_call(
     check: bool = True,
     retry_on_rate_limit: bool = True,
     max_retries: int = 6,
+    log_on_error: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Call gh CLI with rate limit handling and circuit breaker protection.
 
@@ -406,6 +414,10 @@ def _gh_call(
         check: Whether to raise on non-zero exit
         retry_on_rate_limit: Whether to retry on rate limit
         max_retries: Maximum retry attempts
+        log_on_error: If False, suppress ERROR-level logs when the command
+            fails.  Pass ``False`` when the failure is expected and already
+            handled by the caller (e.g. ``updatePullRequestReviewComment`` on a
+            foreign-authored comment that the caller recovers via a shadow post).
 
     Returns:
         CompletedProcess instance
@@ -425,6 +437,7 @@ def _gh_call(
             check=check,
             retry_on_rate_limit=retry_on_rate_limit,
             max_retries=max_retries,
+            log_on_error=log_on_error,
         )
     except CircuitBreakerOpenError as exc:
         # Translate to a domain exception (RuntimeError subclass) so existing

@@ -147,10 +147,13 @@ class TestGhCallCircuitBreaker:
 
         assert result == expected_result
 
-        # Verify the mock was called with correct arguments
+        # Verify the mock was called with correct arguments — log_on_error is now
+        # forwarded by the circuit-breaker passthrough (added in #1368), so it
+        # must appear in the expected call (default value True).
         mock_impl.assert_called_once_with(
             ["issue", "list"],
             check=False,
             retry_on_rate_limit=False,
             max_retries=3,
+            log_on_error=True,
         )

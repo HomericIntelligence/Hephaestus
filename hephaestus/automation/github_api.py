@@ -1239,6 +1239,14 @@ def gh_pr_update_review_comment(comment_node_id: str, body: str) -> None:
 
     Used to edit an existing inline comment in place (#1083) instead of posting
     a duplicate on the same line.
+
+    GitHub rejects this mutation when the token does not own the comment
+    ("Body is not editable").  That failure is EXPECTED and fully recovered by
+    :func:`_edit_or_keep_comments` — it catches the exception and posts an
+    editable shadow comment instead (#1327).  We therefore suppress ERROR-level
+    logs for this call (``log_on_error=False``) so routine automation-loop runs
+    are not polluted with misleading error noise for a handled condition.
+    Genuine, unexpected failures still propagate as exceptions to the caller.
     """
     mutation = (
         "mutation($id:ID!,$body:String!){"
@@ -1257,7 +1265,8 @@ def gh_pr_update_review_comment(comment_node_id: str, body: str) -> None:
             f"id={comment_node_id}",
             "-f",
             f"body={body}",
-        ]
+        ],
+        log_on_error=False,
     )
 
 

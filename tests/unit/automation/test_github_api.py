@@ -2698,6 +2698,79 @@ class TestEditOrKeepUneditableComment:
         # The finding was consumed by the shadow comment, not re-posted fresh.
         assert kept == []
 
+    @patch("hephaestus.automation.github_api.gh_pr_wont_fix_line_index", return_value=set())
+    @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
+    @patch("hephaestus.automation.github_api.gh_pr_review_post")
+    @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
+    def test_uneditable_viewer_flag_emits_no_error_log(
+        self,
+        mock_index: Any,
+        mock_post: Any,
+        mock_update: Any,
+        _mock_wont_fix: Any,
+        caplog: Any,
+    ) -> None:
+        """#1368: foreign-comment (viewerCanUpdate=False) path emits no ERROR logs.
+
+        When ``viewerCanUpdate`` is False the proactive path posts a shadow
+        comment directly — the ``updatePullRequestReviewComment`` mutation is
+        NEVER called, so no failure is generated.  This test confirms the update
+        mock is not called AND that no ERROR-level records are emitted.
+        """
+        from hephaestus.automation.github_api import _edit_or_keep_comments
+
+        mock_index.side_effect = [
+            {("a.py", 2, "RIGHT"): ("FOREIGN_NODE", "copilot finding", False)},
+            {("a.py", 2, "RIGHT"): ("OUR_NODE", "our finding", True)},
+        ]
+
+        with caplog.at_level("ERROR"):
+            kept = _edit_or_keep_comments(
+                7, [{"path": "a.py", "line": 2, "side": "RIGHT", "body": "our finding"}]
+            )
+
+        # Proactive path: update mutation must not be called for a foreign comment.
+        mock_update.assert_not_called()
+        # Recovery still happens: shadow comment is posted.
+        mock_post.assert_called_once()
+        # Finding is consumed, not returned for re-post.
+        assert kept == []
+        # No ERROR-level noise for an expected, fully-recovered condition.
+        error_records = [r for r in caplog.records if r.levelno >= 40]
+        assert error_records == [], (
+            f"Expected no ERROR logs but got: {[r.getMessage() for r in error_records]}"
+        )
+
+    @patch("hephaestus.github.client.run_subprocess")
+    def test_update_review_comment_does_not_log_error_on_not_editable(
+        self,
+        mock_run: Any,
+        caplog: Any,
+    ) -> None:
+        """#1368: gh_pr_update_review_comment passes log_on_error=False to _gh_call.
+
+        When GitHub rejects the update with "Body is not editable" the call
+        raises (so the caller can shadow-post), but must NOT emit ERROR-level
+        logs — the failure is expected and the caller recovers it.  Genuine
+        unexpected failures elsewhere should still log at ERROR (checked via
+        the existing test_token_scope_error_is_non_transient test).
+        """
+        from hephaestus.automation.github_api import gh_pr_update_review_comment
+
+        mock_run.side_effect = subprocess.CalledProcessError(
+            1, "gh", stderr="gh: Body is not editable"
+        )
+
+        with caplog.at_level("ERROR"):
+            with pytest.raises(subprocess.CalledProcessError):
+                gh_pr_update_review_comment("NODE_ID", "some body")
+
+        error_records = [r for r in caplog.records if r.levelno >= 40]
+        assert error_records == [], (
+            f"Expected no ERROR logs for expected 'not editable' failure but got: "
+            f"{[r.getMessage() for r in error_records]}"
+        )
+
 
 class TestGhPrInlineCommentIndex:
     """gh_pr_inline_comment_index returns (path,line) → (node_id, body) (#1085)."""
