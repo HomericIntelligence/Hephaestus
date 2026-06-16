@@ -13,6 +13,7 @@ import subprocess
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+from hephaestus.constants import TRANSIENT_ERROR_CORE
 from hephaestus.resilience.circuit_breaker import CircuitBreaker, get_circuit_breaker
 from hephaestus.utils.retry import retry_with_backoff
 
@@ -28,25 +29,27 @@ TRANSIENT_SUBPROCESS_ERRORS: tuple[type[Exception], ...] = (
     OSError,
 )
 
-# Patterns in stderr that indicate transient (retryable) failures
-TRANSIENT_ERROR_PATTERNS: list[str] = [
-    "connection reset",
-    "connection refused",
-    "network unreachable",
-    "network is unreachable",
-    "temporary failure",
-    "could not resolve host",
-    "curl 56",
-    "timed out",
-    "early eof",
-    "recv failure",
-    "broken pipe",
-    "connection timed out",
-    "ssl handshake",
-    "503",
-    "502",
-    "504",
-]
+# Patterns in stderr that indicate transient (retryable) failures.
+# Derived from the shared TRANSIENT_ERROR_CORE (issue #1205) plus
+# subprocess-specific signals. The explicit ``connection *`` / ``could not
+# resolve host`` phrases are retained as extras (rather than relying solely on
+# the broader core substrings) so callers and tests asserting exact membership
+# keep working. Kept as a sorted list because call sites iterate it.
+_SUBPROCESS_TRANSIENT_EXTRAS: frozenset[str] = frozenset(
+    {
+        "connection reset",
+        "connection refused",
+        "connection timed out",
+        "network is unreachable",
+        "could not resolve host",
+        "curl 56",
+        "early eof",
+        "recv failure",
+        "broken pipe",
+        "ssl handshake",
+    }
+)
+TRANSIENT_ERROR_PATTERNS: list[str] = sorted(TRANSIENT_ERROR_CORE | _SUBPROCESS_TRANSIENT_EXTRAS)
 
 
 def is_transient_subprocess_error(error: BaseException) -> bool:

@@ -32,6 +32,26 @@ LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 # Base field names included in every JSON log record.
 JSON_LOG_FIELDS: tuple[str, ...] = ("timestamp", "level", "logger", "message")
 
+# Canonical transient-failure substrings shared by the resilience and retry
+# layers. Both ``subprocess_resilience.TRANSIENT_ERROR_PATTERNS`` and
+# ``retry.NETWORK_ERROR_KEYWORDS`` derive from this core so the overlapping
+# signals cannot drift (see issue #1205). Each consumer adds its own
+# layer-specific extras on top: the retry layer additionally treats
+# rate-limit/throttle signals as retryable, which the resilience layer
+# intentionally does NOT retry (rate-limit passthrough is handled by callers).
+TRANSIENT_ERROR_CORE: frozenset[str] = frozenset(
+    {
+        "connection",
+        "timed out",
+        "temporary failure",
+        "could not resolve",
+        "network unreachable",
+        "503",
+        "502",
+        "504",
+    }
+)
+
 # Marker file that identifies the repo root in a dev checkout.
 _REPO_ROOT_MARKER = "pyproject.toml"
 

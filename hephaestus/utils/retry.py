@@ -15,24 +15,25 @@ import time
 from collections.abc import Callable
 from typing import Any, TypeVar, cast
 
+from hephaestus.constants import TRANSIENT_ERROR_CORE
+
 # Type variable for generic function decoration
 F = TypeVar("F", bound=Callable[..., Any])
 
-# Network error keywords to detect transient failures
-NETWORK_ERROR_KEYWORDS = [
-    "connection",
-    "network",
-    "timeout",
-    "timed out",
-    "temporary failure",
-    "could not resolve",
-    "name resolution",
-    "rate limit",
-    "throttle",
-    "503",
-    "502",
-    "504",
-]
+# Network error keywords to detect transient failures. Derived from the shared
+# TRANSIENT_ERROR_CORE (issue #1205) plus retry-specific signals — including
+# rate-limit/throttle, which (unlike the resilience layer) the retry layer DOES
+# treat as retryable network errors.
+_NETWORK_EXTRA_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "network",
+        "timeout",
+        "name resolution",
+        "rate limit",
+        "throttle",
+    }
+)
+NETWORK_ERROR_KEYWORDS: list[str] = sorted(TRANSIENT_ERROR_CORE | _NETWORK_EXTRA_KEYWORDS)
 
 
 def is_network_error(error: BaseException) -> bool:
