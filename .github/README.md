@@ -41,7 +41,7 @@ Builds and publishes the package to PyPI on version tag push (`v*`).
 ### Required Checks Workflow (`workflows/_required.yml`)
 
 The consolidated required-status-check gate that runs on every pull request to
-`main` (and on push to `main`). It aggregates lint, markdownlint, `pixi-check`,
+`main` (and on push to `main`). It aggregates lint, `pixi-check`,
 shellcheck, the `pr-policy` gate (enforces `Closes #N` and signed commits),
 unit/integration/shell tests, wheel build, security scans (pip-audit, Gitleaks,
 bandit), workflow-schema validation, and version-sync. It also runs the

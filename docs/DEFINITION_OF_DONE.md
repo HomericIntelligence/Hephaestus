@@ -28,7 +28,7 @@ A piece of work is **done** when every item below is true.
 | 15 | Dep sync check passes (pyproject.toml then pixi.toml then pixi.lock) | CI job `deps/version-sync` |
 | 16 | Secrets scan finds no leaks | CI jobs `security/secrets-scan`, gitleaks in `_required.yml` |
 | 17 | Dependency vulnerability scan passes | CI jobs `security/dependency-scan`, `pip-audit` in `_required.yml` |
-| 18 | Markdownlint passes on all `.md` changes | CI job `markdownlint` |
+| 18 | Markdownlint passes on all `.md` changes | CI job `lint` (pre-commit hook) |
 | 19 | Shellcheck passes on all shell scripts | CI job `shellcheck` |
 | 20 | Yamllint passes on all YAML changes | CI job `lint` |
 | 21 | Pre-commit hooks pass on the diff | CI job `lint` (pre-commit suite folded into `lint` per #1173) |

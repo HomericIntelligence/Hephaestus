@@ -61,7 +61,11 @@ repos:
       - id: markdownlint-cli2
         name: Markdown Lint
         description: Lint markdown files for consistency
-        exclude: ^(build/|docs/)
+        # docs/ is intentionally IN scope (consolidated from the former
+        # standalone `markdownlint` CI job, #1199). .claude/ stays excluded:
+        # its two tracked .md files (security/guidelines.md,
+        # workflows/development.md) were never linted by that job — keep parity.
+        exclude: ^(build/|\.claude/)
         args: ['--config', '.markdownlint.yaml', '--fix']
 
   # YAML linting

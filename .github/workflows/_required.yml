@@ -191,7 +191,7 @@ jobs:
           restore-keys: |
             pre-commit-${{ runner.os }}-
 
-      - name: Run pre-commit (ruff, mypy, yamllint, markdownlint + all hooks)
+      - name: Run pre-commit (all hooks)
         run: |
           # Several hooks (check-dep-sync, check-unit-test-structure, the
           # hephaestus-* catalog checks) invoke `pixi run hephaestus-*`, which
@@ -208,24 +208,6 @@ jobs:
           retention-days: 7
           path: |
             .git/pre-commit-*
-
-  markdownlint:
-    name: markdownlint
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    needs: [lint, changes-gate]
-    if: needs.changes-gate.outputs.code_event == 'true'
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
-      - name: Run markdownlint-cli2
-        uses: DavidAnson/markdownlint-cli2-action@ded1f9488f68a970bc66ea5619e13e9b52e601cd  # v20.0.0
-        with:
-          globs: |
-            **/*.md
-            !.claude/**
-          config: ".markdownlint.yaml"
 
   pixi-check:
     name: pixi-check
@@ -867,7 +849,6 @@ jobs:
       - changes-gate
       - forbid-suppressions
       - lint
-      - markdownlint
       - pixi-check
       - justfile-check
       - symlink-check
