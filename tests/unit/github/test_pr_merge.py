@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """Tests for hephaestus.github.pr_merge module."""
 
-import importlib.util
+import json
 import subprocess
-import sys
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from hephaestus.github.pr_merge import (
     checks_success_and_log,
@@ -18,6 +15,15 @@ from hephaestus.github.pr_merge import (
     try_push_head_branch,
 )
 from hephaestus.utils.helpers import METADATA_TIMEOUT
+
+
+def _gh_result(payload: object) -> MagicMock:
+    """Build a gh_call result carrying JSON stdout."""
+    result = MagicMock()
+    result.stdout = json.dumps(payload)
+    result.stderr = ""
+    result.returncode = 0
+    return result
 
 
 class TestDetectRepoFromRemote:
@@ -318,389 +324,232 @@ class TestHandleMergeResult:
 class TestMain:
     """Tests for the main() entry point."""
 
-    def _make_pr(self, number: int, head_ref: str, base_ref: str, sha: str) -> MagicMock:
-        pr = MagicMock()
-        pr.number = number
-        pr.head.ref = head_ref
-        pr.head.sha = sha
-        pr.base.ref = base_ref
-        return pr
+    def _make_pr(self, number: int = 1, bucket: str = "pass") -> list[MagicMock]:
+        """Return gh_call side effects for repo view, PR list, checks, and merge."""
+        return [
+            _gh_result({"nameWithOwner": "owner/repo"}),
+            _gh_result(
+                [
+                    {
+                        "number": number,
+                        "headRefName": "feature",
+                        "headRefOid": "abc123",
+                        "baseRefName": "main",
+                    }
+                ]
+            ),
+            _gh_result([{"name": "ci", "state": "SUCCESS", "bucket": bucket, "workflow": "CI"}]),
+            _gh_result({"merged": True, "sha": "def456", "message": "ok"}),
+        ]
 
     @patch("hephaestus.github.pr_merge.run_git_cmd")
-    @patch("hephaestus.github.pr_merge.detect_repo_from_remote")
-    def test_returns_1_when_no_token(self, mock_detect, mock_git) -> None:
-        """main() returns 1 when GITHUB_TOKEN is not set."""
-        with patch.dict("os.environ", {}, clear=True):
-            with patch("os.getenv", return_value=None):
-                with patch("sys.argv", ["prog"]):
-                    from hephaestus.github.pr_merge import main
-
-                    assert main() == 1
-
-    @patch("hephaestus.github.pr_merge.run_git_cmd")
-    def test_returns_1_when_no_repo_detected(self, mock_git) -> None:
+    def test_returns_1_when_no_repo_detected(self, _mock_git) -> None:
         """main() returns 1 when repo can't be detected."""
-        with patch("os.getenv", return_value="fake-token"):
-            with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value=None):
-                with patch("sys.argv", ["prog"]):
-                    from hephaestus.github.pr_merge import main
+        with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value=None):
+            with patch("sys.argv", ["prog"]):
+                from hephaestus.github.pr_merge import main
 
-                    assert main() == 1
-
-    @pytest.mark.skipif(
-        not importlib.util.find_spec("github"),
-        reason="PyGithub not installed — cannot mock its absence when it is genuinely absent",
-    )
-    @patch("hephaestus.github.pr_merge.run_git_cmd")
-    def test_returns_1_when_pygithub_not_installed(self, mock_git) -> None:
-        """main() returns 1 when PyGithub is not importable."""
-        # A blanket builtins.__import__ patch also fires for argparse's
-        # transitive `import locale`, so main() may not reach the github import
-        # at all. Accept either outcome (return 1 from the clean path, or
-        # ImportError propagating from incidental machinery) — both signal that
-        # PyGithub's absence is fatal, which is what we are asserting.
-        from hephaestus.github.pr_merge import main
-
-        with patch("os.getenv", return_value="fake-token"):
-            with patch(
-                "hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"
-            ):
-                with patch(
-                    "builtins.__import__", side_effect=ImportError("No module named 'github'")
-                ):
-                    with patch("sys.argv", ["prog"]):
-                        try:
-                            result = main()
-                        except ImportError:
-                            return  # acceptable failure mode
-                        assert result == 1
+                assert main() == 1
 
     @patch("hephaestus.github.pr_merge.run_git_cmd")
-    def test_returns_1_when_repo_access_fails(self, mock_git) -> None:
-        """main() returns 1 when GitHub repo access raises."""
-        mock_gh = MagicMock()
-        mock_gh.get_repo.side_effect = Exception("Not found")
-        mock_github_module = MagicMock()
-        mock_github_module.Github.return_value = mock_gh
+    @patch("hephaestus.github.pr_merge.gh_call")
+    def test_returns_1_when_repo_access_fails(self, mock_gh_call, _mock_git) -> None:
+        """main() returns 1 when gh cannot read the repository."""
+        mock_gh_call.side_effect = subprocess.CalledProcessError(1, ["gh"], stderr="Not found")
+        with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"):
+            with patch("sys.argv", ["prog"]):
+                from hephaestus.github.pr_merge import main
 
-        with patch("os.getenv", return_value="fake-token"):
-            with patch(
-                "hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"
-            ):
-                with patch.dict(sys.modules, {"github": mock_github_module}):
-                    with patch("sys.argv", ["prog"]):
-                        from hephaestus.github.pr_merge import main
-
-                        assert main() == 1
+                assert main() == 1
 
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
-    def test_merges_pr_when_checks_pass(self, mock_git, mock_push) -> None:
-        """main() merges PR when CI checks pass."""
-        pr = self._make_pr(1, "feature", "main", "abc123")
-        pr.merge.return_value = MagicMock(merged=True, sha="def456", message="ok")
+    @patch("hephaestus.github.pr_merge.gh_call")
+    def test_merges_pr_when_checks_pass(self, mock_gh_call, _mock_git, mock_push) -> None:
+        """main() merges PR through gh_call when CI checks pass."""
+        mock_gh_call.side_effect = self._make_pr()
+        with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"):
+            with patch("sys.argv", ["prog"]):
+                from hephaestus.github.pr_merge import main
 
-        commit = MagicMock()
-        commit.get_check_runs.return_value = [
-            MagicMock(name="ci", status="completed", conclusion="success")
-        ]
+                assert main() == 0
 
-        mock_repo = MagicMock()
-        mock_repo.get_pulls.return_value = [pr]
-        mock_repo.get_commit.return_value = commit
-
-        mock_gh = MagicMock()
-        mock_gh.get_repo.return_value = mock_repo
-        mock_github_module = MagicMock()
-        mock_github_module.Github.return_value = mock_gh
-
-        with patch("os.getenv", return_value="fake-token"):
-            with patch(
-                "hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"
-            ):
-                with patch.dict(sys.modules, {"github": mock_github_module}):
-                    with patch("sys.argv", ["prog"]):
-                        from hephaestus.github.pr_merge import main
-
-                        main()
-
-        pr.merge.assert_called_once_with(merge_method="squash")
+        merge_args = mock_gh_call.call_args_list[-1].args[0]
+        assert merge_args[:4] == ["api", "-X", "PUT", "/repos/owner/repo/pulls/1/merge"]
+        assert "merge_method=squash" in merge_args
+        assert "sha=abc123" in merge_args
+        mock_push.assert_called_once_with("feature", False)
 
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
-    def test_skips_pr_when_checks_fail(self, mock_git, mock_push) -> None:
+    @patch("hephaestus.github.pr_merge.gh_call")
+    def test_skips_pr_when_checks_fail(self, mock_gh_call, _mock_git, mock_push) -> None:
         """main() skips merge when CI checks fail."""
-        pr = self._make_pr(1, "feature", "main", "abc123")
+        mock_gh_call.side_effect = self._make_pr(bucket="fail")
+        with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"):
+            with patch("sys.argv", ["prog"]):
+                from hephaestus.github.pr_merge import main
 
-        commit = MagicMock()
-        commit.get_check_runs.return_value = [
-            MagicMock(name="ci", status="completed", conclusion="failure")
-        ]
+                assert main() == 0
 
-        mock_repo = MagicMock()
-        mock_repo.get_pulls.return_value = [pr]
-        mock_repo.get_commit.return_value = commit
-
-        mock_gh = MagicMock()
-        mock_gh.get_repo.return_value = mock_repo
-        mock_github_module = MagicMock()
-        mock_github_module.Github.return_value = mock_gh
-
-        with patch("os.getenv", return_value="fake-token"):
-            with patch(
-                "hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"
-            ):
-                with patch.dict(sys.modules, {"github": mock_github_module}):
-                    with patch("sys.argv", ["prog"]):
-                        from hephaestus.github.pr_merge import main
-
-                        main()
-
-        pr.merge.assert_not_called()
+        assert len(mock_gh_call.call_args_list) == 3
+        mock_push.assert_not_called()
 
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
-    def test_dry_run_does_not_merge(self, mock_git, mock_push) -> None:
+    @patch("hephaestus.github.pr_merge.gh_call")
+    def test_dry_run_does_not_merge(self, mock_gh_call, _mock_git, mock_push) -> None:
         """main() with --dry-run skips actual merge."""
-        pr = self._make_pr(1, "feature", "main", "abc123")
+        mock_gh_call.side_effect = self._make_pr()
+        with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"):
+            with patch("sys.argv", ["prog", "--dry-run"]):
+                from hephaestus.github.pr_merge import main
 
-        commit = MagicMock()
-        commit.get_check_runs.return_value = [
-            MagicMock(name="ci", status="completed", conclusion="success")
-        ]
+                assert main() == 0
 
-        mock_repo = MagicMock()
-        mock_repo.get_pulls.return_value = [pr]
-        mock_repo.get_commit.return_value = commit
-
-        mock_gh = MagicMock()
-        mock_gh.get_repo.return_value = mock_repo
-        mock_github_module = MagicMock()
-        mock_github_module.Github.return_value = mock_gh
-
-        with patch("os.getenv", return_value="fake-token"):
-            with patch(
-                "hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"
-            ):
-                with patch.dict(sys.modules, {"github": mock_github_module}):
-                    with patch("sys.argv", ["prog", "--dry-run"]):
-                        from hephaestus.github.pr_merge import main
-
-                        main()
-
-        pr.merge.assert_not_called()
+        assert len(mock_gh_call.call_args_list) == 3
+        mock_push.assert_not_called()
 
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
-    def test_falls_back_to_legacy_status_when_no_check_runs(self, mock_git, mock_push) -> None:
+    @patch("hephaestus.github.pr_merge.gh_call")
+    def test_falls_back_to_legacy_status_when_no_check_runs(
+        self, mock_gh_call, _mock_git, _mock_push
+    ) -> None:
         """main() uses legacy status when no check runs found."""
-        pr = self._make_pr(1, "feature", "main", "abc123")
-        pr.merge.return_value = MagicMock(merged=True, sha="abc", message="ok")
+        mock_gh_call.side_effect = [
+            _gh_result({"nameWithOwner": "owner/repo"}),
+            _gh_result(
+                [
+                    {
+                        "number": 1,
+                        "headRefName": "feature",
+                        "headRefOid": "abc123",
+                        "baseRefName": "main",
+                    }
+                ]
+            ),
+            subprocess.CalledProcessError(
+                1, ["gh", "pr", "checks"], stderr="no checks reported on branch"
+            ),
+            _gh_result({"state": "success", "statuses": []}),
+            _gh_result({"merged": True, "sha": "def456", "message": "ok"}),
+        ]
+        with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"):
+            with patch("sys.argv", ["prog"]):
+                from hephaestus.github.pr_merge import main
 
-        combined = MagicMock()
-        combined.state = "success"
-        combined.statuses = []
+                assert main() == 0
 
-        commit = MagicMock()
-        commit.get_check_runs.return_value = []  # no check runs
-        commit.get_combined_status.return_value = combined
-
-        mock_repo = MagicMock()
-        mock_repo.get_pulls.return_value = [pr]
-        mock_repo.get_commit.return_value = commit
-
-        mock_gh = MagicMock()
-        mock_gh.get_repo.return_value = mock_repo
-        mock_github_module = MagicMock()
-        mock_github_module.Github.return_value = mock_gh
-
-        with patch("os.getenv", return_value="fake-token"):
-            with patch(
-                "hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"
-            ):
-                with patch.dict(sys.modules, {"github": mock_github_module}):
-                    with patch("sys.argv", ["prog"]):
-                        from hephaestus.github.pr_merge import main
-
-                        main()
-
-        pr.merge.assert_called_once_with(merge_method="squash")
+        assert mock_gh_call.call_args_list[-1].args[0][:4] == [
+            "api",
+            "-X",
+            "PUT",
+            "/repos/owner/repo/pulls/1/merge",
+        ]
 
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
-    def test_push_all_pushes_every_pr(self, mock_git, mock_push) -> None:
+    @patch("hephaestus.github.pr_merge.gh_call")
+    def test_push_all_pushes_every_pr(self, mock_gh_call, _mock_git, mock_push) -> None:
         """main() with --push-all calls try_push_head_branch for every PR."""
-        pr = self._make_pr(1, "feature", "main", "abc123")
+        mock_gh_call.side_effect = self._make_pr(bucket="fail")
+        with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"):
+            with patch("sys.argv", ["prog", "--push-all"]):
+                from hephaestus.github.pr_merge import main
 
-        commit = MagicMock()
-        commit.get_check_runs.return_value = [
-            MagicMock(name="ci", status="completed", conclusion="failure")
-        ]
+                assert main() == 0
 
-        mock_repo = MagicMock()
-        mock_repo.get_pulls.return_value = [pr]
-        mock_repo.get_commit.return_value = commit
-
-        mock_gh = MagicMock()
-        mock_gh.get_repo.return_value = mock_repo
-        mock_github_module = MagicMock()
-        mock_github_module.Github.return_value = mock_gh
-
-        with patch("os.getenv", return_value="fake-token"):
-            with patch(
-                "hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"
-            ):
-                with patch.dict(sys.modules, {"github": mock_github_module}):
-                    with patch("sys.argv", ["prog", "--push-all"]):
-                        from hephaestus.github.pr_merge import main
-
-                        main()
-
-        mock_push.assert_called()
+        mock_push.assert_called_once_with("feature", False)
 
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
-    def test_continues_on_commit_fetch_error(self, mock_git, mock_push) -> None:
-        """main() continues to next PR when commit fetch fails."""
-        pr1 = self._make_pr(1, "bad-branch", "main", "badsha")
-        pr2 = self._make_pr(2, "good-branch", "main", "goodsha")
-        pr2.merge.return_value = MagicMock(merged=True, sha="xyz", message="ok")
-
-        good_commit = MagicMock()
-        good_commit.get_check_runs.return_value = [
-            MagicMock(name="ci", status="completed", conclusion="success")
+    @patch("hephaestus.github.pr_merge.gh_call")
+    def test_continues_when_head_sha_missing(self, mock_gh_call, _mock_git, mock_push) -> None:
+        """main() continues when a PR list row lacks a head SHA."""
+        mock_gh_call.side_effect = [
+            _gh_result({"nameWithOwner": "owner/repo"}),
+            _gh_result(
+                [
+                    {"number": 1, "headRefName": "bad", "baseRefName": "main"},
+                    {
+                        "number": 2,
+                        "headRefName": "good",
+                        "headRefOid": "goodsha",
+                        "baseRefName": "main",
+                    },
+                ]
+            ),
+            _gh_result([{"name": "ci", "state": "SUCCESS", "bucket": "pass", "workflow": "CI"}]),
+            _gh_result({"merged": True, "sha": "merged", "message": "ok"}),
         ]
+        with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"):
+            with patch("sys.argv", ["prog"]):
+                from hephaestus.github.pr_merge import main
 
-        mock_repo = MagicMock()
-        mock_repo.get_pulls.return_value = [pr1, pr2]
-        mock_repo.get_commit.side_effect = [Exception("not found"), good_commit]
-
-        mock_gh = MagicMock()
-        mock_gh.get_repo.return_value = mock_repo
-        mock_github_module = MagicMock()
-        mock_github_module.Github.return_value = mock_gh
-
-        with patch("os.getenv", return_value="fake-token"):
-            with patch(
-                "hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"
-            ):
-                with patch.dict(sys.modules, {"github": mock_github_module}):
-                    with patch("sys.argv", ["prog"]):
-                        from hephaestus.github.pr_merge import main
-
-                        main()
-
-        # pr2 should still be merged despite pr1 failing
-        pr2.merge.assert_called_once()
+                assert main() == 0
+        mock_push.assert_called_once_with("good", False)
 
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
-    def test_merge_exception_continues(self, mock_git, mock_push) -> None:
-        """main() logs and continues when pr.merge() raises."""
-        pr = self._make_pr(1, "feature", "main", "abc123")
-        pr.merge.side_effect = Exception("merge conflict")
-
-        commit = MagicMock()
-        commit.get_check_runs.return_value = [
-            MagicMock(name="ci", status="completed", conclusion="success")
+    @patch("hephaestus.github.pr_merge.gh_call")
+    def test_merge_exception_continues(self, mock_gh_call, _mock_git, _mock_push) -> None:
+        """main() logs and continues when the merge API call raises."""
+        mock_gh_call.side_effect = [
+            *self._make_pr()[:3],
+            subprocess.CalledProcessError(1, ["gh"], stderr="merge conflict"),
         ]
+        with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"):
+            with patch("sys.argv", ["prog"]):
+                from hephaestus.github.pr_merge import main
 
-        mock_repo = MagicMock()
-        mock_repo.get_pulls.return_value = [pr]
-        mock_repo.get_commit.return_value = commit
-
-        mock_gh = MagicMock()
-        mock_gh.get_repo.return_value = mock_repo
-        mock_github_module = MagicMock()
-        mock_github_module.Github.return_value = mock_gh
-
-        with patch("os.getenv", return_value="fake-token"):
-            with patch(
-                "hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"
-            ):
-                with patch.dict(sys.modules, {"github": mock_github_module}):
-                    with patch("sys.argv", ["prog"]):
-                        # Should not raise
-                        from hephaestus.github.pr_merge import main
-
-                        main()
+                assert main() == 0
 
 
 class TestMainJson:
     """Smoke tests covering --json branches of pr_merge.main()."""
 
-    def test_no_token_json(self, capsys) -> None:
-        import json
-
+    @patch("hephaestus.github.pr_merge.run_git_cmd")
+    def test_no_repo_json(self, _mock_git, capsys) -> None:
         from hephaestus.github.pr_merge import main
 
-        with patch("os.getenv", return_value=None):
+        with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value=None):
             with patch("sys.argv", ["prog", "--json"]):
                 assert main() == 1
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "error"
-        assert payload["exit_code"] == 1
 
-    @patch("hephaestus.github.pr_merge.run_git_cmd")
-    def test_no_repo_json(self, _mock_git, capsys) -> None:
-        import json
-
-        from hephaestus.github.pr_merge import main
-
-        with patch("os.getenv", return_value="fake-token"):
-            with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value=None):
-                with patch("sys.argv", ["prog", "--json"]):
-                    assert main() == 1
-        payload = json.loads(capsys.readouterr().out)
-        assert payload["status"] == "error"
-
+    @patch("hephaestus.github.pr_merge.gh_call")
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
-    def test_success_json(self, _mock_git, _mock_push, capsys) -> None:
+    def test_success_json(self, _mock_git, _mock_push, mock_gh_call, capsys) -> None:
         """Full happy-path with no PRs returns 0 and emits ok envelope."""
-        import json
+        mock_gh_call.side_effect = [_gh_result({"nameWithOwner": "owner/repo"}), _gh_result([])]
+        with patch(
+            "hephaestus.github.pr_merge.detect_repo_from_remote",
+            return_value="owner/repo",
+        ):
+            with patch("sys.argv", ["prog", "--json"]):
+                from hephaestus.github.pr_merge import main
 
-        mock_repo = MagicMock()
-        mock_repo.get_pulls.return_value = []
-        mock_gh = MagicMock()
-        mock_gh.get_repo.return_value = mock_repo
-        mock_github_module = MagicMock()
-        mock_github_module.Github.return_value = mock_gh
-
-        with patch("os.getenv", return_value="fake-token"):
-            with patch(
-                "hephaestus.github.pr_merge.detect_repo_from_remote",
-                return_value="owner/repo",
-            ):
-                with patch.dict(sys.modules, {"github": mock_github_module}):
-                    with patch("sys.argv", ["prog", "--json"]):
-                        from hephaestus.github.pr_merge import main
-
-                        assert main() == 0
+                assert main() == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "ok"
         assert payload["exit_code"] == 0
 
+    @patch("hephaestus.github.pr_merge.gh_call")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
-    def test_repo_access_failure_json(self, _mock_git, capsys) -> None:
-        """When gh.get_repo raises, --json emits an error envelope."""
-        import json
+    def test_repo_access_failure_json(self, _mock_git, mock_gh_call, capsys) -> None:
+        """When gh repo view fails, --json emits an error envelope."""
+        mock_gh_call.side_effect = RuntimeError("403")
+        with patch(
+            "hephaestus.github.pr_merge.detect_repo_from_remote",
+            return_value="owner/repo",
+        ):
+            with patch("sys.argv", ["prog", "--json"]):
+                from hephaestus.github.pr_merge import main
 
-        mock_gh = MagicMock()
-        mock_gh.get_repo.side_effect = RuntimeError("403")
-        mock_github_module = MagicMock()
-        mock_github_module.Github.return_value = mock_gh
-
-        with patch("os.getenv", return_value="fake-token"):
-            with patch(
-                "hephaestus.github.pr_merge.detect_repo_from_remote",
-                return_value="owner/repo",
-            ):
-                with patch.dict(sys.modules, {"github": mock_github_module}):
-                    with patch("sys.argv", ["prog", "--json"]):
-                        from hephaestus.github.pr_merge import main
-
-                        assert main() == 1
+                assert main() == 1
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "error"
 
@@ -708,7 +557,7 @@ class TestMainJson:
 class TestSquashOnlyInvariant:
     """The HomericIntelligence repos disable rebase merges in branch protection.
 
-    `pr.merge(merge_method="rebase")` fails with "Rebase merges are not allowed
+    `merge_method=rebase` fails with "Rebase merges are not allowed
     on this repository". Lock the squash-only contract at the source level so a
     future edit cannot silently reintroduce a rebase merge path.
     """
@@ -719,5 +568,5 @@ class TestSquashOnlyInvariant:
         from hephaestus.github import pr_merge
 
         source = inspect.getsource(pr_merge)
-        assert 'merge_method="rebase"' not in source
-        assert 'merge_method="squash"' in source
+        assert "merge_method=rebase" not in source
+        assert "merge_method=squash" in source

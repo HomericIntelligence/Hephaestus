@@ -46,6 +46,27 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/install_helpers.sh"
 # $dir expansion). Notably forbidden: '"', '`', whitespace, and any '$('.
 # shellcheck disable=SC2016  # Single quotes intentional; regex must be literal
 readonly ADD_TO_BASHRC_ALLOWED_RE='^(eval "\$\(/[A-Za-z0-9._/-]+ shellenv\)"|export PATH=\$PATH:[A-Za-z0-9._/$-]+)$'
+INSTALL_TMP_ROOT="${TMPDIR:-/tmp}/hephaestus-$(id -u)"
+readonly INSTALL_TMP_ROOT
+
+make_secure_tmp_component() {
+    local component="$1"
+    local base="$INSTALL_TMP_ROOT"
+
+    if [[ -e "$base" && ( -L "$base" || ! -d "$base" || ! -O "$base" ) ]]; then
+        return 1
+    fi
+    mkdir -p "$base/$component" || return 1
+    if [[ -L "$base/$component" || ! -O "$base/$component" ]]; then
+        return 1
+    fi
+    chmod 700 "$base" "$base/$component" || return 1
+    printf '%s\n' "$base/$component"
+}
+
+make_secure_runtime_dir() {
+    make_secure_tmp_component "$1"
+}
 
 # Append a line to ~/.bashrc if not already present, then apply it to the
 # current shell.
@@ -90,6 +111,13 @@ add_to_bashrc() {
 
 should_check_worker()  { [[ "$ROLE" == "all" || "$ROLE" == "worker" ]]; }
 should_check_control() { [[ "$ROLE" == "all" || "$ROLE" == "control" ]]; }
+
+make_install_tmpdir() {
+    local prefix="$1"
+    local tmp_root
+    tmp_root="$(make_secure_tmp_component install)" || return 1
+    mktemp -d "$tmp_root/${prefix}.XXXXXX"
+}
 
 # ─── Pinned upstream-tool versions (issue #744 — verified installs) ───────────
 # Bumping any of these REQUIRES updating both the version string and the
@@ -311,7 +339,7 @@ else
         fi
         if [ -n "$tgt" ]; then
             url="https://github.com/casey/just/releases/download/${JUST_VERSION}/${tgt}"
-            tmp="$(mktemp -d)"
+            tmp="$(make_install_tmpdir just)"
             mkdir -p ~/.local/bin
             if download_and_verify "$sha" "$url" "$tmp/just.tar.gz" \
                 && tar -xzf "$tmp/just.tar.gz" -C "$tmp" just \
@@ -531,7 +559,7 @@ else
         fi
         if [ -n "$tgt" ]; then
             url="https://github.com/prefix-dev/pixi/releases/download/v${PIXI_VERSION}/${tgt}"
-            tmp="$(mktemp -d)"
+            tmp="$(make_install_tmpdir pixi)"
             mkdir -p ~/.local/bin
             if download_and_verify "$sha" "$url" "$tmp/pixi.tar.gz" \
                 && tar -xzf "$tmp/pixi.tar.gz" -C "$tmp" \
@@ -579,16 +607,18 @@ if should_check_worker; then
         echo -e "    ${BLUE}→${NC} Installing Go 1.23.8..."
         GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
         GO_PKG="go1.23.8.linux-${GOARCH}.tar.gz"
-        if curl -fsSL "https://go.dev/dl/$GO_PKG" -o "/tmp/$GO_PKG" \
+        GO_TMP_DIR="$(make_install_tmpdir go)"
+        GO_ARCHIVE="$GO_TMP_DIR/$GO_PKG"
+        if curl -fsSL "https://go.dev/dl/$GO_PKG" -o "$GO_ARCHIVE" \
             && sudo rm -rf /usr/local/go \
-            && sudo tar -C /usr/local -xzf "/tmp/$GO_PKG" \
-            && rm "/tmp/$GO_PKG"; then
+            && sudo tar -C /usr/local -xzf "$GO_ARCHIVE"; then
             check_pass "Go 1.23.8 installed to /usr/local/go"
             add_to_bashrc "export PATH=\$PATH:/usr/local/go/bin"
             _go_installed_now=true
         else
             check_fail "Go — install failed"
         fi
+        rm -rf "$GO_TMP_DIR"
     }
 
     if has_cmd go || [[ -x /usr/local/go/bin/go ]]; then
@@ -652,14 +682,17 @@ else
         NATS_PKG="nats-server-v2.10.24-linux-${GOARCH}.tar.gz"
         NATS_URL="https://github.com/nats-io/nats-server/releases/download/v2.10.24/$NATS_PKG"
         mkdir -p ~/.local/bin
-        # shellcheck disable=SC2015  # B is check_pass (never fails); ternary is safe
-        curl -fsSL "$NATS_URL" -o "/tmp/$NATS_PKG" \
-            && tar -xzf "/tmp/$NATS_PKG" -C /tmp \
-            && mv "/tmp/nats-server-v2.10.24-linux-${GOARCH}/nats-server" ~/.local/bin/nats-server \
-            && chmod +x ~/.local/bin/nats-server \
-            && rm -rf "/tmp/$NATS_PKG" "/tmp/nats-server-v2.10.24-linux-${GOARCH}" \
-            && check_pass "nats-server 2.10.24 installed to ~/.local/bin" \
-            || check_fail "nats-server — install failed"
+        NATS_TMP_DIR="$(make_install_tmpdir nats-server)"
+        if curl -fsSL "$NATS_URL" -o "$NATS_TMP_DIR/$NATS_PKG" \
+            && tar -xzf "$NATS_TMP_DIR/$NATS_PKG" -C "$NATS_TMP_DIR" \
+            && mv "$NATS_TMP_DIR/nats-server-v2.10.24-linux-${GOARCH}/nats-server" ~/.local/bin/nats-server \
+            && chmod +x ~/.local/bin/nats-server; then
+            rm -rf "$NATS_TMP_DIR"
+            check_pass "nats-server 2.10.24 installed to ~/.local/bin"
+        else
+            rm -rf "$NATS_TMP_DIR"
+            check_fail "nats-server — install failed"
+        fi
         echo -e "    ${DIM}Ensure ~/.local/bin is in PATH${NC}"
     fi
 fi
@@ -675,14 +708,17 @@ else
         NATS_CLI_PKG="nats-0.1.5-linux-${GOARCH}.zip"
         NATS_CLI_URL="https://github.com/nats-io/natscli/releases/download/v0.1.5/$NATS_CLI_PKG"
         mkdir -p ~/.local/bin
-        # shellcheck disable=SC2015  # B is check_pass (never fails); ternary is safe
-        curl -fsSL "$NATS_CLI_URL" -o "/tmp/$NATS_CLI_PKG" \
-            && unzip -q "/tmp/$NATS_CLI_PKG" -d /tmp/nats-cli \
-            && mv /tmp/nats-cli/nats-*/nats ~/.local/bin/nats \
-            && chmod +x ~/.local/bin/nats \
-            && rm -rf "/tmp/$NATS_CLI_PKG" /tmp/nats-cli \
-            && check_pass "nats CLI installed to ~/.local/bin" \
-            || check_warn "nats CLI — install failed (optional)"
+        NATS_CLI_TMP_DIR="$(make_install_tmpdir nats-cli)"
+        if curl -fsSL "$NATS_CLI_URL" -o "$NATS_CLI_TMP_DIR/$NATS_CLI_PKG" \
+            && unzip -q "$NATS_CLI_TMP_DIR/$NATS_CLI_PKG" -d "$NATS_CLI_TMP_DIR/nats-cli" \
+            && mv "$NATS_CLI_TMP_DIR"/nats-cli/nats-*/nats ~/.local/bin/nats \
+            && chmod +x ~/.local/bin/nats; then
+            rm -rf "$NATS_CLI_TMP_DIR"
+            check_pass "nats CLI installed to ~/.local/bin"
+        else
+            rm -rf "$NATS_CLI_TMP_DIR"
+            check_warn "nats CLI — install failed (optional)"
+        fi
     fi
 fi
 
@@ -707,18 +743,28 @@ if should_check_worker; then
         if apt_install podman-compose; then check_pass "podman-compose installed"; fi
     fi
 
-    # Podman socket (required for some compose operations)
-    PODMAN_SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"
-    if [[ -S "$PODMAN_SOCK" ]]; then
-        check_pass "podman socket active"
-    else
-        check_warn "podman socket not active — run: systemctl --user enable --now podman.socket"
-        if $INSTALL; then
-            # shellcheck disable=SC2015  # B is check_pass (never fails); ternary is safe
-            systemctl --user enable --now podman.socket 2>/dev/null \
-                && check_pass "podman socket enabled" \
-                || check_warn "podman socket — could not enable (may need desktop session)"
+    # Podman socket (required for some compose operations). User-specific
+    # runtime sockets live under a locked-down per-user TMPDIR subtree.
+    if PODMAN_SOCKET_DIR="$(make_secure_runtime_dir podman)"; then
+        PODMAN_SOCK="$PODMAN_SOCKET_DIR/podman.sock"
+        if [[ -S "$PODMAN_SOCK" ]]; then
+            check_pass "podman socket active at $PODMAN_SOCK"
+        else
+            check_warn "podman socket not active — run: podman system service --time=0 'unix://$PODMAN_SOCK'"
+            if $INSTALL; then
+                podman system service --time=0 "unix://$PODMAN_SOCK" >/dev/null 2>&1 &
+                sleep 1
+                if [[ -S "$PODMAN_SOCK" ]]; then
+                    check_pass "podman socket started at $PODMAN_SOCK"
+                else
+                    check_warn "podman socket — service did not create $PODMAN_SOCK"
+                fi
+            else
+                :
+            fi
         fi
+    else
+        check_warn "podman socket — could not create a secure runtime directory"
     fi
 fi
 
@@ -939,7 +985,7 @@ else
         if [ -n "$goos" ]; then
             tgt="dagger_v${DAGGER_VERSION}_${goos}_${goarch}.tar.gz"
             url="https://github.com/dagger/dagger/releases/download/v${DAGGER_VERSION}/${tgt}"
-            tmp="$(mktemp -d)"
+            tmp="$(make_install_tmpdir dagger)"
             mkdir -p ~/.local/bin
             if download_and_verify "$sha" "$url" "$tmp/dagger.tar.gz" \
                 && tar -xzf "$tmp/dagger.tar.gz" -C "$tmp" \

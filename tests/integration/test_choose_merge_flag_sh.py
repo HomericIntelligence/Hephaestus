@@ -38,7 +38,7 @@ gh() {{
 }}
 export -f gh
 . {SNIPPET}
-choose_merge_flag {repo}
+choose_merge_flag --gh-bin gh {repo}
 """
     return subprocess.run(
         ["bash", "-c", script],
@@ -67,7 +67,7 @@ gh() {{
 }}
 export -f gh
 . {SNIPPET}
-choose_merge_flag owner/repo
+choose_merge_flag --gh-bin gh owner/repo
 """
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     assert result.returncode == 0, f"stderr noise broke jq parse: stderr={result.stderr!r}"

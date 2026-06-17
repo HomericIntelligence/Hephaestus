@@ -26,10 +26,16 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import subprocess
 import sys
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.cli.utils import (
+    add_github_throttle_args,
+    add_json_arg,
+    add_version_arg,
+    configure_github_throttle_from_args,
+    emit_json_status,
+)
+from hephaestus.github.client import gh_call
 
 # Allow-list: the only labels this tool may ever apply. Mirrors the provisioned
 # ``severity:*`` labels (verified via ``gh label list``).
@@ -72,8 +78,8 @@ def parse_severity(issue_body: str) -> str | None:
 
 
 def _gh(*args: str) -> str:
-    """Run ``gh`` with the given args (list form — never ``shell=True``)."""
-    return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+    """Run ``gh`` through the shared adapter."""
+    return gh_call(list(args), check=True).stdout
 
 
 def apply_severity_label(repo: str, issue_number: int, selected: str | None) -> None:
@@ -134,9 +140,11 @@ def main(argv: list[str] | None = None) -> int:
             "from the environment."
         )
     )
+    add_github_throttle_args(parser)
     add_json_arg(parser)
     add_version_arg(parser)
     args = parser.parse_args(argv)
+    configure_github_throttle_from_args(args)
 
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     if not repo or "/" not in repo:

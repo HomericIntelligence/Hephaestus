@@ -1120,6 +1120,9 @@ def main() -> int:
 
     """
     args = _parse_args()
+    from hephaestus.cli.utils import configure_github_throttle_from_args
+
+    configure_github_throttle_from_args(args)
     setup_review_logging(args.verbose)
     agent = resolve_agent(args.agent)
 

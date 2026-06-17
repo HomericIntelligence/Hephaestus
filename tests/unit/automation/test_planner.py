@@ -490,15 +490,14 @@ class TestEnsureMnemosyne:
         """Test successful clone returns True and runs correct command."""
         mnemosyne_root = tmp_path / "ProjectMnemosyne"
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
+        with patch("hephaestus.automation.advise_runner.gh_call") as mock_gh:
+            mock_gh.return_value = MagicMock(returncode=0)
 
             result = planner._ensure_mnemosyne(mnemosyne_root)
 
         assert result is True
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args[0][0]
-        assert "gh" in cmd
+        mock_gh.assert_called_once()
+        cmd = mock_gh.call_args[0][0]
         assert "repo" in cmd
         assert "clone" in cmd
         assert "HomericIntelligence/ProjectMnemosyne" in cmd
@@ -508,8 +507,8 @@ class TestEnsureMnemosyne:
         """Test clone failure returns False and logs warning."""
         mnemosyne_root = tmp_path / "ProjectMnemosyne"
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.CalledProcessError(
+        with patch("hephaestus.automation.advise_runner.gh_call") as mock_gh:
+            mock_gh.side_effect = subprocess.CalledProcessError(
                 1, "gh", stderr="authentication failed"
             )
 
@@ -549,8 +548,8 @@ class TestEnsureMnemosyne:
         mnemosyne_root = tmp_path / "ProjectMnemosyne"
         lock_path = tmp_path / ".mnemosyne.lock"
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
+        with patch("hephaestus.automation.advise_runner.gh_call") as mock_gh:
+            mock_gh.return_value = MagicMock(returncode=0)
 
             result = planner._ensure_mnemosyne(mnemosyne_root)
 
@@ -616,11 +615,12 @@ class TestEnsureMnemosyne:
         def fake_subprocess(cmd: list[str], **kwargs: object) -> MagicMock:
             if "rev-parse" in cmd:
                 return MagicMock(returncode=0, stdout="true\n", stderr="")
-            # Only count gh repo clone calls, not git pull calls
-            if "gh" in cmd and "clone" in cmd:
-                clone_calls.append(1)
-                # Create the directory so subsequent checks see it
-                mnemosyne_root.mkdir(exist_ok=True)
+            return MagicMock(returncode=0)
+
+        def fake_gh_call(*_: object, **__: object) -> MagicMock:
+            clone_calls.append(1)
+            # Create the directory so subsequent checks see it.
+            mnemosyne_root.mkdir(exist_ok=True)
             return MagicMock(returncode=0)
 
         planner1 = Planner(mock_options)
@@ -635,7 +635,10 @@ class TestEnsureMnemosyne:
         t1 = threading.Thread(target=worker, args=(planner1,))
         t2 = threading.Thread(target=worker, args=(planner2,))
 
-        with patch("subprocess.run", side_effect=fake_subprocess):
+        with (
+            patch("subprocess.run", side_effect=fake_subprocess),
+            patch("hephaestus.automation.advise_runner.gh_call", side_effect=fake_gh_call),
+        ):
             t1.start()
             t2.start()
             start_event.set()
@@ -649,8 +652,8 @@ class TestEnsureMnemosyne:
         """TimeoutExpired on gh repo clone must return False without raising (#368)."""
         mnemosyne_root = tmp_path / "ProjectMnemosyne"
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.TimeoutExpired("gh", 120)
+        with patch("hephaestus.automation.advise_runner.gh_call") as mock_gh:
+            mock_gh.side_effect = subprocess.TimeoutExpired("gh", 120)
 
             result = planner._ensure_mnemosyne(mnemosyne_root)
 
@@ -664,13 +667,13 @@ class TestEnsureMnemosyne:
         """
         mnemosyne_root = tmp_path / "ProjectMnemosyne"
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
+        with patch("hephaestus.automation.advise_runner.gh_call") as mock_gh:
+            mock_gh.return_value = MagicMock(returncode=0)
 
             planner._ensure_mnemosyne(mnemosyne_root)
 
-        call_kwargs = mock_run.call_args.kwargs
-        assert "timeout" in call_kwargs, "subprocess.run for clone must pass timeout="
+        call_kwargs = mock_gh.call_args.kwargs
+        assert "timeout" in call_kwargs, "gh_call for clone must pass timeout="
         assert call_kwargs["timeout"] == 120
 
 

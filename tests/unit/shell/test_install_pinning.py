@@ -77,6 +77,18 @@ def test_trust_model_documented_for_unpinned(install_script: str) -> None:
     )
 
 
+def test_podman_socket_uses_secure_runtime_directory(install_script: str) -> None:
+    """Podman socket setup uses a hardened TMPDIR subtree."""
+    assert "XDG_RUNTIME_DIR" not in install_script
+    assert "/run/user" not in install_script
+    assert 'INSTALL_TMP_ROOT="${TMPDIR:-/tmp}/hephaestus-$(id -u)"' in install_script
+    assert "readonly INSTALL_TMP_ROOT" in install_script
+    assert "make_secure_tmp_component()" in install_script
+    assert 'local base="$INSTALL_TMP_ROOT"' in install_script
+    assert 'chmod 700 "$base" "$base/$component"' in install_script
+    assert 'PODMAN_SOCKET_DIR="$(make_secure_runtime_dir podman)"' in install_script
+
+
 def test_download_and_verify_rejects_bad_hash(tmp_path: Path) -> None:
     """Functional test: helper must exit non-zero on hash mismatch.
 

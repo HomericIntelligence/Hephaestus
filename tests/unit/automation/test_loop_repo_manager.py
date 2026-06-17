@@ -8,6 +8,7 @@ loop_runner namespace (preserved via explicit re-exports).
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -29,8 +30,6 @@ class TestDetectCwdRepo:
     """Tests for _detect_cwd_repo URL parsing logic."""
 
     def test_returns_none_tuple_when_not_in_git_repo(self) -> None:
-        import subprocess
-
         with patch(
             "hephaestus.automation.loop_repo_manager.subprocess.run",
             side_effect=subprocess.CalledProcessError(128, "git"),
@@ -207,17 +206,13 @@ class TestEnsureClone:
         git_dir = tmp_path / ".git"
         git_dir.mkdir()
 
-        with patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run:
+        with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh_call:
             _ensure_clone("MyOrg", "MyRepo", tmp_path)
-        mock_run.assert_not_called()
+        mock_gh_call.assert_not_called()
 
     def test_raises_on_failed_clone(self, tmp_path: Path) -> None:
-        m = MagicMock()
-        m.returncode = 1
-
-        with (
-            patch("hephaestus.automation.loop_repo_manager.resilient_call", return_value=m),
-        ):
+        with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh_call:
+            mock_gh_call.side_effect = subprocess.CalledProcessError(1, ["gh"])
             with pytest.raises(RuntimeError, match=r"gh repo clone.*failed"):
                 _ensure_clone("MyOrg", "MyRepo", tmp_path)
 
@@ -225,7 +220,7 @@ class TestEnsureClone:
         m = MagicMock()
         m.returncode = 0
 
-        with patch("hephaestus.automation.loop_repo_manager.resilient_call", return_value=m):
+        with patch("hephaestus.automation.loop_repo_manager.gh_call", return_value=m):
             _ensure_clone("MyOrg", "MyRepo", tmp_path)
 
 

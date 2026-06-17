@@ -69,12 +69,32 @@ if [ -z "$CMD_BIN" ] || [ ! -x "$CMD_BIN" ]; then
     exec "$CMD" "$@"
 fi
 
+hephaestus_tmp_subdir() {
+    local component="$1"
+    local base
+    base="${TMPDIR:-/tmp}/hephaestus-$(id -u)"
+    if [[ -e "$base" && ( -L "$base" || ! -d "$base" || ! -O "$base" ) ]]; then
+        echo "[run-under-gdb] ERROR: unsafe temp root: $base" >&2
+        return 1
+    fi
+    mkdir -p "$base/$component" || return 1
+    if [[ -L "$base/$component" || ! -O "$base/$component" ]]; then
+        echo "[run-under-gdb] ERROR: unsafe temp directory: $base/$component" >&2
+        return 1
+    fi
+    chmod 700 "$base" "$base/$component" || return 1
+    printf '%s\n' "$base/$component"
+}
+
 # Write the gdb command script to a temp file. Multi-line gdb scripts passed
 # via repeated -ex flags are not portable across gdb versions; -x <file> is.
-GDB_SCRIPT=$(mktemp /tmp/run-under-gdb-XXXXXX.gdb)
+GDB_TMP_DIR="$(hephaestus_tmp_subdir run-under-gdb)" || exit 1
+GDB_SCRIPT=$(mktemp "$GDB_TMP_DIR/run-under-gdb-XXXXXX.gdb")
 EXIT_CODE_FILE="${CORE_DIR}/exit-${TS}.code"
-# shellcheck disable=SC2064
-trap "rm -f '$GDB_SCRIPT'" EXIT
+trap 'rm -f -- "$GDB_SCRIPT"' EXIT
+export RUN_UNDER_GDB_LOG="$GDB_LOG"
+export RUN_UNDER_GDB_CORE="$CORE_FILE"
+export RUN_UNDER_GDB_EXIT="$EXIT_CODE_FILE"
 
 # The gdb script uses Python event hooks rather than a plain gdb-script `if`
 # because:
@@ -90,14 +110,18 @@ trap "rm -f '$GDB_SCRIPT'" EXIT
 cat > "$GDB_SCRIPT" <<GDBEOF
 set pagination off
 set confirm off
-set logging file ${GDB_LOG}
-set logging overwrite on
-set logging enabled on
 
 python
 import gdb
-EXIT_FILE = "${EXIT_CODE_FILE}"
-CORE_FILE = "${CORE_FILE}"
+import os
+import shlex
+
+EXIT_FILE = os.environ["RUN_UNDER_GDB_EXIT"]
+CORE_FILE = os.environ["RUN_UNDER_GDB_CORE"]
+LOG_FILE = os.environ["RUN_UNDER_GDB_LOG"]
+gdb.execute("set logging file " + shlex.quote(LOG_FILE))
+gdb.execute("set logging overwrite on")
+gdb.execute("set logging enabled on")
 # POSIX shell convention for signal-terminated processes (128 + signo).
 SIG_MAP = {"SIGABRT": 6, "SIGSEGV": 11, "SIGBUS": 7, "SIGFPE": 8, "SIGILL": 4}
 state = {"signaled": False}
@@ -114,7 +138,7 @@ def on_stop(event):
     if isinstance(event, gdb.SignalEvent):
         signo = event.stop_signal
         print("[run-under-gdb] caught " + signo + "; dumping " + CORE_FILE)
-        gdb.execute("generate-core-file " + CORE_FILE)
+        gdb.execute("generate-core-file " + shlex.quote(CORE_FILE))
         gdb.execute("bt full")
         gdb.execute("info threads")
         gdb.execute("info sharedlibrary")

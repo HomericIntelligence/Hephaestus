@@ -9,9 +9,11 @@ import pytest
 
 from hephaestus.cli.utils import (
     CommandRegistry,
+    add_github_throttle_args,
     add_json_arg,
     add_logging_args,
     add_version_arg,
+    configure_github_throttle_from_args,
     confirm_action,
     create_parser,
     emit_json_status,
@@ -166,6 +168,55 @@ class TestAddLoggingArgs:
         add_logging_args(parser)
         args = parser.parse_args(["--log-file", "out.log"])
         assert args.log_file == "out.log"
+
+
+class TestAddGithubThrottleArgs:
+    """Tests for shared GitHub throttle CLI options."""
+
+    def test_defaults(self) -> None:
+        parser = argparse.ArgumentParser()
+        add_github_throttle_args(parser)
+        args = parser.parse_args([])
+        assert args.gh_global_rate == 10.0
+        assert args.gh_global_burst == 30.0
+
+    def test_custom_values(self) -> None:
+        parser = argparse.ArgumentParser()
+        add_github_throttle_args(parser)
+        args = parser.parse_args(["--gh-global-rate", "5.5", "--gh-global-burst", "12"])
+        assert args.gh_global_rate == 5.5
+        assert args.gh_global_burst == 12.0
+
+    def test_zero_rate_allowed(self) -> None:
+        parser = argparse.ArgumentParser()
+        add_github_throttle_args(parser)
+        args = parser.parse_args(["--gh-global-rate", "0"])
+        assert args.gh_global_rate == 0.0
+
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [
+            ("--gh-global-rate", "-1"),
+            ("--gh-global-rate", "nan"),
+            ("--gh-global-burst", "0"),
+            ("--gh-global-burst", "0.5"),
+            ("--gh-global-burst", "-1"),
+        ],
+    )
+    def test_invalid_values_exit_2(self, flag: str, value: str) -> None:
+        parser = argparse.ArgumentParser()
+        add_github_throttle_args(parser)
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args([flag, value])
+        assert exc.value.code == 2
+
+    def test_configure_from_args(self) -> None:
+        parser = argparse.ArgumentParser()
+        add_github_throttle_args(parser)
+        args = parser.parse_args(["--gh-global-rate", "4", "--gh-global-burst", "9"])
+        with patch("hephaestus.github.rate_limit.configure_gh_global_throttle") as mock_configure:
+            configure_github_throttle_from_args(args)
+        mock_configure.assert_called_once_with(rate=4.0, burst=9.0)
 
 
 class TestFormatTable:

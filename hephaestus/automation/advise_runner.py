@@ -29,6 +29,8 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
+from hephaestus.github.client import gh_call
+
 # fcntl is POSIX-only; CPython does not bundle it on Windows. Import lazily so
 # this module stays importable on Windows for tests that only need its
 # pure-Python helpers. The cross-process file lock that uses fcntl is only
@@ -65,17 +67,14 @@ def _clone_mnemosyne(mnemosyne_root: Path) -> bool:
     """Clone the ProjectMnemosyne repository into ``mnemosyne_root``."""
     try:
         logger.info("Cloning ProjectMnemosyne to %s...", mnemosyne_root)
-        subprocess.run(
+        gh_call(
             [
-                "gh",
                 "repo",
                 "clone",
                 "HomericIntelligence/ProjectMnemosyne",
                 str(mnemosyne_root),
             ],
             check=True,
-            capture_output=True,
-            text=True,
             timeout=_MNEMOSYNE_CLONE_TIMEOUT,
         )
         logger.info("ProjectMnemosyne cloned successfully")
@@ -88,6 +87,9 @@ def _clone_mnemosyne(mnemosyne_root: Path) -> bool:
         return False
     except subprocess.CalledProcessError as e:
         logger.warning("Failed to clone ProjectMnemosyne: %s", e.stderr or e)
+        return False
+    except (RuntimeError, OSError) as e:
+        logger.warning("Failed to clone ProjectMnemosyne: %s", e)
         return False
 
 

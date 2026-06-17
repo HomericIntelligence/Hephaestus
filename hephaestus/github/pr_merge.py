@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Merge open PRs with successful CI/CD using GitHub API.
+"""Merge open PRs with successful CI/CD using the shared gh adapter.
 
 Supports dry-run mode and can detect repository name from git remote.
 
@@ -12,19 +12,25 @@ Flags:
     --repo       Repository in format OWNER/REPO (auto-detected from git remote if not provided)
 
 Requires:
-    - PyGithub (pip install PyGithub)
+    - gh authenticated for the target repository
     - Git installed locally
-    - GITHUB_TOKEN environment variable with 'repo' scope
 """
 
 import argparse
-import os
+import json
 import re
 import subprocess
 import sys
 from typing import Any
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.cli.utils import (
+    add_github_throttle_args,
+    add_json_arg,
+    add_version_arg,
+    configure_github_throttle_from_args,
+    emit_json_status,
+)
+from hephaestus.github.client import gh_call
 from hephaestus.logging.utils import get_logger
 from hephaestus.utils.helpers import METADATA_TIMEOUT, run_subprocess
 
@@ -90,7 +96,7 @@ def checks_success_and_log(commit: Any) -> tuple[bool | None, list[Any]]:
     """
     try:
         checks = list(commit.get_check_runs())
-    except Exception as e:  # broad catch intentional: PyGithub raises many exception subtypes
+    except Exception as e:  # broad catch intentional: git remote detection can fail in many ways
         logger.error("Error getting check runs: %s", e)
         return None, []
 
@@ -128,7 +134,7 @@ def legacy_status_and_log(commit: Any) -> str:
                 "    - %s: state=%s, description=%s", ctx.context, ctx.state, ctx.description
             )
         return combined.state or "unknown"
-    except Exception as e:  # broad catch intentional: PyGithub raises many exception subtypes
+    except Exception as e:  # broad catch retained for legacy object-style helper compatibility
         logger.error("Error getting combined status: %s", e)
         return "unknown"
 
@@ -180,26 +186,151 @@ def handle_merge_result(result: Any, pr_number: int, base_branch: str) -> None:
     """Handle and log the result of a PR merge.
 
     Args:
-        result: Merge result object from PyGithub
+        result: Merge result dict from gh api, or a legacy object-style result
         pr_number: PR number
         base_branch: Base branch name
 
     """
-    try:
-        merged = getattr(result, "merged", None)
-        message = getattr(result, "message", None)
-        sha = getattr(result, "sha", None)
-    except AttributeError:
-        # Fallback for unexpected types. `sha` is intentionally not set here:
-        # it is only read in the `if merged:` branch below, and this path
-        # forces merged=False.
-        merged = False
-        message = str(result)
+    if isinstance(result, dict):
+        merged = result.get("merged")
+        message = result.get("message")
+        sha = result.get("sha")
+    else:
+        try:
+            merged = getattr(result, "merged", None)
+            message = getattr(result, "message", None)
+            sha = getattr(result, "sha", None)
+        except AttributeError:
+            # Fallback for unexpected types. `sha` is intentionally not set here:
+            # it is only read in the `if merged:` branch below, and this path
+            # forces merged=False.
+            merged = False
+            message = str(result)
 
     if merged:
         logger.info("  PR #%d merged into %s via squash. sha=%s", pr_number, base_branch, sha)
     else:
         logger.error("  Failed to merge PR #%d. API message: %s", pr_number, message)
+
+
+def _gh_json(args: list[str]) -> Any:
+    """Run gh through the shared adapter and parse JSON stdout."""
+    result = gh_call(args)
+    return json.loads(result.stdout or "null")
+
+
+def _verify_repo_access(repo_name: str) -> bool:
+    """Return whether gh can read the target repository."""
+    try:
+        _gh_json(["repo", "view", repo_name, "--json", "nameWithOwner"])
+    except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as exc:
+        logger.error("Error accessing repo %s: %s", repo_name, exc)
+        return False
+    return True
+
+
+def _list_open_prs(repo_name: str) -> list[dict[str, Any]]:
+    """Return open PR metadata in oldest-created order."""
+    data = _gh_json(
+        [
+            "pr",
+            "list",
+            "--repo",
+            repo_name,
+            "--state",
+            "open",
+            "--limit",
+            "1000",
+            "--json",
+            "number,headRefName,headRefOid,baseRefName",
+        ]
+    )
+    return data if isinstance(data, list) else []
+
+
+_CHECK_BAD_BUCKETS = {"fail", "cancel"}
+
+
+def _checks_success_and_log(repo_name: str, pr_number: int) -> bool | None:
+    """Return PR checks success, false, or ``None`` when no checks exist."""
+    try:
+        checks = _gh_json(
+            [
+                "pr",
+                "checks",
+                str(pr_number),
+                "--repo",
+                repo_name,
+                "--json",
+                "name,state,bucket,workflow",
+            ]
+        )
+    except subprocess.CalledProcessError as exc:
+        blob = (exc.stderr or "") + (exc.stdout or "")
+        if "no checks reported" in blob:
+            return None
+        logger.error("Error getting check runs for PR #%d: %s", pr_number, blob.strip() or exc)
+        return None
+    except (RuntimeError, json.JSONDecodeError) as exc:
+        logger.error("Error getting check runs for PR #%d: %s", pr_number, exc)
+        return None
+
+    if not isinstance(checks, list) or not checks:
+        return None
+
+    any_success = False
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        name = check.get("name", "")
+        state = check.get("state", "")
+        bucket = str(check.get("bucket", "")).lower()
+        logger.info("    - %s: state=%s, bucket=%s", name, state, bucket)
+        if bucket in _CHECK_BAD_BUCKETS:
+            return False
+        if bucket == "pending":
+            return False
+        if bucket == "pass":
+            any_success = True
+    return any_success
+
+
+def _legacy_status_and_log(repo_name: str, head_sha: str) -> str:
+    """Return combined legacy commit status for ``head_sha``."""
+    try:
+        payload = _gh_json(["api", f"/repos/{repo_name}/commits/{head_sha}/status"])
+    except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as exc:
+        logger.error("Error getting combined status: %s", exc)
+        return "unknown"
+    if not isinstance(payload, dict):
+        return "unknown"
+    for ctx in payload.get("statuses") or []:
+        if not isinstance(ctx, dict):
+            continue
+        logger.info(
+            "    - %s: state=%s, description=%s",
+            ctx.get("context", ""),
+            ctx.get("state", ""),
+            ctx.get("description", ""),
+        )
+    return str(payload.get("state") or "unknown")
+
+
+def _merge_pr(repo_name: str, pr_number: int, head_sha: str) -> dict[str, Any]:
+    """Squash-merge ``pr_number`` through the GitHub REST API."""
+    payload = _gh_json(
+        [
+            "api",
+            "-X",
+            "PUT",
+            f"/repos/{repo_name}/pulls/{pr_number}/merge",
+            "-f",
+            "merge_method=squash",
+            "-f",
+            f"sha={head_sha}",
+        ]
+    )
+    return payload if isinstance(payload, dict) else {"merged": False, "message": str(payload)}
 
 
 def main() -> int:  # noqa: C901  # CLI dispatch: many command branches + retry paths for PR merge automation
@@ -221,19 +352,11 @@ def main() -> int:  # noqa: C901  # CLI dispatch: many command branches + retry 
         "--repo",
         help="Repository in format OWNER/REPO (auto-detected if not provided)",
     )
+    add_github_throttle_args(parser)
     add_json_arg(parser)
     add_version_arg(parser)
     args = parser.parse_args()
-
-    # Get GitHub token
-    token = os.getenv("GITHUB_TOKEN")
-    if not token:
-        logger.error(
-            "Please set GITHUB_TOKEN environment variable with a token that has 'repo' scope."
-        )
-        if args.json:
-            emit_json_status(1)
-        return 1
+    configure_github_throttle_from_args(args)
 
     # Detect or use provided repo name
     repo_name = args.repo or detect_repo_from_remote()
@@ -247,25 +370,7 @@ def main() -> int:  # noqa: C901  # CLI dispatch: many command branches + retry 
         return 1
 
     logger.info("Working with repository: %s", repo_name)
-
-    # Import PyGithub
-    try:
-        from github import Github
-    except ImportError:
-        logger.error(
-            "PyGithub not installed. Install with: pip install PyGithub\n"
-            "Or install hephaestus with github extras: pip install hephaestus[github]"
-        )
-        if args.json:
-            emit_json_status(1)
-        return 1
-
-    # Connect to GitHub
-    gh = Github(token)
-    try:
-        repo = gh.get_repo(repo_name)
-    except Exception as e:  # broad catch intentional: PyGithub raises many exception subtypes
-        logger.error("Error accessing repo %s: %s", repo_name, e)
+    if not _verify_repo_access(repo_name):
         if args.json:
             emit_json_status(1)
         return 1
@@ -275,24 +380,30 @@ def main() -> int:  # noqa: C901  # CLI dispatch: many command branches + retry 
     run_git_cmd(["git", "checkout", "main"], dry_run=args.dry_run)
     run_git_cmd(["git", "pull", "origin", "main"], dry_run=args.dry_run)
 
-    # Process open PRs
-    for pr in repo.get_pulls(state="open", sort="created"):
-        head_branch = pr.head.ref
-        base_branch = pr.base.ref
-        logger.info("\nChecking PR #%d: %s -> %s", pr.number, head_branch, base_branch)
+    try:
+        prs = _list_open_prs(repo_name)
+    except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as exc:
+        logger.error("Error listing open PRs for %s: %s", repo_name, exc)
+        if args.json:
+            emit_json_status(1)
+        return 1
 
-        try:
-            commit = repo.get_commit(pr.head.sha)
-        except Exception as e:  # broad catch intentional: PyGithub raises many exception subtypes
-            logger.error("  Unable to retrieve head commit for PR #%d: %s", pr.number, e)
+    for pr in prs:
+        pr_number = int(pr["number"])
+        head_branch = str(pr.get("headRefName") or "")
+        head_sha = str(pr.get("headRefOid") or "")
+        base_branch = str(pr.get("baseRefName") or "main")
+        if not head_sha:
+            logger.error("  Unable to retrieve head commit for PR #%d", pr_number)
             continue
+        logger.info("\nChecking PR #%d: %s -> %s", pr_number, head_branch, base_branch)
 
         logger.info("  Checks API results:")
-        success, _checks = checks_success_and_log(commit)
+        success = _checks_success_and_log(repo_name, pr_number)
 
         if success is None:
             logger.info("  No check runs found; falling back to legacy status contexts:")
-            state = legacy_status_and_log(commit)
+            state = _legacy_status_and_log(repo_name, head_sha)
             success = state == "success"
 
         # Handle push-all flag
@@ -302,25 +413,20 @@ def main() -> int:  # noqa: C901  # CLI dispatch: many command branches + retry 
 
         # Merge if checks passed
         if success:
-            logger.info("  CI/CD checks passed for PR #%d. Attempting merge...", pr.number)
-            if not args.push_all:
+            logger.info("  CI/CD checks passed for PR #%d. Attempting merge...", pr_number)
+            if not args.push_all and not args.dry_run:
                 try_push_head_branch(head_branch, args.dry_run)
 
             if args.dry_run:
-                logger.info("[DRY-RUN] Would merge PR #%d via squash", pr.number)
+                logger.info("[DRY-RUN] Would merge PR #%d via squash", pr_number)
             else:
                 try:
-                    # Squash-only: the HomericIntelligence repos disable rebase
-                    # merges in branch protection (a rebase merge fails with
-                    # "Rebase merges are not allowed on this repository").
-                    # Matches `gh pr merge --auto --squash`.
-                    result = pr.merge(merge_method="squash")
-                    handle_merge_result(result, pr.number, base_branch)
-                # broad catch intentional: PyGithub raises many exception subtypes
-                except Exception as e:
-                    logger.error("  Error merging PR #%d: %s", pr.number, e)
+                    result = _merge_pr(repo_name, pr_number, head_sha)
+                    handle_merge_result(result, pr_number, base_branch)
+                except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as e:
+                    logger.error("  Error merging PR #%d: %s", pr_number, e)
         else:
-            logger.warning("  CI/CD checks not successful for PR #%d. Skipping merge.", pr.number)
+            logger.warning("  CI/CD checks not successful for PR #%d. Skipping merge.", pr_number)
 
     logger.info("\nDone processing all open PRs.")
     if args.json:

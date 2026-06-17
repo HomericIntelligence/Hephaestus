@@ -21,9 +21,10 @@ Exception hierarchy::
     ├── GitHubUnavailableError    (breaker open; sustained outage)
     └── ClaudeUsageCapError       (Claude per-period cap)
 
-Out of scope for ``gh_call``: ``pr_merge`` uses the PyGithub object API
-(not the gh CLI); ``tidy``'s interactive ``gh tidy`` Popen requires direct
-stdin/stdout access.
+Out of scope for ``gh_call``: ``tidy``'s interactive ``gh tidy`` Popen
+requires direct stdin/stdout access, and ``rate_limit``'s reset probe uses a
+raw ``gh api rate_limit`` subprocess to avoid recursing back into ``gh_call``
+while ``gh_call`` is classifying a rate-limit error.
 
 CLI entry points (``hephaestus-merge-prs``, ``hephaestus-fleet-sync``,
 ``hephaestus-tidy``) are intentionally NOT exported here: they are

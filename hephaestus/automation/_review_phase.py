@@ -27,6 +27,7 @@ from hephaestus.agents.runtime import (
     resume_codex_session,
     run_codex_text,
 )
+from hephaestus.github.client import gh_call
 
 from . import review_state
 from ._stage_context import StageMixin
@@ -40,6 +41,7 @@ from .claude_invoke import (
 from .claude_models import implementer_model, reviewer_model
 from .claude_timeouts import implementer_claude_timeout
 from .git_utils import (
+    get_repo_info,
     get_repo_slug,
     issue_ref,
     pr_ref,
@@ -96,6 +98,11 @@ def _is_automation_owned_thread(thread: dict[str, Any], current_login: str | Non
 
 class ReviewPhase(StageMixin):
     """Run the bounded review + address cycle and label the final verdict."""
+
+    def _repo_name_with_owner(self) -> str:
+        """Return ``OWNER/REPO`` for gh commands that require an explicit repo."""
+        owner, repo = get_repo_info(self.repo_root)
+        return f"{owner}/{repo}"
 
     def __init__(self, ctx: StageContext) -> None:
         """Store the shared :class:`StageContext`."""
@@ -405,13 +412,19 @@ class ReviewPhase(StageMixin):
         misread as CONFLICTING.
         """
         try:
-            result = run(
-                ["gh", "pr", "view", str(pr_number), "--json", "mergeStateStatus,mergeable"],
-                cwd=self.repo_root,
-                capture_output=True,
+            result = gh_call(
+                [
+                    "pr",
+                    "view",
+                    str(pr_number),
+                    "--repo",
+                    self._repo_name_with_owner(),
+                    "--json",
+                    "mergeStateStatus,mergeable",
+                ],
             )
             state = dict(json.loads(result.stdout or "{}"))
-        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as exc:
             logger.warning(
                 "#%d: could not fetch PR %s merge-state for conflict gate: %s",
                 pr_number,
@@ -493,13 +506,19 @@ class ReviewPhase(StageMixin):
         # prompt. Best-effort: default to ``main`` like ``_resolve_dirty_pr``.
         base_branch = "main"
         try:
-            base_result = run(
-                ["gh", "pr", "view", str(pr_number), "--json", "baseRefName"],
-                cwd=self.repo_root,
-                capture_output=True,
+            base_result = gh_call(
+                [
+                    "pr",
+                    "view",
+                    str(pr_number),
+                    "--repo",
+                    self._repo_name_with_owner(),
+                    "--json",
+                    "baseRefName",
+                ],
             )
             base_branch = dict(json.loads(base_result.stdout or "{}")).get("baseRefName") or "main"
-        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as exc:
             logger.debug(
                 "#%d: failed to determine base branch for %s; defaulting to 'main': %s",
                 issue_number,

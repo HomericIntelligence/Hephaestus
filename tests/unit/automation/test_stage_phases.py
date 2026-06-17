@@ -89,7 +89,7 @@ def test_plan_phase_has_plan_true_on_plan_comment(tmp_path: Path) -> None:
         stdout=json.dumps({"comments": [{"body": "# Implementation Plan\n\nstep 1"}]})
     )
     with (
-        mock.patch("hephaestus.automation._plan_phase.run", return_value=fake),
+        mock.patch("hephaestus.automation._plan_phase.gh_call", return_value=fake),
         mock.patch(
             "hephaestus.automation._plan_phase._comments_contain_plan", return_value=True
         ) as mock_check,
@@ -101,7 +101,7 @@ def test_plan_phase_has_plan_true_on_plan_comment(tmp_path: Path) -> None:
 def test_plan_phase_has_plan_false_on_subprocess_error(tmp_path: Path) -> None:
     """_has_plan swallows subprocess/JSON errors and returns False."""
     phase = PlanPhase(_make_ctx(tmp_path))
-    with mock.patch("hephaestus.automation._plan_phase.run", side_effect=OSError("boom")):
+    with mock.patch("hephaestus.automation._plan_phase.gh_call", side_effect=OSError("boom")):
         assert phase._has_plan(7) is False
 
 
@@ -357,8 +357,23 @@ def test_review_phase_commit_if_changes_clean_returns_false(tmp_path: Path) -> N
 
 
 def _gh_json(payload: dict[str, Any]) -> SimpleNamespace:
-    """Stub a ``run(..., capture_output=True)`` result carrying JSON stdout."""
+    """Stub a gh result carrying JSON stdout."""
     return SimpleNamespace(stdout=json.dumps(payload), stderr="")
+
+
+def test_review_phase_merge_state_uses_owner_repo_slug(tmp_path: Path) -> None:
+    """``gh pr view --repo`` requires OWNER/REPO, not the short repo slug."""
+    phase = ReviewPhase(_make_ctx(tmp_path))
+    with (
+        mock.patch("hephaestus.automation._review_phase.get_repo_info", return_value=("o", "r")),
+        mock.patch(
+            "hephaestus.automation._review_phase.gh_call",
+            return_value=_gh_json({"mergeStateStatus": "dirty", "mergeable": "conflicting"}),
+        ) as gh_call,
+    ):
+        assert phase._pr_merge_state(12) == ("DIRTY", "CONFLICTING")
+    args = gh_call.call_args.args[0]
+    assert args[args.index("--repo") + 1] == "o/r"
 
 
 def test_conflict_gate_clean_pr_proceeds_without_resolution(tmp_path: Path) -> None:
@@ -397,7 +412,7 @@ def test_conflict_gate_mechanical_rebase_clears_conflict(tmp_path: Path) -> None
             side_effect=[("DIRTY", "CONFLICTING"), ("CLEAN", "MERGEABLE")],
         ),
         mock.patch(
-            "hephaestus.automation._review_phase.run",
+            "hephaestus.automation._review_phase.gh_call",
             return_value=_gh_json({"baseRefName": "main"}),
         ),
         mock.patch("hephaestus.automation._review_phase.sync_worktree_to_remote_branch"),
@@ -439,7 +454,7 @@ def test_conflict_gate_dispatches_agent_when_rebase_conflicts(tmp_path: Path) ->
             side_effect=[("DIRTY", "CONFLICTING"), ("CLEAN", "MERGEABLE")],
         ),
         mock.patch(
-            "hephaestus.automation._review_phase.run",
+            "hephaestus.automation._review_phase.gh_call",
             return_value=_gh_json({"baseRefName": "main"}),
         ),
         mock.patch("hephaestus.automation._review_phase.sync_worktree_to_remote_branch"),
@@ -475,7 +490,7 @@ def test_conflict_gate_unresolved_returns_false(tmp_path: Path) -> None:
             side_effect=[("DIRTY", "CONFLICTING"), ("DIRTY", "CONFLICTING")],
         ),
         mock.patch(
-            "hephaestus.automation._review_phase.run",
+            "hephaestus.automation._review_phase.gh_call",
             return_value=_gh_json({"baseRefName": "main"}),
         ),
         mock.patch("hephaestus.automation._review_phase.sync_worktree_to_remote_branch"),

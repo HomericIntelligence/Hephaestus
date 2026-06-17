@@ -21,7 +21,13 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import is_codex, run_codex_text
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.cli.utils import (
+    add_github_throttle_args,
+    add_json_arg,
+    add_version_arg,
+    configure_github_throttle_from_args,
+    emit_json_status,
+)
 
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import reviewer_model
@@ -248,6 +254,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="Skip the agent call and the GitHub posting step."
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="DEBUG-level logging.")
+    add_github_throttle_args(parser)
     add_json_arg(parser)
     add_version_arg(parser)
     return parser
@@ -256,6 +263,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Parse CLI arguments and run the audit reviewer."""
     args = _build_parser().parse_args(argv)
+    configure_github_throttle_from_args(args)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

@@ -12,6 +12,7 @@ Follows development principles:
 
 import argparse
 import json
+import math
 import sys
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -25,9 +26,11 @@ __all__ = [
     "DRY_RUN_HELP_CAVEAT",
     "CommandRegistry",
     "add_dry_run_arg",
+    "add_github_throttle_args",
     "add_json_arg",
     "add_logging_args",
     "add_version_arg",
+    "configure_github_throttle_from_args",
     "confirm_action",
     "create_parser",
     "emit_json_status",
@@ -180,6 +183,73 @@ def add_dry_run_arg(parser: argparse.ArgumentParser, *, prefix: str | None = Non
         "--dry-run",
         action="store_true",
         help=help_text,
+    )
+
+
+def _finite_float(value: str) -> float:
+    """Parse a finite float for CLI configuration flags."""
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected a finite number, got {value!r}") from exc
+    if not math.isfinite(parsed):
+        raise argparse.ArgumentTypeError(f"expected a finite number, got {value!r}")
+    return parsed
+
+
+def _non_negative_float(value: str) -> float:
+    """Parse a finite non-negative float."""
+    parsed = _finite_float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"expected a non-negative number, got {value!r}")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    """Parse a finite positive float."""
+    parsed = _finite_float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive number, got {value!r}")
+    return parsed
+
+
+def _at_least_one_float(value: str) -> float:
+    """Parse a finite float greater than or equal to one."""
+    parsed = _finite_float(value)
+    if parsed < 1.0:
+        raise argparse.ArgumentTypeError(f"expected a number >= 1.0, got {value!r}")
+    return parsed
+
+
+def add_github_throttle_args(parser: argparse.ArgumentParser) -> None:
+    """Add GitHub global-throttle configuration flags to a CLI parser."""
+    group = parser.add_argument_group("GitHub throttle options")
+    group.add_argument(
+        "--gh-global-rate",
+        type=_non_negative_float,
+        default=10.0,
+        metavar="FLOAT",
+        help=(
+            "Global gh token-bucket refill rate in calls/sec (default: 10.0). "
+            "Pass 0 to disable the global throttle."
+        ),
+    )
+    group.add_argument(
+        "--gh-global-burst",
+        type=_at_least_one_float,
+        default=30.0,
+        metavar="FLOAT",
+        help="Global gh token-bucket burst size (default: 30.0).",
+    )
+
+
+def configure_github_throttle_from_args(args: argparse.Namespace) -> None:
+    """Apply GitHub global-throttle options parsed from CLI args."""
+    from hephaestus.github.rate_limit import configure_gh_global_throttle
+
+    configure_gh_global_throttle(
+        rate=float(args.gh_global_rate),
+        burst=float(args.gh_global_burst),
     )
 
 

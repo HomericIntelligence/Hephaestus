@@ -18,6 +18,11 @@
 #   ~/drive-prs-green-ecosystem.sh                     # real run, logs to ~/drive-prs-green-logs/<utc-ts>/
 #   ~/drive-prs-green-ecosystem.sh --log-dir DIR       # write logs under DIR/<utc-ts>/
 #   ~/drive-prs-green-ecosystem.sh --dry-run           # forward --dry-run to driver
+#   ~/drive-prs-green-ecosystem.sh --org HomericIntelligence
+#   ~/drive-prs-green-ecosystem.sh --project-root /path/to/ProjectHephaestus
+#   ~/drive-prs-green-ecosystem.sh --gh-bin hephaestus-gh
+#   ~/drive-prs-green-ecosystem.sh --gh-global-rate 5  # tune shared gh throttle
+#   ~/drive-prs-green-ecosystem.sh --gh-global-burst 20
 #   ~/drive-prs-green-ecosystem.sh -- --max-workers 5  # everything after `--` goes to driver
 #
 # All non-script-flag args before `--` are forwarded to drive_prs_green.py as well.
@@ -38,7 +43,12 @@ set -uo pipefail   # no -e: keep iterating across per-repo failures
 # ── Flag parsing ─────────────────────────────────────────────────────────────
 LOG_ROOT_DEFAULT="$HOME/drive-prs-green-logs"
 LOG_ROOT="${DRIVE_GREEN_LOG_ROOT:-$LOG_ROOT_DEFAULT}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ORG="HomericIntelligence"
+GH_BIN="hephaestus-gh"
 DRIVER_ARGS=()
+GH_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -49,11 +59,43 @@ while [[ $# -gt 0 ]]; do
     --log-dir=*)
       LOG_ROOT="${1#--log-dir=}"; shift
       ;;
+    --org)
+      if [[ $# -lt 2 ]]; then echo "ERROR: --org requires a value" >&2; exit 2; fi
+      ORG="$2"; shift 2
+      ;;
+    --org=*)
+      ORG="${1#--org=}"; shift
+      ;;
+    --project-root)
+      if [[ $# -lt 2 ]]; then echo "ERROR: --project-root requires a path" >&2; exit 2; fi
+      PROJECT_ROOT="$2"; shift 2
+      ;;
+    --project-root=*)
+      PROJECT_ROOT="${1#--project-root=}"; shift
+      ;;
+    --gh-bin)
+      if [[ $# -lt 2 ]]; then echo "ERROR: --gh-bin requires a value" >&2; exit 2; fi
+      GH_BIN="$2"; shift 2
+      ;;
+    --gh-bin=*)
+      GH_BIN="${1#--gh-bin=}"; shift
+      ;;
+    --gh-global-rate|--gh-global-burst)
+      if [[ $# -lt 2 ]]; then echo "ERROR: $1 requires a value" >&2; exit 2; fi
+      GH_ARGS+=("$1" "$2"); shift 2
+      ;;
+    --gh-global-rate=*|--gh-global-burst=*)
+      GH_ARGS+=("${1%%=*}" "${1#*=}"); shift
+      ;;
     --)
       shift; DRIVER_ARGS+=("$@"); break
       ;;
     -h|--help)
-      sed -n '2,/^# *$/p' "$0" | sed 's/^# \{0,1\}//'
+      awk '
+        /^# Usage:/ {show=1}
+        show && /^# Log directory layout/ {exit}
+        show {sub(/^# ?/, ""); print}
+      ' "$0"
       exit 0
       ;;
     *)
@@ -63,10 +105,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── Environment ──────────────────────────────────────────────────────────────
-ORG="${HEPHAESTUS_ORG:-HomericIntelligence}"
-HEPHAESTUS_DIR="${HEPHAESTUS_DIR:-/home/mvillmow/Projects/ProjectHephaestus}"
 PROJECTS_ROOT="${PROJECTS_ROOT:-/home/mvillmow/Projects}"
-DRIVER="$HEPHAESTUS_DIR/scripts/drive_prs_green.py"
+DRIVER="$PROJECT_ROOT/scripts/drive_prs_green.py"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_VERSION="$(cd "$(dirname "$SCRIPT_PATH")" && md5sum "$(basename "$SCRIPT_PATH")" 2>/dev/null | cut -d' ' -f1 || echo unknown)"
 
@@ -78,13 +118,17 @@ SUMMARY_LOG="$RUN_DIR/_summary.log"
 SUMMARY_JSON="$RUN_DIR/_summary.json"
 META_JSON="$RUN_DIR/_run.meta.json"
 
+hephaestus_gh() {
+  "$GH_BIN" "${GH_ARGS[@]}" "$@"
+}
+
 # ── Sanity checks ────────────────────────────────────────────────────────────
 if [[ ! -f "$DRIVER" ]]; then
   echo "ERROR: driver script not found at $DRIVER" >&2
   exit 1
 fi
-if ! command -v gh >/dev/null 2>&1; then
-  echo "ERROR: gh CLI not found on PATH" >&2
+if ! hephaestus_gh --version >/dev/null 2>&1; then
+  echo "ERROR: GitHub CLI wrapper unavailable: $GH_BIN" >&2
   exit 1
 fi
 if ! command -v jq >/dev/null 2>&1; then
@@ -100,7 +144,7 @@ note()   { printf '[%s] %s\n' "$(ts_utc)" "$*" | tee -a "$SUMMARY_LOG"; }
 write_run_meta() {
   # Top-level metadata so an analysis agent has the full provenance.
   local hep_rev
-  hep_rev="$(git -C "$HEPHAESTUS_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  hep_rev="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
   jq -n \
     --arg run_id "$RUN_ID" \
@@ -109,7 +153,7 @@ write_run_meta() {
     --arg user "${USER:-unknown}" \
     --arg org "$ORG" \
     --arg projects_root "$PROJECTS_ROOT" \
-    --arg hephaestus_dir "$HEPHAESTUS_DIR" \
+    --arg project_root "$PROJECT_ROOT" \
     --arg hephaestus_rev "$hep_rev" \
     --arg driver_path "$DRIVER" \
     --arg log_root "$LOG_ROOT" \
@@ -123,7 +167,7 @@ write_run_meta() {
       user: $user,
       org: $org,
       projects_root: $projects_root,
-      hephaestus_dir: $hephaestus_dir,
+      project_root: $project_root,
       hephaestus_rev: $hephaestus_rev,
       driver_path: $driver_path,
       log_root: $log_root,
@@ -196,12 +240,12 @@ banner() {
 write_run_meta
 note "▶ drive-prs-green-ecosystem run $RUN_ID"
 note "  log_dir=$RUN_DIR  meta=$META_JSON"
-note "  org=$ORG  projects_root=$PROJECTS_ROOT  hep_dir=$HEPHAESTUS_DIR"
+note "  org=$ORG  projects_root=$PROJECTS_ROOT  project_root=$PROJECT_ROOT"
 note "  driver_args=${DRIVER_ARGS[*]:-<none>}"
 
 note "▶ Enumerating non-fork, non-archived repos in $ORG ..."
 mapfile -t REPOS < <(
-  gh repo list "$ORG" --no-archived --limit 200 --json name,isFork \
+  hephaestus_gh repo list "$ORG" --no-archived --limit 200 --json name,isFork \
     --jq '.[] | select(.isFork == false) | .name'
 )
 if [[ ${#REPOS[@]} -eq 0 ]]; then
@@ -254,7 +298,7 @@ for REPO in "${REPOS[@]}"; do
   # ``/repos/.../issues`` returns BOTH issues and PRs; filter via the
   # ``pull_request`` field which only PRs carry.
   mapfile -t ISSUES < <(
-    gh api --paginate "/repos/$ORG/$REPO/issues?state=open&per_page=100" \
+    hephaestus_gh api --paginate "/repos/$ORG/$REPO/issues?state=open&per_page=100" \
       --jq '.[] | select(.pull_request | not) | .number' 2>>"$DISCOVERY_LOG"
   )
   printf '\nfound   : %d open issue(s): %s\n' "${#ISSUES[@]}" "${ISSUES[*]:-<none>}" >> "$DISCOVERY_LOG"
@@ -270,7 +314,7 @@ for REPO in "${REPOS[@]}"; do
   # zero open issues but non-zero open bot PRs is correctly classified as
   # "drive" rather than "skip — no issues" in the per-repo log.
   BOT_PR_COUNT=$(
-    gh api --paginate "/repos/$ORG/$REPO/pulls?state=open&per_page=100" \
+    hephaestus_gh api --paginate "/repos/$ORG/$REPO/pulls?state=open&per_page=100" \
       --jq '[.[] | select(.user.type == "Bot")] | length' 2>>"$DISCOVERY_LOG" || echo 0
   )
   BOT_PR_COUNT="${BOT_PR_COUNT:-0}"
@@ -300,15 +344,17 @@ for REPO in "${REPOS[@]}"; do
   if (
     cd "$REPO_DIR"
     if ((${#ISSUES[@]})); then
-      pixi run --manifest-path "$HEPHAESTUS_DIR/pixi.toml" python -u \
+      pixi run --manifest-path "$PROJECT_ROOT/pixi.toml" python -u \
         "$DRIVER" \
         --issues "${ISSUES[@]}" \
         --no-ui \
+        "${GH_ARGS[@]}" \
         "${DRIVER_ARGS[@]}"
     else
-      pixi run --manifest-path "$HEPHAESTUS_DIR/pixi.toml" python -u \
+      pixi run --manifest-path "$PROJECT_ROOT/pixi.toml" python -u \
         "$DRIVER" \
         --no-ui \
+        "${GH_ARGS[@]}" \
         "${DRIVER_ARGS[@]}"
     fi
   ) >> "$REPO_LOG" 2>&1; then

@@ -1027,7 +1027,7 @@ class TestHasPlanPrefixMatch:
         ]
 
         with patch(
-            "hephaestus.automation._plan_phase.run",
+            "hephaestus.automation._plan_phase.gh_call",
             side_effect=self._mock_gh_view(comments),
         ):
             assert impl.phase_runner._has_plan(1) is False
@@ -1043,7 +1043,7 @@ class TestHasPlanPrefixMatch:
         ]
 
         with patch(
-            "hephaestus.automation._plan_phase.run",
+            "hephaestus.automation._plan_phase.gh_call",
             side_effect=self._mock_gh_view(comments),
         ):
             assert impl.phase_runner._has_plan(1) is True

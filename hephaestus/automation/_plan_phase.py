@@ -13,6 +13,8 @@ import subprocess
 import sys
 from typing import TYPE_CHECKING
 
+from hephaestus.github.client import gh_call
+
 from ._stage_context import StageMixin
 from .claude_timeouts import planner_claude_timeout
 from .git_utils import run
@@ -43,14 +45,13 @@ class PlanPhase(StageMixin):
         here is intentional to avoid a third copy of the same prefix logic.
         """
         try:
-            result = run(
-                ["gh", "issue", "view", str(issue_number), "--comments", "--json", "comments"],
-                capture_output=True,
+            result = gh_call(
+                ["issue", "view", str(issue_number), "--comments", "--json", "comments"]
             )
             data = json.loads(result.stdout)
             comments = data.get("comments", [])
             return _comments_contain_plan(comments)
-        except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
+        except (subprocess.SubprocessError, RuntimeError, json.JSONDecodeError, OSError):
             return False
 
     def _generate(self, issue_number: int) -> None:

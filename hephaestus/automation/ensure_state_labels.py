@@ -33,7 +33,14 @@ import logging
 import subprocess
 import sys
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.cli.utils import (
+    add_github_throttle_args,
+    add_json_arg,
+    add_version_arg,
+    configure_github_throttle_from_args,
+    emit_json_status,
+)
+from hephaestus.github.client import gh_call
 
 from .state_labels import STATE_LABEL_SPECS
 
@@ -48,26 +55,25 @@ def _gh_list_org_repos(org: str, *, timeout: int = 60) -> list[str]:
     runner — operators running it during an emergency shouldn't transitively
     load the automation pipeline).
     """
-    out = subprocess.run(
-        [
-            "gh",
-            "repo",
-            "list",
-            org,
-            "--no-archived",
-            "--source",  # excludes forks
-            "--limit",
-            "200",
-            "--json",
-            "name,isArchived,isFork",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
-    if out.returncode != 0:
-        raise SystemExit(f"gh repo list {org} failed (rc={out.returncode}): {out.stderr.strip()}")
+    try:
+        out = gh_call(
+            [
+                "repo",
+                "list",
+                org,
+                "--no-archived",
+                "--source",  # excludes forks
+                "--limit",
+                "200",
+                "--json",
+                "name,isArchived,isFork",
+            ],
+            timeout=timeout,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            f"gh repo list {org} failed (rc={exc.returncode}): {(exc.stderr or '').strip()}"
+        ) from exc
     try:
         entries = json.loads(out.stdout or "[]")
     except json.JSONDecodeError as exc:
@@ -100,7 +106,6 @@ def ensure_labels_on_repo(repo: str, *, dry_run: bool = False) -> int:
             )
             continue
         cmd = [
-            "gh",
             "label",
             "create",
             label,
@@ -112,14 +117,15 @@ def ensure_labels_on_repo(repo: str, *, dry_run: bool = False) -> int:
             spec["description"],
             "--force",  # upsert: create-or-update
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=30)
-        if proc.returncode != 0:
+        try:
+            gh_call(cmd, timeout=30)
+        except subprocess.CalledProcessError as exc:
             logger.warning(
                 "%s: failed to ensure label %r (rc=%s): %s",
                 repo,
                 label,
-                proc.returncode,
-                proc.stderr.strip(),
+                exc.returncode,
+                (exc.stderr or "").strip(),
             )
             continue
         logger.info("%s: ensured label %r", repo, label)
@@ -129,14 +135,17 @@ def ensure_labels_on_repo(repo: str, *, dry_run: bool = False) -> int:
 
 def _detect_current_repo_slug() -> str:
     """Derive ``owner/name`` from the current git checkout's ``origin`` remote."""
-    proc = subprocess.run(
-        ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-    if proc.returncode != 0 or not proc.stdout.strip():
+    try:
+        proc = gh_call(
+            ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+            timeout=30,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            "Could not detect current repo via 'gh repo view'. "
+            "Pass --repo OWNER/NAME or --org NAME explicitly."
+        ) from exc
+    if not proc.stdout.strip():
         raise SystemExit(
             "Could not detect current repo via 'gh repo view'. "
             "Pass --repo OWNER/NAME or --org NAME explicitly."
@@ -174,6 +183,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable DEBUG logging.",
     )
+    add_github_throttle_args(parser)
     add_json_arg(parser)
     add_version_arg(parser)
     return parser
@@ -187,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
     do not fail the overall run — operators can re-run to retry.
     """
     args = _build_parser().parse_args(argv)
+    configure_github_throttle_from_args(args)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

@@ -28,7 +28,12 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import is_codex, resolve_agent, run_codex_text
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.cli.utils import (
+    add_json_arg,
+    add_version_arg,
+    configure_github_throttle_from_args,
+    emit_json_status,
+)
 
 from ._review_utils import (
     build_review_parser,
@@ -911,6 +916,7 @@ def main() -> int:
 
     """
     args = _parse_args()
+    configure_github_throttle_from_args(args)
     setup_review_logging(args.verbose)
     agent = resolve_agent(args.agent)
 

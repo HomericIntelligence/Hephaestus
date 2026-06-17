@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # Tests for scripts/shell/drive_prs_green_ecosystem.sh — the three honesty
 # fixes from #848:
-#   * issue enumeration uses ``gh api --paginate`` (no --limit 200 cap)
+#   * issue enumeration uses ``hephaestus_gh api --paginate`` (no --limit 200 cap)
 #   * open bot-authored PRs are counted alongside issues so a repo with
 #     only Dependabot PRs is NOT misclassified as "skip — no issues"
 #   * the driver is invoked WITHOUT --issues when the issue list is empty
@@ -21,11 +21,39 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
-@test "drive_prs_green_ecosystem.sh: issue enumeration uses gh api --paginate" {
+@test "drive_prs_green_ecosystem.sh: issue enumeration uses shared gh adapter with paginate" {
     # The --limit 200 cap silently dropped older issues in repos with more
     # than 200 open. The fix must use the REST endpoint with --paginate.
-    run grep -F 'gh api --paginate "/repos/$ORG/$REPO/issues?state=open&per_page=100"' "$SCRIPT"
+    run grep -F 'hephaestus_gh api --paginate "/repos/$ORG/$REPO/issues?state=open&per_page=100"' "$SCRIPT"
     [ "$status" -eq 0 ]
+}
+
+@test "drive_prs_green_ecosystem.sh: throttle flags are forwarded to child driver" {
+    run grep -F '"${GH_ARGS[@]}" \' "$SCRIPT"
+    [ "$status" -eq 0 ]
+    run grep -F 'hephaestus_gh repo list "$ORG"' "$SCRIPT"
+    [ "$status" -eq 0 ]
+}
+
+@test "drive_prs_green_ecosystem.sh: help documents both throttle flags" {
+    run grep -F -- '--gh-global-rate 5' "$SCRIPT"
+    [ "$status" -eq 0 ]
+    run grep -F -- '--gh-global-burst 20' "$SCRIPT"
+    [ "$status" -eq 0 ]
+}
+
+@test "drive_prs_green_ecosystem.sh: help documents explicit gh wrapper and context flags" {
+    run grep -F -- '--gh-bin hephaestus-gh' "$SCRIPT"
+    [ "$status" -eq 0 ]
+    run grep -F -- '--org HomericIntelligence' "$SCRIPT"
+    [ "$status" -eq 0 ]
+    run grep -F -- '--project-root /path/to/ProjectHephaestus' "$SCRIPT"
+    [ "$status" -eq 0 ]
+}
+
+@test "drive_prs_green_ecosystem.sh: does not read HEPHAESTUS env configuration" {
+    run grep -E 'HEPHAESTUS_(GH|ORG|DIR)' "$SCRIPT"
+    [ "$status" -ne 0 ]
 }
 
 @test "drive_prs_green_ecosystem.sh: --limit 200 is NOT used on issue enumeration" {
@@ -39,7 +67,7 @@ setup() {
     # Bot PRs lack Closes #N links so the issue-driven path is blind to
     # them. The script must probe them so a Dependabot-only repo is not
     # classified "skip — no issues".
-    run grep -F 'gh api --paginate "/repos/$ORG/$REPO/pulls?state=open&per_page=100"' "$SCRIPT"
+    run grep -F 'hephaestus_gh api --paginate "/repos/$ORG/$REPO/pulls?state=open&per_page=100"' "$SCRIPT"
     [ "$status" -eq 0 ]
     run grep -F 'select(.user.type == "Bot")' "$SCRIPT"
     [ "$status" -eq 0 ]

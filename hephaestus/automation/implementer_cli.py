@@ -25,6 +25,7 @@ from hephaestus.agents.runtime import add_agent_argument
 from hephaestus.automation._review_utils import add_max_workers_arg
 from hephaestus.cli.utils import (
     add_dry_run_arg,
+    add_github_throttle_args,
     add_json_arg,
     add_version_arg,
 )
@@ -154,6 +155,7 @@ Examples:
         action="store_true",
         help="Enable verbose logging",
     )
+    add_github_throttle_args(parser)
     add_json_arg(parser)
     add_version_arg(parser)
     return parser

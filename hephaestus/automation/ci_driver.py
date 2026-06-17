@@ -28,7 +28,13 @@ from hephaestus.agents.runtime import (
     run_codex_session,
     session_agent_matches,
 )
-from hephaestus.cli.utils import add_dry_run_arg, add_json_arg, emit_json_status
+from hephaestus.cli.utils import (
+    add_dry_run_arg,
+    add_github_throttle_args,
+    add_json_arg,
+    configure_github_throttle_from_args,
+    emit_json_status,
+)
 
 from ._review_utils import add_max_workers_arg, find_pr_for_issue
 from .address_review import (
@@ -2295,6 +2301,7 @@ Examples:
             "require the agent for all behind/conflicting PRs."
         ),
     )
+    add_github_throttle_args(parser)
     add_json_arg(parser)
     return parser
 
@@ -2406,6 +2413,7 @@ def main() -> int:
 
     """
     args = _parse_args()
+    configure_github_throttle_from_args(args)
     _setup_logging(args.verbose)
     agent = resolve_agent(args.agent)
 

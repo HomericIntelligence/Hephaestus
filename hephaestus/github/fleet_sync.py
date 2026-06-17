@@ -41,7 +41,13 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument, is_codex, resolve_agent, run_codex_text
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.cli.utils import (
+    add_github_throttle_args,
+    add_json_arg,
+    add_version_arg,
+    configure_github_throttle_from_args,
+    emit_json_status,
+)
 from hephaestus.config.utils import load_config
 from hephaestus.github.client import gh_call
 from hephaestus.logging.utils import get_logger
@@ -1001,6 +1007,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "stdout to ASCII-only consumers."
         ),
     )
+    add_github_throttle_args(parser)
     add_json_arg(parser)
     add_version_arg(parser)
     return parser
@@ -1010,6 +1017,7 @@ def main() -> int:
     """Entry point for hephaestus-fleet-sync."""
     parser = _build_parser()
     args = parser.parse_args()
+    configure_github_throttle_from_args(args)
     args.agent = resolve_agent(args.agent)
 
     logging.basicConfig(

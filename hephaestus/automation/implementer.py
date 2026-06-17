@@ -312,7 +312,9 @@ class IssueImplementer:
 
         # Check gh CLI
         try:
-            run(["gh", "--version"], check=True)
+            from hephaestus.github.client import gh_call
+
+            gh_call(["--version"], check=True, retry_on_rate_limit=False, max_retries=1)
             logger.info("gh CLI available")
         except (subprocess.CalledProcessError, FileNotFoundError, OSError) as e:
             logger.error("gh CLI not available: %s", e)
@@ -809,10 +811,11 @@ def main() -> int:
 
     """
     from hephaestus.agents.runtime import resolve_agent
-    from hephaestus.cli.utils import emit_json_status
+    from hephaestus.cli.utils import configure_github_throttle_from_args, emit_json_status
     from hephaestus.utils.terminal import terminal_guard
 
     args = _parse_args()
+    configure_github_throttle_from_args(args)
     agent = resolve_agent(args.agent)
 
     state_dir = get_repo_root() / "build" / ".issue_implementer"

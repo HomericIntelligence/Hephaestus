@@ -16,16 +16,17 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import math
 import os
 import re
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import TextIO
 
 logger = logging.getLogger(__name__)
 
@@ -278,14 +279,95 @@ def gh_rate_limit_reset_epoch(resource: str = "graphql") -> int | None:
 
 _DEFAULT_GLOBAL_RATE = 10.0  # tokens per second
 _DEFAULT_BURST = 30.0  # max tokens stored
+_global_throttle_rate = _DEFAULT_GLOBAL_RATE
+_global_throttle_burst = _DEFAULT_BURST
+
+
+def configure_gh_global_throttle(rate: float, burst: float) -> None:
+    """Configure the process-local global ``gh`` throttle parameters.
+
+    CLI entrypoints call this before making GitHub requests. The state file is
+    still shared across processes; the rate/burst values are deliberately
+    process-local so operators configure them explicitly via CLI flags instead
+    of ambient environment variables.
+
+    Args:
+        rate: Tokens per second. ``0`` disables the throttle.
+        burst: Maximum stored tokens. Must be at least ``1.0``.
+
+    Raises:
+        ValueError: If either value is non-finite, if rate is negative, or if
+            burst is less than ``1.0``.
+
+    """
+    if not math.isfinite(rate) or rate < 0:
+        raise ValueError(f"rate must be a finite non-negative number, got {rate!r}")
+    if not math.isfinite(burst) or burst < 1.0:
+        raise ValueError(f"burst must be a finite number >= 1.0, got {burst!r}")
+
+    global _global_throttle_rate, _global_throttle_burst
+    _global_throttle_rate = float(rate)
+    _global_throttle_burst = float(burst)
+
+
+def _current_uid_fragment() -> str:
+    """Return a stable user identifier for fallback runtime paths."""
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:  # pragma: no cover - Windows path
+        return "user"
+    return str(getuid())
+
+
+def _owned_by_current_user(path: Path) -> bool:
+    """Return whether ``path`` is owned by the current user when POSIX uid exists."""
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:  # pragma: no cover - Windows path
+        return True
+    try:
+        return path.stat().st_uid == int(getuid())
+    except OSError:
+        return False
+
+
+def _runtime_base_dir() -> Path:
+    """Return the preferred secure root for user-specific runtime artifacts.
+
+    All transient state lives under ``TMPDIR`` so callers have one root to
+    control. A per-user component avoids sharing the same lock/state directory
+    across users when ``TMPDIR`` falls back to ``/tmp``.
+    """
+    tmpdir = os.environ.get("TMPDIR") or "/tmp"  # nosec B108: explicit fallback root
+    return Path(tmpdir) / f"hephaestus-{_current_uid_fragment()}"
+
+
+def _ensure_private_dir(path: Path) -> None:
+    """Create ``path`` as a current-user private directory, rejecting symlinks."""
+    if path.exists() and path.is_symlink():
+        raise RuntimeError(f"Refusing to use symlinked runtime directory: {path}")
+    path.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if path.is_symlink() or not path.is_dir():
+        raise RuntimeError(f"Refusing to use unsafe runtime directory: {path}")
+    if not _owned_by_current_user(path):
+        raise RuntimeError(f"Refusing to use runtime directory not owned by current user: {path}")
+    path.chmod(0o700)
 
 
 def _global_throttle_state_path() -> Path:
-    base = os.environ.get("HEPHAESTUS_RATE_DIR")
-    if not base:
-        runtime = os.environ.get("XDG_RUNTIME_DIR")
-        base = runtime if runtime else tempfile.gettempdir()
-    return Path(base) / "hephaestus_gh_rate.json"
+    return _runtime_base_dir() / "gh-rate" / "hephaestus_gh_rate.json"
+
+
+def _open_secure_state_file(path: Path) -> TextIO:
+    """Open the throttle state file without following symlinks."""
+    _ensure_private_dir(path.parent.parent)
+    _ensure_private_dir(path.parent)
+    if path.exists() and path.is_symlink():
+        raise RuntimeError(f"Refusing to use symlinked throttle state file: {path}")
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    os.fchmod(fd, 0o600)
+    return os.fdopen(fd, "r+")
 
 
 def gh_global_throttle_acquire() -> None:
@@ -293,19 +375,19 @@ def gh_global_throttle_acquire() -> None:
 
     The bucket is shared across all processes on this machine via a small
     JSON state file guarded by ``fcntl.flock``. Refill rate defaults to
-    ``10`` tokens/sec with a burst of ``30``; both can be overridden with
-    ``HEPHAESTUS_GH_GLOBAL_RATE`` (calls/sec) and ``HEPHAESTUS_GH_GLOBAL_BURST``.
-    Setting the rate to ``0`` disables the throttle entirely (useful for
-    tests and for callers that already hold a known budget).
+    ``10`` tokens/sec with a burst of ``30``; CLI entrypoints can override
+    both through :func:`configure_gh_global_throttle`. Setting the rate to
+    ``0`` disables the throttle entirely (useful for tests and for callers
+    that already hold a known budget).
 
     On platforms without ``fcntl`` (Windows) the throttle silently no-ops;
     the per-thread throttle in :mod:`hephaestus.automation.github_api`
     still applies.
     """
-    rate = float(os.environ.get("HEPHAESTUS_GH_GLOBAL_RATE", _DEFAULT_GLOBAL_RATE))
+    rate = _global_throttle_rate
     if rate <= 0:
         return
-    burst = float(os.environ.get("HEPHAESTUS_GH_GLOBAL_BURST", _DEFAULT_BURST))
+    burst = _global_throttle_burst
 
     try:
         import fcntl
@@ -313,12 +395,11 @@ def gh_global_throttle_acquire() -> None:
         return
 
     state_path = _global_throttle_state_path()
-    state_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Loop because the bucket may be empty when we first acquire the lock;
     # we sleep for the time required to refill one token, then retry.
     while True:
-        with state_path.open("a+") as fh:
+        with _open_secure_state_file(state_path) as fh:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
             try:
                 fh.seek(0)

@@ -32,6 +32,18 @@ def test_parse_args_issues_multiple_values(monkeypatch: pytest.MonkeyPatch) -> N
     assert args.issues == [814, 815]
 
 
+def test_parse_args_accepts_github_throttle_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CI driver accepts explicit GitHub throttle config."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["drive_prs_green.py", "--gh-global-rate", "4.5", "--gh-global-burst", "11"],
+    )
+    args = ci_driver._parse_args()
+    assert args.gh_global_rate == 4.5
+    assert args.gh_global_burst == 11.0
+
+
 def test_parse_args_issues_flag_without_values_exits_2(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

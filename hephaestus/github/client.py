@@ -2,14 +2,16 @@
 
 Public contract
 ---------------
-``gh_call(args, *, check=True, retry_on_rate_limit=True, max_retries=6)``
+``gh_call(args, *, check=True, retry_on_rate_limit=True, max_retries=6, timeout=None)``
    Run ``gh <args>``. Every invocation passes through the ``github-api``
    circuit breaker, the per-thread throttle (``GH_RATE_LIMIT_PER_SEC``),
    REST + GraphQL rate-limit detection (waits until reset), and Claude
    per-period usage-cap interception.
 
 Bare ``subprocess.run(["gh", ...])`` calls bypass the breaker and are a
-reliability bug — route them through ``gh_call``.
+reliability bug — route them through ``gh_call``. The narrow exceptions are
+interactive ``gh tidy`` and the ``rate_limit`` reset probe, which cannot call
+back into ``gh_call`` while ``gh_call`` is classifying a rate-limit error.
 
 Raises:
     GitHubRateLimitError, GitHubUnavailableError, ClaudeUsageCapError,
@@ -299,6 +301,7 @@ def _gh_call_impl(
     retry_on_rate_limit: bool = True,
     max_retries: int = 6,
     log_on_error: bool = True,
+    timeout: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Implement gh CLI call with rate limit handling (circuit breaker will wrap this).
 
@@ -311,6 +314,8 @@ def _gh_call_impl(
             fails.  Pass ``False`` when the failure is expected and already
             handled by the caller (e.g. ``updatePullRequestReviewComment`` on a
             foreign-authored comment that the caller recovers via a shadow post).
+        timeout: Optional per-call timeout override. Defaults to
+            :func:`gh_cli_timeout`.
 
     Returns:
         CompletedProcess instance
@@ -328,7 +333,7 @@ def _gh_call_impl(
             result = run_subprocess(
                 ["gh", *args],
                 check=check,
-                timeout=gh_cli_timeout(),
+                timeout=timeout if timeout is not None else gh_cli_timeout(),
                 log_on_error=log_on_error,
             )
             return result
@@ -402,6 +407,7 @@ def _gh_call(
     retry_on_rate_limit: bool = True,
     max_retries: int = 6,
     log_on_error: bool = True,
+    timeout: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Call gh CLI with rate limit handling and circuit breaker protection.
 
@@ -418,6 +424,8 @@ def _gh_call(
             fails.  Pass ``False`` when the failure is expected and already
             handled by the caller (e.g. ``updatePullRequestReviewComment`` on a
             foreign-authored comment that the caller recovers via a shadow post).
+        timeout: Optional per-call timeout override. Defaults to
+            :func:`gh_cli_timeout`.
 
     Returns:
         CompletedProcess instance
@@ -438,6 +446,7 @@ def _gh_call(
             retry_on_rate_limit=retry_on_rate_limit,
             max_retries=max_retries,
             log_on_error=log_on_error,
+            timeout=timeout,
         )
     except CircuitBreakerOpenError as exc:
         # Translate to a domain exception (RuntimeError subclass) so existing

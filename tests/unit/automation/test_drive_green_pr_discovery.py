@@ -57,11 +57,8 @@ class TestCountFailingPrs:
                 "mergeStateStatus": "CLEAN",
             },
         ]
-        with patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run:
-            mock_run.return_value = Mock(
-                returncode=0,
-                stdout=json.dumps(mock_output),
-            )
+        with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh:
+            mock_gh.return_value = Mock(stdout=json.dumps(mock_output))
             result = _count_failing_prs("MyOrg", "MyRepo")
         assert result == 2
 
@@ -75,35 +72,29 @@ class TestCountFailingPrs:
                 "mergeStateStatus": "CLEAN",
             },
         ]
-        with patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run:
-            mock_run.return_value = Mock(
-                returncode=0,
-                stdout=json.dumps(mock_output),
-            )
+        with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh:
+            mock_gh.return_value = Mock(stdout=json.dumps(mock_output))
             result = _count_failing_prs("MyOrg", "MyRepo")
         assert result == 0
 
     def test_count_failing_prs_returns_zero_on_gh_error(self) -> None:
         """Returns 0 on gh command failure (fail-closed)."""
-        with patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=1)
+        with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh:
+            mock_gh.side_effect = subprocess.CalledProcessError(1, ["gh"])
             result = _count_failing_prs("MyOrg", "MyRepo")
         assert result == 0
 
     def test_count_failing_prs_returns_zero_on_timeout(self) -> None:
         """Returns 0 on timeout (fail-closed)."""
-        with patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=30)
+        with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh:
+            mock_gh.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=30)
             result = _count_failing_prs("MyOrg", "MyRepo")
         assert result == 0
 
     def test_count_failing_prs_returns_zero_on_invalid_json(self) -> None:
         """Returns 0 on invalid JSON (fail-closed)."""
-        with patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run:
-            mock_run.return_value = Mock(
-                returncode=0,
-                stdout="not-json",
-            )
+        with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh:
+            mock_gh.return_value = Mock(stdout="not-json")
             result = _count_failing_prs("MyOrg", "MyRepo")
         assert result == 0
 
@@ -118,11 +109,8 @@ class TestCountFailingPrs:
             }
             for i in range(1, 1001)
         ]
-        with patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run:
-            mock_run.return_value = Mock(
-                returncode=0,
-                stdout=json.dumps(mock_output),
-            )
+        with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh:
+            mock_gh.return_value = Mock(stdout=json.dumps(mock_output))
             with patch("hephaestus.automation.loop_repo_manager.LOG") as mock_logger:
                 result = _count_failing_prs("MyOrg", "MyRepo")
         assert result == 1000

@@ -19,8 +19,10 @@ from typing import Any
 from hephaestus.agents.runtime import add_agent_argument, resolve_agent
 from hephaestus.cli.utils import (
     add_dry_run_arg,
+    add_github_throttle_args,
     add_json_arg,
     add_version_arg,
+    configure_github_throttle_from_args,
     emit_json_status,
 )
 
@@ -634,6 +636,7 @@ Examples:
         action="store_true",
         help="Enable verbose logging",
     )
+    add_github_throttle_args(parser)
     add_json_arg(parser)
     add_version_arg(parser)
     return parser
@@ -652,6 +655,7 @@ def main() -> int:
 
     """
     args = _parse_args()
+    configure_github_throttle_from_args(args)
     _setup_logging(args.verbose)
 
     log = logging.getLogger(__name__)

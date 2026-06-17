@@ -27,6 +27,12 @@ _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from hephaestus.cli.utils import (  # noqa: E402
+    add_github_throttle_args,
+    configure_github_throttle_from_args,
+)
+from hephaestus.github.client import gh_call  # noqa: E402
+
 STAGES = (
     "planning",
     "plan-review",
@@ -48,17 +54,12 @@ STAGES = (
 
 def _gh(args: list[str], *, parse_json: bool = False) -> Any:
     """Run a gh CLI command and return stdout as text or parsed JSON."""
-    result = subprocess.run(
-        ["gh", *args],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if result.returncode != 0:
+    try:
+        result = gh_call(args)
+    except subprocess.CalledProcessError as exc:
         raise RuntimeError(
-            f"gh {' '.join(args)} failed: {result.stderr.strip() or result.stdout.strip()}"
-        )
+            f"gh {' '.join(args)} failed: {(exc.stderr or exc.stdout or '').strip()}"
+        ) from exc
     return json.loads(result.stdout) if parse_json else result.stdout
 
 
@@ -311,6 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--branch", default="", help="Branch name (for implementation stage)")
     parser.add_argument("--worktree", default="", help="Worktree path (for implementation stage)")
     parser.add_argument("--iteration", type=int, default=0, help="Review iteration number")
+    add_github_throttle_args(parser)
     return parser
 
 
@@ -318,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
     """Entry point for the show-prompt CLI."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    configure_github_throttle_from_args(args)
 
     try:
         prompt = build_prompt(

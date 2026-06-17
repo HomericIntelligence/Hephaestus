@@ -15,11 +15,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from datetime import datetime
 from typing import Any
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status, format_output
+from hephaestus.cli.utils import (
+    add_github_throttle_args,
+    add_json_arg,
+    add_version_arg,
+    configure_github_throttle_from_args,
+    emit_json_status,
+    format_output,
+)
 from hephaestus.github.client import gh_call
 
 # ---------------------------------------------------------------------------
@@ -219,8 +227,9 @@ def get_commits_stats(
     if author:
         params += ["-f", f"author={author}"]
 
-    result = gh_call(params[1:], check=False)
-    if result.returncode != 0:
+    try:
+        result = gh_call(params[1:])
+    except subprocess.CalledProcessError:
         return {"total": 0}
 
     total = sum(int(line.strip()) for line in result.stdout.strip().split("\n") if line.strip())
@@ -316,10 +325,12 @@ def main() -> int:
     parser.add_argument("end_date", help="End date (YYYY-MM-DD)")
     parser.add_argument("--author", help="Filter by author username")
     parser.add_argument("--repo", help="Repository (owner/repo), defaults to current repo")
+    add_github_throttle_args(parser)
     add_json_arg(parser)
     add_version_arg(parser)
 
     args = parser.parse_args()
+    configure_github_throttle_from_args(args)
 
     if not validate_date(args.start_date):
         if args.json:

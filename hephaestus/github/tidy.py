@@ -24,7 +24,13 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument, is_codex, resolve_agent, run_codex_text
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.cli.utils import (
+    add_github_throttle_args,
+    add_json_arg,
+    add_version_arg,
+    configure_github_throttle_from_args,
+    emit_json_status,
+)
 from hephaestus.github.client import gh_call
 from hephaestus.github.pr_merge import detect_repo_from_remote
 from hephaestus.logging.utils import get_logger
@@ -266,22 +272,22 @@ git -C {worktree_path} push --force-with-lease --force-if-includes origin {branc
 
 ### 7. Re-arm auto-merge (if a PR exists)
 ```bash
-PR=$(gh pr list --repo {repo_slug} --head {branch} --json number --jq '.[0].number // empty')
+GH_BIN="hephaestus-gh"
+PR=$("$GH_BIN" pr list --repo {repo_slug} --head {branch} --json number --jq '.[0].number // empty')
 if [ -n "$PR" ]; then
   HELPER=""
   for cand in \
-      "${{HEPHAESTUS_REPO_ROOT:-}}/scripts/choose_merge_flag.sh" \
       "$(git rev-parse --show-toplevel 2>/dev/null)/scripts/choose_merge_flag.sh" \
       "$HOME/Projects/ProjectHephaestus/scripts/choose_merge_flag.sh"; do
     if [ -r "$cand" ]; then HELPER="$cand"; break; fi
   done
   if [ -n "$HELPER" ]; then
     . "$HELPER"
-    MERGE_FLAG=$(choose_merge_flag {repo_slug}) || MERGE_FLAG="--squash"
+    MERGE_FLAG=$(choose_merge_flag --gh-bin "$GH_BIN" {repo_slug}) || MERGE_FLAG="--squash"
   else
     MERGE_FLAG="--squash"
   fi
-  gh pr merge --auto "$MERGE_FLAG" "$PR"
+  "$GH_BIN" pr merge --auto "$MERGE_FLAG" "$PR"
 fi
 ```
 
@@ -453,6 +459,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     add_agent_argument(parser)
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
+    add_github_throttle_args(parser)
     add_json_arg(parser)
     add_version_arg(parser)
     return parser
@@ -513,6 +520,7 @@ def _print_summary(results: dict[str, str]) -> int:
 def main() -> int:  # noqa: C901  # CLI dispatch: many command branches for tidy workflow stages
     """Entry point for hephaestus-tidy."""
     args = _build_arg_parser().parse_args()
+    configure_github_throttle_from_args(args)
     agent = resolve_agent(args.agent)
 
     logging.basicConfig(

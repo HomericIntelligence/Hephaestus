@@ -3,7 +3,8 @@
 Extracted from loop_runner.py (refs #1360 / umbrella #1179). This module
 owns the cluster of functions that interact with GitHub's repo list API,
 local git operations (clone, fetch, rebase), and open-issue/failing-PR
-counting. All functions here shell out to ``gh`` or ``git``; their
+counting. GitHub CLI calls go through ``hephaestus.github.client.gh_call``;
+local git operations shell out directly. Their
 pure-function helpers are unit-tested in
 ``tests/unit/automation/test_loop_repo_manager.py``.
 """
@@ -17,7 +18,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from hephaestus.automation.ci_driver import _pr_is_failing
-from hephaestus.automation.claude_timeouts import gh_cli_timeout
+from hephaestus.github.client import gh_call
 from hephaestus.resilience.subprocess_resilience import resilient_call
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
@@ -80,9 +81,8 @@ def _detect_cwd_repo() -> tuple[str | None, str | None]:
 def _gh_list_repos(org: str) -> list[str]:
     """Return non-archived, non-fork repos for ``org``."""
     try:
-        out = subprocess.run(
+        out = gh_call(
             [
-                "gh",
                 "repo",
                 "list",
                 org,
@@ -92,15 +92,13 @@ def _gh_list_repos(org: str) -> list[str]:
                 "--limit",
                 "200",
             ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=gh_cli_timeout(),
         )
     except subprocess.TimeoutExpired as exc:
         raise SystemExit(f"gh repo list {org} timed out after {exc.timeout}s") from exc
-    if out.returncode != 0:
-        raise SystemExit(f"gh repo list {org} failed (rc={out.returncode}): {out.stderr.strip()}")
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            f"gh repo list {org} failed (rc={exc.returncode}): {(exc.stderr or '').strip()}"
+        ) from exc
     try:
         entries = json.loads(out.stdout or "[]")
     except json.JSONDecodeError as exc:
@@ -125,9 +123,8 @@ def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
     fall back safely.
     """
     try:
-        out = subprocess.run(
+        out = gh_call(
             [
-                "gh",
                 "issue",
                 "list",
                 "--repo",
@@ -141,14 +138,8 @@ def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
                 "--jq",
                 ".[].number",
             ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=gh_cli_timeout(),
         )
-    except subprocess.TimeoutExpired:
-        return []
-    if out.returncode != 0:
+    except (subprocess.SubprocessError, RuntimeError, OSError):
         return []
     return sorted(int(x) for x in out.stdout.split() if x.strip().isdigit())
 
@@ -171,9 +162,8 @@ def _count_failing_prs(org: str, repo: str) -> int:
     fail-closed (we don't run the driver when we can't confirm work).
     """
     try:
-        out = subprocess.run(
+        out = gh_call(
             [
-                "gh",
                 "pr",
                 "list",
                 "--repo",
@@ -185,14 +175,8 @@ def _count_failing_prs(org: str, repo: str) -> int:
                 "--json",
                 "number,isDraft,statusCheckRollup,mergeStateStatus",
             ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=gh_cli_timeout(),
         )
-    except (subprocess.TimeoutExpired, OSError):
-        return 0
-    if out.returncode != 0:
+    except (subprocess.SubprocessError, RuntimeError, OSError):
         return 0
     try:
         pulls = json.loads(out.stdout or "[]")
@@ -226,18 +210,13 @@ def _ensure_clone(org: str, repo: str, dest: Path) -> None:
         return
     LOG.info("Cloning %s/%s -> %s", org, repo, dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # Route the clone through resilient_call: a network blip retries with
-    # backoff, while a true hang is bounded by NETWORK_TIMEOUT (#684).
-    completed = resilient_call(
-        subprocess.run,
-        ["gh", "repo", "clone", f"{org}/{repo}", str(dest)],
-        check=False,
-        timeout=NETWORK_TIMEOUT,
-        circuit_breaker_name="gh-repo-clone",
-    )
-    rc = completed.returncode
-    if rc != 0:
-        raise RuntimeError(f"gh repo clone {org}/{repo} failed (rc={rc})")
+    try:
+        gh_call(
+            ["repo", "clone", f"{org}/{repo}", str(dest)],
+            timeout=NETWORK_TIMEOUT,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"gh repo clone {org}/{repo} failed (rc={exc.returncode})") from exc
 
 
 def _clone_missing_repos(org: str, repos: list[str], projects_dir: Path) -> None:

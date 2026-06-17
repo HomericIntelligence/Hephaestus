@@ -14,6 +14,7 @@ from hephaestus.automation.claude_invoke import invoke_claude_with_session
 from hephaestus.automation.session_naming import (
     AGENT_PLAN_REVIEWER,
     AGENT_PLANNER,
+    session_jsonl_path,
     session_uuid,
 )
 
@@ -44,10 +45,10 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _make_existing_jsonl(home: Path, cwd: Path, sid: str) -> None:
     """Pre-create the transcript file so the helper takes the --resume path."""
-    encoded = str(cwd.resolve()).replace("/", "-")
-    target_dir = home / ".claude" / "projects" / encoded
-    target_dir.mkdir(parents=True, exist_ok=True)
-    (target_dir / f"{sid}.jsonl").write_text("{}\n")
+    del home
+    target = session_jsonl_path(sid, cwd)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("{}\n")
 
 
 class TestCreateThenResume:
