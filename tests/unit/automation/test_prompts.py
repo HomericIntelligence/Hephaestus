@@ -304,8 +304,8 @@ class TestAdvisePrompt:
         assert "7" in out
         assert "/mp.json" in out
 
-    def test_codex_prompt_uses_dollar_advise_skill_trigger(self) -> None:
-        """Codex automation should invoke the installed skill, not manual slash syntax."""
+    def test_codex_prompt_selects_skills_without_skill_trigger(self) -> None:
+        """Codex automation should use bounded JSON selection, not interactive skills."""
         out = prompts.get_codex_advise_prompt(
             issue_number=7,
             issue_title="t",
@@ -313,9 +313,12 @@ class TestAdvisePrompt:
             marketplace_path="/mp.json",
         )
 
-        assert out.startswith("$advise ")
+        assert not out.startswith("$advise")
+        assert "$advise" not in out
         assert "/advise" not in out
-        assert "Issue #7: t" in out
+        assert "/mp.json" in out
+        assert '"skills"' in out
+        assert "**Issue:** #7: t" in out
         assert "b" in out
 
     def test_advise_prompt_builder_selects_codex_prompt(self) -> None:

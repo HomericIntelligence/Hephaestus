@@ -24,6 +24,9 @@ class TestDefaults:
         monkeypatch.delenv("HEPH_REVIEWER_MODEL", raising=False)
         assert claude_models.reviewer_model() == claude_models.SONNET
 
+    def test_codex_advise_defaults_to_gpt_mini(self) -> None:
+        assert claude_models.codex_advise_model() == "gpt-5.4-mini"
+
 
 class TestEnvOverride:
     """An operator can flip a phase's model without code changes.
@@ -54,6 +57,7 @@ class TestModuleStable:
         assert claude_models.OPUS == "claude-opus-4-7"
         assert claude_models.HAIKU == "claude-haiku-4-5"
         assert claude_models.SONNET == "claude-sonnet-4-6"
+        assert claude_models.CODEX_ADVISE == "gpt-5.4-mini"
 
 
 class TestEnvVarValidation:

@@ -1,7 +1,7 @@
 """Claude model selection per automation phase.
 
-Each automation phase calls the ``claude`` CLI with ``--model <id>`` so the
-chosen model is pinned regardless of the user's CLI default. The mapping
+Each Claude automation phase calls the ``claude`` CLI with ``--model <id>`` so
+the chosen model is pinned regardless of the user's CLI default. The mapping
 reflects the cost/quality tradeoff for each phase:
 
 - Planning needs reasoning quality but few tokens overall → Opus
@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 OPUS = "claude-opus-4-7"
 SONNET = "claude-sonnet-4-6"
 HAIKU = "claude-haiku-4-5"
+CODEX_ADVISE = "gpt-5.4-mini"
 
 # Newer tiers that are valid model IDs but not the per-phase defaults. Listed in
 # the known set so pinning them via HEPH_*_MODEL doesn't emit a spurious
@@ -83,8 +84,13 @@ def reviewer_model() -> str:
 
 
 def advise_model() -> str:
-    """Model used by the /advise step inside the planner."""
+    """Claude model used by the advise skill-selection step."""
     return _resolve_model("HEPH_ADVISE_MODEL", HAIKU)
+
+
+def codex_advise_model() -> str:
+    """Codex model used by the advise skill-selection step."""
+    return CODEX_ADVISE
 
 
 def learn_model() -> str:

@@ -1,4 +1,4 @@
-"""Advise-phase prompt: search the team knowledge base before planning."""
+"""Advise-phase prompt: select team knowledge to inject into automation prompts."""
 
 from collections.abc import Callable
 
@@ -7,7 +7,7 @@ from hephaestus.agents.runtime import is_codex
 from ._shared import _TERSE_OUTPUT_DIRECTIVE, _relativize_path
 
 ADVISE_PROMPT = """
-Search the team knowledge base for relevant prior learnings before planning this issue.
+Search ProjectMnemosyne for relevant prior learnings before this automation stage.
 
 **Issue:** #{issue_number}: {issue_title}
 
@@ -15,56 +15,43 @@ Search the team knowledge base for relevant prior learnings before planning this
 
 ---
 
+**Marketplace:** {marketplace_path}
+
+```json
+{marketplace_json}
+```
+
+---
+
 {terse_output_directive}
 
 **Your task:**
-1. Read the skills marketplace: {marketplace_path}
-2. Search for plugins matching this issue's topic by:
+1. Search the marketplace entries above for skills matching this issue's topic by:
    - Keywords in plugin names and descriptions
    - Tags and categories
    - Similar problem domains
-3. For each relevant plugin, read its SKILL.md file to understand:
-   - What worked (successful approaches)
-   - What failed (common pitfalls)
-   - Recommended parameters and configurations
-   - Related patterns and conventions
+2. Select at most 5 skills whose files should be appended to the downstream prompt.
+3. Do not modify files, implement code, post comments, or run write commands.
 
 **Output format:**
-## Related Skills
-| Plugin | Category | Relevance |
-|--------|----------|-----------|
-| plugin-name | category | Why it's relevant |
+Return only valid JSON with this exact shape:
+{{
+  "skills": [
+    {{
+      "name": "skill-name",
+      "source": "./skills/skill-name.md",
+      "reason": "One sentence explaining relevance to this issue."
+    }}
+  ]
+}}
 
-## What Worked
-- Successful approach 1
-- Successful approach 2
+If no relevant skills are found, return:
+{{"skills": []}}
 
-## What Failed
-- Common pitfall 1 (from plugin X)
-- Common pitfall 2 (from plugin Y)
-
-## Recommended Parameters
-- Parameter/configuration 1
-- Parameter/configuration 2
-
-If no relevant skills are found, output:
-## Related Skills
-None found
-
-**Important:** Only return findings from the actual marketplace. Do not speculate or invent skills.
+**Important:** Only select skills from the actual marketplace. Do not speculate or invent skills.
 """
 
-CODEX_ADVISE_PROMPT = """$advise Search team knowledge before planning this issue.
-
-Issue #{issue_number}: {issue_title}
-
-Body:
-{issue_body}
-
-{terse_output_directive}
-
-Return the advise findings only, in markdown. Do not implement or modify files.
-"""
+CODEX_ADVISE_PROMPT = ADVISE_PROMPT
 
 
 def get_advise_prompt(
@@ -73,6 +60,7 @@ def get_advise_prompt(
     issue_body: str,
     marketplace_path: str,
     repo_root: str | None = None,
+    marketplace_json: str = '{"plugins": []}',
 ) -> str:
     """Get the advise prompt for searching team knowledge.
 
@@ -84,6 +72,7 @@ def get_advise_prompt(
         repo_root: Absolute path to the repository root.  When provided,
             *marketplace_path* is relativized to avoid leaking the operator's
             filesystem layout into the prompt.
+        marketplace_json: Compact marketplace payload to select from.
 
     Returns:
         Formatted advise prompt
@@ -95,6 +84,7 @@ def get_advise_prompt(
         issue_title=issue_title,
         issue_body=issue_body,
         marketplace_path=safe_marketplace_path,
+        marketplace_json=marketplace_json,
         terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )
 
@@ -105,19 +95,16 @@ def get_codex_advise_prompt(
     issue_body: str,
     marketplace_path: str,
     repo_root: str | None = None,
+    marketplace_json: str = '{"plugins": []}',
 ) -> str:
-    """Get the Codex advise prompt using Codex's ``$advise`` skill trigger.
-
-    Codex skills are invoked with ``$skill-name`` rather than Claude slash
-    commands. The marketplace path is accepted for the shared runner call
-    signature but intentionally not interpolated: the installed Codex advise
-    skill owns Mnemosyne clone/update and marketplace discovery.
-    """
-    del marketplace_path, repo_root
+    """Get the Codex advise prompt for bounded JSON skill selection."""
+    safe_marketplace_path = _relativize_path(marketplace_path, repo_root)
     return CODEX_ADVISE_PROMPT.format(
         issue_number=issue_number,
         issue_title=issue_title,
         issue_body=issue_body,
+        marketplace_path=safe_marketplace_path,
+        marketplace_json=marketplace_json,
         terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )
 

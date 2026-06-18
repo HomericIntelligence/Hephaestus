@@ -50,7 +50,7 @@ from .ci_check_inspector import (
 )
 from .ci_fix_orchestrator import CIFixOrchestrator
 from .claude_invoke import invoke_claude_with_session
-from .claude_models import advise_model
+from .claude_models import advise_model, codex_advise_model
 from .claude_timeouts import (
     advise_claude_timeout,
     ci_poll_max_wait,
@@ -761,6 +761,7 @@ class CIDriver:
                     prompt,
                     cwd=self.repo_root,
                     timeout=advise_claude_timeout(),
+                    model=codex_advise_model(),
                     sandbox="read-only",
                 )
                 return (result.stdout or "").strip()

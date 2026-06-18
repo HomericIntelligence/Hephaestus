@@ -16,7 +16,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.runtime import add_agent_argument, resolve_agent
+from hephaestus.agents.runtime import add_agent_argument, is_codex, resolve_agent
 from hephaestus.cli.utils import (
     add_dry_run_arg,
     add_github_throttle_args,
@@ -32,7 +32,7 @@ from ._review_utils import (
     find_pr_for_issue,
 )
 from .advise_runner import advise_skipped, ensure_mnemosyne, run_advise
-from .claude_models import advise_model
+from .claude_models import advise_model, codex_advise_model
 from .claude_timeouts import advise_claude_timeout
 from .git_utils import issue_ref
 from .github_api import (
@@ -335,10 +335,15 @@ class Planner:
         model: str,
         max_retries: int = 3,
         timeout: int = 300,
+        sandbox: str = "workspace-write",
     ) -> str:
         """Call Codex (delegates to claude_runner)."""
         return self.claude_runner.call_codex(
-            prompt, model=model, max_retries=max_retries, timeout=timeout
+            prompt,
+            model=model,
+            max_retries=max_retries,
+            timeout=timeout,
+            sandbox=sandbox,
         )
 
     def _ensure_mnemosyne(self, mnemosyne_root: Path) -> bool:
@@ -378,7 +383,14 @@ class Planner:
         """
 
         def _invoke(prompt: str) -> str:
-            # /advise is light search work, so it runs on the cheap model with a
+            if is_codex(self.options.agent):
+                return self._call_codex(
+                    prompt,
+                    model=codex_advise_model(),
+                    timeout=advise_claude_timeout(),
+                    sandbox="read-only",
+                )
+            # Advise is light search work, so it runs on the cheap model with a
             # short timeout under its own AGENT_ADVISE session.
             return self._call_claude(
                 prompt,

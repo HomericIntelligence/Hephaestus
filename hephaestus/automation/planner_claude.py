@@ -177,6 +177,7 @@ class PlannerClaudeRunner:
         model: str,
         max_retries: int = 3,
         timeout: int = 300,
+        sandbox: str = "workspace-write",
     ) -> str:
         """Call Codex CLI with retry logic for rate limits."""
         try:
@@ -184,7 +185,8 @@ class PlannerClaudeRunner:
                 prompt,
                 cwd=get_repo_root(),
                 timeout=timeout,
-                sandbox="workspace-write",
+                model=model,
+                sandbox=sandbox,
             )
         except subprocess.CalledProcessError as e:
             stderr = e.stderr or ""
@@ -198,6 +200,7 @@ class PlannerClaudeRunner:
                     model=model,
                     max_retries=max_retries - 1,
                     timeout=timeout,
+                    sandbox=sandbox,
                 )
             detail = stderr or stdout or str(e)
             raise RuntimeError(f"Codex failed: {detail}") from e

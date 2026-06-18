@@ -417,7 +417,7 @@ def test_ci_fix_head_pushable_with_clean_committed_pr_head(
 
 
 def test_codex_ci_advise_uses_codex_prompt_builder(driver: CIDriver) -> None:
-    """Codex CI repair runs should trigger the Codex `$advise` skill prompt."""
+    """Codex CI advise uses JSON skill selection on gpt-5.4-mini."""
     driver.options.agent = "codex"
 
     with (
@@ -426,11 +426,17 @@ def test_codex_ci_advise_uses_codex_prompt_builder(driver: CIDriver) -> None:
             return_value={"title": "Test Issue", "body": "Issue body"},
         ),
         patch("hephaestus.automation.ci_driver.run_advise", return_value="findings") as run,
+        patch("hephaestus.automation.ci_driver.run_codex_session") as codex,
     ):
+        codex.return_value = MagicMock(stdout='{"skills": []}')
         result = driver._run_advise(123)
+        invoke = run.call_args.kwargs["invoke"]
+        assert invoke("prompt") == '{"skills": []}'
 
     assert result == "findings"
     assert run.call_args.kwargs["build_prompt"].__name__ == "get_codex_advise_prompt"
+    assert codex.call_args.kwargs["model"] == "gpt-5.4-mini"
+    assert codex.call_args.kwargs["sandbox"] == "read-only"
 
 
 # ---------------------------------------------------------------------------

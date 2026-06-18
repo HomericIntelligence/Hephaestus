@@ -29,7 +29,7 @@ from hephaestus.github.rate_limit import wait_until
 from ._stage_context import StageMixin
 from .advise_runner import run_advise
 from .claude_invoke import invoke_claude_with_session
-from .claude_models import advise_model, implementer_model
+from .claude_models import advise_model, codex_advise_model, implementer_model
 from .claude_timeouts import advise_claude_timeout, implementer_claude_timeout
 from .git_utils import get_repo_slug
 from .learn import compact_session
@@ -76,15 +76,7 @@ class ImplementPhase(StageMixin):
         self.ctx = ctx
 
     def _run_advise(self, issue_number: int, issue_title: str, issue_body: str) -> str:
-        """Search ProjectMnemosyne for prior learnings — planner's separate-session path.
-
-        Used by the planner (and Codex) where advise runs under ``AGENT_ADVISE``
-        (a distinct, cheap, read-only session) and returns text findings for the
-        caller to inject into its own prompt context.  Claude implementer sessions
-        use :meth:`_run_advise_as_implementer_turn` instead, which makes advise
-        the *first turn* of the implementer's own session so the findings live in
-        the transcript and inform the implementation turn directly.
-        """
+        """Select ProjectMnemosyne skills and return prompt-ready context."""
 
         def _invoke(prompt: str) -> str:
             if is_codex(self.options.agent):
@@ -92,6 +84,7 @@ class ImplementPhase(StageMixin):
                     prompt,
                     cwd=self.repo_root,
                     timeout=advise_claude_timeout(),
+                    model=codex_advise_model(),
                     sandbox="read-only",
                 )
                 return (result.stdout or "").strip()
@@ -123,73 +116,14 @@ class ImplementPhase(StageMixin):
         issue_body: str,
         worktree_path: Path,
     ) -> str:
-        """Send the advise prompt as the first turn of the implementer's Claude session.
+        """Compatibility wrapper for the former Claude two-turn advise path.
 
-        Unlike :meth:`_run_advise`, which creates a separate ``AGENT_ADVISE``
-        session and returns text, this method sends the advise prompt directly to
-        ``AGENT_IMPLEMENTER`` (using ``cwd=worktree_path`` so the session transcript
-        is co-located with the subsequent implementation turn).  The advise findings
-        live in the implementer's own transcript, so turn 2 (the implementation
-        prompt) automatically inherits them via ``--resume`` — no text injection
-        needed.
-
-        Codex does not support this two-turn flow; callers must guard with
-        ``is_codex`` and fall back to :meth:`_run_advise` + text injection for
-        Codex agents.
-
-        On first run ``invoke_claude_with_session`` auto-creates the session
-        (``transcript.exists()`` is False).  On subsequent loops the same
-        deterministic session UUID auto-resumes so the advise findings accumulate
-        across iterations.
-
-        Any failure degrades gracefully inside ``run_advise`` and returns an
-        empty string, so the caller can still proceed to the implementation turn.
+        Advise now behaves the same for Claude and Codex: gather a selected-skill
+        context block in a separate read-only advise pass, then inject that block
+        into the downstream implementation/review prompt explicitly.
         """
-        repo_slug = get_repo_slug(self.repo_root)
-
-        # Fetch plan and plan-review from GitHub comments to give advise the full
-        # context of what's been planned (same anchored selection as
-        # _fetch_plan_and_review so PLAN_REVIEW comments are distinguished from
-        # the PLAN comment).
-        plan_text, plan_review_text = self.runner._fetch_plan_and_review(issue_number)
-
-        def _build_prompt_with_plan(**kw: object) -> str:
-            # Claude runs with cwd=worktree_path, so pass worktree_path as the
-            # relativization root.  marketplace.json lives under build/ in the main
-            # repo, not under the worktree, so _relativize_path will fall back to
-            # the absolute path — which is always readable regardless of cwd.
-            kw["repo_root"] = str(worktree_path)
-            base_prompt = get_advise_prompt_builder(self.options.agent)(**kw)
-            if not plan_text and not plan_review_text:
-                return base_prompt
-            parts = []
-            if plan_text:
-                parts.append(f"## Implementation Plan\n\n{plan_text}")
-            if plan_review_text:
-                parts.append(f"## Plan Review\n\n{plan_review_text}")
-            plan_block = "\n\n".join(parts)
-            return f"{plan_block}\n\n---\n\n{base_prompt}"
-
-        def _invoke(prompt: str) -> str:
-            stdout, _ = invoke_claude_with_session(
-                repo=repo_slug,
-                issue=issue_number,
-                agent=AGENT_IMPLEMENTER,
-                prompt=prompt,
-                model=implementer_model(),
-                cwd=worktree_path,
-                timeout=advise_claude_timeout(),
-                output_format="text",
-            )
-            return (stdout or "").strip()
-
-        return run_advise(
-            issue_number=issue_number,
-            issue_title=issue_title,
-            issue_body=issue_body,
-            invoke=_invoke,
-            build_prompt=_build_prompt_with_plan,
-        )
+        del worktree_path
+        return self._run_advise(issue_number, issue_title, issue_body)
 
     def _compact_implementer_session(self, issue_number: int, worktree_path: Path) -> None:
         """Compact the implementer session after /learn (#842). Non-fatal."""

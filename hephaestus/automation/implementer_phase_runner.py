@@ -485,31 +485,21 @@ class ImplementationPhaseRunner:
         Returns ``(session_id, advise_findings)``.
         """
         impl = self.impl
-        # Advise-first (#30): For Claude agents the advise prompt is sent as the
-        # *first turn* of the implementer's own session so findings live in the
-        # transcript and are visible to the implementation turn via --resume.
-        # For Codex agents the separate-session path is retained (no multi-turn).
+        # Advise-first (#30): Claude and Codex both use the shared selected-skill
+        # lookup and explicitly prepend its returned context to the task prompt.
         implementation_advise_findings = ""
-        if self.options.enable_advise and not is_codex(self.options.agent):
+        if self.options.enable_advise:
             self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Advising")
-            implementation_advise_findings = impl._run_advise_as_implementer_turn(
-                issue_number, issue.title, issue.body, worktree_path
-            )
+            implementation_advise_findings = impl._run_advise(issue_number, issue.title, issue.body)
 
         self.status_tracker.update_slot(
             slot_id, f"{issue_ref(issue_number)}: Running {self.options.agent}"
         )
-        codex_advise_findings = ""
-        if self.options.enable_advise and is_codex(self.options.agent):
-            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Advising")
-            codex_advise_findings = impl._run_advise(issue_number, issue.title, issue.body)
-            implementation_advise_findings = codex_advise_findings
-
         session_id = impl._run_claude_code(
             issue_number,
             worktree_path,
             _prepend_advise(
-                codex_advise_findings,
+                implementation_advise_findings,
                 get_implementation_prompt(
                     issue_number=issue_number,
                     issue_title=issue.title,
@@ -720,14 +710,9 @@ class ImplementationPhaseRunner:
         impl = self.impl
         issue = fetch_issue_info(issue_number)
 
-        # Advise-first (#30): same two-turn pattern as the fresh-implementation path.
+        # Advise-first (#30): same selected-skill context path as fresh implementation.
         implementation_advise_findings = ""
-        if self.options.enable_advise and not is_codex(self.options.agent):
-            self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Advising")
-            implementation_advise_findings = impl._run_advise_as_implementer_turn(
-                issue_number, issue.title, issue.body, worktree_path
-            )
-        elif self.options.enable_advise:
+        if self.options.enable_advise:
             self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Advising")
             implementation_advise_findings = impl._run_advise(issue_number, issue.title, issue.body)
 
