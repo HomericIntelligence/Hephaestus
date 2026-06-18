@@ -8,25 +8,24 @@ live here once (DRY) rather than being copied into ``planner.py``,
 ``implementer_phase_runner.py``, and ``ci_driver.py``.
 
 The only thing that differs per stage is *how* the selected agent is invoked.
-Callers therefore pass an ``invoke`` callable that takes the advise prompt and
-returns the agent's text output; this module owns everything around it.
+Callers therefore pass an ``invoke`` callable that takes the skill-selection
+prompt and returns the agent's JSON output; this module owns everything around
+it.
 
-For the planner and CI-driver, the ``invoke`` callable targets ``AGENT_ADVISE``
-(a distinct, cheap, read-only session) so the findings are returned as text and
-injected into the stage's own prompt context.  The implementer's Claude path
-instead targets ``AGENT_IMPLEMENTER`` with ``cwd=worktree_path`` so that the
-advise step is the *first turn* of the implementer's session — the findings
-live in the transcript and the implementation turn auto-resumes them via
-``--resume`` without any text injection.
+Each stage gets the same result shape: a bounded ``## Selected Team Skills``
+context block assembled from local ProjectMnemosyne skill files and injected
+explicitly into the downstream prompt.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import subprocess
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from hephaestus.github.client import gh_call
@@ -51,6 +50,19 @@ logger = logging.getLogger(__name__)
 _MNEMOSYNE_LOCK = threading.Lock()
 _MNEMOSYNE_GIT_TIMEOUT = 30
 _MNEMOSYNE_CLONE_TIMEOUT = 120
+_MAX_SELECTED_SKILLS = 5
+_MAX_SKILL_CONTEXT_CHARS = 40_000
+_MAX_MARKETPLACE_PROMPT_CHARS = 80_000
+
+
+@dataclass(frozen=True)
+class SelectedSkill:
+    """A skill selected by the model and validated against the local checkout."""
+
+    name: str
+    source: str
+    reason: str
+    path: Path
 
 
 def advise_skipped(reason: str) -> str:
@@ -61,6 +73,11 @@ def advise_skipped(reason: str) -> str:
     inert wherever the findings get interpolated (plan body, prompt context).
     """
     return f"<!-- advise step skipped: {reason} -->"
+
+
+def default_mnemosyne_root() -> Path:
+    """Return the shared ProjectMnemosyne checkout root."""
+    return Path.home() / ".agent-brain" / "ProjectMnemosyne"
 
 
 def _clone_mnemosyne(mnemosyne_root: Path) -> bool:
@@ -210,6 +227,180 @@ def resolve_marketplace(mnemosyne_root: Path) -> tuple[Path | None, str]:
     return marketplace_path, ""
 
 
+def _extract_json_object(text: str) -> dict[str, object]:
+    """Parse the selector's JSON object, allowing fenced or prefixed output."""
+    stripped = text.strip()
+    if not stripped:
+        raise ValueError("empty selector output")
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start < 0 or end < start:
+            raise ValueError("selector output did not contain a JSON object") from None
+        try:
+            data = json.loads(stripped[start : end + 1])
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid selector JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("selector JSON must be an object")
+    return data
+
+
+def marketplace_prompt_payload(marketplace_path: Path) -> str:
+    """Return a compact JSON payload of marketplace entries for model selection."""
+    try:
+        data = json.loads(marketplace_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to read ProjectMnemosyne marketplace %s: %s", marketplace_path, exc)
+        return '{"plugins": []}'
+
+    plugins = data.get("plugins")
+    if not isinstance(plugins, list):
+        return '{"plugins": []}'
+
+    compact_plugins: list[dict[str, object]] = []
+    for plugin in plugins:
+        if not isinstance(plugin, dict):
+            continue
+        compact: dict[str, object] = {}
+        for key in ("name", "description", "category", "tags", "source"):
+            value = plugin.get(key)
+            if isinstance(value, (str, list)):
+                compact[key] = value
+        if compact:
+            compact_plugins.append(compact)
+        payload = json.dumps(
+            {"plugins": compact_plugins},
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        if len(payload) > _MAX_MARKETPLACE_PROMPT_CHARS:
+            compact_plugins.pop()
+            break
+
+    return json.dumps(
+        {"plugins": compact_plugins},
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def _validate_skill_source(mnemosyne_root: Path, source: str) -> Path | None:
+    """Return a safe local skill path for a marketplace source, or ``None``."""
+    source_path = Path(source)
+    if source_path.is_absolute() or ".." in source_path.parts:
+        logger.warning("Ignoring unsafe ProjectMnemosyne skill source: %s", source)
+        return None
+
+    try:
+        skills_root = (mnemosyne_root / "skills").resolve(strict=False)
+        candidate = (mnemosyne_root / source_path).resolve(strict=False)
+        candidate.relative_to(skills_root)
+    except ValueError:
+        logger.warning("Ignoring non-skill ProjectMnemosyne source: %s", source)
+        return None
+
+    if not candidate.is_file():
+        logger.warning("Ignoring missing ProjectMnemosyne skill source: %s", candidate)
+        return None
+    return candidate
+
+
+def parse_selected_skills(selector_output: str, mnemosyne_root: Path) -> list[SelectedSkill]:
+    """Parse and validate up to five selected skills from model JSON output."""
+    data = _extract_json_object(selector_output)
+    skills = data.get("skills")
+    if not isinstance(skills, list):
+        raise ValueError("selector JSON must contain a skills list")
+
+    selected: list[SelectedSkill] = []
+    seen_paths: set[Path] = set()
+    for item in skills:
+        if len(selected) >= _MAX_SELECTED_SKILLS:
+            break
+        if not isinstance(item, dict):
+            logger.warning("Ignoring malformed selected skill entry: %r", item)
+            continue
+        name = item.get("name")
+        source = item.get("source")
+        reason = item.get("reason")
+        if not isinstance(name, str) or not isinstance(source, str) or not isinstance(reason, str):
+            logger.warning("Ignoring selected skill entry with non-string fields: %r", item)
+            continue
+
+        path = _validate_skill_source(mnemosyne_root, source)
+        if path is None or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        selected.append(
+            SelectedSkill(
+                name=name.strip() or path.stem,
+                source=source.strip(),
+                reason=reason.strip(),
+                path=path,
+            )
+        )
+    return selected
+
+
+def format_selected_skill_context(
+    selected: list[SelectedSkill],
+    *,
+    max_chars: int = _MAX_SKILL_CONTEXT_CHARS,
+) -> str:
+    """Read selected skill files and format a bounded prompt context block."""
+    if not selected:
+        return "## Selected Team Skills\n\nNone found."
+
+    intro = "\n".join(
+        [
+            "## Selected Team Skills",
+            "",
+            "These ProjectMnemosyne skills were selected for this issue. "
+            + "Apply only the relevant guidance.",
+        ]
+    )
+    parts = [intro]
+    remaining = max_chars - len(intro)
+
+    for skill in selected[:_MAX_SELECTED_SKILLS]:
+        header = (
+            f"\n### {skill.name}\n"
+            f"Source: `{skill.source}`\n"
+            f"Relevance: {skill.reason}\n\n"
+            f"--- BEGIN SKILL {skill.name} ---\n"
+        )
+        footer = f"\n--- END SKILL {skill.name} ---"
+        try:
+            content = skill.path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            logger.warning("Failed to read selected ProjectMnemosyne skill %s: %s", skill.path, exc)
+            continue
+
+        separator_len = 1
+        overhead = separator_len + len(header) + len(footer)
+        if remaining <= overhead:
+            break
+        budget = remaining - overhead
+        truncated = len(content) > budget
+        if truncated:
+            marker = "\n[truncated]"
+            content = content[: max(0, budget - len(marker))] + marker
+        block = f"{header}{content}{footer}"
+        parts.append(block)
+        remaining -= separator_len + len(block)
+        if truncated or remaining <= 0:
+            break
+
+    if len(parts) == 1:
+        return "## Selected Team Skills\n\nNone found."
+    return "\n".join(parts)
+
+
 def run_advise(
     *,
     issue_number: int,
@@ -218,29 +409,30 @@ def run_advise(
     invoke: Callable[[str], str],
     build_prompt: Callable[..., str],
 ) -> str:
-    """Run the advise step and return findings (or a skip marker).
+    """Run skill selection and return prompt-ready context (or a skip marker).
 
-    Locates ProjectMnemosyne (cloning/refreshing as needed), builds the advise
-    prompt, and invokes the selected agent via the stage-supplied ``invoke`` callable. Any
-    failure degrades to an :func:`advise_skipped` marker so a stage never aborts
-    just because advice could not be gathered.
+    Locates ProjectMnemosyne (cloning/refreshing as needed), builds a compact
+    marketplace-selection prompt, invokes the selected agent, validates the JSON
+    response, then reads the selected skill files locally. Any failure degrades
+    to an :func:`advise_skipped` marker so a stage never aborts just because
+    advice could not be gathered.
 
     Args:
         issue_number: GitHub issue number (for prompt grounding + logging).
         issue_title: Issue title.
         issue_body: Issue body/description.
-        invoke: Stage-specific callable that runs the advise prompt under
-            ``AGENT_ADVISE`` and returns the agent's text output.
-        build_prompt: The advise prompt builder (``prompts.get_advise_prompt``),
-            injected so this module need not import the prompts package.
+        invoke: Stage-specific callable that runs the selector prompt and
+            returns the agent's JSON output.
+        build_prompt: The advise prompt builder, injected so this module need
+            not import the prompts package.
 
     Returns:
-        Findings text on success, or an ``advise_skipped`` marker string.
+        Selected-skill context on success, or an ``advise_skipped`` marker.
 
     """
     try:
         repo_root = get_repo_root()
-        mnemosyne_root = repo_root / "build" / "ProjectMnemosyne"
+        mnemosyne_root = default_mnemosyne_root()
 
         marketplace_path, skip_reason = resolve_marketplace(mnemosyne_root)
         if marketplace_path is None:
@@ -252,9 +444,12 @@ def run_advise(
             issue_body=issue_body,
             marketplace_path=str(marketplace_path),
             repo_root=str(repo_root),
+            marketplace_json=marketplace_prompt_payload(marketplace_path),
         )
-        logger.info("Running advise for issue #%s...", issue_number)
-        return invoke(advise_prompt)
+        logger.info("Running advise skill selection for issue #%s...", issue_number)
+        selector_output = invoke(advise_prompt)
+        selected = parse_selected_skills(selector_output, mnemosyne_root)
+        return format_selected_skill_context(selected)
     except Exception as e:
         logger.warning("Advise step failed for issue #%s: %s", issue_number, e)
         return advise_skipped(f"unexpected error: {e}")

@@ -702,8 +702,8 @@ def test_phase_env_model_vars_only_when_non_empty(monkeypatch: pytest.MonkeyPatc
     assert env_set["HEPH_IMPLEMENTER_MODEL"] == "opus"
 
 
-def test_phase_env_model_fans_out_to_all_phases(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--model (cfg.model) sets every phase env var so no HEPH_*_MODEL is needed."""
+def test_phase_env_model_fans_out_to_worker_phases(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--model sets worker phase env vars; advise is selected at call sites."""
     for var in (
         "HEPH_PLANNER_MODEL",
         "HEPH_REVIEWER_MODEL",
@@ -717,7 +717,7 @@ def test_phase_env_model_fans_out_to_all_phases(monkeypatch: pytest.MonkeyPatch)
     assert env["HEPH_PLANNER_MODEL"] == "claude-fable-5"
     assert env["HEPH_REVIEWER_MODEL"] == "claude-fable-5"
     assert env["HEPH_IMPLEMENTER_MODEL"] == "claude-fable-5"
-    assert env["HEPH_ADVISE_MODEL"] == "claude-fable-5"
+    assert "HEPH_ADVISE_MODEL" not in env
 
 
 def test_phase_env_per_phase_flag_overrides_catch_all(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -735,7 +735,7 @@ def test_phase_env_per_phase_flag_overrides_catch_all(monkeypatch: pytest.Monkey
     assert env["HEPH_PLANNER_MODEL"] == "claude-fable-5"
     assert env["HEPH_REVIEWER_MODEL"] == "claude-sonnet-4-6"
     assert env["HEPH_IMPLEMENTER_MODEL"] == "claude-fable-5"
-    assert env["HEPH_ADVISE_MODEL"] == "claude-fable-5"
+    assert "HEPH_ADVISE_MODEL" not in env
 
 
 def test_parse_args_model_flag_wires_to_namespace() -> None:

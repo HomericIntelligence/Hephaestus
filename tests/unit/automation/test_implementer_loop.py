@@ -59,14 +59,24 @@ def _error() -> str:
 def test_codex_implementer_advise_uses_codex_prompt_builder(
     implementer: IssueImplementer,
 ) -> None:
-    """Codex implementer runs should trigger the Codex `$advise` skill prompt."""
+    """Codex implementer advise uses JSON skill selection on gpt-5.4-mini."""
     implementer.options.agent = "codex"
 
-    with patch("hephaestus.automation._implement_phase.run_advise", return_value="findings") as run:
+    with (
+        patch("hephaestus.automation._implement_phase.run_advise", return_value="findings") as run,
+        patch("hephaestus.automation._implement_phase.run_codex_text") as codex,
+    ):
+        codex.return_value = subprocess.CompletedProcess(
+            args=["codex", "exec"], returncode=0, stdout='{"skills": []}', stderr=""
+        )
         result = implementer._run_advise(123, "Test Issue", "Issue body")
+        invoke = run.call_args.kwargs["invoke"]
+        assert invoke("prompt") == '{"skills": []}'
 
     assert result == "findings"
     assert run.call_args.kwargs["build_prompt"].__name__ == "get_codex_advise_prompt"
+    assert codex.call_args.kwargs["model"] == "gpt-5.4-mini"
+    assert codex.call_args.kwargs["sandbox"] == "read-only"
 
 
 class TestRunImplReviewLoop:
@@ -1248,7 +1258,7 @@ class TestImplementationAutoMergeGate:
                 "hephaestus.automation.implementer_phase_runner.is_plan_review_go",
                 return_value=True,
             ),
-            patch.object(implementer, "_run_advise_as_implementer_turn"),
+            patch.object(implementer, "_run_advise"),
             patch.object(implementer, "_run_claude_code", return_value="session-1"),
             patch.object(implementer, "_finalize_pr", return_value=456),
             patch.object(
@@ -1775,7 +1785,7 @@ class TestReviewExistingPrShortCircuit:
             ) as mock_sync,
             patch.object(implementer, "_save_state"),
             patch("hephaestus.automation.implementer_phase_runner.fetch_issue_info") as mock_issue,
-            patch.object(implementer, "_run_advise_as_implementer_turn"),
+            patch.object(implementer, "_run_advise"),
             patch.object(
                 implementer, "_run_impl_review_loop", return_value=(1, "GO", "A")
             ) as mock_loop,
@@ -1974,7 +1984,7 @@ class TestReviewExistingPrShortCircuit:
             ) as mock_sync,
             patch.object(implementer, "_save_state"),
             patch("hephaestus.automation.implementer_phase_runner.fetch_issue_info") as mock_issue,
-            patch.object(implementer, "_run_advise_as_implementer_turn"),
+            patch.object(implementer, "_run_advise"),
             patch.object(implementer, "_run_impl_review_loop", return_value=(1, "GO", "A")),
             patch.object(implementer.phase_runner, "_apply_impl_review_verdict"),
         ):
@@ -2022,7 +2032,7 @@ class TestResolveDirtyReusedWorktree:
             patch("hephaestus.automation.implementer_phase_runner.sync_worktree_to_remote_branch"),
             patch.object(implementer, "_save_state"),
             patch("hephaestus.automation.implementer_phase_runner.fetch_issue_info") as mock_issue,
-            patch.object(implementer, "_run_advise_as_implementer_turn"),
+            patch.object(implementer, "_run_advise"),
             patch.object(implementer, "_run_impl_review_loop", return_value=(1, "GO", "A")),
             patch.object(implementer.phase_runner, "_apply_impl_review_verdict"),
         ):
@@ -2072,7 +2082,7 @@ class TestResolveDirtyReusedWorktree:
             patch.object(implementer.phase_runner, "_push_branch") as mock_push,
             patch.object(implementer, "_save_state"),
             patch("hephaestus.automation.implementer_phase_runner.fetch_issue_info") as mock_issue,
-            patch.object(implementer, "_run_advise_as_implementer_turn"),
+            patch.object(implementer, "_run_advise"),
             patch.object(implementer, "_run_impl_review_loop", return_value=(1, "GO", "A")),
             patch.object(implementer.phase_runner, "_apply_impl_review_verdict"),
         ):

@@ -281,7 +281,7 @@ class TestPlanReviewVerdictGate:
                 return_value=gate_return,
             ),
             # Everything past the gate — only reached when gate returns True.
-            patch.object(impl, "_run_advise_as_implementer_turn"),
+            patch.object(impl, "_run_advise"),
             patch.object(impl, "_run_claude_code", return_value="sess-1"),
             patch.object(
                 impl,
@@ -466,7 +466,7 @@ class TestExistingPrEntersReviewLoop:
                 "hephaestus.automation.implementer_phase_runner.fetch_issue_info",
                 return_value=MagicMock(title="t", body="b"),
             ),
-            patch.object(impl, "_run_advise_as_implementer_turn"),
+            patch.object(impl, "_run_advise"),
             patch("hephaestus.automation._review_phase.mark_pr_implementation_go") as mark_go,
             patch("hephaestus.automation._review_phase.mark_pr_implementation_no_go") as mark_no_go,
             patch("hephaestus.automation._review_phase.enable_auto_merge_after_implementation_go"),
@@ -554,7 +554,7 @@ class TestExistingPrEntersReviewLoop:
                 "hephaestus.automation.implementer_phase_runner.fetch_issue_info",
                 return_value=MagicMock(title="t", body="b"),
             ),
-            patch.object(impl, "_run_advise_as_implementer_turn"),
+            patch.object(impl, "_run_advise"),
             patch.object(impl, "_run_impl_review_loop", return_value=(2, "GO", "A")) as review_loop,
             patch("hephaestus.automation._review_phase.mark_pr_implementation_go") as mark_go,
             patch("hephaestus.automation._review_phase.mark_pr_implementation_no_go"),
@@ -607,7 +607,7 @@ class TestExistingPrEntersReviewLoop:
                 "hephaestus.automation.implementer_phase_runner.fetch_issue_info",
                 return_value=MagicMock(title="t", body="b"),
             ),
-            patch.object(impl, "_run_advise_as_implementer_turn"),
+            patch.object(impl, "_run_advise"),
             patch("hephaestus.automation._review_phase.mark_pr_implementation_go") as mark_go,
             patch("hephaestus.automation._review_phase.mark_pr_implementation_no_go") as mark_no_go,
         ):
@@ -636,7 +636,7 @@ class TestExistingPrEntersReviewLoop:
                 "hephaestus.automation.implementer_phase_runner.is_plan_review_go",
                 return_value=True,
             ),
-            patch.object(impl, "_run_advise_as_implementer_turn"),
+            patch.object(impl, "_run_advise"),
             patch.object(impl, "_run_claude_code", return_value="sess-1"),
             patch.object(impl, "_run_impl_review_loop", return_value=(1, "GO", "A")),
             patch.object(impl, "_finalize_pr", return_value=999),
@@ -855,7 +855,7 @@ class TestNoChangesProducedAppliesStateSkip:
                 return_value=True,
             ),
             patch("hephaestus.automation.implementer_phase_runner.fetch_issue_info"),
-            patch.object(impl, "_run_advise_as_implementer_turn"),
+            patch.object(impl, "_run_advise"),
             patch.object(impl, "_run_claude_code", return_value="session-id"),
             patch.object(impl, "_finalize_pr", side_effect=no_changes_error),
             patch(
@@ -870,18 +870,12 @@ class TestNoChangesProducedAppliesStateSkip:
 
 
 # ---------------------------------------------------------------------------
-# Two-turn advise mechanism: verify cwd + agent invariants
+# Advise compatibility wrapper
 # ---------------------------------------------------------------------------
 
 
 class TestAdviseAsImplementerTurn:
-    """_run_advise_as_implementer_turn routes the advise prompt to AGENT_IMPLEMENTER.
-
-    This is the critical invariant: Claude advise runs as the *first turn* of
-    the implementer's own session (not a separate AGENT_ADVISE session), and
-    cwd=worktree_path ensures the transcript is co-located with the
-    implementation turn that follows.
-    """
+    """_run_advise_as_implementer_turn now delegates to the shared advise path."""
 
     @pytest.fixture
     def impl(self, tmp_path: Path) -> IssueImplementer:
@@ -896,51 +890,23 @@ class TestAdviseAsImplementerTurn:
         with patch("hephaestus.automation.implementer.get_repo_root", return_value=tmp_path):
             return IssueImplementer(options)
 
-    def test_invokes_under_agent_implementer_with_worktree_cwd(
-        self, impl: IssueImplementer, tmp_path: Path
-    ) -> None:
-        """run_advise calls _invoke with agent=AGENT_IMPLEMENTER and cwd=worktree_path."""
-        from hephaestus.automation.session_naming import AGENT_IMPLEMENTER
-
+    def test_delegates_to_shared_advise_path(self, impl: IssueImplementer, tmp_path: Path) -> None:
+        """Claude and Codex advise use the same selected-skill context behavior."""
         worktree_path = tmp_path / "build" / ".worktrees" / "issue-1"
         worktree_path.mkdir(parents=True)
 
-        captured_kwargs: list[dict] = []
-
-        def _fake_invoke_with_session(**kw: object) -> tuple[str, None]:
-            captured_kwargs.append(kw)
-            return ("findings text", None)
-
-        with (
-            patch(
-                "hephaestus.automation._implement_phase.invoke_claude_with_session",
-                side_effect=_fake_invoke_with_session,
-            ),
-            patch(
-                "hephaestus.automation.advise_runner.resolve_marketplace",
-                return_value=(tmp_path / "marketplace.json", ""),
-            ),
-            patch(
-                "hephaestus.automation.implementer_phase_runner."
-                "ImplementationPhaseRunner._fetch_plan_and_review",
-                return_value=("plan text", "review text"),
-            ),
-        ):
-            impl._run_advise_as_implementer_turn(
+        with patch.object(
+            impl.phase_runner.implement_phase, "_run_advise", return_value="selected skills"
+        ) as run_advise:
+            result = impl._run_advise_as_implementer_turn(
                 issue_number=1,
                 issue_title="Fix the widget",
                 issue_body="It is broken",
                 worktree_path=worktree_path,
             )
 
-        assert len(captured_kwargs) == 1, "Expected exactly one invoke_claude_with_session call"
-        call = captured_kwargs[0]
-        assert call["agent"] == AGENT_IMPLEMENTER, (
-            f"Expected agent=AGENT_IMPLEMENTER but got agent={call['agent']!r}"
-        )
-        assert call["cwd"] == worktree_path, (
-            f"Expected cwd=worktree_path but got cwd={call['cwd']!r}"
-        )
+        assert result == "selected skills"
+        run_advise.assert_called_once_with(1, "Fix the widget", "It is broken")
 
     def test_learn_passes_implementer_model(self, impl: IssueImplementer, tmp_path: Path) -> None:
         """_run_learn forwards implementer_model() to run_learn, not the Haiku default."""

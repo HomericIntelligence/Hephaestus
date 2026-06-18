@@ -712,17 +712,15 @@ def _phase_env(
     # Precedence per phase: explicit per-phase flag > catch-all --model > any
     # ambient HEPH_*_MODEL the operator exported > the phase default resolved
     # in the child. Only export when we have a value so we never clobber an
-    # ambient env var with an empty string. --model also covers advise, so an
-    # all-one-model run needs no env vars; /learn inherits its parent phase
-    # downstream (see claude_models / the learn call sites).
+    # ambient env var with an empty string. Advise model selection is handled at
+    # the call site because Codex and Claude intentionally use different quick
+    # selector defaults.
     if planner := (cfg.planner_model or cfg.model):
         env["HEPH_PLANNER_MODEL"] = planner
     if reviewer := (cfg.reviewer_model or cfg.model):
         env["HEPH_REVIEWER_MODEL"] = reviewer
     if implementer := (cfg.implementer_model or cfg.model):
         env["HEPH_IMPLEMENTER_MODEL"] = implementer
-    if cfg.model:
-        env["HEPH_ADVISE_MODEL"] = cfg.model
     env["HEPH_TRUNK_GITHASH"] = trunk_sha
     project_root = str(Path(__file__).resolve().parents[2])
     if env.get("PYTHONPATH"):

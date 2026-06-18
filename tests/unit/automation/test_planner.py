@@ -293,32 +293,54 @@ class TestRunAdvise:
     supplies its own ``_call_claude`` as the invoker, so that patch stays.
     """
 
-    def test_returns_findings(self, planner: Any) -> None:
-        """Test successful advise returns findings."""
-        with (
-            patch("hephaestus.automation.advise_runner.get_repo_root") as mock_get_repo,
-            patch.object(Path, "exists", return_value=True),
-        ):
-            mock_get_repo.return_value = Path("/repo")
+    def test_returns_selected_skill_context(self, planner: Any, tmp_path: Path) -> None:
+        """Test successful advise returns prompt-ready selected skill context."""
+        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        skills_dir = mnemosyne_root / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "loop.md").write_text("Use non-interactive runs.\n", encoding="utf-8")
 
+        with (
+            patch("hephaestus.automation.advise_runner.get_repo_root", return_value=Path("/repo")),
+            patch(
+                "hephaestus.automation.advise_runner.default_mnemosyne_root",
+                return_value=mnemosyne_root,
+            ),
+            patch(
+                "hephaestus.automation.advise_runner.resolve_marketplace",
+                return_value=(mnemosyne_root / ".claude-plugin" / "marketplace.json", ""),
+            ),
+        ):
             with patch.object(
-                planner, "_call_claude", return_value="## Related Skills\nFound 3 skills"
+                planner,
+                "_call_claude",
+                return_value=(
+                    '{"skills": [{"name": "loop", "source": "./skills/loop.md", '
+                    '"reason": "Relevant to automation loops."}]}'
+                ),
             ):
                 result = planner._run_advise(123, "Test Issue", "Issue body")
 
-                assert "Related Skills" in result
-                assert "Found 3 skills" in result
+                assert "## Selected Team Skills" in result
+                assert "Use non-interactive runs." in result
 
     def test_codex_advise_uses_codex_prompt_builder(self, mock_options: Any) -> None:
-        """Codex runs should trigger the Codex `$advise` skill prompt."""
+        """Codex runs should use the Codex JSON skill-selection prompt."""
         mock_options.agent = "codex"
         planner = Planner(mock_options)
 
-        with patch("hephaestus.automation.planner.run_advise", return_value="findings") as run:
+        with (
+            patch("hephaestus.automation.planner.run_advise", return_value="findings") as run,
+            patch.object(planner, "_call_codex", return_value='{"skills": []}') as call_codex,
+        ):
             result = planner._run_advise(123, "Test Issue", "Issue body")
+            invoke = run.call_args.kwargs["invoke"]
+            assert invoke("prompt") == '{"skills": []}'
 
         assert result == "findings"
         assert run.call_args.kwargs["build_prompt"].__name__ == "get_codex_advise_prompt"
+        assert call_codex.call_args.kwargs["model"] == "gpt-5.4-mini"
+        assert call_codex.call_args.kwargs["sandbox"] == "read-only"
 
     def test_graceful_failure_on_error(self, planner: Any) -> None:
         """When advise errors, return a sentinel-comment (not silent ``""``).
@@ -366,12 +388,12 @@ class TestRunAdvise:
             patch("hephaestus.automation.advise_runner.get_repo_root") as mock_get_repo,
             patch("hephaestus.automation.advise_runner.ensure_mnemosyne", return_value=True),
             patch.object(Path, "exists", patched_exists),
-            patch.object(planner, "_call_claude", return_value="## Related Skills\nFound 2 skills"),
+            patch.object(planner, "_call_claude", return_value='{"skills": []}'),
         ):
             mock_get_repo.return_value = Path("/repo")
             result = planner._run_advise(123, "Test Issue", "Issue body")
 
-        assert "Related Skills" in result
+        assert "None found" in result
 
     def test_marketplace_missing_triggers_reclone_and_succeeds(self, planner: Any) -> None:
         """Test that missing marketplace.json triggers re-clone and succeeds on retry."""
@@ -397,14 +419,14 @@ class TestRunAdvise:
             patch(
                 "hephaestus.automation.advise_runner.ensure_mnemosyne", return_value=True
             ) as mock_ensure,
-            patch.object(planner, "_call_claude", return_value="## Found Skills\nSkill A"),
+            patch.object(planner, "_call_claude", return_value='{"skills": []}'),
         ):
             mock_get_repo.return_value = Path("/repo")
             result = planner._run_advise(123, "Test Issue", "Issue body")
 
         mock_rmtree.assert_called_once()
         mock_ensure.assert_called_once()
-        assert "Found Skills" in result
+        assert "None found" in result
 
     def test_marketplace_missing_reclone_fails_returns_sentinel(self, planner: Any) -> None:
         """Missing marketplace.json + failed re-clone returns the skipped sentinel."""

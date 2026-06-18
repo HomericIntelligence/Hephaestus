@@ -578,7 +578,7 @@ class IssueImplementer:
         issue_body: str,
         worktree_path: Path,
     ) -> str:
-        """Advise turn 1 of the implementer session (delegates to runner)."""
+        """Compatibility wrapper for the shared advise path (delegates to runner)."""
         return self.phase_runner._run_advise_as_implementer_turn(
             issue_number, issue_title, issue_body, worktree_path
         )

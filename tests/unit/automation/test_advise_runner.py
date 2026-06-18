@@ -30,6 +30,13 @@ class TestAdviseSkipped:
     def test_marker_format(self) -> None:
         assert advise_runner.advise_skipped("boom") == "<!-- advise step skipped: boom -->"
 
+    def test_default_mnemosyne_root_uses_agent_brain(self, tmp_path: Path) -> None:
+        with patch.object(Path, "home", return_value=tmp_path):
+            assert (
+                advise_runner.default_mnemosyne_root()
+                == tmp_path / ".agent-brain" / "ProjectMnemosyne"
+            )
+
 
 # ---------------------------------------------------------------------------
 # ensure_mnemosyne
@@ -89,7 +96,9 @@ class TestResolveMarketplace:
 
     def test_returns_path_when_present(self) -> None:
         with patch.object(Path, "exists", return_value=True):
-            path, reason = advise_runner.resolve_marketplace(Path("/repo/build/ProjectMnemosyne"))
+            path, reason = advise_runner.resolve_marketplace(
+                Path("/home/user/.agent-brain/ProjectMnemosyne")
+            )
         assert path is not None
         assert path.name == "marketplace.json"
         assert reason == ""
@@ -99,7 +108,9 @@ class TestResolveMarketplace:
             patch.object(Path, "exists", return_value=False),
             patch.object(advise_runner, "ensure_mnemosyne", return_value=False) as ensure,
         ):
-            path, reason = advise_runner.resolve_marketplace(Path("/repo/build/ProjectMnemosyne"))
+            path, reason = advise_runner.resolve_marketplace(
+                Path("/home/user/.agent-brain/ProjectMnemosyne")
+            )
         assert path is None
         assert reason == "ProjectMnemosyne unavailable"
         ensure.assert_called_once()
@@ -119,7 +130,9 @@ class TestResolveMarketplace:
             patch("hephaestus.automation.advise_runner.shutil.rmtree") as rmtree,
             patch.object(advise_runner, "ensure_mnemosyne", return_value=True) as ensure,
         ):
-            path, reason = advise_runner.resolve_marketplace(Path("/repo/build/ProjectMnemosyne"))
+            path, reason = advise_runner.resolve_marketplace(
+                Path("/home/user/.agent-brain/ProjectMnemosyne")
+            )
         assert path is not None
         assert reason == ""
         rmtree.assert_called_once()
@@ -136,7 +149,9 @@ class TestResolveMarketplace:
             patch("hephaestus.automation.advise_runner.shutil.rmtree") as rmtree,
             patch.object(advise_runner, "ensure_mnemosyne", return_value=False) as ensure,
         ):
-            path, reason = advise_runner.resolve_marketplace(Path("/repo/build/ProjectMnemosyne"))
+            path, reason = advise_runner.resolve_marketplace(
+                Path("/home/user/.agent-brain/ProjectMnemosyne")
+            )
         assert path is None
         assert "marketplace.json missing" in reason
         rmtree.assert_called_once()
@@ -151,14 +166,21 @@ class TestResolveMarketplace:
 class TestRunAdvise:
     """run_advise orchestration: success, skip, and fail-safe degradation."""
 
-    def test_returns_invoker_output_on_success(self) -> None:
+    def test_returns_selected_skill_context_on_success(self, tmp_path: Path) -> None:
+        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        skills_dir = mnemosyne_root / "skills"
+        skills_dir.mkdir(parents=True)
+        skill_file = skills_dir / "debugging.md"
+        skill_file.write_text("# Debugging\n\nUse tight repros.\n", encoding="utf-8")
+
         with (
             patch.object(advise_runner, "get_repo_root", return_value=Path("/repo")),
+            patch.object(advise_runner, "default_mnemosyne_root", return_value=mnemosyne_root),
             patch.object(
                 advise_runner,
                 "resolve_marketplace",
                 return_value=(
-                    Path("/repo/build/ProjectMnemosyne/.claude-plugin/marketplace.json"),
+                    mnemosyne_root / ".claude-plugin" / "marketplace.json",
                     "",
                 ),
             ),
@@ -167,7 +189,10 @@ class TestRunAdvise:
 
             def invoke(prompt: str) -> str:
                 captured.append(prompt)
-                return "## Findings\n- be careful"
+                return (
+                    '{"skills": [{"name": "debugging", "source": "./skills/debugging.md", '
+                    '"reason": "Relevant to frozen automation loops."}]}'
+                )
 
             result = advise_runner.run_advise(
                 issue_number=7,
@@ -176,7 +201,10 @@ class TestRunAdvise:
                 invoke=invoke,
                 build_prompt=_build_prompt,
             )
-        assert result == "## Findings\n- be careful"
+        assert "## Selected Team Skills" in result
+        assert "### debugging" in result
+        assert "Relevant to frozen automation loops." in result
+        assert "Use tight repros." in result
         # The marketplace path is threaded into the prompt builder + invoker.
         assert captured and "marketplace.json" in captured[0]
 
@@ -217,3 +245,47 @@ class TestRunAdvise:
             )
         assert result.startswith("<!-- advise step skipped:")
         assert "git boom" in result
+
+    def test_rejects_selected_skill_outside_skills_tree(self, tmp_path: Path) -> None:
+        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        (mnemosyne_root / "skills").mkdir(parents=True)
+        outside = mnemosyne_root / "README.md"
+        outside.write_text("not a skill", encoding="utf-8")
+
+        selected = advise_runner.parse_selected_skills(
+            '{"skills": [{"name": "bad", "source": "./README.md", "reason": "x"}]}',
+            mnemosyne_root,
+        )
+
+        assert selected == []
+
+    def test_rejects_selected_skill_parent_traversal(self, tmp_path: Path) -> None:
+        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        (mnemosyne_root / "skills").mkdir(parents=True)
+
+        selected = advise_runner.parse_selected_skills(
+            '{"skills": [{"name": "bad", "source": "../secret.md", "reason": "x"}]}',
+            mnemosyne_root,
+        )
+
+        assert selected == []
+
+    def test_selected_skill_context_is_bounded(self, tmp_path: Path) -> None:
+        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        skills_dir = mnemosyne_root / "skills"
+        skills_dir.mkdir(parents=True)
+        skill_file = skills_dir / "large.md"
+        skill_file.write_text("x" * 500, encoding="utf-8")
+        selected = [
+            advise_runner.SelectedSkill(
+                name="large",
+                source="./skills/large.md",
+                reason="large context",
+                path=skill_file,
+            )
+        ]
+
+        result = advise_runner.format_selected_skill_context(selected, max_chars=260)
+
+        assert "[truncated]" in result
+        assert len(result) <= 260
