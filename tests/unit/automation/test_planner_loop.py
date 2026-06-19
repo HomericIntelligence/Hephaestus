@@ -869,6 +869,7 @@ class TestPlanIssueNOGOExhausted:
     def test_nogo_exhausted_plan_result_success_false(self, planner: Planner) -> None:
         """All-NOGO loop must produce PlanResult(success=False) not PlanResult(success=True)."""
         with (
+            patch.object(planner, "_pr_coverage_skip", return_value=None),
             patch.object(planner, "_has_existing_plan", return_value=False),
             patch.object(
                 planner,
@@ -886,6 +887,7 @@ class TestPlanIssueNOGOExhausted:
     def test_go_plan_result_success_true(self, planner: Planner) -> None:
         """A GO loop must still produce PlanResult(success=True)."""
         with (
+            patch.object(planner, "_pr_coverage_skip", return_value=None),
             patch.object(planner, "_has_existing_plan", return_value=False),
             patch.object(
                 planner,
@@ -907,6 +909,7 @@ class TestPlanIssueNOGOExhausted:
         in _filter_issues.
         """
         with (
+            patch.object(planner, "_pr_coverage_skip", return_value=None),
             patch.object(planner, "_has_existing_plan", return_value=True),
             patch.object(planner, "_run_plan_review_loop") as mock_loop,
             patch.object(planner, "_post_plan") as mock_post,
@@ -927,6 +930,7 @@ class TestPlanIssueNOGOExhausted:
         """
         planner.options.force = True
         with (
+            patch.object(planner, "_pr_coverage_skip", return_value=None),
             patch.object(planner, "_has_existing_plan") as mock_check,
             patch.object(
                 planner,

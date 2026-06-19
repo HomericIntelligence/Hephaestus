@@ -90,6 +90,7 @@ def test_run_skips_issue_with_existing_plan() -> None:
     planner = planner_mod.Planner(options)
 
     with (
+        patch.object(planner, "_pr_coverage_skip", return_value=None),
         patch.object(planner, "_has_existing_plan", return_value=True) as mock_has,
         patch.object(planner, "_call_claude") as mock_claude,
         patch.object(planner, "_post_plan") as mock_post,
@@ -125,6 +126,7 @@ def test_run_dry_run_does_not_post_or_call_claude() -> None:
     planner = planner_mod.Planner(options)
 
     with (
+        patch.object(planner, "_pr_coverage_skip", return_value=None),
         patch.object(planner, "_call_claude") as mock_claude,
         patch.object(planner, "_post_plan") as mock_post,
     ):
