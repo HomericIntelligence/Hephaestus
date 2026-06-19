@@ -2445,7 +2445,7 @@ class TestMechanicalRebase:
         mock_push.assert_not_called()
 
     def test_up_to_date_pr_skips_rebase_entirely(self, driver: CIDriver, tmp_path: Path) -> None:
-        """A CLEAN/BLOCKED PR is already on its base — no rebase, no push."""
+        """A CLEAN PR is already on its base — no rebase, no push."""
         with (
             patch(
                 "hephaestus.automation.ci_fix_orchestrator._gh_call",
@@ -2471,6 +2471,7 @@ class TestMechanicalRebase:
                 "hephaestus.automation.ci_fix_orchestrator._gh_call",
                 return_value=self._pr_state("BLOCKED"),
             ),
+            patch.object(driver, "_failing_required_check_names", return_value=[]),
             patch("hephaestus.automation.ci_fix_orchestrator.rebase_worktree_onto") as mock_rebase,
         ):
             result = driver._attempt_mechanical_rebase(
@@ -2479,6 +2480,34 @@ class TestMechanicalRebase:
 
         assert result is False
         mock_rebase.assert_not_called()
+
+    def test_blocked_pr_with_failing_checks_rebases_before_agent(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        """BLOCKED with red required checks still gets the cheap rebase attempt."""
+        with (
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator._gh_call",
+                return_value=self._pr_state("BLOCKED"),
+            ),
+            patch.object(driver, "_failing_required_check_names", return_value=["pr-policy"]),
+            patch.object(driver, "_get_worktree_path", return_value=tmp_path),
+            patch("hephaestus.automation.ci_fix_orchestrator.sync_worktree_to_remote_branch"),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.rebase_worktree_onto",
+                return_value=True,
+            ) as mock_rebase,
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.push_current_branch_with_lease_on_divergence"
+            ) as mock_push,
+        ):
+            result = driver._attempt_mechanical_rebase(
+                issue_number=5, pr_number=50, acquired_slot=0
+            )
+
+        assert result is True
+        mock_rebase.assert_called_once_with(tmp_path, "main")
+        mock_push.assert_called_once_with(tmp_path, branch="5-impl", push_ref="HEAD:5-impl")
 
     def test_uses_pr_base_ref_not_hardcoded_main(self, driver: CIDriver, tmp_path: Path) -> None:
         """The rebase targets the PR's actual baseRefName, not a hardcoded main."""
@@ -2558,6 +2587,24 @@ class TestWaitForPrTerminal:
         ):
             assert driver._wait_for_pr_terminal(1, 2) == "FAILING"
 
+    def test_open_with_only_auto_merge_policy_failure_waits(
+        self, driver: CIDriver, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # auto-merge-policy can remain red briefly after auto-merge is armed.
+        # It is not a code-fixable CI failure and must not trigger the agent.
+        monkeypatch.setenv("HEPH_PR_MERGE_MAX_WAIT", "0")
+        with (
+            patch.object(driver, "_gh_pr_state", return_value={"state": "OPEN"}),
+            patch.object(
+                driver,
+                "_failing_required_check_names",
+                return_value=["auto-merge-policy"],
+            ),
+            patch("hephaestus.automation.ci_driver.time.sleep") as mock_sleep,
+        ):
+            assert driver._wait_for_pr_terminal(1, 2) == "TIMEOUT"
+        mock_sleep.assert_not_called()
+
     def test_open_dirty_returns_dirty(self, driver: CIDriver) -> None:
         # OPEN, checks green, but mergeStateStatus DIRTY (conflict) → DIRTY,
         # don't wait out the full timeout on an unmergeable armed PR (#838).
@@ -2599,6 +2646,30 @@ class TestWaitForPrTerminal:
             patch("hephaestus.automation.ci_driver.time.sleep") as mock_sleep,
         ):
             assert driver._wait_for_pr_terminal(1, 2) == "BLOCKED"
+        mock_sleep.assert_not_called()
+
+    def test_open_blocked_with_only_auto_merge_policy_failure_waits(
+        self, driver: CIDriver, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A stale auto-merge-policy failure after arming should get a chance to
+        # refresh, not be misclassified as a branch-protection BLOCKED state.
+        monkeypatch.setenv("HEPH_PR_MERGE_MAX_WAIT", "0")
+        with (
+            patch.object(
+                driver,
+                "_gh_pr_state",
+                return_value={"state": "OPEN", "mergeStateStatus": "BLOCKED"},
+            ),
+            patch.object(
+                driver,
+                "_failing_required_check_names",
+                return_value=["auto-merge-policy"],
+            ),
+            patch.object(driver, "_pending_required_check_names") as mock_pending,
+            patch("hephaestus.automation.ci_driver.time.sleep") as mock_sleep,
+        ):
+            assert driver._wait_for_pr_terminal(1, 2) == "TIMEOUT"
+        mock_pending.assert_not_called()
         mock_sleep.assert_not_called()
 
     def test_open_blocked_with_failing_checks_does_not_short_circuit(
@@ -3627,3 +3698,39 @@ class TestHandleFailingPr:
         with patch.object(driver, "_attempt_ci_fixes", return_value=fix_result):
             result = driver._handle_failing_pr(1, 42, 0, checks)
         assert result.success is False
+
+    def test_auto_merge_policy_failure_arms_when_implementation_go(self, driver: CIDriver) -> None:
+        """auto-merge-policy alone → arm auto-merge instead of invoking CI fixer."""
+        checks = [_make_check("auto-merge-policy", conclusion="failure")]
+        arm_result = WorkerResult(issue_number=1, success=True, pr_number=42)
+        with (
+            patch.object(driver, "_pr_has_implementation_go", return_value=True),
+            patch.object(
+                driver,
+                "_arm_and_wait_for_merge",
+                return_value=arm_result,
+            ) as mock_arm,
+            patch.object(driver, "_attempt_ci_fixes") as mock_fix,
+        ):
+            result = driver._handle_failing_pr(1, 42, 0, checks)
+
+        mock_arm.assert_called_once_with(1, 42, 0)
+        mock_fix.assert_not_called()
+        assert result is arm_result
+
+    def test_auto_merge_policy_failure_without_implementation_go_does_not_agent(
+        self, driver: CIDriver
+    ) -> None:
+        """auto-merge-policy alone without implementation GO is policy-deferred."""
+        checks = [_make_check("auto-merge-policy", conclusion="failure")]
+        with (
+            patch.object(driver, "_pr_has_implementation_go", return_value=False),
+            patch.object(driver, "_arm_and_wait_for_merge") as mock_arm,
+            patch.object(driver, "_attempt_ci_fixes") as mock_fix,
+        ):
+            result = driver._handle_failing_pr(1, 42, 0, checks)
+
+        mock_arm.assert_not_called()
+        mock_fix.assert_not_called()
+        assert result.success is True
+        assert result.pr_number == 42

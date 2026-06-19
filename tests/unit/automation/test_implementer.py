@@ -204,6 +204,10 @@ class TestRunTestsInWorktree:
             with (
                 patch.object(impl, "_ensure_pr_created", return_value=42),
                 patch.object(impl, "_save_state"),
+                patch(
+                    "hephaestus.automation._pr_create_phase._has_uncommitted_changes",
+                    return_value=False,
+                ),
             ):
                 impl._finalize_pr(
                     issue_number=1,
@@ -745,11 +749,12 @@ class TestRunWithNothingToImplement:
 
 
 class TestStateSkipLabel:
-    """``state:skip`` on an issue makes _load_issues skip it entirely.
+    """``state:skip`` on an issue normally makes _load_issues skip it entirely.
 
     Mirrors the existing ``skip_closed`` gate: a skipped issue is marked
     completed in the resolver (so dependents are not blocked) and is never
-    added to the work graph.
+    added to the work graph, except for the stale approved-plan/no-PR recovery
+    path covered below.
     """
 
     @pytest.fixture
@@ -810,6 +815,57 @@ class TestStateSkipLabel:
 
         mock_add.assert_called_once_with(normal)
         assert 43 not in impl.resolver.completed
+
+    def test_plan_go_skip_with_existing_pr_still_skips(self, impl: IssueImplementer) -> None:
+        from hephaestus.automation.models import IssueInfo
+
+        skipped = IssueInfo(number=44, title="t", labels=["state:skip", "state:plan-go"])
+        with (
+            patch(
+                "hephaestus.automation.github_api.prefetch_issue_states",
+                return_value={},
+            ),
+            patch(
+                "hephaestus.automation.implementer.fetch_issue_info",
+                return_value=skipped,
+            ),
+            patch(
+                "hephaestus.automation.implementer.find_pr_for_issue",
+                return_value=777,
+            ) as mock_find_pr,
+            patch.object(impl.resolver, "add_issue") as mock_add,
+        ):
+            impl._load_issues([44])
+
+        mock_find_pr.assert_called_once_with(44)
+        mock_add.assert_not_called()
+        assert 44 in impl.resolver.completed
+
+    def test_plan_go_skip_without_pr_is_loaded(self, impl: IssueImplementer) -> None:
+        from hephaestus.automation.models import IssueInfo
+
+        ready = IssueInfo(number=45, title="t", labels=["state:skip", "state:plan-go"])
+        with (
+            patch(
+                "hephaestus.automation.github_api.prefetch_issue_states",
+                return_value={},
+            ),
+            patch(
+                "hephaestus.automation.implementer.fetch_issue_info",
+                return_value=ready,
+            ),
+            patch(
+                "hephaestus.automation.implementer.find_pr_for_issue",
+                return_value=None,
+            ) as mock_find_pr,
+            patch.object(impl.resolver, "_load_dependencies"),
+            patch.object(impl.resolver, "add_issue") as mock_add,
+        ):
+            impl._load_issues([45])
+
+        mock_find_pr.assert_called_once_with(45)
+        mock_add.assert_called_once_with(ready)
+        assert 45 not in impl.resolver.completed
 
 
 class TestNoChangesProducedAppliesStateSkip:

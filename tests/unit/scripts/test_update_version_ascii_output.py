@@ -6,6 +6,7 @@ see GitHub issue #769.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 
@@ -16,10 +17,15 @@ SCRIPT = REPO_ROOT / "scripts" / "update_version.py"
 
 def _run_verify(version: str) -> subprocess.CompletedProcess[bytes]:
     """Run update_version.py --verify-only and capture output."""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(REPO_ROOT), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
+    )
     return subprocess.run(
         [sys.executable, str(SCRIPT), version, "--verify-only"],
         capture_output=True,
         cwd=REPO_ROOT,
+        env=env,
         timeout=30,
         check=False,
     )

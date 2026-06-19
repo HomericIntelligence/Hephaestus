@@ -41,6 +41,11 @@ AGENT_IMPLEMENTER = "implementer"
 AGENT_PR_REVIEWER = "pr-reviewer"
 AGENT_ADDRESS_REVIEW = "address-review"
 AGENT_CI_DRIVER = "ci-driver"
+# Lightweight read-only metadata writers. They are deliberately separate from
+# implementer/reviewer sessions so commit and PR text generation cannot inherit
+# or mutate a code-producing transcript.
+AGENT_COMMIT_MESSAGE = "commit-message"
+AGENT_PR_MESSAGE = "pr-message"
 # #1083: cheap read-only sub-agent that labels each review comment's fix
 # difficulty (simple/medium/hard) to pick the per-comment fixer's model tier.
 AGENT_COMMENT_CLASSIFIER = "comment-classifier"
@@ -55,6 +60,8 @@ _ALL_AGENTS = frozenset(
         AGENT_PR_REVIEWER,
         AGENT_ADDRESS_REVIEW,
         AGENT_CI_DRIVER,
+        AGENT_COMMIT_MESSAGE,
+        AGENT_PR_MESSAGE,
         AGENT_COMMENT_CLASSIFIER,
     }
 )

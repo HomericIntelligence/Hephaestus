@@ -81,6 +81,12 @@ def test_planner_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
             claude_timeouts.follow_up_claude_timeout,
             TWO_HOURS_S,
         ),
+        (
+            "HEPH_GIT_MESSAGE_AGENT_TIMEOUT",
+            "HEPH_GIT_MESSAGE_CLAUDE_TIMEOUT",
+            claude_timeouts.git_message_agent_timeout,
+            300,
+        ),
     ],
 )
 def test_legacy_claude_timeout_envs_are_ignored(
@@ -132,6 +138,13 @@ def test_advise_timeout_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HEPH_ADVISE_AGENT_TIMEOUT", "600")
 
     assert claude_timeouts.advise_claude_timeout() == 600
+
+
+def test_git_message_timeout_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lightweight git-message agent uses its own short tunable timeout."""
+    monkeypatch.setenv("HEPH_GIT_MESSAGE_AGENT_TIMEOUT", "90")
+
+    assert claude_timeouts.git_message_agent_timeout() == 90
 
 
 def test_ci_poll_max_wait_default(monkeypatch: pytest.MonkeyPatch) -> None:

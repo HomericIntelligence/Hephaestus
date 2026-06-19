@@ -50,11 +50,13 @@ STATE_IMPLEMENTATION_NO_GO = "state:implementation-no-go"
 STATE_IMPLEMENTATION_GO = "state:implementation-go"
 ALL_IMPLEMENTATION_STATE_LABELS = (STATE_IMPLEMENTATION_NO_GO, STATE_IMPLEMENTATION_GO)
 
-#: Manual override: when present on an issue OR its PR, every automation phase
+#: Manual override: when present on an issue OR its PR, automation normally
 #: skips that work item entirely (#1083). Unlike the plan/implementation state
 #: labels this is operator-applied (or auto-applied by the review loop when it
 #: exhausts MAX_REVIEW_ITERATIONS without a GO), and it is independent of all
 #: other state labels — so it deliberately lives outside the tuples above.
+#: The implementer has one narrow stale-state recovery path for explicitly
+#: selected issues that also carry ``state:plan-go`` and have no open PR.
 STATE_SKIP = "state:skip"
 
 #: Per-label colour (hex without leading ``#``) and short description. The
@@ -87,7 +89,7 @@ STATE_LABEL_SPECS: dict[str, dict[str, str]] = {
     },
     STATE_SKIP: {
         "color": "ededed",  # grey — intentionally inert
-        "description": "Automation skips this issue/PR in every phase.",
+        "description": "Automation normally skips this issue/PR in every phase.",
     },
 }
 
@@ -128,8 +130,9 @@ def is_implementation_go(labels: Iterable[str]) -> bool:
 def is_skipped(labels: Iterable[str]) -> bool:
     """Return ``True`` iff the issue/PR carries the ``state:skip`` override.
 
-    When set, every automation phase skips the work item (#1083). Honored on
-    both issues and their PRs.
+    When set, automation normally skips the work item (#1083). Honored on both
+    issues and their PRs; callers may still add narrower stale-state recovery
+    policy where they have enough context.
     """
     return has_label(labels, STATE_SKIP)
 

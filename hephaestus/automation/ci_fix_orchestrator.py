@@ -46,6 +46,42 @@ from .session_naming import AGENT_CI_DRIVER
 
 logger = logging.getLogger(__name__)
 
+_ACTIONABLE_UNTRACKED_PREFIXES: tuple[str, ...] = (
+    ".github/",
+    "docs/",
+    "hephaestus/",
+    "scripts/",
+    "skills/",
+    "tests/",
+)
+_ACTIONABLE_UNTRACKED_SUFFIXES: tuple[str, ...] = (
+    ".cfg",
+    ".json",
+    ".md",
+    ".py",
+    ".sh",
+    ".toml",
+    ".txt",
+    ".yaml",
+    ".yml",
+)
+_IGNORED_UNTRACKED_PATHS: frozenset[str] = frozenset(
+    {
+        ".coverage",
+        "coverage.xml",
+        "uv.lock",
+    }
+)
+_IGNORED_UNTRACKED_PREFIXES: tuple[str, ...] = (
+    ".mypy_cache/",
+    ".pytest_cache/",
+    ".ruff_cache/",
+    ".tox/",
+    "build/",
+    "dist/",
+    "htmlcov/",
+)
+
 
 class CIFixOrchestrator:
     """Orchestrates CI fix sessions using narrow-callable injection.
@@ -120,8 +156,9 @@ class CIFixOrchestrator:
         if dirty_block:
             dirty_block = (
                 "\n\nThe local worktree also contains uncommitted tracked changes "
-                "from the previous turn. Review this existing diff first and either "
-                f"commit it after verification or amend it before committing:\n\n{dirty_block}\n"
+                "or relevant untracked files from the previous turn. Review this "
+                "existing work first and either commit it after verification or "
+                f"amend it before committing:\n\n{dirty_block}\n"
             )
         remote_block = (
             "The required CI checks below are STILL failing on the remote"
@@ -520,14 +557,33 @@ class CIFixOrchestrator:
         findings = advise_findings.strip()
         if findings and not findings.startswith("<!-- advise step skipped"):
             advise_block = f"## Prior Learnings from Team Knowledge Base\n\n{findings}\n\n---\n\n"
+        failing_check_names = self._failing_required_check_names(pr_number)
+        failing_checks_block = ""
+        if failing_check_names:
+            failing_lines = "\n".join(f"- {name}" for name in failing_check_names)
+            aggregate_note = ""
+            if "required-checks-gate" in failing_check_names:
+                aggregate_note = (
+                    "\n\n`required-checks-gate` is an aggregate fan-in check. "
+                    "Fix the underlying failed job(s) named above and in the logs; "
+                    "do not try to patch the aggregate gate unless its own code is "
+                    "the direct failure."
+                )
+            failing_checks_block = (
+                f"Failing checks reported by GitHub:\n{failing_lines}{aggregate_note}\n\n"
+            )
         review_threads_block = self._format_review_threads_block(pr_number)
         return (
             f"{advise_block}{review_threads_block}"
             f"Fix the CI failures for PR {pr_ref(pr_number)} (issue {issue_ref(issue_number)}).\n\n"
             f"Working directory: {worktree_path}\n"
             f"Current branch (DO NOT change): {pr_head_branch}\n\n"
+            f"{failing_checks_block}"
             f"CI failure logs:\n{ci_logs}\n\n"
-            "Fix the code to make the CI checks pass. After fixing:\n"
+            "Fix only the code, workflow, commit metadata, or PR metadata needed "
+            "to make the listed CI checks pass; do not implement unrelated issue "
+            "work. If the fix requires new files, add them to git explicitly. "
+            "After fixing:\n"
             "1. Run: pixi run python -m pytest tests/ -v\n"
             "2. Run: pre-commit run --all-files\n"
             "3. Commit changes (do NOT push) on the current branch — DO NOT run "
@@ -635,8 +691,10 @@ class CIFixOrchestrator:
 
         1. Query ``mergeStateStatus`` / ``mergeable`` / ``baseRefName``. Skip
            (return ``False``) unless the PR is ``BEHIND`` or ``DIRTY`` /
-           ``CONFLICTING`` — a PR already on top of its base needs no rebase and
-           the normal check-status path handles it.
+           ``CONFLICTING``. ``BLOCKED`` is also eligible only when required
+           checks are failing, because GitHub can report failed-check PRs as
+           branch-protection blocked even when a base rebase can bring in the
+           fix.
         2. Sync the worktree to the PR head, then ``rebase_worktree_onto`` the
            base branch.
         3. Clean rebase → push ``HEAD:<pr-head>`` with ``--force-with-lease`` and
@@ -682,10 +740,24 @@ class CIFixOrchestrator:
             return False
 
         merge_state = str(state.get("mergeStateStatus") or "").upper()
-        # Only behind-base / conflicting PRs need a rebase. CLEAN / BLOCKED /
-        # UNSTABLE / HAS_HOOKS PRs are already on top of their base — let the
-        # check-status path handle them. (BLOCKED is the review-gated case.)
-        if merge_state not in ("BEHIND", "DIRTY", "CONFLICTING"):
+        # Only behind-base / conflicting PRs need a rebase. CLEAN / UNSTABLE /
+        # HAS_HOOKS PRs are already on top of their base — let the check-status
+        # path handle them. BLOCKED is usually review-gated, but GitHub also
+        # reports some failed required-check PRs as BLOCKED; those are still
+        # eligible for the cheap rebase path before invoking an agent.
+        rebase_states = ("BEHIND", "DIRTY", "CONFLICTING")
+        if merge_state == "BLOCKED":
+            failing_checks = self._failing_required_check_names(pr_number)
+            if not failing_checks:
+                return False
+            logger.info(
+                "Issue #%s: PR #%s is BLOCKED with failing required checks (%s); "
+                "attempting mechanical rebase before CI-fix agent",
+                issue_number,
+                pr_number,
+                ", ".join(failing_checks),
+            )
+        elif merge_state not in rebase_states:
             return False
 
         pr_head_branch = str(state.get("headRefName") or "") or self._get_pr_branch(pr_number)
@@ -743,13 +815,12 @@ class CIFixOrchestrator:
             return False
 
     def _tracked_worktree_changes(self, worktree_path: Path, issue_number: int) -> list[str]:
-        """Return tracked dirty status lines for a post-agent worktree.
+        """Return actionable dirty status lines for a post-agent worktree.
 
-        Untracked tool output such as a local ``uv.lock`` is intentionally
-        ignored. A no-commit turn that left tracked files modified is still
-        actionable even when the remote has no red required checks, as happens
-        for merge-conflict/behind-branch repairs where the agent fixed files but
-        forgot the signed commit.
+        Tracked edits are always actionable. Untracked local tool output such
+        as ``uv.lock`` / caches is intentionally ignored, while new files under
+        source, script, workflow, docs, skills, and tests paths are surfaced so
+        a no-commit retry can tell the agent to add and sign-commit them.
         """
         status = self._git_stdout_for_push_guard(
             worktree_path,
@@ -759,7 +830,27 @@ class CIFixOrchestrator:
         )
         if status is None:
             return []
-        return [line for line in status.splitlines() if line.strip() and not line.startswith("?? ")]
+        return [
+            line
+            for line in status.splitlines()
+            if line.strip() and self._status_line_needs_no_commit_retry(line)
+        ]
+
+    @staticmethod
+    def _status_line_needs_no_commit_retry(line: str) -> bool:
+        """Return whether a porcelain status line is actionable retry context."""
+        if not line.startswith("?? "):
+            return True
+        path = line[3:].strip()
+        if not path:
+            return False
+        if path in _IGNORED_UNTRACKED_PATHS:
+            return False
+        if path.startswith(_IGNORED_UNTRACKED_PREFIXES):
+            return False
+        if path.startswith(_ACTIONABLE_UNTRACKED_PREFIXES):
+            return True
+        return "/" not in path and path.endswith(_ACTIONABLE_UNTRACKED_SUFFIXES)
 
     def _head_advanced(
         self,

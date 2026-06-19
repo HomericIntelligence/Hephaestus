@@ -51,7 +51,16 @@ If no relevant skills are found, return:
 **Important:** Only select skills from the actual marketplace. Do not speculate or invent skills.
 """
 
-CODEX_ADVISE_PROMPT = ADVISE_PROMPT
+CODEX_ADVISE_PROMPT = (
+    ADVISE_PROMPT
+    + """
+
+**Codex automation constraints:**
+- Do not invoke `$advise`; this prompt is already the advise step.
+- Do not clone or update ProjectMnemosyne yourself; use the marketplace path above.
+- Do not implement, commit, push, create a PR, or modify files.
+"""
+)
 
 
 def get_advise_prompt(
@@ -97,7 +106,15 @@ def get_codex_advise_prompt(
     repo_root: str | None = None,
     marketplace_json: str = '{"plugins": []}',
 ) -> str:
-    """Get the Codex advise prompt for bounded JSON skill selection."""
+    """Get the Codex advise prompt using the shared resolved marketplace path.
+
+    Earlier Codex automation invoked the installed ``$advise`` skill from inside
+    a nested ``codex exec`` run. That bypassed the shared Mnemosyne checkout
+    lock/timeout in :mod:`advise_runner` and could leave the pipeline waiting on
+    a second clone/update path. Codex now receives the same concrete
+    ``marketplace.json`` path as Claude, plus constraints that keep the turn
+    read-only and non-recursive.
+    """
     safe_marketplace_path = _relativize_path(marketplace_path, repo_root)
     return CODEX_ADVISE_PROMPT.format(
         issue_number=issue_number,

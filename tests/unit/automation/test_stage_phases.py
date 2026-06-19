@@ -194,25 +194,63 @@ def test_implement_phase_run_claude_code_dispatches_claude(tmp_path: Path) -> No
 def test_pr_create_finalize_persists_pr_number(tmp_path: Path) -> None:
     """_finalize_pr ensures the PR exists and persists its number on state."""
     ctx = _make_ctx(tmp_path)
-    ctx.impl._ensure_pr_created = mock.MagicMock(return_value=321)  # type: ignore[method-assign]
-    ctx.impl._run_tests_in_worktree = mock.MagicMock(return_value=True)  # type: ignore[method-assign]
+    ctx.impl._ensure_pr_created = mock.MagicMock(return_value=321)  # type: ignore[attr-defined]
+    ctx.impl._commit_changes = mock.MagicMock()  # type: ignore[attr-defined]
+    ctx.impl._run_tests_in_worktree = mock.MagicMock(return_value=True)  # type: ignore[attr-defined]
     phase = PRCreatePhase(ctx)
     state = SimpleNamespace(phase=None, pr_number=None)
-    pr = phase._finalize_pr(7, "7-auto-impl", tmp_path, cast(Any, state), slot_id=None)
+    with mock.patch(
+        "hephaestus.automation._pr_create_phase._has_uncommitted_changes",
+        return_value=False,
+    ):
+        pr = phase._finalize_pr(7, "7-auto-impl", tmp_path, cast(Any, state), slot_id=None)
     assert pr == 321
     assert state.pr_number == 321
+    ctx.impl._commit_changes.assert_not_called()
     # Pre-PR tests are off by default, so the gate must not have run.
     ctx.impl._run_tests_in_worktree.assert_not_called()
+
+
+def test_pr_create_finalize_commits_dirty_worktree_before_pr(tmp_path: Path) -> None:
+    """_finalize_pr commits agent edits before push/PR creation."""
+    ctx = _make_ctx(tmp_path)
+    ctx.impl._commit_changes = mock.MagicMock()  # type: ignore[attr-defined]
+    ctx.impl._ensure_pr_created = mock.MagicMock(return_value=321)  # type: ignore[attr-defined]
+    ctx.impl._run_tests_in_worktree = mock.MagicMock(return_value=True)  # type: ignore[attr-defined]
+    parent = mock.MagicMock()
+    parent.attach_mock(ctx.impl._commit_changes, "commit")
+    parent.attach_mock(ctx.impl._ensure_pr_created, "ensure")
+    phase = PRCreatePhase(ctx)
+    state = SimpleNamespace(phase=None, pr_number=None)
+
+    with mock.patch(
+        "hephaestus.automation._pr_create_phase._has_uncommitted_changes",
+        return_value=True,
+    ):
+        pr = phase._finalize_pr(7, "7-auto-impl", tmp_path, cast(Any, state), slot_id=None)
+
+    assert pr == 321
+    parent.assert_has_calls(
+        [
+            mock.call.commit(7, tmp_path),
+            mock.call.ensure(7, "7-auto-impl", tmp_path, None),
+        ]
+    )
 
 
 def test_pr_create_finalize_runs_pre_pr_tests_when_enabled(tmp_path: Path) -> None:
     """_finalize_pr runs the opt-in pre-PR test gate before creating the PR."""
     ctx = _make_ctx(tmp_path, run_pre_pr_tests=True)
-    ctx.impl._ensure_pr_created = mock.MagicMock(return_value=9)  # type: ignore[method-assign]
-    ctx.impl._run_tests_in_worktree = mock.MagicMock(return_value=False)  # type: ignore[method-assign]
+    ctx.impl._ensure_pr_created = mock.MagicMock(return_value=9)  # type: ignore[attr-defined]
+    ctx.impl._commit_changes = mock.MagicMock()  # type: ignore[attr-defined]
+    ctx.impl._run_tests_in_worktree = mock.MagicMock(return_value=False)  # type: ignore[attr-defined]
     phase = PRCreatePhase(ctx)
     state = SimpleNamespace(phase=None, pr_number=None)
-    phase._finalize_pr(7, "b", tmp_path, cast(Any, state), slot_id=None)
+    with mock.patch(
+        "hephaestus.automation._pr_create_phase._has_uncommitted_changes",
+        return_value=False,
+    ):
+        phase._finalize_pr(7, "b", tmp_path, cast(Any, state), slot_id=None)
     ctx.impl._run_tests_in_worktree.assert_called_once()
 
 

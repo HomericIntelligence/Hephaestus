@@ -419,6 +419,59 @@ def sync_worktree_to_remote_branch(
     run(["git", "reset", "--hard", f"{remote}/{branch}"], cwd=cwd)
 
 
+def _remove_untracked_files_tracked_by_ref(cwd: Path, ref: str) -> list[Path]:
+    """Remove untracked worktree files whose paths are tracked by ``ref``.
+
+    ``git reset --hard`` intentionally leaves untracked files behind. In reused
+    automation worktrees, stale files from a previous failed agent turn can then
+    block ``git rebase`` with "untracked working tree files would be overwritten"
+    when the base branch has since added those same paths. Deleting only
+    untracked files that already exist in the target ref preserves unrelated
+    scratch files while unblocking the deterministic rebase path.
+    """
+    try:
+        result = run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=cwd,
+            log_errors=False,
+        )
+    except subprocess.CalledProcessError:
+        return []
+
+    cwd_resolved = cwd.resolve()
+    stdout = result.stdout if isinstance(result.stdout, str) else ""
+    removed: list[Path] = []
+    for rel in (part for part in stdout.split("\0") if part):
+        rel_path = Path(rel)
+        if rel_path.is_absolute() or ".." in rel_path.parts:
+            logger.warning("Skipping unsafe untracked path before rebase: %s", rel)
+            continue
+        try:
+            run(["git", "cat-file", "-e", f"{ref}:{rel}"], cwd=cwd, log_errors=False)
+        except subprocess.CalledProcessError:
+            continue
+
+        target = (cwd / rel_path).resolve()
+        try:
+            target.relative_to(cwd_resolved)
+        except ValueError:
+            logger.warning("Skipping untracked path outside worktree before rebase: %s", rel)
+            continue
+        if not (target.is_file() or target.is_symlink()):
+            continue
+        target.unlink()
+        removed.append(rel_path)
+
+    if removed:
+        logger.info(
+            "Removed %s stale untracked file(s) tracked by %s before rebase: %s",
+            len(removed),
+            ref,
+            ", ".join(str(path) for path in removed),
+        )
+    return removed
+
+
 def rebase_worktree_onto(
     cwd: Path,
     base_branch: str = "main",
@@ -461,9 +514,11 @@ def rebase_worktree_onto(
             case is handled internally and returns ``False`` rather than raising.
 
     """
+    base_ref = f"{remote}/{base_branch}"
     run(["git", "fetch", remote, base_branch], cwd=cwd)
+    _remove_untracked_files_tracked_by_ref(cwd, base_ref)
     try:
-        run(["git", "rebase", f"{remote}/{base_branch}"], cwd=cwd)
+        run(["git", "rebase", base_ref], cwd=cwd)
         logger.info("Rebased worktree at %s onto %s/%s cleanly", cwd, remote, base_branch)
         return True
     except subprocess.CalledProcessError:

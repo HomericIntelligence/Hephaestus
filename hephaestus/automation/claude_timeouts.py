@@ -76,6 +76,11 @@ def follow_up_claude_timeout() -> int:
     return _read_int_env("HEPH_FOLLOW_UP_AGENT_TIMEOUT", 7200)
 
 
+def git_message_agent_timeout() -> int:
+    """Timeout for the lightweight commit/PR message writer (default 300s)."""
+    return _read_int_env("HEPH_GIT_MESSAGE_AGENT_TIMEOUT", 300)
+
+
 # Re-exported from hephaestus.github.client so the gh-adapter timeout lives
 # with the gh adapter; this alias preserves the legacy import path.
 from hephaestus.github.client import gh_cli_timeout  # noqa: E402
@@ -87,6 +92,7 @@ __all__ = [
     "ci_poll_max_wait",
     "follow_up_claude_timeout",
     "gh_cli_timeout",
+    "git_message_agent_timeout",
     "implementer_claude_timeout",
     "learn_claude_timeout",
     "plan_reviewer_claude_timeout",

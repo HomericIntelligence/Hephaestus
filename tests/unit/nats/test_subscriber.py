@@ -365,18 +365,54 @@ def test_subscribe_loop_lazy_import_suppresses_deprecation_warning() -> None:
 
     code = """
 import asyncio
+import builtins
+import sys
+import types
+import warnings
+
 from hephaestus.nats.config import NATSConfig
 from hephaestus.nats.subscriber import NATSSubscriberThread
 
 cfg = NATSConfig(enabled=True, url='nats://127.0.0.1:1', subjects=['x.>'])
 t = NATSSubscriberThread(config=cfg, handler=lambda e: None)
 
+fake_nats = types.ModuleType("nats")
+fake_api = types.ModuleType("nats.js.api")
+
+async def connect(url):
+    raise RuntimeError("connect stopped before network")
+
+class DeliverPolicy(str):
+    def __new__(cls, value):
+        return str.__new__(cls, value)
+
+fake_nats.connect = connect
+fake_api.DeliverPolicy = DeliverPolicy
+real_import = builtins.__import__
+
+def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "nats":
+        warnings.warn_explicit(
+            "asyncio.iscoroutinefunction is deprecated",
+            DeprecationWarning,
+            "nats/client.py",
+            1,
+            module="nats",
+        )
+        return fake_nats
+    if name == "nats.js.api":
+        return fake_api
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = fake_import
 try:
     asyncio.run(t._subscribe_loop())
 except DeprecationWarning:
     raise SystemExit(2)
 except Exception:
     pass
+finally:
+    builtins.__import__ = real_import
 
 raise SystemExit(0)
 """

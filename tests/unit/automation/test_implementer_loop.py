@@ -59,7 +59,7 @@ def _error() -> str:
 def test_codex_implementer_advise_uses_codex_prompt_builder(
     implementer: IssueImplementer,
 ) -> None:
-    """Codex implementer advise uses JSON skill selection on gpt-5.4-mini."""
+    """Codex implementer advise uses JSON selection via the Codex prompt."""
     implementer.options.agent = "codex"
 
     with (

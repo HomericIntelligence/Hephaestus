@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ._stage_context import StageMixin
-from .git_utils import issue_ref
+from .git_utils import issue_ref, run
 from .models import ImplementationPhase, ImplementationState
 from .pr_manager import ensure_pr_created
 
@@ -39,11 +39,18 @@ class PRCreatePhase(StageMixin):
         state: ImplementationState,
         slot_id: int | None,
     ) -> int:
-        """Ensure commit is pushed and PR is created, then persist the PR number."""
+        """Commit dirty changes, push the branch, create/reuse the PR, and persist it."""
         impl = self.impl
         with self.state_lock:
             state.phase = ImplementationPhase.CREATING_PR
         impl._save_state(state)
+
+        if _has_uncommitted_changes(worktree_path):
+            if slot_id is not None:
+                self.status_tracker.update_slot(
+                    slot_id, f"{issue_ref(issue_number)}: Committing changes"
+                )
+            impl._commit_changes(issue_number, worktree_path)
 
         # A2-004: optional pre-PR test gate (opt-in via run_pre_pr_tests=True).
         if self.options.run_pre_pr_tests:
@@ -99,7 +106,7 @@ class PRCreatePhase(StageMixin):
         worktree_path: Path,
         slot_id: int | None = None,
     ) -> int:
-        """Ensure commit is pushed and PR is created (fallback if Claude didn't do it)."""
+        """Ensure an implementation commit is pushed and a PR exists."""
         return ensure_pr_created(
             issue_number,
             branch_name,
@@ -109,3 +116,13 @@ class PRCreatePhase(StageMixin):
             slot_id,
             self.options.agent,
         )
+
+
+def _has_uncommitted_changes(worktree_path: Path) -> bool:
+    """Return True when the worktree has unstaged/staged/untracked changes."""
+    result = run(
+        ["git", "status", "--porcelain"],
+        cwd=worktree_path,
+        capture_output=True,
+    )
+    return bool((result.stdout or "").strip())

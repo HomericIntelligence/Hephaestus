@@ -78,45 +78,26 @@ Implement GitHub issue #{issue_number}.
 - Clean up any backup files before finishing
 - Only stage actual implementation files
 
-**Git Workflow (MANDATORY — non-negotiable policy):**
-After implementation is complete and tests pass:
-1. Create git commits. EVERY commit MUST be cryptographically signed.
-   - Use `git commit -S` (or have `commit.gpgsign=true` configured globally).
-   - NEVER pass `--no-gpg-sign` or otherwise bypass signing.
-   - Verify with `git log --show-signature -1` after each commit; abort if the
-     signature is missing or shows "BAD signature".
-   - Use a descriptive commit message following conventional commits format.
-2. Push the changes to origin (`git push -u origin <branch>`).
-3. Create a pull request — but FIRST check for an existing one. Run
-   `gh pr list --head <branch> --json number,state`. If an OPEN PR already
-   exists for this branch, DO NOT open a second PR: your push in step 2 has
-   already extended it. Reference that PR number and stop here. Only when no
-   open PR exists do you create one. The PR body MUST contain the EXACT line:
-       Closes #{issue_number}
-   on its own line, with the literal keyword `Closes` (capital C). The
-   variants `Fixes #N`, `Resolves #N`, `Closes: #N`, `closes #n` are NOT
-   accepted by the policy check — even though GitHub recognizes them.
-4. DO NOT enable auto-merge yet. Auto-merge is armed only after the
-   implementation-review loop marks the PR with `state:implementation-go`.
-5. Verify the creation-time policy properties before declaring done.
-   ``gh pr view`` exposes the body but NOT per-commit signatures, so the
-   verification uses two queries — the REST projection for body and GraphQL
-   for signing state:
-       # Body:
-       gh pr view <PR#> --json body,autoMergeRequest \\
-         -q '.body | test("(?m)^Closes #\\\\d+\\\\s*$"), .autoMergeRequest == null'
-       # Per-commit signing state (GraphQL — replace OWNER/REPO/PR#):
-       gh api graphql -f query='query($owner:String!,$name:String!,$pr:Int!){{
-         repository(owner:$owner,name:$name){{
-           pullRequest(number:$pr){{
-             commits(first:100){{ nodes{{ commit{{ oid signature{{ isValid }} }} }} }} }} }} }}' \\
-         -F owner=OWNER -F name=REPO -F pr=<PR#> \\
-         -q '[.data.repository.pullRequest.commits.nodes[].commit.signature.isValid] | all'
-   All three checks must return `true`. If any fails, fix it before
-   reporting completion.
+**Git Boundary (MANDATORY — non-negotiable policy):**
+Your job is to edit files and run the relevant local tests. The
+ProjectHephaestus orchestrator owns all git and GitHub mutation after this
+agent turn returns.
 
-A PR that fails any of these three checks will be BLOCKED at code review and
-by the required CI gate. This policy applies to every PR — no exceptions.
+- DO NOT run `git commit`, `git push`, `gh pr create`, `gh pr merge`, or any
+  other command that writes to GitHub.
+- Leave the final implementation changes in the working tree.
+- When you finish, summarize what changed and what tests you ran.
+
+After you return, the orchestrator will:
+1. Create a cryptographically signed commit with `git commit -S`.
+2. Push the branch to origin.
+3. Create or reuse the pull request for this branch.
+4. Ensure the PR body contains the exact policy line `Closes #{issue_number}`.
+5. Keep auto-merge disabled until the implementation-review loop marks the PR
+   with `state:implementation-go`.
+
+A PR that fails any of these policy checks will be blocked by the required CI
+gate. This policy applies to every PR — no exceptions.
 """
 
 

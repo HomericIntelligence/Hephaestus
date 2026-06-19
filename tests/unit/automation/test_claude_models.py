@@ -27,6 +27,10 @@ class TestDefaults:
     def test_codex_advise_defaults_to_gpt_mini(self) -> None:
         assert claude_models.codex_advise_model() == "gpt-5.4-mini"
 
+    def test_git_message_defaults_to_haiku(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("HEPH_GIT_MESSAGE_MODEL", raising=False)
+        assert claude_models.git_message_model() == claude_models.HAIKU
+
 
 class TestEnvOverride:
     """An operator can flip a phase's model without code changes.
@@ -43,6 +47,10 @@ class TestEnvOverride:
     def test_implementer_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("HEPH_IMPLEMENTER_MODEL", "claude-opus-4-7")
         assert claude_models.implementer_model() == "claude-opus-4-7"
+
+    def test_git_message_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HEPH_GIT_MESSAGE_MODEL", "claude-fable-5")
+        assert claude_models.git_message_model() == "claude-fable-5"
 
 
 class TestModuleStable:
@@ -98,6 +106,7 @@ class TestEnvVarValidation:
             "HEPH_REVIEWER_MODEL",
             "HEPH_ADVISE_MODEL",
             "HEPH_LEARN_MODEL",
+            "HEPH_GIT_MESSAGE_MODEL",
         ):
             monkeypatch.setenv(env_var, model_id)
 
@@ -106,6 +115,7 @@ class TestEnvVarValidation:
         assert claude_models.reviewer_model() == model_id
         assert claude_models.advise_model() == model_id
         assert claude_models.learn_model() == model_id
+        assert claude_models.git_message_model() == model_id
 
 
 class TestNewerModelsRecognized:

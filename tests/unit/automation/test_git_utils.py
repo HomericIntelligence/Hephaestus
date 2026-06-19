@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from hephaestus.automation.git_utils import (
+    _remove_untracked_files_tracked_by_ref,
     clear_repo_caches,
     get_current_branch,
     get_repo_info,
@@ -500,16 +501,19 @@ class TestRebaseWorktreeOnto:
     @patch("hephaestus.automation.git_utils.run")
     def test_clean_rebase_fetches_then_rebases_returns_true(self, mock_run: Any) -> None:
         """Runs ``git fetch origin <base>`` then ``git rebase origin/<base>`` → True."""
-        mock_run.return_value = Mock(returncode=0)
+        mock_run.return_value = Mock(returncode=0, stdout="")
         worktree = Path("/tmp/worktree-xyz")
 
         assert rebase_worktree_onto(worktree, "main") is True
 
-        assert mock_run.call_count == 2
+        assert mock_run.call_count == 3
         fetch_args, fetch_kwargs = mock_run.call_args_list[0]
         assert fetch_args[0] == ["git", "fetch", "origin", "main"]
         assert fetch_kwargs["cwd"] == worktree
-        rebase_args, rebase_kwargs = mock_run.call_args_list[1]
+        ls_files_args, ls_files_kwargs = mock_run.call_args_list[1]
+        assert ls_files_args[0] == ["git", "ls-files", "--others", "--exclude-standard", "-z"]
+        assert ls_files_kwargs["cwd"] == worktree
+        rebase_args, rebase_kwargs = mock_run.call_args_list[2]
         assert rebase_args[0] == ["git", "rebase", "origin/main"]
         assert rebase_kwargs["cwd"] == worktree
 
@@ -519,17 +523,50 @@ class TestRebaseWorktreeOnto:
         rebase_err = subprocess.CalledProcessError(
             1, ["git", "rebase"], output="", stderr="CONFLICT (content)\n"
         )
-        # fetch ok, rebase conflicts, abort ok.
-        mock_run.side_effect = [Mock(returncode=0), rebase_err, Mock(returncode=0)]
+        # fetch ok, no stale untracked files, rebase conflicts, abort ok.
+        mock_run.side_effect = [
+            Mock(returncode=0),
+            Mock(returncode=0, stdout=""),
+            rebase_err,
+            Mock(returncode=0),
+        ]
         worktree = Path("/tmp/worktree-xyz")
 
         assert rebase_worktree_onto(worktree, "main") is False
 
-        assert mock_run.call_count == 3
-        abort_args, abort_kwargs = mock_run.call_args_list[2]
+        assert mock_run.call_count == 4
+        abort_args, abort_kwargs = mock_run.call_args_list[3]
         assert abort_args[0] == ["git", "rebase", "--abort"]
         # The abort must be best-effort so it cannot mask the conflict signal.
         assert abort_kwargs.get("check") is False
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_removes_untracked_files_that_are_tracked_by_base_ref(
+        self, mock_run: Any, tmp_path: Path
+    ) -> None:
+        """Stale untracked files from old agent turns should not block rebase."""
+        tracked_shadow = tmp_path / "scripts" / "check_conventional_commit.py"
+        unrelated = tmp_path / "scratch.txt"
+        tracked_shadow.parent.mkdir()
+        tracked_shadow.write_text("old local copy\n")
+        unrelated.write_text("keep me\n")
+        missing_from_ref = subprocess.CalledProcessError(
+            1, ["git", "cat-file", "-e"], output="", stderr="missing\n"
+        )
+        mock_run.side_effect = [
+            Mock(
+                returncode=0,
+                stdout="scripts/check_conventional_commit.py\0scratch.txt\0",
+            ),
+            Mock(returncode=0),
+            missing_from_ref,
+        ]
+
+        removed = _remove_untracked_files_tracked_by_ref(tmp_path, "origin/main")
+
+        assert removed == [Path("scripts/check_conventional_commit.py")]
+        assert not tracked_shadow.exists()
+        assert unrelated.exists()
 
     @patch("hephaestus.automation.git_utils.run")
     def test_fetch_failure_propagates(self, mock_run: Any) -> None:
@@ -547,9 +584,9 @@ class TestRebaseWorktreeOnto:
     @patch("hephaestus.automation.git_utils.run")
     def test_custom_base_and_remote(self, mock_run: Any) -> None:
         """Base branch and remote are threaded into both git commands."""
-        mock_run.return_value = Mock(returncode=0)
+        mock_run.return_value = Mock(returncode=0, stdout="")
 
         assert rebase_worktree_onto(Path("/wt"), "develop", remote="upstream") is True
 
         assert mock_run.call_args_list[0][0][0] == ["git", "fetch", "upstream", "develop"]
-        assert mock_run.call_args_list[1][0][0] == ["git", "rebase", "upstream/develop"]
+        assert mock_run.call_args_list[2][0][0] == ["git", "rebase", "upstream/develop"]

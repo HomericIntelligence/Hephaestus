@@ -635,6 +635,30 @@ def test_resolve_phase_bin_falls_back_to_python_module_when_console_script_absen
     assert leading == ["-m", "hephaestus.automation.planner"]
 
 
+@pytest.mark.parametrize(
+    ("phase", "script_name", "module"),
+    [
+        ("plan", "hephaestus-plan-issues", "hephaestus.automation.planner"),
+        ("implement", "hephaestus-implement-issues", "hephaestus.automation.implementer"),
+    ],
+)
+def test_resolve_phase_bin_ignores_broken_console_script_shebang(
+    tmp_path: Path,
+    phase: str,
+    script_name: str,
+    module: str,
+) -> None:
+    """Broken Pixi entry-point stubs must not block source-checkout fallback."""
+    script = tmp_path / script_name
+    script.write_text("#!/definitely/missing/python\nprint('stale')\n", encoding="utf-8")
+    script.chmod(0o755)
+
+    with patch("hephaestus.automation.loop_runner.shutil.which", return_value=str(script)):
+        resolved = _resolve_phase_bin(phase)
+
+    assert resolved == (sys.executable, ["-m", module])
+
+
 def test_build_phase_argv_plan_uses_parallel_worker_flag() -> None:
     """Plan phase receives worker count via its --parallel flag."""
     cfg = LoopConfig(max_workers=4)

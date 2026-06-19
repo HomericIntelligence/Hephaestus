@@ -33,21 +33,24 @@ class TestImplementationPrompt:
         out = prompts.get_implementation_prompt(issue_number=1)
         assert "1" in out
 
-    def test_enforces_pr_policy(self) -> None:
-        """Implementer prompt must require Closes #N, deferred auto-merge, and signatures."""
+    def test_delegates_git_and_pr_policy_to_orchestrator(self) -> None:
+        """Implementer prompt must keep git/GitHub mutation in the orchestrator."""
         out = prompts.get_implementation_prompt(issue_number=42)
-        # All three policy properties must be named in the prompt.
+        # All policy properties must still be named, but as orchestrator-owned work.
+        assert "ProjectHephaestus orchestrator owns all git and GitHub mutation" in out
         assert "Closes #42" in out
         assert "MANDATORY" in out
         assert "git commit -S" in out
-        assert "DO NOT enable auto-merge yet" in out
+        assert "DO NOT run `git commit`" in out
+        assert "`git push`" in out
+        assert "`gh pr create`" in out
+        assert "Keep auto-merge disabled" in out
         assert "state:implementation-go" in out
-        # Verification command must include all three fields.
-        assert "autoMergeRequest" in out
-        assert ".autoMergeRequest == null" in out
-        assert "isValid" in out
-        # The agent must be told to abort on failure (no "best-effort" wording).
-        assert "abort" in out.lower() or "non-negotiable" in out.lower()
+        # The implementation agent should not run the PR verification/mutation commands.
+        assert "gh pr view" not in out
+        assert "gh api graphql" not in out
+        assert "git push -u origin" not in out
+        assert "autoMergeRequest" not in out
 
     def test_states_task_plan_review_context_model(self) -> None:
         """The implementer prompt must declare TASK/PLAN/PLAN-REVIEW context."""
@@ -60,11 +63,12 @@ class TestImplementationPrompt:
         # Later iterations address inline PR-review threads in the same session.
         assert "PR-review thread" in out or "PR-review threads" in out
 
-    def test_implementation_prompt_instructs_reuse_existing_pr(self) -> None:
-        """The implementer must reuse an existing open PR, not duplicate it (#1018)."""
+    def test_implementation_prompt_delegates_pr_reuse(self) -> None:
+        """The orchestrator, not the implementer agent, owns PR reuse (#1018)."""
         out = prompts.get_implementation_prompt(issue_number=42)
-        assert "gh pr list --head" in out
-        assert "DO NOT open a second PR" in out
+        assert "Create or reuse the pull request" in out
+        assert "gh pr list --head" not in out
+        assert "DO NOT open a second PR" not in out
 
 
 class TestPRReviewAnalysisPrompt:
@@ -304,8 +308,8 @@ class TestAdvisePrompt:
         assert "7" in out
         assert "/mp.json" in out
 
-    def test_codex_prompt_selects_skills_without_skill_trigger(self) -> None:
-        """Codex automation should use bounded JSON selection, not interactive skills."""
+    def test_codex_prompt_uses_resolved_marketplace_not_nested_skill(self) -> None:
+        """Codex automation should not recursively invoke the installed advise skill."""
         out = prompts.get_codex_advise_prompt(
             issue_number=7,
             issue_title="t",
@@ -313,12 +317,13 @@ class TestAdvisePrompt:
             marketplace_path="/mp.json",
         )
 
-        assert not out.startswith("$advise")
-        assert "$advise" not in out
-        assert "/advise" not in out
+        assert not out.startswith("$advise ")
         assert "/mp.json" in out
+        assert "Do not invoke `$advise`" in out
+        assert "Do not clone or update ProjectMnemosyne yourself" in out
+        assert "/advise" not in out
+        assert "#7: t" in out
         assert '"skills"' in out
-        assert "**Issue:** #7: t" in out
         assert "b" in out
 
     def test_advise_prompt_builder_selects_codex_prompt(self) -> None:

@@ -10,14 +10,19 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
-from hephaestus.agents.runtime import is_codex
+from hephaestus.agents.runtime import is_codex, run_codex_text
 
 from ._secret_patterns import SECRET_FILE_EXTENSIONS, SECRET_FILE_NAMES
-from .claude_models import implementer_model
-from .git_utils import issue_ref, run
+from .claude_invoke import invoke_claude_with_session
+from .claude_models import git_message_model, implementer_model
+from .claude_timeouts import git_message_agent_timeout
+from .git_utils import get_repo_slug, issue_ref, run
 from .github_api import (
     _gh_call,
     fetch_issue_info,
@@ -26,6 +31,7 @@ from .github_api import (
     gh_pr_create,
 )
 from .prompts import get_pr_description
+from .session_naming import AGENT_COMMIT_MESSAGE, AGENT_PR_MESSAGE
 from .state_labels import (
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
@@ -35,6 +41,30 @@ from .state_labels import (
 from .status_tracker import StatusTracker
 
 logger = logging.getLogger(__name__)
+
+_RESERVED_MESSAGE_LINE = re.compile(
+    r"^\s*(?:Closes\s+#\d+|Implemented-By:|Co-Authored-By:)",
+    re.IGNORECASE,
+)
+_GIT_MESSAGE_MODEL_ENV = "HEPH_GIT_MESSAGE_MODEL"
+
+
+@dataclass(frozen=True)
+class _CommitMessageParts:
+    """Agent-proposed commit message content before policy trailers."""
+
+    subject: str
+    body: str
+
+
+@dataclass(frozen=True)
+class _PrMessageParts:
+    """Agent-proposed PR text before policy/footer rendering."""
+
+    title: str
+    summary: str
+    changes: str
+    testing: str
 
 
 def _agent_display_name(agent: str) -> str:
@@ -63,6 +93,341 @@ def _provenance_for_agent(agent: str) -> str:
     if is_codex(agent):
         return "Codex"
     return implementer_model()
+
+
+def _codex_git_message_model() -> str:
+    """Return the optional Codex model override for git-message generation."""
+    return os.environ.get(_GIT_MESSAGE_MODEL_ENV, "")
+
+
+def _issue_body(issue: Any) -> str:
+    """Return an issue body only when the fetched object carries a string body."""
+    body = getattr(issue, "body", "")
+    return body if isinstance(body, str) else ""
+
+
+def _single_line(value: object, *, fallback: str, max_len: int = 120) -> str:
+    """Normalize an agent-provided title/subject into one non-empty line."""
+    text = str(value or "").strip().splitlines()[0].strip() if value else ""
+    if not text:
+        return fallback
+    return text[:max_len].rstrip()
+
+
+def _strip_reserved_lines(text: str) -> str:
+    """Remove policy/trailer lines that the orchestrator must own."""
+    lines = []
+    for line in text.splitlines():
+        if _RESERVED_MESSAGE_LINE.match(line):
+            continue
+        lines.append(line.rstrip())
+    return "\n".join(lines).strip()
+
+
+def _message_text(value: object) -> str:
+    """Normalize an agent JSON string/list field into markdown text."""
+    if isinstance(value, list):
+        cleaned = [str(item).strip().lstrip("- ").strip() for item in value if str(item).strip()]
+        return "\n".join(f"- {item}" for item in cleaned)
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def _parse_agent_json(text: str) -> dict[str, Any] | None:
+    """Parse a JSON object from raw agent output, tolerating fenced prose."""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        data = json.loads(raw[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _git_output(worktree_path: Path, args: list[str]) -> str:
+    """Return best-effort git output for message-agent context."""
+    try:
+        result = run(["git", *args], cwd=worktree_path, capture_output=True, check=False)
+    except Exception as exc:
+        logger.debug("Could not collect git message context for %s: %s", args, exc)
+        return ""
+    return (result.stdout or "").strip()
+
+
+def _staged_change_context(worktree_path: Path) -> tuple[str, str]:
+    """Return staged changed files and diff stat for commit-message generation."""
+    return (
+        _git_output(worktree_path, ["diff", "--cached", "--name-status"]),
+        _git_output(worktree_path, ["diff", "--cached", "--stat"]),
+    )
+
+
+def _branch_change_context(worktree_path: Path, base: str) -> tuple[str, str, str]:
+    """Return changed files, diff stat, and commits for PR-message generation."""
+    ranges = (f"origin/{base}..HEAD", f"{base}..HEAD")
+    for revision_range in ranges:
+        changed_files = _git_output(worktree_path, ["diff", "--name-status", revision_range])
+        diff_stat = _git_output(worktree_path, ["diff", "--stat", revision_range])
+        commits = _git_output(worktree_path, ["log", "--oneline", revision_range])
+        if changed_files or diff_stat or commits:
+            return changed_files, diff_stat, commits
+    return "", "", ""
+
+
+def _commit_message_prompt(
+    *,
+    issue_number: int,
+    issue_title: str,
+    issue_body: str,
+    changed_files: str,
+    diff_stat: str,
+) -> str:
+    """Build a read-only prompt for the commit-message agent."""
+    return f"""You are a lightweight git commit message writer.
+
+Return JSON only, with exactly:
+{{"subject":"type(scope): concise summary","body":"short explanatory body"}}
+
+Rules:
+- Do not modify files, run git, push, or create a PR.
+- Do not include Closes, Implemented-By, or Co-Authored-By lines.
+- Base the message only on the issue and changed files below.
+- Keep the subject one line and under 72 characters when practical.
+
+Issue #{issue_number}: {issue_title}
+
+Issue body:
+{issue_body or "(empty)"}
+
+Changed files:
+{changed_files or "(none reported)"}
+
+Diff stat:
+{diff_stat or "(none reported)"}
+"""
+
+
+def _pr_message_prompt(
+    *,
+    issue_number: int,
+    issue_title: str,
+    issue_body: str,
+    changed_files: str,
+    diff_stat: str,
+    commits: str,
+) -> str:
+    """Build a read-only prompt for the PR-message agent."""
+    return f"""You are a lightweight GitHub pull-request message writer.
+
+Return JSON only, with exactly:
+{{
+  "title": "type(scope): concise PR title",
+  "summary": "brief summary",
+  "changes": ["specific change 1", "specific change 2"],
+  "testing": ["test or verification 1"]
+}}
+
+Rules:
+- Do not modify files, run git, push, or create a PR.
+- Do not include Closes lines; the orchestrator adds the required policy line.
+- Base the message only on the issue, changed files, and commits below.
+
+Issue #{issue_number}: {issue_title}
+
+Issue body:
+{issue_body or "(empty)"}
+
+Changed files:
+{changed_files or "(none reported)"}
+
+Diff stat:
+{diff_stat or "(none reported)"}
+
+Commits:
+{commits or "(none reported)"}
+"""
+
+
+def _invoke_git_message_agent(
+    *,
+    issue_number: int,
+    agent_kind: str,
+    prompt: str,
+    worktree_path: Path,
+    agent: str,
+) -> str:
+    """Run the lightweight message agent in a separate read-only session."""
+    timeout = git_message_agent_timeout()
+    if is_codex(agent):
+        result = run_codex_text(
+            prompt,
+            cwd=worktree_path,
+            timeout=timeout,
+            model=_codex_git_message_model(),
+            sandbox="read-only",
+        )
+        return (result.stdout or "").strip()
+
+    stdout, _ = invoke_claude_with_session(
+        repo=get_repo_slug(worktree_path),
+        issue=issue_number,
+        agent=agent_kind,
+        prompt=prompt,
+        model=git_message_model(),
+        cwd=worktree_path,
+        timeout=timeout,
+        output_format="text",
+        allowed_tools="Read,Glob,Grep",
+    )
+    return (stdout or "").strip()
+
+
+def _format_commit_message(
+    *,
+    issue_number: int,
+    agent: str,
+    subject: str,
+    body: str,
+) -> str:
+    """Render the final commit message with orchestrator-owned policy trailers."""
+    coauthor_name, coauthor_email = _coauthor_for_agent(agent)
+    provenance = _provenance_for_agent(agent)
+    clean_body = _strip_reserved_lines(body)
+    body_block = f"\n\n{clean_body}" if clean_body else ""
+    return f"""{subject}{body_block}
+
+Closes #{issue_number}
+
+Implemented-By: {provenance}
+Co-Authored-By: {coauthor_name} <{coauthor_email}>
+"""
+
+
+def _fallback_commit_message(issue_number: int, issue_title: str, agent: str) -> str:
+    """Return the deterministic commit message used when agent output is invalid."""
+    return _format_commit_message(
+        issue_number=issue_number,
+        agent=agent,
+        subject=f"feat: Implement #{issue_number}",
+        body=issue_title,
+    )
+
+
+def _generate_commit_message(
+    *,
+    issue_number: int,
+    issue_title: str,
+    issue_body: str,
+    worktree_path: Path,
+    agent: str,
+) -> str:
+    """Generate a commit message via a lightweight agent with deterministic fallback."""
+    changed_files, diff_stat = _staged_change_context(worktree_path)
+    prompt = _commit_message_prompt(
+        issue_number=issue_number,
+        issue_title=issue_title,
+        issue_body=issue_body,
+        changed_files=changed_files,
+        diff_stat=diff_stat,
+    )
+    try:
+        raw = _invoke_git_message_agent(
+            issue_number=issue_number,
+            agent_kind=AGENT_COMMIT_MESSAGE,
+            prompt=prompt,
+            worktree_path=worktree_path,
+            agent=agent,
+        )
+        data = _parse_agent_json(raw)
+        if data is None:
+            raise ValueError("message agent returned no JSON object")
+        subject = _single_line(
+            data.get("subject"),
+            fallback=f"feat: Implement #{issue_number}",
+            max_len=120,
+        )
+        body = _strip_reserved_lines(_message_text(data.get("body")))
+        parts = _CommitMessageParts(subject=subject, body=body)
+        return _format_commit_message(
+            issue_number=issue_number,
+            agent=agent,
+            subject=parts.subject,
+            body=parts.body,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Commit-message agent failed for %s; using fallback message (%s)",
+            issue_ref(issue_number),
+            exc,
+        )
+        return _fallback_commit_message(issue_number, issue_title, agent)
+
+
+def _fallback_pr_message(issue_number: int, issue_title: str, agent: str) -> _PrMessageParts:
+    """Return deterministic PR text when the message agent is unavailable."""
+    return _PrMessageParts(
+        title=f"feat: {issue_title}",
+        summary=f"Implements #{issue_number}",
+        changes=f"- Automated implementation via {_agent_display_name(agent)}",
+        testing="- Automated tests included",
+    )
+
+
+def _generate_pr_message(
+    *,
+    issue_number: int,
+    issue_title: str,
+    issue_body: str,
+    branch_name: str,
+    base: str,
+    worktree_path: Path | None,
+    agent: str,
+) -> _PrMessageParts:
+    """Generate PR text via a lightweight agent with deterministic fallback."""
+    fallback = _fallback_pr_message(issue_number, issue_title, agent)
+    if worktree_path is None:
+        return fallback
+
+    changed_files, diff_stat, commits = _branch_change_context(worktree_path, base)
+    prompt = _pr_message_prompt(
+        issue_number=issue_number,
+        issue_title=issue_title,
+        issue_body=issue_body,
+        changed_files=changed_files,
+        diff_stat=diff_stat,
+        commits=commits,
+    )
+    try:
+        raw = _invoke_git_message_agent(
+            issue_number=issue_number,
+            agent_kind=AGENT_PR_MESSAGE,
+            prompt=prompt,
+            worktree_path=worktree_path,
+            agent=agent,
+        )
+        data = _parse_agent_json(raw)
+        if data is None:
+            raise ValueError("message agent returned no JSON object")
+        return _PrMessageParts(
+            title=_single_line(data.get("title"), fallback=fallback.title, max_len=120),
+            summary=_strip_reserved_lines(_message_text(data.get("summary"))) or fallback.summary,
+            changes=_strip_reserved_lines(_message_text(data.get("changes"))) or fallback.changes,
+            testing=_strip_reserved_lines(_message_text(data.get("testing"))) or fallback.testing,
+        )
+    except Exception as exc:
+        logger.warning(
+            "PR-message agent failed for %s on branch %s; using fallback body (%s)",
+            issue_ref(issue_number),
+            branch_name,
+            exc,
+        )
+        return fallback
 
 
 def _detect_default_base_branch(worktree_path: Path) -> str:
@@ -269,17 +634,13 @@ def commit_changes(issue_number: int, worktree_path: Path, agent: str = "claude"
 
     # Generate commit message
     issue = fetch_issue_info(issue_number)
-    coauthor_name, coauthor_email = _coauthor_for_agent(agent)
-    provenance = _provenance_for_agent(agent)
-    commit_msg = f"""feat: Implement #{issue_number}
-
-{issue.title}
-
-Closes #{issue_number}
-
-Implemented-By: {provenance}
-Co-Authored-By: {coauthor_name} <{coauthor_email}>
-"""
+    commit_msg = _generate_commit_message(
+        issue_number=issue_number,
+        issue_title=issue.title,
+        issue_body=_issue_body(issue),
+        worktree_path=worktree_path,
+        agent=agent,
+    )
 
     # Commit (signed — required by repo policy)
     run(
@@ -297,7 +658,7 @@ def ensure_pr_created(
     slot_id: int | None = None,
     agent: str = "claude",
 ) -> int:
-    """Ensure commit is pushed and PR is created (fallback if Claude didn't do it).
+    """Ensure the implementation commit is pushed and a PR exists.
 
     Args:
         issue_number: Issue number
@@ -331,7 +692,7 @@ def ensure_pr_created(
     if not result.stdout.strip():
         raise RuntimeError(
             f"No commit found for issue {issue_ref(issue_number)}. "
-            "Claude did not create any commits."
+            "No implementation changes were committed."
         )
 
     logger.info("Commit exists: %s", result.stdout.strip()[:80])
@@ -390,6 +751,7 @@ def ensure_pr_created(
         auto_merge=False,
         agent=agent,
         base=base_branch,
+        worktree_path=worktree_path,
     )
     logger.info("Created PR #%s", pr_number)
     return pr_number
@@ -401,6 +763,7 @@ def create_pr(
     auto_merge: bool = False,
     agent: str = "claude",
     base: str = "main",
+    worktree_path: Path | None = None,
 ) -> int:
     """Create pull request for issue.
 
@@ -409,6 +772,9 @@ def create_pr(
         branch_name: Git branch name
         auto_merge: Whether to enable auto-merge on the PR
         agent: Selected implementation agent for generated PR metadata.
+        base: Base branch used for changed-file and commit context.
+        worktree_path: Optional worktree path used to invoke the lightweight
+            PR-message agent. When omitted, deterministic fallback text is used.
 
     Returns:
         PR number
@@ -416,12 +782,21 @@ def create_pr(
     """
     issue = fetch_issue_info(issue_number)
 
-    pr_title = f"feat: {issue.title}"
+    pr_message = _generate_pr_message(
+        issue_number=issue_number,
+        issue_title=issue.title,
+        issue_body=_issue_body(issue),
+        branch_name=branch_name,
+        base=base,
+        worktree_path=worktree_path,
+        agent=agent,
+    )
+    pr_title = pr_message.title
     pr_body = get_pr_description(
         issue_number=issue_number,
-        summary=f"Implements #{issue_number}",
-        changes=f"- Automated implementation via {_agent_display_name(agent)}",
-        testing="- Automated tests included",
+        summary=pr_message.summary,
+        changes=pr_message.changes,
+        testing=pr_message.testing,
         generated_by=f"{_agent_display_name(agent)} via ProjectHephaestus automation.",
     )
 

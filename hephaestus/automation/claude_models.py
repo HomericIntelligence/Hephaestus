@@ -7,6 +7,7 @@ reflects the cost/quality tradeoff for each phase:
 - Planning needs reasoning quality but few tokens overall → Opus
 - Implementation is a long mechanical tool-use loop → Haiku
 - Reviewers / advise / learn → Sonnet (middle ground)
+- Git/PR message writing is tiny metadata generation → Haiku
 
 Each function honors a ``HEPH_<PHASE>_MODEL`` environment variable so an
 operator can override without code changes (e.g. when one tier's quota is
@@ -96,3 +97,8 @@ def codex_advise_model() -> str:
 def learn_model() -> str:
     """Model used by /learn and follow-up issue filing."""
     return _resolve_model("HEPH_LEARN_MODEL", HAIKU)
+
+
+def git_message_model() -> str:
+    """Model used by the lightweight commit/PR message writer."""
+    return _resolve_model("HEPH_GIT_MESSAGE_MODEL", HAIKU)

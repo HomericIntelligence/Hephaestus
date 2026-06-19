@@ -1,6 +1,7 @@
 """Guard against re-introducing emoji in scripts/compare_benchmarks.py stderr output."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -28,10 +29,15 @@ def _write_results(path: Path, mean_ns: float) -> None:
 
 
 def _run(current: Path, baseline: Path) -> subprocess.CompletedProcess[bytes]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(REPO_ROOT), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
+    )
     return subprocess.run(
         [sys.executable, str(SCRIPT), str(current), str(baseline)],
         capture_output=True,
         check=False,
+        env=env,
     )
 
 

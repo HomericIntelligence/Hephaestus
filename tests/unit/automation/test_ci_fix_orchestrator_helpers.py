@@ -36,6 +36,25 @@ def orchestrator(tmp_path: Path) -> CIFixOrchestrator:
     )
 
 
+def _orchestrator_with_failing_checks(
+    tmp_path: Path, failing_checks: list[str]
+) -> CIFixOrchestrator:
+    options = MagicMock()
+    options.agent = "claude"
+    options.dry_run = False
+    status = MagicMock()
+    return CIFixOrchestrator(
+        options_provider=lambda: options,
+        repo_root_provider=lambda: tmp_path,
+        state_dir_provider=lambda: tmp_path,
+        status_tracker_provider=lambda: status,
+        get_pr_branch=lambda pr: f"{pr}-impl",
+        get_worktree_path=lambda issue, pr: tmp_path,
+        format_review_threads_block=lambda pr: "",
+        failing_required_check_names=lambda pr: failing_checks,
+    )
+
+
 class TestForceEngagementPrompt:
     """The retry prompt must name failing checks/dirty files verbatim."""
 
@@ -103,6 +122,23 @@ class TestBuildCiFixPrompt:
         assert "boom: import error" in prompt
         assert "1-fix" in prompt
 
+    def test_includes_failing_check_names(self, tmp_path: Path) -> None:
+        orchestrator = _orchestrator_with_failing_checks(
+            tmp_path, ["pr-policy", "required-checks-gate"]
+        )
+        prompt = orchestrator.build_ci_fix_prompt(
+            issue_number=1,
+            pr_number=2,
+            worktree_path=tmp_path,
+            ci_logs="python3: can't open file 'scripts/check_conventional_commit.py'",
+            pr_head_branch="1-fix",
+            advise_findings="",
+        )
+        assert "Failing checks reported by GitHub" in prompt
+        assert "- pr-policy" in prompt
+        assert "- required-checks-gate" in prompt
+        assert "aggregate" in prompt
+
     def test_skip_marker_advise_contributes_nothing(
         self, orchestrator: CIFixOrchestrator, tmp_path: Path
     ) -> None:
@@ -115,6 +151,32 @@ class TestBuildCiFixPrompt:
             advise_findings="<!-- advise step skipped -->",
         )
         assert "Prior Learnings from Team Knowledge Base" not in prompt
+
+
+class TestRetryWorktreeChanges:
+    """No-commit retries should notice relevant new files without sweeping junk."""
+
+    def test_relevant_untracked_files_are_actionable(
+        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    ) -> None:
+        status = MagicMock(
+            stdout=(
+                " M hephaestus/automation/ci_driver.py\n"
+                "?? scripts/check_conventional_commit.py\n"
+                "?? tests/unit/scripts/test_check_conventional_commit.py\n"
+                "?? uv.lock\n"
+                "?? .pytest_cache/v/cache/nodeids\n"
+            ),
+            stderr="",
+            returncode=0,
+        )
+        with patch("hephaestus.automation.ci_fix_orchestrator.run", return_value=status):
+            changes = orchestrator._tracked_worktree_changes(tmp_path, 1515)
+        assert " M hephaestus/automation/ci_driver.py" in changes
+        assert "?? scripts/check_conventional_commit.py" in changes
+        assert "?? tests/unit/scripts/test_check_conventional_commit.py" in changes
+        assert all("uv.lock" not in line for line in changes)
+        assert all(".pytest_cache" not in line for line in changes)
 
 
 class TestRecordRepeatedNoCommit:
@@ -138,7 +200,7 @@ class TestRecordRepeatedNoCommit:
 
 
 class TestAttemptMechanicalRebase:
-    """Only BEHIND/DIRTY/CONFLICTING PRs are rebased; clean ones are skipped."""
+    """Only stale/conflicting or failing-check BLOCKED PRs are rebased."""
 
     @staticmethod
     def _pr_state(merge_state: str, head: str = "5-impl", base: str = "main") -> MagicMock:
@@ -163,6 +225,40 @@ class TestAttemptMechanicalRebase:
         ):
             assert orchestrator.attempt_mechanical_rebase(5, 50, 0) is False
         mock_rebase.assert_not_called()
+
+    def test_blocked_pr_without_failing_checks_skips_rebase(
+        self, orchestrator: CIFixOrchestrator
+    ) -> None:
+        with (
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator._gh_call",
+                return_value=self._pr_state("BLOCKED"),
+            ),
+            patch("hephaestus.automation.ci_fix_orchestrator.rebase_worktree_onto") as mock_rebase,
+        ):
+            assert orchestrator.attempt_mechanical_rebase(5, 50, 0) is False
+        mock_rebase.assert_not_called()
+
+    def test_blocked_pr_with_failing_checks_rebases_clean_and_pushes(self, tmp_path: Path) -> None:
+        orchestrator = _orchestrator_with_failing_checks(tmp_path, ["pr-policy"])
+        with (
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator._gh_call",
+                return_value=self._pr_state("BLOCKED"),
+            ),
+            patch("hephaestus.automation.ci_fix_orchestrator.sync_worktree_to_remote_branch"),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.rebase_worktree_onto",
+                return_value=True,
+            ) as mock_rebase,
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator."
+                "push_current_branch_with_lease_on_divergence"
+            ) as mock_push,
+        ):
+            assert orchestrator.attempt_mechanical_rebase(5, 50, 0) is True
+        mock_rebase.assert_called_once_with(tmp_path, "main")
+        mock_push.assert_called_once()
 
     def test_behind_pr_rebases_clean_and_pushes(
         self, orchestrator: CIFixOrchestrator, tmp_path: Path

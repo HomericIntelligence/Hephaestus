@@ -90,6 +90,12 @@ logger = logging.getLogger(__name__)
 # but never fully clears the set, so an unsatisfiable thread can never spin
 # forever.
 _BLOCKED_ADDRESS_MAX_ATTEMPTS = 2
+_AUTO_MERGE_POLICY_CHECK = "auto-merge-policy"
+
+
+def _without_auto_merge_policy(check_names: list[str]) -> list[str]:
+    """Return failing checks that can plausibly be fixed by a CI-fix agent."""
+    return [name for name in check_names if name != _AUTO_MERGE_POLICY_CHECK]
 
 
 def _pr_is_failing(pr: dict[str, Any]) -> bool:
@@ -666,6 +672,25 @@ class CIDriver:
                 pr_number,
             )
             return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+
+        failing_names = [str(c.get("name") or "") for c in failing]
+        fixable_failing_names = _without_auto_merge_policy(failing_names)
+        if not fixable_failing_names and _AUTO_MERGE_POLICY_CHECK in failing_names:
+            if not self._pr_has_implementation_go(pr_number):
+                logger.info(
+                    "Issue #%s: PR #%s only fails auto-merge-policy but lacks "
+                    "state:implementation-go; leaving auto-merge disabled until "
+                    "implementation review approves it",
+                    issue_number,
+                    pr_number,
+                )
+                return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+            logger.info(
+                "Issue #%s: PR #%s only fails auto-merge-policy; enabling auto-merge",
+                issue_number,
+                pr_number,
+            )
+            return self._arm_and_wait_for_merge(issue_number, pr_number, acquired_slot)
 
         fix_result = self._attempt_ci_fixes(issue_number, pr_number, acquired_slot)
         if fix_result is not None and fix_result.success:
@@ -1452,12 +1477,13 @@ class CIDriver:
             # Still OPEN (or unknown). If a required check has gone red since
             # arming, stop waiting and let the caller drive a fix.
             failing = self._failing_required_check_names(pr_number)
-            if failing:
+            fixable_failing = _without_auto_merge_policy(failing)
+            if fixable_failing:
                 logger.warning(
                     "Issue #%s: PR #%s went red while awaiting merge (failing: %s)",
                     issue_number,
                     pr_number,
-                    ", ".join(failing),
+                    ", ".join(fixable_failing),
                 )
                 return "FAILING"
 
@@ -1481,6 +1507,7 @@ class CIDriver:
             # branch-protection gate and not just in-flight checks: GitHub
             # also reports BLOCKED while required checks are still running.
             # Guard: no failing AND no pending required checks.
+            policy_only_failure = bool(failing) and not fixable_failing
             if merge_status == "BLOCKED" and not failing:
                 pending = self._pending_required_check_names(pr_number)
                 if not pending:
@@ -1492,6 +1519,13 @@ class CIDriver:
                         pr_number,
                     )
                     return "BLOCKED"
+            if merge_status == "BLOCKED" and policy_only_failure:
+                logger.info(
+                    "Issue #%s: PR #%s is BLOCKED only by auto-merge-policy; "
+                    "waiting for the policy check to refresh after arming",
+                    issue_number,
+                    pr_number,
+                )
 
             sleep_secs = min(2**attempt, 60)
             if elapsed + sleep_secs > max_wait:

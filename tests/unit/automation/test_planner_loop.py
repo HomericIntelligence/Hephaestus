@@ -108,6 +108,48 @@ class TestRunPlanReviewLoop:
 
         assert mock_review.call_args.kwargs["advise_findings"] == "prior team learning"
 
+    def test_order_is_advise_plan_learn_review_with_shared_advise(self, planner: Planner) -> None:
+        """Planner loop order is advise → plan → planner-/learn → review."""
+        planner.options.enable_advise = True
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        def _advise(*args: object, **kwargs: object) -> str:
+            calls.append(("advise", {"args": args, "kwargs": kwargs}))
+            return "prior team learning"
+
+        def _plan(*args: object, **kwargs: object) -> str:
+            calls.append(("plan", {"args": args, "kwargs": kwargs}))
+            return "plan v0"
+
+        def _learn(*args: object, **kwargs: object) -> str:
+            calls.append(("learn", {"args": args, "kwargs": kwargs}))
+            return "learn0"
+
+        def _review(*args: object, **kwargs: object) -> str:
+            calls.append(("review", {"args": args, "kwargs": kwargs}))
+            return _go_review()
+
+        with (
+            patch(
+                "hephaestus.automation.planner_review_loop.gh_issue_json",
+                return_value={"title": "T", "body": "B"},
+            ),
+            patch.object(planner, "_run_advise", side_effect=_advise),
+            patch.object(planner, "_generate_plan", side_effect=_plan),
+            patch.object(planner, "_capture_planner_learnings", side_effect=_learn),
+            patch.object(planner, "_run_plan_review", side_effect=_review),
+        ):
+            planner._run_plan_review_loop(123, slot_id=0)
+
+        assert [name for name, _ in calls] == ["advise", "plan", "learn", "review"]
+        plan_kwargs = calls[1][1]["kwargs"]
+        review_kwargs = calls[3][1]["kwargs"]
+        assert isinstance(plan_kwargs, dict)
+        assert isinstance(review_kwargs, dict)
+        assert plan_kwargs["cached_advise"] == "prior team learning"
+        assert review_kwargs["advise_findings"] == "prior team learning"
+        assert review_kwargs["learnings"] == "learn0"
+
     def test_runs_all_3_iterations_on_sustained_nogo(self, planner: Planner) -> None:
         """When every review says NOGO, the loop runs exactly 3 iterations."""
         with (
@@ -825,6 +867,7 @@ class TestPlanIssueNOGOExhausted:
     def test_nogo_exhausted_plan_result_success_false(self, planner: Planner) -> None:
         """All-NOGO loop must produce PlanResult(success=False) not PlanResult(success=True)."""
         with (
+            patch.object(planner, "_pr_coverage_skip", return_value=None),
             patch.object(planner, "_has_existing_plan", return_value=False),
             patch.object(
                 planner,
@@ -842,6 +885,7 @@ class TestPlanIssueNOGOExhausted:
     def test_go_plan_result_success_true(self, planner: Planner) -> None:
         """A GO loop must still produce PlanResult(success=True)."""
         with (
+            patch.object(planner, "_pr_coverage_skip", return_value=None),
             patch.object(planner, "_has_existing_plan", return_value=False),
             patch.object(
                 planner,
@@ -863,6 +907,7 @@ class TestPlanIssueNOGOExhausted:
         in _filter_issues.
         """
         with (
+            patch.object(planner, "_pr_coverage_skip", return_value=None),
             patch.object(planner, "_has_existing_plan", return_value=True),
             patch.object(planner, "_run_plan_review_loop") as mock_loop,
             patch.object(planner, "_post_plan") as mock_post,
@@ -883,6 +928,7 @@ class TestPlanIssueNOGOExhausted:
         """
         planner.options.force = True
         with (
+            patch.object(planner, "_pr_coverage_skip", return_value=None),
             patch.object(planner, "_has_existing_plan") as mock_check,
             patch.object(
                 planner,
