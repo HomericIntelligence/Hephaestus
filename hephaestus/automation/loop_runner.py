@@ -30,6 +30,7 @@ import contextlib
 import json
 import logging
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -585,6 +586,62 @@ def _phase_order_warnings(cfg: LoopConfig) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+def _console_script_is_usable(path: str) -> bool:
+    """Return False for stale entry-point stubs with missing shebang interpreters."""
+    script = Path(path)
+    try:
+        with script.open("rb") as fh:
+            first_line = fh.readline(512)
+    except OSError as exc:
+        LOG.warning("Ignoring phase console script %s: cannot inspect it (%s)", path, exc)
+        return False
+
+    if not first_line.startswith(b"#!"):
+        return True
+
+    try:
+        shebang = first_line[2:].decode("utf-8").strip()
+    except UnicodeDecodeError:
+        LOG.warning("Ignoring phase console script %s: invalid shebang encoding", path)
+        return False
+    if not shebang:
+        LOG.warning("Ignoring phase console script %s: empty shebang", path)
+        return False
+
+    try:
+        parts = shlex.split(shebang)
+    except ValueError as exc:
+        LOG.warning("Ignoring phase console script %s: invalid shebang (%s)", path, exc)
+        return False
+    if not parts:
+        return False
+
+    interpreter = parts[0]
+    if Path(interpreter).name == "env":
+        if len(parts) < 2:
+            LOG.warning("Ignoring phase console script %s: /usr/bin/env without command", path)
+            return False
+        return shutil.which(parts[1]) is not None
+
+    if Path(interpreter).exists():
+        return True
+
+    LOG.warning(
+        "Ignoring phase console script %s: shebang interpreter does not exist: %s",
+        path,
+        interpreter,
+    )
+    return False
+
+
+def _resolve_console_or_module(script_name: str, module: str) -> tuple[str, list[str]]:
+    """Resolve an installed console script or fall back to this checkout's module."""
+    bin_path = shutil.which(script_name)
+    if bin_path and _console_script_is_usable(bin_path):
+        return (bin_path, [])
+    return (sys.executable, ["-m", module])
+
+
 def _resolve_phase_bin(phase: str) -> tuple[str, list[str]] | None:
     """Return ``(executable, leading_args)`` for ``phase``.
 
@@ -593,15 +650,12 @@ def _resolve_phase_bin(phase: str) -> tuple[str, list[str]] | None:
     """
     script_dir = _scripts_dir()
     if phase == "plan":
-        bin_path = shutil.which("hephaestus-plan-issues")
-        if bin_path:
-            return (bin_path, [])
-        return (sys.executable, ["-m", "hephaestus.automation.planner"])
+        return _resolve_console_or_module("hephaestus-plan-issues", "hephaestus.automation.planner")
     if phase == "implement":
-        bin_path = shutil.which("hephaestus-implement-issues")
-        if bin_path:
-            return (bin_path, [])
-        return (sys.executable, ["-m", "hephaestus.automation.implementer"])
+        return _resolve_console_or_module(
+            "hephaestus-implement-issues",
+            "hephaestus.automation.implementer",
+        )
     if phase == "drive-green":
         py = sys.executable
         return (py, [str(script_dir / "drive_prs_green.py")])
