@@ -458,43 +458,6 @@ class TestPushCurrentBranchWithLeaseOnDivergence:
             "HEAD:5391-auto-impl",
         ]
 
-    @patch("hephaestus.automation.git_utils.run")
-    def test_verify_false_skips_hooks_on_initial_and_lease_push(self, mock_run: Any) -> None:
-        """Automation can bypass local hooks while preserving lease safety."""
-        worktree = Path("/tmp/worktree-xyz")
-        push_err = subprocess.CalledProcessError(
-            1,
-            ["git", "push", "--no-verify", "origin", "HEAD:5391-auto-impl"],
-            output="",
-            stderr="non-fast-forward\n",
-        )
-        mock_run.side_effect = [push_err, Mock(returncode=0), Mock(returncode=0)]
-
-        push_current_branch_with_lease_on_divergence(
-            worktree,
-            branch="5391-auto-impl",
-            push_ref="HEAD:5391-auto-impl",
-            verify=False,
-        )
-
-        initial_args, _ = mock_run.call_args_list[0]
-        assert initial_args[0] == [
-            "git",
-            "push",
-            "--no-verify",
-            "origin",
-            "HEAD:5391-auto-impl",
-        ]
-        lease_args, _ = mock_run.call_args_list[2]
-        assert lease_args[0] == [
-            "git",
-            "push",
-            "--no-verify",
-            "--force-with-lease=5391-auto-impl",
-            "origin",
-            "HEAD:5391-auto-impl",
-        ]
-
 
 class TestSyncWorktreeToRemoteBranch:
     """Tests for sync_worktree_to_remote_branch (#832 — reset before agent)."""

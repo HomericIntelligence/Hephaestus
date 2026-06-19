@@ -295,14 +295,13 @@ def push_current_branch_with_lease_on_divergence(
     branch: str | None = None,
     remote: str = "origin",
     push_ref: str = "HEAD",
-    verify: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Push ``HEAD`` to ``<remote>``; on divergence, fetch + force-with-lease retry.
 
-    The first attempt is ``git push [--no-verify] <remote> <push_ref>``. If that
-    fails with a non-fast-forward / fetch-first rejection — the exact symptom
-    seen when a second CI-fix iteration runs before the bot's previous push has
-    been mirrored locally, or when a human commits to the bot's branch — we then:
+    The first attempt is ``git push <remote> <push_ref>``. If that fails with a
+    non-fast-forward / fetch-first rejection — the exact symptom seen when a
+    second CI-fix iteration runs before the bot's previous push has been mirrored
+    locally, or when a human commits to the bot's branch — we then:
 
     1. ``git fetch <remote> <branch>`` to update the remote-tracking ref.
     2. ``git push --force-with-lease=<branch> <remote> <push_ref_or_default>`` so
@@ -324,9 +323,6 @@ def push_current_branch_with_lease_on_divergence(
             should pass an explicit refspec like ``f"HEAD:{branch}"`` to force
             the push to land on the named remote branch regardless of local
             branch state.
-        verify: Whether Git should run local pre-push hooks. Automation callers
-            that already validated their change can set this to ``False`` so
-            local hooks cannot trap the worker inside an unrelated full-suite run.
 
     Returns:
         The successful push's ``CompletedProcess``.
@@ -339,12 +335,13 @@ def push_current_branch_with_lease_on_divergence(
 
     """
     try:
-        push_cmd = ["git", "push"]
-        if not verify:
-            push_cmd.append("--no-verify")
-        push_cmd.extend([remote, push_ref])
         return run(
-            push_cmd,
+            [
+                "git",
+                "push",
+                remote,
+                push_ref,
+            ],
             cwd=cwd,
         )
     except subprocess.CalledProcessError as exc:
@@ -369,18 +366,14 @@ def push_current_branch_with_lease_on_divergence(
         # ``HEAD:<branch>`` so the lease push and the initial push behave
         # consistently when no explicit refspec is given.
         lease_push_ref = push_ref if push_ref != "HEAD" else f"HEAD:{branch}"
-        lease_cmd = ["git", "push"]
-        if not verify:
-            lease_cmd.append("--no-verify")
-        lease_cmd.extend(
+        return run(
             [
+                "git",
+                "push",
                 f"--force-with-lease={branch}",
                 remote,
                 lease_push_ref,
-            ]
-        )
-        return run(
-            lease_cmd,
+            ],
             cwd=cwd,
         )
 

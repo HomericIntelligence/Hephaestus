@@ -310,9 +310,7 @@ def test_codex_ci_fix_session_falls_back_to_fresh_on_resume_failure(
     mock_sync.assert_called_once_with(tmp_path, "456-pr-head")
     # And the push must target the PR's head branch explicitly — not bare HEAD —
     # so a Claude-side branch switch cannot route the fix to a stray branch (#832).
-    mock_push.assert_called_once_with(
-        tmp_path, branch="456-pr-head", push_ref="HEAD:456-pr-head", verify=False
-    )
+    mock_push.assert_called_once_with(tmp_path, branch="456-pr-head", push_ref="HEAD:456-pr-head")
 
 
 def test_codex_ci_fix_session_skips_push_when_head_did_not_advance(
@@ -2421,9 +2419,7 @@ class TestMechanicalRebase:
         assert result is True
         mock_sync.assert_called_once_with(tmp_path, "5-impl")
         mock_rebase.assert_called_once_with(tmp_path, "main")
-        mock_push.assert_called_once_with(
-            tmp_path, branch="5-impl", push_ref="HEAD:5-impl", verify=False
-        )
+        mock_push.assert_called_once_with(tmp_path, branch="5-impl", push_ref="HEAD:5-impl")
 
     def test_conflicting_pr_defers_to_agent_no_push(self, driver: CIDriver, tmp_path: Path) -> None:
         """A DIRTY PR whose rebase conflicts must NOT push — it returns False."""
@@ -2511,9 +2507,7 @@ class TestMechanicalRebase:
 
         assert result is True
         mock_rebase.assert_called_once_with(tmp_path, "main")
-        mock_push.assert_called_once_with(
-            tmp_path, branch="5-impl", push_ref="HEAD:5-impl", verify=False
-        )
+        mock_push.assert_called_once_with(tmp_path, branch="5-impl", push_ref="HEAD:5-impl")
 
     def test_uses_pr_base_ref_not_hardcoded_main(self, driver: CIDriver, tmp_path: Path) -> None:
         """The rebase targets the PR's actual baseRefName, not a hardcoded main."""

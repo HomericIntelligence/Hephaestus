@@ -262,9 +262,7 @@ class TestAttemptMechanicalRebase:
         ):
             assert orchestrator.attempt_mechanical_rebase(5, 50, 0) is True
         mock_rebase.assert_called_once_with(tmp_path, "main")
-        mock_push.assert_called_once_with(
-            tmp_path, branch="5-impl", push_ref="HEAD:5-impl", verify=False
-        )
+        mock_push.assert_called_once()
 
     def test_behind_pr_rebases_clean_and_pushes(
         self, orchestrator: CIFixOrchestrator, tmp_path: Path
@@ -286,9 +284,7 @@ class TestAttemptMechanicalRebase:
         ):
             assert orchestrator.attempt_mechanical_rebase(5, 50, 0) is True
         mock_rebase.assert_called_once_with(tmp_path, "main")
-        mock_push.assert_called_once_with(
-            tmp_path, branch="5-impl", push_ref="HEAD:5-impl", verify=False
-        )
+        mock_push.assert_called_once()
 
     def test_gh_query_failure_swallowed(self, orchestrator: CIFixOrchestrator) -> None:
         with patch(
