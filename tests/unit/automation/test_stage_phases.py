@@ -194,9 +194,9 @@ def test_implement_phase_run_claude_code_dispatches_claude(tmp_path: Path) -> No
 def test_pr_create_finalize_persists_pr_number(tmp_path: Path) -> None:
     """_finalize_pr ensures the PR exists and persists its number on state."""
     ctx = _make_ctx(tmp_path)
-    ctx.impl._ensure_pr_created = mock.MagicMock(return_value=321)  # type: ignore[attr-defined]
-    ctx.impl._commit_changes = mock.MagicMock()  # type: ignore[attr-defined]
-    ctx.impl._run_tests_in_worktree = mock.MagicMock(return_value=True)  # type: ignore[attr-defined]
+    ctx.impl._ensure_pr_created = mock.MagicMock(return_value=321)  # type: ignore[method-assign]
+    ctx.impl._commit_changes = mock.MagicMock()  # type: ignore[method-assign]
+    ctx.impl._run_tests_in_worktree = mock.MagicMock(return_value=True)  # type: ignore[method-assign]
     phase = PRCreatePhase(ctx)
     state = SimpleNamespace(phase=None, pr_number=None)
     with mock.patch(
@@ -214,9 +214,9 @@ def test_pr_create_finalize_persists_pr_number(tmp_path: Path) -> None:
 def test_pr_create_finalize_commits_dirty_worktree_before_pr(tmp_path: Path) -> None:
     """_finalize_pr commits agent edits before push/PR creation."""
     ctx = _make_ctx(tmp_path)
-    ctx.impl._commit_changes = mock.MagicMock()  # type: ignore[attr-defined]
-    ctx.impl._ensure_pr_created = mock.MagicMock(return_value=321)  # type: ignore[attr-defined]
-    ctx.impl._run_tests_in_worktree = mock.MagicMock(return_value=True)  # type: ignore[attr-defined]
+    ctx.impl._commit_changes = mock.MagicMock()  # type: ignore[method-assign]
+    ctx.impl._ensure_pr_created = mock.MagicMock(return_value=321)  # type: ignore[method-assign]
+    ctx.impl._run_tests_in_worktree = mock.MagicMock(return_value=True)  # type: ignore[method-assign]
     parent = mock.MagicMock()
     parent.attach_mock(ctx.impl._commit_changes, "commit")
     parent.attach_mock(ctx.impl._ensure_pr_created, "ensure")
@@ -241,9 +241,9 @@ def test_pr_create_finalize_commits_dirty_worktree_before_pr(tmp_path: Path) -> 
 def test_pr_create_finalize_runs_pre_pr_tests_when_enabled(tmp_path: Path) -> None:
     """_finalize_pr runs the opt-in pre-PR test gate before creating the PR."""
     ctx = _make_ctx(tmp_path, run_pre_pr_tests=True)
-    ctx.impl._ensure_pr_created = mock.MagicMock(return_value=9)  # type: ignore[attr-defined]
-    ctx.impl._commit_changes = mock.MagicMock()  # type: ignore[attr-defined]
-    ctx.impl._run_tests_in_worktree = mock.MagicMock(return_value=False)  # type: ignore[attr-defined]
+    ctx.impl._ensure_pr_created = mock.MagicMock(return_value=9)  # type: ignore[method-assign]
+    ctx.impl._commit_changes = mock.MagicMock()  # type: ignore[method-assign]
+    ctx.impl._run_tests_in_worktree = mock.MagicMock(return_value=False)  # type: ignore[method-assign]
     phase = PRCreatePhase(ctx)
     state = SimpleNamespace(phase=None, pr_number=None)
     with mock.patch(

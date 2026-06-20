@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation import pr_manager
+from hephaestus.automation.session_naming import AGENT_COMMIT_MESSAGE, AGENT_PR_MESSAGE
 
 
 def _status(stdout: str = "", returncode: int = 0) -> MagicMock:
@@ -350,7 +351,7 @@ class TestMessageAgentInvocation:
             assert (
                 pr_manager._invoke_git_message_agent(
                     issue_number=9,
-                    agent_kind=pr_manager.AGENT_COMMIT_MESSAGE,
+                    agent_kind=AGENT_COMMIT_MESSAGE,
                     prompt="prompt",
                     worktree_path=Path("/tmp/wt"),
                     agent="claude",
@@ -359,7 +360,7 @@ class TestMessageAgentInvocation:
             )
 
         kwargs = invoke.call_args.kwargs
-        assert kwargs["agent"] == pr_manager.AGENT_COMMIT_MESSAGE
+        assert kwargs["agent"] == AGENT_COMMIT_MESSAGE
         assert kwargs["model"] == "claude-haiku-4-5"
         assert kwargs["allowed_tools"] == "Read,Glob,Grep"
         assert kwargs["timeout"] == 120
@@ -377,7 +378,7 @@ class TestMessageAgentInvocation:
             assert (
                 pr_manager._invoke_git_message_agent(
                     issue_number=9,
-                    agent_kind=pr_manager.AGENT_PR_MESSAGE,
+                    agent_kind=AGENT_PR_MESSAGE,
                     prompt="prompt",
                     worktree_path=Path("/tmp/wt"),
                     agent="codex",
