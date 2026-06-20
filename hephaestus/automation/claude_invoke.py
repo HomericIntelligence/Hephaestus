@@ -18,6 +18,7 @@ What lives here:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -27,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hephaestus.automation.session_naming import session_jsonl_path, session_name
+from hephaestus.github.client import ClaudeUsageCapError
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch
 
 logger = logging.getLogger(__name__)
@@ -184,6 +186,47 @@ def invoke_claude_with_session(
         cwd=str(cwd),
     )
     return result.stdout, sid
+
+
+def raise_for_error_envelope(stdout: str) -> None:
+    """Raise if ``stdout`` is an ``is_error: true`` Claude JSON envelope.
+
+    The Claude CLI can exit 0 while returning a JSON envelope whose
+    ``is_error`` is true — e.g. a 429 quota cap or another fatal API error
+    surfaced inside the ``result`` field. Callers that pass
+    ``output_format="json"`` and would otherwise treat that envelope as a real
+    result (``pr_reviewer``, ``review_validator``) call this to fail loudly
+    instead of forwarding the cap message downstream (#1528 follow-up).
+
+    A quota cap becomes a :class:`ClaudeUsageCapError` carrying the reset epoch
+    (a ``RuntimeError`` subclass, so existing ``except RuntimeError`` handlers
+    still catch it); any other ``is_error`` envelope becomes a plain
+    ``RuntimeError``. Non-JSON or non-error stdout is left untouched.
+
+    Args:
+        stdout: The raw stdout returned by :func:`invoke_claude_with_session`.
+
+    Raises:
+        ClaudeUsageCapError: If the envelope signals a 429 quota cap.
+        RuntimeError: If the envelope is ``is_error`` for any other reason.
+
+    """
+    if not stdout:
+        return
+    try:
+        data = json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        return
+    if not (isinstance(data, dict) and data.get("is_error")):
+        return
+    err_text = str(data.get("result") or "")
+    reset_epoch = resolve_quota_reset_epoch(err_text)
+    if reset_epoch is not None:
+        raise ClaudeUsageCapError(
+            "Claude usage cap reached",
+            reset_epoch=reset_epoch if reset_epoch > 0 else None,
+        )
+    raise RuntimeError(f"Claude Code failed: {err_text or 'is_error=true'}")
 
 
 def scan_quota_reset(*texts: str) -> int | None:

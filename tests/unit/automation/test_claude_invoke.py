@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from hephaestus.automation.claude_invoke import (
     INFRA_ERROR_REVIEW_TEXT,
     ReviewVerdict,
@@ -144,3 +146,53 @@ class TestInfraErrorVerdict:
         """A GO verdict is not an error."""
         v = parse_review_verdict("Grade: A\nVerdict: GO")
         assert v.is_error is False
+
+
+class TestRaiseForErrorEnvelope:
+    """Tests for the central is_error JSON envelope guard (#1528 follow-up)."""
+
+    def test_429_envelope_raises_usage_cap_with_reset(self) -> None:
+        """A 429 envelope raises ClaudeUsageCapError carrying the reset epoch."""
+        import json
+
+        from hephaestus.automation.claude_invoke import raise_for_error_envelope
+        from hephaestus.github.client import ClaudeUsageCapError
+
+        stdout = json.dumps(
+            {
+                "is_error": True,
+                "api_error_status": 429,
+                "result": "You've hit your session limit · resets 5pm (America/Los_Angeles)",
+            }
+        )
+        with pytest.raises(ClaudeUsageCapError) as exc:
+            raise_for_error_envelope(stdout)
+        assert exc.value.reset_epoch is not None and exc.value.reset_epoch > 0
+
+    def test_non_quota_error_envelope_raises_runtime_error(self) -> None:
+        """A non-quota is_error envelope raises a plain RuntimeError."""
+        import json
+
+        from hephaestus.automation.claude_invoke import raise_for_error_envelope
+        from hephaestus.github.client import ClaudeUsageCapError
+
+        stdout = json.dumps({"is_error": True, "result": "tool execution failed"})
+        with pytest.raises(RuntimeError) as exc:
+            raise_for_error_envelope(stdout)
+        assert not isinstance(exc.value, ClaudeUsageCapError)
+
+    def test_success_envelope_does_not_raise(self) -> None:
+        """A normal (is_error absent/false) result is left untouched."""
+        import json
+
+        from hephaestus.automation.claude_invoke import raise_for_error_envelope
+
+        raise_for_error_envelope(json.dumps({"result": "Grade: A\nVerdict: GO"}))
+        raise_for_error_envelope(json.dumps({"is_error": False, "result": "ok"}))
+
+    def test_non_json_stdout_does_not_raise(self) -> None:
+        """Plain-text or empty stdout is ignored (not every caller uses json)."""
+        from hephaestus.automation.claude_invoke import raise_for_error_envelope
+
+        raise_for_error_envelope("just some prose")
+        raise_for_error_envelope("")

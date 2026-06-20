@@ -43,7 +43,7 @@ from ._review_utils import (
     setup_review_logging,
 )
 from ._reviewer_base import BaseReviewer
-from .claude_invoke import invoke_claude_with_session
+from .claude_invoke import invoke_claude_with_session, raise_for_error_envelope
 from .claude_models import reviewer_model
 from .claude_timeouts import pr_reviewer_claude_timeout
 from .curses_ui import CursesUI
@@ -177,6 +177,13 @@ def run_pr_review_analysis(
             input_via_stdin=True,
         )
         log_file.write_text(stdout or "")
+
+        # The CLI can exit 0 with an ``is_error: true`` envelope carrying a 429
+        # quota cap; without this guard the cap message would be parsed as
+        # review text and silently produce a bogus verdict (#1528 follow-up).
+        # Raises ClaudeUsageCapError (a RuntimeError) so the review-phase handler
+        # waits for reset before recording ERROR.
+        raise_for_error_envelope(stdout or "")
 
         # Extract the response text from Claude's JSON wrapper
         try:

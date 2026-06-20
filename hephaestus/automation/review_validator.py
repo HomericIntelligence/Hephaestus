@@ -38,7 +38,7 @@ from typing import Any
 from hephaestus.agents.runtime import is_codex, run_codex_text
 
 from ._review_utils import parse_json_block
-from .claude_invoke import invoke_claude_with_session
+from .claude_invoke import invoke_claude_with_session, raise_for_error_envelope
 from .claude_models import reviewer_model
 from .claude_timeouts import pr_reviewer_claude_timeout
 from .git_utils import get_repo_root, get_repo_slug, pr_ref
@@ -198,6 +198,10 @@ def _run_validation_session(
                 input_via_stdin=True,
             )
             log_file.write_text(stdout or "")
+            # Fail loudly on an ``is_error: true`` envelope (e.g. a 429 cap)
+            # instead of validating against the cap message as if it were a
+            # real review (#1528 follow-up).
+            raise_for_error_envelope(stdout or "")
             try:
                 data = json.loads(stdout or "{}")
                 response_text: str = data.get("result", stdout or "")

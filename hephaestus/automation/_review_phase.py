@@ -28,7 +28,7 @@ from hephaestus.agents.runtime import (
     resume_codex_session,
     run_codex_text,
 )
-from hephaestus.github.client import gh_call
+from hephaestus.github.client import ClaudeUsageCapError, gh_call
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 
 from . import review_state
@@ -98,7 +98,9 @@ def _handle_reviewer_quota_or_overload(
 
     The reviewer subprocess surfaces the 429/529 text inside the ``RuntimeError``
     message (``Analysis session failed for PR …: <CLI output>``), so the
-    classifiers read ``str(error)``.
+    classifiers read ``str(error)``. A :class:`ClaudeUsageCapError` raised by the
+    central ``is_error`` envelope guard carries the reset epoch as an attribute
+    instead (its message has no reset phrasing), so that is honored first.
 
     Args:
         error: The exception raised by the reviewer invocation.
@@ -106,8 +108,12 @@ def _handle_reviewer_quota_or_overload(
         iteration: Current review iteration; also drives the overload backoff.
 
     """
+    # A typed cap carries the reset epoch directly — prefer it over text scanning.
+    cap_reset = (
+        getattr(error, "reset_epoch", None) if isinstance(error, ClaudeUsageCapError) else None
+    )
     text = str(error)
-    reset_epoch = resolve_quota_reset_epoch(text)
+    reset_epoch = cap_reset if cap_reset is not None else resolve_quota_reset_epoch(text)
     if reset_epoch is not None and reset_epoch > 0:
         logger.warning(
             "#%s R%s: in-loop PR review hit Claude usage cap; waiting for reset",

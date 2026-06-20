@@ -73,6 +73,26 @@ class TestHandleReviewerQuotaOrOverload:
         assert waited == []
         assert slept == []
 
+    def test_usage_cap_error_reset_epoch_attr_is_honored(self, monkeypatch):
+        """A ClaudeUsageCapError's reset_epoch attribute drives wait_until.
+
+        The central is_error guard raises ClaudeUsageCapError whose message has
+        no reset phrasing, so resolve_quota_reset_epoch(str(e)) would miss it —
+        the attribute must be used instead (#1528 follow-up).
+        """
+        from hephaestus.github.client import ClaudeUsageCapError
+
+        waited: list[int] = []
+        monkeypatch.setattr(_review_phase, "wait_until", lambda epoch: waited.append(epoch))
+        # str(error) carries no reset phrasing, so text scanning returns None.
+        monkeypatch.setattr(_review_phase, "resolve_quota_reset_epoch", lambda *t: None)
+
+        future = int(time.time()) + 3600
+        err = ClaudeUsageCapError("Claude usage cap reached", reset_epoch=future)
+        _review_phase._handle_reviewer_quota_or_overload(err, issue_number=5, iteration=0)
+
+        assert waited == [future]
+
     def test_zero_reset_epoch_does_not_wait(self, monkeypatch):
         """A 0 reset-epoch sentinel (reset unknown) must not call wait_until."""
         waited: list[int] = []
