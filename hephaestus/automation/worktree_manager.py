@@ -22,6 +22,7 @@ that runs the automation. Recovery procedure for a force-killed loop:
     rm -rf <repo>/build/.worktrees/issue-N                    # last resort
 """
 
+import contextlib
 import logging
 import os
 import shutil
@@ -460,6 +461,23 @@ class WorktreeManager:
                 return
 
             worktree_path = self.worktrees[issue_number]
+
+            # Idempotent removal: when several issues share one branch they alias
+            # the same path (see create_worktree's branch-reuse), so cleanup_all
+            # may reach this with the directory already gone after the first key
+            # removed it. Treat an absent directory as already-removed rather than
+            # raising [Errno 2] — drop the key and prune stale git metadata (#1532).
+            if not worktree_path.exists():
+                logger.info(
+                    "Worktree directory for issue #%s already gone (%s); pruning metadata",
+                    issue_number,
+                    worktree_path,
+                )
+                del self.worktrees[issue_number]
+                with contextlib.suppress(Exception):
+                    run(["git", "worktree", "prune"], cwd=self.repo_root, check=False)
+                return
+
             self._cleanup_automation_prompt_artifacts(worktree_path)
 
             if not force and not is_clean_working_tree(worktree_path):
@@ -510,9 +528,28 @@ class WorktreeManager:
         with self.lock:
             issue_numbers = list(self.worktrees.keys())
 
+        # Several issues can alias the same path when they share a branch (see
+        # create_worktree's branch-reuse). Remove each distinct directory once;
+        # for aliased keys whose path was already removed, just drop the stale
+        # registration instead of re-running `git worktree remove` on a gone dir
+        # (which logged "[Errno 2]" failures before #1532).
+        removed_paths: set[Path] = set()
         for issue_num in issue_numbers:
+            with self.lock:
+                path = self.worktrees.get(issue_num)
+            if path is not None and path in removed_paths:
+                with self.lock:
+                    self.worktrees.pop(issue_num, None)
+                logger.debug(
+                    "Issue #%s aliases already-removed worktree %s; dropping registration",
+                    issue_num,
+                    path,
+                )
+                continue
             try:
                 self.remove_worktree(issue_num, force=force)
+                if path is not None:
+                    removed_paths.add(path)
             except WorktreeDirtyError as e:
                 logger.info("Preserved dirty worktree for issue #%s at %s", e.issue_number, e.path)
                 self.preserved.append((e.issue_number, e.path))

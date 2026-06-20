@@ -303,8 +303,10 @@ class TestWorktreeManager:
         mock_run.return_value.stdout = "origin/main"
         manager = WorktreeManager()
 
-        # Add worktree to tracked list
+        # Add worktree to tracked list (directory must exist on disk so removal
+        # runs `git worktree remove` rather than the idempotent already-gone path).
         worktree_path = manager.base_dir / "issue-123"
+        worktree_path.mkdir(parents=True)
         manager.worktrees[123] = worktree_path
 
         manager.remove_worktree(123)
@@ -326,6 +328,7 @@ class TestWorktreeManager:
         manager = WorktreeManager()
 
         worktree_path = manager.base_dir / "issue-123"
+        worktree_path.mkdir(parents=True)
         manager.worktrees[123] = worktree_path
 
         manager.remove_worktree(123, force=True)
@@ -362,6 +365,7 @@ class TestWorktreeManager:
         manager = WorktreeManager()
 
         worktree_path = manager.base_dir / "issue-123"
+        worktree_path.mkdir(parents=True)
         manager.worktrees[123] = worktree_path
 
         mock_run.side_effect = subprocess.CalledProcessError(1, "git")
@@ -380,6 +384,7 @@ class TestWorktreeManager:
         manager = WorktreeManager()
 
         worktree_path = manager.base_dir / "issue-42"
+        worktree_path.mkdir(parents=True)
         manager.worktrees[42] = worktree_path
 
         with pytest.raises(WorktreeDirtyError) as exc_info:
@@ -406,6 +411,7 @@ class TestWorktreeManager:
         manager = WorktreeManager()
 
         dirty_path = manager.base_dir / "issue-1"
+        dirty_path.mkdir(parents=True)
         manager.worktrees[1] = dirty_path
 
         manager.cleanup_all()
@@ -437,10 +443,11 @@ class TestWorktreeManager:
         mock_get_root.return_value = tmp_path
         manager = WorktreeManager()
 
-        # Add multiple worktrees
-        manager.worktrees[123] = manager.base_dir / "issue-123"
-        manager.worktrees[456] = manager.base_dir / "issue-456"
-        manager.worktrees[789] = manager.base_dir / "issue-789"
+        # Add multiple worktrees (dirs must exist so each runs a real removal).
+        for num in (123, 456, 789):
+            path = manager.base_dir / f"issue-{num}"
+            path.mkdir(parents=True)
+            manager.worktrees[num] = path
 
         manager.cleanup_all()
 
@@ -459,8 +466,10 @@ class TestWorktreeManager:
         mock_get_root.return_value = tmp_path
         manager = WorktreeManager()
 
-        manager.worktrees[123] = manager.base_dir / "issue-123"
-        manager.worktrees[456] = manager.base_dir / "issue-456"
+        for num in (123, 456):
+            path = manager.base_dir / f"issue-{num}"
+            path.mkdir(parents=True)
+            manager.worktrees[num] = path
 
         # First removal fails, second succeeds
         mock_run.side_effect = [
@@ -470,6 +479,67 @@ class TestWorktreeManager:
 
         # Should not crash
         manager.cleanup_all()
+
+    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=True)
+    @patch("hephaestus.automation.worktree_manager.run")
+    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    def test_remove_worktree_missing_dir_is_idempotent(
+        self, mock_get_root: Any, mock_run: Any, mock_clean: Any, tmp_path: Any
+    ) -> None:
+        """Removing a worktree whose directory is already gone succeeds (#1532).
+
+        Regression for the `[Errno 2] No such file or directory` failures: a
+        missing directory must be treated as already-removed (drop the key,
+        prune metadata) rather than running `git worktree remove` on a gone dir.
+        """
+        mock_get_root.return_value = tmp_path
+        manager = WorktreeManager()
+
+        # Registered but never created on disk (the post-first-removal alias case).
+        gone_path = manager.base_dir / "issue-28"
+        manager.worktrees[28] = gone_path
+
+        manager.remove_worktree(28)
+
+        assert 28 not in manager.worktrees
+        # No `git worktree remove` fired; only the metadata prune.
+        assert all(
+            call.args[0][0:3] != ["git", "worktree", "remove"] for call in mock_run.call_args_list
+        )
+        assert any(call.args[0] == ["git", "worktree", "prune"] for call in mock_run.call_args_list)
+
+    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=True)
+    @patch("hephaestus.automation.worktree_manager.run")
+    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    def test_cleanup_all_dedups_aliased_paths(
+        self, mock_get_root: Any, mock_run: Any, mock_clean: Any, tmp_path: Any
+    ) -> None:
+        """Several issue keys aliasing one path remove it once, no errors (#1532).
+
+        Reproduces the branch-reuse aliasing (issues #12/#29/#65 sharing the
+        issue-28 worktree): the shared directory is removed exactly once and the
+        aliased registrations are dropped without re-running removal on a gone dir.
+        """
+        mock_get_root.return_value = tmp_path
+        manager = WorktreeManager()
+
+        shared = manager.base_dir / "issue-28"
+        shared.mkdir(parents=True)
+        # 28 owns the dir; 12/29/65 alias the same path (branch-reuse).
+        for num in (28, 12, 29, 65):
+            manager.worktrees[num] = shared
+
+        manager.cleanup_all()
+
+        assert manager.worktrees == {}
+        assert manager.preserved == []
+        # `git worktree remove` runs exactly once for the shared directory.
+        remove_calls = [
+            call
+            for call in mock_run.call_args_list
+            if call.args[0][0:3] == ["git", "worktree", "remove"]
+        ]
+        assert len(remove_calls) == 1
 
     @patch("hephaestus.automation.worktree_manager.run")
     @patch("hephaestus.automation.worktree_manager.get_repo_root")
