@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +29,7 @@ from hephaestus.agents.runtime import (
     run_codex_text,
 )
 from hephaestus.github.client import gh_call
+from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 
 from . import review_state
 from ._stage_context import StageMixin
@@ -35,6 +37,7 @@ from .address_review import run_address_fix_session
 from .claude_invoke import (
     INFRA_ERROR_REVIEW_TEXT,
     SESSION_EXPIRED_PHRASES,
+    detect_server_overload,
     invoke_claude_with_session,
     parse_review_verdict,
 )
@@ -74,6 +77,57 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAX_REVIEW_ITERATIONS = 3
+
+# Bounded exponential backoff for transient 529 server-overload responses
+# (5s → 10s → 20s, capped). Unlike a 429 quota cap these carry no reset epoch,
+# so the correct response is a short backoff, not a wait-until-reset.
+_OVERLOAD_BACKOFF_BASE_SECONDS = 5
+_OVERLOAD_BACKOFF_MAX_SECONDS = 20
+
+
+def _handle_reviewer_quota_or_overload(
+    error: Exception, *, issue_number: int, iteration: int
+) -> None:
+    """Block on a Claude quota cap / server overload before recording ERROR.
+
+    The in-loop PR-review path used to catch a 429 session-limit failure, record
+    a synthetic ``Verdict=ERROR``, and immediately re-review — firing fresh
+    reviewer sessions against an exhausted quota (issue #1528). The implement
+    phase already detects the cap and blocks; this helper gives the review path
+    the same behavior so both honor the same transient-failure families.
+
+    The reviewer subprocess surfaces the 429/529 text inside the ``RuntimeError``
+    message (``Analysis session failed for PR …: <CLI output>``), so the
+    classifiers read ``str(error)``.
+
+    Args:
+        error: The exception raised by the reviewer invocation.
+        issue_number: Issue under review (for log context).
+        iteration: Current review iteration; also drives the overload backoff.
+
+    """
+    text = str(error)
+    reset_epoch = resolve_quota_reset_epoch(text)
+    if reset_epoch is not None and reset_epoch > 0:
+        logger.warning(
+            "#%s R%s: in-loop PR review hit Claude usage cap; waiting for reset",
+            issue_number,
+            iteration,
+        )
+        wait_until(reset_epoch)
+        return
+    if detect_server_overload(text):
+        delay = min(
+            _OVERLOAD_BACKOFF_BASE_SECONDS * (2**iteration),
+            _OVERLOAD_BACKOFF_MAX_SECONDS,
+        )
+        logger.warning(
+            "#%s R%s: in-loop PR review hit server overload; backing off %ss",
+            issue_number,
+            iteration,
+            delay,
+        )
+        time.sleep(delay)
 
 
 def _is_automation_owned_thread(thread: dict[str, Any], current_login: str | None) -> bool:
@@ -1142,6 +1196,11 @@ class ReviewPhase(StageMixin):
                 dry_run=False,
             )
         except Exception as e:
+            # A 429 quota cap / 529 overload must pause the loop, not spin fresh
+            # reviewer sessions against an exhausted quota (issue #1528). After
+            # any wait, still record ERROR so a transient infra failure re-reviews
+            # next loop and is never mistaken for a NOGO.
+            _handle_reviewer_quota_or_overload(e, issue_number=issue_number, iteration=iteration)
             logger.error(
                 "#%s R%s: in-loop PR review failed: %s; recording ERROR (re-review next "
                 "loop, no skip/label) so an infra failure isn't mistaken for a NOGO",
@@ -1501,6 +1560,10 @@ class ReviewPhase(StageMixin):
                 raise RuntimeError("reviewer returned empty output")
             return output
         except Exception as e:
+            # Mirror the in-loop path: pause on a Claude 429 cap / 529 overload
+            # before recording ERROR so the diff-only fallback does not burn
+            # sessions against an exhausted quota either (issue #1528).
+            _handle_reviewer_quota_or_overload(e, issue_number=issue_number, iteration=iteration)
             logger.error(
                 "#%s R%s: impl reviewer call failed: %s; recording ERROR (re-review next "
                 "loop, no skip/label) so an infra failure isn't mistaken for a NOGO",
