@@ -92,26 +92,49 @@ class FollowUpResponse:
 def _extract_json_object(text: str) -> dict[str, Any] | None:
     """Extract the first JSON object from ``text``.
 
-    Looks for a fenced ```json ... ``` block first, then falls back to
-    ``json.JSONDecoder.raw_decode`` over the bare text starting at the
-    first ``{``. Returns ``None`` if nothing parseable is found.
-    """
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if fenced is not None:
-        candidate = fenced.group(1)
-    else:
-        start = text.find("{")
-        if start == -1:
-            return None
-        candidate = text[start:]
+    Prefers a fenced ```json ... ``` block, then falls back to scanning the
+    bare text. Both paths use ``json.JSONDecoder.raw_decode`` from each ``{``
+    so a valid object is found even when:
 
-    try:
-        parsed, _ = json.JSONDecoder().raw_decode(candidate)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    return parsed
+    * the object contains nested braces — a non-greedy ``{.*?}`` regex would
+      truncate at the first ``}`` and fail to parse (#1534); and
+    * the first ``{`` in the text is prose (an example or stray brace) rather
+      than the start of the JSON — earlier ``{`` candidates are skipped until
+      one decodes.
+
+    Returns ``None`` if nothing parseable is found.
+    """
+    # Greedy capture inside the fence (not the non-greedy `{.*?}`): the
+    # _decode_first_object scan below validates and trims to the real object,
+    # so capturing too much is harmless but capturing too little drops data.
+    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+    if fenced is not None:
+        parsed = _decode_first_object(fenced.group(1))
+        if parsed is not None:
+            return parsed
+
+    return _decode_first_object(text)
+
+
+def _decode_first_object(text: str) -> dict[str, Any] | None:
+    """Return the first JSON object decodable from any ``{`` position in ``text``.
+
+    Tries ``raw_decode`` at each ``{`` in order, so a leading prose brace does
+    not mask a valid object that appears later. Returns ``None`` if no ``{``
+    starts a decodable JSON object (or the decoded value is not an object).
+    """
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    while start != -1:
+        try:
+            parsed, _ = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            start = text.find("{", start + 1)
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+        start = text.find("{", start + 1)
+    return None
 
 
 def _classify_follow_up_entry(
@@ -161,7 +184,15 @@ def parse_follow_up_response(text: str) -> FollowUpResponse:
     """
     obj = _extract_json_object(text)
     if obj is None:
-        logger.warning("No JSON object found in follow-up response")
+        # Surface a snippet so a dropped follow-up batch is diagnosable rather
+        # than vanishing silently (#1534). The text is the agent's `result`
+        # field, which may be empty (truncated/soft-capped session) or prose.
+        snippet = text.strip().replace("\n", " ")[:200]
+        logger.warning(
+            "No JSON object found in follow-up response (%d chars); first 200: %r",
+            len(text),
+            snippet,
+        )
         return FollowUpResponse()
 
     raw_follow_ups = obj.get("follow_ups", [])
