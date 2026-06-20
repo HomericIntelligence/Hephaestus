@@ -105,6 +105,50 @@ class TestParseFollowUpResponse:
         assert len(response.follow_ups) == 1
         assert response.follow_ups[0].category == "security"
 
+    def test_parses_when_prose_brace_precedes_real_json(self) -> None:
+        """A stray ``{`` in prose before the JSON must not mask the real object.
+
+        Regression for #1534: decoding only from the first ``{`` failed when an
+        example brace appeared earlier in the text; the scan now skips it.
+        """
+        text = (
+            "Here is an example shape like {category, title, body} for reference.\n"
+            '{"follow_ups": [{"category": "core", "title": "Real",'
+            ' "body": "B"}], "rejected": []}'
+        )
+        response = parse_follow_up_response(text)
+        assert len(response.follow_ups) == 1
+        assert response.follow_ups[0].title == "Real"
+
+    def test_parses_fenced_json_with_deeply_nested_object(self) -> None:
+        """Greedy fenced capture must span multiple levels of nested braces."""
+        text = (
+            "```json\n"
+            '{"follow_ups": [{"category": "core", "title": "T", "body": "B",'
+            ' "meta": {"a": {"b": {"c": 1}}}}], "rejected": []}\n'
+            "```"
+        )
+        response = parse_follow_up_response(text)
+        assert len(response.follow_ups) == 1
+        assert response.follow_ups[0].title == "T"
+
+    def test_empty_response_logs_diagnostic_snippet(self) -> None:
+        """An empty/truncated session result logs length + snippet, not a bare warning.
+
+        The 37 ``No JSON object found`` warnings in the loop log carried no
+        context; #1534 surfaces the response length and a snippet so a dropped
+        follow-up batch is diagnosable.
+        """
+        with patch("hephaestus.automation.follow_up.logger") as mock_logger:
+            response = parse_follow_up_response("")
+        assert response.follow_ups == []
+        assert response.rejected == []
+        mock_logger.warning.assert_called_once()
+        fmt = mock_logger.warning.call_args.args[0]
+        assert "No JSON object found" in fmt
+        # length arg and snippet arg are passed for diagnosis
+        assert mock_logger.warning.call_args.args[1] == 0
+
     def test_caps_at_three_items(self) -> None:
         items = [{"category": "core", "title": f"T{i}", "body": f"B{i}"} for i in range(10)]
         text = json.dumps({"follow_ups": items, "rejected": []})
