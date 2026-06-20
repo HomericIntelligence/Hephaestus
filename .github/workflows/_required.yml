@@ -78,7 +78,7 @@ jobs:
     needs: changes-gate
     if: needs.changes-gate.outputs.code_event == 'true'
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: "Reject silent-failure workaround in shell/YAML/Dockerfile/justfile/HCL"
         run: |
@@ -166,7 +166,7 @@ jobs:
     if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           fetch-depth: 0
 
@@ -218,7 +218,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - name: Setup pixi
         uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11  # v0.9.6
         with:
@@ -242,7 +242,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
         with:
@@ -261,7 +261,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - name: Run symlink check
         run: bash scripts/check-symlinks.sh
 
@@ -274,7 +274,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Run shellcheck
@@ -323,7 +323,7 @@ jobs:
       # that predates the validator and so misses the script. The head SHA is an
       # immutable object id (not an attacker-controllable ref name), and the
       # validator ships with the PR until it lands on main.
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
@@ -515,7 +515,7 @@ jobs:
     if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           # Full history + tags so test_version_currency can resolve the
           # latest vX.Y.Z tag for the doc-version-drift guard (#1233).
@@ -558,7 +558,7 @@ jobs:
     if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Set up Python 3.12
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
@@ -587,7 +587,7 @@ jobs:
     if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Setup pixi env (default)
         uses: ./.github/actions/setup-pixi-env
@@ -605,7 +605,7 @@ jobs:
     if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           fetch-depth: 0
 
@@ -642,7 +642,7 @@ jobs:
     if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Setup pixi env (lint)
         uses: ./.github/actions/setup-pixi-env
@@ -677,7 +677,7 @@ jobs:
     if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           fetch-depth: 0
 
@@ -702,7 +702,7 @@ jobs:
     if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Setup pixi env (lint)
         uses: ./.github/actions/setup-pixi-env
@@ -737,7 +737,7 @@ jobs:
     if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Set up Python 3.12
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
@@ -770,7 +770,7 @@ jobs:
     if: needs.changes-gate.outputs.code_event == 'true'
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           fetch-depth: 0
 
