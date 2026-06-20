@@ -33,14 +33,19 @@ def _relativize_path(path: str, repo_root: str | None) -> str:
     if not path:
         return path
     if repo_root is None:
-        _prompts_logger.warning(
+        # Benign: an absolute path is a correct, working fallback. Logged at
+        # DEBUG so it only surfaces under -v/--verbose rather than as routine
+        # WARNING noise on every default run (#1556).
+        _prompts_logger.debug(
             "repo_root not provided; injecting absolute path into prompt: %s", path
         )
         return path
     try:
         return str(Path(path).relative_to(repo_root))
     except ValueError:
-        _prompts_logger.warning(
+        # Benign: cross-repo paths (e.g. the ProjectMnemosyne marketplace) are
+        # expected and the absolute path works. DEBUG, not WARNING (#1556).
+        _prompts_logger.debug(
             "Path %r is not under repo_root %r; injecting absolute path into prompt.",
             path,
             repo_root,

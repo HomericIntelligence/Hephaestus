@@ -67,25 +67,37 @@ def test_env_var_dir_missing_warns_and_falls_back(
     assert str(nonexistent) in caplog.records[0].getMessage()
 
 
-def test_no_override_no_env_warns_and_uses_default(
+def test_no_override_no_env_no_warning_at_info(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Unset PROJECTS_ROOT + no override emits the 'not set' warning + default."""
+    """Unset PROJECTS_ROOT is benign: nothing at INFO/WARNING, only DEBUG (#1556)."""
     monkeypatch.delenv("PROJECTS_ROOT", raising=False)
-    with caplog.at_level(logging.WARNING, logger="hephaestus.config.paths"):
+    with caplog.at_level(logging.INFO, logger="hephaestus.config.paths"):
+        result = resolve_projects_dir()
+    assert result == DEFAULT_PROJECTS_DIR
+    # Benign fallback must not surface at INFO or above on a default run.
+    assert caplog.records == []
+
+
+def test_no_override_no_env_emits_debug_under_verbose(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The 'not set' fallback message is still available at DEBUG (verbose mode)."""
+    monkeypatch.delenv("PROJECTS_ROOT", raising=False)
+    with caplog.at_level(logging.DEBUG, logger="hephaestus.config.paths"):
         result = resolve_projects_dir()
     assert result == DEFAULT_PROJECTS_DIR
     assert len(caplog.records) == 1
-    assert caplog.records[0].levelno == logging.WARNING
+    assert caplog.records[0].levelno == logging.DEBUG
     assert "PROJECTS_ROOT not set" in caplog.records[0].getMessage()
 
 
-def test_warning_deduplicated_within_process(
+def test_debug_deduplicated_within_process(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Calling resolve twice with the same (override, env) key warns only once."""
+    """Calling resolve twice with the same (override, env) key logs only once."""
     monkeypatch.delenv("PROJECTS_ROOT", raising=False)
-    with caplog.at_level(logging.WARNING, logger="hephaestus.config.paths"):
+    with caplog.at_level(logging.DEBUG, logger="hephaestus.config.paths"):
         first = resolve_projects_dir()
         second = resolve_projects_dir()
     assert first == DEFAULT_PROJECTS_DIR

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 import threading
@@ -227,22 +228,54 @@ def resolve_marketplace(mnemosyne_root: Path) -> tuple[Path | None, str]:
     return marketplace_path, ""
 
 
+def _repair_json_text(text: str) -> str:
+    """Best-effort repair of near-JSON the selector model commonly emits.
+
+    Handles two non-fatal shapes seen in real automation-loop runs (#1556):
+
+    - Python-style single-quoted objects (``{'skills': []}``), which json
+      rejects at char 1 with "Expecting property name enclosed in double
+      quotes".
+    - Trailing commas before ``]`` or ``}`` (``[{"a": 1},]``).
+
+    Quotes are only flipped when the text contains no double quotes, so a
+    valid JSON string that legitimately contains an apostrophe is never
+    corrupted. The result is *attempted* JSON, not guaranteed valid — the
+    caller still parses and validates it.
+    """
+    repaired = text
+    if "'" in repaired and '"' not in repaired:
+        repaired = repaired.replace("'", '"')
+    # Drop trailing commas: `, ]` / `, }` (optionally with whitespace between).
+    repaired = re.sub(r",(\s*[\]}])", r"\1", repaired)
+    return repaired
+
+
 def _extract_json_object(text: str) -> dict[str, object]:
-    """Parse the selector's JSON object, allowing fenced or prefixed output."""
+    """Parse the selector's JSON object, allowing fenced or prefixed output.
+
+    Recovers from the common malformed shapes the selector model emits:
+    markdown code fences, prose prefixes, Python-style single quotes, and
+    trailing commas (#1556). Strict JSON is always tried first.
+    """
     stripped = text.strip()
     if not stripped:
         raise ValueError("empty selector output")
     try:
-        data = json.loads(stripped)
+        data: object = json.loads(stripped)
     except json.JSONDecodeError:
         start = stripped.find("{")
         end = stripped.rfind("}")
         if start < 0 or end < start:
             raise ValueError("selector output did not contain a JSON object") from None
+        candidate = stripped[start : end + 1]
         try:
-            data = json.loads(stripped[start : end + 1])
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"invalid selector JSON: {exc}") from exc
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            try:
+                data = json.loads(_repair_json_text(candidate))
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid selector JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise ValueError("selector JSON must be an object")
     return data

@@ -11,6 +11,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from hephaestus.automation import advise_runner
 
 
@@ -289,3 +291,60 @@ class TestRunAdvise:
 
         assert "[truncated]" in result
         assert len(result) <= 260
+
+
+# ---------------------------------------------------------------------------
+# _extract_json_object — robustness against common malformed selector output
+# ---------------------------------------------------------------------------
+
+
+class TestExtractJsonObject:
+    """The selector model sometimes returns JSON that is not strictly valid.
+
+    These cover the shapes seen in real automation-loop runs (issue #1556):
+    markdown fences, Python-style single quotes, and trailing commas. The
+    extractor must recover rather than raising ``invalid selector JSON``.
+    """
+
+    def test_plain_object(self) -> None:
+        assert advise_runner._extract_json_object('{"skills": []}') == {"skills": []}
+
+    def test_json_fenced_block(self) -> None:
+        text = '```json\n{"skills": [{"name": "a"}]}\n```'
+        assert advise_runner._extract_json_object(text) == {"skills": [{"name": "a"}]}
+
+    def test_bare_fenced_block(self) -> None:
+        text = '```\n{"skills": []}\n```'
+        assert advise_runner._extract_json_object(text) == {"skills": []}
+
+    def test_prose_prefix_before_object(self) -> None:
+        text = 'Here is the selection:\n{"skills": []}'
+        assert advise_runner._extract_json_object(text) == {"skills": []}
+
+    def test_single_quoted_object(self) -> None:
+        # Python-style dict literal: the failure shape from issue #1556's log
+        # ("Expecting property name enclosed in double quotes ... char 1").
+        text = "{'skills': [{'name': 'a', 'reason': 'b'}]}"
+        assert advise_runner._extract_json_object(text) == {
+            "skills": [{"name": "a", "reason": "b"}]
+        }
+
+    def test_trailing_comma_object(self) -> None:
+        text = '{"skills": [{"name": "a"},],}'
+        assert advise_runner._extract_json_object(text) == {"skills": [{"name": "a"}]}
+
+    def test_single_quoted_inside_fence(self) -> None:
+        text = "```json\n{'skills': []}\n```"
+        assert advise_runner._extract_json_object(text) == {"skills": []}
+
+    def test_empty_raises(self) -> None:
+        with pytest.raises(ValueError, match="empty selector output"):
+            advise_runner._extract_json_object("   ")
+
+    def test_no_object_raises(self) -> None:
+        with pytest.raises(ValueError, match="did not contain a JSON object"):
+            advise_runner._extract_json_object("no braces here")
+
+    def test_non_object_json_raises(self) -> None:
+        with pytest.raises(ValueError, match="must be an object"):
+            advise_runner._extract_json_object("[1, 2, 3]")

@@ -66,7 +66,11 @@ def resolve_projects_dir(override: str | None = None) -> Path:
         return DEFAULT_PROJECTS_DIR
 
     if key not in _warned_keys:
-        logger.warning(
+        # Benign: an unset PROJECTS_ROOT with no override is the normal case;
+        # the default is a correct fallback. DEBUG (visible under -v) rather
+        # than routine WARNING noise (#1556). A *nonexistent* PROJECTS_ROOT
+        # (above) stays at WARNING — that is operator misconfiguration.
+        logger.debug(
             "PROJECTS_ROOT not set and no --projects-dir given; falling back to default: %s",
             DEFAULT_PROJECTS_DIR,
         )
