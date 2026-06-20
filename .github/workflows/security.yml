@@ -6,6 +6,7 @@ on:
       - "pixi.toml"
       - "pixi.lock"
       - "pyproject.toml"
+      - "NOTICE"
       - "**/*.py"
       - ".github/workflows/security.yml"
   schedule:
