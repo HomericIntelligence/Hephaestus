@@ -51,8 +51,10 @@ dev = [
     "pre-commit>=3.0,<5",
     "ruff>=0.15,<1",
     # Upper-cap kept in lockstep with pixi.toml [feature.dev]/[feature.lint] —
-    # mypy 1.x and 2.x have different error semantics; CI tests only 1.x.
-    # Enforced by tests/unit/scripts/test_dependency_floor_consistency.py.
+    # silently widening would let pip-install users land on a major that is
+    # never resolved in CI. CI runs `pixi run mypy` against the version
+    # resolved by pixi.lock. Enforced by
+    # tests/unit/scripts/test_dependency_floor_consistency.py.
     "mypy>=1.8.0,<3",
     "build>=1.0,<2",
     "pip-audit>=2.7,<3",
