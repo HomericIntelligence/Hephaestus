@@ -20,6 +20,7 @@ import pytest
 from hephaestus.automation import loop_runner
 from hephaestus.automation.loop_runner import (
     ALL_PHASES,
+    ALL_SELECTABLE,
     LoopConfig,
     PhaseResult,
     RepoResult,
@@ -37,6 +38,7 @@ from hephaestus.automation.loop_runner import (
     run_loop,
     run_phase,
 )
+from hephaestus.automation.state_labels import STATE_SKIP
 from hephaestus.constants import scripts_dir as _scripts_dir
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
@@ -173,6 +175,97 @@ def test_build_phase_argv_forwards_github_throttle_options() -> None:
     assert argv is not None
     assert argv[argv.index("--gh-global-rate") + 1] == "4.5"
     assert argv[argv.index("--gh-global-burst") + 1] == "11"
+
+
+def test_parse_args_accepts_max_merge_attempts() -> None:
+    """--max-merge-attempts is parsed; default is 1 (#1560)."""
+    assert loop_runner._parse_args(["--max-merge-attempts", "3"]).max_merge_attempts == 3
+    assert loop_runner._parse_args([]).max_merge_attempts == 1
+
+
+def test_build_phase_argv_drive_green_forwards_max_merge_attempts() -> None:
+    """drive-green argv carries --max-fix-iterations = cfg.max_merge_attempts (#1560)."""
+    cfg = LoopConfig(max_merge_attempts=4, phases=ALL_SELECTABLE)
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/dg", [])):
+        argv = loop_runner._build_phase_argv("drive-green", cfg, open_issues=[1])
+    assert argv is not None
+    assert argv[argv.index("--max-fix-iterations") + 1] == "4"
+
+
+def test_build_phase_argv_non_drive_green_omits_max_fix_iterations() -> None:
+    """plan/implement argv must not carry the drive-green merge-attempt flag."""
+    cfg = LoopConfig(max_merge_attempts=4)
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/p", [])):
+        plan_argv = loop_runner._build_phase_argv("plan", cfg, open_issues=[1])
+    assert plan_argv is not None
+    assert "--max-fix-iterations" not in plan_argv
+
+
+def test_process_one_issue_tags_skip_when_drive_green_fails() -> None:
+    """A failed (non-merged) drive-green tags the issue state:skip (#1560)."""
+    cfg = LoopConfig(loops=1, phases=ALL_SELECTABLE, max_merge_attempts=2)
+
+    def fake_run_phase(**kw: object) -> PhaseResult:
+        name = str(kw["phase"])
+        rc = 1 if name == "drive-green" else 0  # PR never merges
+        return PhaseResult(name=name, rc=rc, elapsed_s=0.1)
+
+    with (
+        patch.object(loop_runner, "run_phase", side_effect=fake_run_phase),
+        patch.object(loop_runner, "gh_issue_add_labels") as add_labels,
+    ):
+        loop_runner._process_one_issue(
+            repo="r",
+            repo_dir=Path("/tmp/r"),
+            issue=42,
+            cfg=cfg,
+            loop_idx=1,
+            trunk_sha="abc1234",
+        )
+
+    add_labels.assert_called_once_with(42, [STATE_SKIP])
+
+
+def test_process_one_issue_no_skip_when_drive_green_merges() -> None:
+    """A successful drive-green (merged) must NOT tag state:skip."""
+    cfg = LoopConfig(loops=1, phases=ALL_SELECTABLE)
+    with (
+        patch.object(loop_runner, "run_phase", side_effect=lambda **kw: _ok(kw["phase"])),
+        patch.object(loop_runner, "gh_issue_add_labels") as add_labels,
+    ):
+        loop_runner._process_one_issue(
+            repo="r",
+            repo_dir=Path("/tmp/r"),
+            issue=42,
+            cfg=cfg,
+            loop_idx=1,
+            trunk_sha="abc1234",
+        )
+    add_labels.assert_not_called()
+
+
+def test_process_one_issue_dry_run_does_not_tag_skip() -> None:
+    """dry-run must not mutate GitHub state even when drive-green fails."""
+    cfg = LoopConfig(loops=1, phases=ALL_SELECTABLE, dry_run=True)
+    with (
+        patch.object(
+            loop_runner,
+            "run_phase",
+            side_effect=lambda **kw: PhaseResult(
+                name=str(kw["phase"]), rc=1 if kw["phase"] == "drive-green" else 0
+            ),
+        ),
+        patch.object(loop_runner, "gh_issue_add_labels") as add_labels,
+    ):
+        loop_runner._process_one_issue(
+            repo="r",
+            repo_dir=Path("/tmp/r"),
+            issue=42,
+            cfg=cfg,
+            loop_idx=1,
+            trunk_sha="abc1234",
+        )
+    add_labels.assert_not_called()
 
 
 def test_parse_args_accepts_issue_scope() -> None:
@@ -342,24 +435,50 @@ def repo_inputs(tmp_path: Path) -> tuple[Path, LoopConfig]:
     return projects, cfg
 
 
-def test_process_repo_runs_all_phases_when_all_succeed(
+def test_process_repo_runs_selected_phases_per_issue(
     repo_inputs: tuple[Path, LoopConfig],
 ) -> None:
-    """Process repo runs all phases when all succeed."""
-    _, cfg = repo_inputs
+    """Issue-major (#1560): each issue runs the SELECTED phases; others skip.
+
+    With the default ``--phases`` (plan, implement), drive-green is recorded
+    skipped per issue. Phases that ran are the selected ones, once per issue.
+    """
+    _, cfg = repo_inputs  # default phases = ALL_PHASES = (plan, implement)
     with (
         patch.object(loop_runner, "_rebase_main", return_value=("abc1234", True)),
         patch.object(loop_runner, "_list_open_issue_numbers", return_value=[1, 2]),
         patch.object(loop_runner, "run_phase", side_effect=lambda **kw: _ok(kw["phase"])),
     ):
         result = process_repo("r", loop_idx=1, cfg=cfg)
-    assert [p.name for p in result.phases] == list(ALL_PHASES)
+
+    ran = [p.name for p in result.phases if not p.skipped]
+    # Each selected phase runs once per issue (2 issues × {plan, implement}).
+    assert sorted(ran) == ["implement", "implement", "plan", "plan"]
+    # drive-green is not selected by default → recorded skipped, never run.
+    assert all(p.skipped for p in result.phases if p.name == "drive-green")
     assert not result.any_failure
 
 
-def test_process_repo_continues_after_phase_failure(repo_inputs: tuple[Path, LoopConfig]) -> None:
-    """The core regression test: phase 1 failing must NOT stop phases 2-6."""
-    _, cfg = repo_inputs
+def test_process_repo_drive_green_runs_per_issue_when_selected(
+    repo_inputs: tuple[Path, LoopConfig],
+) -> None:
+    """When drive-green is selected it runs per issue (the blocking phase)."""
+    projects, _ = repo_inputs
+    cfg = LoopConfig(loops=1, projects_dir=projects, phases=ALL_SELECTABLE)
+    with (
+        patch.object(loop_runner, "_rebase_main", return_value=("abc1234", True)),
+        patch.object(loop_runner, "_list_open_issue_numbers", return_value=[7]),
+        patch.object(loop_runner, "run_phase", side_effect=lambda **kw: _ok(kw["phase"])),
+    ):
+        result = process_repo("r", loop_idx=1, cfg=cfg)
+
+    ran = [p.name for p in result.phases if not p.skipped]
+    # One issue, full selectable sequence in order.
+    assert ran == list(ALL_SELECTABLE)
+
+
+def test_process_one_issue_continues_after_phase_failure() -> None:
+    """Phase isolation per issue: a failed plan must NOT skip later phases."""
     call_order: list[str] = []
 
     def fake_run_phase(**kw: object) -> PhaseResult:
@@ -368,18 +487,44 @@ def test_process_repo_continues_after_phase_failure(repo_inputs: tuple[Path, Loo
         rc = 1 if name == "plan" else 0
         return PhaseResult(name=name, rc=rc, elapsed_s=0.1)
 
-    with (
-        patch.object(loop_runner, "_rebase_main", return_value=("abc1234", True)),
-        patch.object(loop_runner, "_list_open_issue_numbers", return_value=[1]),
-        patch.object(loop_runner, "_count_failing_prs", return_value=1),
-        patch.object(loop_runner, "run_phase", side_effect=fake_run_phase),
-    ):
-        result = process_repo("r", loop_idx=1, cfg=cfg)
+    cfg = LoopConfig(loops=1, phases=ALL_SELECTABLE)
+    with patch.object(loop_runner, "run_phase", side_effect=fake_run_phase):
+        phases = loop_runner._process_one_issue(
+            repo="r",
+            repo_dir=Path("/tmp/r"),
+            issue=1,
+            cfg=cfg,
+            loop_idx=1,
+            trunk_sha="abc1234",
+        )
 
-    assert call_order == list(ALL_PHASES), "phase 1 failure must not skip subsequent phases"
-    assert result.phases[0].failed
-    assert not result.phases[1].failed
-    assert result.any_failure
+    assert call_order == list(ALL_SELECTABLE), "a failed phase must not skip subsequent phases"
+    assert phases[0].failed  # plan
+    assert not phases[1].failed  # implement
+    assert any(p.failed for p in phases)
+
+
+def test_process_one_issue_skips_disabled_phases() -> None:
+    """--phases selection is honored per issue: unselected phases are skipped."""
+    ran: list[str] = []
+
+    def fake_run_phase(**kw: object) -> PhaseResult:
+        ran.append(str(kw["phase"]))
+        return PhaseResult(name=str(kw["phase"]), rc=0, elapsed_s=0.1)
+
+    cfg = LoopConfig(loops=1, phases=("implement",))  # only implement selected
+    with patch.object(loop_runner, "run_phase", side_effect=fake_run_phase):
+        phases = loop_runner._process_one_issue(
+            repo="r",
+            repo_dir=Path("/tmp/r"),
+            issue=1,
+            cfg=cfg,
+            loop_idx=1,
+            trunk_sha="abc1234",
+        )
+
+    assert ran == ["implement"], "only the selected phase runs"
+    assert {p.name for p in phases if p.skipped} == {"plan", "drive-green"}
 
 
 def test_process_repo_swallows_worker_exceptions(repo_inputs: tuple[Path, LoopConfig]) -> None:

@@ -248,7 +248,12 @@ class ImplementationPhaseRunner:
             )
 
         self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Creating worktree")
-        worktree_path = self.worktree_manager.create_worktree(issue_number, branch_name)
+        # refresh_base=True: issue-major loop (#1560) — cut this issue's branch
+        # from the freshly-merged trunk so it never conflicts with a sibling
+        # issue's just-merged PR.
+        worktree_path = self.worktree_manager.create_worktree(
+            issue_number, branch_name, refresh_base=True
+        )
         with self.state_lock:
             state.worktree_path = str(worktree_path)
             state.branch_name = branch_name

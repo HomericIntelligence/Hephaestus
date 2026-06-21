@@ -893,3 +893,52 @@ class TestCreateWorktreeBranchCollision:
         ):
             assert manager._worktree_holding_branch("708-auto-impl") == p
             assert manager._worktree_holding_branch("999-auto-impl") is None
+
+    @patch("hephaestus.automation.worktree_manager.run")
+    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    def test_refresh_base_branch_refetches_and_redetects(
+        self, mock_get_root: Any, mock_run: Any, tmp_path: Any
+    ) -> None:
+        """refresh_base_branch fetches origin and clears the cached base (#1560)."""
+        mock_get_root.return_value = tmp_path
+        mock_run.return_value.stdout = "origin/main"
+        manager = WorktreeManager()
+        # Prime the cache via first access.
+        assert manager.base_branch == "origin/main"
+        mock_run.reset_mock()
+
+        result = manager.refresh_base_branch()
+
+        argvs = [c[0][0] for c in mock_run.call_args_list]
+        assert ["git", "fetch", "origin"] in argvs, argvs
+        assert result == "origin/main"
+
+    @patch("hephaestus.automation.worktree_manager.run")
+    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    def test_refresh_base_branch_noop_when_pinned(
+        self, mock_get_root: Any, mock_run: Any, tmp_path: Any
+    ) -> None:
+        """A pinned base (explicit/HEPH_TRUNK_GITHASH) is never moved by refresh."""
+        mock_get_root.return_value = tmp_path
+        manager = WorktreeManager(base_branch="deadbeef")
+        mock_run.reset_mock()
+
+        result = manager.refresh_base_branch()
+
+        argvs = [c[0][0] for c in mock_run.call_args_list]
+        assert all(a[:2] != ["git", "fetch"] for a in argvs), argvs
+        assert result == "deadbeef"
+
+    @patch("hephaestus.automation.worktree_manager.run")
+    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    def test_create_worktree_refresh_base_fetches(
+        self, mock_get_root: Any, mock_run: Any, tmp_path: Any
+    ) -> None:
+        """create_worktree(refresh_base=True) fetches origin before adding (#1560)."""
+        mock_get_root.return_value = tmp_path
+        mock_run.return_value.stdout = "origin/main"
+        manager = WorktreeManager()
+        with patch.object(manager, "_worktree_holding_branch", return_value=None):
+            manager.create_worktree(123, "123-feature", refresh_base=True)
+        argvs = [c[0][0] for c in mock_run.call_args_list]
+        assert ["git", "fetch", "origin"] in argvs, argvs

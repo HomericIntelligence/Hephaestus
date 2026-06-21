@@ -106,6 +106,26 @@ class WorktreeManager:
         self._base_branch_resolved = self._detect_base_branch()
         return self._base_branch_resolved
 
+    def refresh_base_branch(self) -> str:
+        """Re-fetch ``origin`` and re-resolve the auto-detected base branch.
+
+        Issue-major loop (#1560): each issue's worktree should branch off the
+        FRESHLY-merged trunk, not a snapshot pinned once per loop. Calling this
+        before creating a worktree fetches the latest ``origin`` and clears the
+        cached ``_base_branch_resolved`` so the next ``base_branch`` access
+        re-detects ``origin/HEAD``.
+
+        A no-op when the base is explicitly pinned (``base_branch=`` or
+        ``HEPH_TRUNK_GITHASH``): the operator chose that snapshot deliberately,
+        so we must not silently move it. Returns the effective base branch.
+        """
+        if self._base_branch_override is not None:
+            return self.base_branch
+        with contextlib.suppress(Exception):
+            run(["git", "fetch", "origin"], cwd=self.repo_root, capture_output=True)
+        self._base_branch_resolved = None  # force re-detect on next access
+        return self.base_branch
+
     def _detect_base_branch(self) -> str:
         try:
             result = run(
@@ -140,12 +160,20 @@ class WorktreeManager:
         self,
         issue_number: int,
         branch_name: str | None = None,
+        *,
+        refresh_base: bool = False,
     ) -> Path:
         """Create a new worktree for an issue.
 
         Args:
             issue_number: Issue number
             branch_name: Branch name (default: {issue_number}-auto)
+            refresh_base: When True, re-fetch origin and re-resolve the
+                auto-detected base branch first, so the new branch is cut from
+                the freshly-merged trunk. Used by the issue-major loop (#1560)
+                so each issue branches off the latest trunk; no-op when the base
+                is explicitly pinned. Default False preserves prior behavior for
+                all other callers (review, address-review, ci-driver).
 
         Returns:
             Path to worktree directory
@@ -158,6 +186,9 @@ class WorktreeManager:
             if issue_number in self.worktrees:
                 logger.warning("Worktree for issue #%s already exists", issue_number)
                 return self.worktrees[issue_number]
+
+            if refresh_base:
+                self.refresh_base_branch()
 
             if branch_name is None:
                 branch_name = f"{issue_number}-auto"

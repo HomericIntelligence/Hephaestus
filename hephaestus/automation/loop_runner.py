@@ -1,23 +1,30 @@
-"""Multi-repo, multi-stage automation loop driver.
+"""Multi-repo, ISSUE-MAJOR automation loop driver.
 
 Replaces ``scripts/run_automation_loop.sh``. Iterates over all
-non-archived HomericIntelligence repos. Per loop iteration, runs the
-2-phase iteration body (``plan`` → ``implement``) ``--loops`` times per
-repo. After the loop body finishes (whether by exhaustion or early-exit),
-runs the post-loop terminal stages (``drive-green``) **once per repo**.
+non-archived HomericIntelligence repos. Within each repo, work is
+ISSUE-MAJOR (#1560): each open issue is carried through the FULL selected
+phase sequence (``plan`` → ``implement`` → ``drive-green``) end to end by a
+single worker before that worker takes the next issue. Up to
+``--max-workers`` issues are in flight at once.
 
-Plan-review, PR-review, and address-review are no longer standalone phases —
-the planner owns its review loop and the implementer absorbs PR-review +
-thread-addressing in-loop (#455/#468/#484). ``drive-green`` was promoted
-from "third loop phase, final-loop only" to "post-loop terminal stage" in
-#818 — it is a per-repo terminal action, not an iteration step.
+``drive-green`` is the BLOCKING phase: scoped to one issue's PR it waits for
+the PR to MERGE (driving CI green, bounded by ``--max-merge-attempts``); if
+the PR does not merge within that budget the issue is tagged ``state:skip``
+and the worker frees its slot for a human/another agent. Because each issue's
+worktree is cut from the freshly-merged trunk, the stale-plan and
+sibling-branch merge-conflict classes the old phase-major batching suffered
+are eliminated.
 
-The key correctness invariant — and the reason this replaces the bash
-version — is that each phase is a plain ``subprocess.run`` call inside a
-Python ``for`` loop. Phase N failing returns a ``PhaseResult(rc=N)`` and
-control unconditionally proceeds to phase N+1. No shell-option landmine
-(``set -e`` / ``set -m`` / subshell exec-optimization) can silently skip
-the rest of the pipeline.
+Phase selection still works per issue: ``--phases plan`` runs only plan per
+issue; ``--phases implement`` only implement; etc. Plan-review, PR-review, and
+address-review are not standalone phases — the planner owns its review loop and
+the implementer absorbs PR-review + thread-addressing in-loop (#455/#468/#484).
+
+The key correctness invariant is that each phase is a plain ``subprocess.run``
+call inside a Python ``for`` loop. Phase N failing returns a
+``PhaseResult(rc=N)`` and control unconditionally proceeds to phase N+1. No
+shell-option landmine (``set -e`` / ``set -m`` / subshell exec-optimization)
+can silently skip the rest of the pipeline.
 
 CLI is flag-compatible with the previous bash script so operator muscle
 memory and any pinned callers keep working.
@@ -38,12 +45,13 @@ import sys
 import threading
 import time
 import traceback
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from hephaestus.agents.runtime import add_agent_argument, resolve_agent
 from hephaestus.automation._review_utils import add_max_workers_arg
+from hephaestus.automation.github_api import gh_issue_add_labels
 from hephaestus.automation.loop_repo_manager import (
     _clone_missing_repos as _clone_missing_repos,
     _count_failing_prs as _count_failing_prs,
@@ -58,6 +66,7 @@ from hephaestus.automation.loop_repo_manager import (
     _resolve_repo_dir as _resolve_repo_dir,
     _sort_repos_by_open_count as _sort_repos_by_open_count,
 )
+from hephaestus.automation.state_labels import STATE_SKIP
 from hephaestus.cli.utils import (
     add_dry_run_arg,
     add_github_throttle_args,
@@ -98,26 +107,22 @@ def _default_phase_timeout_s() -> float:
         return float(default)
 
 
-# Canonical loop-body ordering. The pipeline collapsed from 6 phases to 2
-# session-stable iteration phases (#455/#468/#484/#818): plan-review,
-# PR-review, and address-review fold into plan/implement, and drive-green
-# was promoted from "final-loop-only phase" to a post-loop terminal stage
-# (see ALL_POST_LOOP_STAGES below).
+# The two non-blocking iteration phases. Plan-review, PR-review, and
+# address-review fold into plan/implement (#455/#468/#484).
 ALL_PHASES: tuple[str, ...] = (
     "plan",
     "implement",
 )
 
-# Post-loop terminal stages. Run once per repo AFTER all loop iterations
-# finish (exhaustion or early-exit). Per #818, drive-green belongs here
-# because it polls existing PRs — it is a terminal action, not an iteration
-# step. Operators select it with ``--phases drive-green`` (same flag, no
-# new arg); the runner partitions selected names into loop phases vs.
-# post-loop stages internally.
+# drive-green is the per-issue BLOCKING phase (#1560): scoped to one issue's
+# PR it waits for the merge (bounded by --max-merge-attempts) before the worker
+# moves on. It runs LAST in each issue's sequence. Kept as a distinct tuple
+# (rather than folded into ALL_PHASES) so ``_run_post_loop_stages`` and the
+# explicit ``--phases drive-green`` operator re-run path keep working.
 ALL_POST_LOOP_STAGES: tuple[str, ...] = ("drive-green",)
 
-# Union used by --phases validation. Operators may select any combination
-# of loop phases and post-loop stages on the same flag.
+# Per-issue phase sequence, in order: plan → implement → drive-green. Operators
+# select any subset via --phases; unselected phases are skipped per issue.
 ALL_SELECTABLE: tuple[str, ...] = ALL_PHASES + ALL_POST_LOOP_STAGES
 
 # DEFAULT_PROJECTS_DIR is re-exported from hephaestus.config.paths so existing
@@ -322,14 +327,19 @@ class LoopConfig:
     loops: int = 5
     max_workers: int = 3
     parallel_repos: int = 1
-    # Dataclass default is loop-body-only by design: it covers ONLY the
-    # iteration phases (``ALL_PHASES``), deliberately excluding post-loop
-    # terminal stages like drive-green. This differs from the CLI ``--phases``
-    # default (``ALL_SELECTABLE`` = loop phases + post-loop stages, set in
-    # ``_parse_args``): an operator on the CLI opts into drive-green by default,
-    # but a bare ``LoopConfig()`` (tests/programmatic callers) gets a quiet
-    # loop-only run that never touches existing PRs via ``_run_post_loop_stages``.
+    # Dataclass default covers ONLY the iteration phases (``ALL_PHASES`` =
+    # plan, implement), deliberately excluding drive-green. This differs from
+    # the CLI ``--phases`` default (``ALL_SELECTABLE`` = plan, implement,
+    # drive-green, set in ``_parse_args``): an operator on the CLI opts into
+    # the blocking per-issue drive-green by default, but a bare ``LoopConfig()``
+    # (tests/programmatic callers) gets a quiet plan+implement run that never
+    # drives existing PRs to merge.
     phases: tuple[str, ...] = ALL_PHASES
+    # Bound on per-issue drive-green merge attempts before the issue is tagged
+    # ``state:skip`` and the worker frees its slot for the next issue (#1560).
+    # Defaults to the CIDriver ``max_fix_iterations`` default (1) so behavior
+    # matches the pre-issue-major drive-green retry budget unless overridden.
+    max_merge_attempts: int = 1
     agent: str = "claude"
     issues: list[int] = field(default_factory=list)
     dry_run: bool = False
@@ -422,6 +432,16 @@ def _build_parser() -> argparse.ArgumentParser:
     add_max_workers_arg(
         p,
         help_text="Parallel workers per repo per phase (1-32, default: 3). Passes to child phases.",
+    )
+    p.add_argument(
+        "--max-merge-attempts",
+        type=int,
+        default=1,
+        help=(
+            "Per-issue drive-green merge attempts before the issue is tagged "
+            "state:skip and the worker moves on (default: 1, matching the prior "
+            "drive-green retry budget)."
+        ),
     )
     p.add_argument(
         "--parallel-repos",
@@ -752,6 +772,12 @@ def _build_phase_argv(
     if phase == "drive-green" and cfg.drive_green_all:
         argv.append("--all")
 
+    # Per-issue drive-green is the blocking merge step (#1560): forward the
+    # operator's merge-attempt budget so a PR that will not go green is
+    # abandoned after N tries (the caller then applies state:skip).
+    if phase == "drive-green":
+        argv.extend(["--max-fix-iterations", str(cfg.max_merge_attempts)])
+
     return argv
 
 
@@ -905,22 +931,72 @@ def _process_repo_inner(
     LOG.info("[%s] trunk=%s%s", repo, trunk_sha, stale_suffix)
 
     # Open-issue discovery happens once per repo per loop. When the operator
-    # scopes the loop explicitly, reuse that bounded list for child phases.
+    # scopes the loop explicitly, reuse that bounded list.
     open_issues = cfg.issues or _list_open_issue_numbers(cfg.org, repo)
 
-    for phase in ALL_PHASES:
+    # ISSUE-MAJOR control flow (#1560): iterate issues outermost and run the
+    # FULL selected-phase sequence (plan → implement → drive-green) for each
+    # issue before it is considered done. Up to ``max_workers`` issues are in
+    # flight at once. drive-green per issue blocks on the PR MERGING (see
+    # _process_one_issue), so each subsequent issue's branch is cut from the
+    # freshly-merged trunk — eliminating the stale-plan and sibling-branch
+    # merge-conflict classes the old phase-major batching suffered.
+    if not open_issues:
+        LOG.info("[%s] no open issues to process", repo)
+        return result
+
+    workers = max(1, cfg.max_workers)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                _process_one_issue,
+                repo=repo,
+                repo_dir=repo_dir,
+                issue=issue,
+                cfg=cfg,
+                loop_idx=loop_idx,
+                trunk_sha=trunk_sha,
+            ): issue
+            for issue in open_issues
+        }
+        for future in as_completed(futures):
+            issue = futures[future]
+            try:
+                result.phases.extend(future.result())
+            except Exception as exc:  # worker boundary: never let one issue crash the repo
+                LOG.error("[%s] issue #%s pipeline crashed: %s", repo, issue, exc)
+                result.phases.append(PhaseResult(name="implement", rc=1, elapsed_s=0.0))
+
+    return result
+
+
+def _process_one_issue(
+    *,
+    repo: str,
+    repo_dir: Path,
+    issue: int,
+    cfg: LoopConfig,
+    loop_idx: int,
+    trunk_sha: str,
+) -> list[PhaseResult]:
+    """Run the full selected-phase sequence for ONE issue, in order.
+
+    Each selected phase (plan, implement, drive-green) runs scoped to this
+    single issue. The ``--phases`` selection is honored per issue: a disabled
+    phase is recorded skipped and the sequence continues. When ``drive-green``
+    is selected it is the BLOCKING phase — ``run_phase`` waits for the issue's
+    PR to merge (or skip on exhaustion) before returning, so the worker only
+    frees its slot once the issue is fully settled.
+    """
+    phases: list[PhaseResult] = []
+    for phase in ALL_SELECTABLE:
         if _shutdown_requested():
-            LOG.warning("[%s] phase %s SKIP (shutdown requested)", repo, phase)
-            result.phases.append(
-                PhaseResult(name=phase, skipped=True, skip_reason="shutdown requested")
-            )
+            LOG.warning("[%s] issue #%s phase %s SKIP (shutdown requested)", repo, issue, phase)
+            phases.append(PhaseResult(name=phase, skipped=True, skip_reason="shutdown requested"))
             continue
 
         if phase not in cfg.phases:
-            LOG.info("[%s] phase %s SKIP (disabled by --phases)", repo, phase)
-            result.phases.append(
-                PhaseResult(name=phase, skipped=True, skip_reason="disabled by --phases")
-            )
+            phases.append(PhaseResult(name=phase, skipped=True, skip_reason="disabled by --phases"))
             continue
 
         phase_result = run_phase(
@@ -929,19 +1005,35 @@ def _process_repo_inner(
             phase=phase,
             cfg=cfg,
             loop_idx=loop_idx,
-            open_issues=open_issues,
+            open_issues=[issue],
             trunk_sha=trunk_sha,
         )
-        result.phases.append(phase_result)
+        phases.append(phase_result)
         if phase_result.failed:
             LOG.warning(
-                "[%s] phase %s FAILED rc=%d — continuing to next phase",
+                "[%s] issue #%s phase %s FAILED rc=%d — continuing to next phase",
                 repo,
+                issue,
                 phase,
                 phase_result.rc,
             )
+            # drive-green is the blocking merge phase: if it fails (the PR did
+            # not merge within --max-merge-attempts), tag the issue state:skip
+            # so it is not re-attempted and a human/another agent can take it
+            # over (#1560). Mirrors the review-loop exhaustion behavior. A
+            # dry-run must not mutate GitHub state.
+            if phase == "drive-green" and not cfg.dry_run:
+                LOG.warning(
+                    "[%s] issue #%s did not merge after %d attempt(s) — tagging %s",
+                    repo,
+                    issue,
+                    cfg.max_merge_attempts,
+                    STATE_SKIP,
+                )
+                with contextlib.suppress(Exception):
+                    gh_issue_add_labels(issue, [STATE_SKIP])
 
-    return result
+    return phases
 
 
 # ---------------------------------------------------------------------------
@@ -1201,10 +1293,12 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
 
         _maybe_sleep_for_rate_budget(loop_idx, cfg.loops)
 
-    # Post-loop terminal stages run once per repo regardless of how the
-    # iteration body exited (exhaustion or early-exit). Per #818.
-    post_loop_results = _run_post_loop_stages(cfg, repos)
-    all_results.extend(post_loop_results)
+    # drive-green is now a per-issue BLOCKING phase inside the issue-major
+    # loop body (#1560) — each issue is driven to merge before its worker
+    # frees the slot. It is no longer a separate once-per-repo post-loop
+    # stage, so nothing runs here. ``_run_post_loop_stages`` is retained for
+    # explicit operator re-runs but the default loop does not invoke it.
+    post_loop_results: list[RepoResult] = []
 
     # Report actual loops run (may be less than cfg.loops due to early
     # exit). Post-loop RepoResults are tagged ``is_post_loop=True`` by
@@ -1317,6 +1411,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = LoopConfig(
         loops=args.loops,
         max_workers=args.max_workers,
+        max_merge_attempts=args.max_merge_attempts,
         parallel_repos=args.parallel_repos,
         phases=phases,
         agent=agent,

@@ -2336,6 +2336,16 @@ Examples:
             "require the agent for all behind/conflicting PRs."
         ),
     )
+    parser.add_argument(
+        "--max-fix-iterations",
+        type=int,
+        default=1,
+        help=(
+            "Number of CI-fix attempts per failing PR before giving up "
+            "(default: 1). The issue-major loop passes its --max-merge-attempts "
+            "here so a PR that will not go green is abandoned after N tries."
+        ),
+    )
     add_github_throttle_args(parser)
     add_json_arg(parser)
     return parser
@@ -2473,6 +2483,7 @@ def main() -> int:
             include_bot_prs=args.include_bot_prs,
             include_all_authors=args.include_all_authors,
             enable_mechanical_rebase=args.enable_mechanical_rebase,
+            max_fix_iterations=args.max_fix_iterations,
         )
 
         driver = CIDriver(options)
