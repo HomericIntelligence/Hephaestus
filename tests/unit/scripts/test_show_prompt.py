@@ -3,15 +3,9 @@
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-# Ensure the repo root is on sys.path so scripts.show_prompt resolves
-# without requiring scripts/__init__.py.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.show_prompt import (
     _PLAN_MARKERS,
