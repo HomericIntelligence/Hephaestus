@@ -1,6 +1,7 @@
 ---
 name: python-repo-modernization
 description: Bring a partially modernized Python repo to production-grade quality by fixing bugs, restructuring tests, enhancing CI/pre-commit, and preparing for PyPI publishing
+argument-hint: <path to Python repo to modernize>
 allowed-tools: [Read, Write, Edit, Bash, Grep, Glob]
 ---
 
