@@ -227,6 +227,76 @@ class TestFilterDropsPlanGoIssues:
         assert mgr.get_cached_labels(1) is None
 
 
+class TestFilterAllFilteredWarning:
+    """``filter()`` warns when an explicit ``--issues`` set fully filters out.
+
+    A run scoped to closed / already-planned issues otherwise no-ops with only
+    INFO-level per-issue ``... skipping`` lines, making a mis-scoped run easy to
+    miss (the 2026-06-21 ``--issues 123,456,789,101`` all-closed run). The
+    warning only fires for explicit sets — auto-discovery legitimately yields an
+    empty work set on a converged repo and must stay quiet.
+    """
+
+    def test_warns_when_explicit_set_fully_filtered(self, caplog: Any) -> None:
+        from hephaestus.automation.state_labels import STATE_PLAN_GO
+
+        opts = _make_options(issues=[10, 11])
+        opts.skip_closed = False
+        opts.issues_explicit = True
+        mgr = PlannerStateManager(opts)
+
+        with (
+            patch(
+                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                return_value={10: [STATE_PLAN_GO], 11: [STATE_PLAN_GO]},
+            ),
+            caplog.at_level("WARNING", logger="hephaestus.automation.planner_state"),
+        ):
+            kept = mgr.filter()
+
+        assert kept == []
+        assert any("filtered out" in r.message and r.levelname == "WARNING" for r in caplog.records)
+
+    def test_no_warning_when_explicit_set_keeps_issues(self, caplog: Any) -> None:
+        opts = _make_options(issues=[10, 11])
+        opts.skip_closed = False
+        opts.issues_explicit = True
+        mgr = PlannerStateManager(opts)
+
+        with (
+            patch(
+                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                return_value={10: [], 11: []},
+            ),
+            caplog.at_level("WARNING", logger="hephaestus.automation.planner_state"),
+        ):
+            kept = mgr.filter()
+
+        assert kept == [10, 11]
+        assert not any("filtered out" in r.message for r in caplog.records)
+
+    def test_no_warning_when_discovered_set_fully_filtered(self, caplog: Any) -> None:
+        """Auto-discovery (issues_explicit=False) empties quietly — no warning."""
+        from hephaestus.automation.state_labels import STATE_PLAN_GO
+
+        opts = _make_options(issues=[10, 11])
+        opts.skip_closed = False
+        opts.issues_explicit = False
+        mgr = PlannerStateManager(opts)
+
+        with (
+            patch(
+                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                return_value={10: [STATE_PLAN_GO], 11: [STATE_PLAN_GO]},
+            ),
+            caplog.at_level("WARNING", logger="hephaestus.automation.planner_state"),
+        ):
+            kept = mgr.filter()
+
+        assert kept == []
+        assert not any("filtered out" in r.message for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # has_existing_plan — fallback (no cache)
 # ---------------------------------------------------------------------------

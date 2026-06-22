@@ -674,6 +674,9 @@ def main() -> int:
     log.info("Starting issue planner")
     agent = resolve_agent(args.agent)
 
+    # Capture explicitness before auto-discovery overwrites ``args.issues``.
+    issues_explicit = bool(args.issues)
+
     if not args.issues:
         try:
             discovered = gh_list_open_issues()
@@ -702,6 +705,7 @@ def main() -> int:
     try:
         options = PlannerOptions(
             issues=args.issues,
+            issues_explicit=issues_explicit,
             agent=agent,
             dry_run=args.dry_run,
             force=args.force,
