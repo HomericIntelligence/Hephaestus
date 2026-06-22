@@ -4,6 +4,7 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -56,7 +57,7 @@ class TestExtractTimings:
 
     def test_extract_timings_empty(self) -> None:
         """Test extracting timings from empty results."""
-        results = {"benchmarks": []}
+        results: dict[str, Any] = {"benchmarks": []}
         timings = extract_timings(results)
         assert timings == {}
 
@@ -174,8 +175,8 @@ class TestFormatMarkdownReport:
                 severity="critical",
             )
         ]
-        improvements = []
-        current_results = {
+        improvements: list[dict[str, Any]] = []
+        current_results: dict[str, Any] = {
             "environment": {
                 "os": "Linux",
                 "cpu": "AMD Ryzen",
@@ -183,7 +184,7 @@ class TestFormatMarkdownReport:
                 "git_commit": "abc123",
             }
         }
-        baseline_results = {"environment": {}}
+        baseline_results: dict[str, Any] = {"environment": {}}
 
         report = format_markdown_report(
             regressions, improvements, current_results, baseline_results
@@ -198,8 +199,8 @@ class TestFormatMarkdownReport:
 
     def test_format_markdown_report_with_improvements(self) -> None:
         """Test generating markdown report with improvements."""
-        regressions = []
-        improvements = [
+        regressions: list[Regression] = []
+        improvements: list[dict[str, Any]] = [
             {
                 "benchmark": "bench1",
                 "baseline_ms": 100.0,
@@ -207,8 +208,8 @@ class TestFormatMarkdownReport:
                 "improvement_percent": 20.0,
             }
         ]
-        current_results = {"environment": {}}
-        baseline_results = {"environment": {}}
+        current_results: dict[str, Any] = {"environment": {}}
+        baseline_results: dict[str, Any] = {"environment": {}}
 
         report = format_markdown_report(
             regressions, improvements, current_results, baseline_results
@@ -221,10 +222,10 @@ class TestFormatMarkdownReport:
 
     def test_format_markdown_report_no_changes(self) -> None:
         """Test generating markdown report with no changes."""
-        regressions = []
-        improvements = []
-        current_results = {"environment": {}}
-        baseline_results = {"environment": {}}
+        regressions: list[Regression] = []
+        improvements: list[dict[str, Any]] = []
+        current_results: dict[str, Any] = {"environment": {}}
+        baseline_results: dict[str, Any] = {"environment": {}}
 
         report = format_markdown_report(
             regressions, improvements, current_results, baseline_results

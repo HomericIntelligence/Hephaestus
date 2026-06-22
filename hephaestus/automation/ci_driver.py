@@ -35,6 +35,7 @@ from hephaestus.cli.utils import (
     configure_github_throttle_from_args,
     emit_json_status,
 )
+from hephaestus.utils.file_lock import file_lock
 
 from ._review_utils import add_max_workers_arg, find_pr_for_issue
 from .address_review import (
@@ -1561,6 +1562,23 @@ class CIDriver:
         whose PR is CLOSED-not-merged, fire ``/learn`` once for records
         whose PR is MERGED (then mark explicit succeeded/failed learn status),
         leave OPEN records alone for the normal per-issue path to handle.
+        """
+        # Serialize the sweep across the issue-major loop's per-issue ci-driver
+        # SUBPROCESSES (#1567). They share one ``state_dir`` and each runs this
+        # sweep on startup; without a cross-process lock, two subprocesses both
+        # find the same MERGED orphan and both fire ``/learn`` +
+        # ``create_worktree`` on the same path → ``fatal: ... already exists``
+        # (the in-process WorktreeManager lock can't see another process). Hold
+        # the lock across the whole sweep so a second sweeper, on acquiring,
+        # re-globs + re-loads records and finds them already terminal/cleared.
+        with file_lock(self.state_dir / "orphan-sweep.lock"):
+            self._sweep_orphaned_arming_records_locked()
+
+    def _sweep_orphaned_arming_records_locked(self) -> None:
+        """Body of :meth:`_sweep_orphaned_arming_records`, run under the lock.
+
+        Globs and processes records inside the cross-process lock so concurrent
+        ci-driver subprocesses never double-process the same arming record.
         """
         try:
             records = sorted(self.state_dir.glob("drive-green-armed-*.json"))

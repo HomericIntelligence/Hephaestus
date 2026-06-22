@@ -2310,6 +2310,41 @@ class TestArmingSweep:
         assert record["learn_succeeded_at"] is None
         assert record["learn_status"] == "failed"
 
+    def test_sweep_acquires_cross_process_lock(self, driver: CIDriver) -> None:
+        """The sweep serializes via ``file_lock`` on the shared state_dir (#1567).
+
+        Two issue-major ci-driver subprocesses share one ``state_dir``; the lock
+        is what prevents them double-firing ``/learn`` + colliding on the same
+        worktree path. Assert the lock is entered for the orphan-sweep sentinel.
+        """
+        self._write_record(driver, issue=841, pr_number=843)
+        with (
+            patch("hephaestus.automation.ci_driver.file_lock") as mock_lock,
+            patch.object(driver, "_gh_pr_state", return_value={"state": "OPEN"}),
+        ):
+            driver._sweep_orphaned_arming_records()
+        mock_lock.assert_called_once_with(driver.state_dir / "orphan-sweep.lock")
+
+    def test_concurrent_sweep_fires_learn_once(self, driver: CIDriver) -> None:
+        """A second sweep must NOT re-fire ``/learn`` for a terminal record.
+
+        Regression for the cross-process double-``/learn`` + duplicate-worktree
+        race (#1567): once the first sweeper marks a MERGED record terminal, the
+        second must skip it.
+
+        The real ``file_lock`` serializes the two sweeps; here we run them
+        sequentially over the SAME ``state_dir``, which is exactly the state the
+        second process observes once it acquires the lock the first released.
+        """
+        self._write_record(driver, issue=841, pr_number=843)
+        with (
+            patch.object(driver, "_gh_pr_state", return_value={"state": "MERGED"}),
+            patch.object(driver, "_run_drive_green_learnings", return_value=True) as mock_learn,
+        ):
+            driver._sweep_orphaned_arming_records()  # first sweeper: fires /learn
+            driver._sweep_orphaned_arming_records()  # second sweeper: record terminal
+        mock_learn.assert_called_once_with(841, 843)
+
 
 class TestRunSweeperWiring:
     """``CIDriver.run()`` invokes the sweeper before any per-issue work."""
