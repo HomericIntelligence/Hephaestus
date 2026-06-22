@@ -1215,11 +1215,45 @@ class TestSummarizeLoop:
         assert "loop 2" in summary
 
     def test_counts_plan_phase(self) -> None:
-        """Non-skipped plan phase counted in planned."""
+        """Plan phase with unknown work_units falls back to counting as 1.
+
+        ``work_units is None`` means the phase did not report (un-instrumented),
+        so it is counted conservatively as 1 — matching ``produced_work``'s
+        "unknown counts as work" convention.
+        """
         repo_result = RepoResult(repo="TestRepo", loop_idx=1)
         repo_result.phases = [PhaseResult("plan", rc=0)]
         summary = _summarize_loop([repo_result], 1, 3.0)
         assert "planned=1" in summary
+
+    def test_plan_counts_work_units(self) -> None:
+        """Plan count reflects the issues actually planned (work_units)."""
+        repo_result = RepoResult(repo="TestRepo", loop_idx=1)
+        repo_result.phases = [PhaseResult("plan", rc=0, work_units=3)]
+        summary = _summarize_loop([repo_result], 1, 3.0)
+        assert "planned=3" in summary
+
+    def test_plan_zero_work_units_counts_zero(self) -> None:
+        """A plan phase that ran but planned 0 issues must not inflate the count.
+
+        Regression for the 2026-06-21 output.log: a run scoped to closed issues
+        logged ``planned=4`` directly above ``produced 0 new plans``. With
+        ``work_units == 0`` the count must read ``planned=0`` so the human
+        summary agrees with the convergence signal.
+        """
+        repo_result = RepoResult(repo="TestRepo", loop_idx=1)
+        repo_result.phases = [PhaseResult("plan", rc=0, work_units=0)]
+        summary = _summarize_loop([repo_result], 1, 3.0)
+        assert "planned=0" in summary
+
+    def test_multiple_repos_sum_plan_work_units(self) -> None:
+        """Plan work_units are summed across repos."""
+        repo1 = RepoResult(repo="Repo1", loop_idx=1)
+        repo1.phases = [PhaseResult("plan", rc=0, work_units=2)]
+        repo2 = RepoResult(repo="Repo2", loop_idx=1)
+        repo2.phases = [PhaseResult("plan", rc=0, work_units=0)]
+        summary = _summarize_loop([repo1, repo2], 1, 10.0)
+        assert "planned=2" in summary
 
     def test_counts_implement_phases(self) -> None:
         """Non-skipped implement phases counted in implemented."""
@@ -1234,6 +1268,7 @@ class TestSummarizeLoop:
         """Mix of skipped, planned, and implemented phases."""
         repo_result = RepoResult(repo="TestRepo", loop_idx=1)
         repo_result.phases = [
+            # No work_units → counted as 1 via the unknown-fallback path.
             PhaseResult("plan", rc=0),
             PhaseResult("implement", rc=1),  # failed but still counted as implemented
             PhaseResult("drive-green", skipped=True, skip_reason="no issues"),

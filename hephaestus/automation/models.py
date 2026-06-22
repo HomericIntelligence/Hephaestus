@@ -146,6 +146,11 @@ class PlannerOptions(BaseModel):
     """Options for the Planner."""
 
     issues: list[int]
+    # True when ``issues`` came from an explicit ``--issues`` flag rather than
+    # auto-discovery. Drives the "all issues filtered out" warning so a
+    # mis-scoped explicit run is visible, while a converged auto-discovery pass
+    # (legitimately empty) stays quiet.
+    issues_explicit: bool = False
     agent: str = "claude"
     dry_run: bool = False
     force: bool = False

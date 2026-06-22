@@ -122,6 +122,19 @@ class PlannerStateManager:
 
             issues_to_plan.append(issue_num)
 
+        # Make a mis-scoped explicit run obvious. An explicit ``--issues`` set
+        # that fully filters out (all closed and/or already-planned) otherwise
+        # no-ops with only INFO-level per-issue "... skipping" lines. Stay quiet
+        # for auto-discovery (issues_explicit=False): a converged repo
+        # legitimately yields an empty set every pass and must not spam.
+        if self.options.issues_explicit and self.options.issues and not issues_to_plan:
+            logger.warning(
+                "All %d explicitly-requested issue(s) were filtered out "
+                "(closed or already planned); nothing to plan. Requested: %s",
+                len(self.options.issues),
+                self.options.issues,
+            )
+
         return issues_to_plan
 
     def get_cached_labels(self, issue_number: int) -> list[str] | None:

@@ -278,10 +278,18 @@ class RepoResult:
 def _summarize_loop(loop_results: list[RepoResult], loop_idx: int, elapsed_s: float) -> str:
     """Generate a one-line summary of loop execution for logs.
 
-    Counts: planned (non-skipped plan stages), implemented (non-skipped
-    implement stages), skipped (all skipped stages). Plan-review and PR-review
-    are now in-loop steps of plan/implement, so they no longer have their own
-    count.
+    Counts: planned (issues actually planned, from the plan phase's
+    ``work_units``; falls back to 1 per un-instrumented plan phase whose
+    ``work_units`` is unknown), implemented (non-skipped implement stages —
+    the implement phase reports no ``work_units``), skipped (all skipped
+    stages). Plan-review and PR-review are now in-loop steps of plan/implement,
+    so they no longer have their own count.
+
+    Counting plan by ``work_units`` keeps this human-facing summary consistent
+    with the machine convergence signal (``produced_work``): a plan phase that
+    ran but planned 0 issues now reads ``planned=0`` instead of inflating to
+    ``planned=1`` (the 2026-06-21 output.log regression — closed-issue runs
+    logged ``planned=N`` directly above ``produced 0 new plans``).
 
     Args:
         loop_results: Results from all repos in this loop iteration.
@@ -301,7 +309,10 @@ def _summarize_loop(loop_results: list[RepoResult], loop_idx: int, elapsed_s: fl
             if phase.skipped:
                 total_skipped += 1
             elif phase.name == "plan":
-                total_planned += 1
+                # Count issues actually planned. ``work_units is None`` means the
+                # phase didn't report (un-instrumented) → count it as 1
+                # conservatively, matching ``produced_work``'s unknown→work rule.
+                total_planned += phase.work_units if phase.work_units is not None else 1
             elif phase.name == "implement":
                 total_implemented += 1
 
