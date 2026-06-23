@@ -22,8 +22,12 @@ Before opening a PR, locate the work in:
   `pr-policy` CI gate).
 
 Keep PRs small: prefer one issue per PR so each change can be reviewed
-and reverted independently. Releases are cut on demand by pushing a
-signed `vX.Y.Z` git tag (see [`docs/RELEASING.md`](docs/RELEASING.md)).
+and reverted independently. As a rough guide, aim to keep PRs under
+~500 changed lines (XS <10 · S <50 · M <250 · L <500 · XL 500+); split
+larger PRs unless the change is inherently atomic. Every PR is reviewed
+against the [Definition of Done](docs/DEFINITION_OF_DONE.md). Releases
+are cut on demand by pushing a signed `vX.Y.Z` git tag (see
+[`docs/RELEASING.md`](docs/RELEASING.md)).
 
 ## How to Contribute
 

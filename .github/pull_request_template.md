@@ -1,6 +1,9 @@
 ## Summary
 
-<!-- Brief description of what this PR accomplishes -->
+<!-- Brief description of what this PR accomplishes.
+     Keep PRs small — prefer one issue per PR (see CONTRIBUTING.md → "Planning artifacts").
+     Rough size guidance: XS <10 lines · S <50 · M <250 · L <500 · XL 500+.
+     PRs over ~500 changed lines should be split unless inherently atomic. -->
 
 ## Changes
 
@@ -47,6 +50,7 @@ Closes #
 - [ ] No new warnings introduced
 - [ ] Conventional commit message format used
 - [ ] Branch named following convention: `<issue-number>-<description>`
+- [ ] Change meets the [Definition of Done](https://github.com/mvillmow/ProjectHephaestus/blob/main/docs/DEFINITION_OF_DONE.md)
 
 ## Additional Notes
 
