@@ -24,9 +24,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hephaestus.agents.runtime import (
+    direct_agent_model,
     is_codex,
+    resume_agent_session,
     resume_codex_session,
+    run_agent_text,
     run_codex_text,
+    uses_direct_agent_runner,
 )
 from hephaestus.github.client import ClaudeUsageCapError, gh_call
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
@@ -1558,6 +1562,41 @@ class ReviewPhase(StageMixin):
                 )
                 return False
 
+        if uses_direct_agent_runner(self.options.agent):
+            try:
+                result = resume_agent_session(
+                    agent=self.options.agent,
+                    session_id=session_id,
+                    prompt=prompt,
+                    cwd=worktree_path,
+                    timeout=implementer_claude_timeout(),
+                    model=direct_agent_model(self.options.agent, "HEPH_IMPLEMENTER_MODEL"),
+                )
+                log_file = (
+                    self.state_dir
+                    / f"{self.options.agent}-feedback-{issue_number}-r{prev_iteration + 1}.log"
+                )
+                log_file.write_text(result.stdout or "")
+                return True
+            except subprocess.CalledProcessError as e:
+                logger.error(
+                    "#%d: %s failed to address R%d feedback (exit=%d): %s",
+                    issue_number,
+                    self.options.agent,
+                    prev_iteration + 1,
+                    e.returncode,
+                    (e.stderr or e.stdout or "")[:500],
+                )
+                return False
+            except subprocess.TimeoutExpired:
+                logger.error(
+                    "#%d: %s timed out addressing R%d feedback",
+                    issue_number,
+                    self.options.agent,
+                    prev_iteration + 1,
+                )
+                return False
+
         # Route through the centralized helper so create/resume semantics and
         # the SESSION_EXPIRED phrase list stay in one place. The deterministic
         # UUID matches what the initial impl session was created with, so the
@@ -1642,6 +1681,19 @@ class ReviewPhase(StageMixin):
                     prompt,
                     cwd=self.repo_root,
                     timeout=600,
+                    sandbox="read-only",
+                )
+                output = (result.stdout or "").strip()
+                if not output:
+                    raise RuntimeError("reviewer returned empty output")
+                return output
+            if uses_direct_agent_runner(self.options.agent):
+                result = run_agent_text(
+                    agent=self.options.agent,
+                    prompt=prompt,
+                    cwd=self.repo_root,
+                    timeout=600,
+                    model=direct_agent_model(self.options.agent, "HEPH_REVIEWER_MODEL"),
                     sandbox="read-only",
                 )
                 output = (result.stdout or "").strip()

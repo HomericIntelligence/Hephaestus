@@ -329,6 +329,7 @@ class TestAdvisePrompt:
     def test_advise_prompt_builder_selects_codex_prompt(self) -> None:
         """Provider-specific advise prompt selection keeps stage callers simple."""
         assert prompts.get_advise_prompt_builder("codex") is prompts.get_codex_advise_prompt
+        assert prompts.get_advise_prompt_builder("pi") is prompts.get_codex_advise_prompt
         assert prompts.get_advise_prompt_builder("claude") is prompts.get_advise_prompt
 
 

@@ -88,6 +88,28 @@ def test_run_agent_dispatches_codex_and_logs_session(
     )
 
 
+def test_run_agent_dispatches_pi_and_logs_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pi stages should use the Pi JSON-mode runner and persist session metadata."""
+
+    def fake_run_pi_session(*args: object, **kwargs: object) -> AgentRunResult:
+        return AgentRunResult(stdout="pi output", stderr="", session_id="pi-session-123")
+
+    monkeypatch.setattr(agent_stage, "run_pi_session", fake_run_pi_session)
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "pi")
+
+    args = _args(tmp_path, agent="pi")
+    rc = agent_stage.run_agent(args)
+
+    assert rc == 0
+    assert Path(args.output).read_text(encoding="utf-8") == "pi output"
+    assert Path(args.log_file).read_text(encoding="utf-8") == (
+        "SESSION_ID: pi-session-123\n\npi output"
+    )
+
+
 def test_run_agent_rejects_unsupported_direct_agent_value(tmp_path: Path) -> None:
     """Direct API callers should not silently route unknown providers to Codex."""
     args = _args(tmp_path, agent="bogus")
@@ -239,3 +261,30 @@ def test_main_allows_approval_with_codex_agent(
         "on-request",
     ]
     assert agent_stage.main(argv) == 0
+
+
+def test_main_rejects_approval_with_pi_agent(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Pi does not honor Codex approval policies; reject instead of no-oping."""
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("p", encoding="utf-8")
+    argv = [
+        "--prompt-file",
+        str(prompt_file),
+        "--repo-root",
+        str(tmp_path),
+        "--stage",
+        "x",
+        "--output",
+        str(tmp_path / "out.txt"),
+        "--agent",
+        "pi",
+        "--approval",
+        "on-request",
+    ]
+    with pytest.raises(SystemExit) as exc:
+        agent_stage.main(argv)
+    assert exc.value.code == 2
+    assert "--approval=on-request" in capsys.readouterr().err

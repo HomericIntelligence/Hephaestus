@@ -33,7 +33,13 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from hephaestus.agents.runtime import is_codex, run_codex_text
+from hephaestus.agents.runtime import (
+    direct_agent_model,
+    is_codex,
+    run_agent_text,
+    run_codex_text,
+    uses_direct_agent_runner,
+)
 
 from . import review_state  # noqa: F401  # patch surface — see #714 cycle-break note
 from ._followup_phase import FollowUpPhase
@@ -885,6 +891,16 @@ class ImplementationPhaseRunner:
                     prompt,
                     cwd=worktree_path,
                     timeout=advise_claude_timeout(),
+                    sandbox="read-only",
+                )
+                output = result.stdout or ""
+            elif uses_direct_agent_runner(self.options.agent):
+                result = run_agent_text(
+                    agent=self.options.agent,
+                    prompt=prompt,
+                    cwd=worktree_path,
+                    timeout=advise_claude_timeout(),
+                    model=direct_agent_model(self.options.agent, "HEPH_ADVISE_MODEL"),
                     sandbox="read-only",
                 )
                 output = result.stdout or ""

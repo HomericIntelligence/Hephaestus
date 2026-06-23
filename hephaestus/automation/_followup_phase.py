@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from hephaestus.agents.runtime import is_codex, session_agent_matches
+from hephaestus.agents.runtime import session_agent_matches, uses_direct_agent_runner
 
 from ._stage_context import StageMixin
 from .claude_models import implementer_model
@@ -70,7 +70,7 @@ class FollowUpPhase(StageMixin):
             with self.state_lock:
                 state.learn_completed = retro_success
             impl._save_state(state)
-            if retro_success and not is_codex(self.options.agent):
+            if retro_success and not uses_direct_agent_runner(self.options.agent):
                 self.runner._compact_implementer_session(issue_number, worktree_path)
 
         # Follow-up issues phase (after LEARN, before COMPLETED)

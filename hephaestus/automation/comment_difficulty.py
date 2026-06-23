@@ -23,7 +23,13 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.runtime import is_codex, run_codex_text
+from hephaestus.agents.runtime import (
+    direct_agent_model,
+    is_codex,
+    run_agent_text,
+    run_codex_text,
+    uses_direct_agent_runner,
+)
 
 from ._review_utils import parse_json_block
 from .claude_invoke import invoke_claude_with_session
@@ -124,6 +130,17 @@ def _run_classifier_session(
                 prompt,
                 cwd=worktree_path,
                 timeout=advise_claude_timeout(),
+                sandbox="read-only",
+            )
+            log_file.write_text(result.stdout or "")
+            parsed = parse_json_block(result.stdout or "")
+        elif uses_direct_agent_runner(agent):
+            result = run_agent_text(
+                agent=agent,
+                prompt=prompt,
+                cwd=worktree_path,
+                timeout=advise_claude_timeout(),
+                model=direct_agent_model(agent, "HEPH_ADVISE_MODEL"),
                 sandbox="read-only",
             )
             log_file.write_text(result.stdout or "")

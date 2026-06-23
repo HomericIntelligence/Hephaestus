@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 
-from hephaestus.agents.runtime import is_codex
+from hephaestus.agents.runtime import uses_direct_agent_runner
 
 from ._shared import _TERSE_OUTPUT_DIRECTIVE, _relativize_path
 
@@ -51,16 +51,17 @@ If no relevant skills are found, return:
 **Important:** Only select skills from the actual marketplace. Do not speculate or invent skills.
 """
 
-CODEX_ADVISE_PROMPT = (
+DIRECT_AGENT_ADVISE_PROMPT = (
     ADVISE_PROMPT
     + """
 
-**Codex automation constraints:**
+**Direct-agent automation constraints:**
 - Do not invoke `$advise`; this prompt is already the advise step.
 - Do not clone or update ProjectMnemosyne yourself; use the marketplace path above.
 - Do not implement, commit, push, create a PR, or modify files.
 """
 )
+CODEX_ADVISE_PROMPT = DIRECT_AGENT_ADVISE_PROMPT
 
 
 def get_advise_prompt(
@@ -116,7 +117,7 @@ def get_codex_advise_prompt(
     read-only and non-recursive.
     """
     safe_marketplace_path = _relativize_path(marketplace_path, repo_root)
-    return CODEX_ADVISE_PROMPT.format(
+    return DIRECT_AGENT_ADVISE_PROMPT.format(
         issue_number=issue_number,
         issue_title=issue_title,
         issue_body=issue_body,
@@ -128,6 +129,6 @@ def get_codex_advise_prompt(
 
 def get_advise_prompt_builder(agent: str) -> Callable[..., str]:
     """Return the provider-specific advise prompt builder."""
-    if is_codex(agent):
+    if uses_direct_agent_runner(agent):
         return get_codex_advise_prompt
     return get_advise_prompt

@@ -20,7 +20,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.runtime import is_codex, run_codex_text
+from hephaestus.agents.runtime import (
+    direct_agent_model,
+    is_codex,
+    run_agent_text,
+    run_codex_text,
+    uses_direct_agent_runner,
+)
 from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
@@ -148,6 +154,16 @@ def run_audit_coordinator(
                 prompt,
                 cwd=get_repo_root(),
                 timeout=pr_reviewer_claude_timeout(),
+                sandbox="read-only",
+            )
+            response = result.stdout or ""
+        elif uses_direct_agent_runner(agent):
+            result = run_agent_text(
+                agent=agent,
+                prompt=prompt,
+                cwd=get_repo_root(),
+                timeout=pr_reviewer_claude_timeout(),
+                model=direct_agent_model(agent, "HEPH_REVIEWER_MODEL"),
                 sandbox="read-only",
             )
             response = result.stdout or ""

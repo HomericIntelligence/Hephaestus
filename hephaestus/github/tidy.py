@@ -23,7 +23,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.runtime import add_agent_argument, is_codex, resolve_agent, run_codex_text
+from hephaestus.agents.runtime import (
+    add_agent_argument,
+    direct_agent_model,
+    is_codex,
+    resolve_agent,
+    run_agent_text,
+    run_codex_text,
+    uses_direct_agent_runner,
+)
 from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
@@ -355,8 +363,8 @@ async def _dispatch_swarm(
 
     Returns a dict of branch -> status string.
     """
-    claude_swarm = None if is_codex(agent) else _load_claude_swarm()
-    if not is_codex(agent) and claude_swarm is None:
+    claude_swarm = None if uses_direct_agent_runner(agent) else _load_claude_swarm()
+    if not uses_direct_agent_runner(agent) and claude_swarm is None:
         return dict.fromkeys(branches, "failed (claude_code_sdk missing)")
 
     results: dict[str, str] = {}
@@ -379,6 +387,15 @@ async def _dispatch_swarm(
                     repo_path,
                 )
                 return
+            if uses_direct_agent_runner(agent):
+                results[branch] = await asyncio.to_thread(
+                    _run_direct_rebase_agent,
+                    agent,
+                    prompt,
+                    branch,
+                    repo_path,
+                )
+                return
 
             results[branch] = await _run_claude_rebase_agent(
                 prompt, branch, repo_path, claude_swarm
@@ -395,6 +412,25 @@ def _run_codex_rebase_agent(prompt: str, branch: str, repo_path: Path) -> str:
             prompt,
             cwd=repo_path,
             timeout=2400,
+            sandbox="workspace-write",
+        )
+        text = result.stdout or ""
+        logger.debug("[%s] agent: %s", branch, text[:300])
+        return _status_from_agent_text(text) or "failed"
+    except Exception as e:
+        logger.error("[%s] agent exception: %s", branch, e)
+        return "failed"
+
+
+def _run_direct_rebase_agent(agent: str, prompt: str, branch: str, repo_path: Path) -> str:
+    """Run one direct rebase-fix agent and return its status marker."""
+    try:
+        result = run_agent_text(
+            agent=agent,
+            prompt=prompt,
+            cwd=repo_path,
+            timeout=2400,
+            model=direct_agent_model(agent, "HEPH_IMPLEMENTER_MODEL"),
             sandbox="workspace-write",
         )
         text = result.stdout or ""

@@ -12,6 +12,7 @@ from hephaestus.agents.runtime import (
     resolve_agent,
     run_claude_text,
     run_codex_session,
+    run_pi_session,
 )
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 
@@ -139,6 +140,46 @@ def run_codex(
     return 0
 
 
+def run_pi(
+    args: argparse.Namespace,
+    prompt: str,
+    repo_root: Path,
+    output_file: Path,
+    log_file: Path | None,
+) -> int:
+    """Run one stage with Pi."""
+    if args.debug:
+        print("Running: pi --mode json", file=sys.stderr)
+
+    try:
+        result = run_pi_session(
+            prompt,
+            cwd=repo_root,
+            timeout=args.timeout,
+            model=args.model,
+            sandbox=args.sandbox,
+            approval=args.approval,
+        )
+    except subprocess.TimeoutExpired as exc:
+        write_log(log_file, str(exc))
+        return 124
+    except subprocess.CalledProcessError as exc:
+        log_text = (
+            f"EXIT CODE: {exc.returncode}\n\n"
+            f"STDOUT:\n{exc.stdout or ''}\n\n"
+            f"STDERR:\n{exc.stderr or ''}"
+        )
+        write_log(log_file, log_text)
+        return exc.returncode
+
+    output_file.write_text(result.stdout, encoding="utf-8")
+    log = result.stdout
+    if result.session_id:
+        log = f"SESSION_ID: {result.session_id}\n\n{log}"
+    write_log(log_file, log)
+    return 0
+
+
 # Flag values that silently no-op when --agent=claude is selected.
 # - `approval` is not a parameter of run_claude_text at all, so any
 #   non-default value (i.e. != "never") is a no-op.
@@ -149,6 +190,14 @@ _CLAUDE_NOOP_VALUES: tuple[tuple[str, str, frozenset[str]], ...] = (
     ("approval", "--approval", frozenset({"untrusted", "on-request"})),
     ("sandbox", "--sandbox", frozenset({"danger-full-access"})),
 )
+_PI_NOOP_VALUES: tuple[tuple[str, str, frozenset[str]], ...] = (
+    ("approval", "--approval", frozenset({"untrusted", "on-request"})),
+    ("sandbox", "--sandbox", frozenset({"danger-full-access"})),
+)
+_NOOP_VALUES_BY_AGENT: dict[str, tuple[tuple[str, str, frozenset[str]], ...]] = {
+    "claude": _CLAUDE_NOOP_VALUES,
+    "pi": _PI_NOOP_VALUES,
+}
 
 
 def validate_agent_flags(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
@@ -158,18 +207,19 @@ def validate_agent_flags(parser: argparse.ArgumentParser, args: argparse.Namespa
     ``--agent`` is omitted, ``resolve_agent`` will auto-detect at run time and
     that path keeps its existing semantics. See issue #773.
     """
-    if args.agent != "claude":
+    noop_values = _NOOP_VALUES_BY_AGENT.get(args.agent)
+    if not noop_values:
         return
     offending: list[str] = []
-    for attr, flag, noop_values in _CLAUDE_NOOP_VALUES:
+    for attr, flag, noops in noop_values:
         value = getattr(args, attr)
-        if value in noop_values:
+        if value in noops:
             offending.append(f"{flag}={value}")
     if offending:
         parser.error(
-            "--agent=claude does not honor "
+            f"--agent={args.agent} does not honor "
             + ", ".join(offending)
-            + " (these flag values are not supported by the claude agent)"
+            + f" (these flag values are not supported by the {args.agent} agent)"
         )
 
 
@@ -193,6 +243,8 @@ def run_agent(args: argparse.Namespace) -> int:
         return run_claude(args, prompt, repo_root, output_file, log_file)
     if agent == "codex":
         return run_codex(args, prompt, repo_root, output_file, log_file)
+    if agent == "pi":
+        return run_pi(args, prompt, repo_root, output_file, log_file)
     raise ValueError(f"Unsupported agent: {agent}")
 
 

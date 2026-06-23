@@ -50,6 +50,7 @@ Thumbs.db
 # Secrets
 .env
 .env.local
+.heph-private-denylist
 *.pem
 credentials.json
 

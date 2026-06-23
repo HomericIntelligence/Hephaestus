@@ -24,9 +24,13 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import (
+    direct_agent_model,
     is_codex,
+    resume_agent_session,
     resume_codex_session,
+    run_agent_session,
     run_codex_session,
+    uses_direct_agent_runner,
 )
 
 from .claude_invoke import invoke_claude_with_session
@@ -305,6 +309,64 @@ class CIFixOrchestrator:
                         prompt,
                         cwd=worktree_path,
                         timeout=ci_driver_claude_timeout(),
+                        sandbox="workspace-write",
+                    )
+                except subprocess.CalledProcessError as exc:
+                    return subprocess.CompletedProcess(
+                        args=exc.cmd,
+                        returncode=exc.returncode,
+                        stdout=exc.stdout or "",
+                        stderr=exc.stderr or "",
+                    )
+            return subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=result.stdout, stderr=result.stderr or ""
+            )
+
+        if uses_direct_agent_runner(options.agent):
+            if session_id:
+                try:
+                    result = resume_agent_session(
+                        agent=options.agent,
+                        session_id=session_id,
+                        prompt=prompt,
+                        cwd=worktree_path,
+                        timeout=ci_driver_claude_timeout(),
+                        model=direct_agent_model(options.agent, "HEPH_IMPLEMENTER_MODEL"),
+                    )
+                except subprocess.CalledProcessError as exc:
+                    logger.warning(
+                        "Issue #%s: %s resume session %r failed for PR #%s; "
+                        "falling back to fresh session: %s",
+                        issue_number,
+                        options.agent,
+                        session_id,
+                        pr_number,
+                        (exc.stderr or exc.stdout or "")[:300],
+                    )
+                    try:
+                        result = run_agent_session(
+                            agent=options.agent,
+                            prompt=prompt,
+                            cwd=worktree_path,
+                            timeout=ci_driver_claude_timeout(),
+                            model=direct_agent_model(options.agent, "HEPH_IMPLEMENTER_MODEL"),
+                            sandbox="workspace-write",
+                        )
+                    except subprocess.CalledProcessError as fresh_exc:
+                        return subprocess.CompletedProcess(
+                            args=fresh_exc.cmd,
+                            returncode=fresh_exc.returncode,
+                            stdout=fresh_exc.stdout or "",
+                            stderr=fresh_exc.stderr or "",
+                        )
+            else:
+                try:
+                    result = run_agent_session(
+                        agent=options.agent,
+                        prompt=prompt,
+                        cwd=worktree_path,
+                        timeout=ci_driver_claude_timeout(),
+                        model=direct_agent_model(options.agent, "HEPH_IMPLEMENTER_MODEL"),
                         sandbox="workspace-write",
                     )
                 except subprocess.CalledProcessError as exc:

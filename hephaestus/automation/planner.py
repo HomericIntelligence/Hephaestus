@@ -16,7 +16,13 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.runtime import add_agent_argument, is_codex, resolve_agent
+from hephaestus.agents.runtime import (
+    add_agent_argument,
+    direct_agent_model,
+    is_codex,
+    resolve_agent,
+    uses_direct_agent_runner,
+)
 from hephaestus.cli.utils import (
     add_dry_run_arg,
     add_github_throttle_args,
@@ -387,6 +393,13 @@ class Planner:
                 return self._call_codex(
                     prompt,
                     model=codex_advise_model(),
+                    timeout=advise_claude_timeout(),
+                    sandbox="read-only",
+                )
+            if uses_direct_agent_runner(self.options.agent):
+                return self.claude_runner.call_direct_agent(
+                    prompt,
+                    model=direct_agent_model(self.options.agent, "HEPH_ADVISE_MODEL"),
                     timeout=advise_claude_timeout(),
                     sandbox="read-only",
                 )

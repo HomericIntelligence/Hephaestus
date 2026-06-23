@@ -17,7 +17,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.runtime import resume_codex_session, session_agent_matches
+from hephaestus.agents.runtime import (
+    direct_agent_model,
+    resume_agent_session,
+    resume_codex_session,
+    session_agent_matches,
+    uses_direct_agent_runner,
+)
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 
 from .claude_models import learn_model
@@ -235,6 +241,28 @@ def run_learn(
 
         return _run_learn_with_retry(
             _invoke_codex, state_dir=state_dir, issue_number=issue_number, log_file=log_file
+        )
+
+    if uses_direct_agent_runner(agent):
+
+        def _invoke_direct_agent() -> str:
+            return (
+                resume_agent_session(
+                    agent=agent,
+                    session_id=session_id,
+                    prompt=build_learn_prompt(""),
+                    cwd=worktree_path,
+                    timeout=learn_claude_timeout(),
+                    model=direct_agent_model(agent, "HEPH_LEARN_MODEL"),
+                ).stdout
+                or ""
+            )
+
+        return _run_learn_with_retry(
+            _invoke_direct_agent,
+            state_dir=state_dir,
+            issue_number=issue_number,
+            log_file=log_file,
         )
 
     # /learn is a SIMPLE-complexity task (summarization + file writes), so we

@@ -1,8 +1,9 @@
-"""Shared Claude/Codex process helpers for agent-driven CLIs."""
+"""Shared process helpers for agent-driven CLIs."""
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
@@ -13,15 +14,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-AgentName = Literal["claude", "codex"]
-AGENT_CHOICES: tuple[AgentName, ...] = ("claude", "codex")
+AgentName = Literal["claude", "codex", "pi"]
+AGENT_CHOICES: tuple[AgentName, ...] = ("claude", "codex", "pi")
 DEFAULT_AGENT: AgentName = "claude"
 AGENT_AUTH_STATUS_TIMEOUT = 10
 CODEX_FINAL_MESSAGE_GRACE_ENV = "HEPH_CODEX_FINAL_MESSAGE_GRACE"
 CODEX_FINAL_MESSAGE_GRACE_SECONDS = 5.0
+PI_MODEL_ENV = "HEPH_PI_MODEL"
+PI_READ_ONLY_TOOLS = "read,grep,find,ls"
 AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
     "claude": (("claude", "auth", "status"),),
     "codex": (("codex", "login", "status"),),
+    "pi": (("pi", "--version"),),
 }
 
 
@@ -32,6 +36,38 @@ class AgentRunResult:
     stdout: str
     stderr: str
     session_id: str | None = None
+
+
+@dataclass(frozen=True)
+class AgentCapabilities:
+    """Backend capabilities used by provider-neutral call sites."""
+
+    direct_runner: bool
+    supports_approval: bool
+    supports_sandbox: bool
+    supports_sessions: bool
+
+
+AGENT_CAPABILITIES: dict[AgentName, AgentCapabilities] = {
+    "claude": AgentCapabilities(
+        direct_runner=False,
+        supports_approval=False,
+        supports_sandbox=True,
+        supports_sessions=True,
+    ),
+    "codex": AgentCapabilities(
+        direct_runner=True,
+        supports_approval=True,
+        supports_sandbox=True,
+        supports_sessions=True,
+    ),
+    "pi": AgentCapabilities(
+        direct_runner=True,
+        supports_approval=False,
+        supports_sandbox=True,
+        supports_sessions=True,
+    ),
+}
 
 
 def add_agent_argument(parser: argparse.ArgumentParser) -> None:
@@ -69,17 +105,7 @@ def is_agent_authenticated(agent: AgentName) -> bool:
 
 
 def resolve_agent(agent: str | None) -> AgentName:
-    """Resolve an optional provider selection into a concrete backend.
-
-    When the operator omits ``--agent``, choose an installed provider that also
-    reports authenticated status. Claude still wins ties when both providers are
-    authenticated.
-
-    When the operator explicitly passes ``--agent``, the selected provider must
-    still be installed and authenticated — an unauthenticated backend would
-    silently produce empty output, causing every automation phase to report
-    success while doing no work.
-    """
+    """Resolve an optional provider selection into a concrete backend."""
     if agent is not None:
         if agent not in AGENT_CHOICES:
             raise ValueError(f"Unsupported agent: {agent}")
@@ -90,17 +116,21 @@ def resolve_agent(agent: str | None) -> AgentName:
                     f"Install the '{agent}' CLI and try again, "
                     f"or omit --agent to auto-detect an authenticated backend."
                 )
+            status_hint = (
+                "`pi --version` and check ~/.pi/agent/models.json"
+                if agent == "pi"
+                else f"`{agent} auth status` (or `{agent} login status`)"
+            )
             raise RuntimeError(
                 f"Agent '{agent}' is installed but not authenticated. "
-                f"Run `{agent} auth status` (or `{agent} login status`) "
-                f"and log in before running automation."
+                f"Run {status_hint} before running automation."
             )
         return agent
 
     installed_agents = tuple(agent_name for agent_name in AGENT_CHOICES if shutil.which(agent_name))
     if not installed_agents:
         raise RuntimeError(
-            "No supported agent backend found on PATH. Install `claude` or `codex`, "
+            "No supported agent backend found on PATH. Install `claude`, `codex`, or `pi`, "
             "or pass --agent after installing the selected backend."
         )
 
@@ -110,14 +140,33 @@ def resolve_agent(agent: str | None) -> AgentName:
 
     raise RuntimeError(
         "Supported agent backends are installed but none are authenticated. "
-        "Run `claude auth status` or `codex login status`, then log in to the "
-        "provider you want automation to use."
+        "Run `claude auth status`, `codex login status`, or `pi --version`, then "
+        "log in/configure the provider you want automation to use."
     )
 
 
 def is_codex(agent: str) -> bool:
     """Return True when the selected provider is Codex."""
     return agent == "codex"
+
+
+def is_pi(agent: str) -> bool:
+    """Return True when the selected provider is Pi."""
+    return agent == "pi"
+
+
+def uses_direct_agent_runner(agent: str) -> bool:
+    """Return True when the provider is invoked through runtime text/session helpers."""
+    if agent not in AGENT_CAPABILITIES:
+        return False
+    return AGENT_CAPABILITIES[agent].direct_runner
+
+
+def direct_agent_model(agent: str, phase_env_var: str) -> str:
+    """Return a model override appropriate for a direct-runner provider."""
+    if is_pi(agent):
+        return os.environ.get(PI_MODEL_ENV, "")
+    return os.environ.get(phase_env_var, "")
 
 
 def session_agent_matches(session_agent: str | None, selected_agent: str) -> bool:
@@ -154,7 +203,6 @@ def run_claude_text(
 
     env = os.environ.copy()
     env["CLAUDECODE"] = ""
-    # Propagate correlation ID to subprocess if set (for gh tracing).
     from hephaestus.logging.utils import get_current_correlation_id
 
     cid = get_current_correlation_id()
@@ -288,6 +336,60 @@ def _parse_codex_json_events(text: str) -> tuple[str | None, str]:
     return session_id, "\n".join(messages).strip()
 
 
+def _pi_message_text(message: Any) -> str:
+    """Extract assistant text from a Pi message object."""
+    if not isinstance(message, dict):
+        return ""
+    if message.get("role") not in (None, "assistant"):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                elif isinstance(item.get("delta"), str):
+                    parts.append(item["delta"])
+        return "".join(parts).strip()
+    text = message.get("text")
+    return text.strip() if isinstance(text, str) else ""
+
+
+def _parse_pi_json_events(text: str) -> tuple[str | None, str]:
+    """Extract Pi session id and final assistant text from JSONL output."""
+    session_id: str | None = None
+    final_message = ""
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event: Any = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "session" and isinstance(event.get("id"), str):
+            session_id = event["id"]
+        if event.get("type") in {"message_end", "turn_end"}:
+            message_text = _pi_message_text(event.get("message"))
+            if message_text:
+                final_message = message_text
+        if event.get("type") == "agent_end":
+            raw_messages = event.get("messages")
+            if isinstance(raw_messages, list):
+                for message in raw_messages:
+                    message_text = _pi_message_text(message)
+                    if message_text:
+                        final_message = message_text
+    return session_id, final_message.strip()
+
+
 def run_codex_session(
     prompt: str,
     *,
@@ -353,6 +455,223 @@ def _run_codex_command(
     session_id, event_message = _parse_codex_json_events(stdout_text)
     stdout = (last_message or event_message or stdout_text or "").strip()
     return AgentRunResult(stdout=stdout, stderr=stderr_text, session_id=session_id)
+
+
+def _pi_base_cmd(*, model: str = "", session_id: str | None = None) -> list[str]:
+    """Build a Pi JSON-mode command."""
+    resolved_model = model or os.environ.get(PI_MODEL_ENV, "")
+    cmd = ["pi", "--mode", "json"]
+    if session_id:
+        cmd.extend(["--session", session_id])
+    if resolved_model:
+        cmd.extend(["--model", resolved_model])
+    return cmd
+
+
+def _pi_sandbox_args(sandbox: str) -> list[str]:
+    """Return Pi tool restrictions for the requested sandbox mode."""
+    if sandbox == "read-only":
+        return ["--tools", PI_READ_ONLY_TOOLS]
+    if sandbox in {"workspace-write", "danger-full-access"}:
+        return []
+    raise ValueError(f"Unsupported Pi sandbox mode: {sandbox}")
+
+
+def _pi_env() -> dict[str, str]:
+    """Return a privacy-biased environment for Pi subprocesses."""
+    env = os.environ.copy()
+    env.setdefault("PI_TELEMETRY", "0")
+    env.setdefault("PI_SKIP_VERSION_CHECK", "1")
+    return env
+
+
+def _run_pi_command(
+    cmd: list[str],
+    *,
+    prompt: str,
+    cwd: Path,
+    timeout: int,
+    sandbox: str,
+) -> subprocess.CompletedProcess[str]:
+    """Run Pi with prompt content attached via an ephemeral file, not argv."""
+    prompt_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            prefix="pi-prompt-",
+            suffix=".md",
+            encoding="utf-8",
+            delete=False,
+        ) as prompt_file:
+            prompt_file.write(prompt)
+            prompt_path = Path(prompt_file.name)
+        prompt_path.chmod(0o600)
+        cmd.extend(_pi_sandbox_args(sandbox))
+        cmd.append(f"@{prompt_path}")
+        return subprocess.run(
+            cmd,
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env=_pi_env(),
+            check=True,
+        )
+    finally:
+        if prompt_path is not None:
+            with contextlib.suppress(OSError):
+                prompt_path.unlink()
+
+
+def run_pi_text(
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
+) -> subprocess.CompletedProcess[str]:
+    """Run Pi non-interactively and return a text completed process."""
+    del approval
+    result = run_pi_session(prompt, cwd=cwd, timeout=timeout, model=model, sandbox=sandbox)
+    return subprocess.CompletedProcess(
+        args=["pi", "--mode", "json"],
+        returncode=0,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+
+
+def run_pi_session(
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
+) -> AgentRunResult:
+    """Run a new Pi JSON-mode session and capture its id."""
+    del approval
+    cmd = _pi_base_cmd(model=model)
+    result = _run_pi_command(
+        cmd,
+        prompt=prompt,
+        cwd=cwd,
+        timeout=timeout,
+        sandbox=sandbox,
+    )
+    session_id, event_message = _parse_pi_json_events(result.stdout or "")
+    stdout = (event_message or result.stdout or "").strip()
+    return AgentRunResult(stdout=stdout, stderr=result.stderr or "", session_id=session_id)
+
+
+def resume_pi_session(
+    session_id: str,
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+) -> AgentRunResult:
+    """Resume a Pi JSON-mode session by id."""
+    cmd = _pi_base_cmd(model=model, session_id=session_id)
+    result = _run_pi_command(
+        cmd,
+        prompt=prompt,
+        cwd=cwd,
+        timeout=timeout,
+        sandbox="workspace-write",
+    )
+    parsed_session_id, event_message = _parse_pi_json_events(result.stdout or "")
+    stdout = (event_message or result.stdout or "").strip()
+    return AgentRunResult(
+        stdout=stdout,
+        stderr=result.stderr or "",
+        session_id=parsed_session_id or session_id,
+    )
+
+
+def run_agent_text(
+    agent: str,
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
+) -> subprocess.CompletedProcess[str]:
+    """Run a direct-runner agent non-interactively and return text output."""
+    if is_codex(agent):
+        return run_codex_text(
+            prompt,
+            cwd=cwd,
+            timeout=timeout,
+            model=model,
+            sandbox=sandbox,
+            approval=approval,
+        )
+    if is_pi(agent):
+        return run_pi_text(
+            prompt,
+            cwd=cwd,
+            timeout=timeout,
+            model=model,
+            sandbox=sandbox,
+            approval=approval,
+        )
+    raise ValueError(f"Agent '{agent}' does not support direct text execution")
+
+
+def run_agent_session(
+    agent: str,
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
+) -> AgentRunResult:
+    """Run a direct-runner agent session and return output plus session id."""
+    if is_codex(agent):
+        return run_codex_session(
+            prompt,
+            cwd=cwd,
+            timeout=timeout,
+            model=model,
+            sandbox=sandbox,
+            approval=approval,
+        )
+    if is_pi(agent):
+        return run_pi_session(
+            prompt,
+            cwd=cwd,
+            timeout=timeout,
+            model=model,
+            sandbox=sandbox,
+            approval=approval,
+        )
+    raise ValueError(f"Agent '{agent}' does not support direct session execution")
+
+
+def resume_agent_session(
+    agent: str,
+    session_id: str,
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+) -> AgentRunResult:
+    """Resume a direct-runner agent session."""
+    if is_codex(agent):
+        return resume_codex_session(session_id, prompt, cwd=cwd, timeout=timeout, model=model)
+    if is_pi(agent):
+        return resume_pi_session(session_id, prompt, cwd=cwd, timeout=timeout, model=model)
+    raise ValueError(f"Agent '{agent}' does not support direct session resume")
 
 
 def _communicate_codex_process(
@@ -471,7 +790,7 @@ def codex_json_stdout(text: str, session_id: str | None = None) -> str:
 
 
 def extract_agent_text(stdout: str) -> str:
-    """Extract model text from either Claude JSON output or raw Codex text."""
+    """Extract model text from either Claude JSON output or raw direct-agent text."""
     try:
         payload: Any = json.loads(stdout or "{}")
     except json.JSONDecodeError:

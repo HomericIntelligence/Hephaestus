@@ -28,11 +28,15 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import (
+    direct_agent_model,
     is_codex,
     resolve_agent,
+    resume_agent_session,
     resume_codex_session,
+    run_agent_session,
     run_codex_session,
     session_agent_matches,
+    uses_direct_agent_runner,
 )
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 
@@ -204,6 +208,26 @@ def run_address_fix_session(
                 log = f"SESSION_ID: {codex_result.session_id}\n\n{log}"
             log_file.write_text(log)
             parsed = parse_fn(codex_result.stdout)
+            logger.info(
+                "Fix session complete for PR #%s; addressed %s thread(s)",
+                pr_number,
+                len(parsed.get("addressed", [])),
+            )
+            return parsed
+        if uses_direct_agent_runner(agent):
+            direct_result = run_agent_session(
+                agent=agent,
+                prompt=prompt,
+                cwd=worktree_path,
+                timeout=address_review_claude_timeout(),
+                model=direct_agent_model(agent, "HEPH_IMPLEMENTER_MODEL"),
+                sandbox="workspace-write",
+            )
+            log = direct_result.stdout
+            if direct_result.session_id:
+                log = f"SESSION_ID: {direct_result.session_id}\n\n{log}"
+            log_file.write_text(log)
+            parsed = parse_fn(direct_result.stdout)
             logger.info(
                 "Fix session complete for PR #%s; addressed %s thread(s)",
                 pr_number,
@@ -891,6 +915,61 @@ class AddressReviewer(BaseReviewer):
                     log = f"SESSION_ID: {codex_result.session_id}\n\n{log}"
                 log_file.write_text(log)
                 parsed = self._parse_json_block(codex_result.stdout, issue_number=issue_number)
+                logger.info(
+                    "Fix session complete for PR #%s; addressed %s thread(s)",
+                    pr_number,
+                    len(parsed.get("addressed", [])),
+                )
+                return parsed
+
+        if (
+            not self.options.dry_run
+            and not is_codex(self.options.agent)
+            and uses_direct_agent_runner(self.options.agent)
+            and session_id
+        ):
+            threads_json = json.dumps(
+                [
+                    {
+                        "thread_id": t["id"],
+                        "path": t["path"],
+                        "line": t.get("line"),
+                        "body": t["body"],
+                    }
+                    for t in threads
+                ]
+            )
+            prompt = get_address_review_prompt(
+                pr_number=pr_number,
+                issue_number=issue_number,
+                worktree_path=str(worktree_path),
+                threads_json=threads_json,
+            )
+            try:
+                direct_result = resume_agent_session(
+                    agent=self.options.agent,
+                    session_id=session_id,
+                    prompt=prompt,
+                    cwd=worktree_path,
+                    timeout=address_review_claude_timeout(),
+                    model=direct_agent_model(self.options.agent, "HEPH_IMPLEMENTER_MODEL"),
+                )
+            except subprocess.CalledProcessError as e:
+                logger.warning(
+                    "Issue #%s: %s resume session %r failed for PR #%s; "
+                    "falling back to fresh session: %s",
+                    issue_number,
+                    self.options.agent,
+                    session_id,
+                    pr_number,
+                    (e.stderr or e.stdout or "")[:300],
+                )
+            else:
+                log = direct_result.stdout
+                if direct_result.session_id:
+                    log = f"SESSION_ID: {direct_result.session_id}\n\n{log}"
+                log_file.write_text(log)
+                parsed = self._parse_json_block(direct_result.stdout, issue_number=issue_number)
                 logger.info(
                     "Fix session complete for PR #%s; addressed %s thread(s)",
                     pr_number,

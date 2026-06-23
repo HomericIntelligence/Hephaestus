@@ -14,7 +14,13 @@ import subprocess
 import time
 from typing import TYPE_CHECKING
 
-from hephaestus.agents.runtime import is_codex, run_codex_text
+from hephaestus.agents.runtime import (
+    direct_agent_model,
+    is_codex,
+    run_agent_text,
+    run_codex_text,
+    uses_direct_agent_runner,
+)
 from hephaestus.github.rate_limit import wait_until
 
 from .claude_invoke import detect_server_overload, invoke_claude_with_session, scan_quota_reset
@@ -92,6 +98,13 @@ class PlannerClaudeRunner:
         """
         if is_codex(self.options.agent):
             return self.call_codex(prompt, model=model, max_retries=max_retries, timeout=timeout)
+        if uses_direct_agent_runner(self.options.agent):
+            return self.call_direct_agent(
+                prompt,
+                model=direct_agent_model(self.options.agent, "HEPH_PLANNER_MODEL"),
+                max_retries=max_retries,
+                timeout=timeout,
+            )
 
         repo_root = get_repo_root()
         repo = get_repo_slug(repo_root)
@@ -210,4 +223,48 @@ class PlannerClaudeRunner:
         response = (result.stdout or "").strip()
         if not response:
             raise RuntimeError("Codex returned empty response")
+        return response
+
+    def call_direct_agent(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        max_retries: int = 3,
+        timeout: int = 300,
+        sandbox: str = "workspace-write",
+    ) -> str:
+        """Call a non-Claude direct agent with retry logic for rate limits."""
+        agent = self.options.agent
+        try:
+            result = run_agent_text(
+                agent=agent,
+                prompt=prompt,
+                cwd=get_repo_root(),
+                timeout=timeout,
+                model=model,
+                sandbox=sandbox,
+            )
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr or ""
+            stdout = e.stdout or ""
+            reset_epoch = scan_quota_reset(stderr, stdout)
+            if reset_epoch is not None and reset_epoch > 0 and max_retries > 0:
+                logger.warning("%s usage cap hit; waiting for reset", agent)
+                wait_until(reset_epoch)
+                return self.call_direct_agent(
+                    prompt,
+                    model=model,
+                    max_retries=max_retries - 1,
+                    timeout=timeout,
+                    sandbox=sandbox,
+                )
+            detail = stderr or stdout or str(e)
+            raise RuntimeError(f"{agent} failed: {detail}") from e
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f"{agent} timed out after {timeout}s") from e
+
+        response = (result.stdout or "").strip()
+        if not response:
+            raise RuntimeError(f"{agent} returned empty response")
         return response

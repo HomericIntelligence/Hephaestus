@@ -13,9 +13,9 @@ def _agents_authenticated_by_default(
 ) -> None:
     """Stub the agent install+auth pre-flight (#1175) to pass by default.
 
-    ``resolve_agent`` now refuses a ``--agent claude|codex`` selection unless the
+    ``resolve_agent`` now refuses a ``--agent claude|codex|pi`` selection unless the
     CLI is installed AND reports authenticated (#1175) — a real guard so an
-    unauthenticated backend cannot silently produce empty output. But neither CLI
+    unauthenticated backend cannot silently produce empty output. But these CLIs
     is installed in CI, so every test that dispatches a named agent through
     automation, fleet-sync, tidy, etc. (mocking the actual run_* call) would
     otherwise hit ``RuntimeError: Agent '...' is not installed``. Default the

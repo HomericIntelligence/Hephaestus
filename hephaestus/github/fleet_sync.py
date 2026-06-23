@@ -40,7 +40,15 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.runtime import add_agent_argument, is_codex, resolve_agent, run_codex_text
+from hephaestus.agents.runtime import (
+    add_agent_argument,
+    direct_agent_model,
+    is_codex,
+    resolve_agent,
+    run_agent_text,
+    run_codex_text,
+    uses_direct_agent_runner,
+)
 from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
@@ -694,6 +702,18 @@ def _run_conflict_agent(agent: str, prompt: str, work: Path, pr_number: int) -> 
             prompt,
             cwd=work,
             timeout=2400,
+            sandbox="workspace-write",
+        )
+        if result.stdout:
+            logger.debug("  agent: %s", result.stdout[:200])
+        return True
+    if uses_direct_agent_runner(agent):
+        result = run_agent_text(
+            agent=agent,
+            prompt=prompt,
+            cwd=work,
+            timeout=2400,
+            model=direct_agent_model(agent, "HEPH_IMPLEMENTER_MODEL"),
             sandbox="workspace-write",
         )
         if result.stdout:

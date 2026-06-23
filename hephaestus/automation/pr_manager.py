@@ -16,7 +16,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from hephaestus.agents.runtime import is_codex, run_codex_text
+from hephaestus.agents.runtime import (
+    is_codex,
+    is_pi,
+    run_agent_text,
+    run_codex_text,
+    uses_direct_agent_runner,
+)
 
 from ._secret_patterns import SECRET_FILE_EXTENSIONS, SECRET_FILE_NAMES
 from .claude_invoke import invoke_claude_with_session
@@ -69,7 +75,11 @@ class _PrMessageParts:
 
 def _agent_display_name(agent: str) -> str:
     """Return a short human-facing name for generated commits/PR bodies."""
-    return "Codex" if is_codex(agent) else "Claude Code"
+    if is_codex(agent):
+        return "Codex"
+    if is_pi(agent):
+        return "Pi"
+    return "Claude Code"
 
 
 def _coauthor_for_agent(agent: str) -> tuple[str, str]:
@@ -81,6 +91,8 @@ def _coauthor_for_agent(agent: str) -> tuple[str, str]:
     """
     if is_codex(agent):
         return ("Codex", "noreply@openai.com")
+    if is_pi(agent):
+        return ("Pi", "noreply@earendil.works")
     return ("Claude Code", "noreply@anthropic.com")
 
 
@@ -92,6 +104,8 @@ def _provenance_for_agent(agent: str) -> str:
     """
     if is_codex(agent):
         return "Codex"
+    if is_pi(agent):
+        return "Pi"
     return implementer_model()
 
 
@@ -267,6 +281,16 @@ def _invoke_git_message_agent(
     if is_codex(agent):
         result = run_codex_text(
             prompt,
+            cwd=worktree_path,
+            timeout=timeout,
+            model=_codex_git_message_model(),
+            sandbox="read-only",
+        )
+        return (result.stdout or "").strip()
+    if uses_direct_agent_runner(agent):
+        result = run_agent_text(
+            agent=agent,
+            prompt=prompt,
             cwd=worktree_path,
             timeout=timeout,
             model=_codex_git_message_model(),

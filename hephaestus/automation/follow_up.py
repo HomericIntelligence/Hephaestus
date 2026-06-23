@@ -31,7 +31,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.runtime import codex_json_stdout, resume_codex_session, session_agent_matches
+from hephaestus.agents.runtime import (
+    codex_json_stdout,
+    direct_agent_model,
+    resume_agent_session,
+    resume_codex_session,
+    session_agent_matches,
+    uses_direct_agent_runner,
+)
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 
 from .claude_timeouts import follow_up_claude_timeout
@@ -417,6 +424,16 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
                 timeout=follow_up_claude_timeout(),
             )
             stdout = codex_json_stdout(codex_result.stdout, codex_result.session_id)
+        elif uses_direct_agent_runner(agent):
+            direct_result = resume_agent_session(
+                agent=agent,
+                session_id=session_id,
+                prompt=prompt_file.read_text(),
+                cwd=worktree_path,
+                timeout=follow_up_claude_timeout(),
+                model=direct_agent_model(agent, "HEPH_LEARN_MODEL"),
+            )
+            stdout = codex_json_stdout(direct_result.stdout, direct_result.session_id)
         else:
             result = run(
                 [

@@ -391,6 +391,30 @@ class TestMessageAgentInvocation:
         assert kwargs["sandbox"] == "read-only"
         assert kwargs["model"] == "gpt-5.4-mini"
 
+    def test_pi_message_agent_uses_read_only_pi_exec(self) -> None:
+        completed = subprocess.CompletedProcess(args=["pi"], returncode=0, stdout="{}", stderr="")
+        with (
+            patch.object(pr_manager, "uses_direct_agent_runner", return_value=True),
+            patch.object(pr_manager, "is_codex", return_value=False),
+            patch.object(pr_manager, "git_message_agent_timeout", return_value=120),
+            patch.object(pr_manager, "run_agent_text", return_value=completed) as run_agent,
+        ):
+            assert (
+                pr_manager._invoke_git_message_agent(
+                    issue_number=9,
+                    agent_kind=AGENT_PR_MESSAGE,
+                    prompt="prompt",
+                    worktree_path=Path("/tmp/wt"),
+                    agent="pi",
+                )
+                == "{}"
+            )
+
+        kwargs = run_agent.call_args.kwargs
+        assert kwargs["agent"] == "pi"
+        assert kwargs["cwd"] == Path("/tmp/wt")
+        assert kwargs["sandbox"] == "read-only"
+
 
 # ---------------------------------------------------------------------------
 # #717: Co-Authored-By uses a human-shaped name; model id moves to Implemented-By
@@ -515,6 +539,36 @@ class TestCoAuthorLine:
         assert coauthor_line == "Co-Authored-By: Codex <noreply@openai.com>"
         assert _COAUTHOR_HUMAN_NAME_RE.match(coauthor_line)
         assert "Implemented-By: Codex" in commit_msg
+        mock_model.assert_not_called()
+
+    def test_pi_coauthor_and_provenance_are_pi(self) -> None:
+        porcelain = " M foo.py\n"
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status("M\tfoo.py\n"),  # changed files context
+                _status(" foo.py | 1 +\n"),  # stat context
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="pi fallback commit")
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "implementer_model") as mock_model,
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(31, Path("/tmp/wt"), agent="pi")
+
+        commit_msg = run_mock.call_args_list[-1].args[0][-1]
+        coauthor_line = next(
+            line for line in commit_msg.splitlines() if line.startswith("Co-Authored-By:")
+        )
+        assert coauthor_line == "Co-Authored-By: Pi <noreply@earendil.works>"
+        assert _COAUTHOR_HUMAN_NAME_RE.match(coauthor_line)
+        assert "Implemented-By: Pi" in commit_msg
         mock_model.assert_not_called()
 
 

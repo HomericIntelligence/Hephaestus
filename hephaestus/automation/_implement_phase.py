@@ -20,9 +20,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from hephaestus.agents.runtime import (
+    direct_agent_model,
     is_codex,
-    run_codex_session,
+    run_agent_session,
+    run_agent_text,
     run_codex_text,
+    uses_direct_agent_runner,
 )
 from hephaestus.github.rate_limit import wait_until
 
@@ -88,6 +91,16 @@ class ImplementPhase(StageMixin):
                     sandbox="read-only",
                 )
                 return (result.stdout or "").strip()
+            if uses_direct_agent_runner(self.options.agent):
+                result = run_agent_text(
+                    agent=self.options.agent,
+                    prompt=prompt,
+                    cwd=self.repo_root,
+                    timeout=advise_claude_timeout(),
+                    model=direct_agent_model(self.options.agent, "HEPH_ADVISE_MODEL"),
+                    sandbox="read-only",
+                )
+                return (result.stdout or "").strip()
             repo_slug = get_repo_slug(self.repo_root)
             stdout, _ = invoke_claude_with_session(
                 repo=repo_slug,
@@ -146,8 +159,8 @@ class ImplementPhase(StageMixin):
 
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
-        if is_codex(self.options.agent):
-            return self.impl._run_codex_code(issue_number, worktree_path, prompt)
+        if uses_direct_agent_runner(self.options.agent):
+            return self._run_direct_agent_code(issue_number, worktree_path, prompt)
 
         return self.impl._run_claude_impl_session(issue_number, worktree_path, prompt)
 
@@ -249,12 +262,23 @@ class ImplementPhase(StageMixin):
 
     def _run_codex_code(self, issue_number: int, worktree_path: Path, prompt: str) -> str | None:
         """Run Codex implementation prompt in a worktree."""
-        log_file = self.state_dir / f"codex-{issue_number}.log"
+        return self._run_direct_agent_code(issue_number, worktree_path, prompt)
+
+    def _run_direct_agent_code(
+        self, issue_number: int, worktree_path: Path, prompt: str
+    ) -> str | None:
+        """Run a direct-runner implementation prompt in a worktree."""
+        agent = self.options.agent
+        log_file = self.state_dir / f"{agent}-{issue_number}.log"
         try:
-            result = run_codex_session(
-                prompt,
+            result = run_agent_session(
+                agent=agent,
+                prompt=prompt,
                 cwd=worktree_path,
                 timeout=implementer_claude_timeout(),
+                model=(
+                    "" if is_codex(agent) else direct_agent_model(agent, "HEPH_IMPLEMENTER_MODEL")
+                ),
                 sandbox="workspace-write",
             )
             log_file.write_text(result.stdout or "")
@@ -266,9 +290,13 @@ class ImplementPhase(StageMixin):
             log_file.write_text(output)
             reset_epoch = _claude_quota_reset_epoch(stderr, stdout)
             if reset_epoch is not None and reset_epoch > 0:
-                logger.warning("Codex usage cap hit for issue #%s; waiting for reset", issue_number)
+                logger.warning(
+                    "%s usage cap hit for issue #%s; waiting for reset",
+                    agent,
+                    issue_number,
+                )
                 wait_until(reset_epoch)
-            raise RuntimeError(f"Codex failed: {stderr or stdout}") from e
+            raise RuntimeError(f"{agent} failed: {stderr or stdout}") from e
         except subprocess.TimeoutExpired as e:
             log_file.write_text(f"TIMEOUT after {e.timeout}s\n\nOutput:\n{e.output or ''}")
-            raise RuntimeError("Codex timed out") from e
+            raise RuntimeError(f"{agent} timed out") from e

@@ -12,7 +12,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.runtime import is_codex, run_codex_session
+from hephaestus.agents.runtime import (
+    direct_agent_model,
+    is_codex,
+    run_agent_session,
+    run_codex_session,
+    uses_direct_agent_runner,
+)
 
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
@@ -156,6 +162,22 @@ class PostMergeProcessor:
                 self._last_learn_evidence = mnemosyne_update_evidence(codex_result.stdout or "")
                 logger.info("Issue #%s: drive-green learnings captured with Codex", issue_number)
                 return True
+            if uses_direct_agent_runner(options.agent):
+                direct_result = run_agent_session(
+                    agent=options.agent,
+                    prompt=prompt,
+                    cwd=cwd,
+                    timeout=learn_claude_timeout(),
+                    model=direct_agent_model(options.agent, "HEPH_LEARN_MODEL"),
+                    sandbox="workspace-write",
+                )
+                self._last_learn_evidence = mnemosyne_update_evidence(direct_result.stdout or "")
+                logger.info(
+                    "Issue #%s: drive-green learnings captured with %s",
+                    issue_number,
+                    options.agent,
+                )
+                return True
             stdout, _ = invoke_claude_with_session(
                 repo=repo_slug,
                 issue=issue_number,
@@ -201,11 +223,11 @@ class PostMergeProcessor:
         """
         options = self._options()
         repo_root = self._repo_root()
-        if is_codex(options.agent):
+        if uses_direct_agent_runner(options.agent):
             logger.info(
-                "Issue #%s: skipping /compact (codex has no persisted "
-                "drive-green session to resume)",
+                "Issue #%s: skipping /compact (%s does not use Claude compact sessions)",
                 issue_number,
+                options.agent,
             )
             return False
         try:
