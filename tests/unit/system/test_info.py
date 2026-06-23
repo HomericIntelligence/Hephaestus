@@ -164,6 +164,13 @@ class TestFormatSystemInfo:
         parsed = json.loads(text)
         assert "os" in parsed
 
+    def test_invalid_format_falls_back_to_text(self) -> None:
+        """Unrecognized format_type renders as text, not an error."""
+        info = get_system_info(include_tools=False)
+        text = format_system_info(info, format_type="yaml")
+        assert "=== System Information ===" in text
+        assert "=== System Information ===" in format_system_info(info, format_type="")
+
 
 def test_main_returns_zero(monkeypatch):
     """Test that main() returns 0 on success."""

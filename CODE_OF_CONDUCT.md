@@ -1,5 +1,7 @@
 # HomericIntelligence Code of Conduct
 
+_Adapted from the Contributor Covenant v2.1._
+
 ## Our Pledge
 
 We as members, contributors, and leaders pledge to make participation in our community a harassment-free experience for everyone, regardless of:

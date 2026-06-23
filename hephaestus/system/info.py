@@ -234,7 +234,9 @@ def format_system_info(info: dict[str, Any], format_type: str = "text") -> str:
 
     Args:
         info: System information dictionary
-        format_type: Output format ("text" or "json")
+        format_type: Output format ("text" or "json"). The comparison is
+            case-insensitive; any value other than "json" (including invalid
+            or empty input) falls back to the default "text" format.
 
     Returns:
         Formatted string representation
