@@ -103,6 +103,7 @@ def run_address_fix_session(
     task_block: str = "",
     task_review_block: str = "",
     diff_text: str = "",
+    unaddressed_findings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run the address-review fix session and return the agent's parsed result.
 
@@ -135,6 +136,9 @@ def run_address_fix_session(
             session can read the task and continue the work.
         task_review_block: Optional plan-review verdict text for the context.
         diff_text: Optional current implementation diff for the context.
+        unaddressed_findings: Optional still-unresolved threads from a prior
+            no-commit turn (#1554); injected as a "Make sure to handle <finding>"
+            directive to re-ground a resumed session on what it failed to fix.
 
     Returns:
         Parsed dict with ``"addressed"`` and ``"replies"`` keys.
@@ -181,6 +185,7 @@ def run_address_fix_session(
         task_block=task_block,
         task_review_block=task_review_block,
         diff_text=diff_text,
+        unaddressed_findings=unaddressed_findings,
     )
 
     prompt_file = worktree_path / f".claude-address-review-{issue_number}.md"

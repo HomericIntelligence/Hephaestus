@@ -842,6 +842,38 @@ class TestAddressReviewPrompt:
         assert "_TASK_REVIEW\n" in out
         assert "_DIFF\n" in out
 
+    def test_no_retry_directive_by_default(self) -> None:
+        """Without unaddressed_findings, no 'Make sure to handle' directive appears."""
+        out = self._build()
+        assert "Make sure to handle" not in out
+        assert "_UNADDRESSED\n" not in out
+
+    def test_retry_directive_contains_finding_body(self) -> None:
+        """#1554: the no-commit retry directive names each unaddressed finding."""
+        out = prompts.get_address_review_prompt(
+            pr_number=42,
+            issue_number=7,
+            worktree_path="/tmp/wt",
+            threads_json='[{"thread_id": "T1", "path": "a.py", "line": 1, "body": "fix"}]',
+            todo_block="@ a.py Line 1 - simple - fix",
+            unaddressed_findings=[
+                {"id": "t0", "path": "scaffold.py", "line": 175, "body": "FIX THE NULL DEREF"}
+            ],
+        )
+        assert "Make sure to handle scaffold.py:175 — FIX THE NULL DEREF" in out
+        assert "produced NO commit on the previous turn" in out
+        # The directive body is reviewer text → fenced as untrusted.
+        assert "_UNADDRESSED\n" in out
+
+    def test_build_unaddressed_directive_empty_is_blank(self) -> None:
+        """An empty findings list renders no directive block."""
+        assert prompts.build_unaddressed_directive([], "NONCE") == ""
+
+    def test_build_unaddressed_directive_handles_missing_fields(self) -> None:
+        """Missing path/line/body degrade gracefully, not crash."""
+        out = prompts.build_unaddressed_directive([{"id": "t0"}], "NONCE")
+        assert "Make sure to handle <no path> — <empty body>" in out
+
 
 class TestReviewValidationPrompt:
     """The review-validation prompt re-checks prior comments against the diff."""

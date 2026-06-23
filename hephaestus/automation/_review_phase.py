@@ -739,6 +739,12 @@ class ReviewPhase(StageMixin):
         # iteration), keyed off the prior round's progress.
         budget = MAX_REVIEW_ITERATIONS
         prior_round_made_progress = False
+        # #1554: still-unresolved threads from a prior address turn that produced
+        # NO commit. Injected into the NEXT address invocation as a "Make sure to
+        # handle <finding>" directive to re-ground a resumed session that
+        # self-reported success without editing code. Empty except on the round
+        # immediately following a no-commit turn.
+        pending_unaddressed: list[dict[str, Any]] = []
         iteration = 0
         while iteration < budget:
             # Extend the budget when the prior round made real progress and this
@@ -815,6 +821,7 @@ class ReviewPhase(StageMixin):
                 thread_id=thread_id,
                 issue_title=issue_title,
                 issue_body=issue_body,
+                unaddressed_findings=pending_unaddressed,
             )
             if address_result is None:
                 break
@@ -823,13 +830,34 @@ class ReviewPhase(StageMixin):
                 iteration += 1
                 continue
             if not addressed:
+                # #1554: the address step produced NO commit (the fix agent
+                # punted or self-reported a phantom fix). If fixable threads
+                # remain AND iterations are left, do NOT give up — re-review and
+                # retry, carrying the still-unresolved threads forward as a "Make
+                # sure to handle <finding>" directive to re-ground the next
+                # address attempt. ``prior_addressed_threads`` is the snapshot the
+                # address step already took (its current unresolved set), so we
+                # reuse it instead of issuing another network call. Only when
+                # there is nothing fixable left OR no iterations remain do we
+                # break to the existing terminal/skip handling (unchanged).
+                still_unresolved = prior_addressed_threads
+                if still_unresolved and iteration < budget - 1:
+                    pending_unaddressed = still_unresolved
+                    iteration += 1
+                    continue
                 break
+            # A committed round: clear the retry directive (it only follows an
+            # immediately-preceding no-commit turn).
+            pending_unaddressed = []
             # The address step resolved a fresh finding (``addressed``) without
             # the validator re-opening a prior one (``validator_clean``): this
             # round made real progress. Record it so the NEXT iteration can
             # extend the budget if it would otherwise be the last — letting a PR
             # that fixes one real bug per round converge instead of being
-            # stranded one pass short of GO and wrongly skipped (#1554).
+            # stranded one pass short of GO and wrongly skipped (#1554). A
+            # no-commit round has ``addressed=False`` and never reaches here, so
+            # it can never set progress or extend the budget — the hard cap
+            # (MAX_REVIEW_ITERATIONS_HARD_CAP) still bounds total iterations.
             prior_round_made_progress = addressed and validator_clean
             iteration += 1
 
@@ -950,6 +978,7 @@ class ReviewPhase(StageMixin):
         thread_id: int | None,
         issue_title: str,
         issue_body: str,
+        unaddressed_findings: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], bool] | None:
         """Run address iteration unless this is the final budgeted iteration.
 
@@ -968,6 +997,9 @@ class ReviewPhase(StageMixin):
             thread_id: Current thread id for logging.
             issue_title: Issue title for context.
             issue_body: Issue body for context.
+            unaddressed_findings: Still-unresolved threads from a prior no-commit
+                turn, injected as a "Make sure to handle <finding>" directive to
+                re-ground a resumed session (#1554).
 
         Returns:
             None if this is the final budgeted iteration (caller should break).
@@ -987,6 +1019,7 @@ class ReviewPhase(StageMixin):
             thread_id=thread_id,
             issue_title=issue_title,
             issue_body=issue_body,
+            unaddressed_findings=unaddressed_findings,
         )
         return prior_addressed_threads, addressed
 
@@ -1003,6 +1036,7 @@ class ReviewPhase(StageMixin):
         thread_id: int | None,
         issue_title: str,
         issue_body: str,
+        unaddressed_findings: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Run the address step for one iteration.
 
@@ -1044,6 +1078,7 @@ class ReviewPhase(StageMixin):
             include_bootstrap_context=session_id is None,
             issue_title=issue_title,
             issue_body=issue_body,
+            unaddressed_findings=unaddressed_findings,
         )
         if not addressed:
             impl._log(
@@ -1295,6 +1330,7 @@ class ReviewPhase(StageMixin):
         include_bootstrap_context: bool = False,
         issue_title: str = "",
         issue_body: str = "",
+        unaddressed_findings: list[dict[str, Any]] | None = None,
     ) -> bool:
         """Address the posted PR threads in-loop, resuming Session 2.
 
@@ -1309,6 +1345,10 @@ class ReviewPhase(StageMixin):
         Returns:
             ``True`` if at least one thread was addressed (so the loop should
             re-review); ``False`` when nothing was addressable (the loop stops).
+
+        ``unaddressed_findings`` carries the still-unresolved threads from a
+        prior no-commit turn; they are injected into the prompt as a "Make sure
+        to handle <finding>" directive to re-ground a resumed session (#1554).
 
         """
         threads = gh_pr_list_unresolved_threads(pr_number, dry_run=False)
@@ -1348,6 +1388,7 @@ class ReviewPhase(StageMixin):
             task_block=task_block,
             task_review_block=task_review_block,
             diff_text=diff_text,
+            unaddressed_findings=unaddressed_findings,
         )
         addressed: list[str] = fix_result.get("addressed", [])
 

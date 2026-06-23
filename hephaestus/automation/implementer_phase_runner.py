@@ -1198,6 +1198,7 @@ class ImplementationPhaseRunner:
         include_bootstrap_context: bool = False,
         issue_title: str = "",
         issue_body: str = "",
+        unaddressed_findings: list[dict[str, Any]] | None = None,
     ) -> bool:
         """Delegate to :meth:`ReviewPhase._run_address_review_step`."""
         return self.review_phase._run_address_review_step(
@@ -1209,6 +1210,7 @@ class ImplementationPhaseRunner:
             include_bootstrap_context=include_bootstrap_context,
             issue_title=issue_title,
             issue_body=issue_body,
+            unaddressed_findings=unaddressed_findings,
         )
 
     def _resume_impl_with_feedback(

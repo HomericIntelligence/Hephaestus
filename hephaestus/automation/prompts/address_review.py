@@ -1,6 +1,7 @@
 """Address-review prompt: apply fixes for unresolved PR review threads."""
 
 import secrets
+from typing import Any
 
 from ._shared import _TERSE_OUTPUT_DIRECTIVE, _UNTRUSTED_NOTICE, _fence_untrusted
 
@@ -19,6 +20,7 @@ These threads live on the PR, not on the issue.
 
 {untrusted_notice}
 {context_block}
+{retry_directive_block}
 **Review Threads to Address (untrusted):**
 {threads_json_block}
 
@@ -100,6 +102,45 @@ Rules for the JSON block:
 """
 
 
+def build_unaddressed_directive(threads: list[dict[str, Any]], nonce: str) -> str:
+    """Render a "Make sure to handle <finding>" directive from unresolved threads.
+
+    Used on a retry after the previous address turn produced NO commit (the fix
+    session resumed a stale transcript and self-reported success without editing
+    code, #1554). The directive re-grounds the resumed session on the concrete
+    findings it still has to fix, naming each by location and reviewer body.
+
+    Each ``body`` is verbatim untrusted reviewer text (GitHub-sourced), so the
+    whole block is fenced as untrusted. The thread dicts use the snapshot shape
+    returned by :func:`gh_pr_list_unresolved_threads` (``id`` / ``path`` /
+    ``line`` / ``body``).
+
+    Args:
+        threads: Still-unresolved review thread dicts from the prior turn.
+        nonce: Per-prompt nonce used to delimit the untrusted fence (shared with
+            the rest of the prompt so all fences use one nonce).
+
+    Returns:
+        The rendered directive block, or ``""`` when ``threads`` is empty.
+
+    """
+    if not threads:
+        return ""
+    lines: list[str] = []
+    for t in threads:
+        loc = t.get("path") or "<no path>"
+        line_no = t.get("line")
+        loc_str = f"{loc}:{line_no}" if line_no is not None else loc
+        body = (t.get("body") or "").strip() or "<empty body>"
+        lines.append(f"- Make sure to handle {loc_str} — {body}")
+    directive = _fence_untrusted("UNADDRESSED", "\n".join(lines), nonce)
+    return (
+        "**You produced NO commit on the previous turn, so these findings are "
+        "STILL unaddressed. Fix each one in code now — do not report success "
+        "without an actual edit (untrusted):**\n" + directive + "\n"
+    )
+
+
 def _build_context_block(
     task_block: str,
     task_review_block: str,
@@ -147,6 +188,7 @@ def get_address_review_prompt(
     task_block: str = "",
     task_review_block: str = "",
     diff_text: str = "",
+    unaddressed_findings: list[dict[str, Any]] | None = None,
 ) -> str:
     """Get the address review prompt for fixing inline review thread feedback.
 
@@ -172,6 +214,10 @@ def get_address_review_prompt(
             untrusted context section.
         diff_text: Optional current implementation diff, rendered as an untrusted
             context section.
+        unaddressed_findings: Optional still-unresolved review threads from a
+            prior address turn that produced NO commit (#1554). When supplied,
+            a "Make sure to handle <finding>" directive is rendered above the
+            thread list to re-ground a resumed session on what it failed to fix.
 
     Returns:
         Formatted address review prompt
@@ -186,5 +232,6 @@ def get_address_review_prompt(
         todo_block=_fence_untrusted("TODO_LIST", todo_block or "_(no todo lines)_", nonce),
         untrusted_notice=_UNTRUSTED_NOTICE,
         context_block=_build_context_block(task_block, task_review_block, diff_text, nonce),
+        retry_directive_block=build_unaddressed_directive(unaddressed_findings or [], nonce),
         terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )

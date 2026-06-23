@@ -47,7 +47,11 @@ from ._strict_rubric import (
     _STRICT_REVIEW_OUTPUT_FORMAT as _STRICT_REVIEW_OUTPUT_FORMAT,
     _STRICT_REVIEW_RUBRIC as _STRICT_REVIEW_RUBRIC,
 )
-from .address_review import ADDRESS_REVIEW_PROMPT, get_address_review_prompt
+from .address_review import (
+    ADDRESS_REVIEW_PROMPT,
+    build_unaddressed_directive,
+    get_address_review_prompt,
+)
 from .advise import (
     ADVISE_PROMPT,
     CODEX_ADVISE_PROMPT,
@@ -98,6 +102,7 @@ __all__ = [
     "PLAN_PROMPT",
     "PLAN_REVIEW_PROMPT",
     "PR_REVIEW_ANALYSIS_PROMPT",
+    "build_unaddressed_directive",
     "get_address_review_prompt",
     "get_advise_prompt",
     "get_advise_prompt_builder",

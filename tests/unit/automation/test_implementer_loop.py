@@ -1059,6 +1059,209 @@ class TestRunImplReviewLoop:
         # No PR → in-loop address step is never invoked.
         mock_addr.assert_not_called()
 
+    def test_no_commit_with_iterations_left_continues_not_break(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """A no-commit address step does not end the loop while fixable work remains.
+
+        #1554 regression: the address agent can resume a stale session and
+        self-report success without committing. The #1083 guard returns
+        ``addressed=False``; previously the loop hit ``if not addressed: break``
+        and stopped at R0, wasting its remaining budget. Now, with unresolved
+        threads still present and iterations left, the loop re-reviews and the
+        next address attempt lands the fix → GO.
+        """
+        # Automation-owned thread (github-actions[bot]) so a GO with it still
+        # open downgrades to NOGO (re-review) rather than HUMAN_BLOCKED.
+        snapshot = [
+            {
+                "id": "t0",
+                "path": "a.py",
+                "line": 5,
+                "body": "fix the guard",
+                "author": "github-actions[bot]",
+            }
+        ]
+        # The thread stays open until the address step commits (R1 returns True),
+        # after which the list-threads helper reports it resolved so R1's GO
+        # can finally stand. ``committed`` is flipped by the address side_effect.
+        committed = {"done": False}
+
+        def _addr(*_args: object, **_kwargs: object) -> bool:
+            if committed["done"]:
+                return True
+            committed["done"] = True  # this turn lands the fix
+            return False  # ...but reports no commit on the FIRST turn
+
+        def _threads(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+            return [] if committed["done"] else snapshot
+
+        with (
+            patch.object(
+                implementer,
+                "_run_impl_review_step",
+                side_effect=[(_nogo("D"), ["t0"]), (_go(), [])],
+            ) as mock_rev,
+            patch.object(implementer, "_run_address_review_step", side_effect=_addr) as mock_addr,
+            patch(
+                "hephaestus.automation._review_phase.gh_pr_list_unresolved_threads",
+                side_effect=_threads,
+            ),
+        ):
+            iters, verdict, _ = implementer._run_impl_review_loop(
+                issue_number=1554,
+                worktree_path=tmp_path,
+                branch_name="1554-auto-impl",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=1570,
+            )
+
+        # The loop did NOT break at R0's no-commit address step — it re-reviewed
+        # (mock_rev twice) and converged on GO. (R1 was a clean GO, so the
+        # address step ran only on R0; the key assertion is that the loop did
+        # not stop after the first no-commit turn.)
+        assert verdict == "GO"
+        assert iters >= 2
+        assert mock_rev.call_count >= 2
+        assert mock_addr.call_count >= 1
+
+    def test_no_commit_retry_injects_directive(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """After a no-commit turn, the NEXT address call carries the directive.
+
+        #1554: the still-unresolved threads from the no-commit round are passed
+        to the next address invocation via ``unaddressed_findings`` so the prompt
+        names what to fix. The FIRST call (no prior no-commit turn) carries none.
+
+        Both R0 and R1 stay NOGO with an open thread and the address step never
+        commits, so two address turns occur: the second must carry the directive.
+        """
+        snapshot = [{"id": "t0", "path": "a.py", "line": 5, "body": "fix the guard"}]
+        with (
+            patch.object(
+                implementer,
+                "_run_impl_review_step",
+                side_effect=[(_nogo("D"), ["t0"]), (_nogo("C"), ["t1"]), (_go(), [])],
+            ),
+            # Never commits → each round is a no-commit retry.
+            patch.object(implementer, "_run_address_review_step", return_value=False) as mock_addr,
+            patch(
+                "hephaestus.automation._review_phase.gh_pr_list_unresolved_threads",
+                return_value=snapshot,
+            ),
+        ):
+            implementer._run_impl_review_loop(
+                issue_number=1554,
+                worktree_path=tmp_path,
+                branch_name="1554-auto-impl",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=1570,
+            )
+
+        assert mock_addr.call_count >= 2
+        # First address turn: no prior no-commit, so empty/no directive.
+        first = mock_addr.call_args_list[0]
+        assert not first.kwargs.get("unaddressed_findings")
+        # Second address turn: re-grounded with the still-unresolved snapshot.
+        second = mock_addr.call_args_list[1]
+        assert second.kwargs.get("unaddressed_findings") == snapshot
+
+    def test_no_commit_then_commit_clears_directive(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """A committed round clears the retry directive for the following turn.
+
+        #1554: the directive must only follow an immediately-preceding no-commit
+        turn. Sequence: R0 no-commit → R1 commits (clears) → R2 no-commit again →
+        R3 should re-inject. We assert R2's address call (after the R1 commit)
+        carries NO directive.
+        """
+        snapshot = [{"id": "t0", "path": "a.py", "line": 5, "body": "fix the guard"}]
+        with (
+            patch.object(
+                implementer,
+                "_run_impl_review_step",
+                # Stay NOGO so the loop keeps addressing; budget extends while
+                # progress is made, so provide enough reviews up to the hard cap.
+                side_effect=[
+                    (_nogo("D"), [f"t{i}"]) for i in range(MAX_REVIEW_ITERATIONS_HARD_CAP)
+                ],
+            ),
+            # R0 no-commit, R1 commit, R2 no-commit, then commits.
+            patch.object(
+                implementer,
+                "_run_address_review_step",
+                side_effect=[False, True, False, True, True],
+            ) as mock_addr,
+            patch(
+                "hephaestus.automation._review_phase.gh_pr_list_unresolved_threads",
+                return_value=snapshot,
+            ),
+        ):
+            implementer._run_impl_review_loop(
+                issue_number=1,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=42,
+            )
+
+        # Address call 0 (R0): no directive. Call 1 (R1, after R0 no-commit):
+        # directive present. Call 2 (R2, after R1 commit): directive CLEARED.
+        calls = mock_addr.call_args_list
+        assert not calls[0].kwargs.get("unaddressed_findings")
+        assert calls[1].kwargs.get("unaddressed_findings") == snapshot
+        assert not calls[2].kwargs.get("unaddressed_findings")
+
+    def test_normal_converging_run_reaches_go_unchanged(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """Regression: a normal NOGO→GO run with committing fixes still converges.
+
+        Guards against behavior drift from the no-commit-retry change: when the
+        address step commits (``True``), the loop behaves exactly as before.
+        """
+        from hephaestus.automation.state_labels import STATE_SKIP
+
+        with (
+            patch.object(
+                implementer,
+                "_run_impl_review_step",
+                side_effect=[(_nogo("D"), ["t0"]), (_go(), [])],
+            ),
+            patch.object(implementer, "_run_address_review_step", return_value=True),
+            patch("hephaestus.automation._review_phase.gh_issue_add_labels") as mock_label,
+        ):
+            iters, verdict, _ = implementer._run_impl_review_loop(
+                issue_number=1,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=42,
+            )
+
+        assert verdict == "GO"
+        assert iters == 2
+        for call in mock_label.call_args_list:
+            assert STATE_SKIP not in call.args[1]
+
 
 class TestRunImplReviewFailsSafe:
     """When the reviewer call itself fails, surface a distinct ERROR verdict.

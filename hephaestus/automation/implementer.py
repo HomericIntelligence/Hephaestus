@@ -684,6 +684,7 @@ class IssueImplementer:
         include_bootstrap_context: bool = False,
         issue_title: str = "",
         issue_body: str = "",
+        unaddressed_findings: list[dict[str, Any]] | None = None,
     ) -> bool:
         """Address the posted PR threads in-loop, resuming Session 2."""
         return self.phase_runner._run_address_review_step(
@@ -695,6 +696,7 @@ class IssueImplementer:
             include_bootstrap_context=include_bootstrap_context,
             issue_title=issue_title,
             issue_body=issue_body,
+            unaddressed_findings=unaddressed_findings,
         )
 
     def _resume_impl_with_feedback(
