@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-from hephaestus.cli.utils import add_json_arg
+from hephaestus.cli.utils import add_json_arg, add_version_arg
 
 _VALID_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -152,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Repository root (defaults to the repo root auto-detected from this file's location)",
     )
     add_json_arg(parser)
+    add_version_arg(parser)
     args = parser.parse_args(argv)
 
     error = _validate_name(args.name)
