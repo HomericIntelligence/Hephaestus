@@ -10,7 +10,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hephaestus.automation.implementer import MAX_REVIEW_ITERATIONS, IssueImplementer
+from hephaestus.automation.implementer import (
+    MAX_REVIEW_ITERATIONS,
+    MAX_REVIEW_ITERATIONS_HARD_CAP,
+    IssueImplementer,
+)
 from hephaestus.automation.implementer_phase_runner import (
     _parse_dirty_reused_worktree_decision,
 )
@@ -392,22 +396,30 @@ class TestRunImplReviewLoop:
         assert iters == 2  # did NOT accept GO on R0; addressed then re-reviewed
         mock_addr.assert_called()
 
-    def test_runs_3_iterations_on_sustained_nogo(
+    def test_sustained_nogo_with_progress_extends_to_hard_cap(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
+        """A NOGO loop that keeps resolving findings extends to the hard cap.
+
+        #1554: when every round resolves a fresh finding (``addressed`` and
+        validator-clean) but the reviewer never issues a clean GO, the budget
+        extends one iteration at a time up to ``MAX_REVIEW_ITERATIONS_HARD_CAP``,
+        then stops. The hard cap bounds a reviewer that invents an endless stream
+        of new findings so the loop can never spin forever.
+        """
         with (
             patch.object(
                 implementer,
                 "_run_impl_review_step",
+                # One distinct NOGO thread per round, never going clean. Provide
+                # enough side-effects to cover the hard cap.
                 side_effect=[
-                    (_nogo("D"), ["t0"]),
-                    (_nogo("C"), ["t1"]),
-                    (_nogo("B"), ["t2"]),
+                    (_nogo("D"), [f"t{i}"]) for i in range(MAX_REVIEW_ITERATIONS_HARD_CAP)
                 ],
             ) as mock_rev,
             patch.object(implementer, "_run_address_review_step", return_value=True) as mock_addr,
         ):
-            iters, verdict, grade = implementer._run_impl_review_loop(
+            iters, verdict, _grade = implementer._run_impl_review_loop(
                 issue_number=1,
                 worktree_path=tmp_path,
                 branch_name="b",
@@ -419,12 +431,11 @@ class TestRunImplReviewLoop:
                 pr_number=42,
             )
 
-        assert iters == MAX_REVIEW_ITERATIONS == 3
+        assert iters == MAX_REVIEW_ITERATIONS_HARD_CAP == 6
         assert verdict == "NOGO"
-        assert grade == "B"  # last review's grade
-        assert mock_rev.call_count == 3
-        # Address called for iterations 0 and 1 (not after the final R2 review).
-        assert mock_addr.call_count == 2
+        assert mock_rev.call_count == MAX_REVIEW_ITERATIONS_HARD_CAP
+        # Address runs on every iteration EXCEPT the final budgeted one.
+        assert mock_addr.call_count == MAX_REVIEW_ITERATIONS_HARD_CAP - 1
 
     def test_address_resolving_nothing_breaks_loop_early(
         self, implementer: IssueImplementer, tmp_path: Path
@@ -454,13 +465,18 @@ class TestRunImplReviewLoop:
         assert verdict == "NOGO"
         assert mock_rev.call_count == 1
 
-    def test_exhaustion_without_go_applies_state_skip(
+    def test_productive_loop_converges_past_base_budget_no_skip(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
-        """Exhausting MAX_REVIEW_ITERATIONS without GO applies ``state:skip``.
+        """A PR that fixes one real finding per round converges to GO (#1554).
 
-        #1083 Bug 2: a sustained NOGO run that never reaches GO must label the
-        issue ``state:skip`` so the next loop skips it.
+        Reproduces the #1554 / PR #1570 strand: the reviewer surfaces a NEW
+        distinct finding on each of R0/R1/R2 (one inline comment per pass), the
+        implementer resolves each in turn, and only the FOURTH review is clean.
+        Before the progress-aware budget the loop hit ``MAX_REVIEW_ITERATIONS``
+        (3) one address-pass short — R2's finding was posted but never addressed,
+        forcing a terminal NOGO and ``state:skip``. Now the budget extends while
+        progress is made, so the loop reaches a clean GO and applies NO skip.
         """
         from hephaestus.automation.state_labels import STATE_SKIP
 
@@ -469,15 +485,100 @@ class TestRunImplReviewLoop:
                 implementer,
                 "_run_impl_review_step",
                 side_effect=[
-                    (_nogo("D"), ["t0"]),
-                    (_nogo("C"), ["t1"]),
-                    (_nogo("B"), ["t2"]),
+                    (_nogo("D"), ["t0"]),  # R0: finding #1
+                    (_nogo("C"), ["t1"]),  # R1: finding #2 (fresh)
+                    (_nogo("B"), ["t2"]),  # R2: finding #3 (fresh) — was the strand point
+                    (_go(), []),  # R3: clean — all addressed
+                ],
+            ) as mock_rev,
+            patch.object(implementer, "_run_address_review_step", return_value=True) as mock_addr,
+            patch("hephaestus.automation._review_phase.gh_issue_add_labels") as mock_label,
+        ):
+            iters, verdict, grade = implementer._run_impl_review_loop(
+                issue_number=1554,
+                worktree_path=tmp_path,
+                branch_name="1554-auto-impl",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=1570,
+            )
+
+        assert verdict == "GO"
+        assert grade == "A"
+        # Converged on the 4th review — one past the base budget of 3.
+        assert iters == 4
+        assert mock_rev.call_count == 4
+        # The final-iteration address-skip off-by-one is fixed: R2's finding was
+        # addressed (address ran on R0, R1, R2 — not on the clean R3).
+        assert mock_addr.call_count == 3
+        # A converged PR must NOT be tagged ``state:skip``.
+        for call in mock_label.call_args_list:
+            assert STATE_SKIP not in call.args[1], f"unexpected state:skip: {call}"
+
+    def test_progress_then_clean_go_does_not_skip(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """One productive round then a clean GO converges without skip (#1554).
+
+        The base budget alone (3) would suffice here, but this guards the common
+        case: progress is made, the next review is clean, and the loop terminates
+        GO well within budget — no extension needed, no ``state:skip``.
+        """
+        from hephaestus.automation.state_labels import STATE_SKIP
+
+        with (
+            patch.object(
+                implementer,
+                "_run_impl_review_step",
+                side_effect=[(_nogo("D"), ["t0"]), (_go(), [])],
+            ),
+            patch.object(implementer, "_run_address_review_step", return_value=True),
+            patch("hephaestus.automation._review_phase.gh_issue_add_labels") as mock_label,
+        ):
+            iters, verdict, _ = implementer._run_impl_review_loop(
+                issue_number=1,
+                worktree_path=tmp_path,
+                branch_name="b",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=42,
+            )
+
+        assert verdict == "GO"
+        assert iters == 2
+        for call in mock_label.call_args_list:
+            assert STATE_SKIP not in call.args[1]
+
+    def test_exhaustion_without_go_applies_state_skip(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """Exhausting the review budget without GO applies ``state:skip``.
+
+        #1083 Bug 2: a sustained NOGO run that never reaches GO must label the
+        issue ``state:skip`` so the next loop skips it. #1554: a progress-making
+        run extends to ``MAX_REVIEW_ITERATIONS_HARD_CAP`` first, but a hard-cap
+        run that still never reaches GO is genuine exhaustion and is skipped.
+        """
+        from hephaestus.automation.state_labels import STATE_SKIP
+
+        with (
+            patch.object(
+                implementer,
+                "_run_impl_review_step",
+                side_effect=[
+                    (_nogo("D"), [f"t{i}"]) for i in range(MAX_REVIEW_ITERATIONS_HARD_CAP)
                 ],
             ),
             patch.object(implementer, "_run_address_review_step", return_value=True),
             patch("hephaestus.automation._review_phase.gh_issue_add_labels") as mock_label,
         ):
-            _, verdict, _ = implementer._run_impl_review_loop(
+            iters, verdict, _ = implementer._run_impl_review_loop(
                 issue_number=7,
                 worktree_path=tmp_path,
                 branch_name="b",
@@ -489,6 +590,7 @@ class TestRunImplReviewLoop:
                 pr_number=42,
             )
 
+        assert iters == MAX_REVIEW_ITERATIONS_HARD_CAP
         assert verdict == "NOGO"
         mock_label.assert_called_once_with(7, [STATE_SKIP])
 

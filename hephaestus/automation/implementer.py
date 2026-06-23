@@ -92,7 +92,11 @@ from .implementer_cli import (
     _parse_args as _parse_args,
     _setup_logging as _setup_logging,
 )
-from .implementer_phase_runner import MAX_REVIEW_ITERATIONS, ImplementationPhaseRunner
+from .implementer_phase_runner import (
+    MAX_REVIEW_ITERATIONS,
+    MAX_REVIEW_ITERATIONS_HARD_CAP,
+    ImplementationPhaseRunner,
+)
 from .implementer_state import ImplementationStateManager
 from .implementer_summary import ImplementationSummaryPrinter
 from .models import (
@@ -110,6 +114,7 @@ from .worktree_manager import WorktreeManager
 # tests assert on it as the documented default.
 __all__ = [
     "MAX_REVIEW_ITERATIONS",
+    "MAX_REVIEW_ITERATIONS_HARD_CAP",
     "_CLAUDE_IMPL_TIMEOUT",
     "IssueImplementer",
     "main",

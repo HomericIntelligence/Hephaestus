@@ -53,7 +53,9 @@ ALL_IMPLEMENTATION_STATE_LABELS = (STATE_IMPLEMENTATION_NO_GO, STATE_IMPLEMENTAT
 #: Manual override: when present on an issue OR its PR, automation normally
 #: skips that work item entirely (#1083). Unlike the plan/implementation state
 #: labels this is operator-applied (or auto-applied by the review loop when it
-#: exhausts MAX_REVIEW_ITERATIONS without a GO), and it is independent of all
+#: exhausts its review budget without a GO — the budget starts at
+#: MAX_REVIEW_ITERATIONS and extends up to MAX_REVIEW_ITERATIONS_HARD_CAP while
+#: the loop keeps making progress, #1554), and it is independent of all
 #: other state labels — so it deliberately lives outside the tuples above.
 #: The implementer has one narrow stale-state recovery path for explicitly
 #: selected issues that also carry ``state:plan-go`` and have no open PR.

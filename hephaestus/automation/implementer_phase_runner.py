@@ -40,7 +40,11 @@ from ._followup_phase import FollowUpPhase
 from ._implement_phase import ImplementPhase, _prepend_advise
 from ._plan_phase import PlanPhase
 from ._pr_create_phase import PRCreatePhase
-from ._review_phase import MAX_REVIEW_ITERATIONS, ReviewPhase
+from ._review_phase import (
+    MAX_REVIEW_ITERATIONS,
+    MAX_REVIEW_ITERATIONS_HARD_CAP,
+    ReviewPhase,
+)
 from ._review_utils import find_pr_for_issue, get_pr_head_branch
 from ._stage_context import StageContext
 from .claude_invoke import invoke_claude_with_session
@@ -105,7 +109,11 @@ logger = logging.getLogger(__name__)
 
 # Re-exported for back-compat: ``implementer`` imports ``MAX_REVIEW_ITERATIONS``
 # from this module. The canonical value now lives in ``_review_phase``.
-__all__ = ["MAX_REVIEW_ITERATIONS", "ImplementationPhaseRunner"]
+__all__ = [
+    "MAX_REVIEW_ITERATIONS",
+    "MAX_REVIEW_ITERATIONS_HARD_CAP",
+    "ImplementationPhaseRunner",
+]
 
 DirtyWorktreeDecision = Literal["commit", "stash"]
 

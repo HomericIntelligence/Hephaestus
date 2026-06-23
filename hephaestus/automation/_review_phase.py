@@ -76,7 +76,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Base review-budget: a loop that is NOT making progress (a stuck or oscillating
+# reviewer) terminates after this many iterations and is tagged ``state:skip``.
 MAX_REVIEW_ITERATIONS = 3
+
+# Absolute ceiling on review iterations. A loop that makes genuine progress every
+# round (resolves a fresh finding without the validator re-opening a prior one)
+# earns extra iterations beyond ``MAX_REVIEW_ITERATIONS`` — up to this hard cap —
+# so a steadily-improving PR with more real findings than the base budget can
+# converge to a clean GO instead of being stranded one address-pass short (#1554).
+# The cap bounds a truly non-converging reviewer so it can never spin forever.
+MAX_REVIEW_ITERATIONS_HARD_CAP = MAX_REVIEW_ITERATIONS * 2
 
 # Bounded exponential backoff for transient 529 server-overload responses
 # (5s → 10s → 20s, capped). Unlike a 429 quota cap these carry no reset epoch,
@@ -672,7 +682,12 @@ class ReviewPhase(StageMixin):
 
         Each iteration posts inline PR review threads and returns a verdict; on
         NOGO the implementer session is resumed to address threads. Terminates on
-        GO, zero blocking threads, or :data:`MAX_REVIEW_ITERATIONS`.
+        GO or zero blocking threads, or on budget exhaustion. The budget starts
+        at :data:`MAX_REVIEW_ITERATIONS` and is extended one iteration at a time —
+        up to :data:`MAX_REVIEW_ITERATIONS_HARD_CAP` — for as long as each round
+        keeps making real progress (resolves a fresh finding without the
+        validator re-opening a prior one), so a steadily-improving PR converges
+        instead of being stranded one address-pass short (#1554).
 
         #1328: before the FIRST review iteration, a PR with a merge conflict is
         rebased / handed to the implementation agent to resolve. A conflicted PR
@@ -710,7 +725,39 @@ class ReviewPhase(StageMixin):
             )
             return 0, "NOGO", None
 
-        for iteration in range(MAX_REVIEW_ITERATIONS):
+        # #1554: progress-aware review budget. The loop starts with the base
+        # ``MAX_REVIEW_ITERATIONS`` budget; whenever the PREVIOUS round made
+        # genuine PROGRESS (its address step resolved a fresh finding without the
+        # validator re-opening a prior one) and the loop is about to exhaust the
+        # budget, grant one more iteration — up to ``MAX_REVIEW_ITERATIONS_HARD_CAP``
+        # — so a steadily-improving PR with more real findings than the base
+        # budget converges to a clean GO instead of being stranded one
+        # address-pass short. A stuck or oscillating reviewer makes no progress
+        # and is never extended, so it still terminates at the base budget and is
+        # tagged ``state:skip``. The extension happens at the TOP of the loop
+        # (before the address-step gate that breaks on the final budgeted
+        # iteration), keyed off the prior round's progress.
+        budget = MAX_REVIEW_ITERATIONS
+        prior_round_made_progress = False
+        iteration = 0
+        while iteration < budget:
+            # Extend the budget when the prior round made real progress and this
+            # would otherwise be the last budgeted iteration — so the fix the
+            # prior round landed gets a re-review (and its findings addressed).
+            if (
+                prior_round_made_progress
+                and iteration == budget - 1
+                and budget < MAX_REVIEW_ITERATIONS_HARD_CAP
+            ):
+                budget += 1
+                self.impl._log(
+                    "info",
+                    f"{issue_ref(issue_number)} R{iteration}: prior round resolved "
+                    f"finding(s); extending review budget to "
+                    f"{budget}/{MAX_REVIEW_ITERATIONS_HARD_CAP} iteration(s)",
+                    thread_id,
+                )
+            prior_round_made_progress = False
             (
                 last_verdict,
                 last_grade,
@@ -753,6 +800,7 @@ class ReviewPhase(StageMixin):
                 and validator_clean
             ):
                 prior_review = review_text
+                iteration += 1
                 continue
             prior_review = review_text
             address_result = self._run_address_step_if_needed(
@@ -761,6 +809,7 @@ class ReviewPhase(StageMixin):
                 branch_name=branch_name,
                 worktree_path=worktree_path,
                 iteration=iteration,
+                budget=budget,
                 session_id=session_id,
                 slot_id=slot_id,
                 thread_id=thread_id,
@@ -771,9 +820,18 @@ class ReviewPhase(StageMixin):
                 break
             prior_addressed_threads, addressed = address_result
             if pr_number is None:
+                iteration += 1
                 continue
             if not addressed:
                 break
+            # The address step resolved a fresh finding (``addressed``) without
+            # the validator re-opening a prior one (``validator_clean``): this
+            # round made real progress. Record it so the NEXT iteration can
+            # extend the budget if it would otherwise be the last — letting a PR
+            # that fixes one real bug per round converge instead of being
+            # stranded one pass short of GO and wrongly skipped (#1554).
+            prior_round_made_progress = addressed and validator_clean
+            iteration += 1
 
         self._finalize_review_outcome(
             issue_number=issue_number,
@@ -886,13 +944,14 @@ class ReviewPhase(StageMixin):
         branch_name: str,
         worktree_path: Path,
         iteration: int,
+        budget: int,
         session_id: str | None,
         slot_id: int | None,
         thread_id: int | None,
         issue_title: str,
         issue_body: str,
     ) -> tuple[list[dict[str, Any]], bool] | None:
-        """Run address iteration if not the final iteration.
+        """Run address iteration unless this is the final budgeted iteration.
 
         Args:
             issue_number: GitHub issue number.
@@ -900,6 +959,10 @@ class ReviewPhase(StageMixin):
             branch_name: Git branch name.
             worktree_path: Path to the checked-out worktree.
             iteration: Current zero-based iteration index.
+            budget: Current iteration budget. Addressing is skipped on the final
+                budgeted iteration (``iteration == budget - 1``); a productive
+                round extends ``budget`` in the caller BEFORE the next pass, so a
+                steadily-improving PR still gets its findings addressed (#1554).
             session_id: Optional implementer session ID.
             slot_id: Worker slot for status tracking.
             thread_id: Current thread id for logging.
@@ -907,11 +970,11 @@ class ReviewPhase(StageMixin):
             issue_body: Issue body for context.
 
         Returns:
-            None if this is the final iteration (caller should break).
+            None if this is the final budgeted iteration (caller should break).
             (prior_addressed_threads, addressed) tuple otherwise.
 
         """
-        if iteration == MAX_REVIEW_ITERATIONS - 1:
+        if iteration == budget - 1:
             return None
         prior_addressed_threads, addressed = self._run_address_iteration(
             issue_number=issue_number,
@@ -1019,9 +1082,11 @@ class ReviewPhase(StageMixin):
         unlabeled for re-review / human action.
         """
         # A2-003: Surface AMBIGUOUS verdict distinctly so operators can triage
-        # without inspecting raw log files.
+        # without inspecting raw log files. #1554: the loop may run beyond the
+        # base budget when it keeps making progress, so anchor on ">=" rather
+        # than "==" — an extended run that still ended non-GO must warn too.
         if last_verdict == "AMBIGUOUS" or (
-            iterations_run == MAX_REVIEW_ITERATIONS and last_verdict not in (None, "GO")
+            iterations_run >= MAX_REVIEW_ITERATIONS and last_verdict not in (None, "GO")
         ):
             logger.warning(
                 "#%d: review loop ended without clear GO — "
