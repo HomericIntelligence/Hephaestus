@@ -1,3 +1,7 @@
+# Platform scope: Linux-only. The pixi environment targets linux-64 (see
+# pixi.toml [workspace] platforms); macOS/Windows CI is out of scope and
+# tracked in #539. Published wheels remain pure-Python importable elsewhere.
+# When #539 lands, expand the matrix to include macOS and Windows runners.
 name: Required Checks
 
 on:

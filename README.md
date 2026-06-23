@@ -33,6 +33,9 @@ import hephaestus
 print(hephaestus.__version__)
 ```
 
+> **Upgrading?** When moving across a major version, read the
+> [migration guide](docs/MIGRATION.md) for required consumer changes.
+
 > **Note on naming.** `pip install hephaestus` and `pip install project-hephaestus` will **not** find this package — both names are unowned on PyPI. The `HomericIntelligence-<Project>` prefix is the deliberate naming convention shared across the HomericIntelligence ecosystem (ProjectKeystone, ProjectOdyssey, etc.) to avoid PyPI namespace collisions. Wheel filenames are PEP 625 normalized to lowercase, so you will see `homericintelligence_hephaestus-<version>-py3-none-any.whl` on disk and in release assets.
 
 ### Optional dependencies
@@ -312,7 +315,7 @@ config = merge_with_env({}, convert_bools=True)
 <!-- CLI table generated from pyproject.toml [project.scripts]. Keep in sync via
      `python3 scripts/check_cli_table_sync.py` (also enforced in pre-commit). -->
 
-49 console scripts are installed when you install the package.  Run any command
+50 console scripts are installed when you install the package.  Run any command
 with `--help` to see full usage.
 
 ### Automation
@@ -423,6 +426,12 @@ sync (#993).
 | `hephaestus-check-precommit-versions` | Pre-commit CI utilities for GitHub Actions integration (version check) |
 | `hephaestus-check-workflow-inventory` | GitHub Actions workflow validation utilities (inventory check) |
 | `hephaestus-validate-workflow-checkout` | GitHub Actions workflow validation utilities (checkout validation) |
+
+### Development Utilities
+
+| Command | Description |
+|---|---|
+| `hephaestus-scaffold-subpackage` | Scaffold a new hephaestus subpackage skeleton with matching test directory |
 
 ### Configuration & Dependencies
 
