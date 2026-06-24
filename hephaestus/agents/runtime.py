@@ -20,6 +20,13 @@ DEFAULT_AGENT: AgentName = "claude"
 AGENT_AUTH_STATUS_TIMEOUT = 10
 CODEX_FINAL_MESSAGE_GRACE_ENV = "HEPH_CODEX_FINAL_MESSAGE_GRACE"
 CODEX_FINAL_MESSAGE_GRACE_SECONDS = 5.0
+CODEX_OPUS_MODEL = "gpt-5.5"
+CODEX_OPUS_REASONING_EFFORT = "xhigh"
+CODEX_SONNET_MODEL = "gpt-5.5"
+CODEX_SONNET_REASONING_EFFORT = "medium"
+CODEX_HAIKU_MODEL = "gpt-5.4-mini"
+CODEX_DEFAULT_MODEL = CODEX_OPUS_MODEL
+CODEX_DEFAULT_REASONING_EFFORT = CODEX_OPUS_REASONING_EFFORT
 PI_MODEL_ENV = "HEPH_PI_MODEL"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
 PI_READ_ONLY_TOOLS = "read,grep,find,ls"
@@ -69,6 +76,14 @@ AGENT_CAPABILITIES: dict[AgentName, AgentCapabilities] = {
         supports_sessions=True,
     ),
 }
+
+
+@dataclass(frozen=True)
+class CodexModelConfig:
+    """Codex-native model selection derived from a provider-neutral tier."""
+
+    model: str
+    reasoning_effort: str = ""
 
 
 def add_agent_argument(parser: argparse.ArgumentParser) -> None:
@@ -266,6 +281,39 @@ def codex_approval_args(approval: str) -> list[str]:
     return []
 
 
+def _codex_model_config(model: str, *, use_default: bool = False) -> CodexModelConfig:
+    """Translate Claude tier IDs into Codex-native model/reasoning settings."""
+    normalized = model.strip()
+    if not normalized:
+        if use_default:
+            return CodexModelConfig(CODEX_DEFAULT_MODEL, CODEX_DEFAULT_REASONING_EFFORT)
+        return CodexModelConfig("")
+    lower_model = normalized.lower()
+    if lower_model == "opus" or lower_model.startswith("claude-opus-"):
+        return CodexModelConfig(CODEX_OPUS_MODEL, CODEX_OPUS_REASONING_EFFORT)
+    if lower_model == "sonnet" or lower_model.startswith("claude-sonnet-"):
+        return CodexModelConfig(CODEX_SONNET_MODEL, CODEX_SONNET_REASONING_EFFORT)
+    if lower_model == "haiku" or lower_model.startswith("claude-haiku-"):
+        return CodexModelConfig(CODEX_HAIKU_MODEL)
+    return CodexModelConfig(normalized)
+
+
+def _codex_model_args(model: str, *, use_default: bool = False) -> list[str]:
+    """Return Codex CLI arguments for the requested model tier."""
+    model_config = _codex_model_config(model, use_default=use_default)
+    args: list[str] = []
+    if model_config.model:
+        args.extend(["--model", model_config.model])
+    if model_config.reasoning_effort:
+        args.extend(
+            [
+                "-c",
+                f"model_reasoning_effort={json.dumps(model_config.reasoning_effort)}",
+            ]
+        )
+    return args
+
+
 def run_codex_text(
     prompt: str,
     *,
@@ -314,8 +362,7 @@ def _codex_base_cmd(
             "exec",
         ]
     )
-    if model:
-        cmd.extend(["--model", model])
+    cmd.extend(_codex_model_args(model, use_default=resume_id is None))
     if resume_id is None:
         if cwd is None:
             raise ValueError("cwd is required for new Codex exec sessions")
@@ -800,8 +847,7 @@ def codex_exec_resume_args(
 ) -> list[str]:
     """Return the Codex command prefix used to resume a non-interactive session."""
     cmd = ["codex", "exec", "resume", session_id]
-    if model:
-        cmd.extend(["--model", model])
+    cmd.extend(_codex_model_args(model))
     return cmd
 
 
