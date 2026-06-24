@@ -17,7 +17,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from hephaestus.agents.runtime import run_pi_session
+from hephaestus.agents.runtime import (
+    pi_private_redaction_tokens,
+    redact_pi_private_values,
+    run_pi_session,
+)
 
 DEFAULT_PROMPT = "Reply with exactly: OK"
 
@@ -39,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     if not model:
         print("ERROR: HEPH_PI_MODEL must name an operator-local Pi model alias.", file=sys.stderr)
         return 2
+    redaction_tokens = pi_private_redaction_tokens(args.cwd, model)
     try:
         result = run_pi_session(
             args.prompt,
@@ -48,12 +53,13 @@ def main(argv: list[str] | None = None) -> int:
             sandbox="read-only",
         )
     except subprocess.CalledProcessError as exc:
-        print(exc.stderr or exc.stdout or str(exc), file=sys.stderr)
+        detail = exc.stderr or exc.stdout or f"Pi smoke failed with exit {exc.returncode}"
+        print(redact_pi_private_values(detail, redaction_tokens), file=sys.stderr)
         return exc.returncode
     except subprocess.TimeoutExpired as exc:
         print(f"ERROR: Pi smoke timed out after {exc.timeout}s", file=sys.stderr)
         return 124
-    print(result.stdout)
+    print(redact_pi_private_values(result.stdout, redaction_tokens))
     if result.session_id:
         print(f"SESSION_ID={result.session_id}", file=sys.stderr)
     return 0

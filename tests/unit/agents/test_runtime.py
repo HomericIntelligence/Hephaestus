@@ -397,6 +397,85 @@ def test_run_pi_session_uses_json_mode_and_captures_session(tmp_path: Path) -> N
     assert captured["kwargs"]["env"]["PI_SKIP_VERSION_CHECK"] == "1"
 
 
+def test_run_pi_session_redacts_private_values_from_failures(tmp_path: Path) -> None:
+    """Pi subprocess failure diagnostics should not leak local aliases or tokens."""
+    (tmp_path / ".heph-private-denylist").write_text(
+        "PRIVATE_ENDPOINT_TOKEN\n",
+        encoding="utf-8",
+    )
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(
+            7,
+            cmd,
+            output="PRIVATE_ENDPOINT_TOKEN",
+            stderr="private-test-alias PRIVATE_ENDPOINT_TOKEN",
+        )
+
+    with patch("subprocess.run", side_effect=fake_run):
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            agent_runtime.run_pi_session(
+                "prompt",
+                cwd=tmp_path,
+                timeout=30,
+                model="private-test-alias",
+            )
+
+    exc = exc_info.value
+    assert "private-test-alias" not in str(exc.cmd)
+    assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stdout or "")
+    assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stderr or "")
+    assert agent_runtime.PI_PRIVATE_REDACTION in (exc.stderr or "")
+
+
+def test_run_pi_session_redacts_private_values_from_timeouts(tmp_path: Path) -> None:
+    """Pi timeout diagnostics should redact cmd, partial stdout, and stderr."""
+    (tmp_path / ".heph-private-denylist").write_text(
+        "PRIVATE_ENDPOINT_TOKEN\n",
+        encoding="utf-8",
+    )
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(
+            cmd,
+            7,
+            output="private-test-alias PRIVATE_ENDPOINT_TOKEN",
+            stderr="PRIVATE_ENDPOINT_TOKEN private-test-alias",
+        )
+
+    with patch("subprocess.run", side_effect=fake_run):
+        with pytest.raises(subprocess.TimeoutExpired) as exc_info:
+            agent_runtime.run_pi_session(
+                "prompt",
+                cwd=tmp_path,
+                timeout=30,
+                model="private-test-alias",
+            )
+
+    exc = exc_info.value
+    assert "private-test-alias" not in str(exc)
+    assert "private-test-alias" not in str(exc.cmd)
+    assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.output or "")
+    assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stdout or "")
+    assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stderr or "")
+    assert agent_runtime.PI_PRIVATE_REDACTION in (exc.output or "")
+    assert agent_runtime.PI_PRIVATE_REDACTION in (exc.stderr or "")
+
+
+def test_redact_pi_private_values_replaces_all_tokens() -> None:
+    """The standalone redactor should replace each configured private value."""
+    text = "private-test-alias uses PRIVATE_ENDPOINT_TOKEN"
+
+    redacted = agent_runtime.redact_pi_private_values(
+        text,
+        ("private-test-alias", "PRIVATE_ENDPOINT_TOKEN"),
+    )
+
+    assert redacted == (
+        f"{agent_runtime.PI_PRIVATE_REDACTION} uses {agent_runtime.PI_PRIVATE_REDACTION}"
+    )
+
+
 def test_run_pi_session_read_only_restricts_tools(tmp_path: Path) -> None:
     """Read-only Pi stages should request a read-only tool surface."""
     captured_cmd: list[str] = []

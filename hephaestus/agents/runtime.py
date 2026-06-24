@@ -10,11 +10,14 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 AgentName = Literal["claude", "codex", "pi"]
+SubprocessCommandPart = str | bytes | os.PathLike[str] | os.PathLike[bytes]
+SubprocessCommand = SubprocessCommandPart | Sequence[SubprocessCommandPart]
 AGENT_CHOICES: tuple[AgentName, ...] = ("claude", "codex", "pi")
 DEFAULT_AGENT: AgentName = "claude"
 AGENT_AUTH_STATUS_TIMEOUT = 10
@@ -29,6 +32,8 @@ CODEX_DEFAULT_MODEL = CODEX_OPUS_MODEL
 CODEX_DEFAULT_REASONING_EFFORT = CODEX_OPUS_REASONING_EFFORT
 PI_MODEL_ENV = "HEPH_PI_MODEL"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
+PI_PRIVATE_DENYLIST_FILENAME = ".heph-private-denylist"
+PI_PRIVATE_REDACTION = "<redacted-pi-private-value>"
 PI_READ_ONLY_TOOLS = "read,grep,find,ls"
 AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
     "claude": (("claude", "auth", "status"),),
@@ -223,6 +228,51 @@ def agent_display_name(agent: str) -> str:
         return names[agent]
     except KeyError as e:
         raise ValueError(f"Unsupported agent: {agent}") from e
+
+
+def pi_private_redaction_tokens(cwd: Path, model: str = "") -> tuple[str, ...]:
+    """Return local Pi values that must be redacted from publishable diagnostics."""
+    tokens: list[str] = []
+    resolved_model = (model or os.environ.get(PI_MODEL_ENV, "")).strip()
+    if resolved_model:
+        tokens.append(resolved_model)
+
+    resolved_cwd = cwd.resolve()
+    for parent in (resolved_cwd, *resolved_cwd.parents):
+        denylist = parent / PI_PRIVATE_DENYLIST_FILENAME
+        if not denylist.is_file():
+            continue
+        try:
+            lines = denylist.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            break
+        for line in lines:
+            token = line.strip()
+            if token and not token.startswith("#"):
+                tokens.append(token)
+        break
+
+    return tuple(dict.fromkeys(tokens))
+
+
+def redact_pi_private_values(text: str, tokens: Iterable[str]) -> str:
+    """Replace local Pi aliases, endpoints, and model identifiers in text."""
+    redacted = text
+    for token in sorted((token for token in tokens if token), key=len, reverse=True):
+        redacted = redacted.replace(token, PI_PRIVATE_REDACTION)
+    return redacted
+
+
+def _redact_pi_command_args(cmd: SubprocessCommand, tokens: Iterable[str]) -> SubprocessCommand:
+    """Redact Pi private values from a subprocess command payload."""
+    if isinstance(cmd, str):
+        return redact_pi_private_values(cmd, tokens)
+    if isinstance(cmd, Sequence) and not isinstance(cmd, bytes):
+        return [
+            redact_pi_private_values(part, tokens) if isinstance(part, str) else part
+            for part in cmd
+        ]
+    return cmd
 
 
 def session_agent_matches(session_agent: str | None, selected_agent: str) -> bool:
@@ -556,6 +606,17 @@ def _pi_base_cmd(*, model: str = "", session_id: str | None = None) -> list[str]
     return cmd
 
 
+def _model_from_pi_cmd(cmd: list[str]) -> str:
+    """Extract the Pi model value from a command list when present."""
+    try:
+        model_index = cmd.index("--model")
+    except ValueError:
+        return ""
+    if model_index + 1 >= len(cmd):
+        return ""
+    return cmd[model_index + 1]
+
+
 def _pi_sandbox_args(sandbox: str) -> list[str]:
     """Return Pi tool restrictions for the requested sandbox mode."""
     if sandbox == "read-only":
@@ -596,15 +657,33 @@ def _run_pi_command(
         prompt_path.chmod(0o600)
         cmd.extend(_pi_sandbox_args(sandbox))
         cmd.append(f"@{prompt_path}")
-        return subprocess.run(
-            cmd,
-            cwd=cwd,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            env=_pi_env(),
-            check=True,
-        )
+        try:
+            return subprocess.run(
+                cmd,
+                cwd=cwd,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                env=_pi_env(),
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            tokens = pi_private_redaction_tokens(cwd, _model_from_pi_cmd(cmd))
+            redacted_cmd = _redact_pi_command_args(exc.cmd, tokens)
+            raise subprocess.CalledProcessError(
+                exc.returncode,
+                redacted_cmd,
+                output=redact_pi_private_values(exc.stdout or "", tokens),
+                stderr=redact_pi_private_values(exc.stderr or "", tokens),
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            tokens = pi_private_redaction_tokens(cwd, _model_from_pi_cmd(cmd))
+            raise subprocess.TimeoutExpired(
+                _redact_pi_command_args(exc.cmd, tokens),
+                exc.timeout,
+                output=redact_pi_private_values(_coerce_timeout_output(exc.output), tokens),
+                stderr=redact_pi_private_values(_coerce_timeout_output(exc.stderr), tokens),
+            ) from exc
     finally:
         if prompt_path is not None:
             with contextlib.suppress(OSError):
