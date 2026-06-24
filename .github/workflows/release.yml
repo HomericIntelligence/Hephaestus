@@ -15,6 +15,14 @@ permissions:
   contents: write
   id-token: write
 
+# Serialize per-tag: this workflow builds, publishes to PyPI, and creates a
+# GitHub release — none idempotent. Two runs for the SAME tag must not race
+# (double-publish); different tags proceed independently. Never cancel a publish
+# in flight, hence cancel-in-progress: false.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   test:
     runs-on: ubuntu-24.04

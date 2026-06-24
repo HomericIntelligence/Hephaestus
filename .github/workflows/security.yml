@@ -16,6 +16,13 @@ on:
 permissions:
   contents: read
 
+# Read-only scans — safe to cancel. Collapse successive pushes to the same PR
+# branch (head_ref) so only the latest scan runs; schedule/dispatch fall back to
+# github.ref for a stable per-ref group.
+concurrency:
+  group: security-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   pip-audit:
     name: Dependency vulnerability scan

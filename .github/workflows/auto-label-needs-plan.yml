@@ -19,6 +19,14 @@ permissions:
   contents: read
   issues: write
 
+# Serialize per-issue so a rapid reopen/edit storm for the same issue does not
+# stack redundant idempotent label POSTs; distinct issues still run in parallel.
+# The run_id fallback gives the workflow_call path (no issue context) a unique
+# group. cancel-in-progress: the newest reconcile wins (label POST is idempotent).
+concurrency:
+  group: auto-label-needs-plan-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   needs-plan:
     runs-on: ubuntu-24.04

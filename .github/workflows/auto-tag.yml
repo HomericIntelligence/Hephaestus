@@ -11,6 +11,13 @@ on:
 permissions:
   contents: write
 
+# Serialize manual dispatches: this workflow pushes a signed vX.Y.Z tag, a
+# non-idempotent write. Two overlapping runs could compute the same next version
+# and race on the push. Never cancel a run mid-push.
+concurrency:
+  group: auto-tag-${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   auto-tag:
     runs-on: ubuntu-24.04
