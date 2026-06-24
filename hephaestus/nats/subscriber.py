@@ -85,6 +85,15 @@ class NATSSubscriberThread(threading.Thread):
     - :meth:`health_dict()` — JSON-serialisable snapshot of the above plus the
       configured URL, stream, and uptime approximation.
 
+    Delivery semantics
+    ------------------
+    Messages are acked **unconditionally** after the handler returns, including
+    when the handler raises — this is *at-most-once* delivery by design. A
+    failing handler does NOT trigger JetStream redelivery (which would loop
+    forever on a poison message); instead the exception is recorded in
+    :attr:`last_error` and logged via ``logger.exception``. Handlers needing
+    retry semantics must implement them internally.
+
     Configurable stop timeout
     -------------------------
     Pass ``join_timeout`` to the constructor to change the default; or supply a
@@ -365,6 +374,14 @@ class NATSSubscriberThread(threading.Thread):
                         )
                     else:
                         self._record_message()
+                    # Ack unconditionally — even when the handler raised. This is
+                    # AT-MOST-ONCE delivery by design: a handler that fails on a
+                    # given message will fail again on redelivery, so re-queuing it
+                    # would wedge the poll loop on a poison message forever. The
+                    # failure is NOT lost — it is recorded in `last_error` and
+                    # surfaced via logger.exception above. Do NOT move this ack into
+                    # the `else:` branch (that switches to at-least-once and
+                    # reintroduces poison-message redelivery loops). (#1551)
                     await msg.ack()
 
         finally:
