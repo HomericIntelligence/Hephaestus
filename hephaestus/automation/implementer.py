@@ -70,7 +70,6 @@ from hephaestus.agents.runtime import (
 # Imports for the Test-Patch Contract — see module docstring for the full table.
 # Each symbol here is either a real call site in IssueImplementer/main or an
 # explicit re-export required by tests or the public API.
-from ._review_utils import find_pr_for_issue
 from .curses_ui import CursesUI, ThreadLogManager
 from .dependency_resolver import CyclicDependencyError, DependencyResolver
 
@@ -106,7 +105,7 @@ from .models import (
     WorkerResult,
 )
 from .pr_manager import commit_changes, create_pr
-from .state_labels import is_plan_go, is_skipped
+from .state_labels import is_skipped
 from .status_tracker import StatusTracker
 from .worktree_manager import WorktreeManager
 
@@ -292,10 +291,13 @@ class IssueImplementer:
                 # issue from all phases. Treat it as completed so dependents are
                 # not blocked, and never add it to the work graph.
                 #
-                # Stale-skip recovery: if an explicitly selected issue also has
-                # an approved plan and no PR, load it anyway so a manual/old
-                # skip label cannot strand ready implementation work forever.
-                if is_skipped(issue.labels) and not self._should_recover_stale_skip(issue):
+                # ``state:skip`` is operator-only and ABSOLUTE (#1576): the
+                # automation never removes it and never auto-recovers a skipped
+                # issue — it is the operator's responsibility to remove the label
+                # between runs. ``issue.labels`` comes from the live
+                # ``fetch_issue_info`` (``gh issue view``) call above, never a
+                # cache, so the decision always reflects current GitHub state.
+                if is_skipped(issue.labels):
                     logger.info("Skipping #%s (state:skip)", issue_num)
                     self.resolver.completed.add(issue_num)
                     continue
@@ -311,30 +313,6 @@ class IssueImplementer:
                 logger.error("Failed to load issue #%s: %s", issue_num, e)
 
         logger.info("Loaded %s issues", len(self.resolver.graph.issues))
-
-    @staticmethod
-    def _should_recover_stale_skip(issue: Any) -> bool:
-        """Return True for a skipped, plan-approved issue that has no PR yet."""
-        if not is_plan_go(issue.labels):
-            return False
-        try:
-            pr_number = find_pr_for_issue(issue.number)
-        except Exception as exc:
-            logger.warning(
-                "Issue #%s has state:skip + state:plan-go, but PR lookup failed; "
-                "honoring state:skip (%s)",
-                issue.number,
-                exc,
-            )
-            return False
-        if pr_number is not None:
-            return False
-        logger.warning(
-            "Issue #%s has state:skip + state:plan-go but no open PR; "
-            "treating state:skip as stale and loading for implementation",
-            issue.number,
-        )
-        return True
 
     def _health_check(self) -> dict[int, WorkerResult]:
         """Perform health check of dependencies and environment.
