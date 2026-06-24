@@ -25,11 +25,8 @@ from typing import TYPE_CHECKING, Any
 
 from hephaestus.agents.runtime import (
     direct_agent_model,
-    is_codex,
     resume_agent_session,
-    resume_codex_session,
     run_agent_text,
-    run_codex_text,
     uses_direct_agent_runner,
 )
 from hephaestus.github.client import ClaudeUsageCapError, gh_call
@@ -1532,36 +1529,6 @@ class ReviewPhase(StageMixin):
             verdict=verdict,
             review_text=review_text,
         )
-        if is_codex(self.options.agent):
-            try:
-                result = resume_codex_session(
-                    session_id,
-                    prompt,
-                    cwd=worktree_path,
-                    timeout=implementer_claude_timeout(),
-                )
-                log_file = (
-                    self.state_dir / f"codex-feedback-{issue_number}-r{prev_iteration + 1}.log"
-                )
-                log_file.write_text(result.stdout or "")
-                return True
-            except subprocess.CalledProcessError as e:
-                logger.error(
-                    "#%d: Codex failed to address R%d feedback (exit=%d): %s",
-                    issue_number,
-                    prev_iteration + 1,
-                    e.returncode,
-                    (e.stderr or e.stdout or "")[:500],
-                )
-                return False
-            except subprocess.TimeoutExpired:
-                logger.error(
-                    "#%d: Codex timed out addressing R%d feedback",
-                    issue_number,
-                    prev_iteration + 1,
-                )
-                return False
-
         if uses_direct_agent_runner(self.options.agent):
             try:
                 result = resume_agent_session(
@@ -1676,17 +1643,6 @@ class ReviewPhase(StageMixin):
             prior_review=prior_review,
         )
         try:
-            if is_codex(self.options.agent):
-                result = run_codex_text(
-                    prompt,
-                    cwd=self.repo_root,
-                    timeout=600,
-                    sandbox="read-only",
-                )
-                output = (result.stdout or "").strip()
-                if not output:
-                    raise RuntimeError("reviewer returned empty output")
-                return output
             if uses_direct_agent_runner(self.options.agent):
                 result = run_agent_text(
                     agent=self.options.agent,

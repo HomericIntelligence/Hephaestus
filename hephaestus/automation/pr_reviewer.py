@@ -29,10 +29,8 @@ from typing import Any
 
 from hephaestus.agents.runtime import (
     direct_agent_model,
-    is_codex,
     resolve_agent,
     run_agent_text,
-    run_codex_text,
     uses_direct_agent_runner,
 )
 from hephaestus.cli.utils import (
@@ -143,26 +141,6 @@ def run_pr_review_analysis(
     log_file = state_dir / f"pr-review-analysis-{issue_number}.log"
 
     try:
-        if is_codex(agent):
-            result = run_codex_text(
-                prompt,
-                cwd=worktree_path,
-                timeout=pr_reviewer_claude_timeout(),
-                sandbox="read-only",
-            )
-            log_file.write_text(result.stdout or "")
-            review_text = result.stdout or ""
-            parsed = _parse_json_block(review_text)
-            # The Verdict:/Grade: line lives in the reviewer prose, not the JSON
-            # summary block. Surface the raw output so callers parse the real
-            # verdict instead of the verdict-free summary.
-            parsed["review_text"] = review_text
-            logger.info(
-                "Analysis complete for PR #%s; found %s inline comment(s)",
-                pr_number,
-                len(parsed.get("comments", [])),
-            )
-            return parsed
         if uses_direct_agent_runner(agent):
             result = run_agent_text(
                 agent=agent,

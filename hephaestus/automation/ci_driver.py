@@ -24,10 +24,8 @@ from typing import Any
 from hephaestus.agents.runtime import (
     add_agent_argument,
     direct_agent_model,
-    is_codex,
     resolve_agent,
     run_agent_session,
-    run_codex_session,
     session_agent_matches,
     uses_direct_agent_runner,
 )
@@ -785,22 +783,17 @@ class CIDriver:
         issue_body = issue_data.get("body", "")
 
         def _invoke(prompt: str) -> str:
-            if is_codex(self.options.agent):
-                result = run_codex_session(
-                    prompt,
-                    cwd=self.repo_root,
-                    timeout=advise_claude_timeout(),
-                    model=codex_advise_model(),
-                    sandbox="read-only",
-                )
-                return (result.stdout or "").strip()
             if uses_direct_agent_runner(self.options.agent):
                 result = run_agent_session(
                     agent=self.options.agent,
                     prompt=prompt,
                     cwd=self.repo_root,
                     timeout=advise_claude_timeout(),
-                    model=direct_agent_model(self.options.agent, "HEPH_ADVISE_MODEL"),
+                    model=direct_agent_model(
+                        self.options.agent,
+                        "HEPH_ADVISE_MODEL",
+                        codex_default=codex_advise_model(),
+                    ),
                     sandbox="read-only",
                 )
                 return (result.stdout or "").strip()

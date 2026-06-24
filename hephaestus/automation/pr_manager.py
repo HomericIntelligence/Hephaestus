@@ -10,17 +10,15 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 from hephaestus.agents.runtime import (
-    is_codex,
-    is_pi,
+    agent_display_name,
+    direct_agent_model,
     run_agent_text,
-    run_codex_text,
     uses_direct_agent_runner,
 )
 
@@ -54,6 +52,11 @@ _RESERVED_MESSAGE_LINE = re.compile(
     re.IGNORECASE,
 )
 _GIT_MESSAGE_MODEL_ENV = "HEPH_GIT_MESSAGE_MODEL"
+_AGENT_COMMIT_IDENTITIES = {
+    "claude": ("Claude Code", "noreply@anthropic.com"),
+    "codex": ("Codex", "noreply@openai.com"),
+    "pi": ("Pi", "noreply@earendil.works"),
+}
 
 # Conventional-commit types the ``pr-policy`` CI gate accepts. MUST stay in sync
 # with ``ALLOWED_TYPES`` in ``scripts/check_conventional_commit.py`` (the gate's
@@ -120,11 +123,7 @@ class _PrMessageParts:
 
 def _agent_display_name(agent: str) -> str:
     """Return a short human-facing name for generated commits/PR bodies."""
-    if is_codex(agent):
-        return "Codex"
-    if is_pi(agent):
-        return "Pi"
-    return "Claude Code"
+    return agent_display_name(agent)
 
 
 def _coauthor_for_agent(agent: str) -> tuple[str, str]:
@@ -134,29 +133,18 @@ def _coauthor_for_agent(agent: str) -> tuple[str, str]:
     ``Co-Authored-By:`` git trailer. Model identifiers are intentionally NOT
     placed in the name slot — see ``_provenance_for_agent`` for that.
     """
-    if is_codex(agent):
-        return ("Codex", "noreply@openai.com")
-    if is_pi(agent):
-        return ("Pi", "noreply@earendil.works")
-    return ("Claude Code", "noreply@anthropic.com")
+    return _AGENT_COMMIT_IDENTITIES.get(agent, _AGENT_COMMIT_IDENTITIES["claude"])
 
 
 def _provenance_for_agent(agent: str) -> str:
     """Return the value for an ``Implemented-By:`` trailer.
 
     For Claude agents this is the resolved model id (honoring
-    ``HEPH_IMPLEMENTER_MODEL``); for Codex it is the literal ``"Codex"``.
+    ``HEPH_IMPLEMENTER_MODEL``); for direct agents it is the provider display name.
     """
-    if is_codex(agent):
-        return "Codex"
-    if is_pi(agent):
-        return "Pi"
+    if uses_direct_agent_runner(agent):
+        return agent_display_name(agent)
     return implementer_model()
-
-
-def _codex_git_message_model() -> str:
-    """Return the optional Codex model override for git-message generation."""
-    return os.environ.get(_GIT_MESSAGE_MODEL_ENV, "")
 
 
 def _issue_body(issue: Any) -> str:
@@ -329,22 +317,13 @@ def _invoke_git_message_agent(
 ) -> str:
     """Run the lightweight message agent in a separate read-only session."""
     timeout = git_message_agent_timeout()
-    if is_codex(agent):
-        result = run_codex_text(
-            prompt,
-            cwd=worktree_path,
-            timeout=timeout,
-            model=_codex_git_message_model(),
-            sandbox="read-only",
-        )
-        return (result.stdout or "").strip()
     if uses_direct_agent_runner(agent):
         result = run_agent_text(
             agent=agent,
             prompt=prompt,
             cwd=worktree_path,
             timeout=timeout,
-            model=_codex_git_message_model(),
+            model=direct_agent_model(agent, _GIT_MESSAGE_MODEL_ENV),
             sandbox="read-only",
         )
         return (result.stdout or "").strip()

@@ -209,6 +209,7 @@ class ReviewState(BaseModel):
     branch_name: str | None = None
     plan_path: str | None = None
     session_id: str | None = None
+    session_agent: str | None = None
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None
     error: str | None = None

@@ -21,10 +21,8 @@ from typing import TYPE_CHECKING, cast
 
 from hephaestus.agents.runtime import (
     direct_agent_model,
-    is_codex,
     run_agent_session,
     run_agent_text,
-    run_codex_text,
     uses_direct_agent_runner,
 )
 from hephaestus.github.rate_limit import wait_until
@@ -82,22 +80,17 @@ class ImplementPhase(StageMixin):
         """Select ProjectMnemosyne skills and return prompt-ready context."""
 
         def _invoke(prompt: str) -> str:
-            if is_codex(self.options.agent):
-                result = run_codex_text(
-                    prompt,
-                    cwd=self.repo_root,
-                    timeout=advise_claude_timeout(),
-                    model=codex_advise_model(),
-                    sandbox="read-only",
-                )
-                return (result.stdout or "").strip()
             if uses_direct_agent_runner(self.options.agent):
                 result = run_agent_text(
                     agent=self.options.agent,
                     prompt=prompt,
                     cwd=self.repo_root,
                     timeout=advise_claude_timeout(),
-                    model=direct_agent_model(self.options.agent, "HEPH_ADVISE_MODEL"),
+                    model=direct_agent_model(
+                        self.options.agent,
+                        "HEPH_ADVISE_MODEL",
+                        codex_default=codex_advise_model(),
+                    ),
                     sandbox="read-only",
                 )
                 return (result.stdout or "").strip()
@@ -276,9 +269,7 @@ class ImplementPhase(StageMixin):
                 prompt=prompt,
                 cwd=worktree_path,
                 timeout=implementer_claude_timeout(),
-                model=(
-                    "" if is_codex(agent) else direct_agent_model(agent, "HEPH_IMPLEMENTER_MODEL")
-                ),
+                model=direct_agent_model(agent, "HEPH_IMPLEMENTER_MODEL"),
                 sandbox="workspace-write",
             )
             log_file.write_text(result.stdout or "")

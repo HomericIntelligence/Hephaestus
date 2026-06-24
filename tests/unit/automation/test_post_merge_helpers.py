@@ -98,16 +98,16 @@ class TestRunDriveGreenLearnings:
         assert inv.called
         assert processor._last_learn_evidence == sentinel
 
-    def test_codex_path_uses_run_codex_session(self, tmp_path: Path) -> None:
+    def test_codex_path_uses_run_agent_session(self, tmp_path: Path) -> None:
         processor = _make_codex_processor(tmp_path)
         with (
             patch(f"{_MOD}.get_repo_slug", return_value="o/r"),
-            patch(f"{_MOD}.run_codex_session", return_value=MagicMock(stdout="codex-out")) as codex,
+            patch(f"{_MOD}.run_agent_session", return_value=MagicMock(stdout="codex-out")) as agent,
             patch(f"{_MOD}.invoke_claude_with_session") as inv,
         ):
             result = processor.run_drive_green_learnings(3, 4)
         assert result is True
-        assert codex.called
+        assert agent.call_args.kwargs["agent"] == "codex"
         assert not inv.called
 
     def test_worktree_failure_falls_back_to_repo_root(self, tmp_path: Path) -> None:

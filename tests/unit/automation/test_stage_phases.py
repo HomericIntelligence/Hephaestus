@@ -177,12 +177,11 @@ def test_implement_phase_run_claude_code_dry_run(tmp_path: Path) -> None:
 
 
 def test_implement_phase_run_claude_code_dispatches_claude(tmp_path: Path) -> None:
-    """_run_claude_code routes to the Claude session for non-codex agents."""
+    """_run_claude_code routes to the Claude session for non-direct agents."""
     ctx = _make_ctx(tmp_path)
     ctx.impl._run_claude_impl_session = mock.MagicMock(return_value="sess-1")  # type: ignore[method-assign]
     phase = ImplementPhase(ctx)
-    with mock.patch("hephaestus.automation._implement_phase.is_codex", return_value=False):
-        assert phase._run_claude_code(7, tmp_path, "prompt") == "sess-1"
+    assert phase._run_claude_code(7, tmp_path, "prompt") == "sess-1"
     ctx.impl._run_claude_impl_session.assert_called_once()
 
 

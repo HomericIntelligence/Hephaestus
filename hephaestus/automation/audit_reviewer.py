@@ -21,10 +21,10 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import (
+    add_agent_argument,
     direct_agent_model,
-    is_codex,
+    resolve_agent,
     run_agent_text,
-    run_codex_text,
     uses_direct_agent_runner,
 )
 from hephaestus.cli.utils import (
@@ -149,15 +149,7 @@ def run_audit_coordinator(
     state_dir.mkdir(parents=True, exist_ok=True)
     log_file = state_dir / "audit-coordinator.log"
     try:
-        if is_codex(agent):
-            result = run_codex_text(
-                prompt,
-                cwd=get_repo_root(),
-                timeout=pr_reviewer_claude_timeout(),
-                sandbox="read-only",
-            )
-            response = result.stdout or ""
-        elif uses_direct_agent_runner(agent):
+        if uses_direct_agent_runner(agent):
             result = run_agent_text(
                 agent=agent,
                 prompt=prompt,
@@ -265,7 +257,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Audit only these PR numbers (default: all open).",
     )
-    parser.add_argument("--codex", action="store_true", help="Use Codex instead of Claude.")
+    add_agent_argument(parser)
+    parser.add_argument("--codex", action="store_true", help="Deprecated alias for --agent codex.")
     parser.add_argument(
         "--dry-run", action="store_true", help="Skip the agent call and the GitHub posting step."
     )
@@ -284,8 +277,10 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    selected_agent = "codex" if args.codex else args.agent
+    agent = (selected_agent or "claude") if args.dry_run else resolve_agent(selected_agent)
     reviewer = AuditReviewer(
-        agent="codex" if args.codex else "claude",
+        agent=agent,
         pr_numbers=args.pr_numbers,
         dry_run=args.dry_run,
     )

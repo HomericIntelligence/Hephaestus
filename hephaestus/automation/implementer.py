@@ -63,8 +63,8 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import (
-    is_codex,
-    is_pi,
+    agent_cli_name,
+    agent_display_name,
 )
 
 # Imports for the Test-Patch Contract — see module docstring for the full table.
@@ -340,15 +340,8 @@ class IssueImplementer:
             logger.error("git not available: %s", e)
 
         # Check selected agent runtime
-        if is_codex(self.options.agent):
-            agent_binary = "codex"
-            agent_name = "Codex"
-        elif is_pi(self.options.agent):
-            agent_binary = "pi"
-            agent_name = "Pi"
-        else:
-            agent_binary = "claude"
-            agent_name = "Claude Code"
+        agent_binary = agent_cli_name(self.options.agent)
+        agent_name = agent_display_name(self.options.agent)
         try:
             run([agent_binary, "--version"], check=True)
             logger.info("%s available", agent_name)

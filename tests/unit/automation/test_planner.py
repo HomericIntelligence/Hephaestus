@@ -331,7 +331,11 @@ class TestRunAdvise:
 
         with (
             patch("hephaestus.automation.planner.run_advise", return_value="findings") as run,
-            patch.object(planner, "_call_codex", return_value='{"skills": []}') as call_codex,
+            patch.object(
+                planner.claude_runner,
+                "call_direct_agent",
+                return_value='{"skills": []}',
+            ) as call_direct,
         ):
             result = planner._run_advise(123, "Test Issue", "Issue body")
             invoke = run.call_args.kwargs["invoke"]
@@ -339,8 +343,8 @@ class TestRunAdvise:
 
         assert result == "findings"
         assert run.call_args.kwargs["build_prompt"].__name__ == "get_codex_advise_prompt"
-        assert call_codex.call_args.kwargs["model"] == "gpt-5.4-mini"
-        assert call_codex.call_args.kwargs["sandbox"] == "read-only"
+        assert call_direct.call_args.kwargs["model"] == "gpt-5.4-mini"
+        assert call_direct.call_args.kwargs["sandbox"] == "read-only"
 
     def test_graceful_failure_on_error(self, planner: Any) -> None:
         """When advise errors, return a sentinel-comment (not silent ``""``).

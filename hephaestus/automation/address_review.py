@@ -29,12 +29,9 @@ from typing import Any
 
 from hephaestus.agents.runtime import (
     direct_agent_model,
-    is_codex,
     resolve_agent,
     resume_agent_session,
-    resume_codex_session,
     run_agent_session,
-    run_codex_session,
     session_agent_matches,
     uses_direct_agent_runner,
 )
@@ -196,24 +193,6 @@ def run_address_fix_session(
     prompt_file.write_text(prompt)
 
     try:
-        if is_codex(agent):
-            codex_result = run_codex_session(
-                prompt,
-                cwd=worktree_path,
-                timeout=address_review_claude_timeout(),
-                sandbox="workspace-write",
-            )
-            log = codex_result.stdout
-            if codex_result.session_id:
-                log = f"SESSION_ID: {codex_result.session_id}\n\n{log}"
-            log_file.write_text(log)
-            parsed = parse_fn(codex_result.stdout)
-            logger.info(
-                "Fix session complete for PR #%s; addressed %s thread(s)",
-                pr_number,
-                len(parsed.get("addressed", [])),
-            )
-            return parsed
         if uses_direct_agent_runner(agent):
             direct_result = run_agent_session(
                 agent=agent,
@@ -872,62 +851,7 @@ class AddressReviewer(BaseReviewer):
         """
         log_file = self.state_dir / f"address-review-{issue_number}.log"
 
-        # Codex retains the resume-then-fallback behavior because it cannot
-        # derive a deterministic session UUID; run the resume attempt here and
-        # delegate the prompt build + parse to the shared core via a fresh run.
-        if not self.options.dry_run and is_codex(self.options.agent) and session_id:
-            threads_json = json.dumps(
-                [
-                    {
-                        "thread_id": t["id"],
-                        "path": t["path"],
-                        "line": t.get("line"),
-                        "body": t["body"],
-                    }
-                    for t in threads
-                ]
-            )
-            prompt = get_address_review_prompt(
-                pr_number=pr_number,
-                issue_number=issue_number,
-                worktree_path=str(worktree_path),
-                threads_json=threads_json,
-            )
-            try:
-                codex_result = resume_codex_session(
-                    session_id,
-                    prompt,
-                    cwd=worktree_path,
-                    timeout=address_review_claude_timeout(),
-                )
-            except subprocess.CalledProcessError as e:
-                logger.warning(
-                    "Issue #%s: Codex resume session %r failed for PR #%s; "
-                    "falling back to fresh session: %s",
-                    issue_number,
-                    session_id,
-                    pr_number,
-                    (e.stderr or e.stdout or "")[:300],
-                )
-            else:
-                log = codex_result.stdout
-                if codex_result.session_id:
-                    log = f"SESSION_ID: {codex_result.session_id}\n\n{log}"
-                log_file.write_text(log)
-                parsed = self._parse_json_block(codex_result.stdout, issue_number=issue_number)
-                logger.info(
-                    "Fix session complete for PR #%s; addressed %s thread(s)",
-                    pr_number,
-                    len(parsed.get("addressed", [])),
-                )
-                return parsed
-
-        if (
-            not self.options.dry_run
-            and not is_codex(self.options.agent)
-            and uses_direct_agent_runner(self.options.agent)
-            and session_id
-        ):
+        if not self.options.dry_run and uses_direct_agent_runner(self.options.agent) and session_id:
             threads_json = json.dumps(
                 [
                     {

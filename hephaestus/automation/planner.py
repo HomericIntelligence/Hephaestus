@@ -19,7 +19,6 @@ from typing import Any
 from hephaestus.agents.runtime import (
     add_agent_argument,
     direct_agent_model,
-    is_codex,
     resolve_agent,
     uses_direct_agent_runner,
 )
@@ -334,24 +333,6 @@ class Planner:
             extra_args=extra_args,
         )
 
-    def _call_codex(
-        self,
-        prompt: str,
-        *,
-        model: str,
-        max_retries: int = 3,
-        timeout: int = 300,
-        sandbox: str = "workspace-write",
-    ) -> str:
-        """Call Codex (delegates to claude_runner)."""
-        return self.claude_runner.call_codex(
-            prompt,
-            model=model,
-            max_retries=max_retries,
-            timeout=timeout,
-            sandbox=sandbox,
-        )
-
     def _ensure_mnemosyne(self, mnemosyne_root: Path) -> bool:
         """Clone or refresh ProjectMnemosyne (delegates to the shared runner).
 
@@ -389,17 +370,14 @@ class Planner:
         """
 
         def _invoke(prompt: str) -> str:
-            if is_codex(self.options.agent):
-                return self._call_codex(
-                    prompt,
-                    model=codex_advise_model(),
-                    timeout=advise_claude_timeout(),
-                    sandbox="read-only",
-                )
             if uses_direct_agent_runner(self.options.agent):
                 return self.claude_runner.call_direct_agent(
                     prompt,
-                    model=direct_agent_model(self.options.agent, "HEPH_ADVISE_MODEL"),
+                    model=direct_agent_model(
+                        self.options.agent,
+                        "HEPH_ADVISE_MODEL",
+                        codex_default=codex_advise_model(),
+                    ),
                     timeout=advise_claude_timeout(),
                     sandbox="read-only",
                 )

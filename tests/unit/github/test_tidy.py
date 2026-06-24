@@ -174,7 +174,8 @@ def test_dispatch_swarm_runs_codex_agents_in_threads(
 
     assert result == {"feature/a": "fixed"}
     assert calls
-    assert calls[0][0] is tidy_module._run_codex_rebase_agent
+    assert calls[0][0] is tidy_module._run_direct_rebase_agent
+    assert calls[0][1][0] == "codex"
 
 
 class TestMain:

@@ -338,7 +338,6 @@ class TestMessageAgentInvocation:
 
     def test_claude_message_agent_uses_separate_session(self) -> None:
         with (
-            patch.object(pr_manager, "is_codex", return_value=False),
             patch.object(pr_manager, "get_repo_slug", return_value="ProjectHephaestus"),
             patch.object(pr_manager, "git_message_model", return_value="claude-haiku-4-5"),
             patch.object(pr_manager, "git_message_agent_timeout", return_value=120),
@@ -370,10 +369,9 @@ class TestMessageAgentInvocation:
             args=["codex", "exec"], returncode=0, stdout="{}", stderr=""
         )
         with (
-            patch.object(pr_manager, "is_codex", return_value=True),
-            patch.object(pr_manager, "_codex_git_message_model", return_value="gpt-5.4-mini"),
+            patch.dict("os.environ", {"HEPH_GIT_MESSAGE_MODEL": "gpt-5.4-mini"}),
             patch.object(pr_manager, "git_message_agent_timeout", return_value=120),
-            patch.object(pr_manager, "run_codex_text", return_value=completed) as run_codex,
+            patch.object(pr_manager, "run_agent_text", return_value=completed) as run_agent,
         ):
             assert (
                 pr_manager._invoke_git_message_agent(
@@ -386,7 +384,8 @@ class TestMessageAgentInvocation:
                 == "{}"
             )
 
-        kwargs = run_codex.call_args.kwargs
+        kwargs = run_agent.call_args.kwargs
+        assert kwargs["agent"] == "codex"
         assert kwargs["cwd"] == Path("/tmp/wt")
         assert kwargs["sandbox"] == "read-only"
         assert kwargs["model"] == "gpt-5.4-mini"
@@ -395,7 +394,6 @@ class TestMessageAgentInvocation:
         completed = subprocess.CompletedProcess(args=["pi"], returncode=0, stdout="{}", stderr="")
         with (
             patch.object(pr_manager, "uses_direct_agent_runner", return_value=True),
-            patch.object(pr_manager, "is_codex", return_value=False),
             patch.object(pr_manager, "git_message_agent_timeout", return_value=120),
             patch.object(pr_manager, "run_agent_text", return_value=completed) as run_agent,
         ):

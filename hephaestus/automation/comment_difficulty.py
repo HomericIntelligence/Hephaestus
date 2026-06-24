@@ -25,9 +25,7 @@ from typing import Any
 
 from hephaestus.agents.runtime import (
     direct_agent_model,
-    is_codex,
     run_agent_text,
-    run_codex_text,
     uses_direct_agent_runner,
 )
 
@@ -125,16 +123,7 @@ def _run_classifier_session(
     )
     log_file = state_dir / f"comment-difficulty-{issue_number}.log"
     try:
-        if is_codex(agent):
-            result = run_codex_text(
-                prompt,
-                cwd=worktree_path,
-                timeout=advise_claude_timeout(),
-                sandbox="read-only",
-            )
-            log_file.write_text(result.stdout or "")
-            parsed = parse_json_block(result.stdout or "")
-        elif uses_direct_agent_runner(agent):
+        if uses_direct_agent_runner(agent):
             result = run_agent_text(
                 agent=agent,
                 prompt=prompt,

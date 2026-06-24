@@ -70,10 +70,11 @@ def test_run_agent_dispatches_codex_and_logs_session(
 ) -> None:
     """Codex stages should persist the captured session id in the log."""
 
-    def fake_run_codex_session(*args: object, **kwargs: object) -> AgentRunResult:
+    def fake_run_agent_session(*args: object, **kwargs: object) -> AgentRunResult:
+        assert kwargs["agent"] == "codex"
         return AgentRunResult(stdout="codex output", stderr="", session_id="session-123")
 
-    monkeypatch.setattr(agent_stage, "run_codex_session", fake_run_codex_session)
+    monkeypatch.setattr(agent_stage, "run_agent_session", fake_run_agent_session)
     # resolve_agent now pre-flights install+auth (#1175); codex is not on PATH in
     # CI, so stub the resolution like the other codex stage tests below.
     monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "codex")
@@ -94,10 +95,11 @@ def test_run_agent_dispatches_pi_and_logs_session(
 ) -> None:
     """Pi stages should use the Pi JSON-mode runner and persist session metadata."""
 
-    def fake_run_pi_session(*args: object, **kwargs: object) -> AgentRunResult:
+    def fake_run_agent_session(*args: object, **kwargs: object) -> AgentRunResult:
+        assert kwargs["agent"] == "pi"
         return AgentRunResult(stdout="pi output", stderr="", session_id="pi-session-123")
 
-    monkeypatch.setattr(agent_stage, "run_pi_session", fake_run_pi_session)
+    monkeypatch.setattr(agent_stage, "run_agent_session", fake_run_agent_session)
     monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "pi")
 
     args = _args(tmp_path, agent="pi")
@@ -239,10 +241,11 @@ def test_main_allows_approval_with_codex_agent(
 ) -> None:
     """Codex honors --approval, so validation must not fire."""
 
-    def fake_run_codex_session(*a: object, **kw: object) -> AgentRunResult:
+    def fake_run_agent_session(*a: object, **kw: object) -> AgentRunResult:
+        assert kw["agent"] == "codex"
         return AgentRunResult(stdout="ok", stderr="", session_id=None)
 
-    monkeypatch.setattr(agent_stage, "run_codex_session", fake_run_codex_session)
+    monkeypatch.setattr(agent_stage, "run_agent_session", fake_run_agent_session)
     monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "codex")
     prompt_file = tmp_path / "prompt.md"
     prompt_file.write_text("p", encoding="utf-8")

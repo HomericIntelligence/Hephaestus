@@ -14,9 +14,7 @@ from typing import Any
 
 from hephaestus.agents.runtime import (
     direct_agent_model,
-    is_codex,
     run_agent_session,
-    run_codex_session,
     uses_direct_agent_runner,
 )
 
@@ -152,16 +150,6 @@ class PostMergeProcessor:
                     wt_err,
                 )
                 cwd = repo_root
-            if is_codex(options.agent):
-                codex_result = run_codex_session(
-                    prompt,
-                    cwd=cwd,
-                    timeout=learn_claude_timeout(),
-                    sandbox="workspace-write",
-                )
-                self._last_learn_evidence = mnemosyne_update_evidence(codex_result.stdout or "")
-                logger.info("Issue #%s: drive-green learnings captured with Codex", issue_number)
-                return True
             if uses_direct_agent_runner(options.agent):
                 direct_result = run_agent_session(
                     agent=options.agent,

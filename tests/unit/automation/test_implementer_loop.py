@@ -68,9 +68,9 @@ def test_codex_implementer_advise_uses_codex_prompt_builder(
 
     with (
         patch("hephaestus.automation._implement_phase.run_advise", return_value="findings") as run,
-        patch("hephaestus.automation._implement_phase.run_codex_text") as codex,
+        patch("hephaestus.automation._implement_phase.run_agent_text") as direct_agent,
     ):
-        codex.return_value = subprocess.CompletedProcess(
+        direct_agent.return_value = subprocess.CompletedProcess(
             args=["codex", "exec"], returncode=0, stdout='{"skills": []}', stderr=""
         )
         result = implementer._run_advise(123, "Test Issue", "Issue body")
@@ -79,8 +79,9 @@ def test_codex_implementer_advise_uses_codex_prompt_builder(
 
     assert result == "findings"
     assert run.call_args.kwargs["build_prompt"].__name__ == "get_codex_advise_prompt"
-    assert codex.call_args.kwargs["model"] == "gpt-5.4-mini"
-    assert codex.call_args.kwargs["sandbox"] == "read-only"
+    assert direct_agent.call_args.kwargs["agent"] == "codex"
+    assert direct_agent.call_args.kwargs["model"] == "gpt-5.4-mini"
+    assert direct_agent.call_args.kwargs["sandbox"] == "read-only"
 
 
 class TestRunImplReviewLoop:

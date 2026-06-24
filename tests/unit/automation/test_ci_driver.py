@@ -273,11 +273,11 @@ def test_codex_ci_fix_session_falls_back_to_fresh_on_resume_failure(
 
     with (
         patch(
-            "hephaestus.automation.ci_fix_orchestrator.resume_codex_session",
+            "hephaestus.automation.ci_fix_orchestrator.resume_agent_session",
             side_effect=resume_error,
         ),
         patch(
-            "hephaestus.automation.ci_fix_orchestrator.run_codex_session",
+            "hephaestus.automation.ci_fix_orchestrator.run_agent_session",
             return_value=fresh_result,
         ) as mock_fresh,
         patch(
@@ -333,7 +333,7 @@ def test_codex_ci_fix_session_skips_push_when_head_did_not_advance(
 
     with (
         patch(
-            "hephaestus.automation.ci_fix_orchestrator.run_codex_session",
+            "hephaestus.automation.ci_fix_orchestrator.run_agent_session",
             return_value=fresh_result,
         ),
         patch(
@@ -426,7 +426,7 @@ def test_codex_ci_advise_uses_codex_prompt_builder(driver: CIDriver) -> None:
             return_value={"title": "Test Issue", "body": "Issue body"},
         ),
         patch("hephaestus.automation.ci_driver.run_advise", return_value="findings") as run,
-        patch("hephaestus.automation.ci_driver.run_codex_session") as codex,
+        patch("hephaestus.automation.ci_driver.run_agent_session") as codex,
     ):
         codex.return_value = MagicMock(stdout='{"skills": []}')
         result = driver._run_advise(123)
@@ -1371,7 +1371,7 @@ class TestDriveGreenLearnings:
         with (
             patch.object(driver, "_get_worktree_path", return_value=tmp_path),
             patch(
-                "hephaestus.automation.post_merge_processor.run_codex_session",
+                "hephaestus.automation.post_merge_processor.run_agent_session",
                 return_value=mock_codex_result,
             ) as mock_codex,
             patch(
@@ -1382,7 +1382,8 @@ class TestDriveGreenLearnings:
 
         assert result is True
         mock_codex.assert_called_once()
-        prompt = mock_codex.call_args.args[0]
+        assert mock_codex.call_args.kwargs["agent"] == "codex"
+        prompt = mock_codex.call_args.kwargs["prompt"]
         assert prompt.startswith("/learn ")
         assert "/skills-registry-commands:learn" not in prompt
         assert "Only push skills to ProjectMnemosyne" in prompt
@@ -1967,7 +1968,7 @@ class TestNoCommitRetry:
         assert not (driver.state_dir / "repeated-no-commit-2.json").exists()
 
     def test_retry_codex_path_resumes_session(self, driver: CIDriver, tmp_path: Path) -> None:
-        """Codex agent + session_id → resume_codex_session called once with the session."""
+        """Codex agent + session_id → resume_agent_session called once with the session."""
         driver.options.agent = "codex"
         post_sha = MagicMock(stdout="deadbeef\n")
         clean_status = MagicMock(stdout="", stderr="", returncode=0)
@@ -1981,10 +1982,10 @@ class TestNoCommitRetry:
                 return_value=[],
             ),
             patch(
-                "hephaestus.automation.ci_fix_orchestrator.resume_codex_session",
+                "hephaestus.automation.ci_fix_orchestrator.resume_agent_session",
                 return_value=AgentRunResult(stdout="ok", stderr="", session_id="s"),
             ) as mock_resume,
-            patch("hephaestus.automation.ci_fix_orchestrator.run_codex_session") as mock_fresh,
+            patch("hephaestus.automation.ci_fix_orchestrator.run_agent_session") as mock_fresh,
             patch(
                 "hephaestus.automation.ci_fix_orchestrator.run",
                 side_effect=[clean_status, post_sha],
@@ -3470,10 +3471,10 @@ class TestInvokeAgentSession:
         driver.options.agent = "codex"
         with (
             patch(
-                "hephaestus.automation.ci_fix_orchestrator.resume_codex_session",
+                "hephaestus.automation.ci_fix_orchestrator.resume_agent_session",
                 return_value=AgentRunResult(stdout="ok", stderr="", session_id="s"),
             ) as mock_resume,
-            patch("hephaestus.automation.ci_fix_orchestrator.run_codex_session") as mock_fresh,
+            patch("hephaestus.automation.ci_fix_orchestrator.run_agent_session") as mock_fresh,
         ):
             result = driver._invoke_agent_session(
                 prompt="fix it",
@@ -3492,11 +3493,11 @@ class TestInvokeAgentSession:
         driver.options.agent = "codex"
         with (
             patch(
-                "hephaestus.automation.ci_fix_orchestrator.resume_codex_session",
+                "hephaestus.automation.ci_fix_orchestrator.resume_agent_session",
                 side_effect=subprocess.CalledProcessError(1, ["codex"], stderr="resume-fail"),
             ),
             patch(
-                "hephaestus.automation.ci_fix_orchestrator.run_codex_session",
+                "hephaestus.automation.ci_fix_orchestrator.run_agent_session",
                 return_value=AgentRunResult(stdout="fresh ok", stderr="", session_id="s2"),
             ) as mock_fresh,
         ):
@@ -3517,11 +3518,11 @@ class TestInvokeAgentSession:
         driver.options.agent = "codex"
         with (
             patch(
-                "hephaestus.automation.ci_fix_orchestrator.resume_codex_session",
+                "hephaestus.automation.ci_fix_orchestrator.resume_agent_session",
                 side_effect=subprocess.CalledProcessError(1, ["codex"], stderr="resume-fail"),
             ),
             patch(
-                "hephaestus.automation.ci_fix_orchestrator.run_codex_session",
+                "hephaestus.automation.ci_fix_orchestrator.run_agent_session",
                 side_effect=subprocess.CalledProcessError(2, ["codex"], stderr="fresh-fail"),
             ),
         ):
@@ -3541,7 +3542,7 @@ class TestInvokeAgentSession:
         """No session_id + fresh codex fails → CompletedProcess(returncode!=0), no exception."""
         driver.options.agent = "codex"
         with patch(
-            "hephaestus.automation.ci_fix_orchestrator.run_codex_session",
+            "hephaestus.automation.ci_fix_orchestrator.run_agent_session",
             side_effect=subprocess.CalledProcessError(3, ["codex"], stderr="fail"),
         ):
             result = driver._invoke_agent_session(
@@ -3556,9 +3557,9 @@ class TestInvokeAgentSession:
     def test_codex_no_session_runs_fresh(self, driver: CIDriver, tmp_path: Path) -> None:
         driver.options.agent = "codex"
         with (
-            patch("hephaestus.automation.ci_fix_orchestrator.resume_codex_session") as mock_resume,
+            patch("hephaestus.automation.ci_fix_orchestrator.resume_agent_session") as mock_resume,
             patch(
-                "hephaestus.automation.ci_fix_orchestrator.run_codex_session",
+                "hephaestus.automation.ci_fix_orchestrator.run_agent_session",
                 return_value=AgentRunResult(stdout="done", stderr="", session_id="s3"),
             ) as mock_fresh,
         ):

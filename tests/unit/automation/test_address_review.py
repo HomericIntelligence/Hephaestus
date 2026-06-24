@@ -184,11 +184,11 @@ def test_codex_fix_session_falls_back_to_fresh_on_resume_failure(
 
     with (
         patch(
-            "hephaestus.automation.address_review.resume_codex_session",
+            "hephaestus.automation.address_review.resume_agent_session",
             side_effect=resume_error,
         ),
         patch(
-            "hephaestus.automation.address_review.run_codex_session",
+            "hephaestus.automation.address_review.run_agent_session",
             return_value=fresh_result,
         ) as mock_fresh,
     ):

@@ -20,7 +20,6 @@ from typing import Any
 from hephaestus.agents.runtime import (
     direct_agent_model,
     resume_agent_session,
-    resume_codex_session,
     session_agent_matches,
     uses_direct_agent_runner,
 )
@@ -225,23 +224,6 @@ def run_learn(
             error=message,
         )
         return False
-
-    if agent == "codex":
-
-        def _invoke_codex() -> str:
-            return (
-                resume_codex_session(
-                    session_id,
-                    build_learn_prompt(""),
-                    cwd=worktree_path,
-                    timeout=learn_claude_timeout(),
-                ).stdout
-                or ""
-            )
-
-        return _run_learn_with_retry(
-            _invoke_codex, state_dir=state_dir, issue_number=issue_number, log_file=log_file
-        )
 
     if uses_direct_agent_runner(agent):
 

@@ -26,10 +26,8 @@ from typing import Any
 from hephaestus.agents.runtime import (
     add_agent_argument,
     direct_agent_model,
-    is_codex,
     resolve_agent,
     run_agent_text,
-    run_codex_text,
     uses_direct_agent_runner,
 )
 from hephaestus.cli.utils import (
@@ -379,14 +377,6 @@ async def _dispatch_swarm(
                 return
 
             logger.info("Spawning agent for branch: %s", branch)
-            if is_codex(agent):
-                results[branch] = await asyncio.to_thread(
-                    _run_codex_rebase_agent,
-                    prompt,
-                    branch,
-                    repo_path,
-                )
-                return
             if uses_direct_agent_runner(agent):
                 results[branch] = await asyncio.to_thread(
                     _run_direct_rebase_agent,
@@ -403,23 +393,6 @@ async def _dispatch_swarm(
 
     await asyncio.gather(*(_run_one(b) for b in branches))
     return results
-
-
-def _run_codex_rebase_agent(prompt: str, branch: str, repo_path: Path) -> str:
-    """Run one Codex rebase-fix agent and return its status marker."""
-    try:
-        result = run_codex_text(
-            prompt,
-            cwd=repo_path,
-            timeout=2400,
-            sandbox="workspace-write",
-        )
-        text = result.stdout or ""
-        logger.debug("[%s] agent: %s", branch, text[:300])
-        return _status_from_agent_text(text) or "failed"
-    except Exception as e:
-        logger.error("[%s] agent exception: %s", branch, e)
-        return "failed"
 
 
 def _run_direct_rebase_agent(agent: str, prompt: str, branch: str, repo_path: Path) -> str:

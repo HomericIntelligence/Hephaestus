@@ -16,9 +16,7 @@ from typing import TYPE_CHECKING
 
 from hephaestus.agents.runtime import (
     direct_agent_model,
-    is_codex,
     run_agent_text,
-    run_codex_text,
     uses_direct_agent_runner,
 )
 from hephaestus.github.rate_limit import wait_until
@@ -96,12 +94,14 @@ class PlannerClaudeRunner:
             RuntimeError: If Claude call fails.
 
         """
-        if is_codex(self.options.agent):
-            return self.call_codex(prompt, model=model, max_retries=max_retries, timeout=timeout)
         if uses_direct_agent_runner(self.options.agent):
             return self.call_direct_agent(
                 prompt,
-                model=direct_agent_model(self.options.agent, "HEPH_PLANNER_MODEL"),
+                model=direct_agent_model(
+                    self.options.agent,
+                    "HEPH_PLANNER_MODEL",
+                    codex_default=model,
+                ),
                 max_retries=max_retries,
                 timeout=timeout,
             )
@@ -182,48 +182,6 @@ class PlannerClaudeRunner:
 
         except subprocess.TimeoutExpired as e:
             raise RuntimeError(f"Claude timed out after {timeout}s") from e
-
-    def call_codex(
-        self,
-        prompt: str,
-        *,
-        model: str,
-        max_retries: int = 3,
-        timeout: int = 300,
-        sandbox: str = "workspace-write",
-    ) -> str:
-        """Call Codex CLI with retry logic for rate limits."""
-        try:
-            result = run_codex_text(
-                prompt,
-                cwd=get_repo_root(),
-                timeout=timeout,
-                model=model,
-                sandbox=sandbox,
-            )
-        except subprocess.CalledProcessError as e:
-            stderr = e.stderr or ""
-            stdout = e.stdout or ""
-            reset_epoch = scan_quota_reset(stderr, stdout)
-            if reset_epoch is not None and reset_epoch > 0 and max_retries > 0:
-                logger.warning("Codex usage cap hit; waiting for reset")
-                wait_until(reset_epoch)
-                return self.call_codex(
-                    prompt,
-                    model=model,
-                    max_retries=max_retries - 1,
-                    timeout=timeout,
-                    sandbox=sandbox,
-                )
-            detail = stderr or stdout or str(e)
-            raise RuntimeError(f"Codex failed: {detail}") from e
-        except subprocess.TimeoutExpired as e:
-            raise RuntimeError(f"Codex timed out after {timeout}s") from e
-
-        response = (result.stdout or "").strip()
-        if not response:
-            raise RuntimeError("Codex returned empty response")
-        return response
 
     def call_direct_agent(
         self,

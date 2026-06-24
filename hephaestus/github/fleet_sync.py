@@ -43,10 +43,8 @@ from typing import Any
 from hephaestus.agents.runtime import (
     add_agent_argument,
     direct_agent_model,
-    is_codex,
     resolve_agent,
     run_agent_text,
-    run_codex_text,
     uses_direct_agent_runner,
 )
 from hephaestus.cli.utils import (
@@ -697,16 +695,6 @@ def rebase_and_resign(
 
 def _run_conflict_agent(agent: str, prompt: str, work: Path, pr_number: int) -> bool:
     """Run the selected conflict-resolution agent."""
-    if is_codex(agent):
-        result = run_codex_text(
-            prompt,
-            cwd=work,
-            timeout=2400,
-            sandbox="workspace-write",
-        )
-        if result.stdout:
-            logger.debug("  agent: %s", result.stdout[:200])
-        return True
     if uses_direct_agent_runner(agent):
         result = run_agent_text(
             agent=agent,

@@ -11,6 +11,8 @@ from hephaestus.automation.models import (
     IssueState,
     PlannerOptions,
     PlanResult,
+    ReviewPhase,
+    ReviewState,
     WorkerResult,
 )
 
@@ -275,6 +277,25 @@ class TestWorkerResult:
         assert result.success is False
         assert result.error == "Implementation failed"
         assert result.pr_number is None
+
+
+class TestReviewState:
+    """Tests for ReviewState model."""
+
+    def test_session_agent_serialization(self) -> None:
+        """Review state files preserve provider metadata with session ids."""
+        state = ReviewState(
+            issue_number=123,
+            pr_number=456,
+            phase=ReviewPhase.FIXING,
+            session_id="pi-session-123",
+            session_agent="pi",
+        )
+
+        restored = ReviewState.model_validate_json(state.model_dump_json())
+
+        assert restored.session_id == "pi-session-123"
+        assert restored.session_agent == "pi"
 
 
 class TestPlannerOptions:

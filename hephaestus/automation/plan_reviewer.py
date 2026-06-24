@@ -22,10 +22,8 @@ from typing import Any
 from hephaestus.agents.runtime import (
     add_agent_argument,
     direct_agent_model,
-    is_codex,
     resolve_agent,
     run_agent_text,
-    run_codex_text,
     uses_direct_agent_runner,
 )
 from hephaestus.automation._review_utils import add_max_workers_arg
@@ -440,8 +438,6 @@ class PlanReviewer:
             plan_text=plan_text,
         )
 
-        if is_codex(self.options.agent):
-            return self._run_codex_analysis(issue_number, prompt, max_retries=max_retries)
         if uses_direct_agent_runner(self.options.agent):
             return self._run_direct_agent_analysis(issue_number, prompt, max_retries=max_retries)
 
@@ -499,56 +495,6 @@ class PlanReviewer:
             return None
         except Exception as e:
             logger.error("Unexpected error calling Claude for issue #%s: %s", issue_number, e)
-            return None
-
-    def _run_codex_analysis(
-        self,
-        issue_number: int,
-        prompt: str,
-        max_retries: int = 3,
-    ) -> str | None:
-        """Run Codex to produce a plan review."""
-        try:
-            result = run_codex_text(
-                prompt,
-                cwd=Path.cwd(),
-                timeout=plan_reviewer_claude_timeout(),
-                sandbox="read-only",
-            )
-            output = (result.stdout or "").strip()
-            if not output:
-                logger.error("Codex returned empty output for issue #%s", issue_number)
-                return None
-            return output
-        except subprocess.CalledProcessError as e:
-            stderr = e.stderr or ""
-            stdout = e.stdout or ""
-            reset_epoch = scan_quota_reset(stderr, stdout)
-            if reset_epoch is not None and max_retries > 0:
-                if reset_epoch > 0:
-                    wait_until(reset_epoch)
-                else:
-                    time.sleep(5)
-                return self._run_codex_analysis(
-                    issue_number,
-                    prompt,
-                    max_retries=max_retries - 1,
-                )
-            logger.error(
-                "Codex returned exit code %s for issue #%s: %s",
-                e.returncode,
-                issue_number,
-                (stderr or stdout)[:200],
-            )
-            return None
-        except subprocess.TimeoutExpired:
-            logger.error("Codex timed out reviewing plan for issue #%s", issue_number)
-            return None
-        except FileNotFoundError:
-            logger.error("'codex' CLI not found in PATH; cannot run plan review")
-            return None
-        except Exception as e:
-            logger.error("Unexpected error calling Codex for issue #%s: %s", issue_number, e)
             return None
 
     def _run_direct_agent_analysis(

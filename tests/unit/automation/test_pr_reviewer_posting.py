@@ -472,9 +472,9 @@ class TestRunPrReviewAnalysis:
                 "hephaestus.automation.pr_reviewer.get_pr_review_analysis_prompt",
                 side_effect=_fake_prompt,
             ),
-            patch("hephaestus.automation.pr_reviewer.run_codex_text") as mock_codex,
+            patch("hephaestus.automation.pr_reviewer.run_agent_text") as mock_agent,
         ):
-            mock_codex.return_value = MagicMock(
+            mock_agent.return_value = MagicMock(
                 stdout='Verdict: GO\n```json\n{"comments": [], "summary": "ok"}\n```'
             )
             run_pr_review_analysis(
@@ -526,7 +526,7 @@ class TestRunPrReviewAnalysis:
         )
 
         with patch(
-            "hephaestus.automation.pr_reviewer.run_codex_text",
+            "hephaestus.automation.pr_reviewer.run_agent_text",
             return_value=MagicMock(stdout=stdout),
         ):
             out = run_pr_review_analysis(

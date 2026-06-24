@@ -283,7 +283,7 @@ class TestRunFollowUpIssues:
         worktree_path = tmp_path / "worktree"
         worktree_path.mkdir()
 
-        with patch("hephaestus.automation.follow_up.resume_codex_session") as mock_resume:
+        with patch("hephaestus.automation.follow_up.resume_agent_session") as mock_resume:
             response = run_follow_up_issues(
                 "sess",
                 worktree_path,

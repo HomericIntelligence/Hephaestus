@@ -465,8 +465,8 @@ def test_resume_pi_session_passes_resume_id(tmp_path: Path) -> None:
     assert result.session_id == "pi-session-789"
 
 
-def test_direct_agent_model_uses_operator_pi_alias() -> None:
-    """Pi uses its own local alias env var instead of phase-specific model names."""
+def test_direct_agent_model_uses_operator_pi_alias_and_codex_default() -> None:
+    """Direct-runner model defaults are provider-aware and explicit."""
     with patch.dict(
         "os.environ",
         {
@@ -478,9 +478,33 @@ def test_direct_agent_model_uses_operator_pi_alias() -> None:
         assert agent_runtime.direct_agent_model("pi", "HEPH_IMPLEMENTER_MODEL") == (
             "operator-local-alias"
         )
+        assert (
+            agent_runtime.direct_agent_model(
+                "codex",
+                "HEPH_IMPLEMENTER_MODEL",
+                codex_default="fallback-model",
+            )
+            == "phase-model"
+        )
+        assert (
+            agent_runtime.direct_agent_model(
+                "codex",
+                "HEPH_UNSET_MODEL",
+                codex_default="fallback-model",
+            )
+            == "fallback-model"
+        )
+        assert agent_runtime.direct_agent_model("codex", "HEPH_UNSET_MODEL") == ""
         assert agent_runtime.direct_agent_model("claude", "HEPH_IMPLEMENTER_MODEL") == (
             "phase-model"
         )
+
+
+def test_agent_json_stdout_wraps_direct_agent_text() -> None:
+    """Direct-agent text output should use a provider-neutral JSON wrapper."""
+    assert agent_runtime.agent_json_stdout("learned", "pi-session") == (
+        '{"result": "learned", "session_id": "pi-session", "is_error": false}'
+    )
 
 
 def test_run_claude_text_builds_stage_command(tmp_path: Path) -> None:

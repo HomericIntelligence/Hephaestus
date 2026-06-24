@@ -10,9 +10,9 @@ from pathlib import Path
 from hephaestus.agents.runtime import (
     add_agent_argument,
     resolve_agent,
+    run_agent_session,
     run_claude_text,
-    run_codex_session,
-    run_pi_session,
+    uses_direct_agent_runner,
 )
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 
@@ -100,60 +100,21 @@ def run_claude(
     return result.returncode
 
 
-def run_codex(
+def run_direct_agent(
     args: argparse.Namespace,
     prompt: str,
     repo_root: Path,
     output_file: Path,
     log_file: Path | None,
 ) -> int:
-    """Run one stage with Codex."""
+    """Run one stage with a provider-neutral direct agent."""
     if args.debug:
-        print("Running: codex exec", file=sys.stderr)
+        print(f"Running: {args.agent} direct session", file=sys.stderr)
 
     try:
-        result = run_codex_session(
-            prompt,
-            cwd=repo_root,
-            timeout=args.timeout,
-            model=args.model,
-            sandbox=args.sandbox,
-            approval=args.approval,
-        )
-    except subprocess.TimeoutExpired as exc:
-        write_log(log_file, str(exc))
-        return 124
-    except subprocess.CalledProcessError as exc:
-        log_text = (
-            f"EXIT CODE: {exc.returncode}\n\n"
-            f"STDOUT:\n{exc.stdout or ''}\n\n"
-            f"STDERR:\n{exc.stderr or ''}"
-        )
-        write_log(log_file, log_text)
-        return exc.returncode
-
-    output_file.write_text(result.stdout, encoding="utf-8")
-    log = result.stdout
-    if result.session_id:
-        log = f"SESSION_ID: {result.session_id}\n\n{log}"
-    write_log(log_file, log)
-    return 0
-
-
-def run_pi(
-    args: argparse.Namespace,
-    prompt: str,
-    repo_root: Path,
-    output_file: Path,
-    log_file: Path | None,
-) -> int:
-    """Run one stage with Pi."""
-    if args.debug:
-        print("Running: pi --mode json", file=sys.stderr)
-
-    try:
-        result = run_pi_session(
-            prompt,
+        result = run_agent_session(
+            agent=args.agent,
+            prompt=prompt,
             cwd=repo_root,
             timeout=args.timeout,
             model=args.model,
@@ -241,10 +202,8 @@ def run_agent(args: argparse.Namespace) -> int:
 
     if agent == "claude":
         return run_claude(args, prompt, repo_root, output_file, log_file)
-    if agent == "codex":
-        return run_codex(args, prompt, repo_root, output_file, log_file)
-    if agent == "pi":
-        return run_pi(args, prompt, repo_root, output_file, log_file)
+    if uses_direct_agent_runner(agent):
+        return run_direct_agent(args, prompt, repo_root, output_file, log_file)
     raise ValueError(f"Unsupported agent: {agent}")
 
 

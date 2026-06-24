@@ -138,7 +138,7 @@ class TestRunLearn:
         worktree_path = tmp_path / "worktree"
         worktree_path.mkdir()
 
-        with patch("hephaestus.automation.learn.resume_codex_session") as mock_resume:
+        with patch("hephaestus.automation.learn.resume_agent_session") as mock_resume:
             result = run_learn(
                 "session-abc",
                 worktree_path,
@@ -163,7 +163,7 @@ class TestRunLearn:
         mock_result.stdout = "learned"
 
         with patch(
-            "hephaestus.automation.learn.resume_codex_session", return_value=mock_result
+            "hephaestus.automation.learn.resume_agent_session", return_value=mock_result
         ) as mock_resume:
             result = run_learn(
                 "session-abc",
@@ -175,7 +175,8 @@ class TestRunLearn:
             )
 
         assert result is True
-        prompt = mock_resume.call_args.args[1]
+        assert mock_resume.call_args.kwargs["agent"] == "codex"
+        prompt = mock_resume.call_args.kwargs["prompt"]
         assert prompt.startswith("/learn")
         assert "/skills-registry-commands:learn" not in prompt
         assert (tmp_path / "learn-42.log").read_text() == "learned"
@@ -395,7 +396,7 @@ class TestRunLearnRateLimitRetry:
 
         with (
             patch(
-                "hephaestus.automation.learn.resume_codex_session",
+                "hephaestus.automation.learn.resume_agent_session",
                 side_effect=[first, second],
             ) as mock_resume,
             patch("hephaestus.automation.learn.wait_until") as mock_wait,

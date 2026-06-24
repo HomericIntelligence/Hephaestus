@@ -198,11 +198,31 @@ def uses_direct_agent_runner(agent: str) -> bool:
     return AGENT_CAPABILITIES[agent].direct_runner
 
 
-def direct_agent_model(agent: str, phase_env_var: str) -> str:
+def direct_agent_model(agent: str, phase_env_var: str, *, codex_default: str = "") -> str:
     """Return a model override appropriate for a direct-runner provider."""
     if is_pi(agent):
         return os.environ.get(PI_MODEL_ENV, "")
-    return os.environ.get(phase_env_var, "")
+    return os.environ.get(phase_env_var, codex_default)
+
+
+def agent_cli_name(agent: str) -> str:
+    """Return the executable name for a supported agent backend."""
+    if agent not in AGENT_CAPABILITIES:
+        raise ValueError(f"Unsupported agent: {agent}")
+    return agent
+
+
+def agent_display_name(agent: str) -> str:
+    """Return a short human-facing name for a supported agent backend."""
+    names = {
+        "claude": "Claude Code",
+        "codex": "Codex",
+        "pi": "Pi",
+    }
+    try:
+        return names[agent]
+    except KeyError as e:
+        raise ValueError(f"Unsupported agent: {agent}") from e
 
 
 def session_agent_matches(session_agent: str | None, selected_agent: str) -> bool:
@@ -851,8 +871,8 @@ def codex_exec_resume_args(
     return cmd
 
 
-def codex_json_stdout(text: str, session_id: str | None = None) -> str:
-    """Wrap Codex text output in the JSON shape expected by Claude callers."""
+def agent_json_stdout(text: str, session_id: str | None = None) -> str:
+    """Wrap direct-agent text output in the JSON shape expected by Claude callers."""
     return json.dumps({"result": text, "session_id": session_id, "is_error": False})
 
 
