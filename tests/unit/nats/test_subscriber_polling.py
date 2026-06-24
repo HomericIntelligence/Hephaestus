@@ -218,3 +218,37 @@ def test_both_timeout_aliases_are_caught(exc_type: type[BaseException]) -> None:
     # asyncio.run; reaching the drain assertion proves it was swallowed.
     _run_loop(thread, nats_module)
     nc.drain.assert_awaited_once()
+
+
+def test_ack_is_awaited_even_when_handler_raises() -> None:
+    """A raising handler must NOT block the ack — at-most-once by design (#1551).
+
+    The message is acked unconditionally so a poison message cannot wedge the
+    poll loop on infinite JetStream redelivery. The failure is surfaced via
+    ``last_error`` and the success counter (``_record_message`` /
+    ``last_message_at``) is left untouched.
+    """
+    boom = RuntimeError("handler exploded")
+
+    def handler(_event: NATSEvent) -> None:
+        raise boom
+
+    thread = NATSSubscriberThread(
+        config=NATSConfig(enabled=True, subjects=["hi.tasks.>"]),
+        handler=handler,
+    )
+
+    msg = _make_msg({"hello": "world"})
+
+    async def next_msg(timeout: float = 0.0) -> MagicMock:
+        # Yield exactly one message, then request shutdown so the loop exits.
+        thread._stop_event.set()
+        return msg
+
+    nats_module, nc = _install_fake_nats(AsyncMock(side_effect=next_msg))
+    _run_loop(thread, nats_module)
+
+    msg.ack.assert_awaited_once()  # acked despite the raise
+    assert thread.last_error is boom  # failure surfaced, not swallowed
+    assert thread.last_message_at is None  # success path NOT taken
+    nc.drain.assert_awaited_once()  # clean drain on loop exit
