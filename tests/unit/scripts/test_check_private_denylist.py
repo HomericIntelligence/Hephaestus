@@ -85,6 +85,31 @@ def test_main_redacts_private_tokens_from_output(
     assert "intentionally not printed" in output
 
 
+def test_main_redacts_private_tokens_from_staged_diagnostic_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Staged diagnostics should not leak private values embedded in filenames."""
+    (tmp_path / ".heph-private-denylist").write_text(
+        "PRIVATE_ENDPOINT_TOKEN\n",
+        encoding="utf-8",
+    )
+    rel_path = Path("docs") / "PRIVATE_ENDPOINT_TOKEN-example.md"
+    monkeypatch.setattr(_mod, "get_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(_mod, "staged_files", lambda _repo_root, _pathspecs=None: [rel_path])
+    monkeypatch.setattr(
+        _mod,
+        "staged_text",
+        lambda _repo_root, _rel_path: "This mentions PRIVATE_ENDPOINT_TOKEN.\n",
+    )
+
+    assert _mod.main(["--staged"]) == 1
+
+    output = capsys.readouterr().out
+    assert f"staged docs/{_mod.PRIVATE_DENYLIST_REDACTION}-example.md:1" in output
+    assert "PRIVATE_ENDPOINT_TOKEN" not in output
+    assert "intentionally not printed" in output
+
+
 def test_staged_scan_reads_index_content_not_worktree(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

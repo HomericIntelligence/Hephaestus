@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Literal, NamedTuple
 
 DENYLIST_FILENAME = ".heph-private-denylist"
+PRIVATE_DENYLIST_REDACTION = "<redacted-private-denylist-value>"
 ScanSource = Literal["working-tree", "tracked", "staged"]
 
 
@@ -111,6 +112,14 @@ def _scan_text(source: ScanSource, rel_path: Path, text: str, tokens: list[str])
     return findings
 
 
+def _redact_private_tokens(text: str, tokens: list[str]) -> str:
+    """Replace local denylist values before emitting diagnostics."""
+    redacted = text
+    for token in sorted((token for token in tokens if token), key=len, reverse=True):
+        redacted = redacted.replace(token, PRIVATE_DENYLIST_REDACTION)
+    return redacted
+
+
 def scan_paths(
     repo_root: Path,
     paths: list[Path],
@@ -182,7 +191,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print("ERROR: local private denylist match(es) found. Remove the value before committing:")
     for finding in findings:
-        print(f"  {finding.source} {finding.path}:{finding.line_number}")
+        redacted_path = _redact_private_tokens(str(finding.path), tokens)
+        print(f"  {finding.source} {redacted_path}:{finding.line_number}")
     print("\nMatched values and line contents are intentionally not printed.")
     print(f"\nDenylist source: {DENYLIST_FILENAME} (local, untracked)")
     return 1
