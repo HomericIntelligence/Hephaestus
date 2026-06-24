@@ -240,6 +240,13 @@ repos:
         language: system
         pass_filenames: false
         files: ^SECURITY\.md$
+      - id: check-pip-audit-ledger-reminder
+        name: Check pip-audit ledger suppressions have re-review triggers
+        description: Reject '--ignore-vuln' entries lacking a 'Re-review:' trigger
+        entry: python3 scripts/check_pip_audit_ledger_reminder.py
+        language: system
+        pass_filenames: false
+        files: ^pixi\.toml$
       - id: check-build-dir-untracked
         name: build/ must stay untracked (gitignored automation scratch)
         description: >

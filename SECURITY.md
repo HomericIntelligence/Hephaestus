@@ -27,7 +27,42 @@ We will coordinate disclosure timing with you once a fix is available.
 
 ## Security Considerations
 
+### Threat Model
+
+ProjectHephaestus is a **library and CLI utility repository**, not a
+network-facing service. Its security posture reflects that scope:
+
+- **Assets**: source-controlled utility code, the optional `automation`
+  product layer, and developer credentials passed via environment variables.
+- **Trust boundary**: inputs originate from the local developer, CI runners,
+  and the GitHub API. There is no public, unauthenticated request surface.
+- **In scope**: unsafe deserialization, command/subprocess injection,
+  secret leakage, and supply-chain risk in dependencies.
+- **Out of scope** (delegated to the *consuming* service): network rate
+  limiting, request authentication/authorization, and DoS protection — this
+  repo ships no long-running listener that could be flooded.
+
+### Hardening Controls
+
 - **No hardcoded secrets**: Credentials are always read from environment variables
 - **Pickle safety**: `load_data` and `save_data` block pickle by default (`allow_unsafe_deserialization=False`)
 - **Subprocess safety**: Avoid passing untrusted input to `run_subprocess`; always use list-form commands (never `shell=True`)
 - **HTTPS downloads**: All dataset downloads use HTTPS
+
+### Abuse & Rate Limiting
+
+Because this repository exposes no network service, there is no in-process
+request rate limiter. The one external-call surface is the GitHub API
+(`hephaestus.github`, `hephaestus.automation`); callers there rely on the
+GitHub client's built-in retry/backoff and on GitHub's own per-token rate
+limits. Downstream services that embed these utilities are responsible for
+applying their own rate limiting and abuse controls at their request edge.
+
+### Dependency Suppression Ledger
+
+Known-but-accepted dependency vulnerabilities are tracked in the pip-audit
+suppression ledger (`pixi.toml`, `[feature.lint.tasks]`). Every suppression
+must carry a re-review trigger; this is enforced at commit time by the
+`check-pip-audit-ledger-reminder` pre-commit hook
+(`scripts/check_pip_audit_ledger_reminder.py`). The weekly `Security`
+workflow (`.github/workflows/security.yml`) re-scans for new vulnerabilities.

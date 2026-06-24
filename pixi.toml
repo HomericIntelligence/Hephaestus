@@ -103,8 +103,12 @@ bandit = ">=1.9.4,<2"
 
 [feature.lint.tasks]
 # pip-audit suppression ledger. Each --ignore-vuln below MUST carry a reason +
-# a re-review trigger so a suppression is never silently permanent. Re-review
-# the whole list every dependency bump (or quarterly, whichever comes first).
+# a "Re-review:" trigger so a suppression is never silently permanent. This is
+# enforced at commit time by scripts/check_pip_audit_ledger_reminder.py (pre-commit
+# hook check-pip-audit-ledger-reminder). The weekly Security workflow
+# (.github/workflows/security.yml, cron "0 8 * * 1") re-scans for new
+# vulnerabilities; re-review this list every dependency bump or quarterly,
+# whichever comes first.
 #
 # PYSEC-2025-183 (CVE-2025-45768): affects every pyjwt release (0.1.1-2.12.1) with
 #   no fixed version, and is disputed by the pyjwt maintainers — it concerns the key
