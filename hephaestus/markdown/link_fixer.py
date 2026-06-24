@@ -53,10 +53,16 @@ class LinkFixer:
         """
         self.options = options or LinkFixerOptions()
         self.exclude_patterns = self.options.exclude_patterns or DEFAULT_EXCLUDE_DIRS
-        # Default pattern matches <home-dir>/<user>/<repo-name>
-        # (captures up to but not including the final slash before the file path)
-        home_dir = re.escape(str(Path.home().parent))
-        self.system_path_pattern = self.options.system_path_pattern or rf"{home_dir}/[^/]+/[^/]+"
+        # Default pattern matches <home-dir>/<user>/<repo-name>. Include /home
+        # explicitly because docs/tests use portable fixture paths even when the
+        # current machine's home parent is elsewhere, such as /mnt/weka/home.
+        home_roots = {str(Path.home().parent), "/home"}
+        root_pattern = "|".join(
+            re.escape(root) for root in sorted(home_roots, key=len, reverse=True)
+        )
+        self.system_path_pattern = (
+            self.options.system_path_pattern or rf"(?:{root_pattern})/[^/]+/[^/]+"
+        )
 
     def fix_system_path_links(self, content: str) -> tuple[str, int]:
         """Fix links with full system paths like /home/user/worktree/...

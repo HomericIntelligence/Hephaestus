@@ -12,6 +12,13 @@ import pytest
 from hephaestus.agents import runtime as agent_runtime
 
 
+def _write_pi_models_config(home: Path) -> None:
+    """Create a minimal Pi model config under a fake home directory."""
+    config_path = home / ".pi" / "agent" / "models.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('{"models": {"local-test": {}}}', encoding="utf-8")
+
+
 def test_parse_codex_json_events_extracts_session_id_and_messages() -> None:
     """Codex JSONL exposes the resumable UUID in the session_meta event."""
     text = "\n".join(
@@ -525,30 +532,76 @@ def test_resolve_agent_uses_codex_when_only_codex_is_authenticated() -> None:
             assert agent_runtime.resolve_agent(None) == "codex"
 
 
-def test_resolve_agent_uses_pi_when_claude_and_codex_absent() -> None:
-    """Pi is the third auto-detected backend after Claude and Codex."""
-    with patch("hephaestus.agents.runtime.shutil.which") as mock_which:
-        mock_which.side_effect = lambda name: "/bin/pi" if name == "pi" else None
-
-        with patch(
+def test_is_agent_authenticated_pi_rejects_missing_model_config(tmp_path: Path) -> None:
+    """Pi is not ready for automation until a local model alias is configured."""
+    with (
+        patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/pi"),
+        patch("hephaestus.agents.runtime.Path.home", return_value=tmp_path),
+        patch(
             "subprocess.run",
             return_value=subprocess.CompletedProcess(
                 ["pi", "--version"], 0, stdout="pi 1.0.0", stderr=""
+            ),
+        ),
+    ):
+        assert not agent_runtime.is_agent_authenticated("pi")
+
+
+def test_resolve_agent_uses_pi_when_claude_and_codex_absent(tmp_path: Path) -> None:
+    """Pi is the third auto-detected backend after Claude and Codex."""
+    _write_pi_models_config(tmp_path)
+    with patch("hephaestus.agents.runtime.shutil.which") as mock_which:
+        mock_which.side_effect = lambda name: "/bin/pi" if name == "pi" else None
+
+        with (
+            patch("hephaestus.agents.runtime.Path.home", return_value=tmp_path),
+            patch(
+                "subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    ["pi", "--version"], 0, stdout="pi 1.0.0", stderr=""
+                ),
             ),
         ):
             assert agent_runtime.resolve_agent(None) == "pi"
 
 
-def test_resolve_agent_explicit_pi() -> None:
+def test_resolve_agent_explicit_pi(tmp_path: Path) -> None:
     """An explicit Pi backend should be accepted when the CLI preflight succeeds."""
-    with patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/pi"):
-        with patch(
+    _write_pi_models_config(tmp_path)
+    with (
+        patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/pi"),
+        patch("hephaestus.agents.runtime.Path.home", return_value=tmp_path),
+        patch(
             "subprocess.run",
             return_value=subprocess.CompletedProcess(
                 ["pi", "--version"], 0, stdout="pi 1.0.0", stderr=""
             ),
-        ):
-            assert agent_runtime.resolve_agent("pi") == "pi"
+        ),
+    ):
+        assert agent_runtime.resolve_agent("pi") == "pi"
+
+
+def test_resolve_agent_explicit_rejects_uninstalled_pi() -> None:
+    """An explicit Pi selection should fail clearly when the CLI is missing."""
+    with patch("hephaestus.agents.runtime.shutil.which", return_value=None):
+        with pytest.raises(RuntimeError, match="not installed on PATH"):
+            agent_runtime.resolve_agent("pi")
+
+
+def test_resolve_agent_explicit_rejects_unconfigured_pi(tmp_path: Path) -> None:
+    """An installed Pi CLI without model configuration should fail preflight."""
+    with (
+        patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/pi"),
+        patch("hephaestus.agents.runtime.Path.home", return_value=tmp_path),
+        patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                ["pi", "--version"], 0, stdout="pi 1.0.0", stderr=""
+            ),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="not authenticated"):
+            agent_runtime.resolve_agent("pi")
 
 
 def test_resolve_agent_explicit_codex_overrides_claude() -> None:

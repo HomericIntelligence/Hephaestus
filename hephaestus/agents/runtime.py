@@ -21,6 +21,7 @@ AGENT_AUTH_STATUS_TIMEOUT = 10
 CODEX_FINAL_MESSAGE_GRACE_ENV = "HEPH_CODEX_FINAL_MESSAGE_GRACE"
 CODEX_FINAL_MESSAGE_GRACE_SECONDS = 5.0
 PI_MODEL_ENV = "HEPH_PI_MODEL"
+PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
 PI_READ_ONLY_TOOLS = "read,grep,find,ls"
 AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
     "claude": (("claude", "auth", "status"),),
@@ -100,7 +101,27 @@ def is_agent_authenticated(agent: AgentName) -> bool:
         except (OSError, subprocess.TimeoutExpired):
             continue
         if result.returncode == 0:
+            if agent == "pi":
+                return _pi_models_configured()
             return True
+    return False
+
+
+def _pi_models_configured() -> bool:
+    """Return True when Pi has at least one local model alias configured."""
+    config_path = Path.home() / PI_MODEL_CONFIG_RELATIVE_PATH
+    try:
+        payload: Any = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    if isinstance(payload, dict):
+        models = payload.get("models")
+        if isinstance(models, (dict, list)):
+            return bool(models)
+        return bool(payload)
+    if isinstance(payload, list):
+        return bool(payload)
     return False
 
 
