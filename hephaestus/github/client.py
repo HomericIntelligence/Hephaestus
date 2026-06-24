@@ -171,6 +171,12 @@ _NON_TRANSIENT_PATTERNS = [
         # app/account (Copilot, CodeQL) is forbidden and never succeeds on
         # retry. Fail fast so the caller posts its own editable comment (#1327).
         r"not editable",
+        # "no checks reported on the '<branch>' branch": the EXPECTED empty state
+        # right after a push, before any check run registers. ``gh pr checks``
+        # exits non-zero for it, but it is not a failure and never "succeeds" on
+        # retry — fail fast so ``gh_pr_checks`` converts it to [] without burning
+        # exponential backoff or logging spurious ERRORs (#1587).
+        r"no checks reported",
     )
 ]
 _NON_TRANSIENT_PATTERNS.append(_TOKEN_SCOPE_PATTERN)
