@@ -40,6 +40,14 @@ logger = logging.getLogger(__name__)
 
 _label_cache: set[str] | None = None
 
+# #1587: in-process memo for issue states so repeated prefetch_issue_states
+# calls within ONE process (e.g. the parent loop's in-loop + post-loop
+# closed-filter, and any phase that prefetches more than once) reuse the result
+# of one gh GraphQL round-trip instead of re-querying. Process-scoped: it dies
+# with the subprocess, so cross-phase staleness is bounded by the subprocess
+# lifetime, and ``refresh=True`` forces a fresh read when a caller needs it.
+_issue_state_cache: dict[int, IssueState] = {}
+
 # Module-level aliases so existing test patches keep resolving.
 # unittest.mock.patch walks the dotted path's module attributes at patch
 # time; these names exist as attributes of this module after the
@@ -819,38 +827,57 @@ def _fetch_batch_states(batch: list[int], owner: str, repo: str) -> dict[int, Is
     return states
 
 
-def prefetch_issue_states(issue_numbers: list[int]) -> dict[int, IssueState]:
-    """Batch fetch issue states using GraphQL.
+def prefetch_issue_states(
+    issue_numbers: list[int], *, refresh: bool = False
+) -> dict[int, IssueState]:
+    """Batch fetch issue states using GraphQL, memoized in-process (#1587).
+
+    Results are cached per process in :data:`_issue_state_cache`, so repeated
+    calls within one process only query the numbers not already seen. The gh
+    GraphQL round-trip is the most expensive of the loop's repeated lookups and
+    previously had no caching at all (it ran once per phase-subprocess AND twice
+    in the parent's closed-filter).
 
     Args:
-        issue_numbers: List of issue numbers
+        issue_numbers: List of issue numbers.
+        refresh: When True, ignore the cache and re-query every number (and
+            update the cache with fresh values). Use when a state may have
+            changed mid-process and a stale read is unacceptable.
 
     Returns:
-        Dictionary mapping issue number to state
+        Dictionary mapping issue number to state (only the requested numbers).
 
     """
     if not issue_numbers:
         return {}
 
+    if not refresh:
+        missing = [n for n in issue_numbers if n not in _issue_state_cache]
+    else:
+        missing = list(issue_numbers)
+    if not missing:
+        return {n: _issue_state_cache[n] for n in issue_numbers if n in _issue_state_cache}
+
     try:
         owner, repo = get_repo_info()
     except RuntimeError as e:
         logger.warning("Failed to get repo info: %s", e)
-        return {}
+        return {n: _issue_state_cache[n] for n in issue_numbers if n in _issue_state_cache}
 
     # Sanitize owner and repo to prevent GraphQL injection
     # Owner and repo should be alphanumeric with hyphens/underscores
     if not re.match(r"^[a-zA-Z0-9_-]+$", owner) or not re.match(r"^[a-zA-Z0-9_-]+$", repo):
         logger.error("Invalid owner/repo format: %s/%s", owner, repo)
-        return {}
+        return {n: _issue_state_cache[n] for n in issue_numbers if n in _issue_state_cache}
 
     batch_size = 100
-    all_states: dict[int, IssueState] = {}
-    for i in range(0, len(issue_numbers), batch_size):
-        batch = issue_numbers[i : i + batch_size]
-        all_states.update(_fetch_batch_states(batch, owner, repo))
+    for i in range(0, len(missing), batch_size):
+        batch = missing[i : i + batch_size]
+        _issue_state_cache.update(_fetch_batch_states(batch, owner, repo))
 
-    return all_states
+    # Return only the requested numbers (those that resolved); a number that
+    # failed to fetch is simply absent, matching the prior contract.
+    return {n: _issue_state_cache[n] for n in issue_numbers if n in _issue_state_cache}
 
 
 def is_issue_closed(issue_number: int, cached_states: dict[int, IssueState] | None = None) -> bool:
@@ -2012,7 +2039,15 @@ def gh_pr_checks(
         return []
 
     try:
-        result = _gh_call(["pr", "checks", str(pr_number), "--json", "name,state,bucket,workflow"])
+        # #1587: "no checks reported" is the expected empty state right after a
+        # push. ``log_on_error=False`` suppresses the spurious ERROR log for that
+        # case; the "no checks reported" non-transient pattern (github.client)
+        # makes _gh_call fail FAST (no exponential-backoff retry) so we reach the
+        # except below immediately. A genuine failure still raises after retries.
+        result = _gh_call(
+            ["pr", "checks", str(pr_number), "--json", "name,state,bucket,workflow"],
+            log_on_error=False,
+        )
     except subprocess.CalledProcessError as exc:
         if _is_gh_pr_checks_no_checks_error(exc):
             logger.info(

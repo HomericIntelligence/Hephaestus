@@ -190,6 +190,19 @@ class TestIsIssueClosed:
 class TestPrefetchIssueStates:
     """Tests for prefetch_issue_states function."""
 
+    @pytest.fixture(autouse=True)
+    def _clear_state_cache(self) -> Any:
+        """Reset the #1587 in-process issue-state memo between tests.
+
+        The memo persists module-level, so without this a state cached by one
+        test would satisfy another test's request and skip its mocked gh call.
+        """
+        from hephaestus.automation import github_api
+
+        github_api._issue_state_cache.clear()
+        yield
+        github_api._issue_state_cache.clear()
+
     def test_empty_list(self) -> None:
         """Test with empty issue list."""
         states = prefetch_issue_states([])
@@ -218,6 +231,64 @@ class TestPrefetchIssueStates:
 
         assert states[123] == IssueState.OPEN
         assert states[456] == IssueState.CLOSED
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info")
+    def test_memoizes_in_process(self, mock_repo_info: Any, mock_gh_call: Any) -> None:
+        """#1587: a second call for cached numbers does not re-query gh."""
+        mock_repo_info.return_value = ("owner", "repo")
+        mock_result = Mock()
+        mock_result.stdout = json.dumps(
+            {"data": {"repository": {"issue0": {"number": 123, "state": "OPEN"}}}}
+        )
+        mock_gh_call.return_value = mock_result
+
+        first = prefetch_issue_states([123])
+        second = prefetch_issue_states([123])
+
+        assert first == second == {123: IssueState.OPEN}
+        # One network round-trip total despite two calls.
+        assert mock_gh_call.call_count == 1
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info")
+    def test_refresh_forces_requery(self, mock_repo_info: Any, mock_gh_call: Any) -> None:
+        """#1587: refresh=True bypasses the memo and re-queries."""
+        mock_repo_info.return_value = ("owner", "repo")
+        mock_result = Mock()
+        mock_result.stdout = json.dumps(
+            {"data": {"repository": {"issue0": {"number": 123, "state": "OPEN"}}}}
+        )
+        mock_gh_call.return_value = mock_result
+
+        prefetch_issue_states([123])
+        prefetch_issue_states([123], refresh=True)
+
+        assert mock_gh_call.call_count == 2
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info")
+    def test_only_missing_numbers_queried(self, mock_repo_info: Any, mock_gh_call: Any) -> None:
+        """#1587: a follow-up call only queries numbers not already cached."""
+        mock_repo_info.return_value = ("owner", "repo")
+        mock_gh_call.side_effect = [
+            Mock(
+                stdout=json.dumps(
+                    {"data": {"repository": {"issue0": {"number": 1, "state": "OPEN"}}}}
+                )
+            ),
+            Mock(
+                stdout=json.dumps(
+                    {"data": {"repository": {"issue0": {"number": 2, "state": "CLOSED"}}}}
+                )
+            ),
+        ]
+
+        prefetch_issue_states([1])
+        states = prefetch_issue_states([1, 2])
+
+        assert states == {1: IssueState.OPEN, 2: IssueState.CLOSED}
+        assert mock_gh_call.call_count == 2  # second call fetched only #2
 
     @patch("hephaestus.automation.github_api.get_repo_info")
     def test_repo_info_failure(self, mock_repo_info: Any) -> None:
@@ -1832,6 +1903,22 @@ class TestGhPrChecks:
         )
 
         assert gh_pr_checks(289) == []
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_no_checks_path_suppresses_error_logging(self, mock_gh_call: Any) -> None:
+        """#1587: gh_pr_checks calls _gh_call with log_on_error=False.
+
+        Combined with the 'no checks reported' non-transient pattern in
+        github.client, this makes the expected post-push empty state fail FAST
+        with no ERROR log and no exponential-backoff retry.
+        """
+        mock_result = Mock()
+        mock_result.stdout = "[]"
+        mock_gh_call.return_value = mock_result
+
+        gh_pr_checks(289)
+
+        assert mock_gh_call.call_args.kwargs.get("log_on_error") is False
 
     @patch("hephaestus.automation.github_api._gh_call")
     def test_other_called_process_error_still_raises(self, mock_gh_call: Any) -> None:

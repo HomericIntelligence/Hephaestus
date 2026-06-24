@@ -1158,6 +1158,24 @@ class CIDriver:
         # (#848): the issue number is synthetic (equals the PR number) so
         # ``gh issue view`` would 404; there is also no human-authored issue
         # body that would meaningfully steer the advise prompt.
+        # #1587: a prior drive-green pass may have already pushed a CI fix whose
+        # CI simply had not concluded when that pass gave up ("post-fix CI still
+        # pending ... leaving for next run"). Re-dispatching a full CI-fix agent
+        # against the SAME tip just re-derives "the fix is already in place" after
+        # a multi-minute, multi-turn session. If the PR head is unchanged since
+        # the last fix this driver recorded, skip the agent and let the
+        # recheck/arm poll wait for the pending CI instead.
+        if not self.options.dry_run and self._ci_fix_already_pushed_for_current_head(
+            issue_number, pr_number
+        ):
+            logger.info(
+                "Issue #%s: PR #%s head unchanged since the last CI fix this driver pushed; "
+                "skipping redundant CI-fix agent and awaiting pending CI",
+                issue_number,
+                pr_number,
+            )
+            return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
+
         advise_findings = ""
         if self.options.enable_advise and not self._is_bot_pr_mode(issue_number, pr_number):
             self.status_tracker.update_slot(acquired_slot, f"{issue_ref(issue_number)}: advising")
@@ -1206,6 +1224,10 @@ class CIDriver:
                     issue_number,
                     iteration + 1,
                 )
+                # #1587: record the pushed head SHA so a later drive-green pass can
+                # detect "fix already pushed, CI still pending" and skip a
+                # redundant agent re-run.
+                self._record_ci_fix_head(pr_number)
                 # Acknowledge automated review comments the fix addressed by
                 # replying + resolving the bot threads (human threads untouched).
                 self._reply_and_resolve_bot_threads(pr_number)
@@ -1214,6 +1236,47 @@ class CIDriver:
             logger.warning("Issue #%s: CI fix attempt %s failed", issue_number, iteration + 1)
 
         return None
+
+    def _ci_fix_marker_path(self, pr_number: int) -> Path:
+        """Path of the marker recording the head SHA of this PR's last CI fix (#1587)."""
+        return self.state_dir / f"last-ci-fix-{pr_number}.json"
+
+    def _record_ci_fix_head(self, pr_number: int) -> None:
+        """Persist the current PR head SHA after a successful CI fix push (#1587)."""
+        gh_state = self._gh_pr_state(pr_number) or {}
+        head_sha = str(gh_state.get("headRefOid") or "")
+        if not head_sha:
+            return
+        try:
+            self._ci_fix_marker_path(pr_number).write_text(
+                json.dumps({"pr_number": pr_number, "head_sha": head_sha}) + "\n"
+            )
+        except OSError as exc:
+            logger.warning(
+                "Issue: failed to write last-ci-fix marker for PR #%s: %s", pr_number, exc
+            )
+
+    def _ci_fix_already_pushed_for_current_head(self, issue_number: int, pr_number: int) -> bool:
+        """Return True if the PR head is unchanged since this driver's last CI fix (#1587).
+
+        Reads the ``last-ci-fix-<pr>.json`` marker and compares its recorded head
+        SHA to the PR's current ``headRefOid``. When they match, the fix this
+        driver already pushed is still the tip — CI is merely pending — so a fresh
+        CI-fix agent would only re-derive "already fixed". Any missing marker,
+        missing SHA, or lookup failure returns False (do not skip on uncertainty).
+        """
+        marker = self._ci_fix_marker_path(pr_number)
+        if not marker.exists():
+            return False
+        try:
+            recorded = str(dict(json.loads(marker.read_text())).get("head_sha") or "")
+        except (OSError, json.JSONDecodeError):
+            return False
+        if not recorded:
+            return False
+        gh_state = self._gh_pr_state(pr_number) or {}
+        current = str(gh_state.get("headRefOid") or "")
+        return bool(current) and current == recorded
 
     def _find_pr_for_issue(self, issue_number: int) -> int | None:
         """Find the open PR for a single issue.

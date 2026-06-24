@@ -645,3 +645,39 @@ class TestPrIsGenuinelyStuck:
         gh_mock = _status("not json")
         with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
             assert pr_manager.pr_is_genuinely_stuck(7) is False
+
+
+class TestNormalizeConventionalType:
+    """``_normalize_conventional_type`` keeps the commit/PR type pr-policy-legal (#1587)."""
+
+    def test_disallowed_type_normalized_scope_preserved(self) -> None:
+        assert (
+            pr_manager._normalize_conventional_type("security(audit): add threat model")
+            == "chore(audit): add threat model"
+        )
+
+    def test_allowed_type_unchanged(self) -> None:
+        assert (
+            pr_manager._normalize_conventional_type("fix(io): handle EOF") == "fix(io): handle EOF"
+        )
+
+    def test_no_prefix_gets_default(self) -> None:
+        assert (
+            pr_manager._normalize_conventional_type("add threat model") == "chore: add threat model"
+        )
+
+    def test_breaking_bang_preserved(self) -> None:
+        assert pr_manager._normalize_conventional_type("security!: drop API") == "chore!: drop API"
+
+    def test_disallowed_no_scope(self) -> None:
+        assert pr_manager._normalize_conventional_type("wip: stuff") == "chore: stuff"
+
+    def test_allowlist_matches_pr_policy_gate(self) -> None:
+        """The mirrored allowlist MUST equal the pr-policy gate's source of truth."""
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
+        from check_conventional_commit import ALLOWED_TYPES
+
+        assert set(pr_manager.ALLOWED_CONVENTIONAL_TYPES) == set(ALLOWED_TYPES)
