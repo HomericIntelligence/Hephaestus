@@ -17,6 +17,17 @@ _LEDGER_REAL_SHAPE = """[feature.lint.tasks]
 pip-audit = "pip-audit --ignore-vuln PYSEC-2025-183"
 """
 
+_LEDGER_WITH_DEP_VERSION_AND_TASK = """[feature.shared.pypi-dependencies]
+pip-audit = ">=2.7,<3"
+
+[feature.lint.tasks]
+# pip-audit suppression ledger. Each --ignore-vuln below MUST carry a reason.
+#
+# PYSEC-2025-183: disputed, unfixable transitive pyjwt CVE.
+#   Re-review: drop if pyjwt publishes a fixed release.
+pip-audit = "pip-audit --ignore-vuln PYSEC-2025-183"
+"""
+
 _LEDGER_NO_TRIGGER = """[feature.lint.tasks]
 # PYSEC-2025-183: disputed, unfixable transitive pyjwt CVE.
 pip-audit = "pip-audit --ignore-vuln PYSEC-2025-183"
@@ -49,6 +60,13 @@ class TestFindUndocumentedSuppressions:
         # passes. This is the case the prior block-walk design false-positived on.
         f = tmp_path / "pixi.toml"
         f.write_text(_LEDGER_REAL_SHAPE)
+        assert find_undocumented_suppressions(f) == []
+
+    def test_ignores_pip_audit_dependency_version_line(self, tmp_path: Path) -> None:
+        # Regression for issue #1587: the dependency declaration must not be
+        # mistaken for the lint task line when both appear in pixi.toml.
+        f = tmp_path / "pixi.toml"
+        f.write_text(_LEDGER_WITH_DEP_VERSION_AND_TASK)
         assert find_undocumented_suppressions(f) == []
 
     def test_flags_suppression_without_trigger(self, tmp_path: Path) -> None:
