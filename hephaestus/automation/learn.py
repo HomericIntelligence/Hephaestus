@@ -449,12 +449,26 @@ def compact_session(
         return False
 
     if result.returncode != 0:
+        stderr = result.stderr or ""
+        # #1587: "No conversation found with session ID" is the EXPECTED case
+        # when this (agent, issue) never created a session this run (e.g. the
+        # arming sweep firing /compact for agent=ci-driver on a PR the driver
+        # didn't fix). There is simply nothing to compact — log at DEBUG, not
+        # WARNING, so it doesn't read as a failure.
+        if "No conversation found with session ID" in stderr:
+            logger.debug(
+                "Issue #%s: no %s session to compact (session %s); skipping",
+                issue,
+                agent,
+                sid,
+            )
+            return False
         logger.warning(
             "Issue #%s: /compact for agent=%s exited %s (non-fatal); stderr=%s",
             issue,
             agent,
             result.returncode,
-            (result.stderr or "")[:200],
+            stderr[:200],
         )
         return False
 

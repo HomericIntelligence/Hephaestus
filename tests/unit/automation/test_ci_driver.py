@@ -3802,3 +3802,57 @@ class TestHandleFailingPr:
         mock_fix.assert_not_called()
         assert result.success is True
         assert result.pr_number == 42
+
+
+class TestCiFixRedispatchGuard:
+    """#1587: don't re-run a CI-fix agent when the fix is already pushed."""
+
+    def test_skips_agent_when_head_unchanged_since_last_fix(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        driver.state_dir = tmp_path
+        # Record a prior fix at SHA "abc123".
+        (tmp_path / "last-ci-fix-42.json").write_text('{"pr_number": 42, "head_sha": "abc123"}')
+        with (
+            patch.object(driver, "_gh_pr_state", return_value={"headRefOid": "abc123"}),
+            patch.object(driver, "_run_ci_fix_session") as mock_session,
+            patch.object(driver, "_run_advise", return_value=""),
+        ):
+            result = driver._attempt_ci_fixes(1, 42, 0)
+        # No expensive agent session spawned; treated as success (let recheck arm).
+        mock_session.assert_not_called()
+        assert result is not None and result.success is True
+
+    def test_runs_agent_when_head_advanced(self, driver: CIDriver, tmp_path: Path) -> None:
+        driver.state_dir = tmp_path
+        (tmp_path / "last-ci-fix-42.json").write_text('{"pr_number": 42, "head_sha": "old999"}')
+        with (
+            patch.object(driver, "_gh_pr_state", return_value={"headRefOid": "new111"}),
+            patch.object(driver, "_run_advise", return_value=""),
+            patch.object(driver, "_get_failing_ci_logs", return_value="logs"),
+            patch.object(driver, "_load_impl_session_id", return_value=None),
+            patch.object(driver, "_get_worktree_path", return_value=tmp_path),
+            patch.object(driver, "_get_pr_branch", return_value="42-auto-impl"),
+            patch.object(driver, "_run_ci_fix_session", return_value=True) as mock_session,
+            patch.object(driver, "_record_ci_fix_head"),
+            patch.object(driver, "_reply_and_resolve_bot_threads"),
+        ):
+            driver._attempt_ci_fixes(1, 42, 0)
+        # Head advanced → genuine new state → agent runs.
+        mock_session.assert_called()
+
+    def test_no_marker_runs_agent(self, driver: CIDriver, tmp_path: Path) -> None:
+        driver.state_dir = tmp_path  # no marker file written
+        with (
+            patch.object(driver, "_gh_pr_state", return_value={"headRefOid": "abc123"}),
+            patch.object(driver, "_run_advise", return_value=""),
+            patch.object(driver, "_get_failing_ci_logs", return_value="logs"),
+            patch.object(driver, "_load_impl_session_id", return_value=None),
+            patch.object(driver, "_get_worktree_path", return_value=tmp_path),
+            patch.object(driver, "_get_pr_branch", return_value="42-auto-impl"),
+            patch.object(driver, "_run_ci_fix_session", return_value=True) as mock_session,
+            patch.object(driver, "_record_ci_fix_head"),
+            patch.object(driver, "_reply_and_resolve_bot_threads"),
+        ):
+            driver._attempt_ci_fixes(1, 42, 0)
+        mock_session.assert_called()

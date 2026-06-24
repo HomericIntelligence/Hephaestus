@@ -210,6 +210,66 @@ class TestRunAdvise:
         # The marketplace path is threaded into the prompt builder + invoker.
         assert captured and "marketplace.json" in captured[0]
 
+    def test_retries_once_on_unparseable_selector_output(self, tmp_path: Path) -> None:
+        """#1587: a non-JSON first selector response is re-asked once, then parsed."""
+        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        skills_dir = mnemosyne_root / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "debugging.md").write_text("# Debugging\n", encoding="utf-8")
+
+        with (
+            patch.object(advise_runner, "get_repo_root", return_value=Path("/repo")),
+            patch.object(advise_runner, "default_mnemosyne_root", return_value=mnemosyne_root),
+            patch.object(
+                advise_runner,
+                "resolve_marketplace",
+                return_value=(mnemosyne_root / ".claude-plugin" / "marketplace.json", ""),
+            ),
+        ):
+            calls: list[str] = []
+
+            def invoke(prompt: str) -> str:
+                calls.append(prompt)
+                if len(calls) == 1:
+                    return "Sure! Here are the skills you should use: (prose, no JSON)"
+                return (
+                    '{"skills": [{"name": "debugging", '
+                    '"source": "./skills/debugging.md", "reason": "r"}]}'
+                )
+
+            result = advise_runner.run_advise(
+                issue_number=7,
+                issue_title="t",
+                issue_body="b",
+                invoke=invoke,
+                build_prompt=_build_prompt,
+            )
+        assert len(calls) == 2  # retried once
+        assert "JSON object" in calls[1]  # retry prompt carries the JSON-only reminder
+        assert "### debugging" in result
+
+    def test_unparseable_twice_degrades_to_skip(self, tmp_path: Path) -> None:
+        """#1587: if the retry is ALSO unparseable, degrade to a skip (no abort)."""
+        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        (mnemosyne_root / "skills").mkdir(parents=True)
+        with (
+            patch.object(advise_runner, "get_repo_root", return_value=Path("/repo")),
+            patch.object(advise_runner, "default_mnemosyne_root", return_value=mnemosyne_root),
+            patch.object(
+                advise_runner,
+                "resolve_marketplace",
+                return_value=(mnemosyne_root / ".claude-plugin" / "marketplace.json", ""),
+            ),
+        ):
+            result = advise_runner.run_advise(
+                issue_number=7,
+                issue_title="t",
+                issue_body="b",
+                invoke=lambda _p: "still no json",
+                build_prompt=_build_prompt,
+            )
+        assert result.startswith("<!-- advise step skipped:")
+
     def test_skips_when_marketplace_unresolved(self) -> None:
         with (
             patch.object(advise_runner, "get_repo_root", return_value=Path("/repo")),

@@ -481,7 +481,25 @@ def run_advise(
         )
         logger.info("Running advise skill selection for issue #%s...", issue_number)
         selector_output = invoke(advise_prompt)
-        selected = parse_selected_skills(selector_output, mnemosyne_root)
+        try:
+            selected = parse_selected_skills(selector_output, mnemosyne_root)
+        except ValueError as parse_err:
+            # #1587: the selector model occasionally returns prose with no JSON
+            # object. Retry ONCE with an explicit JSON-only reminder before
+            # degrading to a skip — a malformed first response is usually
+            # transient and a single re-ask recovers it.
+            logger.warning(
+                "Advise selector output for issue #%s was unparseable (%s); retrying once",
+                issue_number,
+                parse_err,
+            )
+            retry_prompt = (
+                advise_prompt
+                + "\n\nIMPORTANT: Return ONLY a JSON object of the form "
+                + '{"skills": [...]}. No prose, no code fences, no commentary.'
+            )
+            selector_output = invoke(retry_prompt)
+            selected = parse_selected_skills(selector_output, mnemosyne_root)
         return format_selected_skill_context(selected)
     except Exception as e:
         logger.warning("Advise step failed for issue #%s: %s", issue_number, e)

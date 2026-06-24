@@ -151,6 +151,17 @@ class TestNonTransientErrorClassification:
 
         assert _is_non_transient_error("gh: Body is not editable") is True
 
+    def test_no_checks_reported_is_non_transient(self) -> None:
+        """#1587: 'no checks reported' is the expected post-push empty state.
+
+        It exits non-zero but never succeeds on retry; classifying it
+        non-transient makes gh_pr_checks fail fast and convert it to [] without
+        burning exponential backoff or logging spurious ERRORs.
+        """
+        from hephaestus.github.client import _is_non_transient_error
+
+        assert _is_non_transient_error("no checks reported on the '45-foo' branch") is True
+
     def test_transient_5xx_is_not_non_transient(self) -> None:
         """A 500 is retryable, so it must NOT be flagged non-transient."""
         from hephaestus.github.client import _is_non_transient_error
