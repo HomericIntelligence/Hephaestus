@@ -2438,6 +2438,22 @@ def _evaluate_run_result(
         mergeable = str(pr.get("mergeable") or "").upper()
         return merge_state in conflict_states or mergeable == "CONFLICTING"
 
+    def _is_pending_review(pr: dict[str, Any]) -> bool:
+        """Return True for an un-armed, non-conflicting PR awaiting review.
+
+        #1576: such a PR is green but un-armed ONLY because it lacks
+        ``state:implementation-go`` — the review gate has not approved it yet.
+        That is NOT a merge failure (it is the system working as designed), so it
+        must not count toward ``needs_action`` / rc=1, or the loop runner tags
+        the owning issue ``state:skip`` every loop. A conflicting PR is excluded
+        (it is genuinely stuck and stays in ``needs_action``).
+        """
+        return (
+            not pr.get("autoMergeRequest")
+            and not _is_conflicting(pr)
+            and not pr_has_implementation_go_label(pr)
+        )
+
     # Armed AND merge-state benign → genuinely merging on its own (rc=0). Armed
     # but CONFLICTING → false-green; demote to needs_action below.
     armed_pending = [
@@ -2445,16 +2461,27 @@ def _evaluate_run_result(
         for pr in open_prs_remaining
         if pr.get("autoMergeRequest") and not _is_conflicting(pr)
     ]
+    # #1576: un-armed-because-awaiting-review PRs are neither armed nor stuck.
+    pending_review = [pr.get("number") for pr in open_prs_remaining if _is_pending_review(pr)]
+    # needs_action = genuinely stuck: un-armed for a reason OTHER than pending
+    # review (e.g. conflicting), or armed-but-conflicting. Pending-review PRs are
+    # explicitly excluded so they never force rc=1.
     needs_action = [
         pr.get("number")
         for pr in open_prs_remaining
-        if not pr.get("autoMergeRequest") or _is_conflicting(pr)
+        if (not pr.get("autoMergeRequest") or _is_conflicting(pr)) and not _is_pending_review(pr)
     ]
     if armed_pending:
         log.warning(
             "%s PR(s) armed and still merging (waited; not a failure): %s",
             len(armed_pending),
             armed_pending,
+        )
+    if pending_review:
+        log.info(
+            "%s open PR(s) awaiting implementation review (not a failure): %s",
+            len(pending_review),
+            pending_review,
         )
     if failed or needs_action:
         if failed:
@@ -2472,12 +2499,20 @@ def _evaluate_run_result(
                 failed=failed,
                 needs_action=needs_action,
                 armed_pending=armed_pending,
+                pending_review=pending_review,
             )
         return 1
 
     log.info("CI driver complete")
     if as_json:
-        emit_json_status(0, issues=issues, failed=[], needs_action=[], armed_pending=armed_pending)
+        emit_json_status(
+            0,
+            issues=issues,
+            failed=[],
+            needs_action=[],
+            armed_pending=armed_pending,
+            pending_review=pending_review,
+        )
     return 0
 
 

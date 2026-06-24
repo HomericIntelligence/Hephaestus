@@ -3182,10 +3182,43 @@ class TestEvaluateRunResult:
         remaining = [{"number": 10, "autoMergeRequest": {"enabledAt": "now"}}]
         assert _evaluate_run_result(results, remaining, issues=[1], as_json=False) == 0
 
-    def test_needs_action_pr_is_one(self) -> None:
-        # An un-armed PR genuinely needs manual action → failure.
+    def test_unarmed_go_labeled_pr_is_needs_action(self) -> None:
+        # #1576: an un-armed PR that HAS state:implementation-go (review approved
+        # but somehow not armed) is a genuine anomaly needing action → rc=1.
+        # (An un-armed PR that LACKS the GO label is pending-review, not a
+        # failure — see test_unarmed_pending_review_pr_is_not_failure.)
         results = {1: WorkerResult(issue_number=1, success=True, pr_number=10)}
-        remaining = [{"number": 11, "autoMergeRequest": None}]
+        remaining = [
+            {
+                "number": 11,
+                "autoMergeRequest": None,
+                "labels": [{"name": "state:implementation-go"}],
+            }
+        ]
+        assert _evaluate_run_result(results, remaining, issues=[1], as_json=False) == 1
+
+    def test_unarmed_pending_review_pr_is_not_failure(self) -> None:
+        # #1576: an un-armed, non-conflicting PR that lacks
+        # state:implementation-go is merely awaiting review — NOT a merge
+        # failure. It must be classified pending_review and keep rc=0, so the
+        # loop runner never tags the owning issue state:skip.
+        results = {1: WorkerResult(issue_number=1, success=True, pr_number=10)}
+        remaining: list[dict[str, Any]] = [{"number": 11, "autoMergeRequest": None, "labels": []}]
+        assert _evaluate_run_result(results, remaining, issues=[1], as_json=False) == 0
+
+    def test_unarmed_pending_review_but_conflicting_is_needs_action(self) -> None:
+        # #1576: a conflicting PR is genuinely stuck even without the GO label —
+        # it stays needs_action (rc=1), never pending_review.
+        results = {1: WorkerResult(issue_number=1, success=True, pr_number=10)}
+        remaining: list[dict[str, Any]] = [
+            {
+                "number": 11,
+                "autoMergeRequest": None,
+                "labels": [],
+                "mergeStateStatus": "DIRTY",
+                "mergeable": "CONFLICTING",
+            }
+        ]
         assert _evaluate_run_result(results, remaining, issues=[1], as_json=False) == 1
 
     def test_failed_issue_is_one(self) -> None:
