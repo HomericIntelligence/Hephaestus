@@ -3,29 +3,32 @@
 
 Operators can create an untracked ``.heph-private-denylist`` at the repository
 root with one fixed string per line. When present, this guard scans supplied
-paths (pre-commit mode) or git-tracked files (manual mode) and fails if any
-denylisted string appears.
+paths (working-tree mode), git-tracked files, or staged index content and fails
+if any denylisted string appears. Diagnostics intentionally print only
+source/path/line, never the matched value or source line.
 
 Usage:
-    python scripts/check_private_denylist.py [paths...]
+    python scripts/check_private_denylist.py [--staged] [--tracked] [paths...]
 """
 
 from __future__ import annotations
 
+import argparse
 import subprocess
 import sys
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 DENYLIST_FILENAME = ".heph-private-denylist"
+ScanSource = Literal["working-tree", "tracked", "staged"]
 
 
 class Finding(NamedTuple):
     """One denylist match in a text file."""
 
+    source: ScanSource
     path: Path
     line_number: int
-    token: str
 
 
 def get_repo_root() -> Path:
@@ -51,16 +54,45 @@ def load_denylist(repo_root: Path) -> list[str]:
     return tokens
 
 
-def tracked_files(repo_root: Path) -> list[Path]:
+def _git_paths(repo_root: Path, cmd: list[str]) -> list[Path]:
+    """Return null-delimited git path output as relative paths."""
+    result = subprocess.run(cmd, cwd=repo_root, capture_output=True, check=True)
+    return [Path(raw.decode()) for raw in result.stdout.split(b"\0") if raw]
+
+
+def tracked_files(repo_root: Path, pathspecs: list[str] | None = None) -> list[Path]:
     """Return git-tracked files for manual scans."""
+    cmd = ["git", "ls-files", "-z", "--", *(pathspecs or [])]
+    return [repo_root / path for path in _git_paths(repo_root, cmd)]
+
+
+def staged_files(repo_root: Path, pathspecs: list[str] | None = None) -> list[Path]:
+    """Return staged paths from the git index without reading the worktree."""
+    cmd = [
+        "git",
+        "diff",
+        "--cached",
+        "--name-only",
+        "-z",
+        "--diff-filter=ACMR",
+        "--",
+        *(pathspecs or []),
+    ]
+    return _git_paths(repo_root, cmd)
+
+
+def staged_text(repo_root: Path, rel_path: Path) -> str | None:
+    """Return staged UTF-8 text for *rel_path*, or None for non-text blobs."""
     result = subprocess.run(
-        ["git", "ls-files"],
+        ["git", "show", f":{rel_path.as_posix()}"],
         cwd=repo_root,
         capture_output=True,
-        text=True,
         check=True,
     )
-    return [repo_root / line for line in result.stdout.splitlines() if line.strip()]
+    try:
+        return result.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def _relative(repo_root: Path, path: Path) -> Path:
@@ -70,7 +102,22 @@ def _relative(repo_root: Path, path: Path) -> Path:
         return path
 
 
-def scan_paths(repo_root: Path, paths: list[Path], tokens: list[str]) -> list[Finding]:
+def _scan_text(source: ScanSource, rel_path: Path, text: str, tokens: list[str]) -> list[Finding]:
+    """Return redacted findings for denylist tokens in text content."""
+    findings: list[Finding] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if any(token in line for token in tokens):
+            findings.append(Finding(source, rel_path, line_number))
+    return findings
+
+
+def scan_paths(
+    repo_root: Path,
+    paths: list[Path],
+    tokens: list[str],
+    *,
+    source: ScanSource = "working-tree",
+) -> list[Finding]:
     """Return denylist matches in text files under *paths*."""
     findings: list[Finding] = []
     if not tokens:
@@ -87,32 +134,56 @@ def scan_paths(repo_root: Path, paths: list[Path], tokens: list[str]) -> list[Fi
         except OSError:
             continue
         rel_path = _relative(repo_root, candidate)
-        for line_number, line in enumerate(lines, start=1):
-            for token in tokens:
-                if token in line:
-                    findings.append(Finding(rel_path, line_number, token))
+        findings.extend(_scan_text(source, rel_path, "\n".join(lines), tokens))
     return findings
 
 
 def main(argv: list[str] | None = None) -> int:
     """Fail (exit 1) if a scanned text file contains a local denylist token."""
-    args = list(sys.argv[1:] if argv is None else argv)
-    if args and args[0] in ("--help", "-h"):
-        print(__doc__)
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tracked", action="store_true", help="scan tracked working-tree text")
+    parser.add_argument("--staged", action="store_true", help="scan staged index text")
+    parser.add_argument("paths", nargs="*", help="optional pathspecs or working-tree paths")
+    if any(arg in ("--help", "-h") for arg in raw_args):
+        parser.print_help()
         return 0
+    args = parser.parse_args(raw_args)
 
     repo_root = get_repo_root()
     tokens = load_denylist(repo_root)
     if not tokens:
         return 0
-    paths = [Path(arg) for arg in args] if args else tracked_files(repo_root)
-    findings = scan_paths(repo_root, paths, tokens)
+    pathspecs = list(args.paths)
+    findings: list[Finding] = []
+
+    if not args.tracked and not args.staged and pathspecs:
+        findings.extend(scan_paths(repo_root, [Path(p) for p in pathspecs], tokens))
+    else:
+        if not args.tracked and not args.staged:
+            args.tracked = True
+        if args.tracked:
+            findings.extend(
+                scan_paths(
+                    repo_root,
+                    tracked_files(repo_root, pathspecs),
+                    tokens,
+                    source="tracked",
+                )
+            )
+        if args.staged:
+            for rel_path in staged_files(repo_root, pathspecs):
+                text = staged_text(repo_root, rel_path)
+                if text is not None:
+                    findings.extend(_scan_text("staged", rel_path, text, tokens))
+
     if not findings:
         return 0
 
-    print("ERROR: local private denylist token(s) found. Remove these values before committing:")
+    print("ERROR: local private denylist match(es) found. Remove the value before committing:")
     for finding in findings:
-        print(f"  {finding.path}:{finding.line_number}")
+        print(f"  {finding.source} {finding.path}:{finding.line_number}")
+    print("\nMatched values and line contents are intentionally not printed.")
     print(f"\nDenylist source: {DENYLIST_FILENAME} (local, untracked)")
     return 1
 

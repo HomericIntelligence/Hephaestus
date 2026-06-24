@@ -47,7 +47,7 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Secrets
+# Secrets and local privacy guards
 .env
 .env.local
 .heph-private-denylist

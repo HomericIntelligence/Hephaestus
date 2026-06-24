@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -29,15 +30,22 @@ def test_load_denylist_ignores_blank_lines_and_comments(tmp_path: Path) -> None:
     assert _mod.load_denylist(tmp_path) == ["PRIVATE_ENDPOINT_TOKEN", "PRIVATE_MODEL_ALIAS"]
 
 
-def test_scan_paths_reports_fake_private_token(tmp_path: Path) -> None:
-    """A tracked text file containing a denylisted token is reported."""
+def _init_repo(tmp_path: Path) -> Path:
+    """Create a minimal git repository for index scan tests."""
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    return tmp_path
+
+
+def test_scan_paths_reports_fake_private_token_without_storing_it(tmp_path: Path) -> None:
+    """A tracked text file containing a denylisted token is reported redacted."""
     source = tmp_path / "hephaestus" / "example.py"
     source.parent.mkdir()
     source.write_text('TOKEN = "PRIVATE_ENDPOINT_TOKEN"\n', encoding="utf-8")
 
     findings = _mod.scan_paths(tmp_path, [source], ["PRIVATE_ENDPOINT_TOKEN"])
 
-    assert findings == [_mod.Finding(source.relative_to(tmp_path), 1, "PRIVATE_ENDPOINT_TOKEN")]
+    assert findings == [_mod.Finding("working-tree", source.relative_to(tmp_path), 1)]
+    assert "PRIVATE_ENDPOINT_TOKEN" not in repr(findings)
 
 
 def test_main_returns_nonzero_when_fake_token_found(
@@ -54,6 +62,47 @@ def test_main_returns_nonzero_when_fake_token_found(
     monkeypatch.setattr(_mod, "get_repo_root", lambda: tmp_path)
 
     assert _mod.main([str(source)]) == 1
+
+
+def test_main_redacts_private_tokens_from_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Diagnostics should identify location without printing private values."""
+    (tmp_path / ".heph-private-denylist").write_text(
+        "PRIVATE_ENDPOINT_TOKEN\n",
+        encoding="utf-8",
+    )
+    source = tmp_path / "docs" / "example.md"
+    source.parent.mkdir()
+    source.write_text("This mentions PRIVATE_ENDPOINT_TOKEN.\n", encoding="utf-8")
+    monkeypatch.setattr(_mod, "get_repo_root", lambda: tmp_path)
+
+    assert _mod.main([str(source)]) == 1
+
+    output = capsys.readouterr().out
+    assert "docs/example.md:1" in output
+    assert "PRIVATE_ENDPOINT_TOKEN" not in output
+    assert "intentionally not printed" in output
+
+
+def test_staged_scan_reads_index_content_not_worktree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--staged should scan index blobs instead of mutable working-tree files."""
+    repo = _init_repo(tmp_path)
+    (repo / ".heph-private-denylist").write_text("PRIVATE_MODEL_ALIAS\n", encoding="utf-8")
+    source = repo / "docs" / "pi.md"
+    source.parent.mkdir()
+    source.write_text("PRIVATE_MODEL_ALIAS\n", encoding="utf-8")
+    subprocess.run(["git", "add", "docs/pi.md"], cwd=repo, check=True)
+    source.write_text("clean working tree copy\n", encoding="utf-8")
+    monkeypatch.setattr(_mod, "get_repo_root", lambda: repo)
+
+    assert _mod.main(["--staged"]) == 1
+
+    output = capsys.readouterr().out
+    assert "staged docs/pi.md:1" in output
+    assert "PRIVATE_MODEL_ALIAS" not in output
 
 
 def test_help_flag_prints_doc_and_exits_zero(

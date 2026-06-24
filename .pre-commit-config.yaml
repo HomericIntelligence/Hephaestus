@@ -262,13 +262,14 @@ repos:
       - id: check-private-denylist
         name: Check local private denylist
         description: >
-          If .heph-private-denylist exists locally, reject changed text files
-          containing any fixed string listed there. The denylist itself is
-          gitignored and must never be committed.
-        entry: python3 scripts/check_private_denylist.py
+          If .heph-private-denylist exists locally, reject staged or tracked
+          text containing any fixed string listed there. The denylist itself is
+          gitignored and must never be committed. Diagnostics print only
+          source/path/line, never matched values.
+        entry: python3 scripts/check_private_denylist.py --staged --tracked
         language: system
-        pass_filenames: true
-        types: [text]
+        pass_filenames: false
+        always_run: true
 
   # Conventional Commits enforcement (DoD row 5; issue #1209).
   # commit-msg stage: pre-commit passes the message file path as the only arg.

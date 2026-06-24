@@ -330,6 +330,15 @@ with `--help` to see full usage.
 | `hephaestus-ensure-state-labels` | Idempotently provision `state:needs-plan` / `state:plan-no-go` / `state:plan-go` labels on one or more repos |
 | `hephaestus-audit-prs` | Audit ALL open PRs in one coordinator agent invocation |
 
+#### Private Pi provider setup
+
+Pi uses operator-local provider configuration only. Do not commit Pi provider
+config, endpoint URLs, hostnames, checkpoint names, model identifiers, or local
+aliases. Configure the OpenAI-compatible provider in the local Pi config, set
+`HEPH_PI_MODEL=<operator-local-alias>`, and see
+[`docs/pi-private-provider.md`](docs/pi-private-provider.md) for the sanitized
+setup and denylist guard.
+
 #### Running the automation loop from a source checkout (macOS / Codex)
 
 When `hephaestus-automation-loop` is not installed on `PATH` (fresh source
