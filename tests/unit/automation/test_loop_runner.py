@@ -201,8 +201,12 @@ def test_build_phase_argv_non_drive_green_omits_max_fix_iterations() -> None:
     assert "--max-fix-iterations" not in plan_argv
 
 
-def test_process_one_issue_tags_skip_when_drive_green_fails() -> None:
-    """A failed (non-merged) drive-green tags the issue state:skip (#1560)."""
+def test_process_one_issue_tags_skip_when_issue_owns_failing_pr() -> None:
+    """A failed drive-green tags state:skip ONLY when the issue owns a stuck PR.
+
+    #1560 + #1576: drive-green's rc is repo-level, so the tag is gated on the
+    issue actually owning a genuinely-stuck PR (verified live).
+    """
     cfg = LoopConfig(loops=1, phases=ALL_SELECTABLE, max_merge_attempts=2)
 
     def fake_run_phase(**kw: object) -> PhaseResult:
@@ -212,6 +216,7 @@ def test_process_one_issue_tags_skip_when_drive_green_fails() -> None:
 
     with (
         patch.object(loop_runner, "run_phase", side_effect=fake_run_phase),
+        patch.object(loop_runner, "_issue_owns_genuinely_failing_pr", return_value=True),
         patch.object(loop_runner, "gh_issue_add_labels") as add_labels,
     ):
         loop_runner._process_one_issue(
@@ -224,6 +229,35 @@ def test_process_one_issue_tags_skip_when_drive_green_fails() -> None:
         )
 
     add_labels.assert_called_once_with(42, [STATE_SKIP])
+
+
+def test_process_one_issue_no_skip_when_pr_pending_review() -> None:
+    """#1576: a failed drive-green does NOT tag skip when the PR isn't stuck.
+
+    A green-but-awaiting-review PR (or no PR / sibling's PR) makes the ownership
+    guard return False, so the issue is never tagged despite the repo-level rc=1.
+    """
+    cfg = LoopConfig(loops=1, phases=ALL_SELECTABLE, max_merge_attempts=2)
+
+    def fake_run_phase(**kw: object) -> PhaseResult:
+        name = str(kw["phase"])
+        return PhaseResult(name=name, rc=1 if name == "drive-green" else 0, elapsed_s=0.1)
+
+    with (
+        patch.object(loop_runner, "run_phase", side_effect=fake_run_phase),
+        patch.object(loop_runner, "_issue_owns_genuinely_failing_pr", return_value=False),
+        patch.object(loop_runner, "gh_issue_add_labels") as add_labels,
+    ):
+        loop_runner._process_one_issue(
+            repo="r",
+            repo_dir=Path("/tmp/r"),
+            issue=42,
+            cfg=cfg,
+            loop_idx=1,
+            trunk_sha="abc1234",
+        )
+
+    add_labels.assert_not_called()
 
 
 def test_process_one_issue_no_skip_when_drive_green_merges() -> None:
@@ -266,6 +300,57 @@ def test_process_one_issue_dry_run_does_not_tag_skip() -> None:
             trunk_sha="abc1234",
         )
     add_labels.assert_not_called()
+
+
+def test_filter_open_issues_drops_closed() -> None:
+    """#1576: explicit --issues list drops closed issues before the phase loop."""
+
+    def fake_is_closed(num: int, _cache: object) -> bool:
+        return num == 1552
+
+    with (
+        patch.object(loop_runner, "prefetch_issue_states", return_value={}),
+        patch.object(loop_runner, "is_issue_closed", side_effect=fake_is_closed),
+    ):
+        kept = loop_runner._filter_open_issues("r", [1554, 1552])
+    assert kept == [1554]
+
+
+def test_filter_open_issues_keeps_all_on_prefetch_failure() -> None:
+    """Fail-open: a prefetch error keeps every issue (never silently drop work)."""
+    with patch.object(loop_runner, "prefetch_issue_states", side_effect=RuntimeError("boom")):
+        kept = loop_runner._filter_open_issues("r", [1554, 1552])
+    assert kept == [1554, 1552]
+
+
+def test_issue_owns_genuinely_failing_pr_true_when_stuck() -> None:
+    """#1576: an issue owning a genuinely-stuck PR is tag-eligible."""
+    with (
+        patch.object(loop_runner, "find_pr_for_issue", return_value=1570),
+        patch.object(loop_runner, "pr_is_genuinely_stuck", return_value=True),
+    ):
+        assert loop_runner._issue_owns_genuinely_failing_pr(1554) is True
+
+
+def test_issue_owns_genuinely_failing_pr_false_when_pending_review() -> None:
+    """#1576: a PR awaiting review is not stuck, so the issue is not tag-eligible."""
+    with (
+        patch.object(loop_runner, "find_pr_for_issue", return_value=1570),
+        patch.object(loop_runner, "pr_is_genuinely_stuck", return_value=False),
+    ):
+        assert loop_runner._issue_owns_genuinely_failing_pr(1554) is False
+
+
+def test_issue_owns_genuinely_failing_pr_false_when_no_pr() -> None:
+    """#1576: an issue with no PR (e.g. closed / no-PR) is never tag-eligible."""
+    with patch.object(loop_runner, "find_pr_for_issue", return_value=None):
+        assert loop_runner._issue_owns_genuinely_failing_pr(1552) is False
+
+
+def test_issue_owns_genuinely_failing_pr_false_on_lookup_error() -> None:
+    """#1576: a PR-lookup failure is treated as not-stuck (never tag on uncertainty)."""
+    with patch.object(loop_runner, "find_pr_for_issue", side_effect=RuntimeError("boom")):
+        assert loop_runner._issue_owns_genuinely_failing_pr(1554) is False
 
 
 def test_parse_args_accepts_issue_scope() -> None:

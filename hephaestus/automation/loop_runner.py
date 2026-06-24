@@ -50,8 +50,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from hephaestus.agents.runtime import add_agent_argument, resolve_agent
-from hephaestus.automation._review_utils import add_max_workers_arg
-from hephaestus.automation.github_api import gh_issue_add_labels
+from hephaestus.automation._review_utils import add_max_workers_arg, find_pr_for_issue
+from hephaestus.automation.github_api import (
+    gh_issue_add_labels,
+    is_issue_closed,
+    prefetch_issue_states,
+)
 from hephaestus.automation.loop_repo_manager import (
     _clone_missing_repos as _clone_missing_repos,
     _count_failing_prs as _count_failing_prs,
@@ -66,6 +70,7 @@ from hephaestus.automation.loop_repo_manager import (
     _resolve_repo_dir as _resolve_repo_dir,
     _sort_repos_by_open_count as _sort_repos_by_open_count,
 )
+from hephaestus.automation.pr_manager import pr_is_genuinely_stuck
 from hephaestus.automation.state_labels import STATE_SKIP
 from hephaestus.cli.utils import (
     add_dry_run_arg,
@@ -942,8 +947,13 @@ def _process_repo_inner(
     LOG.info("[%s] trunk=%s%s", repo, trunk_sha, stale_suffix)
 
     # Open-issue discovery happens once per repo per loop. When the operator
-    # scopes the loop explicitly, reuse that bounded list.
+    # scopes the loop explicitly, reuse that bounded list — but drop any that are
+    # CLOSED (#1576): an explicit ``--issues`` list bypasses the open-state
+    # filter that ``_list_open_issue_numbers`` applies, so a closed issue would
+    # otherwise be driven (and wrongly tagged ``state:skip``) every loop.
     open_issues = cfg.issues or _list_open_issue_numbers(cfg.org, repo)
+    if cfg.issues:
+        open_issues = _filter_open_issues(repo, open_issues)
 
     # ISSUE-MAJOR control flow (#1560): iterate issues outermost and run the
     # FULL selected-phase sequence (plan → implement → drive-green) for each
@@ -979,6 +989,66 @@ def _process_repo_inner(
                 result.phases.append(PhaseResult(name="implement", rc=1, elapsed_s=0.0))
 
     return result
+
+
+def _filter_open_issues(repo: str, issue_numbers: list[int]) -> list[int]:
+    """Drop CLOSED issues from an explicit ``--issues`` list (#1576).
+
+    An operator-pinned ``cfg.issues`` list bypasses the ``--state open`` filter
+    that auto-discovery applies, so a closed issue would otherwise be driven
+    every loop and wrongly tagged ``state:skip`` by drive-green. States are
+    fetched once via :func:`prefetch_issue_states` and checked with
+    :func:`is_issue_closed`. On any lookup failure an issue is KEPT (fail-open:
+    never silently drop work over a transient API blip).
+
+    Args:
+        repo: Repository name (for logging).
+        issue_numbers: The explicit issue list.
+
+    Returns:
+        The subset that is not closed (order preserved).
+
+    """
+    try:
+        cached_states = prefetch_issue_states(issue_numbers)
+    except Exception as exc:  # transient API failure → keep all, don't drop work
+        LOG.warning("[%s] could not prefetch issue states for closed-filter: %s", repo, exc)
+        return issue_numbers
+    kept: list[int] = []
+    for num in issue_numbers:
+        if is_issue_closed(num, cached_states):
+            LOG.info("[%s] issue #%s is closed — excluding from phase loop", repo, num)
+            continue
+        kept.append(num)
+    return kept
+
+
+def _issue_owns_genuinely_failing_pr(issue: int) -> bool:
+    """Return True iff *issue* has a PR that is genuinely stuck (#1576).
+
+    Guards the drive-green ``state:skip`` tag so the loop tags an issue ONLY when
+    that issue's OWN PR genuinely cannot merge (conflict or red CI) — never for a
+    PR that is merely awaiting implementation review, and never for an issue with
+    no PR at all (which covers closed / no-PR issues that share the repo-wide
+    drive-green rc). The PR state is fetched LIVE via
+    :func:`pr_is_genuinely_stuck`. A missing PR or any lookup failure yields
+    False (never tag on uncertainty).
+
+    Args:
+        issue: GitHub issue number.
+
+    Returns:
+        True only when the issue owns a genuinely-stuck PR.
+
+    """
+    try:
+        pr_number = find_pr_for_issue(issue)
+    except Exception as exc:
+        LOG.warning("Could not resolve PR for issue #%s before skip-tagging: %s", issue, exc)
+        return False
+    if pr_number is None:
+        return False
+    return pr_is_genuinely_stuck(pr_number)
 
 
 def _process_one_issue(
@@ -1028,12 +1098,20 @@ def _process_one_issue(
                 phase,
                 phase_result.rc,
             )
-            # drive-green is the blocking merge phase: if it fails (the PR did
-            # not merge within --max-merge-attempts), tag the issue state:skip
-            # so it is not re-attempted and a human/another agent can take it
-            # over (#1560). Mirrors the review-loop exhaustion behavior. A
-            # dry-run must not mutate GitHub state.
-            if phase == "drive-green" and not cfg.dry_run:
+            # drive-green is the blocking merge phase. Its rc is REPO-LEVEL (one
+            # CI-driver run over the whole batch), so a non-zero rc does NOT mean
+            # THIS issue's PR failed — it may be a sibling's PR, or merely a
+            # PR awaiting implementation review. Tag ``state:skip`` ONLY when this
+            # issue OWNS a genuinely-stuck PR (conflict / red CI), verified LIVE
+            # (#1576). This stops the self-perpetuating skip cycle where an
+            # awaiting-review PR (or a closed / no-PR issue sharing the rc) was
+            # re-tagged every loop. ``state:skip`` is operator-only thereafter.
+            # A dry-run must not mutate GitHub state.
+            if (
+                phase == "drive-green"
+                and not cfg.dry_run
+                and _issue_owns_genuinely_failing_pr(issue)
+            ):
                 LOG.warning(
                     "[%s] issue #%s did not merge after %d attempt(s) — tagging %s",
                     repo,
@@ -1194,6 +1272,8 @@ def _run_post_loop_stages(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]
         try:
             trunk_sha, _fetch_ok = _rebase_main(repo, repo_dir)
             open_issues = cfg.issues or _list_open_issue_numbers(cfg.org, repo)
+            if cfg.issues:
+                open_issues = _filter_open_issues(repo, open_issues)
             for stage in selected_post:
                 skip_reason = _post_loop_stage_skip_reason(cfg, repo, stage, open_issues)
                 if skip_reason is not None:

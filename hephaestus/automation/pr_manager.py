@@ -25,6 +25,7 @@ from hephaestus.agents.runtime import (
 )
 
 from ._secret_patterns import SECRET_FILE_EXTENSIONS, SECRET_FILE_NAMES
+from .ci_check_inspector import FAILING_CHECK_CONCLUSIONS
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import git_message_model, implementer_model
 from .claude_timeouts import git_message_agent_timeout
@@ -537,6 +538,65 @@ def pr_has_implementation_go_label(pr: dict[str, object]) -> bool:
             if isinstance(name, str):
                 names.append(name)
     return is_implementation_go(names)
+
+
+def pr_is_genuinely_stuck(pr_number: int) -> bool:
+    """Return True iff a PR genuinely cannot merge without manual/agent action.
+
+    "Genuinely stuck" means a merge CONFLICT (``mergeStateStatus`` DIRTY or
+    CONFLICTING, or ``mergeable`` CONFLICTING) OR a red required check
+    (any ``statusCheckRollup`` conclusion in
+    :data:`~hephaestus.automation.ci_check_inspector.FAILING_CHECK_CONCLUSIONS`).
+
+    Crucially, a PR that is merely **pending implementation review** — green CI,
+    unarmed, ``mergeStateStatus == "BLOCKED"`` only because branch protection
+    requires a review that has not happened yet — is NOT stuck. Returning False
+    for that case is what stops the automation loop from wrongly tagging an
+    awaiting-review PR ``state:skip`` (#1576). ``BLOCKED`` alone is deliberately
+    NOT treated as stuck here (unlike ``_pr_is_failing`` in the CI driver, which
+    intentionally picks BLOCKED PRs up to drive).
+
+    This is the single source of truth shared by the CI driver's needs-action
+    partition and the loop runner's skip-ownership guard, fetched LIVE from
+    GitHub. Any query/parse failure yields ``False`` (safe default: never
+    misclassify an unknown PR as stuck and strand it).
+
+    Args:
+        pr_number: GitHub PR number.
+
+    Returns:
+        True if the PR is conflicting or has a red required check; False for a
+        green/pending/awaiting-review PR or on any lookup failure.
+
+    """
+    try:
+        result = _gh_call(
+            [
+                "pr",
+                "view",
+                str(pr_number),
+                "--json",
+                "mergeStateStatus,mergeable,statusCheckRollup",
+            ],
+            check=False,
+        )
+        pr = cast(dict[str, object], json.loads(result.stdout or "{}"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Could not fetch PR #%s state for stuck-check: %s", pr_number, exc)
+        return False
+
+    merge_state = str(pr.get("mergeStateStatus") or "").upper()
+    mergeable = str(pr.get("mergeable") or "").upper()
+    if merge_state in {"DIRTY", "CONFLICTING"} or mergeable == "CONFLICTING":
+        return True
+
+    rollup = pr.get("statusCheckRollup")
+    if isinstance(rollup, list):
+        return any(
+            isinstance(check, dict) and check.get("conclusion") in FAILING_CHECK_CONCLUSIONS
+            for check in rollup
+        )
+    return False
 
 
 def _pr_label_names(pr_number: int) -> list[str]:

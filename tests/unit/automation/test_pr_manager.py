@@ -599,3 +599,49 @@ class TestImplementationStateLabel:
         gh_mock = _status("not json")
         with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
             assert pr_manager.pr_has_implementation_state_label(7) == (False, False)
+
+
+class TestPrIsGenuinelyStuck:
+    """``pr_is_genuinely_stuck`` distinguishes stuck PRs from pending ones (#1576)."""
+
+    def test_dirty_merge_state_is_stuck(self) -> None:
+        gh_mock = _status('{"mergeStateStatus": "DIRTY", "mergeable": "", "statusCheckRollup": []}')
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_is_genuinely_stuck(7) is True
+
+    def test_conflicting_mergeable_is_stuck(self) -> None:
+        gh_mock = _status(
+            '{"mergeStateStatus": "BLOCKED", "mergeable": "CONFLICTING", "statusCheckRollup": []}'
+        )
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_is_genuinely_stuck(7) is True
+
+    def test_red_check_is_stuck(self) -> None:
+        gh_mock = _status(
+            '{"mergeStateStatus": "BLOCKED", "mergeable": "MERGEABLE", '
+            '"statusCheckRollup": [{"conclusion": "FAILURE"}]}'
+        )
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_is_genuinely_stuck(7) is True
+
+    def test_blocked_on_review_is_not_stuck(self) -> None:
+        # Green CI, BLOCKED only because review hasn't approved → NOT stuck.
+        gh_mock = _status(
+            '{"mergeStateStatus": "BLOCKED", "mergeable": "MERGEABLE", '
+            '"statusCheckRollup": [{"conclusion": "SUCCESS"}]}'
+        )
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_is_genuinely_stuck(7) is False
+
+    def test_clean_green_is_not_stuck(self) -> None:
+        gh_mock = _status(
+            '{"mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE", "statusCheckRollup": []}'
+        )
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_is_genuinely_stuck(7) is False
+
+    def test_malformed_json_is_not_stuck(self) -> None:
+        # Safe default: never misclassify an unknown PR as stuck.
+        gh_mock = _status("not json")
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_is_genuinely_stuck(7) is False
