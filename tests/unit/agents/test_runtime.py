@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -260,6 +261,63 @@ def test_codex_approval_args_preserves_legacy_flag() -> None:
             "--approval-policy",
             "never",
         ]
+
+
+@pytest.mark.parametrize(
+    ("claude_model", "expected_model", "expected_reasoning"),
+    [
+        ("claude-opus-4-7", "gpt-5.5", "xhigh"),
+        ("claude-sonnet-4-6", "gpt-5.5", "medium"),
+    ],
+)
+def test_codex_base_cmd_maps_claude_reasoning_tiers(
+    tmp_path: Path,
+    claude_model: str,
+    expected_model: str,
+    expected_reasoning: str,
+) -> None:
+    """Codex must receive Codex model IDs plus tier-specific reasoning config."""
+    with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
+        cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model=claude_model)
+
+    assert cmd[cmd.index("--model") + 1] == expected_model
+    assert cmd[cmd.index("-c") + 1] == (f"model_reasoning_effort={json.dumps(expected_reasoning)}")
+
+
+def test_codex_base_cmd_maps_haiku_to_mini_without_reasoning_override(
+    tmp_path: Path,
+) -> None:
+    """Haiku-tier Codex work should use GPT-5.4-Mini without forcing reasoning."""
+    with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
+        cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model="claude-haiku-4-5")
+
+    assert cmd[cmd.index("--model") + 1] == "gpt-5.4-mini"
+    assert "model_reasoning_effort" not in cmd
+
+
+def test_codex_base_cmd_keeps_native_codex_model_ids(tmp_path: Path) -> None:
+    """Explicit native Codex model overrides should still pass through unchanged."""
+    with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
+        cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model="gpt-5.4-mini")
+
+    assert cmd[cmd.index("--model") + 1] == "gpt-5.4-mini"
+    assert "model_reasoning_effort" not in cmd
+
+
+def test_codex_base_cmd_defaults_new_sessions_to_gpt_55_xhigh(tmp_path: Path) -> None:
+    """A fresh Codex session should not depend on the operator's CLI default."""
+    with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
+        cmd = agent_runtime._codex_base_cmd(cwd=tmp_path)
+
+    assert cmd[cmd.index("--model") + 1] == "gpt-5.5"
+    assert cmd[cmd.index("-c") + 1] == 'model_reasoning_effort="xhigh"'
+
+
+def test_codex_base_cmd_resume_without_model_preserves_session_model() -> None:
+    """Resume should not force the default model unless a model is requested."""
+    cmd = agent_runtime._codex_base_cmd(resume_id="session-123", sandbox=None)
+
+    assert cmd == ["codex", "exec", "resume", "session-123", "--json"]
 
 
 def test_resume_codex_session_uses_exec_resume(tmp_path: Path) -> None:
