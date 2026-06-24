@@ -146,6 +146,7 @@ bypass a misfiring hook locally use
 | `hephaestus-mypy-each-file` | Internal | Repo CI per-file mypy runner |
 | `hephaestus-check-links` | Internal | Repo CI link checker |
 | `hephaestus-validate-anchors` | Internal | Repo CI anchor validator |
+| `hephaestus-scaffold-subpackage` | Internal | Dev scaffolding tool for new subpackages |
 | `hephaestus-check-dep-sync` | Internal | Repo CI dependency-sync check |
 | `hephaestus-sync-requirements` | Internal | Repo CI requirements sync |
 | `hephaestus-bench-precommit` | Internal | Repo CI pre-commit benchmark |

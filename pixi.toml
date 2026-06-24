@@ -15,7 +15,9 @@ mypy = "mypy hephaestus/ scripts/ tests/"
 # recipe does not double-scan by appending `hephaestus` to the default
 # `mypy` task's argument list.
 mypy-pkg = "mypy hephaestus/"
-audit = "pixi run --environment lint pip-audit"
+# Runs pip-audit in the lint environment without a nested `pixi run` invocation.
+# The top-level `audit` alias was removed: use `pixi run --environment lint audit`
+# or `pixi run --environment lint pip-audit` directly (as CI already does).
 docs = "pdoc hephaestus --output-dir docs/api"
 # Editable install of this package into the pixi environment, for local dev
 # that imports `hephaestus` at runtime. Run once after `pixi install`:
@@ -111,6 +113,9 @@ bandit = ">=1.9.4,<2"
 #   version bump or code change that resolves it. Ignored as unfixable + disputed.
 #   Re-review: drop if pyjwt publishes a fixed release or pygithub drops the dep.
 pip-audit = "pip-audit --ignore-vuln PYSEC-2025-183"
+# Non-recursive alias: `pixi run --environment lint audit` delegates to pip-audit
+# above without spawning a nested `pixi run` (the old top-level audit task did).
+audit = { depends-on = ["pip-audit"] }
 sast = "bandit -c pyproject.toml -r hephaestus scripts --severity-level medium"
 
 [environments]
