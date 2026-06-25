@@ -35,6 +35,7 @@ from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
 from .git_utils import (
     commit_if_changes,
+    ensure_branch_commit_metadata,
     get_repo_slug,
     issue_ref,
     pr_ref,
@@ -207,9 +208,10 @@ class CIFixOrchestrator:
             f"This MUST include any markdown/lint hooks — every file you add or "
             f"edit has to pass the repo's own linters, with no rule disabled.\n"
             f"4. **Every commit MUST be cryptographically signed and DCO signed off "
-            f"(`git commit -S -s`).** NEVER use `--no-verify`. The repository's CI "
-            f"gate rejects unsigned commits, missing sign-offs, and any commit that "
-            f"bypassed pre-commit hooks.\n"
+            f"4. **Every commit MUST be cryptographically signed and DCO-signed "
+            f"(`git commit -S -s`).** NEVER use `--no-verify`. The repository's "
+            f"CI gate rejects unsigned commits, commits without Signed-off-by "
+            f"trailers, and any commit that bypassed pre-commit hooks.\n"
             f"5. Do NOT run `git checkout -b`, `git switch -c`, or any command "
             f"that creates or switches branches — the fix has to land on "
             f"`{pr_head_branch}`.\n"
@@ -320,6 +322,15 @@ class CIFixOrchestrator:
                 return False
             if not self._ci_fix_head_is_pushable(worktree_path, issue_number):
                 return False
+        try:
+            ensure_branch_commit_metadata(worktree_path)
+        except Exception as metadata_err:
+            logger.error(
+                "Issue #%s: failed to enforce signed+DCO commit metadata before push: %s",
+                issue_number,
+                metadata_err,
+            )
+            return False
         try:
             push_current_branch_with_lease_on_divergence(
                 worktree_path,
@@ -526,7 +537,7 @@ class CIFixOrchestrator:
             "3. Commit changes (do NOT push) on the current branch — DO NOT run "
             "`git checkout -b`, `git switch -c`, or any other command that creates "
             "or switches to a different branch\n"
-            "4. Every commit MUST be cryptographically signed and DCO signed off "
+            "4. Every commit MUST be cryptographically signed and DCO-signed "
             "(`git commit -S -s`); NEVER use `--no-verify`.\n\n"
             f"Commit message: fix: Address CI failures for PR {pr_ref(pr_number)}\n"
         )

@@ -328,6 +328,7 @@ def test_codex_ci_fix_session_falls_back_to_fresh_on_resume_failure(
         patch(
             "hephaestus.automation.ci_fix_orchestrator.push_current_branch_with_lease_on_divergence"
         ) as mock_push,
+        patch("hephaestus.automation.ci_fix_orchestrator.ensure_branch_commit_metadata"),
         patch(
             "hephaestus.automation.ci_fix_orchestrator.sync_worktree_to_remote_branch"
         ) as mock_sync,
@@ -3692,6 +3693,7 @@ class TestPushCiFix:
                 "hephaestus.automation.ci_fix_orchestrator.run",
                 side_effect=[post_sha, clean_status, no_untracked, ahead_count],
             ),
+            patch("hephaestus.automation.ci_fix_orchestrator.ensure_branch_commit_metadata"),
             patch(
                 "hephaestus.automation.ci_fix_orchestrator.push_current_branch_with_lease_on_divergence"
             ) as mock_push,
@@ -3706,6 +3708,42 @@ class TestPushCiFix:
             )
         assert result is True
         mock_push.assert_called_once()
+
+    def test_enforces_signature_and_dco_metadata_before_push(
+        self, driver: CIDriver, tmp_path: Path
+    ) -> None:
+        post_sha = MagicMock(stdout="deadbeef\n")
+        clean_status = MagicMock(stdout="", stderr="", returncode=0)
+        ahead_count = MagicMock(stdout="1\n", stderr="", returncode=0)
+        no_untracked = MagicMock(stdout="", returncode=0)
+        events: list[str] = []
+        with (
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.run",
+                side_effect=[post_sha, clean_status, no_untracked, ahead_count],
+            ),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.ensure_branch_commit_metadata",
+                create=True,
+            ) as mock_policy,
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.push_current_branch_with_lease_on_divergence"
+            ) as mock_push,
+        ):
+            mock_policy.side_effect = lambda *_args, **_kwargs: events.append("policy")
+            mock_push.side_effect = lambda *_args, **_kwargs: events.append("push")
+            result = driver._push_ci_fix(
+                worktree_path=tmp_path,
+                pre_agent_sha="cafef00d",
+                issue_number=1,
+                pr_number=2,
+                pr_head_branch="1-fix",
+                session_id=None,
+            )
+
+        assert result is True
+        mock_policy.assert_called_once_with(tmp_path)
+        assert events == ["policy", "push"]
 
     def test_returns_false_when_head_not_advanced_and_retry_fails(
         self, driver: CIDriver, tmp_path: Path

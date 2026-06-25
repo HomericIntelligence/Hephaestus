@@ -537,6 +537,23 @@ def _remove_untracked_files_tracked_by_ref(cwd: Path, ref: str) -> list[Path]:
     return removed
 
 
+def _commit_policy_rebase_command(base_ref: str) -> list[str]:
+    """Return a rebase command that repairs signature and DCO metadata per commit."""
+    return ["git", "rebase", base_ref, "--exec", COMMIT_POLICY_REWRITE_EXEC]
+
+
+def ensure_branch_commit_metadata(
+    cwd: Path,
+    base_branch: str = "main",
+    *,
+    remote: str = "origin",
+) -> None:
+    """Rewrite branch commits so each carries a verified signature and DCO trailer."""
+    base_ref = f"{remote}/{base_branch}"
+    run(["git", "fetch", remote, base_branch], cwd=cwd)
+    run(_commit_policy_rebase_command(base_ref), cwd=cwd)
+
+
 def rebase_worktree_onto(
     cwd: Path,
     base_branch: str = "main",
@@ -585,7 +602,7 @@ def rebase_worktree_onto(
     run(["git", "fetch", remote, base_branch], cwd=cwd)
     _remove_untracked_files_tracked_by_ref(cwd, base_ref)
     try:
-        run(["git", "rebase", base_ref, "--exec", COMMIT_POLICY_REWRITE_EXEC], cwd=cwd)
+        run(_commit_policy_rebase_command(base_ref), cwd=cwd)
         logger.info("Rebased worktree at %s onto %s/%s cleanly", cwd, remote, base_branch)
         return True
     except subprocess.CalledProcessError:
