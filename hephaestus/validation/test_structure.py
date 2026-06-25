@@ -1,12 +1,15 @@
 """Validate unit test directory structure.
 
-Provides two complementary checks:
+Provides three complementary checks:
 
 1. **Mirror check**: Every subpackage in the source directory has a corresponding
    directory under ``tests/unit/``.
 2. **No-loose-files check**: No ``test_*.py`` files exist directly under
    ``tests/unit/`` root — they must live in sub-packages that mirror the source
    layout.
+3. **No-unsanctioned-dirs check**: Every directory under ``tests/unit/`` either
+   mirrors a source subpackage or is in the ``SANCTIONED_EXTRA_TEST_DIRS``
+   allowlist (for non-package targets like top-level ``scripts/``/``docs/``).
 
 Usage::
 
@@ -25,6 +28,19 @@ from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.utils.helpers import get_repo_root
 
 ALLOWED_ROOT_FILES: frozenset[str] = frozenset({"__init__.py", "conftest.py"})
+
+# Test subdirectories that intentionally have NO hephaestus/ subpackage
+# counterpart because they cover non-package targets. Each must name its target.
+# (Distinct axis from _detect_src_package's `skip` set, which excludes top-level
+# dirs during SOURCE-package detection; this set allowlists TEST dirs.)
+SANCTIONED_EXTRA_TEST_DIRS: frozenset[str] = frozenset(
+    {
+        "constants",  # -> hephaestus/constants.py (module, not a subpackage)
+        "docs",  # -> top-level docs/ tree
+        "scripts",  # -> top-level scripts/*.py
+        "shell",  # -> shell installer scripts
+    }
+)
 
 
 def _get_subpackages(root: Path) -> set[str]:
@@ -85,6 +101,34 @@ def check_no_loose_test_files(
 
     violations = sorted(p for p in unit_root.glob("test_*.py") if p.name not in allowed_names)
     return len(violations) == 0, violations
+
+
+def check_no_unsanctioned_test_dirs(
+    src_root: Path,
+    test_root: Path,
+    sanctioned: frozenset[str] = SANCTIONED_EXTRA_TEST_DIRS,
+) -> tuple[bool, set[str]]:
+    """Check that every tests/unit/ subdir mirrors a source subpackage or is allowlisted.
+
+    Guards the *reverse* of :func:`check_test_directory_mirrors`: a test
+    directory with no corresponding source subpackage breaks the mirror
+    invariant unless it is in *sanctioned* (covering a non-package target).
+
+    Args:
+        src_root: Path to the source package (e.g. ``mypackage/``).
+        test_root: Path to the unit test root (e.g. ``tests/unit/``).
+        sanctioned: Allowlist of test directory names that intentionally have no
+            source subpackage counterpart.
+
+    Returns:
+        Tuple of ``(ok, unsanctioned)`` where *unsanctioned* is the set of test
+        directory names that neither mirror a source subpackage nor are allowlisted.
+
+    """
+    src_packages = _get_subpackages(src_root)
+    test_packages = _get_subpackages(test_root)
+    unsanctioned = test_packages - src_packages - sanctioned
+    return len(unsanctioned) == 0, unsanctioned
 
 
 def check_test_structure(
@@ -152,6 +196,23 @@ def check_test_structure(
         )
         for p in violations:
             print(f"  {p}", file=sys.stderr)
+
+    # Check 3: No unsanctioned extra test directories (reverse mirror)
+    ok_extra, unsanctioned = check_no_unsanctioned_test_dirs(src_root, test_root)
+    if ok_extra:
+        if verbose:
+            print("OK: No unsanctioned extra test directories under tests/unit/.")
+    else:
+        all_passed = False
+        print(
+            "ERROR: tests/unit/ has directories with no source subpackage and no\n"
+            "allowlist entry. Add a SANCTIONED_EXTRA_TEST_DIRS entry (with a target\n"
+            "comment) in hephaestus/validation/test_structure.py, or remove the dir.\n"
+            "Unsanctioned:",
+            file=sys.stderr,
+        )
+        for name in sorted(unsanctioned):
+            print(f"  tests/unit/{name}/", file=sys.stderr)
 
     return all_passed
 

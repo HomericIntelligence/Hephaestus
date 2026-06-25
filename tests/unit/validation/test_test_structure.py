@@ -3,8 +3,10 @@
 from pathlib import Path
 
 from hephaestus.validation.test_structure import (
+    SANCTIONED_EXTRA_TEST_DIRS,
     _detect_src_package,
     check_no_loose_test_files,
+    check_no_unsanctioned_test_dirs,
     check_test_directory_mirrors,
     check_test_structure,
     main,
@@ -116,6 +118,58 @@ class TestCheckNoLooseTestFiles:
         assert len(violations) == 2
 
 
+class TestCheckNoUnsanctionedTestDirs:
+    """Tests for check_no_unsanctioned_test_dirs()."""
+
+    def test_all_mirrored_passes(self, tmp_path: Path) -> None:
+        src = tmp_path / "mypackage"
+        tests = tmp_path / "tests" / "unit"
+        for name in ["utils", "io"]:
+            _make_package(src, name)
+            (tests / name).mkdir(parents=True)
+        ok, unsanctioned = check_no_unsanctioned_test_dirs(src, tests, frozenset())
+        assert ok is True
+        assert unsanctioned == set()
+
+    def test_unsanctioned_dir_flagged(self, tmp_path: Path) -> None:
+        src = tmp_path / "mypackage"
+        tests = tmp_path / "tests" / "unit"
+        _make_package(src, "utils")
+        (tests / "utils").mkdir(parents=True)
+        (tests / "rogue").mkdir()
+        ok, unsanctioned = check_no_unsanctioned_test_dirs(src, tests, frozenset())
+        assert ok is False
+        assert unsanctioned == {"rogue"}
+
+    def test_sanctioned_dir_allowed(self, tmp_path: Path) -> None:
+        src = tmp_path / "mypackage"
+        tests = tmp_path / "tests" / "unit"
+        _make_package(src, "utils")
+        (tests / "utils").mkdir(parents=True)
+        (tests / "scripts").mkdir()
+        ok, unsanctioned = check_no_unsanctioned_test_dirs(
+            src, tests, frozenset({"scripts"})
+        )
+        assert ok is True
+        assert unsanctioned == set()
+
+    def test_reuses_subpackage_filtering(self, tmp_path: Path) -> None:
+        """__pycache__/dotdirs are ignored (shared _get_subpackages semantics)."""
+        src = tmp_path / "mypackage"
+        tests = tmp_path / "tests" / "unit"
+        _make_package(src, "utils")
+        (tests / "utils").mkdir(parents=True)
+        (tests / "__pycache__").mkdir()
+        (tests / ".hidden").mkdir()
+        ok, unsanctioned = check_no_unsanctioned_test_dirs(src, tests, frozenset())
+        assert ok is True
+        assert unsanctioned == set()
+
+    def test_real_repo_extras_are_sanctioned(self) -> None:
+        """The four real tests/unit/ extras are all in the shipped allowlist."""
+        assert {"constants", "docs", "scripts", "shell"} <= SANCTIONED_EXTRA_TEST_DIRS
+
+
 class TestCheckTestStructure:
     """Tests for check_test_structure()."""
 
@@ -175,6 +229,23 @@ class TestCheckTestStructure:
         (test_root / "core").mkdir(parents=True)
         passed = check_test_structure(tmp_path)
         assert passed is True
+
+    def test_unsanctioned_test_dir_fails(self, tmp_path: Path, capsys) -> None:
+        """check_test_structure fails and prints when an unsanctioned test dir exists.
+
+        Exercises Check 3's failure branch (the sorted-unsanctioned print loop).
+        """
+        src = tmp_path / "mypackage"
+        _make_package(src, "utils")
+        (src / "__init__.py").touch()
+        test_root = tmp_path / "tests" / "unit"
+        (test_root / "utils").mkdir(parents=True)
+        (test_root / "rogue").mkdir()  # no source counterpart, not allowlisted
+        passed = check_test_structure(tmp_path, src_package="mypackage")
+        assert passed is False
+        err = capsys.readouterr().err
+        assert "tests/unit/rogue/" in err
+        assert "SANCTIONED_EXTRA_TEST_DIRS" in err
 
 
 class TestDetectSrcPackage:

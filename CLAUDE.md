@@ -48,7 +48,7 @@ ProjectHephaestus/
 ├── scripts/                    # Automation and maintenance scripts
 ├── skills/                     # Claude Code skill definitions (23 SKILL.md skills; kebab-case naming for plugin format)
 ├── tests/                      # Unit and integration tests
-│   ├── unit/                   # Unit tests (mirrors hephaestus/ structure)
+│   ├── unit/                   # Unit tests (mirror hephaestus/ subpackages; a small sanctioned set of extra dirs covers non-package targets — scripts/, docs/, shell, top-level modules)
 │   └── integration/            # Integration tests
 ├── docs/                       # Documentation
 └── .claude/                    # Claude Code configurations
@@ -424,7 +424,7 @@ pre-commit run --all-files
 - `hephaestus/cli/` - CLI utilities (argument parsing, output formatting)
 - `hephaestus/system/` - System information collection
 - `hephaestus/github/` - GitHub automation (PR merging)
-- `tests/unit/` - Unit test suite (mirrors hephaestus/ package structure)
+- `tests/unit/` - Unit test suite (mirrors hephaestus/ subpackages; sanctioned extra dirs in SANCTIONED_EXTRA_TEST_DIRS cover non-package targets like scripts/, docs/, shell installers, top-level modules)
 - `tests/integration/` - Integration tests (package importability, smoke tests)
 - `scripts/` - Automation and maintenance tools
 - `docs/` - Documentation and guides
