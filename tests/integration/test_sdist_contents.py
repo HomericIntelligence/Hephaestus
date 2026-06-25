@@ -42,6 +42,10 @@ def test_sdist_includes_notice_and_compatibility(tmp_path: Path) -> None:
             "--sdist",
             "--outdir",
             str(tmp_path),
+            # This test validates sdist contents, not build isolation or
+            # package-index access. The Pixi environment already provides the
+            # backend dependencies, so avoid network-only dependency fetching.
+            "--no-isolation",
         ],
         cwd=REPO_ROOT.parent,
         check=True,

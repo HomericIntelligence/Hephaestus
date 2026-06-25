@@ -31,7 +31,7 @@ def test_local_codex_marketplace_wrapper_resolves_manifest_and_icon() -> None:
     marketplace = json.loads(
         (REPO_ROOT / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8")
     )
-    plugin = marketplace["plugins"][0]
+    plugin = next(plugin for plugin in marketplace["plugins"] if plugin["name"] == "hephaestus")
 
     plugin_root = REPO_ROOT / plugin["source"]["path"]
     assert (plugin_root / ".codex-plugin" / "plugin.json").resolve() == (
