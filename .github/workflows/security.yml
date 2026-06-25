@@ -112,6 +112,10 @@ jobs:
 
   license-scan:
     name: License compatibility scan
+    # PR-time license-scan runs in _required.yml (license-scan, gated via
+    # required-checks-gate). Skip here on PRs to avoid the ~2x duplicate run;
+    # still runs on the weekly schedule + manual dispatch. See issue #1514.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
