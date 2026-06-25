@@ -6,6 +6,28 @@ Thank you for considering contributing to ProjectHephaestus! We welcome contribu
 
 This project follows the [HomericIntelligence Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code.
 
+## Your first day
+
+New here? This is the shortest path from a fresh clone to a merged PR. Each step
+links to the full section below.
+
+1. **Set up the environment** ([Development Setup](#development-setup)) — install
+   Pixi, then `just bootstrap` (one command: deps + editable install + pre-commit
+   hooks).
+2. **Confirm the toolchain works** — run `just check` (lint + format-check +
+   typecheck) and `pixi run pytest tests/unit`. Green here means your machine is
+   ready.
+3. **Pick an issue** ([Code Contributions](#code-contributions)) — pick or open a
+   GitHub issue, then branch as `<issue-number>-description`.
+4. **Make the change test-first** ([Testing](#testing)) — write a failing test,
+   make it pass, keep coverage at 83%+ (target 90%).
+5. **Open the PR** ([Pull Request Process](#pull-request-process)) — sign every
+   commit (`git commit -S`), put `Closes #<issue-number>` on its own line in the
+   body, and enable auto-merge (`gh pr merge --auto --squash`).
+
+If anything in steps 1–2 fails, see [Platform Support](#platform-support) — the
+pixi dev environment is `linux-64` only by design.
+
 ## Planning artifacts
 
 Before opening a PR, locate the work in:
