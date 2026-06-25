@@ -199,11 +199,18 @@ def check_test_structure(
 
     # Check 3: No unsanctioned extra test directories (reverse mirror)
     ok_extra, unsanctioned = check_no_unsanctioned_test_dirs(src_root, test_root)
-    if ok_extra:
+    if not _report_unsanctioned(ok_extra, unsanctioned, verbose):
+        all_passed = False
+
+    return all_passed
+
+
+def _report_unsanctioned(ok: bool, unsanctioned: set[str], verbose: bool) -> bool:
+    """Report check_no_unsanctioned_test_dirs result; return *ok*."""
+    if ok:
         if verbose:
             print("OK: No unsanctioned extra test directories under tests/unit/.")
     else:
-        all_passed = False
         print(
             "ERROR: tests/unit/ has directories with no source subpackage and no\n"
             "allowlist entry. Add a SANCTIONED_EXTRA_TEST_DIRS entry (with a target\n"
@@ -213,8 +220,7 @@ def check_test_structure(
         )
         for name in sorted(unsanctioned):
             print(f"  tests/unit/{name}/", file=sys.stderr)
-
-    return all_passed
+    return ok
 
 
 def _detect_src_package(repo_root: Path) -> str:
