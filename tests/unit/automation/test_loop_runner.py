@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -48,10 +49,11 @@ from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
 
 def test_all_phases_is_three_stage_pipeline() -> None:
-    """The loop body collapsed to exactly (plan, implement); drive-green moved post-loop.
+    """Default phases stay plan+implement; drive-green remains separately selectable.
 
     Plan-review, PR-review, and address-review fold into plan/implement
-    (#455/#468/#484); drive-green moved to ALL_POST_LOOP_STAGES (#818).
+    (#455/#468/#484). drive-green is both the per-issue blocking phase when
+    selected and the final catch-up stage (#1560/#1577/#1580).
     """
     from hephaestus.automation.loop_runner import ALL_POST_LOOP_STAGES
 
@@ -562,6 +564,33 @@ def test_process_repo_drive_green_runs_per_issue_when_selected(
     assert ran == list(ALL_SELECTABLE)
 
 
+def test_process_one_issue_drive_green_receives_only_current_issue() -> None:
+    """Worker drive-green must not inherit the loop's full explicit issue list."""
+    seen: list[tuple[str, list[int]]] = []
+
+    def fake_run_phase(**kw: object) -> PhaseResult:
+        open_issues = cast(list[int], kw["open_issues"])
+        seen.append((str(kw["phase"]), list(open_issues)))
+        return PhaseResult(name=str(kw["phase"]), rc=0, elapsed_s=0.1)
+
+    cfg = LoopConfig(loops=1, phases=ALL_SELECTABLE, issues=[1577, 1580])
+    with patch.object(loop_runner, "run_phase", side_effect=fake_run_phase):
+        loop_runner._process_one_issue(
+            repo="r",
+            repo_dir=Path("/tmp/r"),
+            issue=1577,
+            cfg=cfg,
+            loop_idx=1,
+            trunk_sha="abc1234",
+        )
+
+    assert seen == [
+        ("plan", [1577]),
+        ("implement", [1577]),
+        ("drive-green", [1577]),
+    ]
+
+
 def test_process_one_issue_continues_after_phase_failure() -> None:
     """Phase isolation per issue: a failed plan must NOT skip later phases."""
     call_order: list[str] = []
@@ -705,6 +734,31 @@ def test_run_loop_continues_when_one_repo_fails(repo_inputs: tuple[Path, LoopCon
     assert not by_repo["ok2"].any_failure
 
 
+def test_run_loop_appends_final_drive_green_catchup(
+    repo_inputs: tuple[Path, LoopConfig],
+) -> None:
+    """After issue workers finish, run one final repo-level drive-green sweep."""
+    _, cfg = repo_inputs
+    cfg = LoopConfig(loops=1, phases=ALL_SELECTABLE, projects_dir=cfg.projects_dir)
+    worker_result = RepoResult(repo="r", loop_idx=1)
+    worker_result.phases.append(PhaseResult(name="plan", rc=0, work_units=1))
+    catchup_result = RepoResult(repo="r", loop_idx=1, is_post_loop=True)
+    catchup_result.post_loop_phases.append(PhaseResult(name="drive-green", rc=0))
+
+    with (
+        patch.object(loop_runner, "process_repo", return_value=worker_result),
+        patch.object(
+            loop_runner,
+            "_run_post_loop_stages",
+            return_value=[catchup_result],
+        ) as catchup,
+    ):
+        results = run_loop(cfg, repos=["r"])
+
+    catchup.assert_called_once_with(cfg, ["r"])
+    assert results == [worker_result, catchup_result]
+
+
 # ---------------------------------------------------------------------------
 # Argv construction
 # ---------------------------------------------------------------------------
@@ -775,28 +829,34 @@ def test_build_phase_argv_forwards_resolved_agent() -> None:
     assert argv[argv.index("--agent") + 1] == "codex"
 
 
-def test_build_phase_argv_drive_green_includes_issues() -> None:
-    """drive-green passes explicit cfg.issues, but not open_issues (uses PR-discovery by default).
-
-    PR-discovery auto-discovers failing PRs; open_issues is only used by other phases.
-    """
+def test_build_phase_argv_drive_green_scopes_to_worker_issue() -> None:
+    """Per-issue drive-green forwards only the current worker issue."""
     cfg = LoopConfig(issues=[7, 8])
     with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/py", ["script.py"])):
         argv = loop_runner._build_phase_argv("drive-green", cfg, open_issues=[1, 2])
     assert argv is not None
     assert "--issues" in argv
-    assert "7" in argv and "8" in argv
-    # Important: the open_issues passed to _build_phase_argv are NOT used for drive-green
-    # when cfg.issues is empty; only explicit cfg.issues are forwarded.
+    issue_idx = argv.index("--issues")
+    assert argv[issue_idx + 1 : issue_idx + 3] == ["1", "2"]
+    assert "7" not in argv and "8" not in argv
 
 
-def test_build_phase_argv_drive_green_omits_issues_when_unscoped() -> None:
-    """drive-green omits --issues when cfg.issues is empty (uses PR-discovery mode)."""
+def test_build_phase_argv_drive_green_omits_issues_for_final_catchup() -> None:
+    """Final catch-up drive-green can pass no issue scope to use PR discovery."""
     cfg = LoopConfig(issues=[])
     with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/py", ["script.py"])):
-        argv = loop_runner._build_phase_argv("drive-green", cfg, open_issues=[7, 8])
+        argv = loop_runner._build_phase_argv("drive-green", cfg, open_issues=[])
     assert argv is not None
     assert "--issues" not in argv
+
+
+def test_build_phase_argv_drive_green_uses_worker_issue_even_unscoped() -> None:
+    """An auto-discovered issue worker still scopes drive-green to its issue."""
+    cfg = LoopConfig(issues=[])
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/py", ["script.py"])):
+        argv = loop_runner._build_phase_argv("drive-green", cfg, open_issues=[1577])
+    assert argv is not None
+    assert argv[argv.index("--issues") + 1] == "1577"
 
 
 def test_build_phase_argv_passes_dry_run() -> None:
@@ -1721,6 +1781,37 @@ class TestDefaultPhaseTimeout:
         ):
             main(["--repos", "Repo", "--dry-run", "--loops", "1", "--agent", "claude"])
         assert captured["cfg"].phase_timeout_s == _default_phase_timeout_s()
+
+    def test_main_prefers_current_checkout_parent_for_projects_dir_default(
+        self, tmp_path: Path
+    ) -> None:
+        """Loop defaults should use the cwd checkout's projects root when available."""
+        captured: dict[str, LoopConfig] = {}
+        projects_dir = tmp_path / "projects"
+
+        def _capture(cfg: LoopConfig, _repos: list[str]) -> list[RepoResult]:
+            captured["cfg"] = cfg
+            return []
+
+        with (
+            patch.object(
+                loop_runner,
+                "_resolve_org_and_repos",
+                return_value=("Org", ["Repo"], None),
+            ),
+            patch.object(loop_runner, "_preflight_token_scopes"),
+            patch.object(loop_runner, "_clone_missing_repos"),
+            patch.object(
+                loop_runner,
+                "resolve_projects_dir",
+                return_value=projects_dir,
+            ) as resolve_projects_dir,
+            patch.object(loop_runner, "run_loop", side_effect=_capture),
+        ):
+            main(["--repos", "Repo", "--dry-run", "--loops", "1", "--agent", "claude"])
+
+        resolve_projects_dir.assert_called_once_with(None, prefer_cwd_parent=True)
+        assert captured["cfg"].projects_dir == projects_dir
 
     def test_main_resolves_agent_before_building_config(self) -> None:
         """LoopConfig stores the concrete auto-detected provider."""

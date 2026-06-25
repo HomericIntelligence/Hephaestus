@@ -8,8 +8,10 @@ per-process de-duplication guard.
 from __future__ import annotations
 
 import logging
+import subprocess
 from collections.abc import Iterator
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -65,6 +67,40 @@ def test_env_var_dir_missing_warns_and_falls_back(
     assert caplog.records[0].levelno == logging.WARNING
     assert "does not exist" in caplog.records[0].getMessage()
     assert str(nonexistent) in caplog.records[0].getMessage()
+
+
+def test_prefer_cwd_parent_uses_current_checkout_parent(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """Loop callers can default to the projects root that owns the cwd checkout."""
+    checkout = tmp_path / "projects" / "ProjectHephaestus"
+    checkout.mkdir(parents=True)
+    monkeypatch.delenv("PROJECTS_ROOT", raising=False)
+    result_mock = MagicMock(stdout=f"{checkout}\n")
+
+    with (
+        patch("hephaestus.config.paths.subprocess.run", return_value=result_mock),
+        caplog.at_level(logging.INFO, logger="hephaestus.config.paths"),
+    ):
+        result = resolve_projects_dir(prefer_cwd_parent=True)
+
+    assert result == checkout.parent
+    assert caplog.records == []
+
+
+def test_prefer_cwd_parent_falls_back_when_git_root_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The cwd-parent preference is best-effort and keeps the historical fallback."""
+    monkeypatch.delenv("PROJECTS_ROOT", raising=False)
+
+    with patch(
+        "hephaestus.config.paths.subprocess.run",
+        side_effect=subprocess.CalledProcessError(128, ["git"]),
+    ):
+        result = resolve_projects_dir(prefer_cwd_parent=True)
+
+    assert result == DEFAULT_PROJECTS_DIR
 
 
 def test_no_override_no_env_no_warning_at_info(

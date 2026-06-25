@@ -1,14 +1,8 @@
-"""Tests for drive-green as a per-issue blocking loop-body phase (#1560).
-
-Supersedes the post-loop-terminal-stage model (#818): drive-green now runs
-INSIDE the issue-major loop body, once per issue per loop (the blocking phase
-that waits for each issue's PR to merge), rather than once per repo after all
-loops. ``_run_post_loop_stages`` is no longer auto-invoked by ``run_loop`` —
-``post_loop_phases`` is therefore always empty in the default path.
-"""
+"""Tests for per-issue drive-green plus the final catch-up sweep (#1560)."""
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -56,6 +50,7 @@ def _patch_run_loop_externals(calls: list):
         ),
         patch.object(loop_runner, "_clone_missing_repos"),
         patch.object(loop_runner, "_preflight_token_scopes"),
+        patch.object(loop_runner, "_maybe_sleep_for_rate_budget"),
         patch.object(loop_runner, "run_phase", side_effect=_record),
     ]
 
@@ -89,28 +84,33 @@ def test_final_loop_only_symbols_removed() -> None:
 
 
 def test_drive_green_alone_runs_per_issue_in_loop_body(tmp_path: Path) -> None:
-    """`--phases drive-green` → drive-green runs per issue in the loop body, no plan/implement.
-
-    With early-exit disabled (drive-green is not a convergence phase, and one
-    issue is discovered each loop), it runs once per issue per loop. The result
-    is recorded under ``phases`` (loop body), never ``post_loop_phases``.
-    """
+    """`--phases drive-green` runs per issue, then one repo-level catch-up sweep."""
     cfg = _cfg(tmp_path, loops=1, phases=("drive-green",))
     repos = ["r1", "r2"]
     _ensure_repo_dirs(cfg, repos)
     calls: list = []
     cms = _patch_run_loop_externals(calls)
-    with cms[0], cms[1], cms[2], cms[3], cms[4], cms[5], cms[6]:
+    with contextlib.ExitStack() as stack:
+        for cm in cms:
+            stack.enter_context(cm)
         results = loop_runner.run_loop(cfg, repos)
     dg_calls = [c for c in calls if c[2] == "drive-green"]
     loop_phase_calls = [c for c in calls if c[2] in ALL_PHASES]
-    # One issue per repo, one loop → drive-green once per repo's issue.
-    assert sorted(c[1] for c in dg_calls) == ["r1", "r2"], dg_calls
+    # One issue per repo, one loop, plus one final catch-up run per repo.
+    assert sorted(c[1] for c in dg_calls) == ["r1", "r1", "r2", "r2"], dg_calls
     assert loop_phase_calls == [], loop_phase_calls
-    # Recorded in the loop body (phases), NOT post_loop_phases (#1560).
-    assert all(not r.post_loop_phases for r in results), results
-    body = [(r.repo, p.name) for r in results for p in r.phases if not p.skipped]
+    body = [
+        (r.repo, p.name) for r in results if not r.is_post_loop for p in r.phases if not p.skipped
+    ]
     assert sorted(body) == [("r1", "drive-green"), ("r2", "drive-green")]
+    catchup = [
+        (r.repo, p.name)
+        for r in results
+        if r.is_post_loop
+        for p in r.post_loop_phases
+        if not p.skipped
+    ]
+    assert sorted(catchup) == [("r1", "drive-green"), ("r2", "drive-green")]
 
 
 # ---------------------------------------------------------------------------
@@ -119,11 +119,7 @@ def test_drive_green_alone_runs_per_issue_in_loop_body(tmp_path: Path) -> None:
 
 
 def test_drive_green_with_loop_phases_runs_per_issue_each_loop(tmp_path: Path) -> None:
-    """`--phases plan,implement,drive-green --loops 3` → all three run per issue, each loop.
-
-    Issue-major (#1560): each loop runs plan→implement→drive-green for the
-    discovered issue, so all three appear once per loop (3 loops → 3 each).
-    """
+    """Full phase selection runs per issue each loop plus final drive-green catch-up."""
     cfg = _cfg(tmp_path, loops=3, phases=ALL_SELECTABLE)
     repos = ["r1"]
     _ensure_repo_dirs(cfg, repos)
@@ -142,14 +138,16 @@ def test_drive_green_with_loop_phases_runs_per_issue_each_loop(tmp_path: Path) -
         patch.object(loop_runner, "_resolve_repo_dir", side_effect=lambda pd, r: pd / r),
         patch.object(loop_runner, "_clone_missing_repos"),
         patch.object(loop_runner, "_preflight_token_scopes"),
+        patch.object(loop_runner, "_maybe_sleep_for_rate_budget"),
         patch.object(loop_runner, "run_phase", side_effect=_record),
     ):
         loop_runner.run_loop(cfg, repos)
     dg = [c for c in calls if c[2] == "drive-green"]
     plan = [c for c in calls if c[2] == "plan"]
     impl = [c for c in calls if c[2] == "implement"]
-    # One issue, 3 loops, full sequence each loop → 3 of each phase.
-    assert len(dg) == 3, dg
+    # One issue, 3 loops, full sequence each loop → plan/implement 3 each,
+    # with one additional repo-level drive-green catch-up at the end.
+    assert [c[0] for c in dg] == [1, 2, 3, 3], dg
     assert len(plan) == 3, plan
     assert len(impl) == 3, impl
 
@@ -166,7 +164,9 @@ def test_phases_plan_implement_does_not_invoke_drive_green(tmp_path: Path) -> No
     _ensure_repo_dirs(cfg, repos)
     calls: list = []
     cms = _patch_run_loop_externals(calls)
-    with cms[0], cms[1], cms[2], cms[3], cms[4], cms[5], cms[6]:
+    with contextlib.ExitStack() as stack:
+        for cm in cms:
+            stack.enter_context(cm)
         results = loop_runner.run_loop(cfg, repos)
     assert all(c[2] != "drive-green" for c in calls), calls
     assert all(not r.post_loop_phases for r in results), results
@@ -179,7 +179,9 @@ def test_phases_plan_only_does_not_invoke_drive_green(tmp_path: Path) -> None:
     _ensure_repo_dirs(cfg, repos)
     calls: list = []
     cms = _patch_run_loop_externals(calls)
-    with cms[0], cms[1], cms[2], cms[3], cms[4], cms[5], cms[6]:
+    with contextlib.ExitStack() as stack:
+        for cm in cms:
+            stack.enter_context(cm)
         results = loop_runner.run_loop(cfg, repos)
     assert all(c[2] != "drive-green" for c in calls), calls
     assert all(not r.post_loop_phases for r in results), results
@@ -191,27 +193,39 @@ def test_phases_plan_only_does_not_invoke_drive_green(tmp_path: Path) -> None:
 
 
 def test_early_exit_loop_1_runs_drive_green_in_loop_body(tmp_path: Path) -> None:
-    """Early-exit (zero-work) after loop 1 still drives each issue green in-body.
-
-    Under issue-major, drive-green runs per issue inside loop 1 (no separate
-    post-loop pass). Early-exit then fires after loop 1, so plan and drive-green
-    each run exactly once per repo.
-    """
+    """Early-exit after loop 1 still runs worker drive-green and catch-up."""
     cfg = _cfg(tmp_path, loops=5, phases=ALL_SELECTABLE)
     repos = ["r1", "r2"]
     _ensure_repo_dirs(cfg, repos)
     calls: list = []
     cms = _patch_run_loop_externals(calls)  # all phases report work_units=0
-    with cms[0], cms[1], cms[2], cms[3], cms[4], cms[5], cms[6]:
+    with contextlib.ExitStack() as stack:
+        for cm in cms:
+            stack.enter_context(cm)
         results = loop_runner.run_loop(cfg, repos)
     plan_calls = [c for c in calls if c[2] == "plan"]
     dg_calls = [c for c in calls if c[2] == "drive-green"]
     # Early-exit fires after loop 1 → plan invoked exactly once per repo
     assert sorted(c[1] for c in plan_calls) == ["r1", "r2"], plan_calls
-    # drive-green ran in the loop body of loop 1, once per repo's issue
-    assert sorted(c[1] for c in dg_calls) == ["r1", "r2"], dg_calls
-    # No post-loop stage records anymore.
-    assert all(not r.post_loop_phases for r in results), results
+    # drive-green ran in the loop body once per repo's issue, then once more
+    # per repo in the final catch-up sweep.
+    assert sorted(c[1] for c in dg_calls) == ["r1", "r1", "r2", "r2"], dg_calls
+    loop_body_dg = [
+        r.repo
+        for r in results
+        if not r.is_post_loop
+        for p in r.phases
+        if p.name == "drive-green" and not p.skipped
+    ]
+    catchup_dg = [
+        r.repo
+        for r in results
+        if r.is_post_loop
+        for p in r.post_loop_phases
+        if p.name == "drive-green" and not p.skipped
+    ]
+    assert sorted(loop_body_dg) == ["r1", "r2"], results
+    assert sorted(catchup_dg) == ["r1", "r2"], results
 
 
 # ---------------------------------------------------------------------------

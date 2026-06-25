@@ -1,0 +1,17 @@
+name: Setup Pi CLI
+description: Install the real Earendil Works Pi coding-agent CLI for tests.
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Node.js for Pi
+      uses: actions/setup-node@v6
+      with:
+        node-version: 22.19.0
+
+    - name: Install Pi CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+        npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.2
+        pi --version

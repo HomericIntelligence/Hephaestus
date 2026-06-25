@@ -22,6 +22,8 @@ AUTO_MERGE_ON_GO_WORKFLOW = (
     REPO_ROOT / ".github" / "workflows" / "enable-auto-merge-on-implementation-go.yml"
 )
 REQUIRED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "_required.yml"
+TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test.yml"
+SETUP_PI_ACTION = REPO_ROOT / ".github" / "actions" / "setup-pi-cli" / "action.yml"
 
 
 class TestCollectYmlFiles:
@@ -256,6 +258,30 @@ class TestEnableAutoMergeOnImplementationGoWorkflow:
         assert "--json body\n" in text or "--json body \\" in text
         # The auto-merge error lives in the advisory job, which is present.
         assert "Auto-merge is enabled before implementation review GO." in text
+
+
+class TestPiCliSetup:
+    """Regression tests for installing the real Pi CLI in test environments."""
+
+    def test_required_unit_tests_install_real_pi_cli(self) -> None:
+        text = REQUIRED_WORKFLOW.read_text(encoding="utf-8")
+        assert "uses: ./.github/actions/setup-pi-cli" in text
+        unit_section = text[text.index("  unit-tests:") : text.index("  integration-tests:")]
+        assert "Install Pi CLI" in unit_section
+        assert "Run unit tests" in unit_section
+        assert unit_section.index("Install Pi CLI") < unit_section.index("Run unit tests")
+
+    def test_matrix_unit_tests_install_real_pi_cli(self) -> None:
+        text = TEST_WORKFLOW.read_text(encoding="utf-8")
+        assert "uses: ./.github/actions/setup-pi-cli" in text
+        assert text.index("uses: ./.github/actions/setup-pi-cli") < text.index("Run unit tests")
+
+    def test_setup_pi_action_pins_real_npm_package(self) -> None:
+        text = SETUP_PI_ACTION.read_text(encoding="utf-8")
+        assert "actions/setup-node@" in text
+        assert "node-version: 22.19.0" in text
+        assert "npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.2" in text
+        assert "pi --version" in text
 
 
 class TestCollectWorkflowFiles:

@@ -7,13 +7,14 @@ phase sequence (``plan`` → ``implement`` → ``drive-green``) end to end by a
 single worker before that worker takes the next issue. Up to
 ``--max-workers`` issues are in flight at once.
 
-``drive-green`` is the BLOCKING phase: scoped to one issue's PR it waits for
-the PR to MERGE (driving CI green, bounded by ``--max-merge-attempts``); if
-the PR does not merge within that budget the issue is tagged ``state:skip``
-and the worker frees its slot for a human/another agent. Because each issue's
-worktree is cut from the freshly-merged trunk, the stale-plan and
-sibling-branch merge-conflict classes the old phase-major batching suffered
-are eliminated.
+``drive-green`` is the BLOCKING per-worker phase: scoped to one issue's PR it
+waits for the PR to MERGE (driving CI green, bounded by
+``--max-merge-attempts``); if the PR does not merge within that budget and is
+genuinely stuck, the issue is tagged ``state:skip`` and the worker frees its
+slot for a human/another agent. Because each worker drives only its current
+issue, sibling workers never touch each other's PR worktrees. After all
+workers finish, one final repo-level drive-green catch-up sweep handles PRs
+left behind by transient or cross-issue ordering effects.
 
 Phase selection still works per issue: ``--phases plan`` runs only plan per
 issue; ``--phases implement`` only implement; etc. Plan-review, PR-review, and
@@ -119,11 +120,12 @@ ALL_PHASES: tuple[str, ...] = (
     "implement",
 )
 
-# drive-green is the per-issue BLOCKING phase (#1560): scoped to one issue's
-# PR it waits for the merge (bounded by --max-merge-attempts) before the worker
-# moves on. It runs LAST in each issue's sequence. Kept as a distinct tuple
-# (rather than folded into ALL_PHASES) so ``_run_post_loop_stages`` and the
-# explicit ``--phases drive-green`` operator re-run path keep working.
+# drive-green is both the per-issue BLOCKING phase (#1560) and the final
+# catch-up stage. Per-issue workers pass exactly one issue; the catch-up pass
+# deliberately passes no issue scope so the CI driver can use PR discovery.
+# Kept as a distinct tuple (rather than folded into ALL_PHASES) so
+# ``_run_post_loop_stages`` and the explicit ``--phases drive-green`` operator
+# re-run path keep working.
 ALL_POST_LOOP_STAGES: tuple[str, ...] = ("drive-green",)
 
 # Per-issue phase sequence, in order: plan → implement → drive-green. Operators
@@ -471,8 +473,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Comma-separated subset of phases/stages to run. "
             f"Valid: {','.join(ALL_SELECTABLE)} "
-            "(plan/implement are loop-body phases; drive-green is a "
-            "post-loop terminal stage that runs once per repo)."
+            "(plan/implement are loop-body phases; drive-green runs per issue "
+            "when selected and also does one final repo-level catch-up sweep)."
         ),
     )
     add_agent_argument(p)
@@ -549,8 +551,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Local directory containing repo clones. When omitted, resolved from "
-            "the ``PROJECTS_ROOT`` env var (if set and existing), otherwise "
-            f"falls back to ``{DEFAULT_PROJECTS_DIR}``."
+            "the ``PROJECTS_ROOT`` env var (if set and existing), otherwise the "
+            "current checkout parent when available, then "
+            f"``{DEFAULT_PROJECTS_DIR}``."
         ),
     )
     p.add_argument(
@@ -596,9 +599,9 @@ def _phase_order_warnings(cfg: LoopConfig) -> list[str]:
 
     Plan-review and PR-review/address-review fold into plan/implement; the
     only remaining ordering hazard is selecting plan without implement
-    (planning-only, produces no PRs). Per #818, drive-green is a post-loop
-    terminal stage and intentionally supports being run without implement
-    ("drive existing PRs without opening new work").
+    (planning-only, produces no PRs). drive-green intentionally supports being
+    run without implement so operators can drive existing PRs without opening
+    new work.
     """
     warnings: list[str] = []
     selected = set(cfg.phases)
@@ -713,8 +716,9 @@ def _resolve_phase_bin(phase: str) -> tuple[str, list[str]] | None:
 _PHASE_FLAGS: dict[str, dict[str, object]] = {
     # plan/implement use "open": forward the loop-discovered open-issue list so
     # the child phase does NOT re-run its own ``gh issue list`` every phase /
-    # every loop. drive-green stays "explicit" — #819 made it discover failing
-    # PRs directly (not via the issue list), so it must NOT receive open_issues.
+    # every loop. Per-issue drive-green also uses "open" because
+    # _process_one_issue passes exactly [issue]; the final catch-up pass passes
+    # [] so drive-green can fall back to PR discovery.
     "plan": {"worker_arg": "--parallel", "no_ui": False, "issues": "open", "advise": True},
     "implement": {
         "worker_arg": "--max-workers",
@@ -727,7 +731,7 @@ _PHASE_FLAGS: dict[str, dict[str, object]] = {
     "drive-green": {
         "worker_arg": "--max-workers",
         "no_ui": True,
-        "issues": "explicit",
+        "issues": "open",
         "advise": True,
         "nitpick": True,
     },
@@ -1235,12 +1239,14 @@ def _post_loop_stage_skip_reason(
 
 
 def _run_post_loop_stages(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
-    """Run post-loop terminal stages (drive-green) once per repo.
+    """Run final catch-up stages (drive-green) once per repo.
 
     Iterates ``repos`` sequentially (no thread pool) — post-loop stages are
     terminal and per-repo, so concurrent execution offers no benefit and
-    risks two workers hitting the same PRs. Returns a list of RepoResult
-    with ``loop_idx=cfg.loops`` and ``post_loop_phases`` populated. Any
+    risks two workers hitting the same PRs. Per-issue workers already passed
+    their issue scopes; this catch-up pass intentionally leaves drive-green
+    unscoped so the CI driver can discover any remaining open PRs. Returns a
+    list of RepoResult with ``loop_idx=cfg.loops`` and ``post_loop_phases`` populated. Any
     repo-level exception is captured in ``runner_error`` so the helper
     never raises to the caller (parity with ``process_repo``).
 
@@ -1288,7 +1294,7 @@ def _run_post_loop_stages(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]
                     phase=stage,
                     cfg=cfg,
                     loop_idx=cfg.loops,
-                    open_issues=open_issues,
+                    open_issues=[] if stage == "drive-green" else open_issues,
                     trunk_sha=trunk_sha,
                 )
                 result.post_loop_phases.append(stage_result)
@@ -1384,12 +1390,11 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
 
         _maybe_sleep_for_rate_budget(loop_idx, cfg.loops)
 
-    # drive-green is now a per-issue BLOCKING phase inside the issue-major
-    # loop body (#1560) — each issue is driven to merge before its worker
-    # frees the slot. It is no longer a separate once-per-repo post-loop
-    # stage, so nothing runs here. ``_run_post_loop_stages`` is retained for
-    # explicit operator re-runs but the default loop does not invoke it.
-    post_loop_results: list[RepoResult] = []
+    # Each worker already ran drive-green for only its current issue. Run one
+    # final sequential catch-up sweep per repo so transient CI or ordering
+    # leftovers are reported and driven without cross-worker worktree races.
+    post_loop_results = _run_post_loop_stages(cfg, repos)
+    all_results.extend(post_loop_results)
 
     # Report actual loops run (may be less than cfg.loops due to early
     # exit). Post-loop RepoResults are tagged ``is_post_loop=True`` by
@@ -1519,7 +1524,7 @@ def main(argv: list[str] | None = None) -> int:
         gh_global_rate=args.gh_global_rate,
         gh_global_burst=args.gh_global_burst,
         org=org,
-        projects_dir=resolve_projects_dir(args.projects_dir),
+        projects_dir=resolve_projects_dir(args.projects_dir, prefer_cwd_parent=True),
         # A non-positive --phase-timeout explicitly disables the bound; any
         # positive value (including the env-overridable default) applies it.
         phase_timeout_s=(

@@ -168,14 +168,17 @@ def test_run_codex_session_returns_session_id_and_last_message(tmp_path: Path) -
         )
         return _FakeCodexPopen(cmd, proc_stdout=stdout, final_message="final answer", **kwargs)
 
-    with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
-        with patch("subprocess.Popen", side_effect=fake_popen):
-            result = agent_runtime.run_codex_session(
-                "prompt",
-                cwd=tmp_path,
-                timeout=30,
-                sandbox="workspace-write",
-            )
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+    ):
+        result = agent_runtime.run_codex_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            sandbox="workspace-write",
+        )
 
     assert result.session_id == "019e1e57-7652-7892-b1ca-c31c93d4b160"
     assert result.stdout == "final answer"
@@ -199,6 +202,7 @@ def test_run_codex_session_recovers_last_message_on_wrapper_timeout(tmp_path: Pa
 
     with (
         patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
         patch.dict("os.environ", {"HEPH_CODEX_FINAL_MESSAGE_GRACE": "0"}),
         patch("subprocess.Popen", side_effect=fake_popen),
     ):
@@ -220,15 +224,18 @@ def test_run_codex_session_timeout_without_last_message_still_raises(tmp_path: P
     def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
         return _FakeCodexPopen(cmd, proc_stdout="", final_message="", hang=True, **kwargs)
 
-    with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
-        with patch("subprocess.Popen", side_effect=fake_popen):
-            with pytest.raises(subprocess.TimeoutExpired):
-                agent_runtime.run_codex_session(
-                    "prompt",
-                    cwd=tmp_path,
-                    timeout=1,
-                    sandbox="workspace-write",
-                )
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+    ):
+        with pytest.raises(subprocess.TimeoutExpired):
+            agent_runtime.run_codex_session(
+                "prompt",
+                cwd=tmp_path,
+                timeout=1,
+                sandbox="workspace-write",
+            )
 
 
 def test_codex_approval_args_uses_config_override_for_current_cli() -> None:
@@ -311,6 +318,64 @@ def test_codex_base_cmd_defaults_new_sessions_to_gpt_55_xhigh(tmp_path: Path) ->
 
     assert cmd[cmd.index("--model") + 1] == "gpt-5.5"
     assert cmd[cmd.index("-c") + 1] == 'model_reasoning_effort="xhigh"'
+
+
+def test_codex_base_cmd_adds_git_common_dir_for_worktree_metadata(tmp_path: Path) -> None:
+    """Codex worktree sessions need write access to the main clone's git dir."""
+    worktree = tmp_path / "repo" / "build" / ".worktrees" / "issue-1"
+    git_common_dir = tmp_path / "repo" / ".git"
+    worktree.mkdir(parents=True)
+    git_common_dir.mkdir(parents=True)
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert cmd == ["git", "-C", str(worktree), "rev-parse", "--git-common-dir"]
+        return subprocess.CompletedProcess(cmd, 0, stdout=f"{git_common_dir}\n", stderr="")
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime.subprocess.run", side_effect=fake_run),
+    ):
+        cmd = agent_runtime._codex_base_cmd(cwd=worktree)
+
+    assert "--add-dir" in cmd
+    add_dir_index = cmd.index("--add-dir")
+    assert cmd[add_dir_index + 1] == str(git_common_dir)
+
+
+def test_codex_base_cmd_does_not_add_git_common_dir_for_read_only(
+    tmp_path: Path,
+) -> None:
+    """Read-only Codex sessions must not receive writable git metadata roots."""
+    worktree = tmp_path / "repo" / "build" / ".worktrees" / "issue-1"
+    worktree.mkdir(parents=True)
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime.subprocess.run") as run_mock,
+    ):
+        cmd = agent_runtime._codex_base_cmd(cwd=worktree, sandbox="read-only")
+
+    assert "--add-dir" not in cmd
+    run_mock.assert_not_called()
+
+
+def test_codex_base_cmd_omits_add_dir_when_git_common_dir_is_inside_cwd(
+    tmp_path: Path,
+) -> None:
+    """Normal checkouts already have their git dir inside the writable root."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, stdout=".git\n", stderr="")
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime.subprocess.run", side_effect=fake_run),
+    ):
+        cmd = agent_runtime._codex_base_cmd(cwd=repo)
+
+    assert "--add-dir" not in cmd
 
 
 def test_codex_base_cmd_resume_without_model_preserves_session_model() -> None:

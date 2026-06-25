@@ -120,8 +120,8 @@ class TestCountFailingPrs:
 class TestBuildPhaseArgv:
     """Tests for _build_phase_argv with drive-green."""
 
-    def test_build_phase_argv_drive_green_omits_issues_when_unscoped(self) -> None:
-        """--issues is NOT passed when cfg.issues is empty and no-args discovery is intended."""
+    def test_build_phase_argv_drive_green_passes_worker_issue_scope(self) -> None:
+        """Per-issue drive-green forwards the worker's current issue scope."""
         cfg = LoopConfig(
             org="MyOrg",
             agent="claude-opus-4-8",
@@ -137,10 +137,29 @@ class TestBuildPhaseArgv:
             mock_bin.return_value = ("/py", ["script.py"])
             argv = _build_phase_argv("drive-green", cfg, open_issues)
         assert argv is not None
+        issues_idx = argv.index("--issues")
+        assert argv[issues_idx + 1 : issues_idx + 3] == ["7", "8"]
+
+    def test_build_phase_argv_drive_green_omits_issues_for_final_catchup(self) -> None:
+        """Final catch-up drive-green can omit --issues and use PR discovery."""
+        cfg = LoopConfig(
+            org="MyOrg",
+            agent="claude-opus-4-8",
+            issues=[],
+            max_workers=3,
+            dry_run=False,
+            no_advise=False,
+            phases=("drive-green",),
+            loops=1,
+        )
+        with patch("hephaestus.automation.loop_runner._resolve_phase_bin") as mock_bin:
+            mock_bin.return_value = ("/py", ["script.py"])
+            argv = _build_phase_argv("drive-green", cfg, [])
+        assert argv is not None
         assert "--issues" not in argv
 
-    def test_build_phase_argv_drive_green_passes_explicit_issues(self) -> None:
-        """--issues is passed with explicit issue numbers when cfg.issues is provided."""
+    def test_build_phase_argv_drive_green_prefers_worker_scope_over_cfg_issues(self) -> None:
+        """Worker drive-green must not inherit the loop's full explicit issue list."""
         cfg = LoopConfig(
             org="MyOrg",
             agent="claude-opus-4-8",
@@ -157,17 +176,11 @@ class TestBuildPhaseArgv:
             argv = _build_phase_argv("drive-green", cfg, open_issues)
         assert argv is not None
         issues_idx = argv.index("--issues")
-        assert argv[issues_idx + 1 : issues_idx + 3] == ["123", "456"]
+        assert argv[issues_idx + 1 : issues_idx + 3] == ["7", "8"]
 
 
 class TestPostLoopDriveGreenSkipLogic:
-    """Tests for drive-green SKIP logic in ``_run_post_loop_stages`` (post-#818).
-
-    drive-green moved out of the loop body and into the post-loop terminal
-    stage. The same work-discovery gate (``_count_failing_prs``, --issues
-    override) now lives in ``_run_post_loop_stages`` rather than
-    ``process_repo``; these tests pin that invariant at the new home.
-    """
+    """Tests for the final drive-green catch-up gate in ``_run_post_loop_stages``."""
 
     def test_drive_green_skips_with_reason_no_failing_prs(
         self, repo_inputs: tuple[Path, LoopConfig]

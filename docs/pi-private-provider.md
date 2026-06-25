@@ -11,6 +11,14 @@ Use placeholders in documentation:
 - `<private-provider-url>`
 - `<private-model-name>`
 
+Install the real Pi CLI in the automation environment; do not substitute a fake
+`pi` binary for adapter validation:
+
+```bash
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.2
+pi --version
+```
+
 Set the local alias at runtime:
 
 ```bash

@@ -384,6 +384,46 @@ def _codex_model_args(model: str, *, use_default: bool = False) -> list[str]:
     return args
 
 
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    """Return whether ``path`` is inside ``parent`` without requiring Python 3.12 APIs."""
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _codex_extra_writable_dirs(cwd: Path, sandbox: str | None) -> list[Path]:
+    """Return extra writable roots Codex needs for git worktree metadata."""
+    if sandbox != "workspace-write":
+        return []
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--git-common-dir"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return []
+
+    raw_common_dir = result.stdout.strip()
+    if not raw_common_dir:
+        return []
+
+    common_dir = Path(raw_common_dir)
+    if not common_dir.is_absolute():
+        common_dir = cwd / common_dir
+    common_dir = common_dir.resolve(strict=False)
+    cwd_resolved = cwd.resolve(strict=False)
+    if _is_relative_to(common_dir, cwd_resolved):
+        return []
+    return [common_dir]
+
+
 def run_codex_text(
     prompt: str,
     *,
@@ -439,6 +479,8 @@ def _codex_base_cmd(
         cmd.extend(["--cd", str(cwd)])
         if sandbox is not None:
             cmd.extend(["--sandbox", sandbox])
+        for writable_dir in _codex_extra_writable_dirs(cwd, sandbox):
+            cmd.extend(["--add-dir", str(writable_dir)])
         cmd.extend(codex_approval_args(approval))
     cmd.extend(["--json"])
     return cmd
