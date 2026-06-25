@@ -83,12 +83,8 @@ class TestLoadConfig:
         monkeypatch.setattr("hephaestus.config.utils.YAML_AVAILABLE", False)
         yaml_file = tmp_path / "config.yaml"
         yaml_file.write_text("key: value\n")
-        try:
+        with pytest.raises(RuntimeError):
             load_config(yaml_file)
-        except ValueError as exc:
-            pytest.fail(f"Got misleading ValueError instead of RuntimeError: {exc}")
-        except RuntimeError:
-            pass
 
 
 class TestGetSetting:
