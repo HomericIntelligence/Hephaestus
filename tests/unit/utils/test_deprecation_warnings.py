@@ -46,23 +46,40 @@ class TestDocumentedDeprecations:
             f"DeprecationWarning message should name the deprecated symbol; got: {msg!r}"
         )
 
-    def test_retry_with_jitter_reachable_from_top_level_lazy_loader(self) -> None:
-        """`hephaestus.retry_with_jitter` must still resolve via PEP 562 lazy loading.
+    def test_retry_with_jitter_access_emits_deprecation_warning(self) -> None:
+        """`hephaestus.retry_with_jitter` must warn at ACCESS time via the lazy loader.
 
-        Removing the symbol from `hephaestus/__init__.py`'s lazy-loader map
-        without first amending COMPATIBILITY.md's deprecation policy would
-        break downstream users mid-deprecation-window.
+        Regression for #1545: the deprecated shim is exposed at the top-level
+        package surface, so binding the name (not only calling it) must signal
+        the deprecation. Removing the symbol from the lazy-loader map without
+        first amending COMPATIBILITY.md would break downstream users mid-window.
         """
         import hephaestus
 
-        # Trip the lazy loader. We expect a successful attribute lookup
-        # (whether or not it also emits a DeprecationWarning on access — only
-        # CALLING the symbol triggers the warning in the current
-        # implementation; the lazy resolve itself is silent).
-        symbol = hephaestus.retry_with_jitter
+        # __getattr__ caches resolved names into module globals (PEP 562), so a
+        # prior access would skip the lazy path. Force a fresh resolve.
+        hephaestus.__dict__.pop("retry_with_jitter", None)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            symbol = hephaestus.retry_with_jitter
+
         assert callable(symbol), (
             "hephaestus.retry_with_jitter must remain importable via the lazy "
             "loader until its deprecation window closes (post-2.0)."
+        )
+        access_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+        assert access_warnings, (
+            "Accessing hephaestus.retry_with_jitter must emit a DeprecationWarning "
+            "(issue #1545). If you intentionally removed it, update COMPATIBILITY.md "
+            "and this test in the same PR."
+        )
+        assert "retry_with_jitter" in str(access_warnings[0].message)
+        # stacklevel=2 must point the warning at THIS test's access line, not at
+        # hephaestus/__init__.py (a wrong stacklevel would otherwise pass silently).
+        assert access_warnings[0].filename == __file__, (
+            f"DeprecationWarning should be attributed to the caller's file "
+            f"({__file__}); got {access_warnings[0].filename}. Check stacklevel."
         )
 
 

@@ -191,8 +191,8 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 removal):
 
 - `retry_with_jitter` — superseded by `retry_with_backoff(jitter=True, max_delay=...)`.
-  Emits a `DeprecationWarning` when called. Scheduled for removal no earlier than
-  the next major version after 1.0.
+  Emits a `DeprecationWarning` both when accessed via `hephaestus.retry_with_jitter`
+  and when called. Scheduled for removal no earlier than the next major version after 1.0.
 
 ### `hephaestus.logging`
 
