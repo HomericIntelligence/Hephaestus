@@ -283,6 +283,18 @@ repos:
         stages: [commit-msg]
         pass_filenames: true
 
+  # DCO enforcement (issue #1516).
+  # commit-msg stage: pre-commit passes the message file path as the only arg.
+  - repo: local
+    hooks:
+      - id: dco-signoff-msg
+        name: Enforce DCO Signed-off-by trailer
+        description: "Reject commit messages lacking a 'Signed-off-by: Name <email>' trailer"
+        entry: python3 scripts/check_dco_signoff.py
+        language: system
+        stages: [commit-msg]
+        pass_filenames: true
+
 
   # Skill merge method check: skills must not hardcode merge flags
   - repo: local

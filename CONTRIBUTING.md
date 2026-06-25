@@ -267,6 +267,15 @@ git config commit.gpgsign true   # always -S
 # add the sign-off per commit with -s (or via a prepare-commit-msg hook)
 ```
 
+Both are now mechanically enforced: the `pr-policy` CI gate (Check 4) fails any PR
+whose commits lack a valid `Signed-off-by: Name <email>` trailer, and the local
+`dco-signoff-msg` `commit-msg` pre-commit hook rejects an un-signed-off commit
+before it is created. To re-sign existing commits run:
+
+```bash
+git rebase --exec 'git commit --amend --no-edit -s' origin/main
+```
+
 ## Questions?
 
 Feel free to ask questions in GitHub issues or discussions.

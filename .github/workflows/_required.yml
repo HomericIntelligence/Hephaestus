@@ -434,6 +434,25 @@ jobs:
                  | .commit.message | split("\n")[0]' commits.json \
             | python3 scripts/check_conventional_commit.py -
 
+      - name: "Check 4: every commit carries a DCO Signed-off-by trailer"
+        if: always() && steps.fetch.outcome == 'success'
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          # Dependabot commits are bot-authored, not human DCO attestations;
+          # exempt like Check 1 / Check 3 (#1070).
+          if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
+            echo "OK: Dependabot PR — DCO sign-off check is not applicable"
+            exit 0
+          fi
+          # Full commit message per node, NUL-separated (the trailer lives in
+          # the body, so unlike Check 3 we keep the whole message). Reuses the
+          # commits.json already fetched above. Empty set passes by design.
+          jq -j '.data.repository.pullRequest.commits.nodes[]
+                 | .commit.message + "\u0000"' commits.json \
+            | python3 scripts/check_dco_signoff.py -
+
   auto-merge-policy:
     name: auto-merge-policy
     # Advisory (NOT a required check): verifies auto-merge matches the

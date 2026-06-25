@@ -147,9 +147,7 @@ class TestCheckNoUnsanctionedTestDirs:
         _make_package(src, "utils")
         (tests / "utils").mkdir(parents=True)
         (tests / "scripts").mkdir()
-        ok, unsanctioned = check_no_unsanctioned_test_dirs(
-            src, tests, frozenset({"scripts"})
-        )
+        ok, unsanctioned = check_no_unsanctioned_test_dirs(src, tests, frozenset({"scripts"}))
         assert ok is True
         assert unsanctioned == set()
 
