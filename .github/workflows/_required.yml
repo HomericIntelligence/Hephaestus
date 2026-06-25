@@ -829,6 +829,51 @@ jobs:
           # command guaranteed available in the repo-pinned pixi v0.69.0.
           pixi install --locked
 
+  license-scan:
+    name: license-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          fetch-depth: 0  # hatch-vcs needs full history to compute the version
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.13"
+          cache: pip  # cache wheels so a PyPI hiccup does not flake the gate
+
+      # Install the package + ALL runtime extras (with deps) on a bare runner,
+      # NOT inside pixi: pip and pixi co-managing site-packages causes lockfile
+      # churn (see security.yml comment). .[all] is required so
+      # distributed_requirements() can read every runtime extra's Requires-Dist.
+      - name: Install package with all runtime extras
+        run: pip install -e ".[all]"
+
+      - name: Run license scan
+        id: license-scan
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: python3 scripts/check_license_compatibility.py
+
+      - name: Post license-scan summary
+        if: always()
+        env:
+          LICENSE_OUTCOME: ${{ steps.license-scan.outcome }}
+        run: |
+          {
+            echo "## License Compatibility Scan"
+            echo ""
+            if [ "$LICENSE_OUTCOME" = "success" ]; then
+              echo "All distributed dependency licenses compatible with BSD-3-Clause (see NOTICE)."
+            else
+              echo "Non-compatible license or coverage gap detected — see job logs and NOTICE."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # required-checks-gate is the SINGLE branch-protection required status check
   # for this workflow (alongside the two `test (...)` contexts from test.yml).
   # It fans in every gating job above so that branch protection never has to
@@ -867,6 +912,7 @@ jobs:
       - security-sast-scan
       - schema-validation
       - deps-version-sync
+      - license-scan
     steps:
       - name: Verify no required job failed or was cancelled
         env:
