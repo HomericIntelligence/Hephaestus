@@ -115,6 +115,17 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module 'hephaestus' has no attribute {name!r}")
 
 
+def __dir__() -> list[str]:
+    """Expose lazily-loaded public symbols to dir() (PEP 562).
+
+    Paired with __getattr__ so introspection tools (IPython tab-completion,
+    IDEs, documentation generators) can discover the full public API. Returns
+    only names — no attribute access — so no lazy module is imported and no
+    deprecation warning is triggered.
+    """
+    return sorted(set(_LAZY_IMPORTS) | set(__all__) | set(globals()))
+
+
 # Static declarations for the lazily-loaded names in __all__. These are
 # annotation-only statements: with ``from __future__ import annotations`` they
 # are never evaluated, create no module attribute, and trigger no import — so

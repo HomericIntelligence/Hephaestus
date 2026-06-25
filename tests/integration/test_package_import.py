@@ -2,6 +2,7 @@
 """Integration tests verifying all public symbols in __all__ are importable."""
 
 import importlib
+import warnings
 
 import pytest
 
@@ -106,6 +107,49 @@ class TestTopLevelImports:
 
         assert hasattr(hephaestus, "__all__")
         assert len(hephaestus.__all__) > 0
+
+
+class TestDirDiscoverability:
+    """Verify dir(hephaestus) exposes the lazy public surface (PEP 562, #1512)."""
+
+    def test_dir_lists_all_lazy_symbols(self):
+        """Every lazily-loaded symbol must be visible to dir()."""
+        import hephaestus
+
+        listed = set(dir(hephaestus))
+        missing = set(hephaestus._LAZY_IMPORTS) - listed
+        assert not missing, f"lazy symbols invisible to dir(): {sorted(missing)}"
+
+    def test_dir_lists_all_public_api(self):
+        """Every __all__ entry must be visible to dir()."""
+        import hephaestus
+
+        listed = set(dir(hephaestus))
+        missing = set(hephaestus.__all__) - listed
+        assert not missing, f"__all__ entries invisible to dir(): {sorted(missing)}"
+
+    def test_dir_preserves_existing_attributes(self):
+        """dir() must not drop already-visible module attributes."""
+        import hephaestus
+
+        listed = set(dir(hephaestus))
+        assert {"__version__", "__author__"} <= listed
+
+    def test_dir_does_not_import_or_warn(self):
+        """dir() returns names only — no lazy import, no DeprecationWarning."""
+        import hephaestus
+
+        hephaestus.__dict__.pop("retry_with_jitter", None)  # bust PEP 562 cache
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _ = dir(hephaestus)
+
+        assert not [w for w in caught if issubclass(w.category, DeprecationWarning)], (
+            "dir() must not trigger deprecation warnings"
+        )
+        assert "retry_with_jitter" not in hephaestus.__dict__, (
+            "dir() must not eagerly resolve lazy symbols into module globals"
+        )
 
 
 class TestSubpackageImports:
