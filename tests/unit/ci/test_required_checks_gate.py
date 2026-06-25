@@ -96,6 +96,24 @@ class TestRequiredChecksGate:
             "not skip on label/auto-merge events and deadlock the required check."
         )
 
+    def test_license_scan_is_gated(self, jobs: dict[str, Any]) -> None:
+        """license-scan must be a job in _required.yml AND wired into the gate.
+
+        Previously license-scan lived only in security.yml and was NOT wired
+        into required-checks-gate, so a PR adding a GPL runtime dependency could
+        merge despite check_license_compatibility.py exiting 1 on pull_request.
+        See issue #1514.
+        """
+        assert "license-scan" in jobs, (
+            "license-scan job missing from _required.yml; it must be a gating "
+            "job so the required-checks-gate blocks merges on license violations"
+        )
+        gate_needs = set(jobs[GATE_JOB]["needs"])
+        assert "license-scan" in gate_needs, (
+            "license-scan must be in required-checks-gate.needs so it blocks "
+            "merges; see issue #1514 and docs/ci/required-checks.md"
+        )
+
     def test_gate_assertion_fires_on_unwired_job(self) -> None:
         """Negative-path: the invariant check must flag a job absent from needs:.
 

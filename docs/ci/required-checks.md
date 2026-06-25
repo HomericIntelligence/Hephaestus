@@ -22,8 +22,8 @@ gate that newer `main` would fail.
 
 ## Why a single aggregator gate
 
-`_required.yml` defines ~18 jobs (`lint`, `pr-policy`, `unit-tests`,
-`build`, the `security/*` scans, etc.). Enumerating each one individually in
+`_required.yml` defines ~19 jobs (`lint`, `pr-policy`, `unit-tests`,
+`build`, the `security/*` scans, `license-scan`, etc.). Enumerating each one individually in
 branch protection is brittle: renaming a job, adding a job, or splitting one
 silently changes what's required, and nobody notices until something slips
 through.
