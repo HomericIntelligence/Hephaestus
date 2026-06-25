@@ -3,10 +3,14 @@
 from hephaestus.cli.colors import Colors
 from hephaestus.cli.utils import (
     COMMAND_REGISTRY,
+    DRY_RUN_HELP_CAVEAT,
     CommandRegistry,
+    add_dry_run_arg,
+    add_github_throttle_args,
     add_json_arg,
     add_logging_args,
     add_version_arg,
+    configure_github_throttle_from_args,
     confirm_action,
     create_parser,
     emit_json_status,
@@ -17,11 +21,15 @@ from hephaestus.cli.utils import (
 
 __all__ = [
     "COMMAND_REGISTRY",
+    "DRY_RUN_HELP_CAVEAT",
     "Colors",
     "CommandRegistry",
+    "add_dry_run_arg",
+    "add_github_throttle_args",
     "add_json_arg",
     "add_logging_args",
     "add_version_arg",
+    "configure_github_throttle_from_args",
     "confirm_action",
     "create_parser",
     "emit_json_status",

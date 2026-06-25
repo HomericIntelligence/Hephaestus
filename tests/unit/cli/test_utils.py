@@ -331,19 +331,20 @@ class TestCliBarrelExports:
 
     def test_framework_symbols_importable_from_cli_package(self) -> None:
         """The CLI framework must be reachable via `from hephaestus.cli import ...`."""
-        from hephaestus.cli import (  # noqa: F401 - import is the assertion
-            COMMAND_REGISTRY,
-            Colors,
-            CommandRegistry,
-            add_json_arg,
-            add_logging_args,
-            add_version_arg,
-            confirm_action,
-            create_parser,
-            format_output,
-            format_table,
-            register_command,
-        )
+        import hephaestus.cli as cli
+
+        # Verify symbols are accessible from the package
+        assert hasattr(cli, "COMMAND_REGISTRY")
+        assert hasattr(cli, "Colors")
+        assert hasattr(cli, "CommandRegistry")
+        assert hasattr(cli, "add_json_arg")
+        assert hasattr(cli, "add_logging_args")
+        assert hasattr(cli, "add_version_arg")
+        assert hasattr(cli, "confirm_action")
+        assert hasattr(cli, "create_parser")
+        assert hasattr(cli, "format_output")
+        assert hasattr(cli, "format_table")
+        assert hasattr(cli, "register_command")
 
     def test_cli_all_lists_framework(self) -> None:
         """hephaestus.cli.__all__ lists the framework symbols, not just Colors."""
@@ -359,6 +360,26 @@ class TestCliBarrelExports:
         for symbol in symbols:
             assert symbol in cli.__all__
             assert hasattr(cli, symbol)
+
+    def test_cli_all_covers_module_all(self) -> None:
+        """Package __all__ re-exports every symbol cli.utils.__all__ declares (#1511)."""
+        import hephaestus.cli as cli
+
+        utils = cli.utils
+
+        missing = set(utils.__all__) - set(cli.__all__)
+        assert not missing, f"cli.__all__ omits stable utils symbols: {sorted(missing)}"
+        for symbol in utils.__all__:
+            assert hasattr(cli, symbol), f"cli has no attribute {symbol!r}"
+
+    def test_dry_run_symbols_reexport_identity(self) -> None:
+        """Re-exports are the SAME objects so patch paths don't diverge (#1511)."""
+        import hephaestus.cli as cli
+
+        utils = cli.utils
+
+        assert cli.add_dry_run_arg is utils.add_dry_run_arg
+        assert cli.DRY_RUN_HELP_CAVEAT is utils.DRY_RUN_HELP_CAVEAT
 
 
 class TestAddJsonArg:
