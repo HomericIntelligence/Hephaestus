@@ -45,6 +45,7 @@ from hephaestus.cli.utils import (
 )
 
 from .github_api import _gh_call
+from .models import DEFAULT_WORKER_COUNT
 
 if TYPE_CHECKING:
     from .models import WorkerResult
@@ -82,8 +83,8 @@ def setup_review_logging(verbose: bool = False) -> None:
 def add_max_workers_arg(
     parser: argparse.ArgumentParser,
     *,
-    default: int = 3,
-    help_text: str = "Maximum number of parallel workers, 1-32 (default: 3)",
+    default: int = DEFAULT_WORKER_COUNT,
+    help_text: str = f"Maximum number of parallel workers, 1-32 (default: {DEFAULT_WORKER_COUNT})",
 ) -> None:
     """Add a validated ``--max-workers`` argument to ``parser``.
 

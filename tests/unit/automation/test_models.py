@@ -3,16 +3,24 @@
 from datetime import datetime
 
 from hephaestus.automation.models import (
+    DEFAULT_WORKER_COUNT,
+    AddressReviewOptions,
+    CIDriverOptions,
     DependencyGraph,
     ImplementationPhase,
     ImplementationState,
     ImplementerOptions,
     IssueInfo,
     IssueState,
+    ParallelWorkerOptionsBase,
     PlannerOptions,
     PlanResult,
+    PlanReviewerOptions,
+    ReviewerOptions,
     ReviewPhase,
     ReviewState,
+    VerboseParallelWorkerOptionsBase,
+    WorkerOptionsBase,
     WorkerResult,
 )
 
@@ -279,6 +287,85 @@ class TestWorkerResult:
         assert result.pr_number is None
 
 
+class TestWorkerOptionsBase:
+    """Tests for shared worker option defaults."""
+
+    def test_base_defaults_and_model_dump(self) -> None:
+        """WorkerOptionsBase exposes only the dry-run field."""
+        options = WorkerOptionsBase()
+
+        assert WorkerOptionsBase.model_fields["dry_run"].default is False
+        assert "verbose" not in WorkerOptionsBase.model_fields
+        assert options.model_dump() == {"dry_run": False}
+
+    def test_parallel_and_verbose_base_defaults(self) -> None:
+        """Narrow worker base classes expose only their shared fields."""
+        assert ParallelWorkerOptionsBase.model_fields["max_workers"].default == DEFAULT_WORKER_COUNT
+        assert VerboseParallelWorkerOptionsBase.model_fields["verbose"].default is False
+
+    def test_all_option_models_inherit_shared_fields(self) -> None:
+        """Every automation option model inherits dry-run and omits state_dir."""
+        for model_cls in (
+            PlannerOptions,
+            ImplementerOptions,
+            ReviewerOptions,
+            PlanReviewerOptions,
+            AddressReviewOptions,
+            CIDriverOptions,
+        ):
+            assert issubclass(model_cls, WorkerOptionsBase)
+            assert "dry_run" in model_cls.model_fields
+            assert "state_dir" not in model_cls.model_fields
+
+    def test_worker_count_defaults_use_shared_constant(self) -> None:
+        """Worker-count fields all use DEFAULT_WORKER_COUNT without renaming."""
+        assert PlannerOptions.model_fields["parallel"].default == DEFAULT_WORKER_COUNT
+        for model_cls in (
+            ImplementerOptions,
+            ReviewerOptions,
+            PlanReviewerOptions,
+            AddressReviewOptions,
+            CIDriverOptions,
+        ):
+            assert model_cls.model_fields["max_workers"].default == DEFAULT_WORKER_COUNT
+
+    def test_constructor_keywords_and_model_dump_are_compatible(self) -> None:
+        """Existing constructor keyword shapes still validate and dump correctly."""
+        cases = (
+            (
+                PlannerOptions,
+                {"issues": [1], "parallel": 5, "dry_run": True},
+                "parallel",
+            ),
+            (
+                ImplementerOptions,
+                {"max_workers": 5, "dry_run": True},
+                "max_workers",
+            ),
+            (ReviewerOptions, {"max_workers": 5, "dry_run": True}, "max_workers"),
+            (
+                PlanReviewerOptions,
+                {"max_workers": 5, "dry_run": True, "verbose": True},
+                "max_workers",
+            ),
+            (
+                AddressReviewOptions,
+                {"max_workers": 5, "dry_run": True, "verbose": True},
+                "max_workers",
+            ),
+            (CIDriverOptions, {"max_workers": 5, "dry_run": True, "verbose": True}, "max_workers"),
+        )
+
+        for model_cls, kwargs, worker_field in cases:
+            options = model_cls(**kwargs)
+            dumped = options.model_dump(include={worker_field, "dry_run", "verbose"})
+            expected = {worker_field: 5, "dry_run": True}
+            if "verbose" in model_cls.model_fields:
+                expected["verbose"] = True
+
+            assert dumped == expected
+
+
 class TestReviewState:
     """Tests for ReviewState model."""
 
@@ -308,7 +395,7 @@ class TestPlannerOptions:
         assert options.issues == [123, 456]
         assert options.dry_run is False
         assert options.force is False
-        assert options.parallel == 3
+        assert options.parallel == DEFAULT_WORKER_COUNT
         assert options.system_prompt_file is None
         assert options.skip_closed is True
         assert options.enable_advise is True
@@ -345,7 +432,7 @@ class TestImplementerOptions:
         assert options.analyze_only is False
         assert options.health_check is False
         assert options.resume is False
-        assert options.max_workers == 3
+        assert options.max_workers == DEFAULT_WORKER_COUNT
         assert options.skip_closed is True
         assert options.auto_merge is True
         assert options.dry_run is False

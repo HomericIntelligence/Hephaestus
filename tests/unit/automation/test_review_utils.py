@@ -20,7 +20,7 @@ from hephaestus.automation._review_utils import (
     parse_json_block,
     print_worker_summary,
 )
-from hephaestus.automation.models import WorkerResult
+from hephaestus.automation.models import DEFAULT_WORKER_COUNT, WorkerResult
 
 # ---------------------------------------------------------------------------
 # parse_json_block
@@ -503,11 +503,13 @@ class TestAddMaxWorkersArg:
     """Tests for the shared add_max_workers_arg helper."""
 
     def test_default_help_and_value(self) -> None:
-        """Default case: uses standard help text and default=3."""
+        """Default case: uses the shared worker default."""
         parser = argparse.ArgumentParser()
         add_max_workers_arg(parser)
         args = parser.parse_args([])
-        assert args.max_workers == 3
+
+        assert args.max_workers == DEFAULT_WORKER_COUNT
+        assert f"default: {DEFAULT_WORKER_COUNT}" in parser.format_help()
 
     def test_custom_help_text(self) -> None:
         """Custom help_text is used in the parser."""

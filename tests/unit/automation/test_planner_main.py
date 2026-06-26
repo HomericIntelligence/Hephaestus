@@ -15,7 +15,7 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.automation import planner as planner_mod
-from hephaestus.automation.models import PlannerOptions, PlanResult
+from hephaestus.automation.models import DEFAULT_WORKER_COUNT, PlannerOptions, PlanResult
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +56,13 @@ def test_main_resolves_agent_when_omitted(monkeypatch: Any) -> None:
     assert rc == 0
     mock_resolve.assert_called_once_with(None)
     assert captured["options"].agent == "codex"
+
+
+def test_parse_args_default_parallel_uses_shared_worker_default() -> None:
+    """Planner --parallel default stays aligned with shared worker defaults."""
+    args = planner_mod._parse_args([])
+
+    assert args.parallel == DEFAULT_WORKER_COUNT
 
 
 def test_main_returns_zero_when_rate_limited(monkeypatch: Any) -> None:
