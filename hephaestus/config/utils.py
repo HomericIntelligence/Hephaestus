@@ -45,7 +45,8 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
 
     Raises:
         FileNotFoundError: If config file doesn't exist
-        ValueError: If config file format is unsupported
+        ValueError: If config file format is unsupported (e.g. .toml)
+        RuntimeError: If a .yaml/.yml file is given but PyYAML is not installed
 
     """
     config_path = Path(config_path)
@@ -53,10 +54,13 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
     if not config_path.exists():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
+    suffix = config_path.suffix.lower()
     with open(config_path) as f:
-        if config_path.suffix.lower() in [".yml", ".yaml"] and YAML_AVAILABLE:
+        if suffix in (".yml", ".yaml"):
+            if not YAML_AVAILABLE:
+                raise RuntimeError("PyYAML is required for YAML config support")
             return cast(dict[str, Any], yaml.safe_load(f) or {})
-        elif config_path.suffix.lower() == ".json":
+        elif suffix == ".json":
             return cast(dict[str, Any], json.load(f))
         else:
             raise ValueError(f"Unsupported config format: {config_path.suffix}")

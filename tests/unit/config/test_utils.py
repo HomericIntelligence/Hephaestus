@@ -62,6 +62,30 @@ class TestLoadConfig:
         config = load_config(config_file)
         assert config["key"] == "value"
 
+    def test_load_yaml_without_pyyaml_raises_runtime_error(self, tmp_path, monkeypatch):
+        """Missing PyYAML on a .yaml file raises RuntimeError, not ValueError (issue #1510)."""
+        monkeypatch.setattr("hephaestus.config.utils.YAML_AVAILABLE", False)
+        yaml_file = tmp_path / "config.yaml"
+        yaml_file.write_text("key: value\n")
+        with pytest.raises(RuntimeError, match="PyYAML is required for YAML config support"):
+            load_config(yaml_file)
+
+    def test_load_yml_without_pyyaml_raises_runtime_error(self, tmp_path, monkeypatch):
+        """The .yml extension also reports the missing dependency, not a format error."""
+        monkeypatch.setattr("hephaestus.config.utils.YAML_AVAILABLE", False)
+        yml_file = tmp_path / "config.yml"
+        yml_file.write_text("key: value\n")
+        with pytest.raises(RuntimeError, match="PyYAML is required for YAML config support"):
+            load_config(yml_file)
+
+    def test_load_yaml_without_pyyaml_is_not_value_error(self, tmp_path, monkeypatch):
+        """Regression (issue #1510): missing-PyYAML must NOT raise 'Unsupported config format'."""
+        monkeypatch.setattr("hephaestus.config.utils.YAML_AVAILABLE", False)
+        yaml_file = tmp_path / "config.yaml"
+        yaml_file.write_text("key: value\n")
+        with pytest.raises(RuntimeError):
+            load_config(yaml_file)
+
 
 class TestGetSetting:
     """Tests for get_setting."""

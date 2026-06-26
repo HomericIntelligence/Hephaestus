@@ -277,9 +277,7 @@ def _load_fleet_config(config_path: str | None) -> tuple[str | None, list[str] |
                 file_repos_raw = cfg.get("repos")
                 if isinstance(file_repos_raw, list):
                     file_repos = file_repos_raw
-            except FileNotFoundError as e:
-                raise RuntimeError(f"Failed to load fleet config from {config_path}: {e}") from e
-            except ValueError as e:
+            except (FileNotFoundError, ValueError, RuntimeError) as e:
                 raise RuntimeError(f"Failed to load fleet config from {config_path}: {e}") from e
 
     return file_org, file_repos
