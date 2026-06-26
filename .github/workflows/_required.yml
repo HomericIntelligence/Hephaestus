@@ -195,6 +195,16 @@ jobs:
           restore-keys: |
             pre-commit-${{ runner.os }}-
 
+      - name: Cache mypy incremental cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          # Persist incremental cache so the full-tree mypy hook (pass_filenames: false)
+          # re-checks only changed modules across CI runs. See issue #1503.
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-${{ hashFiles('pixi.lock', 'pyproject.toml') }}
+          restore-keys: |
+            mypy-${{ runner.os }}-
+
       - name: Run pre-commit (all hooks)
         run: |
           # Several hooks (check-dep-sync, check-unit-test-structure, the

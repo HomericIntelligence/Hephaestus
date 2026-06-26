@@ -231,6 +231,15 @@ implicit_reexport = false
 # Allow scripts/ (no __init__.py) to be discovered without "found twice" errors
 explicit_package_bases = true
 
+# Incremental type-checking (issue #1503). The pre-commit hook runs mypy over the
+# whole tree (hephaestus/ scripts/ tests/) on any .py change because
+# explicit_package_bases + duplicate basenames make per-file invocation unsafe
+# (see hephaestus/validation/mypy_per_file.py). Making incremental mode explicit
+# — rather than relying on mypy's default — keeps the full scan fast locally and
+# gives CI a single canonical cache path to persist.
+incremental = true
+cache_dir = ".mypy_cache"
+
 # Relax strict typing requirements for test and script code
 [[tool.mypy.overrides]]
 module = ["tests.*", "scripts.*"]
