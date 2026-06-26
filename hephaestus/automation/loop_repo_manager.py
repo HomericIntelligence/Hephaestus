@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from hephaestus.automation.ci_driver import _pr_is_failing
+from hephaestus.automation.git_utils import COMMIT_POLICY_REWRITE_EXEC
 from hephaestus.github.client import gh_call
 from hephaestus.resilience.subprocess_resilience import resilient_call
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
@@ -309,6 +310,10 @@ def _rebase_main(repo: str, repo_dir: Path) -> tuple[str, bool]:
     would propagate the "stale" marker into every child session label and
     would also break any future caller that consumed the env var as a git
     ref. The staleness is conveyed via the second return value instead.
+
+    If the local checkout is ahead of the detected base ref, the rebase uses a
+    per-commit exec hook that re-signs and DCO-signs replayed commits so repo
+    preparation cannot silently create PR-policy-invalid history.
     """
     fetch_ok = True
     try:
@@ -342,8 +347,12 @@ def _rebase_main(repo: str, repo_dir: Path) -> tuple[str, bool]:
             fetch_ok = False
     base_ref = _detect_remote_base_ref(repo, repo_dir)
     local_ahead = _local_ahead_count(repo, repo_dir, base_ref)
+    rebase_cmd = ["git", "-C", str(repo_dir), "rebase", base_ref]
+    if local_ahead > 0:
+        rebase_cmd.extend(["--exec", COMMIT_POLICY_REWRITE_EXEC])
+    rebase_cmd.append("--quiet")
     rb = subprocess.run(
-        ["git", "-C", str(repo_dir), "rebase", base_ref, "--quiet"],
+        rebase_cmd,
         capture_output=True,
         text=True,
         check=False,

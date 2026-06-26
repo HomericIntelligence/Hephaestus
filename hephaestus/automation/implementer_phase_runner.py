@@ -967,6 +967,7 @@ class ImplementationPhaseRunner:
                 "git",
                 "commit",
                 "-S",
+                "-s",
                 "-m",
                 f"chore: preserve reused worktree changes on {branch_name}",
             ],
@@ -1033,7 +1034,7 @@ class ImplementationPhaseRunner:
         )
         try:
             run(
-                ["git", "cherry-pick", "-S", commit_sha],
+                ["git", "cherry-pick", "-S", "-s", commit_sha],
                 cwd=worktree_path,
                 check=True,
             )

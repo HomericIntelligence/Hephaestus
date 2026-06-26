@@ -40,7 +40,7 @@ class TestImplementationPrompt:
         assert "ProjectHephaestus orchestrator owns all git and GitHub mutation" in out
         assert "Closes #42" in out
         assert "MANDATORY" in out
-        assert "git commit -S" in out
+        assert "git commit -S -s" in out
         assert "DO NOT run `git commit`" in out
         assert "`git push`" in out
         assert "`gh pr create`" in out

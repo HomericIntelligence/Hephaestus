@@ -89,7 +89,7 @@ agent turn returns.
 - When you finish, summarize what changed and what tests you ran.
 
 After you return, the orchestrator will:
-1. Create a cryptographically signed commit with `git commit -S`.
+1. Create a cryptographically signed and DCO signed-off commit with `git commit -S -s`.
 2. Push the branch to origin.
 3. Create or reuse the pull request for this branch.
 4. Ensure the PR body contains the exact policy line `Closes #{issue_number}`.

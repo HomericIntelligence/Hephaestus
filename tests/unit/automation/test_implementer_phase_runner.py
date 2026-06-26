@@ -308,7 +308,9 @@ class TestRestoreDirtyReusedWorktreeCommitAfterSync:
         fake_worktree = tmp_path / "wt"
         fake_worktree.mkdir()
 
-        conflict_error = subprocess.CalledProcessError(1, ["git", "cherry-pick", "-S", "abc1234"])
+        conflict_error = subprocess.CalledProcessError(
+            1, ["git", "cherry-pick", "-S", "-s", "abc1234"]
+        )
 
         with patch(
             "hephaestus.automation.implementer_phase_runner.run",
@@ -338,7 +340,9 @@ class TestRestoreDirtyReusedWorktreeCommitAfterSync:
         fake_worktree = tmp_path / "wt"
         fake_worktree.mkdir()
 
-        conflict_error = subprocess.CalledProcessError(1, ["git", "cherry-pick", "-S", "deadbeef"])
+        conflict_error = subprocess.CalledProcessError(
+            1, ["git", "cherry-pick", "-S", "-s", "deadbeef"]
+        )
 
         with patch(
             "hephaestus.automation.implementer_phase_runner.run",
@@ -374,7 +378,9 @@ class TestRestoreDirtyReusedWorktreeCommitAfterSync:
         # cherry-pick conflicts because the synced branch diverged.
         rev_parse_result = MagicMock()
         rev_parse_result.stdout = "cafebabe\n"
-        conflict_error = subprocess.CalledProcessError(1, ["git", "cherry-pick", "-S", "cafebabe"])
+        conflict_error = subprocess.CalledProcessError(
+            1, ["git", "cherry-pick", "-S", "-s", "cafebabe"]
+        )
 
         with patch(
             "hephaestus.automation.implementer_phase_runner.run",

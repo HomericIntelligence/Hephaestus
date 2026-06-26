@@ -5,7 +5,7 @@ the "Console-Script Stability Tiers" table in COMPATIBILITY.md. The CLI name
 is the row key; the tier (Stable / Provisional / Internal) is the value.
 
 If this hook misfires in a way you cannot fix locally, bypass it with
-``SKIP=hephaestus-check-cli-tier-docs git commit -S ...`` (do NOT use
+``SKIP=hephaestus-check-cli-tier-docs git commit -S -s ...`` (do NOT use
 ``--no-verify``, which skips ALL hooks including signing).
 
 Usage::

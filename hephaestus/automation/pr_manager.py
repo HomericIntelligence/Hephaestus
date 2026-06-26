@@ -764,9 +764,9 @@ def commit_changes(issue_number: int, worktree_path: Path, agent: str = "claude"
         agent=agent,
     )
 
-    # Commit (signed — required by repo policy)
+    # Commit with cryptographic signature and DCO sign-off — required by repo policy.
     run(
-        ["git", "commit", "-S", "-m", commit_msg],
+        ["git", "commit", "-S", "-s", "-m", commit_msg],
         cwd=worktree_path,
     )
 

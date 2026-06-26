@@ -942,3 +942,76 @@ class TestCreateWorktreeBranchCollision:
             manager.create_worktree(123, "123-feature", refresh_base=True)
         argvs = [c[0][0] for c in mock_run.call_args_list]
         assert ["git", "fetch", "origin"] in argvs, argvs
+
+    @patch("hephaestus.automation.worktree_manager.run")
+    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    def test_create_worktree_refresh_base_ignores_loop_trunk_pin(
+        self,
+        mock_get_root: Any,
+        mock_run: Any,
+        tmp_path: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Issue-major workers branch from fresh origin/main, not loop-start trunk."""
+        monkeypatch.setenv("HEPH_TRUNK_GITHASH", "3883866")
+        mock_get_root.return_value = tmp_path
+        mock_run.return_value = Mock(returncode=1, stdout="origin/main")
+        manager = WorktreeManager()
+
+        with patch.object(manager, "_worktree_holding_branch", return_value=None):
+            manager.create_worktree(1420, "1420-auto-impl", refresh_base=True)
+
+        argvs = [c[0][0] for c in mock_run.call_args_list]
+        assert ["git", "fetch", "origin"] in argvs, argvs
+        add_calls = [argv for argv in argvs if argv[:3] == ["git", "worktree", "add"]]
+        assert add_calls
+        assert add_calls[-1][-1] == "origin/main"
+
+    @patch("hephaestus.automation.worktree_manager.rebase_worktree_onto")
+    @patch("hephaestus.automation.worktree_manager.run")
+    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    def test_refresh_base_rebases_existing_local_issue_branch(
+        self,
+        mock_get_root: Any,
+        mock_run: Any,
+        mock_rebase: Any,
+        tmp_path: Any,
+    ) -> None:
+        """Issue-major reruns rebase a reused local issue branch before implementation."""
+        mock_get_root.return_value = tmp_path
+        mock_run.return_value = Mock(returncode=0, stdout="origin/main")
+        mock_rebase.return_value = True
+        manager = WorktreeManager()
+
+        with (
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch.object(manager, "_local_branch_exists", return_value=True),
+        ):
+            manager.create_worktree(1577, "1577-auto-impl", refresh_base=True)
+
+        mock_rebase.assert_called_once_with(manager.base_dir / "issue-1577", "main")
+
+    @patch("hephaestus.automation.worktree_manager.rebase_worktree_onto")
+    @patch("hephaestus.automation.worktree_manager.run")
+    @patch("hephaestus.automation.worktree_manager.get_repo_root")
+    def test_refresh_base_rebases_existing_remote_issue_branch(
+        self,
+        mock_get_root: Any,
+        mock_run: Any,
+        mock_rebase: Any,
+        tmp_path: Any,
+    ) -> None:
+        """Issue-major reruns rebase a reused remote issue branch before implementation."""
+        mock_get_root.return_value = tmp_path
+        mock_run.return_value = Mock(returncode=0, stdout="origin/main")
+        mock_rebase.return_value = True
+        manager = WorktreeManager()
+
+        with (
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch.object(manager, "_local_branch_exists", return_value=False),
+            patch.object(manager, "_remote_branch_exists", return_value=True),
+        ):
+            manager.create_worktree(1580, "1580-auto-impl", refresh_base=True)
+
+        mock_rebase.assert_called_once_with(manager.base_dir / "issue-1580", "main")

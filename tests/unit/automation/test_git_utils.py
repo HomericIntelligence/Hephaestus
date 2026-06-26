@@ -563,7 +563,7 @@ class TestRebaseWorktreeOnto:
 
     @patch("hephaestus.automation.git_utils.run")
     def test_clean_rebase_fetches_then_rebases_returns_true(self, mock_run: Any) -> None:
-        """Runs ``git fetch origin <base>`` then ``git rebase origin/<base>`` → True."""
+        """Runs fetch, cleans stale files, then rebases with policy metadata repair."""
         mock_run.return_value = Mock(returncode=0, stdout="")
         worktree = Path("/tmp/worktree-xyz")
 
@@ -577,8 +577,31 @@ class TestRebaseWorktreeOnto:
         assert ls_files_args[0] == ["git", "ls-files", "--others", "--exclude-standard", "-z"]
         assert ls_files_kwargs["cwd"] == worktree
         rebase_args, rebase_kwargs = mock_run.call_args_list[2]
-        assert rebase_args[0] == ["git", "rebase", "origin/main"]
+        assert rebase_args[0] == [
+            "git",
+            "rebase",
+            "origin/main",
+            "--exec",
+            "git commit --amend --no-edit -S -s",
+        ]
         assert rebase_kwargs["cwd"] == worktree
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_clean_rebase_resigns_and_signs_off_replayed_commits(self, mock_run: Any) -> None:
+        """Mechanical rebases repair both cryptographic signature and DCO metadata."""
+        mock_run.return_value = Mock(returncode=0, stdout="")
+        worktree = Path("/tmp/worktree-xyz")
+
+        assert rebase_worktree_onto(worktree, "main") is True
+
+        rebase_args = mock_run.call_args_list[2].args[0]
+        assert rebase_args == [
+            "git",
+            "rebase",
+            "origin/main",
+            "--exec",
+            "git commit --amend --no-edit -S -s",
+        ]
 
     @patch("hephaestus.automation.git_utils.run")
     def test_conflict_aborts_and_returns_false(self, mock_run: Any) -> None:
@@ -652,4 +675,10 @@ class TestRebaseWorktreeOnto:
         assert rebase_worktree_onto(Path("/wt"), "develop", remote="upstream") is True
 
         assert mock_run.call_args_list[0][0][0] == ["git", "fetch", "upstream", "develop"]
-        assert mock_run.call_args_list[2][0][0] == ["git", "rebase", "upstream/develop"]
+        assert mock_run.call_args_list[2][0][0] == [
+            "git",
+            "rebase",
+            "upstream/develop",
+            "--exec",
+            "git commit --amend --no-edit -S -s",
+        ]

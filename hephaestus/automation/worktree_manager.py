@@ -29,7 +29,7 @@ import shutil
 import threading
 from pathlib import Path
 
-from .git_utils import get_repo_root, is_clean_working_tree, run
+from .git_utils import get_repo_root, is_clean_working_tree, rebase_worktree_onto, run
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,11 @@ def _loop_trunk_githash() -> str | None:
     if not trunk or trunk == "unknown":
         return None
     return trunk
+
+
+def _looks_like_sha(ref: str) -> bool:
+    """Return True when ``ref`` looks like a raw hex commit-ish."""
+    return len(ref) >= 7 and all(ch in "0123456789abcdefABCDEF" for ch in ref)
 
 
 class WorktreeDirtyError(Exception):
@@ -82,12 +87,15 @@ class WorktreeManager:
 
         # Base-branch detection is deferred to first use so that constructing
         # a WorktreeManager in test fixtures or environments without origin/*
-        # refs does not raise. The automation loop passes HEPH_TRUNK_GITHASH so
-        # phase subprocesses create issue worktrees from the exact trunk commit
-        # they are validating, including local signed commits not yet on origin.
-        # The hard error from #382 / A4-05 still fires when neither explicit
-        # base nor loop trunk is available.
-        self._base_branch_override = base_branch or _loop_trunk_githash()
+        # refs does not raise. The automation loop passes HEPH_TRUNK_GITHASH as
+        # a session-stable fallback, but issue-major workers may still request a
+        # fresh remote base via refresh_base=True before cutting a new branch.
+        # An explicit constructor base remains pinned and is never moved.
+        loop_trunk = _loop_trunk_githash()
+        self._base_branch_override = base_branch or loop_trunk
+        self._base_branch_override_source = (
+            "explicit" if base_branch is not None else "loop_trunk" if loop_trunk else None
+        )
         self._base_branch_resolved: str | None = None
         self.worktrees: dict[int, Path] = {}
         self.preserved: list[tuple[int, Path]] = []
@@ -115,12 +123,16 @@ class WorktreeManager:
         cached ``_base_branch_resolved`` so the next ``base_branch`` access
         re-detects ``origin/HEAD``.
 
-        A no-op when the base is explicitly pinned (``base_branch=`` or
-        ``HEPH_TRUNK_GITHASH``): the operator chose that snapshot deliberately,
-        so we must not silently move it. Returns the effective base branch.
+        A no-op only when the base is explicitly pinned with ``base_branch=``.
+        ``HEPH_TRUNK_GITHASH`` is a loop-start fallback, not an issue-major
+        freshness pin, so refresh_base=True deliberately drops it and re-detects
+        the current remote base. Returns the effective base branch.
         """
-        if self._base_branch_override is not None:
+        if self._base_branch_override_source == "explicit":
             return self.base_branch
+        if self._base_branch_override_source == "loop_trunk":
+            self._base_branch_override = None
+            self._base_branch_override_source = None
         with contextlib.suppress(Exception):
             run(["git", "fetch", "origin"], cwd=self.repo_root, capture_output=True)
         self._base_branch_resolved = None  # force re-detect on next access
@@ -242,7 +254,11 @@ class WorktreeManager:
                     logger.debug("git worktree prune failed: %s", e)
 
             try:
-                self._add_worktree_for_branch(worktree_path, branch_name)
+                self._add_worktree_for_branch(
+                    worktree_path,
+                    branch_name,
+                    refresh_base=refresh_base,
+                )
                 self.worktrees[issue_number] = worktree_path
                 logger.info("Created worktree for issue #%s at %s", issue_number, worktree_path)
                 return worktree_path
@@ -250,20 +266,30 @@ class WorktreeManager:
             except Exception as e:
                 raise RuntimeError(f"Failed to create worktree: {e}") from e
 
-    def _add_worktree_for_branch(self, worktree_path: Path, branch_name: str) -> None:
+    def _add_worktree_for_branch(
+        self,
+        worktree_path: Path,
+        branch_name: str,
+        *,
+        refresh_base: bool = False,
+    ) -> None:
         """Add a git worktree, choosing the right source for ``branch_name``.
 
         Resolution order:
 
-        1. Branch exists locally → reuse it.
+        1. Branch exists locally → reuse it, then rebase it if this is an
+           issue-major fresh-base checkout.
         2. Branch exists on origin only → fetch and extend ``origin/<branch>``,
            so a remote branch from a prior loop is not discarded and re-created
-           from base (which would produce a divergent duplicate PR — #1018).
+           from base (which would produce a divergent duplicate PR — #1018),
+           then rebase it if this is an issue-major fresh-base checkout.
         3. Branch is new → create it from the base branch.
 
         Args:
             worktree_path: Destination path for the worktree.
             branch_name: Branch the worktree should track.
+            refresh_base: When True, reused issue automation branches are rebased
+                onto the refreshed base before the implementer starts.
 
         """
         if self._local_branch_exists(branch_name):
@@ -272,6 +298,11 @@ class WorktreeManager:
             run(
                 ["git", "worktree", "add", str(worktree_path), branch_name],
                 cwd=self.repo_root,
+            )
+            self._rebase_existing_issue_branch_if_requested(
+                worktree_path,
+                branch_name,
+                refresh_base=refresh_base,
             )
         elif self._remote_branch_exists(branch_name):
             logger.info(
@@ -292,6 +323,11 @@ class WorktreeManager:
                 ],
                 cwd=self.repo_root,
             )
+            self._rebase_existing_issue_branch_if_requested(
+                worktree_path,
+                branch_name,
+                refresh_base=refresh_base,
+            )
         else:
             run(
                 [
@@ -305,6 +341,45 @@ class WorktreeManager:
                 ],
                 cwd=self.repo_root,
             )
+
+    def _rebase_existing_issue_branch_if_requested(
+        self,
+        worktree_path: Path,
+        branch_name: str,
+        *,
+        refresh_base: bool,
+    ) -> None:
+        """Rebase reused issue automation branches before implementation starts."""
+        if not refresh_base or not self._is_issue_automation_branch(branch_name):
+            return
+        base_branch_name = self._origin_base_branch_name()
+        if base_branch_name is None:
+            logger.info(
+                "Skipping pre-implementation rebase for %s: base %s is not an origin branch",
+                branch_name,
+                self.base_branch,
+            )
+            return
+        logger.info(
+            "Rebasing reused issue branch %s onto %s before implementation",
+            branch_name,
+            self.base_branch,
+        )
+        if not rebase_worktree_onto(worktree_path, base_branch_name):
+            raise RuntimeError(
+                f"Could not rebase reused issue branch {branch_name} onto {self.base_branch}"
+            )
+
+    def _origin_base_branch_name(self) -> str | None:
+        """Return the branch name portion for an ``origin/<branch>`` base."""
+        base_ref = self.base_branch
+        if base_ref.startswith("refs/remotes/origin/"):
+            return base_ref.removeprefix("refs/remotes/origin/")
+        if base_ref.startswith("origin/"):
+            return base_ref.removeprefix("origin/")
+        if "/" not in base_ref and not _looks_like_sha(base_ref):
+            return base_ref
+        return None
 
     def _refresh_stale_local_branch_if_safe(self, branch_name: str) -> None:
         """Fast-forward a stale local branch that has no work beyond base.
