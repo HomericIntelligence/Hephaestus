@@ -207,11 +207,17 @@ removal):
 
 | Symbol | Added | Notes |
 |--------|-------|-------|
-| `get_config_value` | 0.2.0 | High-level config lookup with env overlay |
+| `get_config_value` | 0.2.0 | High-level config lookup with env overlay — **(deprecated)**, use `load_config` + `merge_with_env` + `get_setting` |
 | `get_setting` | 0.1.0 | Dot-notation access to nested config dict |
 | `load_config` | 0.1.0 | Load YAML/JSON config file |
 | `merge_configs` | 0.1.0 | Deep-merge multiple config dicts |
 | `merge_with_env` | 0.2.0 | Overlay env vars onto config |
+
+**Deprecated symbols** (covered by the deprecation policy until removal):
+
+- `get_config_value` — superseded by the explicit pipeline `load_config()` →
+  `merge_with_env()` → `get_setting()`. Emits a `DeprecationWarning` when called.
+  Scheduled for removal no earlier than the next major version after 1.0.
 
 ### `hephaestus.io`
 

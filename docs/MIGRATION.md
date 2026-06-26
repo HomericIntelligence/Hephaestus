@@ -62,6 +62,10 @@ behavior (you should not have), review these:
   max_delay=...)`. It still works and emits a `DeprecationWarning`; it is retained for
   backwards compatibility and is not removed in 1.0. See the
   [deprecation policy](../COMPATIBILITY.md#deprecation-policy).
+- `get_config_value` — deprecated in favor of the explicit pipeline `load_config()`
+  → `merge_with_env()` → `get_setting()`. It still works and emits a
+  `DeprecationWarning`; it is retained for backwards compatibility and is not removed
+  in 1.0. See the [deprecation policy](../COMPATIBILITY.md#deprecation-policy).
 
 ### Questions
 
