@@ -1597,15 +1597,12 @@ class TestGhCallThrottle:
         monkeypatch.setenv("GH_RATE_LIMIT_PER_SEC", "0")
         mock_run.return_value = Mock(stdout="", stderr="", returncode=0)
 
-        import time as _time
+        with patch("hephaestus.github.client.time.sleep") as mock_sleep:
+            for _ in range(5):
+                _gh_call(["api", "/rate_limit"])
 
-        t0 = _time.monotonic()
-        for _ in range(5):
-            _gh_call(["api", "/rate_limit"])
-        elapsed = _time.monotonic() - t0
-
-        # 5 calls with no throttle should finish well under one min-interval.
-        assert elapsed < 0.05, f"unexpected delay with throttle off; elapsed={elapsed:.3f}s"
+        assert mock_run.call_count == 5
+        mock_sleep.assert_not_called()
 
     @patch("hephaestus.github.client.run_subprocess")
     def test_buckets_are_per_thread(self, mock_run: Any) -> None:
