@@ -1,0 +1,118 @@
+---
+# Source of truth for the 6 repo-analyze* skill variants.
+# Edit a row + run: pixi run --environment default hephaestus-check-repo-analyze-skills --write
+variants:
+  - name: repo-analyze
+    template: repo_analyze.md.tmpl
+    description: >-
+      Performs comprehensive repository completeness and quality audit
+      with grading across 15 dimensions
+    rubric: rubric_default.md
+    sections: sections_15.md
+    output_format: output_format_full.md
+    methodology: methodology_sampling.md
+    coverage_report: ""
+    h1_suffix: ""
+    intro: >-
+      Performs a comprehensive completeness and quality audit of the
+      current repository (rooted at the current working directory).
+    vs_callout: ""
+
+  - name: repo-analyze-full
+    template: repo_analyze.md.tmpl
+    description: >-
+      Full-coverage repository audit - dispatches one Myrmidon swarm agent
+      per audit section so EVERY file is analyzed with no sampling cap.
+      Use when `repo-analyze` misses bugs by only reading sampled files.
+    rubric: rubric_default.md
+    sections: sections_15.md
+    output_format: output_format_full.md
+    methodology: methodology_full.md
+    coverage_report: coverage_report_block.md
+    h1_suffix: " (Full Coverage)"
+    intro: >-
+      Performs a comprehensive completeness and quality audit of the current
+      repository (rooted at the current working directory), analyzing
+      **every source file** via a Myrmidon swarm — no sampling, no file limits.
+    vs_callout: >-
+      **vs. /repo-analyze:** `repo-analyze` reads a representative sample of
+      files per section. `repo-analyze-full` reads every file in each section's
+      bucket. Use this variant on repos where sampling would miss bugs spread
+      across many files.
+
+  - name: repo-analyze-strict
+    template: repo_analyze_strict.md.tmpl
+    description: >-
+      Ruthlessly thorough repository audit with strict grading - starts at F,
+      requires concrete evidence for every grade improvement
+    rubric: rubric_strict.md
+    sections: sections_15.md
+    output_format: output_format_full.md
+    methodology: methodology_sampling.md
+    coverage_report: ""
+    h1_suffix: ""
+    intro: >-
+      Performs an exhaustive completeness and quality audit of the current
+      repository with STRICT grading standards.
+    vs_callout: ""
+
+  - name: repo-analyze-strict-full
+    template: repo_analyze_strict.md.tmpl
+    description: >-
+      Ruthlessly thorough repository audit with strict grading AND full file
+      coverage - dispatches one Myrmidon swarm agent per section so every file
+      is read, then grades from F up with concrete evidence required.
+    rubric: rubric_strict.md
+    sections: sections_15.md
+    output_format: output_format_full.md
+    methodology: methodology_full.md
+    coverage_report: coverage_report_block.md
+    h1_suffix: " (Full Coverage)"
+    intro: >-
+      Performs an exhaustive completeness and quality audit of the current
+      repository with STRICT grading standards, analyzing **every source file**
+      via a Myrmidon swarm — no sampling, no file limits, no grade inflation.
+    vs_callout: >-
+      **vs. /repo-analyze-strict:** `repo-analyze-strict` reads 10 random
+      + 5 largest + 5 smallest source files. `repo-analyze-strict-full` reads
+      every file via per-section swarm agents. Use this variant when you need
+      strict grading AND cannot afford to miss files due to sampling.
+
+  - name: repo-analyze-quick
+    template: repo_analyze_quick.md.tmpl
+    description: >-
+      Quick repository health check - catches showstoppers only, defaults to B,
+      focuses on broken/dangerous/missing critical items
+    rubric: rubric_quick.md
+    sections: sections_8.md
+    output_format: output_format_quick.md
+    methodology: methodology_sampling.md
+    coverage_report: ""
+    h1_suffix: ""
+    intro: >-
+      Performs a fast health check of the current repository to catch
+      showstoppers.
+    vs_callout: ""
+
+  - name: repo-analyze-quick-full
+    template: repo_analyze_quick.md.tmpl
+    description: >-
+      Quick repository health check with full file coverage - catches
+      showstoppers in every file via per-section swarm agents. Same B-default
+      philosophy as repo-analyze-quick, but no sampling cap.
+    rubric: rubric_quick.md
+    sections: sections_8.md
+    output_format: output_format_quick.md
+    methodology: methodology_full_8.md
+    coverage_report: coverage_report_block.md
+    h1_suffix: " (Full Coverage)"
+    intro: >-
+      Performs a fast health check of the current repository to catch
+      showstoppers, examining **every source file** via a Myrmidon swarm —
+      no sampling.
+    vs_callout: >-
+      **vs. /repo-analyze-quick:** `repo-analyze-quick` peeks at 3–5 source
+      files. `repo-analyze-quick-full` dispatches one Sonnet agent per section
+      and reads every file at the showstopper-detection level. Use this variant
+      on repos large enough that sampling might miss an exposed secret or
+      broken test.
