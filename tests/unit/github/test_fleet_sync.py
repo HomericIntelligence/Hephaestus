@@ -238,7 +238,7 @@ class TestGetResignEmail:
         monkeypatch.setenv("FLEET_GIT_EMAIL", "carol@example.com")
         cmd = get_resign_exec()
         assert "user.email=carol@example.com" in cmd
-        assert "commit --amend --no-edit -S --reset-author" in cmd
+        assert "commit --amend --no-edit -S -s --reset-author" in cmd
 
 
 class TestResignEmailKeyGuard:

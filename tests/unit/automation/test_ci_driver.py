@@ -1742,8 +1742,8 @@ class TestForceEngagementPrompt:
         # The branch invariant is restated — agent must not switch branches.
         assert "1-fix" in prompt
         assert "DO NOT create a new branch" in prompt
-        # Signed-commits and no --no-verify re-stated (user requirement).
-        assert "git commit -S" in prompt
+        # Signed/DCO commits and no --no-verify re-stated (repo policy).
+        assert "git commit -S -s" in prompt
         assert "--no-verify" in prompt
         # Bug 4: the agent must NOT be told to commit a blocker file (a new
         # Markdown file fails the repo's markdownlint and turns 1 red check into

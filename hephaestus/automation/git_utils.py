@@ -22,6 +22,8 @@ from hephaestus.utils.retry import retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
+COMMIT_POLICY_REWRITE_EXEC = "git commit --amend --no-edit -S -s"
+
 
 def run(
     cmd: list[str],
@@ -538,17 +540,19 @@ def rebase_worktree_onto(
     """Mechanically rebase the worktree at ``cwd`` onto ``<remote>/<base_branch>``.
 
     This is the cheap, deterministic path for PRs that are merely *behind* the
-    base branch (or have textually non-overlapping changes): a plain ``git
-    rebase`` resolves them with no agent involvement. Only when the rebase hits a
-    real conflict do we hand off to the CI-fix agent.
+    base branch (or have textually non-overlapping changes): a policy-aware
+    ``git rebase --exec`` resolves them with no agent involvement while
+    re-signing each replayed commit and adding a DCO sign-off. Only when the
+    rebase hits a real conflict do we hand off to the CI-fix agent.
 
     Two steps in ``cwd``:
 
     1. ``git fetch <remote> <base_branch>`` — refresh the remote-tracking ref so
        the rebase target is current.
-    2. ``git rebase <remote>/<base_branch>`` — replay the PR's commits on top of
-       the latest base. On conflict, ``git rebase --abort`` restores the
-       pre-rebase HEAD so the worktree is left clean for the agent path.
+    2. ``git rebase <remote>/<base_branch> --exec ...`` — replay the PR's commits
+       on top of the latest base and run ``git commit --amend --no-edit -S -s``
+       after each replayed commit. On conflict, ``git rebase --abort`` restores
+       the pre-rebase HEAD so the worktree is left clean for the agent path.
 
     The caller is expected to push the rebased HEAD with
     :func:`push_current_branch_with_lease_on_divergence` (the rebase rewrites
@@ -575,7 +579,7 @@ def rebase_worktree_onto(
     run(["git", "fetch", remote, base_branch], cwd=cwd)
     _remove_untracked_files_tracked_by_ref(cwd, base_ref)
     try:
-        run(["git", "rebase", base_ref], cwd=cwd)
+        run(["git", "rebase", base_ref, "--exec", COMMIT_POLICY_REWRITE_EXEC], cwd=cwd)
         logger.info("Rebased worktree at %s onto %s/%s cleanly", cwd, remote, base_branch)
         return True
     except subprocess.CalledProcessError:

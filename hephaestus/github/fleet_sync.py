@@ -7,7 +7,8 @@ For every open PR in every configured repo:
                   then re-sign and push
 
 Signing uses the local GPG key configured in git's ``user.signingkey``.
-All commits produced by this script are signed with ``git commit -S``.
+All commits produced by this script are signed and DCO-signed with
+``git commit -S -s``.
 
 Usage:
     hephaestus-fleet-sync [--dry-run] [--org ORG] [--repos REPO ...] \
@@ -137,16 +138,16 @@ def _signing_key_uid_emails() -> list[str] | None:
 def _validate_resign_email(email: str) -> str:
     """Validate ``email`` matches the GPG signing key, then return it.
 
-    fleet_sync re-signs every rebased commit with ``git commit -S`` using the
+    fleet_sync re-signs every rebased commit with ``git commit -S -s`` using the
     local GPG key. GitHub only marks a signature ``verified`` when the commit's
     committer email is one of the *verified emails on the account that owns the
     signing key* — in practice, one of the key's UID emails. If we re-sign with
     an email that is not on the key (e.g. an operator's bot/no-reply alias that
     was never added to the key), the commit signs fine locally yet GitHub reports
-    ``{verified: false, reason: "no_user"}`` and the ``pr-policy`` "every commit
-    is signed" check rejects the PR at merge. Catch that here so fleet_sync fails
-    fast with an actionable message instead of producing commits that pr-policy
-    will silently reject across the whole fleet.
+    ``{verified: false, reason: "no_user"}`` and the ``pr-policy`` checks reject
+    the PR at merge. Catch that here so fleet_sync fails fast with an actionable
+    message instead of producing commits that pr-policy will silently reject
+    across the whole fleet.
 
     Set ``FLEET_SKIP_EMAIL_KEY_CHECK=1`` to bypass (e.g. signing format other than
     OpenPGP, or a deliberately unusual setup).
@@ -217,7 +218,7 @@ def get_resign_exec() -> str:
     The email is resolved lazily so changes to ``$FLEET_GIT_EMAIL`` or git config
     between calls take effect without restarting the process.
     """
-    return f"git -c user.email={get_resign_email()} commit --amend --no-edit -S --reset-author"
+    return f"git -c user.email={get_resign_email()} commit --amend --no-edit -S -s --reset-author"
 
 
 def _parse_env_repos(env_repos_raw: str | None) -> list[str] | None:
@@ -469,7 +470,7 @@ def list_prs(repo: str, org: str) -> list[PRInfo]:
 
     Discovery is scoped to ``--author @me`` (#1070): fleet_sync rebases and
     re-signs every PR it returns (:func:`rebase_and_resign` runs
-    ``commit --amend --reset-author -S`` then force-pushes). Run against a PR the
+    ``commit --amend --reset-author -S -s`` then force-pushes). Run against a PR the
     current user did NOT author — most notably a Dependabot bump — that rewrite
     strips the native GitHub web-flow signature and stamps the local identity,
     and when the amend runs in a shell where gpg-agent was not warmed it silently

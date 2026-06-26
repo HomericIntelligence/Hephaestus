@@ -1176,6 +1176,59 @@ class TestRunImplReviewLoop:
         second = mock_addr.call_args_list[1]
         assert second.kwargs.get("unaddressed_findings") == snapshot
 
+    def test_no_commit_thread_count_reduction_extends_budget_to_re_review(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """A no-commit address turn still makes progress if unresolved threads decrease."""
+        snapshots = [
+            [{"id": "t0"}, {"id": "t1"}, {"id": "t2"}],
+            [{"id": "t1"}, {"id": "t2"}],
+            [{"id": "t1"}, {"id": "t2"}],
+            [{"id": "t2"}],
+            [{"id": "t2"}],
+            [],
+        ]
+
+        with (
+            patch.object(
+                implementer,
+                "_run_impl_review_step",
+                side_effect=[
+                    (_nogo("D"), ["t0"]),
+                    (_nogo("D"), ["t1"]),
+                    (_nogo("D"), ["t2"]),
+                    (_go(), []),
+                ],
+            ) as mock_rev,
+            patch.object(implementer, "_run_address_review_step", return_value=False),
+            patch.object(implementer, "_collect_diff", return_value="diff"),
+            patch(
+                "hephaestus.automation._review_phase.validate_prior_comments_addressed",
+                return_value=([], True, set()),
+            ) as validate,
+            patch(
+                "hephaestus.automation._review_phase.gh_pr_list_unresolved_threads",
+                side_effect=snapshots,
+            ),
+        ):
+            iters, verdict, _ = implementer._run_impl_review_loop(
+                issue_number=1554,
+                worktree_path=tmp_path,
+                branch_name="1554-auto-impl",
+                issue_title="t",
+                issue_body="ib",
+                session_id="sess",
+                slot_id=0,
+                thread_id=None,
+                pr_number=1570,
+            )
+
+        assert verdict == "GO"
+        assert iters == 4
+        assert mock_rev.call_count == 4
+        first_validated_threads = validate.call_args_list[0].kwargs["prior_threads"]
+        assert [thread["id"] for thread in first_validated_threads] == ["t0", "t1", "t2"]
+
     def test_no_commit_then_commit_clears_directive(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
@@ -2541,10 +2594,10 @@ class TestResolveDirtyReusedWorktree:
                     thread_id=None,
                 )
 
-    def test_restores_dirty_commit_after_sync_with_signed_cherry_pick(
+    def test_restores_dirty_commit_after_sync_with_signed_dco_cherry_pick(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
-        """The salvage commit is replayed with a signed cherry-pick."""
+        """The salvage commit is replayed with signed and DCO-signed cherry-pick."""
         wt = tmp_path / "worktree"
         wt.mkdir(exist_ok=True)
         with patch("hephaestus.automation.implementer_phase_runner.run") as mock_run:
@@ -2556,7 +2609,7 @@ class TestResolveDirtyReusedWorktree:
                 thread_id=None,
             )
         mock_run.assert_called_once_with(
-            ["git", "cherry-pick", "-S", "abc123"],
+            ["git", "cherry-pick", "-S", "-s", "abc123"],
             cwd=wt,
             check=True,
         )

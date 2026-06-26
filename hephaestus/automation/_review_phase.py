@@ -148,6 +148,14 @@ def _handle_reviewer_quota_or_overload(
         time.sleep(delay)
 
 
+def _review_thread_count_decreased(
+    before: list[dict[str, Any]],
+    after: list[dict[str, Any]],
+) -> bool:
+    """Return True when an address turn reduced unresolved PR review threads."""
+    return bool(before) and len(after) < len(before)
+
+
 def _is_automation_owned_thread(thread: dict[str, Any], current_login: str | None) -> bool:
     """Return True for unresolved review threads the automation may resolve on GO."""
     authors = {str(author).strip() for author in thread.get("authors", []) if str(author).strip()}
@@ -848,18 +856,16 @@ class ReviewPhase(StageMixin):
                     iteration += 1
                     continue
                 break
-            # A committed round: clear the retry directive (it only follows an
-            # immediately-preceding no-commit turn).
+            # A progress round clears the retry directive. Progress is either a
+            # committed code change or an observed unresolved-thread count drop.
             pending_unaddressed = []
-            # The address step resolved a fresh finding (``addressed``) without
-            # the validator re-opening a prior one (``validator_clean``): this
-            # round made real progress. Record it so the NEXT iteration can
-            # extend the budget if it would otherwise be the last — letting a PR
-            # that fixes one real bug per round converge instead of being
-            # stranded one pass short of GO and wrongly skipped (#1554). A
-            # no-commit round has ``addressed=False`` and never reaches here, so
-            # it can never set progress or extend the budget — the hard cap
-            # (MAX_REVIEW_ITERATIONS_HARD_CAP) still bounds total iterations.
+            # The address step made progress without the validator re-opening a
+            # prior one (``validator_clean``). Record it so the NEXT iteration
+            # can extend the budget if it would otherwise be the last — letting
+            # a PR that fixes one real bug or closes one real thread per round
+            # converge instead of being stranded one pass short of GO and
+            # wrongly skipped (#1554). The hard cap still bounds total
+            # iterations.
             prior_round_made_progress = addressed and validator_clean
             iteration += 1
 
@@ -1083,6 +1089,23 @@ class ReviewPhase(StageMixin):
             unaddressed_findings=unaddressed_findings,
         )
         if not addressed:
+            current_unresolved = self._list_unresolved_threads_after_address(
+                pr_number=pr_number,
+                issue_number=issue_number,
+                iteration=iteration,
+            )
+            if current_unresolved is not None and _review_thread_count_decreased(
+                prior_addressed_threads, current_unresolved
+            ):
+                impl._log(
+                    "info",
+                    f"{issue_ref(issue_number)}: address step produced no commit on "
+                    f"iteration {iteration}, but unresolved review threads decreased "
+                    f"from {len(prior_addressed_threads)} to {len(current_unresolved)}; "
+                    "re-reviewing instead of treating the turn as stuck",
+                    thread_id,
+                )
+                return prior_addressed_threads, True
             impl._log(
                 "info",
                 f"{issue_ref(issue_number)}: address step resolved no threads on "
@@ -1090,6 +1113,26 @@ class ReviewPhase(StageMixin):
                 thread_id,
             )
         return prior_addressed_threads, addressed
+
+    def _list_unresolved_threads_after_address(
+        self,
+        *,
+        pr_number: int,
+        issue_number: int,
+        iteration: int,
+    ) -> list[dict[str, Any]] | None:
+        """Best-effort post-address unresolved thread snapshot."""
+        try:
+            return gh_pr_list_unresolved_threads(pr_number, dry_run=False)
+        except Exception as exc:
+            logger.info(
+                "#%s R%s: could not refetch unresolved threads after address step on %s: %s",
+                issue_number,
+                iteration,
+                pr_ref(pr_number),
+                exc,
+            )
+            return None
 
     def _finalize_review_outcome(
         self,
