@@ -1478,7 +1478,13 @@ class ReviewPhase(StageMixin):
         matches = _parse_addressed_block(text)
         if not matches.get("addressed") and "```json" not in text:
             with contextlib.suppress(Exception):
-                trace_path = self.state_dir / f"address-{issue_number}-r{iteration}.parse-error.log"
+                trace_path = log_file_path(
+                    self.state_dir,
+                    "address",
+                    issue_number,
+                    iteration=iteration,
+                    suffix="parse-error.log",
+                )
                 write_secure(
                     trace_path,
                     f"reason: no fenced ```json block found in response\n\n"

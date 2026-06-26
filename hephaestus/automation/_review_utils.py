@@ -506,12 +506,13 @@ def log_file_path(
     issue_number: int,
     *,
     iteration: int | None = None,
+    suffix: str = "log",
 ) -> Path:
     """Return the standard per-issue automation log path."""
     stem = f"{prefix}-{issue_number}"
     if iteration is not None:
         stem = f"{stem}-r{iteration}"
-    return state_dir / f"{stem}.log"
+    return state_dir / f"{stem}.{suffix.removeprefix('.')}"
 
 
 def _copy_default(default: Mapping[str, Any]) -> dict[str, Any]:
