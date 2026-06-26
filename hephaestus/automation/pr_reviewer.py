@@ -46,6 +46,7 @@ from ._review_utils import (
     find_pr_for_issue,
     instance_log,
     parse_json_block,
+    print_worker_summary,
     setup_review_logging,
 )
 from ._reviewer_base import BaseReviewer
@@ -868,22 +869,12 @@ class PRReviewer(BaseReviewer):
             results: Mapping of issue number to WorkerResult
 
         """
-        total = len(results)
-        successful = sum(1 for r in results.values() if r.success)
-        failed = total - successful
-
-        logger.info("=" * 60)
-        logger.info("PR Review Summary")
-        logger.info("=" * 60)
-        logger.info("Total PRs: %s", total)
-        logger.info("Successful: %s", successful)
-        logger.info("Failed: %s", failed)
-
-        if failed > 0:
-            logger.info("\nFailed issues:")
-            for issue_num, result in results.items():
-                if not result.success:
-                    logger.info("  #%s: %s", issue_num, result.error)
+        print_worker_summary(
+            "PR Review Summary",
+            results,
+            count_noun="PRs",
+            failed_header="\nFailed issues:",
+        )
 
 
 def _build_parser() -> argparse.ArgumentParser:

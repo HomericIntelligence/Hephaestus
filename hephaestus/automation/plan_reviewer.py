@@ -26,7 +26,7 @@ from hephaestus.agents.runtime import (
     run_agent_text,
     uses_direct_agent_runner,
 )
-from hephaestus.automation._review_utils import add_max_workers_arg
+from hephaestus.automation._review_utils import add_max_workers_arg, print_worker_summary
 from hephaestus.cli.utils import add_dry_run_arg, add_json_arg, emit_json_status
 from hephaestus.github.rate_limit import wait_until
 
@@ -589,22 +589,7 @@ class PlanReviewer:
             results: Mapping of issue number to WorkerResult.
 
         """
-        total = len(results)
-        successful = sum(1 for r in results.values() if r.success)
-        failed = total - successful
-
-        logger.info("=" * 60)
-        logger.info("Plan Review Summary")
-        logger.info("=" * 60)
-        logger.info("Total issues: %s", total)
-        logger.info("Successful: %s", successful)
-        logger.info("Failed: %s", failed)
-
-        if failed > 0:
-            logger.info("Failed issues:")
-            for issue_num, result in results.items():
-                if not result.success:
-                    logger.info("  #%s: %s", issue_num, result.error)
+        print_worker_summary("Plan Review Summary", results)
 
 
 # ---------------------------------------------------------------------------

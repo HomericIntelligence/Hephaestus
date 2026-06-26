@@ -42,6 +42,7 @@ from ._review_utils import (
     find_pr_for_issue,
     instance_log,
     load_impl_session_id,
+    print_worker_summary,
     setup_review_logging,
 )
 from ._reviewer_base import BaseReviewer
@@ -1034,22 +1035,11 @@ class AddressReviewer(BaseReviewer):
             results: Mapping of issue number to WorkerResult
 
         """
-        total = len(results)
-        successful = sum(1 for r in results.values() if r.success)
-        failed = total - successful
-
-        logger.info("=" * 60)
-        logger.info("Address Review Summary")
-        logger.info("=" * 60)
-        logger.info("Total issues: %s", total)
-        logger.info("Successful: %s", successful)
-        logger.info("Failed: %s", failed)
-
-        if failed > 0:
-            logger.info("\nFailed issues:")
-            for issue_num, result in results.items():
-                if not result.success:
-                    logger.info("  #%s: %s", issue_num, result.error)
+        print_worker_summary(
+            "Address Review Summary",
+            results,
+            failed_header="\nFailed issues:",
+        )
 
 
 def _build_parser() -> argparse.ArgumentParser:

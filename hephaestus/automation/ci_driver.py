@@ -42,6 +42,7 @@ from ._review_utils import (
     add_max_workers_arg,
     find_pr_for_issue,
     load_impl_session_id,
+    print_worker_summary,
 )
 from .address_review import (
     _parse_addressed_block,
@@ -2249,22 +2250,7 @@ class CIDriver:
             results: Mapping of issue number to WorkerResult.
 
         """
-        total = len(results)
-        successful = sum(1 for r in results.values() if r.success)
-        failed = total - successful
-
-        logger.info("=" * 60)
-        logger.info("CI Driver Summary")
-        logger.info("=" * 60)
-        logger.info("Total issues: %s", total)
-        logger.info("Successful: %s", successful)
-        logger.info("Failed: %s", failed)
-
-        if failed > 0:
-            logger.info("Failed issues:")
-            for issue_num, result in results.items():
-                if not result.success:
-                    logger.info("  #%s: %s", issue_num, result.error)
+        print_worker_summary("CI Driver Summary", results)
 
 
 # ---------------------------------------------------------------------------

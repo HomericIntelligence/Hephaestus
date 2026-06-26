@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import logging
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -17,7 +18,9 @@ from hephaestus.automation._review_utils import (
     get_pr_head_branch,
     load_impl_session_id,
     parse_json_block,
+    print_worker_summary,
 )
+from hephaestus.automation.models import WorkerResult
 
 # ---------------------------------------------------------------------------
 # parse_json_block
@@ -56,6 +59,89 @@ class TestParseJsonBlock:
         result = parse_json_block(text)
         assert result["summary"] == "ok"
         assert len(result["comments"]) == 1
+
+
+class TestPrintWorkerSummary:
+    """Tests for the shared worker summary logger."""
+
+    @staticmethod
+    def _worker_result(issue_number: int, success: bool, error: str | None = None) -> WorkerResult:
+        return WorkerResult(issue_number=issue_number, success=success, error=error)
+
+    def test_empty_results_logs_zero_counts_without_failures(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Empty result sets log zero totals and omit the failure block."""
+        with caplog.at_level(logging.INFO):
+            print_worker_summary("PR Review Summary", {})
+
+        text = "\n".join(caplog.messages)
+        assert "PR Review Summary" in text
+        assert "Total issues: 0" in text
+        assert "Successful: 0" in text
+        assert "Failed: 0" in text
+        assert "Failed issues:" not in text
+
+    def test_all_successful_results_log_success_count(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Successful result sets log the expected success tally."""
+        results = {
+            1: self._worker_result(1, True),
+            2: self._worker_result(2, True),
+        }
+
+        with caplog.at_level(logging.INFO):
+            print_worker_summary("Plan Review Summary", results)
+
+        text = "\n".join(caplog.messages)
+        assert "Plan Review Summary" in text
+        assert "Total issues: 2" in text
+        assert "Successful: 2" in text
+        assert "Failed: 0" in text
+
+    def test_mixed_results_log_failed_errors(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Failed results are listed with their issue numbers and error text."""
+        results = {
+            1: self._worker_result(1, True),
+            2: self._worker_result(2, False, "boom"),
+        }
+
+        with caplog.at_level(logging.INFO):
+            print_worker_summary("CI Driver Summary", results)
+
+        text = "\n".join(caplog.messages)
+        assert "CI Driver Summary" in text
+        assert "Successful: 1" in text
+        assert "Failed: 1" in text
+        assert "Failed issues:" in text
+        assert "  #2: boom" in text
+
+    def test_custom_count_noun_preserves_pr_summary_text(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Callers can preserve the existing PR-specific total label."""
+        results = {1: self._worker_result(1, True)}
+
+        with caplog.at_level(logging.INFO):
+            print_worker_summary("PR Review Summary", results, count_noun="PRs")
+
+        assert "Total PRs: 1" in caplog.messages
+
+    def test_custom_failed_header_preserves_leading_newline(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Callers can preserve summary methods that logged a blank line first."""
+        results = {1: self._worker_result(1, False, "x")}
+
+        with caplog.at_level(logging.INFO):
+            print_worker_summary(
+                "Address Review Summary",
+                results,
+                failed_header="\nFailed issues:",
+            )
+
+        assert "\nFailed issues:" in caplog.messages
 
 
 # ---------------------------------------------------------------------------

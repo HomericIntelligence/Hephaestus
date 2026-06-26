@@ -11,6 +11,8 @@ Provides:
   lookup strategies depending on the caller's needs).
 - ``setup_review_logging``: Standard logging configuration for the reviewer
   CLIs (#599 dedupe).
+- ``print_worker_summary``: Standard worker-run summary logging for reviewer
+  and driver classes (#1381 dedupe).
 - ``build_review_parser``: Argparse parser builder shared by ``pr_reviewer``
   and ``address_review`` (#599 dedupe).
 - ``instance_log``: Shared body of the per-instance ``_log`` helper used by
@@ -28,12 +30,15 @@ import re
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hephaestus.agents.runtime import add_agent_argument, session_agent_matches
 from hephaestus.cli.utils import add_dry_run_arg, add_github_throttle_args
 
 from .github_api import _gh_call
+
+if TYPE_CHECKING:
+    from .models import WorkerResult
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +88,40 @@ def add_max_workers_arg(
         metavar="N",
         help=help_text,
     )
+
+
+def print_worker_summary(
+    title: str,
+    results: dict[int, WorkerResult],
+    *,
+    count_noun: str = "issues",
+    failed_header: str = "Failed issues:",
+) -> None:
+    """Log the standard worker-run summary.
+
+    Args:
+        title: Summary banner to log between separator lines.
+        results: Mapping of issue or PR number to worker result.
+        count_noun: Noun used in the total-count line.
+        failed_header: Header logged before the per-failure list.
+
+    """
+    total = len(results)
+    successful = sum(1 for result in results.values() if result.success)
+    failed = total - successful
+
+    logger.info("=" * 60)
+    logger.info(title)
+    logger.info("=" * 60)
+    logger.info("Total %s: %s", count_noun, total)
+    logger.info("Successful: %s", successful)
+    logger.info("Failed: %s", failed)
+
+    if failed > 0:
+        logger.info(failed_header)
+        for issue_num, result in results.items():
+            if not result.success:
+                logger.info("  #%s: %s", issue_num, result.error)
 
 
 def build_review_parser(
