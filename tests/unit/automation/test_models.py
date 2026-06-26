@@ -1,8 +1,13 @@
 """Tests for automation Pydantic models."""
 
+import ast
 from datetime import datetime
+from pathlib import Path
 
 from hephaestus.automation.models import (
+    _DEFAULT_WORKERS,
+    AddressReviewOptions,
+    CIDriverOptions,
     DependencyGraph,
     ImplementationPhase,
     ImplementationState,
@@ -11,9 +16,15 @@ from hephaestus.automation.models import (
     IssueState,
     PlannerOptions,
     PlanResult,
+    PlanReviewerOptions,
+    ReviewerOptions,
     ReviewPhase,
     ReviewState,
+    WorkerOptionsBase,
     WorkerResult,
+    _MaxWorkerOptionsBase,
+    _ParallelWorkerOptionsBase,
+    _VerboseWorkerOptionsBase,
 )
 
 
@@ -296,6 +307,74 @@ class TestReviewState:
 
         assert restored.session_id == "pi-session-123"
         assert restored.session_agent == "pi"
+
+
+_MODELS_PATH = Path(__file__).parents[3] / "hephaestus" / "automation" / "models.py"
+
+
+def _annotated_field_owners(field_name: str) -> list[str]:
+    module = ast.parse(_MODELS_PATH.read_text())
+    owners: list[str] = []
+    for node in module.body:
+        if isinstance(node, ast.ClassDef):
+            for stmt in node.body:
+                if (
+                    isinstance(stmt, ast.AnnAssign)
+                    and isinstance(stmt.target, ast.Name)
+                    and stmt.target.id == field_name
+                ):
+                    owners.append(node.name)
+    return owners
+
+
+def _field_default_expr(class_name: str, field_name: str) -> str:
+    module = ast.parse(_MODELS_PATH.read_text())
+    for node in module.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for stmt in node.body:
+                if (
+                    isinstance(stmt, ast.AnnAssign)
+                    and isinstance(stmt.target, ast.Name)
+                    and stmt.target.id == field_name
+                    and stmt.value is not None
+                ):
+                    return ast.unparse(stmt.value)
+    raise AssertionError(f"{class_name}.{field_name} not found")
+
+
+class TestWorkerOptionsBase:
+    """Tests for shared automation option model fields."""
+
+    def test_all_worker_options_inherit_common_base(self) -> None:
+        for options_cls in (
+            PlannerOptions,
+            ImplementerOptions,
+            ReviewerOptions,
+            PlanReviewerOptions,
+            AddressReviewOptions,
+            CIDriverOptions,
+        ):
+            assert issubclass(options_cls, WorkerOptionsBase)
+
+    def test_shared_fields_are_declared_only_on_intended_bases(self) -> None:
+        assert _annotated_field_owners("dry_run") == ["WorkerOptionsBase"]
+        assert _annotated_field_owners("max_workers") == ["_MaxWorkerOptionsBase"]
+        assert _annotated_field_owners("parallel") == ["_ParallelWorkerOptionsBase"]
+        assert _annotated_field_owners("verbose") == ["_VerboseWorkerOptionsBase"]
+
+    def test_worker_defaults_route_through_default_workers(self) -> None:
+        assert _field_default_expr("_MaxWorkerOptionsBase", "max_workers") == "_DEFAULT_WORKERS"
+        assert _field_default_expr("_ParallelWorkerOptionsBase", "parallel") == "_DEFAULT_WORKERS"
+        assert _MaxWorkerOptionsBase.model_fields["max_workers"].default == _DEFAULT_WORKERS
+        assert _ParallelWorkerOptionsBase.model_fields["parallel"].default == _DEFAULT_WORKERS
+
+    def test_verbose_only_exists_on_current_verbose_option_models(self) -> None:
+        assert issubclass(PlanReviewerOptions, _VerboseWorkerOptionsBase)
+        assert issubclass(AddressReviewOptions, _VerboseWorkerOptionsBase)
+        assert issubclass(CIDriverOptions, _VerboseWorkerOptionsBase)
+        assert "verbose" not in PlannerOptions.model_fields
+        assert "verbose" not in ImplementerOptions.model_fields
+        assert "verbose" not in ReviewerOptions.model_fields
 
 
 class TestPlannerOptions:
