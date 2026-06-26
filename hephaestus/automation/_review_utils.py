@@ -4,6 +4,8 @@ Extracts utilities that were previously duplicated across
 ``pr_reviewer.py`` and ``address_review.py``.
 
 Provides:
+- ``DEFAULT_STATE_DIR`` / ``ensure_state_dir``: Canonical automation state
+  directory path and creation helper.
 - ``parse_json_block``: Extract the last ```json``` block from Claude output.
 - ``_discover_prs_simple``: Shared issue-to-PR discovery loop for reviewer
   callers that supply their own single-issue lookup function.

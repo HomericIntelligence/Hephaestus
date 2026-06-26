@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation import implementer
+from hephaestus.automation._review_utils import DEFAULT_STATE_DIR
 from hephaestus.automation.implementer import (
     _CLAUDE_IMPL_TIMEOUT,
     IssueImplementer,
@@ -218,6 +219,12 @@ class TestIssueImplementerDynamicDelegates:
         ):
             missing_name = "_sav_state"
             getattr(dry_run_implementer, missing_name)
+
+
+def test_default_state_dir_uses_canonical_path(dry_run_implementer: IssueImplementer) -> None:
+    """IssueImplementer creates the shared default automation state directory."""
+    assert dry_run_implementer.state_dir == dry_run_implementer.repo_root / DEFAULT_STATE_DIR
+    assert dry_run_implementer.state_dir.is_dir()
 
 
 # ---------------------------------------------------------------------------
