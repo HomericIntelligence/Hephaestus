@@ -38,6 +38,7 @@ from ._review_utils import (
     ensure_state_dir,
     find_pr_for_issue,
     load_impl_session_id,
+    load_state_file,
     log_file_path,
     parse_json_block,
     print_worker_summary,
@@ -1333,16 +1334,11 @@ class CIDriver:
             Path to the worktree directory.
 
         """
-        review_state_file = self.state_dir / f"review-{issue_number}.json"
-        if review_state_file.exists():
-            try:
-                data = json.loads(review_state_file.read_text())
-                if data.get("worktree_path"):
-                    wt = Path(data["worktree_path"])
-                    if wt.exists():
-                        return wt
-            except Exception as e:
-                logger.debug("Could not read review state for issue #%s: %s", issue_number, e)
+        data = load_state_file(self.state_dir, "review", issue_number, state_logger=logger)
+        if data and data.get("worktree_path"):
+            wt = Path(data["worktree_path"])
+            if wt.exists():
+                return wt
 
         # Fallback: create a new worktree for the PR head branch
         branch = self._get_pr_branch(pr_number)

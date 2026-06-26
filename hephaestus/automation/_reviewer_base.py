@@ -18,9 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from hephaestus.io.utils import write_secure
-
-from ._review_utils import ensure_state_dir, instance_log
+from ._review_utils import ensure_state_dir, instance_log, load_state_file, save_state_file
 from .curses_ui import CursesUI, ThreadLogManager
 from .git_utils import get_repo_root as _default_get_repo_root, issue_ref
 from .models import ReviewPhase, ReviewState, WorkerResult
@@ -107,8 +105,7 @@ class BaseReviewer(ABC):
             state: The ``ReviewState`` to persist.
 
         """
-        state_file = self.state_dir / f"review-{state.issue_number}.json"
-        write_secure(state_file, state.model_dump_json(indent=2))
+        save_state_file(self.state_dir, "review", state.issue_number, state)
 
     def _fail(
         self,
@@ -151,18 +148,17 @@ class BaseReviewer(ABC):
             ``ReviewState`` if the file exists and parses, else ``None``.
 
         """
-        state_file = self.state_dir / f"review-{issue_number}.json"
-        if not state_file.exists():
-            return None
-        try:
-            return ReviewState.model_validate_json(state_file.read_text())
-        except Exception as exc:
-            # Log under the subclass module's logger so observability tooling
-            # that filters on logger name attributes this to pr_reviewer /
-            # address_review (same behavior as before the BaseReviewer split).
-            subclass_logger = logging.getLogger(type(self).__module__)
-            subclass_logger.warning("Malformed review state for issue #%d (%s)", issue_number, exc)
-            return None
+        # Log under the subclass module's logger so observability tooling
+        # that filters on logger name attributes this to pr_reviewer /
+        # address_review (same behavior as before the BaseReviewer split).
+        subclass_logger = logging.getLogger(type(self).__module__)
+        return load_state_file(
+            self.state_dir,
+            "review",
+            issue_number,
+            ReviewState,
+            state_logger=subclass_logger,
+        )
 
     @abstractmethod
     def run(self) -> Any:

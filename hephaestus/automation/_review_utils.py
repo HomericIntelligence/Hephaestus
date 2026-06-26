@@ -23,6 +23,8 @@ Provides:
 - ``load_impl_session_id``: Shared implementer-session state loader for
   drive-green and address-review.
 - ``log_file_path``: Standard per-issue automation log filename builder.
+- ``load_state_file``: Generic state file loader (raw dict or Pydantic model).
+- ``save_state_file``: Generic secure state file writer.
 """
 
 from __future__ import annotations
@@ -36,7 +38,9 @@ import threading
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar, overload
+
+from pydantic import BaseModel
 
 from hephaestus.agents.runtime import add_agent_argument, session_agent_matches
 from hephaestus.cli.utils import (
@@ -45,6 +49,7 @@ from hephaestus.cli.utils import (
     add_json_arg,
     add_version_arg,
 )
+from hephaestus.io.utils import write_secure
 
 from .github_api import _gh_call
 from .models import DEFAULT_STATE_DIR, DEFAULT_WORKER_COUNT
@@ -62,6 +67,109 @@ _REVIEW_PARSE_FAILED = {
     "comments": [],
     "summary": "Failed to parse structured output from analysis",
 }
+
+_StateModelT = TypeVar("_StateModelT", bound=BaseModel)
+
+
+@overload
+def load_state_file(
+    state_dir: Path,
+    prefix: str,
+    issue_number: int,
+    model_class: type[_StateModelT],
+    *,
+    state_logger: logging.Logger | None = None,
+) -> _StateModelT | None: ...
+
+
+@overload
+def load_state_file(
+    state_dir: Path,
+    prefix: str,
+    issue_number: int,
+    model_class: None = None,
+    *,
+    state_logger: logging.Logger | None = None,
+) -> dict[str, Any] | None: ...
+
+
+def load_state_file(
+    state_dir: Path,
+    prefix: str,
+    issue_number: int,
+    model_class: type[_StateModelT] | None = None,
+    *,
+    state_logger: logging.Logger | None = None,
+) -> _StateModelT | dict[str, Any] | None:
+    """Load ``<prefix>-<issue_number>.json`` as a JSON object or Pydantic model.
+
+    Args:
+        state_dir: Directory containing state files.
+        prefix: File prefix, such as ``"issue"`` or ``"review"``.
+        issue_number: GitHub issue number used in the filename.
+        model_class: Optional Pydantic model class used to validate the JSON object.
+        state_logger: Optional logger for malformed-file warnings.
+
+    Returns:
+        A raw JSON object dict, a validated Pydantic model, or ``None`` when the
+        file is absent or invalid.
+
+    """
+    target_logger = state_logger or logger
+    state_file = state_dir / f"{prefix}-{issue_number}.json"
+    if not state_file.exists():
+        return None
+
+    try:
+        payload = json.loads(state_file.read_text())
+    except (OSError, ValueError) as exc:
+        target_logger.warning(
+            "Malformed %s state for issue #%d at %s: %s",
+            prefix,
+            issue_number,
+            state_file,
+            exc,
+        )
+        return None
+
+    if not isinstance(payload, dict):
+        target_logger.warning(
+            "Malformed %s state for issue #%d at %s: expected JSON object, got %s",
+            prefix,
+            issue_number,
+            state_file,
+            type(payload).__name__,
+        )
+        return None
+
+    if model_class is None:
+        return payload
+
+    try:
+        return model_class.model_validate(payload)
+    except ValueError as exc:
+        target_logger.warning(
+            "Malformed %s state for issue #%d at %s: %s",
+            prefix,
+            issue_number,
+            state_file,
+            exc,
+        )
+        return None
+
+
+def save_state_file(state_dir: Path, prefix: str, issue_number: int, state: BaseModel) -> None:
+    """Securely persist ``state`` to ``<prefix>-<issue_number>.json``.
+
+    Args:
+        state_dir: Directory where the state file should be written.
+        prefix: File prefix, such as ``"issue"`` or ``"review"``.
+        issue_number: GitHub issue number used in the filename.
+        state: Pydantic model to serialize.
+
+    """
+    state_file = state_dir / f"{prefix}-{issue_number}.json"
+    write_secure(state_file, state.model_dump_json(indent=2))
 
 
 def setup_review_logging(verbose: bool = False) -> None:
