@@ -3192,6 +3192,28 @@ class TestEvaluateRunResult:
         remaining = [{"number": 10, "autoMergeRequest": {"enabledAt": "now"}}]
         assert _evaluate_run_result(results, remaining, issues=[1], as_json=False) == 0
 
+    def test_failed_issue_same_armed_pending_pr_is_zero(self) -> None:
+        # A no-commit CI-fix turn can leave a stale failed WorkerResult after
+        # the same PR has become armed and is only waiting on GitHub. The final
+        # repo gate should trust the current PR state and not fail the loop.
+        results = {
+            1: WorkerResult(
+                issue_number=1,
+                success=False,
+                pr_number=10,
+                error="CI fix failed after 1 attempt(s)",
+            )
+        }
+        remaining = [
+            {
+                "number": 10,
+                "autoMergeRequest": {"enabledAt": "now"},
+                "mergeStateStatus": "BLOCKED",
+                "mergeable": "MERGEABLE",
+            }
+        ]
+        assert _evaluate_run_result(results, remaining, issues=[1], as_json=False) == 0
+
     def test_unarmed_go_labeled_pr_is_needs_action(self) -> None:
         # #1576: an un-armed PR that HAS state:implementation-go (review approved
         # but somehow not armed) is a genuine anomaly needing action → rc=1.
