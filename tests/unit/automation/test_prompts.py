@@ -156,8 +156,8 @@ class TestPRReviewAnalysisPrompt:
     def test_pr_review_prompt_preserves_json_block(self) -> None:
         """The trailing JSON fenced block must remain byte-exact.
 
-        `pr_reviewer.py:_parse_json_block` extracts the LAST fenced JSON
-        block — any change to the schema or fence ordering breaks parsing.
+        `_review_utils.parse_json_block` extracts the LAST fenced JSON block — any
+        change to the schema or fence ordering breaks parsing.
         """
         out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
         # The schema example object must appear verbatim (now on its own line so

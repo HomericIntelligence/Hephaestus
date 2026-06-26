@@ -11,57 +11,10 @@ from hephaestus.automation.claude_invoke import parse_review_verdict
 from hephaestus.automation.models import ReviewerOptions
 from hephaestus.automation.pr_reviewer import (
     PRReviewer,
-    _parse_json_block,
     gather_impl_review_context,
     review_pr_inline,
     run_pr_review_analysis,
 )
-
-# ---------------------------------------------------------------------------
-# _parse_json_block (module-level function)
-# ---------------------------------------------------------------------------
-
-
-class TestParseJsonBlock:
-    """Tests for the module-level _parse_json_block function."""
-
-    def test_parse_json_block_extracts_last_block(self) -> None:
-        """Multiple ```json blocks → returns last one parsed."""
-        text = (
-            "Some analysis\n"
-            "```json\n"
-            '{"comments": ["first"], "summary": "first"}\n'
-            "```\n"
-            "More text\n"
-            "```json\n"
-            '{"comments": ["second"], "summary": "second"}\n'
-            "```"
-        )
-        result = _parse_json_block(text)
-        assert result["summary"] == "second"
-        assert result["comments"] == ["second"]
-
-    def test_parse_json_block_no_block(self) -> None:
-        """No json block → returns defaults with empty comments."""
-        result = _parse_json_block("No json here at all.")
-        assert result["comments"] == []
-        assert "No structured output" in result["summary"]
-
-    def test_parse_json_block_invalid_json(self) -> None:
-        """Malformed json block → returns default dict."""
-        text = "```json\n{invalid json!!!}\n```"
-        result = _parse_json_block(text)
-        assert result["comments"] == []
-        assert "Failed to parse" in result["summary"]
-
-    def test_parse_json_block_single_valid_block(self) -> None:
-        """Single valid json block → returns parsed content."""
-        comments = [{"path": "foo.py", "line": 10, "body": "Fix this"}]
-        text = "```json\n" + json.dumps({"comments": comments, "summary": "Looks good"}) + "\n```"
-        result = _parse_json_block(text)
-        assert len(result["comments"]) == 1
-        assert result["summary"] == "Looks good"
-
 
 # ---------------------------------------------------------------------------
 # PRReviewer fixtures
@@ -542,6 +495,34 @@ class TestRunPrReviewAnalysis:
         assert out["summary"] == "Needs fixes."
         assert "Verdict: NOGO" in out["review_text"]
         assert parse_review_verdict(out["review_text"]).verdict == "NOGO"
+
+    def test_uses_canonical_review_utils_parser_patch_target(self, tmp_path: Path) -> None:
+        """PR-review parsing goes through the canonical patch target."""
+        stdout = 'review prose\n```json\n{"comments": [], "summary": "real"}\n```'
+
+        with (
+            patch(
+                "hephaestus.automation.pr_reviewer.run_agent_text",
+                return_value=MagicMock(stdout=stdout),
+            ),
+            patch(
+                "hephaestus.automation._review_utils.parse_json_block",
+                return_value={"comments": [], "summary": "patched"},
+            ) as parse_json,
+        ):
+            out = run_pr_review_analysis(
+                pr_number=1,
+                issue_number=1,
+                worktree_path=tmp_path,
+                context={"pr_diff": "diff"},
+                agent="codex",
+                state_dir=tmp_path,
+                dry_run=False,
+            )
+
+        parse_json.assert_called_once_with(stdout)
+        assert out["summary"] == "patched"
+        assert out["review_text"] == stdout
 
     def test_prompt_passed_via_stdin_not_argv(self, tmp_path: Path) -> None:
         """The reviewer prompt is piped via stdin, never embedded in argv.

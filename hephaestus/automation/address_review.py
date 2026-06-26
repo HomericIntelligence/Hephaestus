@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 import subprocess
 import threading
 import time
@@ -36,6 +35,7 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 
+from . import _review_utils
 from ._review_utils import (
     _discover_prs_simple,
     build_review_parser,
@@ -68,12 +68,14 @@ from .session_naming import AGENT_IMPLEMENTER
 
 logger = logging.getLogger(__name__)
 
+_ADDRESS_PARSE_DEFAULT: dict[str, Any] = {"addressed": [], "replies": {}}
+
 
 def _parse_addressed_block(text: str) -> dict[str, Any]:
     """Extract the last ```json``` block as an ``{"addressed", "replies"}`` dict.
 
     Trace-free parser shared by the in-loop address step (#28). The standalone
-    :meth:`AddressReviewer._parse_json_block` wraps this with a diagnostic
+    :class:`AddressReviewer` path wraps the same parser with a diagnostic
     trace-file writer; callers that don't need the trace use this directly.
 
     Args:
@@ -84,13 +86,28 @@ def _parse_addressed_block(text: str) -> dict[str, Any]:
         if no parseable ``json`` block is present.
 
     """
-    matches = re.findall(r"```json\s*(.*?)\s*```", text, re.DOTALL)
-    if not matches:
-        return {"addressed": [], "replies": {}}
-    try:
-        return dict(json.loads(matches[-1]))
-    except json.JSONDecodeError:
-        return {"addressed": [], "replies": {}}
+    return _review_utils.parse_json_block(text, default=_ADDRESS_PARSE_DEFAULT)
+
+
+def _log_address_parse_error(
+    issue_number: int,
+    reason: str,
+    trace_path: Path | None,
+    trace_error: OSError | None,
+) -> None:
+    if trace_error is not None:
+        logger.warning(
+            "Issue #%d: address-review JSON parse failed and trace write also failed: %s",
+            issue_number,
+            trace_error,
+        )
+    elif trace_path is not None:
+        logger.warning(
+            "Issue #%d: address-review JSON parse failed (%s); trace at %s",
+            issue_number,
+            reason,
+            trace_path,
+        )
 
 
 def run_address_fix_session(
@@ -131,7 +148,7 @@ def run_address_fix_session(
         agent: Selected implementation agent (``"claude"`` / ``"codex"``).
         repo_root: Repo root used for session-naming githash + slug.
         parse_fn: Callable ``(text) -> dict`` used to parse the agent's output.
-            The standalone path passes its trace-writing method; the in-loop
+            The standalone path passes its trace-writing closure; the in-loop
             path passes :func:`_parse_addressed_block`.
         log_file: Path to write the raw session log to.
         dry_run: When True, skip the agent call and return empty result.
@@ -834,6 +851,20 @@ class AddressReviewer(BaseReviewer):
         """
         log_file = self.state_dir / f"address-review-{issue_number}.log"
 
+        def parse_with_trace(text: str) -> dict[str, Any]:
+            return _review_utils.parse_json_block(
+                text,
+                default=_ADDRESS_PARSE_DEFAULT,
+                trace_dir=self.state_dir,
+                trace_name=f"address-{issue_number}.parse-error.log",
+                on_error=lambda reason, path, error: _log_address_parse_error(
+                    issue_number,
+                    reason,
+                    path,
+                    error,
+                ),
+            )
+
         if not self.options.dry_run and uses_direct_agent_runner(self.options.agent) and session_id:
             threads_json = json.dumps(
                 [
@@ -876,7 +907,7 @@ class AddressReviewer(BaseReviewer):
                 if direct_result.session_id:
                     log = f"SESSION_ID: {direct_result.session_id}\n\n{log}"
                 log_file.write_text(log)
-                parsed = self._parse_json_block(direct_result.stdout, issue_number=issue_number)
+                parsed = parse_with_trace(direct_result.stdout)
                 logger.info(
                     "Fix session complete for PR #%s; addressed %s thread(s)",
                     pr_number,
@@ -891,84 +922,10 @@ class AddressReviewer(BaseReviewer):
             threads=threads,
             agent=self.options.agent,
             repo_root=self.repo_root,
-            parse_fn=lambda text: self._parse_json_block(text, issue_number=issue_number),
+            parse_fn=parse_with_trace,
             log_file=log_file,
             dry_run=self.options.dry_run,
         )
-
-    def _parse_json_block(self, text: str, issue_number: int | None = None) -> dict[str, Any]:
-        """Extract the last ```json ... ``` block from an agent response.
-
-        On parse failure or missing block, writes a trace file under the state
-        dir so an empty ``addressed`` list is distinguishable from "the agent
-        reviewed and decided no fixes were warranted". Without this the two
-        cases looked identical in logs and it was hard to know whether to
-        retry, escalate, or trust the result.
-
-        Args:
-            text: Claude's full response text
-            issue_number: Issue number for diagnostic filenames; if None, no
-                trace is written (used by tests).
-
-        Returns:
-            Parsed dict with "addressed" and "replies" keys, or defaults if not found
-
-        """
-        matches = re.findall(r"```json\s*(.*?)\s*```", text, re.DOTALL)
-        if not matches:
-            self._write_parse_trace(
-                issue_number,
-                reason="no fenced ```json block found in response",
-                text=text,
-            )
-            return {"addressed": [], "replies": {}}
-        try:
-            return dict(json.loads(matches[-1]))
-        except json.JSONDecodeError as e:
-            self._write_parse_trace(
-                issue_number,
-                reason=f"json.JSONDecodeError: {e}",
-                text=text,
-                last_block=matches[-1],
-            )
-            return {"addressed": [], "replies": {}}
-
-    def _write_parse_trace(
-        self,
-        issue_number: int | None,
-        *,
-        reason: str,
-        text: str,
-        last_block: str | None = None,
-    ) -> None:
-        """Persist a diagnostic file describing why JSON parsing failed."""
-        if issue_number is None:
-            logger.warning("Parse trace skipped (no issue_number): %s", reason)
-            return
-        trace_path = self.state_dir / f"address-{issue_number}.parse-error.log"
-        try:
-            payload = [
-                f"reason: {reason}",
-                "",
-                "=== last fenced block (if any) ===",
-                last_block or "(none)",
-                "",
-                "=== full response ===",
-                text,
-            ]
-            trace_path.write_text("\n".join(payload))
-            logger.warning(
-                "Issue #%d: address-review JSON parse failed (%s); trace at %s",
-                issue_number,
-                reason,
-                trace_path,
-            )
-        except OSError as exc:
-            logger.warning(
-                "Issue #%d: address-review JSON parse failed and trace write also failed: %s",
-                issue_number,
-                exc,
-            )
 
     def _resolve_addressed_threads(
         self,

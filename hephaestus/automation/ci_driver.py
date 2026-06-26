@@ -10,7 +10,6 @@ Provides:
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import logging
 import os
@@ -42,6 +41,7 @@ from ._review_utils import (
     add_max_workers_arg,
     find_pr_for_issue,
     load_impl_session_id,
+    parse_json_block,
     print_worker_summary,
 )
 from .address_review import (
@@ -2221,7 +2221,7 @@ class CIDriver:
         return self._post_merge.run_drive_green_compact(issue_number, pr_number)
 
     def _parse_json_block(self, text: str) -> dict[str, Any]:
-        """Extract and parse the first JSON block from a text string.
+        """Extract and parse the first JSON block or raw JSON object.
 
         Args:
             text: Input text that may contain a JSON block.
@@ -2230,18 +2230,13 @@ class CIDriver:
             Parsed dictionary, or empty dict if no valid JSON found.
 
         """
-        import re
-
-        match = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
-        if match:
-            with contextlib.suppress(json.JSONDecodeError):
-                return dict(json.loads(match.group(1)))
-
-        # Try raw JSON
-        with contextlib.suppress(json.JSONDecodeError):
-            return dict(json.loads(text))
-
-        return {}
+        return parse_json_block(
+            text,
+            default={},
+            parse_error_default={},
+            raw_json_fallback=True,
+            use_last_block=False,
+        )
 
     def _print_summary(self, results: dict[int, WorkerResult]) -> None:
         """Print a summary of CI drive results.

@@ -251,6 +251,15 @@ class TestParseJsonBlock:
         result = driver._parse_json_block("not json at all")
         assert result == {}
 
+    def test_first_invalid_block_does_not_parse_later_valid_block(self, driver: CIDriver) -> None:
+        """First-block mode does not skip ahead to a later valid block."""
+        text = '```json\n{bad}\n```\n```json\n{"fixed": true}\n```'
+        assert driver._parse_json_block(text) == {}
+
+    def test_raw_json_scalar_returns_empty_dict(self, driver: CIDriver) -> None:
+        """Raw JSON fallback must still return a dict shape."""
+        assert driver._parse_json_block("42") == {}
+
 
 def test_codex_ci_fix_session_falls_back_to_fresh_on_resume_failure(
     driver: CIDriver,

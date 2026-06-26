@@ -60,6 +60,43 @@ class TestParseJsonBlock:
         assert result["summary"] == "ok"
         assert len(result["comments"]) == 1
 
+    def test_invalid_json_with_custom_default_writes_trace(self, tmp_path: Path) -> None:
+        """Malformed JSON with trace_dir writes the diagnostic payload."""
+        default: dict[str, Any] = {"addressed": [], "replies": {}}
+        text = "before\n```json\n{broken!!}\n```\nafter"
+
+        result = parse_json_block(
+            text,
+            default=default,
+            trace_dir=tmp_path,
+            trace_name="address-123.parse-error.log",
+        )
+
+        assert result == default
+        trace = tmp_path / "address-123.parse-error.log"
+        assert trace.exists()
+        payload = trace.read_text()
+        assert "reason: json.JSONDecodeError:" in payload
+        assert "=== last fenced block (if any) ===\n{broken!!}" in payload
+        assert "=== full response ===\n" in payload
+        assert text in payload
+
+    def test_raw_json_fallback_invalid_returns_custom_default(self) -> None:
+        """Invalid raw JSON fallback returns the caller's shape."""
+        assert parse_json_block("{bad", default={}, raw_json_fallback=True) == {}
+
+    def test_first_block_invalid_with_raw_fallback_does_not_use_later_block(self) -> None:
+        """First-block mode preserves CI-driver semantics on invalid first blocks."""
+        text = '```json\n{bad}\n```\n```json\n{"fixed": true}\n```'
+        assert (
+            parse_json_block(text, default={}, raw_json_fallback=True, use_last_block=False) == {}
+        )
+
+    def test_scalar_json_returns_parse_error_default(self) -> None:
+        """Scalar JSON is not a dict result and uses the parse-error default."""
+        result = parse_json_block("```json\n42\n```")
+        assert result["summary"].startswith("Failed to parse")
+
 
 class TestPrintWorkerSummary:
     """Tests for the shared worker summary logger."""

@@ -40,12 +40,12 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 
+from . import _review_utils
 from ._review_utils import (
     _discover_prs_simple,
     build_review_parser,
     find_pr_for_issue,
     instance_log,
-    parse_json_block,
     print_worker_summary,
     setup_review_logging,
 )
@@ -61,22 +61,6 @@ from .prompts import get_pr_review_analysis_prompt
 from .session_naming import AGENT_PR_REVIEWER, reviewer_agent
 
 logger = logging.getLogger(__name__)
-
-
-def _parse_json_block(text: str) -> dict[str, Any]:
-    """Extract the last ```json ... ``` block from an agent response.
-
-    Thin wrapper around :func:`_review_utils.parse_json_block` kept for
-    backward compatibility with existing callers and tests.
-
-    Args:
-        text: Agent response text
-
-    Returns:
-        Parsed dict with keys "comments" and "summary", or defaults if not found
-
-    """
-    return parse_json_block(text)
 
 
 def run_pr_review_analysis(
@@ -154,7 +138,7 @@ def run_pr_review_analysis(
             )
             log_file.write_text(result.stdout or "")
             review_text = result.stdout or ""
-            parsed = _parse_json_block(review_text)
+            parsed = _review_utils.parse_json_block(review_text)
             parsed["review_text"] = review_text
             logger.info(
                 "Analysis complete for PR #%s; found %s inline comment(s)",
@@ -198,7 +182,7 @@ def run_pr_review_analysis(
         except (json.JSONDecodeError, AttributeError):
             response_text = stdout or ""
 
-        parsed = _parse_json_block(response_text)
+        parsed = _review_utils.parse_json_block(response_text)
         # The Verdict:/Grade: line lives in the reviewer prose, not the JSON
         # summary block. Surface it so callers parse the real verdict.
         parsed["review_text"] = response_text

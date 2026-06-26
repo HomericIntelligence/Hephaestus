@@ -24,11 +24,13 @@ Provides:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -41,6 +43,15 @@ if TYPE_CHECKING:
     from .models import WorkerResult
 
 logger = logging.getLogger(__name__)
+
+ParseJsonErrorCallback = Callable[[str, Path | None, OSError | None], None]
+
+_JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
+_REVIEW_PARSE_MISSING = {"comments": [], "summary": "No structured output from analysis"}
+_REVIEW_PARSE_FAILED = {
+    "comments": [],
+    "summary": "Failed to parse structured output from analysis",
+}
 
 
 def setup_review_logging(verbose: bool = False) -> None:
@@ -212,23 +223,118 @@ def instance_log(
     log_manager.log(tid, ui_msg)
 
 
-def parse_json_block(text: str) -> dict[str, Any]:
-    """Extract the last ```json ... ``` block from an agent response.
+def _copy_default(default: Mapping[str, Any]) -> dict[str, Any]:
+    return deepcopy(dict(default))
+
+
+def _format_parse_error(exc: Exception) -> str:
+    if isinstance(exc, json.JSONDecodeError):
+        return f"json.JSONDecodeError: {exc}"
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _write_json_parse_trace(
+    *,
+    trace_dir: Path,
+    trace_name: str,
+    reason: str,
+    text: str,
+    last_block: str | None,
+) -> tuple[Path, OSError | None]:
+    trace_path = trace_dir / trace_name
+    try:
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        trace_path.write_text(
+            "\n".join(
+                [
+                    f"reason: {reason}",
+                    "",
+                    "=== last fenced block (if any) ===",
+                    last_block or "(none)",
+                    "",
+                    "=== full response ===",
+                    text,
+                ]
+            )
+        )
+        return trace_path, None
+    except OSError as exc:
+        return trace_path, exc
+
+
+def parse_json_block(
+    text: str,
+    *,
+    default: Mapping[str, Any] | None = None,
+    parse_error_default: Mapping[str, Any] | None = None,
+    trace_dir: Path | None = None,
+    trace_name: str = "parse-error.log",
+    raw_json_fallback: bool = False,
+    use_last_block: bool = True,
+    on_error: ParseJsonErrorCallback | None = None,
+) -> dict[str, Any]:
+    """Extract a JSON object from an agent response.
 
     Args:
         text: Agent response text.
+        default: Result shape for missing JSON, and for parse errors unless
+            ``parse_error_default`` is supplied.
+        parse_error_default: Result shape for malformed/non-object JSON.
+        trace_dir: Optional directory for parse-failure diagnostics.
+        trace_name: Diagnostic filename when ``trace_dir`` is supplied.
+        raw_json_fallback: Try parsing the full response as raw JSON.
+        use_last_block: When true, parse the last fenced block; otherwise the
+            first. Reviewers use the last block, CI repair uses the first.
+        on_error: Optional callback receiving the reason, trace path, and trace
+            write error.
 
     Returns:
-        Parsed dict, or a default dict with empty collections on failure.
+        Parsed dict, or a caller-provided/default dict on failure.
 
     """
-    matches = re.findall(r"```json\s*(.*?)\s*```", text, re.DOTALL)
-    if not matches:
-        return {"comments": [], "summary": "No structured output from analysis"}
-    try:
-        return dict(json.loads(matches[-1]))
-    except json.JSONDecodeError:
-        return {"comments": [], "summary": "Failed to parse structured output from analysis"}
+    missing_default = _REVIEW_PARSE_MISSING if default is None else default
+    if parse_error_default is not None:
+        failed_default = parse_error_default
+    elif default is None:
+        failed_default = _REVIEW_PARSE_FAILED
+    else:
+        failed_default = missing_default
+
+    def record_error(reason: str, last_block: str | None) -> None:
+        trace_path: Path | None = None
+        trace_error: OSError | None = None
+        if trace_dir is not None:
+            trace_path, trace_error = _write_json_parse_trace(
+                trace_dir=trace_dir,
+                trace_name=trace_name,
+                reason=reason,
+                text=text,
+                last_block=last_block,
+            )
+        if on_error is not None:
+            on_error(reason, trace_path, trace_error)
+
+    matches = _JSON_BLOCK_RE.findall(text)
+    if matches:
+        block = matches[-1 if use_last_block else 0]
+        try:
+            return dict(json.loads(block))
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            if raw_json_fallback:
+                with contextlib.suppress(json.JSONDecodeError, TypeError, ValueError):
+                    return dict(json.loads(text))
+            record_error(_format_parse_error(exc), block)
+            return _copy_default(failed_default)
+
+    if raw_json_fallback:
+        try:
+            return dict(json.loads(text))
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            record_error(_format_parse_error(exc), None)
+            return _copy_default(failed_default)
+
+    record_error("no fenced ```json block found in response", None)
+    return _copy_default(missing_default)
 
 
 def _discover_prs_simple(
