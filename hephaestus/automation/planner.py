@@ -17,21 +17,17 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import (
-    add_agent_argument,
     direct_agent_model,
     resolve_agent,
     uses_direct_agent_runner,
 )
 from hephaestus.cli.utils import (
-    add_dry_run_arg,
-    add_github_throttle_args,
-    add_json_arg,
-    add_version_arg,
     configure_github_throttle_from_args,
     emit_json_status,
 )
 
 from ._review_utils import (
+    build_automation_parser,
     close_issue_as_covered,
     find_merged_closing_pr,
     find_pr_for_issue,
@@ -569,7 +565,7 @@ def _build_parser() -> argparse.ArgumentParser:
     """
     from pathlib import Path
 
-    parser = argparse.ArgumentParser(
+    parser = build_automation_parser(
         description="Bulk plan GitHub issues using Claude Code or Codex",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -592,6 +588,11 @@ Examples:
   # Plan with more parallelism
   %(prog)s --issues 123 456 789 --parallel 5
         """,
+        add_max_workers=False,
+        add_parallel=True,
+        parallel_help="Number of parallel workers, 1-32 (default: 3)",
+        add_github_throttle=True,
+        dry_run_prefix="Suppress GitHub mutations and agent calls (no issue comments posted).",
     )
 
     parser.add_argument(
@@ -600,23 +601,10 @@ Examples:
         nargs="+",
         help="Issue numbers to plan (default: all open issues)",
     )
-    add_agent_argument(parser)
-    add_dry_run_arg(
-        parser,
-        prefix="Suppress GitHub mutations and agent calls (no issue comments posted).",
-    )
     parser.add_argument(
         "--force",
         action="store_true",
         help="Force re-planning even if plan already exists",
-    )
-    parser.add_argument(
-        "--parallel",
-        type=int,
-        default=3,
-        choices=range(1, 33),
-        metavar="N",
-        help="Number of parallel workers, 1-32 (default: 3)",
     )
     parser.add_argument(
         "--system-prompt",
@@ -633,15 +621,6 @@ Examples:
         action="store_true",
         help="Skip the advise step (don't search team knowledge base before planning)",
     )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
-    )
-    add_github_throttle_args(parser)
-    add_json_arg(parser)
-    add_version_arg(parser)
     return parser
 
 

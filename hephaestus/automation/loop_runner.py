@@ -50,8 +50,8 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hephaestus.agents.runtime import add_agent_argument, resolve_agent
-from hephaestus.automation._review_utils import add_max_workers_arg, find_pr_for_issue
+from hephaestus.agents.runtime import resolve_agent
+from hephaestus.automation._review_utils import build_automation_parser, find_pr_for_issue
 from hephaestus.automation.github_api import (
     gh_issue_add_labels,
     is_issue_closed,
@@ -74,10 +74,6 @@ from hephaestus.automation.loop_repo_manager import (
 from hephaestus.automation.pr_manager import pr_is_genuinely_stuck
 from hephaestus.automation.state_labels import STATE_SKIP
 from hephaestus.cli.utils import (
-    add_dry_run_arg,
-    add_github_throttle_args,
-    add_json_arg,
-    add_version_arg,
     configure_github_throttle_from_args,
     emit_json_status,
 )
@@ -435,22 +431,22 @@ def _read_work_report(path: str) -> int | None:
 
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser for the loop runner."""
-    p = argparse.ArgumentParser(
+    p = build_automation_parser(
         prog="hephaestus-automation-loop",
         description=(
             "Run the 2-stage loop body and post-loop terminal stages across "
             "HomericIntelligence repos."
         ),
-    )
-    add_dry_run_arg(
-        p,
-        prefix="Forward --dry-run to every phase (suppresses GitHub mutations and git pushes).",
+        max_workers_help=(
+            "Parallel workers per repo per phase (1-32, default: 3). Passes to child phases."
+        ),
+        add_github_throttle=True,
+        dry_run_prefix=(
+            "Forward --dry-run to every phase (suppresses GitHub mutations and git pushes)."
+        ),
+        verbose_help="Enable DEBUG logging",
     )
     p.add_argument("--loops", type=int, default=5, help="Number of loop iterations (default: 5)")
-    add_max_workers_arg(
-        p,
-        help_text="Parallel workers per repo per phase (1-32, default: 3). Passes to child phases.",
-    )
     p.add_argument(
         "--max-merge-attempts",
         type=int,
@@ -477,7 +473,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "when selected and also does one final repo-level catch-up sweep)."
         ),
     )
-    add_agent_argument(p)
     p.add_argument(
         "--issues",
         type=_parse_issue_list,
@@ -574,10 +569,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "enumeration. Space-separated input is NOT accepted."
         ),
     )
-    add_github_throttle_args(p)
-    p.add_argument("-v", "--verbose", action="store_true", help="Enable DEBUG logging")
-    add_json_arg(p)
-    add_version_arg(p)
     return p
 
 

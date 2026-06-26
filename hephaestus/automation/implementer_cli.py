@@ -21,14 +21,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from hephaestus.agents.runtime import add_agent_argument
-from hephaestus.automation._review_utils import add_max_workers_arg
-from hephaestus.cli.utils import (
-    add_dry_run_arg,
-    add_github_throttle_args,
-    add_json_arg,
-    add_version_arg,
-)
+from hephaestus.automation._review_utils import build_automation_parser
 
 
 def _setup_logging(verbose: bool = False, log_dir: Path | None = None) -> None:
@@ -54,7 +47,7 @@ def _setup_logging(verbose: bool = False, log_dir: Path | None = None) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser for the implementer CLI."""
-    parser = argparse.ArgumentParser(
+    parser = build_automation_parser(
         description="Bulk implement GitHub issues using Claude Code or Codex",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -80,6 +73,9 @@ Examples:
   # Dry run
   %(prog)s --issues 595 --dry-run
         """,
+        add_github_throttle=True,
+        dry_run_prefix="Suppress GitHub mutations and git pushes (no PR creation, no commits).",
+        add_no_ui=True,
     )
 
     parser.add_argument(
@@ -93,7 +89,6 @@ Examples:
         nargs="+",
         help="Specific issue numbers to implement (alternative to --epic)",
     )
-    add_agent_argument(parser)
     parser.add_argument(
         "--analyze",
         action="store_true",
@@ -109,7 +104,6 @@ Examples:
         action="store_true",
         help="Resume previous implementation from saved state",
     )
-    add_max_workers_arg(parser)
     parser.add_argument(
         "--no-skip-closed",
         action="store_true",
@@ -119,10 +113,6 @@ Examples:
         "--no-auto-merge",
         action="store_true",
         help="Don't enable auto-merge after implementation-review GO",
-    )
-    add_dry_run_arg(
-        parser,
-        prefix="Suppress GitHub mutations and git pushes (no PR creation, no commits).",
     )
     parser.add_argument(
         "--no-learn",
@@ -144,20 +134,6 @@ Examples:
         action="store_true",
         help="Let the reviewer emit nitpick-severity comments (suppressed by default)",
     )
-    parser.add_argument(
-        "--no-ui",
-        action="store_true",
-        help="Disable curses UI (use plain logging instead)",
-    )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
-    )
-    add_github_throttle_args(parser)
-    add_json_arg(parser)
-    add_version_arg(parser)
     return parser
 
 

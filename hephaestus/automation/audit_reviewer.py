@@ -21,20 +21,17 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import (
-    add_agent_argument,
     direct_agent_model,
     resolve_agent,
     run_agent_text,
     uses_direct_agent_runner,
 )
 from hephaestus.cli.utils import (
-    add_github_throttle_args,
-    add_json_arg,
-    add_version_arg,
     configure_github_throttle_from_args,
     emit_json_status,
 )
 
+from ._review_utils import build_automation_parser
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import reviewer_model
 from .claude_timeouts import pr_reviewer_claude_timeout
@@ -246,9 +243,13 @@ class AuditReviewer:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = build_automation_parser(
         prog="hephaestus-audit-prs",
         description="Audit ALL open PRs in one coordinator agent invocation.",
+        add_max_workers=False,
+        add_github_throttle=True,
+        dry_run_help="Skip the agent call and the GitHub posting step.",
+        verbose_help="DEBUG-level logging.",
     )
     parser.add_argument(
         "--pr-numbers",
@@ -257,15 +258,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Audit only these PR numbers (default: all open).",
     )
-    add_agent_argument(parser)
     parser.add_argument("--codex", action="store_true", help="Deprecated alias for --agent codex.")
-    parser.add_argument(
-        "--dry-run", action="store_true", help="Skip the agent call and the GitHub posting step."
-    )
-    parser.add_argument("-v", "--verbose", action="store_true", help="DEBUG-level logging.")
-    add_github_throttle_args(parser)
-    add_json_arg(parser)
-    add_version_arg(parser)
     return parser
 
 

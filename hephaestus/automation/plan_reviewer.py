@@ -20,14 +20,13 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import (
-    add_agent_argument,
     direct_agent_model,
     resolve_agent,
     run_agent_text,
     uses_direct_agent_runner,
 )
-from hephaestus.automation._review_utils import add_max_workers_arg, print_worker_summary
-from hephaestus.cli.utils import add_dry_run_arg, add_json_arg, emit_json_status
+from hephaestus.automation._review_utils import build_automation_parser, print_worker_summary
+from hephaestus.cli.utils import emit_json_status
 from hephaestus.github.rate_limit import wait_until
 
 from .claude_invoke import invoke_claude_with_session, parse_review_verdict, scan_quota_reset
@@ -614,7 +613,7 @@ def _setup_logging(verbose: bool = False) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser for plan_reviewer CLI."""
-    parser = argparse.ArgumentParser(
+    parser = build_automation_parser(
         description="Review implementation plans posted to GitHub issues using Claude",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -631,6 +630,10 @@ Examples:
   # Verbose output
   %(prog)s --issues 123 -v
         """,
+        add_github_throttle=False,
+        dry_run_prefix="Suppress GitHub mutations (no review comments posted).",
+        add_no_ui=True,
+        add_version=False,
     )
 
     parser.add_argument(
@@ -640,24 +643,6 @@ Examples:
         required=True,
         help="Issue numbers whose plans should be reviewed",
     )
-    add_agent_argument(parser)
-    add_max_workers_arg(parser)
-    add_dry_run_arg(
-        parser,
-        prefix="Suppress GitHub mutations (no review comments posted).",
-    )
-    parser.add_argument(
-        "--no-ui",
-        action="store_true",
-        help="Disable curses UI (use plain logging instead)",
-    )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
-    )
-    add_json_arg(parser)
     return parser
 
 

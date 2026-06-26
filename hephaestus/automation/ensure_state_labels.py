@@ -33,15 +33,10 @@ import logging
 import subprocess
 import sys
 
-from hephaestus.cli.utils import (
-    add_github_throttle_args,
-    add_json_arg,
-    add_version_arg,
-    configure_github_throttle_from_args,
-    emit_json_status,
-)
+from hephaestus.cli.utils import configure_github_throttle_from_args, emit_json_status
 from hephaestus.github.client import gh_call
 
+from ._review_utils import build_automation_parser
 from .state_labels import STATE_LABEL_SPECS
 
 logger = logging.getLogger(__name__)
@@ -154,12 +149,17 @@ def _detect_current_repo_slug() -> str:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = build_automation_parser(
         prog="hephaestus-ensure-state-labels",
         description=(
             "Idempotently provision automation state:* labels "
             "(plan-state, implementation-review, and skip) on one or more repos."
         ),
+        add_agent=False,
+        add_max_workers=False,
+        add_github_throttle=True,
+        dry_run_help="Print what would happen; mutate nothing.",
+        verbose_help="Enable DEBUG logging.",
     )
     target = parser.add_mutually_exclusive_group()
     target.add_argument(
@@ -172,20 +172,6 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="ORG",
         help="Apply to every non-archived, non-fork repo in the org.",
     )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print what would happen; mutate nothing.",
-    )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Enable DEBUG logging.",
-    )
-    add_github_throttle_args(parser)
-    add_json_arg(parser)
-    add_version_arg(parser)
     return parser
 
 

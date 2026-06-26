@@ -33,7 +33,7 @@ from hephaestus.agents.runtime import (
     run_agent_session,
     uses_direct_agent_runner,
 )
-from hephaestus.cli.utils import add_json_arg, emit_json_status
+from hephaestus.cli.utils import emit_json_status
 
 from . import _review_utils
 from ._review_utils import (
@@ -1018,9 +1018,10 @@ Examples:
   %(prog)s --issues 595 596 597 --max-workers 5
         """,
         issues_help="Issue numbers whose linked PRs should have review threads addressed",
-        dry_run_help="Show what would be done without actually resolving threads or pushing code.",
+        dry_run_prefix=(
+            "Show what would be done without actually resolving threads or pushing code."
+        ),
     )
-    add_json_arg(parser)
     return parser
 
 

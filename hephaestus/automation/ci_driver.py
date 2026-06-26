@@ -21,16 +21,12 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.runtime import (
-    add_agent_argument,
     direct_agent_model,
     resolve_agent,
     run_agent_session,
     uses_direct_agent_runner,
 )
 from hephaestus.cli.utils import (
-    add_dry_run_arg,
-    add_github_throttle_args,
-    add_json_arg,
     configure_github_throttle_from_args,
     emit_json_status,
 )
@@ -38,7 +34,7 @@ from hephaestus.utils.file_lock import file_lock
 
 from ._review_utils import (
     _discover_prs_simple,
-    add_max_workers_arg,
+    build_automation_parser,
     find_pr_for_issue,
     load_impl_session_id,
     parse_json_block,
@@ -2270,7 +2266,7 @@ def _setup_logging(verbose: bool = False) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser for the CI-driver CLI."""
-    parser = argparse.ArgumentParser(
+    parser = build_automation_parser(
         description="Drive PRs to green CI: fix failures and enable auto-merge",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -2296,6 +2292,12 @@ Examples:
   # Drive every open PR, including teammates' and bots' (default is @me only)
   %(prog)s --all
         """,
+        add_github_throttle=True,
+        dry_run_prefix=(
+            "Suppress GitHub writes and git pushes (no comments, no merges, no pushes)."
+        ),
+        add_no_ui=True,
+        add_version=False,
     )
 
     parser.add_argument(
@@ -2322,27 +2324,10 @@ Examples:
             "--issues; duplicate PRs are deduped."
         ),
     )
-    add_agent_argument(parser)
-    add_max_workers_arg(parser)
-    add_dry_run_arg(
-        parser,
-        prefix="Suppress GitHub writes and git pushes (no comments, no merges, no pushes).",
-    )
-    parser.add_argument(
-        "--no-ui",
-        action="store_true",
-        help="Disable curses UI (use plain logging instead)",
-    )
     parser.add_argument(
         "--no-advise",
         action="store_true",
         help="Skip the advise step before CI fixing",
-    )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
     )
     parser.add_argument(
         "--no-include-bot-prs",
@@ -2393,8 +2378,6 @@ Examples:
             "here so a PR that will not go green is abandoned after N tries."
         ),
     )
-    add_github_throttle_args(parser)
-    add_json_arg(parser)
     return parser
 
 

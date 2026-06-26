@@ -13,6 +13,8 @@ Provides:
   CLIs (#599 dedupe).
 - ``print_worker_summary``: Standard worker-run summary logging for reviewer
   and driver classes (#1381 dedupe).
+- ``build_automation_parser``: Argparse parser builder for automation CLIs
+  with opt-in common flags (#1392 dedupe).
 - ``build_review_parser``: Argparse parser builder shared by ``pr_reviewer``
   and ``address_review`` (#599 dedupe).
 - ``instance_log``: Shared body of the per-instance ``_log`` helper used by
@@ -35,7 +37,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hephaestus.agents.runtime import add_agent_argument, session_agent_matches
-from hephaestus.cli.utils import add_dry_run_arg, add_github_throttle_args
+from hephaestus.cli.utils import (
+    add_dry_run_arg,
+    add_github_throttle_args,
+    add_json_arg,
+    add_version_arg,
+)
 
 from .github_api import _gh_call
 
@@ -135,12 +142,116 @@ def print_worker_summary(
                 logger.info("  #%s: %s", issue_num, result.error)
 
 
+def _automation_parser_kwargs(
+    description: str,
+    epilog: str | None,
+    prog: str | None,
+    formatter_class: type[argparse.HelpFormatter] | None,
+) -> dict[str, Any]:
+    """Build ArgumentParser kwargs while omitting unset optional parameters."""
+    kwargs: dict[str, Any] = {"description": description}
+    if prog is not None:
+        kwargs["prog"] = prog
+    if formatter_class is not None:
+        kwargs["formatter_class"] = formatter_class
+    if epilog is not None:
+        kwargs["epilog"] = epilog
+    return kwargs
+
+
+def build_automation_parser(
+    description: str,
+    epilog: str | None = None,
+    *,
+    prog: str | None = None,
+    formatter_class: type[argparse.HelpFormatter] | None = None,
+    add_agent: bool = True,
+    add_max_workers: bool = True,
+    max_workers_help: str = "Maximum number of parallel workers, 1-32 (default: 3)",
+    add_parallel: bool = False,
+    parallel_help: str = "Number of parallel workers, 1-32 (default: 3)",
+    add_github_throttle: bool = False,
+    add_dry_run: bool = True,
+    dry_run_prefix: str | None = None,
+    dry_run_help: str | None = None,
+    add_no_ui: bool = False,
+    add_json: bool = True,
+    add_version: bool = True,
+    add_verbose: bool = True,
+    verbose_help: str = "Enable verbose logging",
+) -> argparse.ArgumentParser:
+    """Build an automation CLI parser with configurable common options.
+
+    Args:
+        description: Parser description text.
+        epilog: Optional parser epilog, typically an examples block.
+        prog: Optional program name override.
+        formatter_class: Optional argparse formatter class.
+        add_agent: Add the common ``--agent`` provider selector.
+        add_max_workers: Add the common validated ``--max-workers`` flag.
+        max_workers_help: Help text for ``--max-workers``.
+        add_parallel: Add the planner-style ``--parallel`` worker flag.
+        parallel_help: Help text for ``--parallel``.
+        add_github_throttle: Add GitHub global-throttle flags.
+        add_dry_run: Add ``--dry-run``.
+        dry_run_prefix: Prefix passed to the canonical dry-run helper.
+        dry_run_help: Raw ``--dry-run`` help text; bypasses the canonical caveat.
+        add_no_ui: Add ``--no-ui``.
+        add_json: Add ``--json``.
+        add_version: Add ``-V`` / ``--version``.
+        add_verbose: Add ``-v`` / ``--verbose``.
+        verbose_help: Help text for ``-v`` / ``--verbose``.
+
+    Returns:
+        Configured ``argparse.ArgumentParser``.
+
+    """
+    parser = argparse.ArgumentParser(
+        **_automation_parser_kwargs(description, epilog, prog, formatter_class)
+    )
+
+    if add_agent:
+        add_agent_argument(parser)
+    if add_max_workers:
+        add_max_workers_arg(parser, help_text=max_workers_help)
+    if add_parallel:
+        parser.add_argument(
+            "--parallel",
+            type=int,
+            default=3,
+            choices=range(1, 33),
+            metavar="N",
+            help=parallel_help,
+        )
+    if add_github_throttle:
+        add_github_throttle_args(parser)
+    if add_dry_run:
+        if dry_run_help is not None:
+            parser.add_argument("--dry-run", action="store_true", help=dry_run_help)
+        else:
+            add_dry_run_arg(parser, prefix=dry_run_prefix)
+    if add_no_ui:
+        parser.add_argument(
+            "--no-ui",
+            action="store_true",
+            help="Disable curses UI (use plain logging instead)",
+        )
+    if add_verbose:
+        parser.add_argument("-v", "--verbose", action="store_true", help=verbose_help)
+    if add_json:
+        add_json_arg(parser)
+    if add_version:
+        add_version_arg(parser)
+
+    return parser
+
+
 def build_review_parser(
     description: str,
     epilog: str | None = None,
     *,
     issues_help: str,
-    dry_run_help: str,
+    dry_run_prefix: str,
 ) -> argparse.ArgumentParser:
     """Build the argparse parser shared by ``pr_reviewer`` and ``address_review``.
 
@@ -153,16 +264,21 @@ def build_review_parser(
         description: Parser description text.
         epilog: Parser epilog text (typically an Examples block).
         issues_help: Help text for the ``--issues`` argument.
-        dry_run_help: Help text for the ``--dry-run`` argument.
+        dry_run_prefix: Prefix string for the ``--dry-run`` help text, appended
+            with ``DRY_RUN_HELP_CAVEAT``.
 
     Returns:
         Configured ``argparse.ArgumentParser`` — caller invokes ``parse_args``.
 
     """
-    parser = argparse.ArgumentParser(
+    parser = build_automation_parser(
         description=description,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_github_throttle=True,
+        dry_run_prefix=dry_run_prefix,
+        add_no_ui=True,
+        add_version=False,
     )
 
     parser.add_argument(
@@ -171,21 +287,6 @@ def build_review_parser(
         nargs="+",
         required=True,
         help=issues_help,
-    )
-    add_agent_argument(parser)
-    add_max_workers_arg(parser)
-    add_github_throttle_args(parser)
-    add_dry_run_arg(parser, prefix=dry_run_help)
-    parser.add_argument(
-        "--no-ui",
-        action="store_true",
-        help="Disable curses UI (use plain logging instead)",
-    )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging",
     )
     return parser
 
