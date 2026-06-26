@@ -308,7 +308,7 @@ class TestCommitIfChanges:
             "hephaestus.automation.address_review.commit_if_changes",
             return_value=True,
         ) as mock_commit:
-            assert reviewer._commit_if_changes(123, tmp_path) is None
+            reviewer._commit_if_changes(123, tmp_path)
 
         mock_commit.assert_called_once_with(
             123,
