@@ -131,6 +131,55 @@ def check_no_unsanctioned_test_dirs(
     return len(unsanctioned) == 0, unsanctioned
 
 
+def check_scripts_coverage(
+    scripts_root: Path,
+    test_root: Path,
+) -> tuple[bool, list[str]]:
+    """Check the ``scripts/*.py`` smoke harness is present and auto-discovering.
+
+    The ``tests/unit/scripts/`` smoke harness globs ``scripts/*.py`` so every
+    script is exercised via a single ``--help`` test. This verifies the harness
+    files exist and the glob marker is intact, so a refactor that silently breaks
+    auto-discovery is caught.
+
+    Args:
+        scripts_root: Path to the top-level ``scripts/`` directory.
+        test_root: Path to the unit test root (e.g. ``tests/unit/``).
+
+    Returns:
+        Tuple of ``(ok, error_lines)`` where *error_lines* describes each
+        coverage gap (empty when the harness is healthy).
+
+    """
+    errors: list[str] = []
+    smoke_dir = test_root / "scripts"
+    conftest = smoke_dir / "conftest.py"
+    smoke_test = smoke_dir / "test_scripts_smoke.py"
+
+    if not conftest.exists():
+        errors.append(f"  Missing: tests/unit/scripts/{conftest.name}")
+    if not smoke_test.exists():
+        errors.append(f"  Missing: tests/unit/scripts/{smoke_test.name}")
+
+    if errors:
+        errors.insert(
+            0,
+            "  The scripts/ smoke harness is required so every scripts/*.py is "
+            "auto-tested via --help.",
+        )
+        return False, errors
+
+    conftest_text = conftest.read_text(encoding="utf-8")
+    if 'glob("*.py")' not in conftest_text and "glob('*.py')" not in conftest_text:
+        errors.append(
+            "  tests/unit/scripts/conftest.py no longer globs scripts/*.py — "
+            "auto-coverage is broken."
+        )
+    if not any(scripts_root.glob("*.py")):
+        errors.append("  No scripts/*.py files found — unexpected.")
+    return len(errors) == 0, errors
+
+
 def check_test_structure(
     repo_root: Path,
     src_package: str | None = None,

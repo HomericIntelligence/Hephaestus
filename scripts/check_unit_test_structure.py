@@ -18,59 +18,15 @@ Usage:
 import sys
 from pathlib import Path
 
-
-def get_subpackages(root: Path) -> set[str]:
-    """Return the set of direct subpackage names under root."""
-    return {
-        d.name
-        for d in root.iterdir()
-        if d.is_dir() and not d.name.startswith("_") and not d.name.startswith(".")
-    }
-
-
-def check_subpackage_mirror(src_root: Path, tests_root: Path) -> list[str]:
-    """Return error lines for each hephaestus subpackage missing a test dir."""
-    src_packages = get_subpackages(src_root)
-    test_packages = get_subpackages(tests_root)
-    return [
-        f"  hephaestus/{name}  →  tests/unit/{name}/ (missing)"
-        for name in sorted(src_packages - test_packages)
-    ]
-
-
-def check_scripts_coverage(scripts_root: Path, tests_root: Path) -> list[str]:
-    """Return error lines if the scripts/ smoke harness is incomplete."""
-    errors: list[str] = []
-    smoke_dir = tests_root / "scripts"
-    conftest = smoke_dir / "conftest.py"
-    smoke_test = smoke_dir / "test_scripts_smoke.py"
-
-    if not conftest.exists():
-        errors.append(f"  Missing: tests/unit/scripts/{conftest.name}")
-    if not smoke_test.exists():
-        errors.append(f"  Missing: tests/unit/scripts/{smoke_test.name}")
-
-    if errors:
-        errors.insert(
-            0,
-            "  The scripts/ smoke harness is required so every scripts/*.py is "
-            "auto-tested via --help.",
-        )
-        return errors
-
-    conftest_text = conftest.read_text(encoding="utf-8")
-    if 'glob("*.py")' not in conftest_text and "glob('*.py')" not in conftest_text:
-        errors.append(
-            "  tests/unit/scripts/conftest.py no longer globs scripts/*.py — "
-            "auto-coverage is broken."
-        )
-    if not any(scripts_root.glob("*.py")):
-        errors.append("  No scripts/*.py files found — unexpected.")
-    return errors
+from hephaestus.validation.test_structure import (
+    _get_subpackages,
+    check_scripts_coverage,
+    check_test_directory_mirrors,
+)
 
 
 def main() -> int:
-    """Run both structural checks; return non-zero if any fail."""
+    """Run the subpackage-mirror and scripts-coverage checks; non-zero on failure."""
     repo_root = Path(__file__).parent.parent
     src_root = repo_root / "hephaestus"
     tests_root = repo_root / "tests" / "unit"
@@ -83,19 +39,19 @@ def main() -> int:
 
     failed = False
 
-    subpkg_errors = check_subpackage_mirror(src_root, tests_root)
-    if subpkg_errors:
+    mirrored, missing = check_test_directory_mirrors(src_root, tests_root)
+    if not mirrored:
         failed = True
         print(
             "ERROR: The following hephaestus subpackages have no corresponding "
             "tests/unit/ directory:",
             file=sys.stderr,
         )
-        for line in subpkg_errors:
-            print(line, file=sys.stderr)
+        for name in sorted(missing):
+            print(f"  hephaestus/{name}  →  tests/unit/{name}/ (missing)", file=sys.stderr)
 
-    scripts_errors = check_scripts_coverage(scripts_root, tests_root)
-    if scripts_errors:
+    ok_scripts, scripts_errors = check_scripts_coverage(scripts_root, tests_root)
+    if not ok_scripts:
         failed = True
         print("ERROR: scripts/ test coverage is incomplete:", file=sys.stderr)
         for line in scripts_errors:
@@ -104,7 +60,7 @@ def main() -> int:
     if failed:
         return 1
 
-    n_subpkgs = len(get_subpackages(src_root))
+    n_subpkgs = len(_get_subpackages(src_root))
     n_scripts = sum(1 for _ in scripts_root.glob("*.py"))
     print(
         f"OK: {n_subpkgs} subpackages have test directories; "

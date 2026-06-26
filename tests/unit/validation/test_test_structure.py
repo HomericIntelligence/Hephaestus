@@ -7,6 +7,7 @@ from hephaestus.validation.test_structure import (
     _detect_src_package,
     check_no_loose_test_files,
     check_no_unsanctioned_test_dirs,
+    check_scripts_coverage,
     check_test_directory_mirrors,
     check_test_structure,
     main,
@@ -307,3 +308,56 @@ class TestMain:
             ],
         )
         assert main() == 1
+
+
+class TestCheckScriptsCoverage:
+    """Tests for check_scripts_coverage()."""
+
+    def _make_harness(self, tmp_path: Path, glob_marker: str = 'glob("*.py")') -> tuple[Path, Path]:
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        (scripts / "foo.py").write_text("print('hi')\n", encoding="utf-8")
+        tests = tmp_path / "tests" / "unit"
+        smoke = tests / "scripts"
+        smoke.mkdir(parents=True)
+        (smoke / "conftest.py").write_text(f"p.{glob_marker}\n", encoding="utf-8")
+        (smoke / "test_scripts_smoke.py").write_text("def test_x(): pass\n", encoding="utf-8")
+        return scripts, tests
+
+    def test_healthy_harness_passes(self, tmp_path: Path) -> None:
+        scripts, tests = self._make_harness(tmp_path)
+        ok, errors = check_scripts_coverage(scripts, tests)
+        assert ok
+        assert errors == []
+
+    def test_missing_conftest_flagged(self, tmp_path: Path) -> None:
+        scripts, tests = self._make_harness(tmp_path)
+        (tests / "scripts" / "conftest.py").unlink()
+        ok, errors = check_scripts_coverage(scripts, tests)
+        assert not ok
+        assert any("conftest.py" in e for e in errors)
+
+    def test_missing_smoke_test_flagged(self, tmp_path: Path) -> None:
+        scripts, tests = self._make_harness(tmp_path)
+        (tests / "scripts" / "test_scripts_smoke.py").unlink()
+        ok, errors = check_scripts_coverage(scripts, tests)
+        assert not ok
+        assert any("test_scripts_smoke.py" in e for e in errors)
+
+    def test_broken_glob_marker_flagged(self, tmp_path: Path) -> None:
+        scripts, tests = self._make_harness(tmp_path, glob_marker="listdir()")
+        ok, errors = check_scripts_coverage(scripts, tests)
+        assert not ok
+        assert any("auto-coverage is broken" in e for e in errors)
+
+    def test_no_scripts_flagged(self, tmp_path: Path) -> None:
+        scripts, tests = self._make_harness(tmp_path)
+        (scripts / "foo.py").unlink()
+        ok, errors = check_scripts_coverage(scripts, tests)
+        assert not ok
+        assert any("No scripts/*.py" in e for e in errors)
+
+    def test_single_quote_glob_marker_accepted(self, tmp_path: Path) -> None:
+        scripts, tests = self._make_harness(tmp_path, glob_marker="glob('*.py')")
+        ok, _errors = check_scripts_coverage(scripts, tests)
+        assert ok

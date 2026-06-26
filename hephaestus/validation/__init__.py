@@ -59,6 +59,7 @@ from hephaestus.validation.stale_scripts import check_stale_scripts, find_stale_
 from hephaestus.validation.structure import StructureValidator
 from hephaestus.validation.test_structure import (
     check_no_loose_test_files,
+    check_scripts_coverage,
     check_test_directory_mirrors,
     check_test_structure,
 )
@@ -88,6 +89,7 @@ __all__ = [
     "check_project_version_consistency",
     "check_python_version_consistency",
     "check_required_sections",
+    "check_scripts_coverage",
     "check_stale_scripts",
     "check_test_directory_mirrors",
     "check_test_structure",
