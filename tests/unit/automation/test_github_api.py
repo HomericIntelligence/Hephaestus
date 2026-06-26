@@ -32,9 +32,9 @@ from hephaestus.automation.github_api import (
     is_issue_closed,
     parse_issue_dependencies,
     prefetch_issue_states,
-    write_secure,
 )
 from hephaestus.automation.models import IssueState
+from hephaestus.io import utils as io_utils
 
 # Circuit-breaker reset is now an autouse package-scope fixture in
 # ``tests/unit/automation/conftest.py`` (#708), so it applies to every test
@@ -1547,82 +1547,17 @@ class TestAssertBranchCommitsSignedApiFallback:
         mock_verified.assert_not_called()
 
 
-class TestWriteSecure:
-    """Tests for write_secure function."""
+class TestWriteSecureCompatibility:
+    """Compatibility coverage for the historical github_api import path."""
 
-    def test_write_new_file(self, tmp_path: Any) -> None:
-        """Test writing to a new file."""
-        test_file = tmp_path / "test.txt"
-        content = "test content"
+    def test_import_path_is_canonical_io_helper(self) -> None:
+        """The historical named import should resolve to the canonical helper."""
+        module = __import__("hephaestus.automation.github_api", fromlist=["write_secure"])
+        assert module.write_secure is io_utils.write_secure
 
-        write_secure(test_file, content)
-
-        assert test_file.exists()
-        assert test_file.read_text() == content
-
-    def test_overwrite_existing_file(self, tmp_path: Any) -> None:
-        """Test overwriting an existing file."""
-        test_file = tmp_path / "test.txt"
-        test_file.write_text("old content")
-
-        write_secure(test_file, "new content")
-
-        assert test_file.read_text() == "new content"
-
-    def test_create_parent_directories(self, tmp_path: Any) -> None:
-        """Test that parent directories are created."""
-        test_file = tmp_path / "subdir" / "nested" / "test.txt"
-
-        write_secure(test_file, "content")
-
-        assert test_file.exists()
-        assert test_file.read_text() == "content"
-
-    def test_atomic_write(self, tmp_path: Any) -> None:
-        """Test that write is atomic (uses temp file + rename)."""
-        test_file = tmp_path / "test.txt"
-
-        # Write initial content
-        test_file.write_text("original")
-
-        # Verify temp file pattern during write
-        write_secure(test_file, "updated")
-
-        # Should have no temp files left
-        temp_files = list(tmp_path.glob(".test.txt.*.tmp"))
-        assert len(temp_files) == 0
-
-        # Content should be updated
-        assert test_file.read_text() == "updated"
-
-    def test_cleanup_on_error(self, tmp_path: Any) -> None:
-        """Test that temp files are cleaned up on error."""
-        test_file = tmp_path / "test.txt"
-
-        # Make parent directory read-only to cause error
-        test_file.parent.chmod(0o444)
-
-        try:
-            with pytest.raises(OSError):
-                write_secure(test_file, "content")
-
-            # Temp files should be cleaned up
-            temp_files = list(tmp_path.glob(".test.txt.*.tmp"))
-            assert len(temp_files) == 0
-        finally:
-            # Restore permissions for cleanup
-            test_file.parent.chmod(0o755)
-
-    def test_writes_with_restrictive_permissions(self, tmp_path: Any) -> None:
-        """github_api.write_secure delegates to io.write_secure → 0o600 perms.
-
-        Regression for #443: the automation copy of write_secure used to write
-        with default permissions; consolidating onto hephaestus.io.write_secure
-        means state files are owner-only.
-        """
-        test_file = tmp_path / "state.json"
-        write_secure(test_file, "{}")
-        assert oct(test_file.stat().st_mode & 0o777) == oct(0o600)
+    def test_internal_io_write_secure_patch_seam_uses_same_helper(self) -> None:
+        """The existing github_api patch seam should stay on the canonical helper."""
+        assert _github_api_module.io_write_secure is io_utils.write_secure
 
 
 class TestGhCallThrottle:

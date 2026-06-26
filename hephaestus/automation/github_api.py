@@ -4,7 +4,6 @@ Provides:
 - Issue data fetching with caching
 - Rate-limited API calls
 - Batch operations with GraphQL
-- Secure file writing
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ from hephaestus.github.client import (
 from hephaestus.github.rate_limit import (
     gh_rate_limit_reset_epoch,
 )
-from hephaestus.io.utils import write_secure as io_write_secure
+from hephaestus.io.utils import write_secure
 
 from .git_utils import get_repo_info, run
 from .models import IssueInfo, IssueState
@@ -56,6 +55,9 @@ _issue_state_cache: dict[int, IssueState] = {}
 _gh_call = gh_call
 _GH_BREAKER = _gh_client._GH_BREAKER
 _GH_THROTTLE = _gh_client._GH_THROTTLE
+# Compatibility alias for existing github_api patch seams and downstream named
+# imports. New code should import hephaestus.io.utils.write_secure directly.
+io_write_secure = write_secure
 
 __all__ = [
     "ClaudeUsageCapError",
@@ -990,21 +992,6 @@ def fetch_open_prs() -> list[dict[str, Any]]:
         ]
     )
     return cast(list[dict[str, Any]], json.loads(result.stdout or "[]"))
-
-
-def write_secure(path: Path, content: str) -> None:
-    """Write content to a file atomically with restrictive permissions.
-
-    Thin wrapper over the canonical :func:`hephaestus.io.utils.write_secure` so
-    automation state files share one atomic, ``0o600`` write implementation.
-
-    Args:
-        path: Destination file path
-        content: Content to write
-
-    """
-    io_write_secure(path, content)
-    logger.debug("Wrote %s bytes to %s", len(content), path)
 
 
 # Matches a unified-diff hunk header: ``@@ -oldStart,oldLen +newStart,newLen @@``.

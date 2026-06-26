@@ -18,10 +18,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from hephaestus.io.utils import write_secure
+
 from ._review_utils import instance_log
 from .curses_ui import CursesUI, ThreadLogManager
 from .git_utils import get_repo_root as _default_get_repo_root, issue_ref
-from .github_api import write_secure
 from .models import ReviewPhase, ReviewState, WorkerResult
 from .status_tracker import StatusTracker
 from .worktree_manager import WorktreeManager

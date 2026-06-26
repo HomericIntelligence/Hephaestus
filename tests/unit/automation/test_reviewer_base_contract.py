@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from hephaestus.automation import _reviewer_base
+from hephaestus.io import utils as io_utils
 
 
 def _make_options(max_workers: int = 2) -> object:
@@ -65,3 +66,8 @@ def test_no_importlib_in_base() -> None:
     """BaseReviewer source must not contain any importlib usage."""
     src = inspect.getsource(_reviewer_base.BaseReviewer)
     assert "importlib" not in src
+
+
+def test_reviewer_base_uses_canonical_write_secure() -> None:
+    """BaseReviewer should import the secure writer from the canonical IO module."""
+    assert vars(_reviewer_base)["write_secure"] is io_utils.write_secure

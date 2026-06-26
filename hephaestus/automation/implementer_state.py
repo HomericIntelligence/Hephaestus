@@ -74,8 +74,8 @@ class ImplementationStateManager:
 
     def save(self, state: ImplementationState) -> None:
         """Atomically persist *state* to ``issue-<n>.json`` under ``state_dir``."""
-        # Imported lazily to avoid widening the module import graph at load.
-        from .github_api import write_secure
+        # Imported lazily to keep this state helper independent of automation.github_api.
+        from hephaestus.io.utils import write_secure
 
         state_file = self.state_dir / f"issue-{state.issue_number}.json"
         write_secure(state_file, state.model_dump_json(indent=2))
