@@ -38,6 +38,7 @@ from hephaestus.agents.runtime import (
 from hephaestus.cli.utils import add_json_arg, emit_json_status
 
 from ._review_utils import (
+    _discover_prs_simple,
     build_review_parser,
     find_pr_for_issue,
     instance_log,
@@ -402,14 +403,13 @@ class AddressReviewer(BaseReviewer):
             Mapping of issue_number -> pr_number for issues that have an open PR
 
         """
-        pr_map: dict[int, int] = {}
-        for issue_num in issue_numbers:
-            pr_number = self._find_pr_for_issue(issue_num)
-            if pr_number is not None:
-                pr_map[issue_num] = pr_number
-            else:
-                logger.info("Issue #%s: no open PR found, skipping", issue_num)
-        return pr_map
+        return _discover_prs_simple(
+            issue_numbers,
+            self._find_pr_for_issue,
+            on_missing=lambda issue_num: logger.info(
+                "Issue #%s: no open PR found, skipping", issue_num
+            ),
+        )
 
     def _address_all(self, pr_map: dict[int, int]) -> dict[int, WorkerResult]:
         """Address all issues in parallel.

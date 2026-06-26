@@ -5,6 +5,8 @@ Extracts utilities that were previously duplicated across
 
 Provides:
 - ``parse_json_block``: Extract the last ```json``` block from Claude output.
+- ``_discover_prs_simple``: Shared issue-to-PR discovery loop for reviewer
+  callers that supply their own single-issue lookup function.
 - ``find_pr_for_issue``: Locate the open PR for a GitHub issue (two or three
   lookup strategies depending on the caller's needs).
 - ``setup_review_logging``: Standard logging configuration for the reviewer
@@ -22,6 +24,7 @@ import json
 import logging
 import re
 import threading
+from collections.abc import Callable
 from typing import Any
 
 from hephaestus.agents.runtime import add_agent_argument
@@ -184,6 +187,33 @@ def parse_json_block(text: str) -> dict[str, Any]:
         return dict(json.loads(matches[-1]))
     except json.JSONDecodeError:
         return {"comments": [], "summary": "Failed to parse structured output from analysis"}
+
+
+def _discover_prs_simple(
+    issue_numbers: list[int],
+    find_fn: Callable[[int], int | None],
+    *,
+    on_missing: Callable[[int], None] | None = None,
+) -> dict[int, int]:
+    """Map issue numbers to open PR numbers using ``find_fn``.
+
+    Args:
+        issue_numbers: Issue numbers to resolve.
+        find_fn: Callable that returns a PR number for one issue, or ``None``.
+        on_missing: Optional callback invoked for each issue without an open PR.
+
+    Returns:
+        Mapping of issue number to PR number for found PRs.
+
+    """
+    pr_map: dict[int, int] = {}
+    for issue_num in issue_numbers:
+        pr_number = find_fn(issue_num)
+        if pr_number is not None:
+            pr_map[issue_num] = pr_number
+        elif on_missing is not None:
+            on_missing(issue_num)
+    return pr_map
 
 
 def find_pr_for_issue(

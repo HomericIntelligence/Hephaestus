@@ -41,6 +41,7 @@ from hephaestus.cli.utils import (
 )
 
 from ._review_utils import (
+    _discover_prs_simple,
     build_review_parser,
     find_pr_for_issue,
     instance_log,
@@ -448,16 +449,13 @@ class PRReviewer(BaseReviewer):
             Mapping of issue_number -> pr_number for found PRs
 
         """
-        pr_map: dict[int, int] = {}
-
-        for issue_num in issue_numbers:
-            pr_number = self._find_pr_for_issue(issue_num)
-            if pr_number is not None:
-                pr_map[issue_num] = pr_number
-            else:
-                logger.warning("No open PR found for issue #%s", issue_num)
-
-        return pr_map
+        return _discover_prs_simple(
+            issue_numbers,
+            self._find_pr_for_issue,
+            on_missing=lambda issue_num: logger.warning(
+                "No open PR found for issue #%s", issue_num
+            ),
+        )
 
     def _find_pr_for_issue(self, issue_number: int) -> int | None:
         """Find the open PR for a single issue.

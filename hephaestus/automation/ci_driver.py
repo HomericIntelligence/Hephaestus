@@ -38,7 +38,7 @@ from hephaestus.cli.utils import (
 )
 from hephaestus.utils.file_lock import file_lock
 
-from ._review_utils import add_max_workers_arg, find_pr_for_issue
+from ._review_utils import _discover_prs_simple, add_max_workers_arg, find_pr_for_issue
 from .address_review import (
     _parse_addressed_block,
     resolve_addressed_threads,
@@ -441,13 +441,13 @@ class CIDriver:
         # Per-issue lookup first; preserve insertion order so the "lowest
         # numbered issue wins" tie-break is stable across runs given the same
         # input list.
-        raw_map: dict[int, int] = {}
-        for issue_num in issue_numbers:
-            pr_number = self._find_pr_for_issue(issue_num)
-            if pr_number is not None:
-                raw_map[issue_num] = pr_number
-            else:
-                logger.info("Issue #%s: no open PR found, skipping", issue_num)
+        raw_map = _discover_prs_simple(
+            issue_numbers,
+            self._find_pr_for_issue,
+            on_missing=lambda issue_num: logger.info(
+                "Issue #%s: no open PR found, skipping", issue_num
+            ),
+        )
 
         # Group by PR, then pick a canonical issue per PR (the smallest one)
         # and log the deferred siblings so operators can see the dedupe.

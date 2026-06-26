@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation._review_utils import (
+    _discover_prs_simple,
     add_max_workers_arg,
     close_issue_as_covered,
     find_merged_closing_pr,
@@ -53,6 +54,39 @@ class TestParseJsonBlock:
         result = parse_json_block(text)
         assert result["summary"] == "ok"
         assert len(result["comments"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# _discover_prs_simple
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverPrsSimple:
+    """Tests for the shared issue-to-PR discovery helper."""
+
+    def test_empty_input_returns_empty_without_calling_find(self) -> None:
+        """Empty issue list returns an empty map without lookup calls."""
+        find_fn = MagicMock(return_value=123)
+
+        result = _discover_prs_simple([], find_fn)
+
+        assert result == {}
+        find_fn.assert_not_called()
+
+    def test_discovers_prs_and_reports_missing_issues_in_order(self) -> None:
+        """Found PRs are mapped while missing issues invoke the callback."""
+        calls: list[int] = []
+        missing: list[int] = []
+
+        def find_fn(issue_number: int) -> int | None:
+            calls.append(issue_number)
+            return {1: 101, 3: 103}.get(issue_number)
+
+        result = _discover_prs_simple([1, 2, 3], find_fn, on_missing=missing.append)
+
+        assert result == {1: 101, 3: 103}
+        assert calls == [1, 2, 3]
+        assert missing == [2]
 
 
 # ---------------------------------------------------------------------------
