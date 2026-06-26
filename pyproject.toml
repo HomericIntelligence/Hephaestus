@@ -236,12 +236,9 @@ explicit_package_bases = true
 # explicit_package_bases + duplicate basenames make per-file invocation unsafe
 # (see hephaestus/validation/mypy_per_file.py). Making incremental mode explicit
 # — rather than relying on mypy's default — keeps the full scan fast locally and
-# gives CI a single canonical cache path to persist. sqlite_cache stores one
-# SQLite file instead of thousands of JSON fragments, which restores/saves faster
-# as a CI cache artifact.
+# gives CI a single canonical cache path to persist.
 incremental = true
 cache_dir = ".mypy_cache"
-sqlite_cache = true
 
 # Relax strict typing requirements for test and script code
 [[tool.mypy.overrides]]

@@ -28,7 +28,3 @@ def test_incremental_enabled(mypy_config: dict[str, object]) -> None:
 
 def test_cache_dir_pinned(mypy_config: dict[str, object]) -> None:
     assert mypy_config.get("cache_dir") == ".mypy_cache"
-
-
-def test_sqlite_cache_enabled(mypy_config: dict[str, object]) -> None:
-    assert mypy_config.get("sqlite_cache") is True
