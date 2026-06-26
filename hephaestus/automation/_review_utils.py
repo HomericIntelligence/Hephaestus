@@ -15,6 +15,8 @@ Provides:
   and ``address_review`` (#599 dedupe).
 - ``instance_log``: Shared body of the per-instance ``_log`` helper used by
   the reviewer classes (#599 dedupe).
+- ``load_impl_session_id``: Shared implementer-session state loader for
+  drive-green and address-review.
 """
 
 from __future__ import annotations
@@ -25,9 +27,10 @@ import logging
 import re
 import threading
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.runtime import add_agent_argument
+from hephaestus.agents.runtime import add_agent_argument, session_agent_matches
 from hephaestus.cli.utils import add_dry_run_arg, add_github_throttle_args
 
 from .github_api import _gh_call
@@ -214,6 +217,48 @@ def _discover_prs_simple(
         elif on_missing is not None:
             on_missing(issue_num)
     return pr_map
+
+
+def load_impl_session_id(state_dir: Path, issue_number: int, agent: str) -> str | None:
+    """Load the implementer's agent session ID from on-disk state.
+
+    The implementer persists its state to ``issue-<n>.json`` (see
+    ``ImplementationStateManager.save``), not ``state-<n>.json``. A stored
+    session is only returned when its ``session_agent`` is compatible with the
+    selected ``agent``; legacy files with no ``session_agent`` are treated as
+    Claude sessions by ``session_agent_matches``.
+
+    Args:
+        state_dir: Directory holding the implementer state files.
+        issue_number: GitHub issue number.
+        agent: Selected agent for the current run.
+
+    Returns:
+        Session ID string, or ``None`` if the file is absent, unreadable, has
+        no ``session_id``, or belongs to a different agent.
+
+    """
+    state_file = state_dir / f"issue-{issue_number}.json"
+    if not state_file.exists():
+        logger.debug("No implementer state file for issue #%s", issue_number)
+        return None
+
+    try:
+        data = json.loads(state_file.read_text())
+        session_id: str | None = data.get("session_id")
+        session_agent: str | None = data.get("session_agent")
+        if session_id and not session_agent_matches(session_agent, agent):
+            logger.info(
+                "Skipping impl session for issue #%s: session belongs to %s, selected agent is %s",
+                issue_number,
+                session_agent or "claude",
+                agent,
+            )
+            return None
+        return session_id
+    except Exception as e:
+        logger.warning("Could not load impl session for #%s: %s", issue_number, e)
+        return None
 
 
 def find_pr_for_issue(

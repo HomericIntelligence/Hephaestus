@@ -26,7 +26,6 @@ from hephaestus.agents.runtime import (
     direct_agent_model,
     resolve_agent,
     run_agent_session,
-    session_agent_matches,
     uses_direct_agent_runner,
 )
 from hephaestus.cli.utils import (
@@ -38,7 +37,12 @@ from hephaestus.cli.utils import (
 )
 from hephaestus.utils.file_lock import file_lock
 
-from ._review_utils import _discover_prs_simple, add_max_workers_arg, find_pr_for_issue
+from ._review_utils import (
+    _discover_prs_simple,
+    add_max_workers_arg,
+    find_pr_for_issue,
+    load_impl_session_id,
+)
 from .address_review import (
     _parse_addressed_block,
     resolve_addressed_threads,
@@ -1825,6 +1829,9 @@ class CIDriver:
     def _load_impl_session_id(self, issue_number: int) -> str | None:
         """Load the agent session ID from the implementer's saved state.
 
+        Thin wrapper around :func:`._review_utils.load_impl_session_id`, kept
+        as a method so existing patch-by-method test seams hold.
+
         Args:
             issue_number: GitHub issue number.
 
@@ -1832,35 +1839,7 @@ class CIDriver:
             Session ID string, or None if not found.
 
         """
-        # The implementer persists its state to ``issue-<n>.json`` (see
-        # ImplementationStateManager.save), NOT ``state-<n>.json``. Reading the
-        # wrong name always missed, so this lookup silently never resumed the
-        # implementer's session — masked for Claude (deterministic-UUID resume)
-        # but breaking Codex session continuity on the CI-fix path.
-        state_file = self.state_dir / f"issue-{issue_number}.json"
-        if not state_file.exists():
-            logger.debug("No implementer state file for issue #%s", issue_number)
-            return None
-
-        try:
-            data = json.loads(state_file.read_text())
-            session_id: str | None = data.get("session_id")
-            session_agent: str | None = data.get("session_agent")
-            if session_id and not session_agent_matches(session_agent, self.options.agent):
-                logger.info(
-                    "Skipping impl session for issue #%s: session belongs to %s, "
-                    "selected agent is %s",
-                    issue_number,
-                    session_agent or "claude",
-                    self.options.agent,
-                )
-                return None
-            if session_id:
-                logger.debug("Loaded session_id for issue #%s: %s...", issue_number, session_id[:8])
-            return session_id
-        except Exception as e:
-            logger.warning("Could not load session_id for issue #%s: %s", issue_number, e)
-            return None
+        return load_impl_session_id(self.state_dir, issue_number, self.options.agent)
 
     def _list_unresolved_threads_safe(self, pr_number: int) -> list[dict[str, Any]]:
         """Fetch unresolved review threads, swallowing lookup failures.

@@ -2,6 +2,7 @@
 
 import argparse
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +15,7 @@ from hephaestus.automation._review_utils import (
     find_merged_closing_pr,
     find_pr_for_issue,
     get_pr_head_branch,
+    load_impl_session_id,
     parse_json_block,
 )
 
@@ -87,6 +89,67 @@ class TestDiscoverPrsSimple:
         assert result == {1: 101, 3: 103}
         assert calls == [1, 2, 3]
         assert missing == [2]
+
+
+# ---------------------------------------------------------------------------
+# load_impl_session_id
+# ---------------------------------------------------------------------------
+
+
+class TestLoadImplSessionId:
+    """Tests for the shared load_impl_session_id helper."""
+
+    def test_returns_session_id_for_matching_claude(self, tmp_path: Path) -> None:
+        """Legacy state without session_agent belongs to Claude."""
+        (tmp_path / "issue-123.json").write_text(json.dumps({"session_id": "abc"}))
+
+        assert load_impl_session_id(tmp_path, 123, "claude") == "abc"
+
+    def test_skips_legacy_claude_session_for_codex(self, tmp_path: Path) -> None:
+        """Legacy Claude session must not resume as Codex."""
+        (tmp_path / "issue-123.json").write_text(json.dumps({"session_id": "abc"}))
+
+        assert load_impl_session_id(tmp_path, 123, "codex") is None
+
+    def test_returns_matching_codex_session(self, tmp_path: Path) -> None:
+        """Codex sessions resume when the selected agent is Codex."""
+        (tmp_path / "issue-123.json").write_text(
+            json.dumps({"session_id": "codex-sess", "session_agent": "codex"})
+        )
+
+        assert load_impl_session_id(tmp_path, 123, "codex") == "codex-sess"
+
+    def test_missing_file_returns_none(self, tmp_path: Path) -> None:
+        """Missing implementer state returns None."""
+        assert load_impl_session_id(tmp_path, 123, "claude") is None
+
+    def test_null_session_id_returns_none(self, tmp_path: Path) -> None:
+        """State with a null session_id returns None."""
+        (tmp_path / "issue-123.json").write_text(json.dumps({"session_id": None}))
+
+        assert load_impl_session_id(tmp_path, 123, "claude") is None
+
+    def test_no_session_id_key_returns_none(self, tmp_path: Path) -> None:
+        """State without session_id returns None."""
+        (tmp_path / "issue-123.json").write_text(json.dumps({"phase": "completed"}))
+
+        assert load_impl_session_id(tmp_path, 123, "claude") is None
+
+    def test_malformed_json_returns_none(self, tmp_path: Path) -> None:
+        """Unreadable JSON state returns None."""
+        (tmp_path / "issue-123.json").write_text("{not json")
+
+        assert load_impl_session_id(tmp_path, 123, "claude") is None
+
+    def test_reads_issue_filename_not_legacy_state_name(self, tmp_path: Path) -> None:
+        """Only the implementer-written issue filename is read."""
+        (tmp_path / "state-123.json").write_text(json.dumps({"session_id": "legacy"}))
+
+        assert load_impl_session_id(tmp_path, 123, "claude") is None
+
+        (tmp_path / "issue-123.json").write_text(json.dumps({"session_id": "real"}))
+
+        assert load_impl_session_id(tmp_path, 123, "claude") == "real"
 
 
 # ---------------------------------------------------------------------------
