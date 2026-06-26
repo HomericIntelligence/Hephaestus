@@ -32,7 +32,6 @@ from hephaestus.agents.runtime import (
     resolve_agent,
     resume_agent_session,
     run_agent_session,
-    session_agent_matches,
     uses_direct_agent_runner,
 )
 from hephaestus.cli.utils import add_json_arg, emit_json_status
@@ -42,6 +41,7 @@ from ._review_utils import (
     build_review_parser,
     find_pr_for_issue,
     instance_log,
+    load_impl_session_id,
     setup_review_logging,
 )
 from ._reviewer_base import BaseReviewer
@@ -729,6 +729,9 @@ class AddressReviewer(BaseReviewer):
     def _load_impl_session_id(self, issue_number: int) -> str | None:
         """Load the implementer's agent session ID from state file.
 
+        Thin wrapper around :func:`._review_utils.load_impl_session_id`, kept
+        as a method so existing patch-by-method test seams hold.
+
         Args:
             issue_number: GitHub issue number
 
@@ -736,29 +739,7 @@ class AddressReviewer(BaseReviewer):
             Session ID string if found, None otherwise
 
         """
-        state_file = self.state_dir / f"issue-{issue_number}.json"
-        if not state_file.exists():
-            logger.warning(
-                "No implementation state for issue #%s, will use fresh session", issue_number
-            )
-            return None
-        try:
-            data = json.loads(state_file.read_text())
-            session_id: str | None = data.get("session_id")
-            session_agent: str | None = data.get("session_agent")
-            if session_id and not session_agent_matches(session_agent, self.options.agent):
-                logger.info(
-                    "Skipping impl session for issue #%s: session belongs to %s, "
-                    "selected agent is %s",
-                    issue_number,
-                    session_agent or "claude",
-                    self.options.agent,
-                )
-                return None
-            return session_id
-        except Exception as e:
-            logger.warning("Could not load impl session for #%s: %s", issue_number, e)
-            return None
+        return load_impl_session_id(self.state_dir, issue_number, self.options.agent)
 
     def _load_review_state(self, issue_number: int) -> ReviewState | None:
         """Load review state from disk.
