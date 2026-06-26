@@ -2425,7 +2425,7 @@ def _evaluate_run_result(
 
     """
     log = logging.getLogger(__name__)
-    failed = [num for num, result in results.items() if not result.success]
+    raw_failed = {num: result for num, result in results.items() if not result.success}
 
     # Terminal-state vocabulary shared with ``_wait_for_armed_merge``: a PR in
     # one of these merge-states has a real conflict with its base and can never
@@ -2460,6 +2460,13 @@ def _evaluate_run_result(
         for pr in open_prs_remaining
         if pr.get("autoMergeRequest") and not _is_conflicting(pr)
     ]
+    armed_pending_prs = set(armed_pending)
+    stale_failed = [
+        num
+        for num, result in raw_failed.items()
+        if result.pr_number is not None and result.pr_number in armed_pending_prs
+    ]
+    failed = [num for num in raw_failed if num not in stale_failed]
     # #1576: un-armed-because-awaiting-review PRs are neither armed nor stuck.
     pending_review = [pr.get("number") for pr in open_prs_remaining if _is_pending_review(pr)]
     # needs_action = genuinely stuck: un-armed for a reason OTHER than pending
@@ -2475,6 +2482,12 @@ def _evaluate_run_result(
             "%s PR(s) armed and still merging (waited; not a failure): %s",
             len(armed_pending),
             armed_pending,
+        )
+    if stale_failed:
+        log.info(
+            "%s issue failure(s) correspond to armed pending PRs and are no longer actionable: %s",
+            len(stale_failed),
+            stale_failed,
         )
     if pending_review:
         log.info(
