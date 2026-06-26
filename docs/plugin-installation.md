@@ -74,9 +74,11 @@ codex plugin add hephaestus@project-hephaestus
 
 The Codex marketplace entry is declared in
 [`.agents/plugins/marketplace.json`](../.agents/plugins/marketplace.json). It points
-Codex at `plugins/hephaestus`, which is a lightweight compatibility wrapper around the
-canonical [`.codex-plugin/plugin.json`](../.codex-plugin/plugin.json) manifest and
-shared [`skills/`](../skills) directory.
+Codex at `plugins/hephaestus`, which is a materialized compatibility wrapper. It
+contains a physical copy of the canonical
+[`.codex-plugin/plugin.json`](../.codex-plugin/plugin.json) manifest and shared
+[`skills/`](../skills) directory so marketplace installs do not depend on symlink
+traversal.
 
 ## Enabling in a Claude Code Project
 
