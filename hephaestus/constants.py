@@ -32,6 +32,31 @@ LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 # Base field names included in every JSON log record.
 JSON_LOG_FIELDS: tuple[str, ...] = ("timestamp", "level", "logger", "message")
 
+
+def _read_timeout_env(name: str, default: int) -> int:
+    """Return an integer timeout override or the documented default."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        _logger.warning("Ignoring non-integer %s=%r; using default %ds", name, raw, default)
+        return default
+
+
+AGENT_AUTH_STATUS_TIMEOUT: int = _read_timeout_env("HEPH_AGENT_AUTH_STATUS_TIMEOUT", 10)
+AGENT_GIT_TIMEOUT: int = _read_timeout_env("HEPH_AGENT_GIT_TIMEOUT", 30)
+AGENT_DIFF_TIMEOUT: int = _read_timeout_env("HEPH_AGENT_DIFF_TIMEOUT", 60)
+AGENT_CLONE_TIMEOUT: int = _read_timeout_env("HEPH_AGENT_CLONE_TIMEOUT", 120)
+AGENT_DEFAULT_TIMEOUT: int = _read_timeout_env("HEPH_AGENT_DEFAULT_TIMEOUT", 300)
+AGENT_PLAN_TIMEOUT: int = _read_timeout_env("HEPH_AGENT_PLAN_TIMEOUT", 300)
+AGENT_LEARN_TIMEOUT: int = _read_timeout_env("HEPH_AGENT_LEARN_TIMEOUT", 300)
+AGENT_REVIEW_TIMEOUT: int = _read_timeout_env("HEPH_AGENT_REVIEW_TIMEOUT", 600)
+AGENT_PRE_PR_TEST_TIMEOUT: int = _read_timeout_env("HEPH_AGENT_PRE_PR_TEST_TIMEOUT", 600)
+AGENT_IMPL_TIMEOUT: int = _read_timeout_env("HEPH_AGENT_IMPL_TIMEOUT", 1800)
+AGENT_REBASE_TIMEOUT: int = _read_timeout_env("HEPH_AGENT_REBASE_TIMEOUT", 2400)
+
 # Canonical transient-failure substrings shared by the resilience and retry
 # layers. Both ``subprocess_resilience.TRANSIENT_ERROR_PATTERNS`` and
 # ``retry.NETWORK_ERROR_KEYWORDS`` derive from this core so the overlapping

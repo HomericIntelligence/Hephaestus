@@ -22,6 +22,7 @@ from hephaestus.agents.runtime import (
 from hephaestus.github.rate_limit import wait_until
 
 from .claude_invoke import detect_server_overload, invoke_claude_with_session, scan_quota_reset
+from .claude_timeouts import AGENT_PLAN_TIMEOUT
 from .git_utils import get_repo_root, get_repo_slug
 
 if TYPE_CHECKING:
@@ -65,7 +66,7 @@ class PlannerClaudeRunner:
         agent: str,
         issue_number: int | str,
         max_retries: int = 3,
-        timeout: int = 300,
+        timeout: int = AGENT_PLAN_TIMEOUT,
         extra_args: list[str] | None = None,
     ) -> str:
         """Call Claude CLI on a deterministic session with rate-limit retry.
@@ -189,7 +190,7 @@ class PlannerClaudeRunner:
         *,
         model: str,
         max_retries: int = 3,
-        timeout: int = 300,
+        timeout: int = AGENT_PLAN_TIMEOUT,
         sandbox: str = "workspace-write",
     ) -> str:
         """Call a non-Claude direct agent with retry logic for rate limits."""

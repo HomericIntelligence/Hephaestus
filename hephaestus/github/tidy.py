@@ -37,6 +37,7 @@ from hephaestus.cli.utils import (
     configure_github_throttle_from_args,
     emit_json_status,
 )
+from hephaestus.constants import AGENT_REBASE_TIMEOUT
 from hephaestus.github.client import gh_call
 from hephaestus.github.pr_merge import detect_repo_from_remote
 from hephaestus.logging.utils import get_logger
@@ -402,7 +403,7 @@ def _run_direct_rebase_agent(agent: str, prompt: str, branch: str, repo_path: Pa
             agent=agent,
             prompt=prompt,
             cwd=repo_path,
-            timeout=2400,
+            timeout=AGENT_REBASE_TIMEOUT,
             model=direct_agent_model(agent, "HEPH_IMPLEMENTER_MODEL"),
             sandbox="workspace-write",
         )

@@ -16,6 +16,20 @@ from __future__ import annotations
 import logging
 import os
 
+from hephaestus.constants import (
+    AGENT_AUTH_STATUS_TIMEOUT,
+    AGENT_CLONE_TIMEOUT,
+    AGENT_DEFAULT_TIMEOUT,
+    AGENT_DIFF_TIMEOUT,
+    AGENT_GIT_TIMEOUT,
+    AGENT_IMPL_TIMEOUT,
+    AGENT_LEARN_TIMEOUT,
+    AGENT_PLAN_TIMEOUT,
+    AGENT_PRE_PR_TEST_TIMEOUT,
+    AGENT_REBASE_TIMEOUT,
+    AGENT_REVIEW_TIMEOUT,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -86,6 +100,17 @@ def git_message_agent_timeout() -> int:
 from hephaestus.github.client import gh_cli_timeout  # noqa: E402
 
 __all__ = [
+    "AGENT_AUTH_STATUS_TIMEOUT",
+    "AGENT_CLONE_TIMEOUT",
+    "AGENT_DEFAULT_TIMEOUT",
+    "AGENT_DIFF_TIMEOUT",
+    "AGENT_GIT_TIMEOUT",
+    "AGENT_IMPL_TIMEOUT",
+    "AGENT_LEARN_TIMEOUT",
+    "AGENT_PLAN_TIMEOUT",
+    "AGENT_PRE_PR_TEST_TIMEOUT",
+    "AGENT_REBASE_TIMEOUT",
+    "AGENT_REVIEW_TIMEOUT",
     "address_review_claude_timeout",
     "advise_claude_timeout",
     "ci_driver_claude_timeout",

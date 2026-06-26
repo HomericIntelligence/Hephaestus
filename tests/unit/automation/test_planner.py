@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.automation.claude_timeouts import AGENT_CLONE_TIMEOUT, AGENT_PLAN_TIMEOUT
 from hephaestus.automation.models import PlannerOptions
 from hephaestus.automation.planner import Planner
 
@@ -123,7 +124,7 @@ class TestCallClaude:
             self._patch_repo(),
             patch("hephaestus.automation.claude_invoke.subprocess.run") as mock_run,
         ):
-            mock_run.side_effect = subprocess.TimeoutExpired("claude", 300)
+            mock_run.side_effect = subprocess.TimeoutExpired("claude", AGENT_PLAN_TIMEOUT)
 
             with pytest.raises(RuntimeError, match="timed out"):
                 planner._call_claude(
@@ -131,7 +132,7 @@ class TestCallClaude:
                     model="claude-opus-4-7",
                     agent="planner",
                     issue_number=1,
-                    timeout=300,
+                    timeout=AGENT_PLAN_TIMEOUT,
                 )
 
     def test_rate_limit_retry(self, planner: Any) -> None:
@@ -679,7 +680,7 @@ class TestEnsureMnemosyne:
         mnemosyne_root = tmp_path / "ProjectMnemosyne"
 
         with patch("hephaestus.automation.advise_runner.gh_call") as mock_gh:
-            mock_gh.side_effect = subprocess.TimeoutExpired("gh", 120)
+            mock_gh.side_effect = subprocess.TimeoutExpired("gh", AGENT_CLONE_TIMEOUT)
 
             result = planner._ensure_mnemosyne(mnemosyne_root)
 
@@ -700,7 +701,7 @@ class TestEnsureMnemosyne:
 
         call_kwargs = mock_gh.call_args.kwargs
         assert "timeout" in call_kwargs, "gh_call for clone must pass timeout="
-        assert call_kwargs["timeout"] == 120
+        assert call_kwargs["timeout"] == AGENT_CLONE_TIMEOUT
 
 
 class TestPrCoverageSkip:

@@ -55,6 +55,7 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 from hephaestus.config.utils import load_config
+from hephaestus.constants import AGENT_REBASE_TIMEOUT
 from hephaestus.github.client import gh_call
 from hephaestus.logging.utils import get_logger
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
@@ -700,7 +701,7 @@ def _run_conflict_agent(agent: str, prompt: str, work: Path, pr_number: int) -> 
             agent=agent,
             prompt=prompt,
             cwd=work,
-            timeout=2400,
+            timeout=AGENT_REBASE_TIMEOUT,
             model=direct_agent_model(agent, "HEPH_IMPLEMENTER_MODEL"),
             sandbox="workspace-write",
         )

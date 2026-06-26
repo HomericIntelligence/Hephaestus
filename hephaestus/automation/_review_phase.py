@@ -43,7 +43,12 @@ from .claude_invoke import (
     parse_review_verdict,
 )
 from .claude_models import implementer_model, reviewer_model
-from .claude_timeouts import implementer_claude_timeout
+from .claude_timeouts import (
+    AGENT_DIFF_TIMEOUT,
+    AGENT_GIT_TIMEOUT,
+    AGENT_REVIEW_TIMEOUT,
+    implementer_claude_timeout,
+)
 from .git_utils import (
     commit_if_changes,
     get_repo_info,
@@ -1626,7 +1631,7 @@ class ReviewPhase(StageMixin):
                     agent=self.options.agent,
                     prompt=prompt,
                     cwd=self.repo_root,
-                    timeout=600,
+                    timeout=AGENT_REVIEW_TIMEOUT,
                     model=direct_agent_model(self.options.agent, "HEPH_REVIEWER_MODEL"),
                     sandbox="read-only",
                 )
@@ -1650,7 +1655,7 @@ class ReviewPhase(StageMixin):
                 capture_output=True,
                 text=True,
                 check=True,
-                timeout=600,
+                timeout=AGENT_REVIEW_TIMEOUT,
                 env=env,
             )
             output = (result.stdout or "").strip()
@@ -1682,7 +1687,7 @@ class ReviewPhase(StageMixin):
                 cwd=worktree_path,
                 capture_output=True,
                 check=False,
-                timeout=60,
+                timeout=AGENT_DIFF_TIMEOUT,
             )
             diff = result.stdout or ""
             if not diff.strip():
@@ -1691,7 +1696,7 @@ class ReviewPhase(StageMixin):
                     cwd=worktree_path,
                     capture_output=True,
                     check=False,
-                    timeout=60,
+                    timeout=AGENT_DIFF_TIMEOUT,
                 )
                 diff = fb.stdout or ""
         except Exception as e:
@@ -1716,7 +1721,7 @@ class ReviewPhase(StageMixin):
                 cwd=worktree_path,
                 capture_output=True,
                 check=False,
-                timeout=30,
+                timeout=AGENT_GIT_TIMEOUT,
             )
             files = (result.stdout or "").strip()
             if files:
@@ -1726,7 +1731,7 @@ class ReviewPhase(StageMixin):
                 cwd=worktree_path,
                 capture_output=True,
                 check=False,
-                timeout=30,
+                timeout=AGENT_GIT_TIMEOUT,
             )
             return (fb.stdout or "").strip()
         except Exception as e:

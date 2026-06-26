@@ -20,6 +20,8 @@ from pathlib import Path
 from hephaestus.utils.helpers import get_repo_root as get_repo_root, run_subprocess
 from hephaestus.utils.retry import retry_with_backoff
 
+from .claude_timeouts import AGENT_GIT_TIMEOUT
+
 logger = logging.getLogger(__name__)
 
 
@@ -253,7 +255,7 @@ def safe_git_fetch(repo_root: Path, retries: int = 3) -> bool:
         run(
             ["git", "fetch", "origin"],
             cwd=repo_root,
-            timeout=30,
+            timeout=AGENT_GIT_TIMEOUT,
         )
         logger.debug("Git fetch succeeded")
         return True

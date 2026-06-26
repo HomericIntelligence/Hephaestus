@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ._stage_context import StageMixin
+from .claude_timeouts import AGENT_PRE_PR_TEST_TIMEOUT
 from .git_utils import issue_ref, run
 from .models import ImplementationPhase, ImplementationState
 from .pr_manager import ensure_pr_created
@@ -80,7 +81,7 @@ class PRCreatePhase(StageMixin):
                 cwd=worktree_path,
                 capture_output=True,
                 text=True,
-                timeout=600,
+                timeout=AGENT_PRE_PR_TEST_TIMEOUT,
             )
             if result.returncode == 0:
                 logger.info("#%d: pre-PR tests passed", issue_number)
@@ -93,7 +94,11 @@ class PRCreatePhase(StageMixin):
             )
             return False
         except subprocess.TimeoutExpired:
-            logger.warning("#%d: pre-PR tests timed out after 600s", issue_number)
+            logger.warning(
+                "#%d: pre-PR tests timed out after %ds",
+                issue_number,
+                AGENT_PRE_PR_TEST_TIMEOUT,
+            )
             return False
         except Exception as e:
             logger.warning("#%d: pre-PR tests could not run: %s", issue_number, e)

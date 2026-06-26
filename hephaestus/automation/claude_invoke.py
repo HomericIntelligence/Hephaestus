@@ -31,6 +31,8 @@ from hephaestus.automation.session_naming import session_jsonl_path, session_nam
 from hephaestus.github.client import ClaudeUsageCapError
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch
 
+from .claude_timeouts import AGENT_DEFAULT_TIMEOUT
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,7 +64,7 @@ def invoke_claude_with_session(
     prompt: str,
     model: str,
     cwd: Path,
-    timeout: int = 300,
+    timeout: int = AGENT_DEFAULT_TIMEOUT,
     system_prompt_file: Path | None = None,
     allowed_tools: str | None = None,
     permission_mode: str | None = None,

@@ -26,7 +26,7 @@ from hephaestus.agents.runtime import (
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 
 from .claude_models import learn_model
-from .claude_timeouts import learn_claude_timeout
+from .claude_timeouts import AGENT_LEARN_TIMEOUT, learn_claude_timeout
 from .git_utils import run
 from .session_naming import session_uuid
 
@@ -378,7 +378,7 @@ def compact_session(
     issue: int | str,
     agent: str,
     cwd: Path,
-    timeout: int = 300,
+    timeout: int = AGENT_LEARN_TIMEOUT,
     model: str | None = None,
 ) -> bool:
     """Send ``/compact`` to the (repo, issue, agent, model) Claude session.

@@ -7,9 +7,30 @@ from collections.abc import Callable
 
 import pytest
 
+from hephaestus import constants
 from hephaestus.automation import claude_timeouts
 
 TWO_HOURS_S = 7200
+
+AGENT_TIMEOUT_CONSTANT_NAMES = (
+    "AGENT_AUTH_STATUS_TIMEOUT",
+    "AGENT_GIT_TIMEOUT",
+    "AGENT_DIFF_TIMEOUT",
+    "AGENT_CLONE_TIMEOUT",
+    "AGENT_DEFAULT_TIMEOUT",
+    "AGENT_PLAN_TIMEOUT",
+    "AGENT_LEARN_TIMEOUT",
+    "AGENT_REVIEW_TIMEOUT",
+    "AGENT_PRE_PR_TEST_TIMEOUT",
+    "AGENT_IMPL_TIMEOUT",
+    "AGENT_REBASE_TIMEOUT",
+)
+
+
+@pytest.mark.parametrize("constant_name", AGENT_TIMEOUT_CONSTANT_NAMES)
+def test_agent_timeout_constants_are_reexported(constant_name: str) -> None:
+    """Automation modules can import agent timeout constants from claude_timeouts."""
+    assert getattr(claude_timeouts, constant_name) == getattr(constants, constant_name)
 
 
 def _clear_planner_timeout_env(monkeypatch: pytest.MonkeyPatch) -> None:

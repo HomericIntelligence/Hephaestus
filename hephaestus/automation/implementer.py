@@ -70,6 +70,7 @@ from hephaestus.agents.runtime import (
 # Imports for the Test-Patch Contract — see module docstring for the full table.
 # Each symbol here is either a real call site in IssueImplementer/main or an
 # explicit re-export required by tests or the public API.
+from .claude_timeouts import AGENT_IMPL_TIMEOUT
 from .curses_ui import CursesUI, ThreadLogManager
 from .dependency_resolver import CyclicDependencyError, DependencyResolver
 
@@ -120,11 +121,9 @@ __all__ = [
     "main",
 ]
 
-# Default implementation timeout in seconds. Actual runtime value is read from
-# ``HEPH_IMPLEMENTER_AGENT_TIMEOUT`` by
-# :func:`.claude_timeouts.implementer_claude_timeout`; this constant serves as
-# the documented default and can be used in tests.
-_CLAUDE_IMPL_TIMEOUT: int = 1800
+# Default implementation timeout in seconds. Preserved as a compatibility seam
+# for tests and older callers; the canonical value lives in hephaestus.constants.
+_CLAUDE_IMPL_TIMEOUT: int = AGENT_IMPL_TIMEOUT
 
 
 logger = logging.getLogger(__name__)

@@ -31,6 +31,8 @@ from pathlib import Path
 
 from hephaestus.github.client import gh_call
 
+from .claude_timeouts import AGENT_CLONE_TIMEOUT, AGENT_GIT_TIMEOUT
+
 # fcntl is POSIX-only; CPython does not bundle it on Windows. Import lazily so
 # this module stays importable on Windows for tests that only need its
 # pure-Python helpers. The cross-process file lock that uses fcntl is only
@@ -49,8 +51,6 @@ logger = logging.getLogger(__name__)
 # stage) serializes against the same lock — previously this lived on the
 # Planner class, which left the implementer/CI-driver advise paths unguarded.
 _MNEMOSYNE_LOCK = threading.Lock()
-_MNEMOSYNE_GIT_TIMEOUT = 30
-_MNEMOSYNE_CLONE_TIMEOUT = 120
 _MAX_SELECTED_SKILLS = 5
 _MAX_SKILL_CONTEXT_CHARS = 40_000
 _MAX_MARKETPLACE_PROMPT_CHARS = 80_000
@@ -93,14 +93,14 @@ def _clone_mnemosyne(mnemosyne_root: Path) -> bool:
                 str(mnemosyne_root),
             ],
             check=True,
-            timeout=_MNEMOSYNE_CLONE_TIMEOUT,
+            timeout=AGENT_CLONE_TIMEOUT,
         )
         logger.info("ProjectMnemosyne cloned successfully")
         return True
     except subprocess.TimeoutExpired:
         logger.warning(
             "gh repo clone timed out after %s s; ProjectMnemosyne unavailable this run",
-            _MNEMOSYNE_CLONE_TIMEOUT,
+            AGENT_CLONE_TIMEOUT,
         )
         return False
     except subprocess.CalledProcessError as e:
@@ -119,7 +119,7 @@ def _is_valid_mnemosyne_checkout(mnemosyne_root: Path) -> bool:
             check=False,
             capture_output=True,
             text=True,
-            timeout=_MNEMOSYNE_GIT_TIMEOUT,
+            timeout=AGENT_GIT_TIMEOUT,
         )
     except (subprocess.SubprocessError, OSError) as e:
         logger.warning("Failed to validate ProjectMnemosyne checkout at %s: %s", mnemosyne_root, e)
@@ -173,7 +173,7 @@ def ensure_mnemosyne(mnemosyne_root: Path) -> bool:
                                 check=True,
                                 capture_output=True,
                                 text=True,
-                                timeout=_MNEMOSYNE_GIT_TIMEOUT,
+                                timeout=AGENT_GIT_TIMEOUT,
                             )
                             logger.debug("ProjectMnemosyne refreshed at %s", mnemosyne_root)
                         except Exception as e:

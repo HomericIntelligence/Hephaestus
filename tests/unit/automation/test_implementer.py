@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hephaestus.automation import implementer
+from hephaestus.automation import claude_timeouts, implementer
 from hephaestus.automation.implementer import (
     _CLAUDE_IMPL_TIMEOUT,
     IssueImplementer,
@@ -139,7 +139,7 @@ class TestClaudeImplTimeoutConstant:
         assert hasattr(implementer, "_CLAUDE_IMPL_TIMEOUT")
 
     def test_constant_value(self) -> None:
-        assert _CLAUDE_IMPL_TIMEOUT == 1800
+        assert _CLAUDE_IMPL_TIMEOUT == claude_timeouts.AGENT_IMPL_TIMEOUT == 1800
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +182,9 @@ class TestRunTestsInWorktree:
     def test_returns_false_on_timeout(self, impl: IssueImplementer, tmp_path: Path) -> None:
         with patch(
             "hephaestus.automation.implementer.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(["pixi"], 600),
+            side_effect=subprocess.TimeoutExpired(
+                ["pixi"], claude_timeouts.AGENT_PRE_PR_TEST_TIMEOUT
+            ),
         ):
             assert impl._run_tests_in_worktree(tmp_path, issue_number=1) is False
 

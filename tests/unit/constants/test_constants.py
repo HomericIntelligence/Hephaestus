@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import importlib
+import logging
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -23,6 +26,66 @@ SHARED_TRANSIENT_SIGNALS = (
     "502",
     "504",
 )
+
+AGENT_TIMEOUT_CONSTANTS = (
+    ("AGENT_AUTH_STATUS_TIMEOUT", "HEPH_AGENT_AUTH_STATUS_TIMEOUT", 10),
+    ("AGENT_GIT_TIMEOUT", "HEPH_AGENT_GIT_TIMEOUT", 30),
+    ("AGENT_DIFF_TIMEOUT", "HEPH_AGENT_DIFF_TIMEOUT", 60),
+    ("AGENT_CLONE_TIMEOUT", "HEPH_AGENT_CLONE_TIMEOUT", 120),
+    ("AGENT_DEFAULT_TIMEOUT", "HEPH_AGENT_DEFAULT_TIMEOUT", 300),
+    ("AGENT_PLAN_TIMEOUT", "HEPH_AGENT_PLAN_TIMEOUT", 300),
+    ("AGENT_LEARN_TIMEOUT", "HEPH_AGENT_LEARN_TIMEOUT", 300),
+    ("AGENT_REVIEW_TIMEOUT", "HEPH_AGENT_REVIEW_TIMEOUT", 600),
+    ("AGENT_PRE_PR_TEST_TIMEOUT", "HEPH_AGENT_PRE_PR_TEST_TIMEOUT", 600),
+    ("AGENT_IMPL_TIMEOUT", "HEPH_AGENT_IMPL_TIMEOUT", 1800),
+    ("AGENT_REBASE_TIMEOUT", "HEPH_AGENT_REBASE_TIMEOUT", 2400),
+)
+
+
+def _reload_constants_module() -> ModuleType:
+    return importlib.reload(constants)
+
+
+class TestAgentTimeoutConstants:
+    """Tests for canonical agent subprocess timeout constants."""
+
+    @pytest.mark.parametrize(("constant_name", "_env_name", "default"), AGENT_TIMEOUT_CONSTANTS)
+    def test_defaults(self, constant_name: str, _env_name: str, default: int) -> None:
+        """Agent timeout constants expose the documented default values."""
+        assert getattr(constants, constant_name) == default
+
+    @pytest.mark.parametrize(("constant_name", "env_name", "_default"), AGENT_TIMEOUT_CONSTANTS)
+    def test_env_overrides(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        constant_name: str,
+        env_name: str,
+        _default: int,
+    ) -> None:
+        """Each timeout can be tuned through its own HEPH_* env var."""
+        monkeypatch.setenv(env_name, "77")
+        try:
+            reloaded = _reload_constants_module()
+            assert getattr(reloaded, constant_name) == 77
+        finally:
+            monkeypatch.delenv(env_name, raising=False)
+            _reload_constants_module()
+
+    def test_invalid_env_logs_and_uses_default(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Malformed timeout overrides warn and fall back to the default."""
+        monkeypatch.setenv("HEPH_AGENT_IMPL_TIMEOUT", "slow")
+
+        try:
+            with caplog.at_level(logging.WARNING, logger="hephaestus.constants"):
+                reloaded = _reload_constants_module()
+        finally:
+            monkeypatch.delenv("HEPH_AGENT_IMPL_TIMEOUT", raising=False)
+            _reload_constants_module()
+
+        assert reloaded.AGENT_IMPL_TIMEOUT == 1800
+        assert any("HEPH_AGENT_IMPL_TIMEOUT" in record.message for record in caplog.records)
 
 
 class TestTransientErrorCore:

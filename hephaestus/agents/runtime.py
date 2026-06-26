@@ -15,12 +15,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from hephaestus.constants import AGENT_AUTH_STATUS_TIMEOUT
+
 AgentName = Literal["claude", "codex", "pi"]
 SubprocessCommandPart = str | bytes | os.PathLike[str] | os.PathLike[bytes]
 SubprocessCommand = SubprocessCommandPart | Sequence[SubprocessCommandPart]
 AGENT_CHOICES: tuple[AgentName, ...] = ("claude", "codex", "pi")
 DEFAULT_AGENT: AgentName = "claude"
-AGENT_AUTH_STATUS_TIMEOUT = 10
 CODEX_FINAL_MESSAGE_GRACE_ENV = "HEPH_CODEX_FINAL_MESSAGE_GRACE"
 CODEX_FINAL_MESSAGE_GRACE_SECONDS = 5.0
 CODEX_OPUS_MODEL = "gpt-5.5"
@@ -335,7 +336,7 @@ def codex_approval_args(approval: str) -> list[str]:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=10,
+            timeout=AGENT_AUTH_STATUS_TIMEOUT,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
