@@ -351,41 +351,47 @@ def test_review_phase_apply_verdict_mapping(
     assert mark_no_go.called is calls_no_go
 
 
-def test_review_phase_push_branch_raises_on_failure(tmp_path: Path) -> None:
-    """_push_branch raises RuntimeError on a failed git push (no silent swallow)."""
-    import subprocess
+def test_review_phase_push_branch_delegates(tmp_path: Path) -> None:
+    """_push_branch delegates to the canonical git helper."""
+    phase = ReviewPhase(_make_ctx(tmp_path))
+    with mock.patch("hephaestus.automation._review_phase.push_branch") as mock_push:
+        phase._push_branch("b", tmp_path)
 
+    mock_push.assert_called_once_with("b", tmp_path)
+
+
+def test_review_phase_commit_if_changes_delegates_to_git_utils(tmp_path: Path) -> None:
+    """_commit_if_changes delegates to the canonical git helper."""
     phase = ReviewPhase(_make_ctx(tmp_path))
     with mock.patch(
-        "hephaestus.automation._review_phase.run",
-        side_effect=subprocess.CalledProcessError(1, ["git", "push"]),
-    ):
-        with pytest.raises(RuntimeError, match="Failed to push branch"):
-            phase._push_branch("b", tmp_path)
-
-
-def test_review_phase_commit_if_changes_skips_secrets_via_commit_changes(tmp_path: Path) -> None:
-    """_commit_if_changes delegates to pr_manager.commit_changes (secret-skip path)."""
-    phase = ReviewPhase(_make_ctx(tmp_path))
-    dirty = SimpleNamespace(stdout=" M file.py\n")
-    with (
-        mock.patch("hephaestus.automation._review_phase.run", return_value=dirty),
-        mock.patch("hephaestus.automation._review_phase.commit_changes") as mock_commit,
-    ):
+        "hephaestus.automation._review_phase.commit_if_changes",
+        return_value=True,
+    ) as mock_commit:
         assert phase._commit_if_changes(7, tmp_path) is True
-    mock_commit.assert_called_once()
+
+    mock_commit.assert_called_once_with(
+        7,
+        tmp_path,
+        phase.options.agent,
+        committed_log_message="Committed in-loop address changes for issue #%s",
+    )
 
 
 def test_review_phase_commit_if_changes_clean_returns_false(tmp_path: Path) -> None:
     """_commit_if_changes returns False (no commit) when the worktree is clean."""
     phase = ReviewPhase(_make_ctx(tmp_path))
-    clean = SimpleNamespace(stdout="")
-    with (
-        mock.patch("hephaestus.automation._review_phase.run", return_value=clean),
-        mock.patch("hephaestus.automation._review_phase.commit_changes") as mock_commit,
-    ):
+    with mock.patch(
+        "hephaestus.automation._review_phase.commit_if_changes",
+        return_value=False,
+    ) as mock_commit:
         assert phase._commit_if_changes(7, tmp_path) is False
-    mock_commit.assert_not_called()
+
+    mock_commit.assert_called_once_with(
+        7,
+        tmp_path,
+        phase.options.agent,
+        committed_log_message="Committed in-loop address changes for issue #%s",
+    )
 
 
 # ---------------------------------------------------------------------------

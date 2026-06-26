@@ -12,10 +12,12 @@ import pytest
 from hephaestus.automation.git_utils import (
     _remove_untracked_files_tracked_by_ref,
     clear_repo_caches,
+    commit_if_changes,
     get_current_branch,
     get_repo_info,
     get_repo_root,
     is_clean_working_tree,
+    push_branch,
     push_current_branch_with_lease_on_divergence,
     rebase_worktree_onto,
     run,
@@ -177,6 +179,67 @@ class TestGetRepoInfo:
         # Next call should invoke run() again
         get_repo_info(repo_root)
         assert mock_run.call_count == 2
+
+
+class TestCommitIfChanges:
+    """Tests for commit_if_changes."""
+
+    @patch("hephaestus.automation.git_utils.run")
+    @patch("hephaestus.automation.pr_manager.commit_changes")
+    def test_dirty_tree_commits_with_selected_agent(
+        self, mock_commit: Any, mock_run: Any, tmp_path: Path
+    ) -> None:
+        mock_run.return_value = Mock(stdout=" M fixed.py\n")
+
+        assert commit_if_changes(123, tmp_path, "codex") is True
+
+        mock_run.assert_called_once_with(
+            ["git", "status", "--porcelain"],
+            cwd=tmp_path,
+            capture_output=True,
+        )
+        mock_commit.assert_called_once_with(123, tmp_path, "codex")
+
+    @patch("hephaestus.automation.git_utils.run")
+    @patch("hephaestus.automation.pr_manager.commit_changes")
+    def test_clean_tree_returns_false_without_commit(
+        self, mock_commit: Any, mock_run: Any, tmp_path: Path
+    ) -> None:
+        mock_run.return_value = Mock(stdout="")
+
+        assert commit_if_changes(123, tmp_path, "claude") is False
+
+        mock_commit.assert_not_called()
+
+    @patch("hephaestus.automation.git_utils.run")
+    @patch("hephaestus.automation.pr_manager.commit_changes")
+    def test_commit_runtime_error_returns_false(
+        self, mock_commit: Any, mock_run: Any, tmp_path: Path
+    ) -> None:
+        mock_run.return_value = Mock(stdout=" M fixed.py\n")
+        mock_commit.side_effect = RuntimeError("nothing commit-safe")
+
+        assert commit_if_changes(123, tmp_path, "claude") is False
+
+
+class TestPushBranch:
+    """Tests for push_branch."""
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_pushes_branch_to_origin(self, mock_run: Any, tmp_path: Path) -> None:
+        push_branch("123-auto-impl", tmp_path)
+
+        mock_run.assert_called_once_with(
+            ["git", "push", "origin", "123-auto-impl"],
+            cwd=tmp_path,
+        )
+
+    @patch("hephaestus.automation.git_utils.run")
+    def test_push_failure_raises_runtime_error(self, mock_run: Any, tmp_path: Path) -> None:
+        mock_run.side_effect = subprocess.CalledProcessError(1, ["git", "push"])
+
+        with pytest.raises(RuntimeError, match="Failed to push branch 123-auto-impl"):
+            push_branch("123-auto-impl", tmp_path)
 
 
 class TestGetCurrentBranch:

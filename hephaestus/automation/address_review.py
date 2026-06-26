@@ -51,10 +51,11 @@ from .claude_timeouts import address_review_claude_timeout
 from .comment_difficulty import classify_comments, format_todo_line
 from .curses_ui import CursesUI
 from .git_utils import (
+    commit_if_changes,
     get_repo_slug,
     issue_ref,
     pr_ref,
-    run,
+    push_branch,
 )
 from .github_api import (
     gh_pr_list_unresolved_threads,
@@ -1020,30 +1021,17 @@ class AddressReviewer(BaseReviewer):
     def _commit_if_changes(self, issue_number: int, worktree_path: Path) -> None:
         """Commit any pending changes in the worktree.
 
-        Silently skips if there are no changes to commit.
-
         Args:
             issue_number: GitHub issue number (used in commit message)
             worktree_path: Path to git worktree
 
         """
-        result = run(
-            ["git", "status", "--porcelain"],
-            cwd=worktree_path,
-            capture_output=True,
+        commit_if_changes(
+            issue_number,
+            worktree_path,
+            self.options.agent,
+            committed_log_message="Committed fix changes for issue #%s",
         )
-        if not result.stdout.strip():
-            logger.info("No changes to commit for issue #%s", issue_number)
-            return
-
-        try:
-            from .pr_manager import commit_changes
-
-            commit_changes(issue_number, worktree_path, self.options.agent)
-            logger.info("Committed fix changes for issue #%s", issue_number)
-        except RuntimeError as e:
-            # commit_changes raises RuntimeError if nothing to commit; already checked above
-            logger.warning("Commit skipped for issue #%s: %s", issue_number, e)
 
     def _push_branch(self, branch_name: str, worktree_path: Path) -> None:
         """Push the branch to origin.
@@ -1056,14 +1044,7 @@ class AddressReviewer(BaseReviewer):
             RuntimeError: If push fails
 
         """
-        try:
-            run(
-                ["git", "push", "origin", branch_name],
-                cwd=worktree_path,
-            )
-            logger.info("Pushed branch %s to origin", branch_name)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to push branch {branch_name}: {e}") from e
+        push_branch(branch_name, worktree_path)
 
     def _print_summary(self, results: dict[int, WorkerResult]) -> None:
         """Print address review summary.

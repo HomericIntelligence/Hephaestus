@@ -45,10 +45,12 @@ from .claude_invoke import (
 from .claude_models import implementer_model, reviewer_model
 from .claude_timeouts import implementer_claude_timeout
 from .git_utils import (
+    commit_if_changes,
     get_repo_info,
     get_repo_slug,
     issue_ref,
     pr_ref,
+    push_branch,
     push_current_branch_with_lease_on_divergence,
     rebase_worktree_onto,
     run,
@@ -61,7 +63,6 @@ from .github_api import (
 )
 from .models import PLAN_COMMENT_MARKER, ImplementationState
 from .pr_manager import (
-    commit_changes,
     enable_auto_merge_after_implementation_go,
     mark_pr_implementation_go,
     mark_pr_implementation_no_go,
@@ -1469,9 +1470,6 @@ class ReviewPhase(StageMixin):
     def _commit_if_changes(self, issue_number: int, worktree_path: Path) -> bool:
         """Commit any pending changes from the in-loop address step.
 
-        Silently skips when the worktree is clean. Mirrors
-        ``AddressReviewer._commit_if_changes``.
-
         Returns:
             ``True`` iff a commit was actually created. ``False`` when the
             worktree was clean (nothing to commit) or the commit failed. The
@@ -1479,36 +1477,16 @@ class ReviewPhase(StageMixin):
             change rather than the model's self-report.
 
         """
-        result = run(
-            ["git", "status", "--porcelain"],
-            cwd=worktree_path,
-            capture_output=True,
+        return commit_if_changes(
+            issue_number,
+            worktree_path,
+            self.options.agent,
+            committed_log_message="Committed in-loop address changes for issue #%s",
         )
-        if not result.stdout.strip():
-            logger.info("No changes to commit for issue #%s", issue_number)
-            return False
-        try:
-            commit_changes(issue_number, worktree_path, self.options.agent)
-            logger.info("Committed in-loop address changes for issue #%s", issue_number)
-            return True
-        except RuntimeError as e:
-            logger.warning("Commit skipped for issue #%s: %s", issue_number, e)
-            return False
 
     def _push_branch(self, branch_name: str, worktree_path: Path) -> None:
-        """Push *branch_name* to origin after an in-loop address step.
-
-        Mirrors ``AddressReviewer._push_branch``.
-
-        Raises:
-            RuntimeError: If the push fails.
-
-        """
-        try:
-            run(["git", "push", "origin", branch_name], cwd=worktree_path)
-            logger.info("Pushed branch %s to origin", branch_name)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to push branch {branch_name}: {e}") from e
+        """Push *branch_name* to origin after an in-loop address step."""
+        push_branch(branch_name, worktree_path)
 
     def _resume_impl_with_feedback(
         self,

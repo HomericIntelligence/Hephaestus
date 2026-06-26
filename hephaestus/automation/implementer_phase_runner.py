@@ -55,10 +55,12 @@ from .claude_invoke import invoke_claude_with_session
 from .claude_models import advise_model
 from .claude_timeouts import advise_claude_timeout
 from .git_utils import (
+    commit_if_changes,
     get_repo_slug,
     is_clean_working_tree,
     issue_ref,
     pr_ref,
+    push_branch,
     run,
     sync_worktree_to_remote_branch,
 )
@@ -1350,12 +1352,17 @@ class ImplementationPhaseRunner:
         return self.review_phase._parse_address_result(text, issue_number, iteration)
 
     def _commit_if_changes(self, issue_number: int, worktree_path: Path) -> bool:
-        """Delegate to :meth:`ReviewPhase._commit_if_changes`."""
-        return self.review_phase._commit_if_changes(issue_number, worktree_path)
+        """Commit pending changes from the in-loop address step."""
+        return commit_if_changes(
+            issue_number,
+            worktree_path,
+            self.options.agent,
+            committed_log_message="Committed in-loop address changes for issue #%s",
+        )
 
     def _push_branch(self, branch_name: str, worktree_path: Path) -> None:
-        """Delegate to :meth:`ReviewPhase._push_branch`."""
-        self.review_phase._push_branch(branch_name, worktree_path)
+        """Push *branch_name* to origin."""
+        push_branch(branch_name, worktree_path)
 
     # FollowUpPhase
     def _run_post_pr_followup(

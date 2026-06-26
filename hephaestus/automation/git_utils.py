@@ -169,6 +169,63 @@ def pr_ref(pr_number: int | str) -> str:
     return f"{get_repo_slug()}#{pr_number}"
 
 
+def commit_if_changes(
+    issue_number: int,
+    worktree_path: Path,
+    agent: str = "claude",
+    *,
+    committed_log_message: str = "Committed changes for issue #%s",
+) -> bool:
+    """Commit pending changes in *worktree_path* if the worktree is dirty.
+
+    Args:
+        issue_number: GitHub issue number used by the commit helper.
+        worktree_path: Path to the git worktree to inspect.
+        agent: Agent name forwarded to the commit helper.
+        committed_log_message: ``logging`` format string for a successful commit.
+
+    Returns:
+        True if a commit was created, otherwise False.
+
+    """
+    result = run(
+        ["git", "status", "--porcelain"],
+        cwd=worktree_path,
+        capture_output=True,
+    )
+    if not result.stdout.strip():
+        logger.info("No changes to commit for issue #%s", issue_number)
+        return False
+
+    try:
+        from .pr_manager import commit_changes
+
+        commit_changes(issue_number, worktree_path, agent)
+        logger.info(committed_log_message, issue_number)
+        return True
+    except RuntimeError as e:
+        logger.warning("Commit skipped for issue #%s: %s", issue_number, e)
+        return False
+
+
+def push_branch(branch_name: str, worktree_path: Path) -> None:
+    """Push *branch_name* to ``origin``.
+
+    Args:
+        branch_name: Branch name to push.
+        worktree_path: Path to the git worktree.
+
+    Raises:
+        RuntimeError: If the push fails.
+
+    """
+    try:
+        run(["git", "push", "origin", branch_name], cwd=worktree_path)
+        logger.info("Pushed branch %s to origin", branch_name)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Failed to push branch {branch_name}: {e}") from e
+
+
 def safe_git_fetch(repo_root: Path, retries: int = 3) -> bool:
     """Safely fetch from git remote with retry and exponential backoff.
 

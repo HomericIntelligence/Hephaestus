@@ -299,21 +299,23 @@ class TestResolveAddressedThreads:
 class TestCommitIfChanges:
     """Tests for AddressReviewer._commit_if_changes."""
 
-    def test_forwards_selected_agent_to_commit_changes(
+    def test_forwards_selected_agent_to_git_utils(
         self, reviewer: AddressReviewer, tmp_path: Path
     ) -> None:
         reviewer.options.agent = "codex"
 
-        with (
-            patch(
-                "hephaestus.automation.address_review.run",
-                return_value=MagicMock(stdout=" M fixed.py\n"),
-            ),
-            patch("hephaestus.automation.pr_manager.commit_changes") as mock_commit,
-        ):
+        with patch(
+            "hephaestus.automation.address_review.commit_if_changes",
+            return_value=True,
+        ) as mock_commit:
             reviewer._commit_if_changes(123, tmp_path)
 
-        mock_commit.assert_called_once_with(123, tmp_path, "codex")
+        mock_commit.assert_called_once_with(
+            123,
+            tmp_path,
+            "codex",
+            committed_log_message="Committed fix changes for issue #%s",
+        )
 
 
 # ---------------------------------------------------------------------------
