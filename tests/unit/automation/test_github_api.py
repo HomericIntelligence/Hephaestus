@@ -73,6 +73,52 @@ class TestGhIssueJson:
         with pytest.raises(RuntimeError, match="Failed to fetch issue"):
             gh_issue_json(123)
 
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_strips_null_bytes_from_title_and_body(self, mock_gh_call: Any) -> None:
+        """#1661: NUL bytes in title/body are stripped at the source."""
+        mock_result = Mock()
+        mock_result.stdout = json.dumps(
+            {
+                "number": 1509,
+                "title": "bad\x00title",
+                "state": "OPEN",
+                "labels": [],
+                "body": "bad\x00body",
+            }
+        )
+        mock_gh_call.return_value = mock_result
+
+        data = gh_issue_json(1509)
+
+        assert data["title"] == "badtitle"
+        assert data["body"] == "badbody"
+        assert "\x00" not in data["title"]
+        assert "\x00" not in data["body"]
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_strip_tolerates_missing_and_non_string_fields(self, mock_gh_call: Any) -> None:
+        """#1661: the .get/isinstance guard skips missing or non-string fields.
+
+        Exercises the defensive branch — a payload with ``body`` absent and a
+        non-string ``title`` must not raise (None/int have no ``.replace``).
+        """
+        mock_result = Mock()
+        mock_result.stdout = json.dumps(
+            {
+                "number": 1509,
+                "title": 123,  # non-string — isinstance guard must skip it
+                "state": "OPEN",
+                "labels": [],
+                # body intentionally omitted — .get returns None, guard skips it
+            }
+        )
+        mock_gh_call.return_value = mock_result
+
+        data = gh_issue_json(1509)
+
+        assert data["title"] == 123
+        assert "body" not in data
+
 
 class TestParseIssueDependencies:
     """Tests for parse_issue_dependencies function."""
@@ -923,6 +969,19 @@ class TestGhIssueCreate:
         assert call_args[4] == "--body-file"
         assert isinstance(call_args[5], str) and call_args[5]
         assert "Test body" not in call_args
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_title_null_byte_stripped_from_argv(self, mock_gh_call: Any) -> None:
+        """#1661: a NUL in the title must not reach the --title argv element."""
+        mock_result = Mock()
+        mock_result.stdout = "https://github.com/owner/repo/issues/791"
+        mock_gh_call.return_value = mock_result
+
+        gh_issue_create(title="bad\x00title", body="Body")
+
+        call_args = mock_gh_call.call_args[0][0]
+        assert call_args[:4] == ["issue", "create", "--title", "badtitle"]
+        assert all("\x00" not in str(arg) for arg in call_args)
 
     @patch("hephaestus.automation.github_api.gh_list_labels", return_value={"bug", "enhancement"})
     @patch("hephaestus.automation.github_api._gh_call")

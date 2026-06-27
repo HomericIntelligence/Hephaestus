@@ -31,6 +31,7 @@ from hephaestus.github.rate_limit import (
     gh_rate_limit_reset_epoch,
 )
 from hephaestus.io.utils import write_secure
+from hephaestus.utils.helpers import strip_null_bytes
 
 from .git_utils import get_repo_info, run
 from .models import IssueInfo, IssueState
@@ -252,7 +253,21 @@ def gh_issue_json(issue_number: int) -> dict[str, Any]:
         result = _gh_call(
             ["issue", "view", str(issue_number), "--json", "number,title,state,labels,body"],
         )
-        return cast(dict[str, Any], json.loads(result.stdout))
+        data = cast(dict[str, Any], json.loads(result.stdout))
+        # Strip stray NUL bytes at the source so downstream prompt assembly never
+        # feeds an embedded null into a subprocess argv (#1661). Title/body are the
+        # free-text fields consumed by the planner/implementer prompts; warn on a
+        # strip so the (rare) mutation of a user-visible field is never silent.
+        for field in ("title", "body"):
+            value = data.get(field)
+            if isinstance(value, str):
+                cleaned = strip_null_bytes(value)
+                if cleaned != value:
+                    logger.warning(
+                        "Stripped NUL byte(s) from issue #%s %s field", issue_number, field
+                    )
+                    data[field] = cleaned
+        return data
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to fetch issue #{issue_number}: {e}") from e
 
@@ -461,7 +476,9 @@ def gh_issue_create(title: str, body: str, labels: list[str] | None = None) -> i
             _ensure_labels_exist(labels)
 
         with _body_file(body) as body_path:
-            cmd = ["issue", "create", "--title", title, "--body-file", body_path]
+            # Title is a direct argv element; a stray NUL would make gh's
+            # subprocess invocation raise ``ValueError: embedded null byte`` (#1661).
+            cmd = ["issue", "create", "--title", strip_null_bytes(title), "--body-file", body_path]
             if labels:
                 for label in labels:
                     cmd.extend(["--label", label])
@@ -745,7 +762,9 @@ def gh_pr_create(
                     "--base",
                     base,
                     "--title",
-                    title,
+                    # NUL in argv → ``ValueError: embedded null byte`` from gh's
+                    # subprocess call before the child runs (#1661).
+                    strip_null_bytes(title),
                     "--body-file",
                     body_path,
                 ]

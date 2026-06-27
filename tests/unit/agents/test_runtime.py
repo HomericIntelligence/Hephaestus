@@ -124,6 +124,7 @@ class _FakeCodexPopen:
         final_message: str = "",
         hang: bool = False,
         returncode: int = 0,
+        captured_input: list[str | None] | None = None,
         **_: Any,
     ) -> None:
         self.cmd = cmd
@@ -133,13 +134,16 @@ class _FakeCodexPopen:
         self.returncode = returncode
         self.killed = False
         self.terminated = False
+        self._captured_input = captured_input
         output_path = Path(cmd[cmd.index("--output-last-message") + 1])
         output_path.write_text(final_message, encoding="utf-8")
 
     def communicate(
         self, input: str | None = None, timeout: float | None = None
     ) -> tuple[str, str]:
-        del input, timeout
+        if self._captured_input is not None:
+            self._captured_input.append(input)
+        del timeout
         if self.hang and not (self.killed or self.terminated):
             raise subprocess.TimeoutExpired(self.cmd, 1)
         return self.stdout, self.stderr
@@ -182,6 +186,58 @@ def test_run_codex_session_returns_session_id_and_last_message(tmp_path: Path) -
 
     assert result.session_id == "019e1e57-7652-7892-b1ca-c31c93d4b160"
     assert result.stdout == "final answer"
+
+
+def test_run_claude_text_strips_null_byte_from_stdin(tmp_path: Path) -> None:
+    """#1661: a NUL in the prompt must not crash the Claude-text stdin path.
+
+    subprocess.run marshals ``input=`` as text stdin and raises
+    ``ValueError: embedded null byte`` on a stray NUL — the same crash the
+    claude_invoke chokepoint guards against, on a sibling runner path.
+    """
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["input"] = kwargs.get("input")
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    with patch("hephaestus.agents.runtime.subprocess.run", side_effect=fake_run):
+        agent_runtime.run_claude_text("plan this\x00issue", cwd=tmp_path, timeout=30)
+
+    assert captured["input"] == "plan thisissue"
+    assert "\x00" not in captured["input"]
+
+
+def test_run_codex_session_strips_null_byte_from_stdin(tmp_path: Path) -> None:
+    """#1661: a NUL in the prompt must not crash the Codex stdin path."""
+    captured_input: list[str | None] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        stdout = (
+            '{"type":"session_meta","payload":{"id":"019e1e57-7652-7892-b1ca-c31c93d4b160"}}\n'
+            '{"type":"agent_message","message":"fallback"}\n'
+        )
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout=stdout,
+            final_message="final answer",
+            captured_input=captured_input,
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+    ):
+        agent_runtime.run_codex_session(
+            "plan this\x00issue",
+            cwd=tmp_path,
+            timeout=30,
+            sandbox="workspace-write",
+        )
+
+    assert captured_input == ["plan thisissue"]
 
 
 def test_run_codex_session_recovers_last_message_on_wrapper_timeout(tmp_path: Path) -> None:

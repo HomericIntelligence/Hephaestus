@@ -30,6 +30,7 @@ from pathlib import Path
 from hephaestus.automation.session_naming import session_jsonl_path, session_name
 from hephaestus.github.client import ClaudeUsageCapError
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch
+from hephaestus.utils.helpers import strip_null_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +153,20 @@ def invoke_claude_with_session(
         cmd += ["--permission-mode", permission_mode]
     if extra_args:
         cmd += extra_args
+    # subprocess.run rejects any argv element (or text stdin) containing a NUL
+    # with ``ValueError: embedded null byte``. The prompt is assembled from
+    # untrusted multi-source text (issue body + agent/advise output + prior
+    # review) and a single stray NUL would otherwise permanently strand the
+    # issue. Strip defensively here — the one chokepoint every agent phase
+    # (planner, implementer, advise, reviewer) passes through (#1661).
+    sanitized = strip_null_bytes(prompt)
+    if sanitized != prompt:
+        logger.warning(
+            "Stripped NUL byte(s) from %s prompt for issue %s before invoking claude",
+            agent,
+            issue,
+        )
+        prompt = sanitized
     cmd.append("--print")
     if not input_via_stdin:
         cmd.append(prompt)

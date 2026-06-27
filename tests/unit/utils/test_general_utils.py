@@ -16,7 +16,51 @@ from hephaestus.utils.helpers import (
     install_package,
     run_subprocess,
     slugify,
+    strip_null_bytes,
 )
+
+
+class TestStripNullBytes:
+    """Tests for strip_null_bytes (#1661)."""
+
+    def test_removes_embedded_null(self) -> None:
+        """An embedded NUL byte is removed, surrounding text preserved."""
+        assert strip_null_bytes("a\x00b") == "ab"
+
+    def test_removes_leading_and_trailing_null(self) -> None:
+        """Leading and trailing NULs are stripped."""
+        assert strip_null_bytes("\x00abc\x00") == "abc"
+
+    def test_removes_multiple_nulls(self) -> None:
+        """Every NUL is removed regardless of count or position."""
+        assert strip_null_bytes("\x00a\x00\x00b\x00c") == "abc"
+
+    def test_nul_adjacent_to_multibyte_unicode(self) -> None:
+        """A NUL next to multibyte characters is removed without corrupting them."""
+        assert strip_null_bytes("✓\x00é\x00中") == "✓é中"
+
+    def test_clean_text_unchanged(self) -> None:
+        """Text without NULs compares equal (value contract, not identity)."""
+        text = "no nulls here — just unicode ✓"
+        assert strip_null_bytes(text) == text
+
+    def test_clean_text_is_not_copied(self) -> None:
+        """Micro-optimization: clean text is returned without allocating a copy.
+
+        Separated from the value-equality contract above so a conformant
+        implementation that always calls ``.replace`` would fail only this
+        explicitly-labeled optimization test, not the behavioral one.
+        """
+        text = "no nulls here"
+        assert strip_null_bytes(text) is text
+
+    def test_empty_string(self) -> None:
+        """An empty string is handled without error."""
+        assert strip_null_bytes("") == ""
+
+    def test_only_nulls(self) -> None:
+        """A string of only NULs becomes empty."""
+        assert strip_null_bytes("\x00\x00\x00") == ""
 
 
 class TestSlugify:
