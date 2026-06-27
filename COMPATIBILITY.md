@@ -182,10 +182,11 @@ the deprecation policy below.
 Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 `check_coverage`, `check_max_complexity`, `check_python_version_consistency`,
 `check_test_structure`, `COMMAND_REGISTRY`, `confirm_action`, `create_parser`,
-`detect_rate_limit`, `filter_audit_results`, `flatten_dict`, `format_output`,
-`format_system_info`, `format_table`, `get_config_value`, `get_proj_root`,
-`get_repo_root`, `get_setting`, `human_readable_size`, `install_package`,
-`load_data`, `merge_configs`, `parse_reset_epoch`, `read_file`, `register_command`,
+`create_validation_parser`, `detect_rate_limit`, `filter_audit_results`,
+`flatten_dict`, `format_output`, `format_system_info`, `format_table`,
+`get_config_value`, `get_proj_root`, `get_repo_root`, `get_setting`,
+`human_readable_size`, `install_package`, `load_data`, `merge_configs`,
+`parse_reset_epoch`, `read_file`, `register_command`, `resolve_repo_root`,
 `run_subprocess`, `safe_write`, `save_data`, `wait_until`, `write_file`, `write_secure`.
 
 **Deprecated lazy-loaded symbols** (covered by the deprecation policy until

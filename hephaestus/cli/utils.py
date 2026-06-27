@@ -113,50 +113,6 @@ Examples:
     return parser
 
 
-def add_logging_args(parser: argparse.ArgumentParser) -> None:
-    """Add standard logging arguments to parser.
-
-    Args:
-        parser: ArgumentParser instance
-
-    """
-    logging_group = parser.add_argument_group("logging options")
-    logging_group.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
-    logging_group.add_argument(
-        "-q", "--quiet", action="store_true", help="Suppress informational messages"
-    )
-    logging_group.add_argument("--log-file", help="Log to file instead of stdout")
-
-
-def add_version_arg(parser: argparse.ArgumentParser) -> None:
-    """Add the standard ``--version`` / ``-V`` flag to a CLI parser.
-
-    Every ``hephaestus-*`` console script accepts ``--version`` for version introspection.
-    """
-    parser.add_argument(
-        "-V",
-        "--version",
-        action="version",
-        version=f"%(prog)s {__version__}",
-    )
-
-
-def add_json_arg(parser: argparse.ArgumentParser) -> None:
-    """Add the standard ``--json`` flag to a CLI parser.
-
-    Every ``hephaestus-*`` console script accepts ``--json`` so output is
-    machine-readable for pipelines. Data-returning CLIs emit their structured
-    payload via ``format_output(data, "json")``; status-only CLIs should call
-    ``emit_json_status()`` to print a minimal ``{"status": ..., "exit_code": ...}``
-    envelope on exit.
-    """
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit machine-readable JSON output instead of human-readable text",
-    )
-
-
 def create_validation_parser(
     description: str | None = None,
     *,
@@ -202,6 +158,50 @@ def create_validation_parser(
 def resolve_repo_root(args: argparse.Namespace) -> Path:
     """Return the explicit CLI repository root or auto-detect it."""
     return args.repo_root if args.repo_root is not None else get_repo_root()
+
+
+def add_logging_args(parser: argparse.ArgumentParser) -> None:
+    """Add standard logging arguments to parser.
+
+    Args:
+        parser: ArgumentParser instance
+
+    """
+    logging_group = parser.add_argument_group("logging options")
+    logging_group.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
+    logging_group.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress informational messages"
+    )
+    logging_group.add_argument("--log-file", help="Log to file instead of stdout")
+
+
+def add_version_arg(parser: argparse.ArgumentParser) -> None:
+    """Add the standard ``--version`` / ``-V`` flag to a CLI parser.
+
+    Every ``hephaestus-*`` console script accepts ``--version`` for version introspection.
+    """
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+
+
+def add_json_arg(parser: argparse.ArgumentParser) -> None:
+    """Add the standard ``--json`` flag to a CLI parser.
+
+    Every ``hephaestus-*`` console script accepts ``--json`` so output is
+    machine-readable for pipelines. Data-returning CLIs emit their structured
+    payload via ``format_output(data, "json")``; status-only CLIs should call
+    ``emit_json_status()`` to print a minimal ``{"status": ..., "exit_code": ...}``
+    envelope on exit.
+    """
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON output instead of human-readable text",
+    )
 
 
 DRY_RUN_HELP_CAVEAT = (
