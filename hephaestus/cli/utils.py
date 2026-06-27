@@ -357,7 +357,14 @@ def format_output(data: Any, format_type: str = "text") -> str:
 
     Args:
         data: Data to format
-        format_type: Output format ('text', 'json', 'table')
+        format_type: Output format. One of ``"json"``, ``"table"``, or
+            ``"text"`` (the default). The match is exact and case-sensitive
+            (e.g. ``"JSON"`` is NOT recognized and falls back to ``"text"``).
+            ``"table"`` applies only when ``data`` is a list or tuple; for any
+            other ``data`` type a ``"table"`` request falls back to ``"text"``.
+            Any unrecognized ``format_type`` (a typo, ``""``, etc.) also falls
+            back to the ``"text"`` format rather than raising — callers wanting
+            strict validation must check ``format_type`` before calling.
 
     Returns:
         Formatted string representation

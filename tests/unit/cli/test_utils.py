@@ -325,6 +325,32 @@ class TestFormatOutput:
         """Text format of a scalar returns its string representation."""
         assert format_output(42) == "42"
 
+    def test_invalid_format_falls_back_to_text(self) -> None:
+        """Unrecognized format_type renders as text, not an error (POLA #1509).
+
+        Non-vacuous: if the else-branch text fallback (cli/utils.py:380-388)
+        raised instead, the bogus/yaml/"" cases would fail; the "JSON" case
+        guards format_output's case-SENSITIVITY (== "json", not .lower()).
+        """
+        data = {"name": "hephaestus", "version": "0.3.0"}
+        for bogus in ("bogus", "yaml", "", "JSON"):  # "JSON" stays case-sensitive
+            result = format_output(data, format_type=bogus)
+            assert "name: hephaestus" in result  # text branch ran
+            assert "{" not in result  # NOT json output
+
+    def test_table_format_on_dict_falls_back_to_text(self) -> None:
+        """'table' on non-sequence data falls back to text, not an error (#1509).
+
+        Non-vacuous: if the isinstance(data, (list, tuple)) guard at
+        cli/utils.py:368 were dropped, a dict would hit the table branch and
+        format differently; asserting the text 'key: value' line AND absence of
+        json's '{' pins the text path specifically.
+        """
+        data = {"name": "hephaestus", "version": "0.3.0"}
+        result = format_output(data, format_type="table")
+        assert "name: hephaestus" in result  # text branch, not table
+        assert "{" not in result  # NOT json output
+
 
 class TestCliBarrelExports:
     """Regression tests for #462: the cli package barrel exposes the framework."""
