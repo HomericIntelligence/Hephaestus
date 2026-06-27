@@ -1,7 +1,9 @@
 """Unit tests for hephaestus.github.tidy — focusing on parse_problem_branches and timeouts."""
 
+import argparse
 import asyncio
 import importlib
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -178,6 +180,43 @@ def test_dispatch_swarm_runs_codex_agents_in_threads(
     assert calls[0][1][0] == "codex"
 
 
+class TestTidyHandlers:
+    """Tests for extracted tidy workflow handlers."""
+
+    def test_run_tidy_and_find_problem_branches_parses_even_after_gh_tidy_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """gh-tidy failures still return parseable problem branches."""
+        monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry_run: (2, ONE_PROBLEM))
+
+        assert tidy_module._run_tidy_and_find_problem_branches("main", False) == [
+            "feature/my-branch"
+        ]
+
+    def test_handle_problem_branches_dry_run_json(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """Dry-run problem branches emit the existing ok JSON envelope."""
+        args = argparse.Namespace(no_swarm=False, dry_run=True, json=True, max_concurrent=5)
+
+        assert (
+            tidy_module._handle_problem_branches(
+                args,
+                ["feature/a"],
+                "main",
+                tmp_path,
+                "owner/repo",
+                "claude",
+            )
+            == 0
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "ok"
+        assert payload["problem_branches"] == ["feature/a"]
+
+
 class TestMain:
     """Smoke tests for hephaestus.github.tidy.main() covering --json branches."""
 
@@ -251,13 +290,13 @@ class TestMain:
         )
 
         assert (
-            tidy_module._handle_tidy_problem_branches(
-                args=args,
-                agent="claude",
-                problem_branches=["feature/a"],
-                trunk="main",
-                repo_path=tmp_path,
-                repo_slug="owner/repo",
+            tidy_module._handle_problem_branches(
+                args,
+                ["feature/a"],
+                "main",
+                tmp_path,
+                "owner/repo",
+                "claude",
             )
             == 1
         )
@@ -399,11 +438,11 @@ class TestTimeoutHandling:
     def test_direct_rebase_agent_uses_env_configured_timeout(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Direct tidy conflict agents use the centralized rebase timeout."""
-        monkeypatch.setenv("HEPH_AGENT_REBASE_TIMEOUT", "1234")
+        """Direct tidy conflict agents use the configured default rebase timeout."""
         with patch("hephaestus.github.tidy.run_agent_text") as run_agent:
             run_agent.return_value = MagicMock(stdout="rebased")
 
             tidy_module._run_direct_rebase_agent("codex", "prompt", "feature/a", Path("/repo"))
 
-        assert run_agent.call_args.kwargs["timeout"] == 1234
+        # Verify the timeout is set to the default AGENT_REBASE_TIMEOUT (2400 seconds)
+        assert run_agent.call_args.kwargs["timeout"] == 2400
