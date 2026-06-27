@@ -7,6 +7,7 @@ here instead of silently no-op'ing in CI.
 
 from __future__ import annotations
 
+import subprocess
 from unittest import mock
 
 import pytest
@@ -88,6 +89,18 @@ def test_apply_reconciles_stale_label() -> None:
     assert any("DELETE" in c and c[-1].endswith("severity:major") for c in calls)
     assert any("labels[]=severity:minor" in c for c in calls)
     assert not any(c[-1].endswith("/labels/bug") for c in calls)
+
+
+def test_gh_wrapper_delegates_to_gh_call() -> None:
+    """The local wrapper routes GitHub CLI calls through the shared adapter."""
+    completed = subprocess.CompletedProcess(["gh"], 0, stdout="ok\n", stderr="")
+    with mock.patch.object(sl, "gh_call", return_value=completed) as mock_gh_call:
+        assert sl._gh("api", "repos/o/r/issues/1/labels") == "ok\n"
+
+    mock_gh_call.assert_called_once_with(
+        ["api", "repos/o/r/issues/1/labels"],
+        check=True,
+    )
 
 
 def test_apply_idempotent_when_already_correct() -> None:

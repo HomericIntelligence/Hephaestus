@@ -459,15 +459,18 @@ class TestTimeoutHandling:
             assert "timeout" in call_kwargs
             assert call_kwargs["timeout"] == fleet_sync_module.METADATA_TIMEOUT
 
-    def test_gh_uses_network_timeout(self) -> None:
-        """_gh function uses NETWORK_TIMEOUT."""
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="[]")
-            fleet_sync_module._gh(["pr", "list"], repo="TestRepo", org="TestOrg")
-            assert mock_run.called
-            call_kwargs = mock_run.call_args[1]
-            assert "timeout" in call_kwargs
-            assert call_kwargs["timeout"] == fleet_sync_module.NETWORK_TIMEOUT
+    def test_gh_delegates_to_gh_call_and_scopes_repo(self) -> None:
+        """_gh routes through gh_call with repo scoping and NETWORK_TIMEOUT."""
+        completed = subprocess.CompletedProcess(["gh"], 0, stdout="[]", stderr="")
+        with patch.object(fleet_sync_module, "gh_call", return_value=completed) as mock_gh_call:
+            result = fleet_sync_module._gh(["pr", "list"], repo="TestRepo", org="TestOrg")
+
+        assert result is completed
+        mock_gh_call.assert_called_once_with(
+            ["--repo", "TestOrg/TestRepo", "pr", "list"],
+            check=True,
+            timeout=fleet_sync_module.NETWORK_TIMEOUT,
+        )
 
     def test_git_uses_network_timeout(self) -> None:
         """_git function uses NETWORK_TIMEOUT."""
@@ -656,6 +659,17 @@ class TestCloneReuseAndWorktrees:
 
         assert clone_count[0] == 0
         assert counts["merged"] == 1
+
+
+class TestMergePr:
+    """Merge-path error handling."""
+
+    def test_merge_pr_handles_runtime_errors_from_gh_call(self) -> None:
+        """Circuit-breaker/runtime failures return False like gh CLI failures."""
+        pr = _pr(42, PRStatus.READY)
+
+        with patch.object(fleet_sync_module, "_gh", side_effect=RuntimeError("breaker open")):
+            assert fleet_sync_module.merge_pr(pr, "HomericIntelligence") is False
 
 
 class TestListPrs:
