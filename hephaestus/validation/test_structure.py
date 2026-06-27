@@ -180,6 +180,66 @@ def check_scripts_coverage(
     return len(errors) == 0, errors
 
 
+def _report_mirror_check(
+    src_root: Path,
+    test_root: Path,
+    src_package: str,
+    verbose: bool,
+) -> bool:
+    mirrored, missing = check_test_directory_mirrors(src_root, test_root)
+    if mirrored:
+        if verbose:
+            src_count = len(_get_subpackages(src_root))
+            print(f"OK: All {src_count} source subpackages have test directories.")
+        return True
+    print(
+        "ERROR: The following source subpackages have no corresponding tests/unit/ directory:",
+        file=sys.stderr,
+    )
+    for name in sorted(missing):
+        print(f"  {src_package}/{name}  ->  tests/unit/{name}/ (missing)", file=sys.stderr)
+    return False
+
+
+def _report_loose_files_check(test_root: Path, verbose: bool) -> bool:
+    no_loose, violations = check_no_loose_test_files(test_root)
+    if no_loose:
+        if verbose:
+            print("OK: No loose test_*.py files at tests/unit/ root.")
+        return True
+    print(
+        "ERROR: test_*.py files found directly under tests/unit/.\n"
+        "Move them into the appropriate sub-package.\n"
+        "Violation(s):",
+        file=sys.stderr,
+    )
+    for p in violations:
+        print(f"  {p}", file=sys.stderr)
+    return False
+
+
+def _report_unsanctioned_dirs_check(
+    src_root: Path,
+    test_root: Path,
+    verbose: bool,
+) -> bool:
+    ok_extra, unsanctioned = check_no_unsanctioned_test_dirs(src_root, test_root)
+    if ok_extra:
+        if verbose:
+            print("OK: No unsanctioned extra test directories under tests/unit/.")
+        return True
+    print(
+        "ERROR: tests/unit/ has directories with no source subpackage and no\n"
+        "allowlist entry. Add a SANCTIONED_EXTRA_TEST_DIRS entry (with a target\n"
+        "comment) in hephaestus/validation/test_structure.py, or remove the dir.\n"
+        "Unsanctioned:",
+        file=sys.stderr,
+    )
+    for name in sorted(unsanctioned):
+        print(f"  tests/unit/{name}/", file=sys.stderr)
+    return False
+
+
 def check_test_structure(
     repo_root: Path,
     src_package: str | None = None,
@@ -202,9 +262,7 @@ def check_test_structure(
 
     src_root = repo_root / src_package
     test_root = repo_root / "tests" / "unit"
-    all_passed = True
 
-    # Check 1: Mirror structure
     if not src_root.is_dir():
         print(f"ERROR: Source root not found: {src_root}", file=sys.stderr)
         return False
@@ -213,63 +271,12 @@ def check_test_structure(
         print(f"ERROR: Test root not found: {test_root}", file=sys.stderr)
         return False
 
-    mirrored, missing = check_test_directory_mirrors(src_root, test_root)
-    if mirrored:
-        src_count = len(_get_subpackages(src_root))
-        if verbose:
-            print(f"OK: All {src_count} source subpackages have test directories.")
-    else:
-        all_passed = False
-        print(
-            "ERROR: The following source subpackages have no corresponding tests/unit/ directory:",
-            file=sys.stderr,
-        )
-        for name in sorted(missing):
-            print(
-                f"  {src_package}/{name}  ->  tests/unit/{name}/ (missing)",
-                file=sys.stderr,
-            )
-
-    # Check 2: No loose test files
-    no_loose, violations = check_no_loose_test_files(test_root)
-    if no_loose:
-        if verbose:
-            print("OK: No loose test_*.py files at tests/unit/ root.")
-    else:
-        all_passed = False
-        print(
-            "ERROR: test_*.py files found directly under tests/unit/.\n"
-            "Move them into the appropriate sub-package.\n"
-            "Violation(s):",
-            file=sys.stderr,
-        )
-        for p in violations:
-            print(f"  {p}", file=sys.stderr)
-
-    # Check 3: No unsanctioned extra test directories (reverse mirror)
-    ok_extra, unsanctioned = check_no_unsanctioned_test_dirs(src_root, test_root)
-    if not _report_unsanctioned(ok_extra, unsanctioned, verbose):
-        all_passed = False
-
-    return all_passed
-
-
-def _report_unsanctioned(ok: bool, unsanctioned: set[str], verbose: bool) -> bool:
-    """Report check_no_unsanctioned_test_dirs result; return *ok*."""
-    if ok:
-        if verbose:
-            print("OK: No unsanctioned extra test directories under tests/unit/.")
-    else:
-        print(
-            "ERROR: tests/unit/ has directories with no source subpackage and no\n"
-            "allowlist entry. Add a SANCTIONED_EXTRA_TEST_DIRS entry (with a target\n"
-            "comment) in hephaestus/validation/test_structure.py, or remove the dir.\n"
-            "Unsanctioned:",
-            file=sys.stderr,
-        )
-        for name in sorted(unsanctioned):
-            print(f"  tests/unit/{name}/", file=sys.stderr)
-    return ok
+    results = [
+        _report_mirror_check(src_root, test_root, src_package, verbose),
+        _report_loose_files_check(test_root, verbose),
+        _report_unsanctioned_dirs_check(src_root, test_root, verbose),
+    ]
+    return all(results)
 
 
 def _detect_src_package(repo_root: Path) -> str:

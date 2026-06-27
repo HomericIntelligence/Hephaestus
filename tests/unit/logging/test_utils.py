@@ -615,3 +615,41 @@ class TestSetupLogging:
         finally:
             root.handlers.clear()
             root.handlers.extend(saved)
+
+
+class TestPublicSurface:
+    """Pin the public correlation-ID surface of hephaestus.logging (issue #1513)."""
+
+    def test_correlation_symbols_importable_from_package_root(self) -> None:
+        from hephaestus.logging import (
+            correlation_id_scope,
+            get_current_correlation_id,
+            set_correlation_id,
+        )
+
+        assert callable(set_correlation_id)
+        assert callable(get_current_correlation_id)
+        assert callable(correlation_id_scope)
+
+    def test_correlation_symbols_in_all(self) -> None:
+        from hephaestus.logging import __all__
+
+        expected = {
+            "correlation_id_scope",
+            "get_current_correlation_id",
+            "set_correlation_id",
+        }
+        missing = expected - set(__all__)
+        assert not missing, f"Missing public correlation-ID symbols in __all__: {missing}"
+
+    def test_package_root_and_submodule_are_same_object(self) -> None:
+        from hephaestus import logging as pkg
+        from hephaestus.logging.utils import (
+            correlation_id_scope,
+            get_current_correlation_id,
+            set_correlation_id,
+        )
+
+        assert pkg.set_correlation_id is set_correlation_id
+        assert pkg.get_current_correlation_id is get_current_correlation_id
+        assert pkg.correlation_id_scope is correlation_id_scope

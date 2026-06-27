@@ -201,7 +201,10 @@ removal):
 |--------|-------|-------|
 | `ContextLogger` | 0.2.0 | Logger adapter with context binding |
 | `JsonFormatter` | 0.5.0 | Structured JSON log formatter |
+| `correlation_id_scope` | TBD | Context manager binding an ambient correlation ID for subprocess propagation |
+| `get_current_correlation_id` | TBD | Read the current ambient correlation ID (None if unset) |
 | `get_logger` | 0.1.0 | Get a configured logger instance |
+| `set_correlation_id` | TBD | Set the ambient correlation ID; returns a reset Token |
 | `setup_logging` | 0.1.0 | Configure root logger |
 
 ### `hephaestus.config`
