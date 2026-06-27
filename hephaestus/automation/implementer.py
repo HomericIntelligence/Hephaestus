@@ -68,6 +68,8 @@ from hephaestus.agents.runtime import (
     agent_display_name,
 )
 
+from ._review_utils import ensure_state_dir
+
 # Imports for the Test-Patch Contract — see module docstring for the full table.
 # Each symbol here is either a real call site in IssueImplementer/main or an
 # explicit re-export required by tests or the public API.
@@ -186,8 +188,7 @@ class IssueImplementer:
         """
         self.options = options
         self.repo_root = get_repo_root()
-        self.state_dir = self.repo_root / "build" / ".issue_implementer"
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir = ensure_state_dir(self.repo_root)
 
         self.resolver = DependencyResolver(skip_closed=options.skip_closed)
         self.worktree_manager = WorktreeManager()
@@ -778,7 +779,7 @@ def main() -> int:
     configure_github_throttle_from_args(args)
     agent = resolve_agent(args.agent)
 
-    state_dir = get_repo_root() / "build" / ".issue_implementer"
+    state_dir = ensure_state_dir(get_repo_root())
     _setup_logging(args.verbose, log_dir=state_dir)
 
     log = logging.getLogger(__name__)

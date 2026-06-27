@@ -13,6 +13,7 @@ Provides:
   CLIs (#599 dedupe).
 - ``print_worker_summary``: Standard worker-run summary logging for reviewer
   and driver classes (#1381 dedupe).
+- ``ensure_state_dir``: Create and return the canonical automation state directory.
 - ``build_automation_parser``: Argparse parser builder for automation CLIs
   with opt-in common flags (#1392 dedupe).
 - ``build_review_parser``: Argparse parser builder shared by ``pr_reviewer``
@@ -45,7 +46,7 @@ from hephaestus.cli.utils import (
 )
 
 from .github_api import _gh_call
-from .models import DEFAULT_WORKER_COUNT
+from .models import DEFAULT_STATE_DIR, DEFAULT_WORKER_COUNT
 
 if TYPE_CHECKING:
     from .models import WorkerResult
@@ -78,6 +79,13 @@ def setup_review_logging(verbose: bool = False) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+
+def ensure_state_dir(repo_root: Path, subdir: str = DEFAULT_STATE_DIR) -> Path:
+    """Create and return the automation state directory under ``repo_root``."""
+    state_dir = repo_root / subdir
+    state_dir.mkdir(parents=True, exist_ok=True)
+    return state_dir
 
 
 def add_max_workers_arg(

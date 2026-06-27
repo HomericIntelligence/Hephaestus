@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+from ._review_utils import ensure_state_dir
 from .claude_invoke import INFRA_ERROR_REVIEW_TEXT, parse_review_verdict
 from .claude_models import planner_model, reviewer_model
 from .claude_timeouts import learn_claude_timeout, planner_claude_timeout
@@ -620,9 +621,7 @@ class PlanReviewLoop:
             return ""
 
     def _planner_learn_state_dir(self) -> Path:
-        state_dir = get_repo_root() / "build" / ".issue_implementer"
-        state_dir.mkdir(parents=True, exist_ok=True)
-        return state_dir
+        return ensure_state_dir(get_repo_root())
 
     def _write_planner_learn_record(
         self,
