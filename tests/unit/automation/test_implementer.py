@@ -94,6 +94,43 @@ def dry_run_implementer(tmp_path: Path) -> IssueImplementer:
         return IssueImplementer(options)
 
 
+class TestPhaseRunnerDelegateCompatibility:
+    """Compatibility tests for dynamic IssueImplementer phase-runner delegates."""
+
+    @pytest.mark.parametrize("name", sorted(IssueImplementer._PHASE_RUNNER_DELEGATES))
+    def test_phase_runner_delegate_compatibility_binds_to_phase_runner(
+        self, dry_run_implementer: IssueImplementer, name: str
+    ) -> None:
+        delegate = getattr(dry_run_implementer, name)
+        runner_delegate = getattr(dry_run_implementer.phase_runner, name)
+
+        assert callable(delegate)
+        assert delegate.__self__ is dry_run_implementer.phase_runner
+        assert delegate.__func__ is runner_delegate.__func__
+
+    @pytest.mark.parametrize("name", sorted(IssueImplementer._PHASE_RUNNER_DELEGATES))
+    def test_phase_runner_delegate_compatibility_patch_object_still_intercepts(
+        self, dry_run_implementer: IssueImplementer, name: str
+    ) -> None:
+        sentinel = object()
+
+        with patch.object(dry_run_implementer, name, return_value=sentinel) as mocked:
+            assert getattr(dry_run_implementer, name)("ignored") is sentinel
+
+        mocked.assert_called_once_with("ignored")
+
+        restored = getattr(dry_run_implementer, name)
+        assert restored.__self__ is dry_run_implementer.phase_runner
+
+    def test_phase_runner_delegate_compatibility_unknown_private_name_still_raises_attribute_error(
+        self, dry_run_implementer: IssueImplementer
+    ) -> None:
+        missing_name = "_not_a_phase_runner_delegate"
+
+        with pytest.raises(AttributeError):
+            getattr(dry_run_implementer, missing_name)
+
+
 # ---------------------------------------------------------------------------
 # Issue #371 — dry-run must not create real worktrees or branches
 # ---------------------------------------------------------------------------

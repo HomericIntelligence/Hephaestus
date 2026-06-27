@@ -58,9 +58,10 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hephaestus.agents.runtime import (
     agent_cli_name,
@@ -141,6 +142,41 @@ class IssueImplementer:
     - Real-time curses UI for status monitoring
     """
 
+    _PHASE_RUNNER_DELEGATES: ClassVar[frozenset[str]] = frozenset(
+        {
+            "_can_resume_state_session",
+            "_ensure_pr_created",
+            "_learn_needs_rerun",
+            "_load_review_iteration_state",
+            "_parse_follow_up_items",
+            "_rerun_failed_learns",
+            "_run_advise_as_implementer_turn",
+            "_run_claude_impl_session",
+            "_run_codex_code",
+            "_run_follow_up_issues",
+            "_run_learn",
+            "_run_tests_in_worktree",
+            "_save_review_iteration_state",
+            "_save_review_log",
+        }
+    )
+
+    if TYPE_CHECKING:
+        _parse_follow_up_items: Callable[..., list[dict[str, Any]]]
+        _can_resume_state_session: Callable[..., bool]
+        _run_follow_up_issues: Callable[..., None]
+        _learn_needs_rerun: Callable[..., bool]
+        _rerun_failed_learns: Callable[[], dict[int, bool]]
+        _run_learn: Callable[..., bool]
+        _run_advise_as_implementer_turn: Callable[..., str]
+        _save_review_log: Callable[..., None]
+        _save_review_iteration_state: Callable[..., None]
+        _load_review_iteration_state: Callable[..., tuple[int, str | None]]
+        _run_tests_in_worktree: Callable[..., bool]
+        _run_claude_impl_session: Callable[..., str | None]
+        _run_codex_code: Callable[..., str | None]
+        _ensure_pr_created: Callable[..., int]
+
     def __init__(self, options: ImplementerOptions):
         """Initialize issue implementer.
 
@@ -179,6 +215,19 @@ class IssueImplementer:
     def state_lock(self) -> threading.Lock:
         """Return the lock guarding :attr:`states`."""
         return self.state_mgr.lock
+
+    def __getattr__(self, name: str) -> Any:
+        """Resolve audited low-risk phase-runner compatibility delegates."""
+        if name in type(self)._PHASE_RUNNER_DELEGATES:
+            try:
+                phase_runner = object.__getattribute__(self, "phase_runner")
+            except AttributeError as exc:
+                raise AttributeError(
+                    f"{type(self).__name__!r} object has no attribute {name!r}"
+                ) from exc
+            return getattr(phase_runner, name)
+
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     def _log(self, level: str, msg: str, thread_id: int | None = None) -> None:
         """Log to both standard logger and UI thread buffer.
@@ -486,11 +535,11 @@ class IssueImplementer:
         return results
 
     # ------------------------------------------------------------------
-    # Per-issue phase runner — bodies live in implementer_phase_runner.py.
-    # Each shim here forwards to the runner; the runner dispatches all
-    # cross-method calls back through ``self.impl._xxx`` so test idioms
-    # like ``patch.object(impl, "_has_plan", ...)`` keep intercepting
-    # every call site, including the ones inside ``_implement_issue``.
+    # Explicit phase-runner shims.
+    #
+    # Keep these as real methods because they are central workflow/review
+    # checkpoints or heavily patched in tests. Lower-risk support shims are
+    # resolved by __getattr__ through _PHASE_RUNNER_DELEGATES.
     # ------------------------------------------------------------------
 
     def _finalize_pr(
@@ -528,73 +577,9 @@ class IssueImplementer:
         """Generate plan for an issue using hephaestus-plan-issues."""
         self.phase_runner._generate_plan(issue_number)
 
-    def _parse_follow_up_items(self, text: str) -> list[dict[str, Any]]:
-        """Parse follow-up items from Claude's JSON response."""
-        return self.phase_runner._parse_follow_up_items(text)
-
-    def _can_resume_state_session(self, state: ImplementationState) -> bool:
-        """Return True when the saved session can be resumed by the selected agent."""
-        return self.phase_runner._can_resume_state_session(state)
-
-    def _run_follow_up_issues(
-        self,
-        session_id: str,
-        worktree_path: Path,
-        issue_number: int,
-        slot_id: int | None = None,
-        *,
-        session_agent: str | None = None,
-    ) -> None:
-        """Resume the selected agent session to identify and file follow-up issues."""
-        self.phase_runner._run_follow_up_issues(
-            session_id,
-            worktree_path,
-            issue_number,
-            slot_id,
-            session_agent=session_agent,
-        )
-
-    def _learn_needs_rerun(self, issue_number: int) -> bool:
-        """Check if learn log indicates failure."""
-        return self.phase_runner._learn_needs_rerun(issue_number)
-
-    def _rerun_failed_learns(self) -> dict[int, bool]:
-        """Re-run failed learns for completed issues."""
-        return self.phase_runner._rerun_failed_learns()
-
-    def _run_learn(
-        self,
-        session_id: str,
-        worktree_path: Path,
-        issue_number: int,
-        slot_id: int | None = None,
-        *,
-        session_agent: str | None = None,
-    ) -> bool:
-        """Resume the selected agent session to run /learn."""
-        return self.phase_runner._run_learn(
-            session_id,
-            worktree_path,
-            issue_number,
-            slot_id,
-            session_agent=session_agent,
-        )
-
     def _run_advise(self, issue_number: int, issue_title: str, issue_body: str) -> str:
         """Run the advise-first step before implementing (delegates to runner)."""
         return self.phase_runner._run_advise(issue_number, issue_title, issue_body)
-
-    def _run_advise_as_implementer_turn(
-        self,
-        issue_number: int,
-        issue_title: str,
-        issue_body: str,
-        worktree_path: Path,
-    ) -> str:
-        """Compatibility wrapper for the shared advise path (delegates to runner)."""
-        return self.phase_runner._run_advise_as_implementer_turn(
-            issue_number, issue_title, issue_body, worktree_path
-        )
 
     def _run_impl_review_loop(
         self,
@@ -730,55 +715,15 @@ class IssueImplementer:
         """Return a newline-separated list of changed files vs ``origin/main``."""
         return self.phase_runner._collect_changed_files(worktree_path, branch_name)
 
-    def _save_review_log(self, issue_number: int, iteration: int, review_text: str) -> None:
-        """Persist a per-iteration review log for later inspection."""
-        self.phase_runner._save_review_log(issue_number, iteration, review_text)
-
-    def _save_review_iteration_state(
-        self, issue_number: int, iterations_run: int, prior_review: str
-    ) -> None:
-        """Persist review loop progress for ``--resume`` continuity (A2-005)."""
-        self.phase_runner._save_review_iteration_state(issue_number, iterations_run, prior_review)
-
-    def _load_review_iteration_state(self, issue_number: int) -> tuple[int, str | None]:
-        """Load persisted review iteration progress for ``--resume`` (A2-005)."""
-        return self.phase_runner._load_review_iteration_state(issue_number)
-
-    def _run_tests_in_worktree(self, worktree_path: Path, issue_number: int) -> bool:
-        """Run the unit test suite inside the worktree as a pre-PR gate (A2-004)."""
-        return self.phase_runner._run_tests_in_worktree(worktree_path, issue_number)
-
     def _run_claude_code(
         self, issue_number: int, worktree_path: Path, prompt: str, slot_id: int | None = None
     ) -> str | None:
         """Run the selected implementation agent in a worktree."""
         return self.phase_runner._run_claude_code(issue_number, worktree_path, prompt, slot_id)
 
-    def _run_claude_impl_session(
-        self, issue_number: int, worktree_path: Path, prompt: str
-    ) -> str | None:
-        """Run Claude implementation prompt and return its session id."""
-        return self.phase_runner._run_claude_impl_session(issue_number, worktree_path, prompt)
-
-    def _run_codex_code(self, issue_number: int, worktree_path: Path, prompt: str) -> str | None:
-        """Run Codex implementation prompt in a worktree."""
-        return self.phase_runner._run_codex_code(issue_number, worktree_path, prompt)
-
     def _commit_changes(self, issue_number: int, worktree_path: Path) -> None:
         """Commit changes in worktree."""
         commit_changes(issue_number, worktree_path, self.options.agent)
-
-    def _ensure_pr_created(
-        self,
-        issue_number: int,
-        branch_name: str,
-        worktree_path: Path,
-        slot_id: int | None = None,
-    ) -> int:
-        """Ensure an implementation commit is pushed and a PR exists."""
-        return self.phase_runner._ensure_pr_created(
-            issue_number, branch_name, worktree_path, slot_id
-        )
 
     def _create_pr(self, issue_number: int, branch_name: str) -> int:
         """Create pull request for issue."""
