@@ -188,7 +188,7 @@ jobs:
           cache-key-prefix: pixi-lint
 
       - name: Cache pre-commit environments
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
@@ -196,7 +196,7 @@ jobs:
             pre-commit-${{ runner.os }}-
 
       - name: Cache mypy incremental cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           # Persist incremental cache so the full-tree mypy hook (pass_filenames: false)
           # re-checks only changed modules across CI runs. See issue #1503.
@@ -556,7 +556,7 @@ jobs:
           fetch-tags: true
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
 
@@ -564,7 +564,7 @@ jobs:
         uses: ./.github/actions/setup-pi-cli
 
       - name: Cache pip packages
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-3.12-${{ hashFiles('pyproject.toml') }}
@@ -597,12 +597,12 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
 
       - name: Cache pip packages
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-3.12-${{ hashFiles('pyproject.toml') }}
@@ -646,12 +646,12 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
 
       - name: Cache pip packages
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-3.12-build-${{ hashFiles('pyproject.toml') }}
@@ -776,7 +776,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
 
@@ -811,7 +811,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
 
@@ -873,7 +873,7 @@ jobs:
         with:
           fetch-depth: 0  # hatch-vcs needs full history to compute the version
 
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.13"
           cache: pip  # cache wheels so a PyPI hiccup does not flake the gate
