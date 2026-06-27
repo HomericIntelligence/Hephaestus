@@ -4,15 +4,12 @@ Contains the plan-generation prompt, the standalone plan-review prompt, and
 the iteration-aware plan-loop review prompt.
 """
 
-import secrets
-
 from ._shared import (
     _TERSE_OUTPUT_DIRECTIVE,
-    _UNTRUSTED_NOTICE,
-    _fence_untrusted,
     _iteration_guidance,
     _iteration_label,
     _prior_review_block,
+    fence_content,
 )
 from ._strict_rubric import (
     _FULL_SWEEP_SUFFIX,
@@ -249,13 +246,13 @@ def get_plan_review_prompt(
         Formatted plan review prompt
 
     """
-    nonce = secrets.token_hex(8).upper()
+    fenced = fence_content()
     return PLAN_REVIEW_PROMPT.format(
         issue_number=issue_number,
         issue_title=issue_title,
-        issue_body_block=_fence_untrusted("ISSUE_BODY", issue_body, nonce),
-        plan_text_block=_fence_untrusted("PLAN_TEXT", plan_text, nonce),
-        untrusted_notice=_UNTRUSTED_NOTICE,
+        issue_body_block=fenced.fence("ISSUE_BODY", issue_body),
+        plan_text_block=fenced.fence("PLAN_TEXT", plan_text),
+        untrusted_notice=fenced.untrusted_notice,
         strict_rubric=_PLAN_STRICT_RUBRIC.strip(),
         terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )
@@ -289,7 +286,7 @@ def get_plan_loop_review_prompt(
         Formatted prompt for a fresh reviewer session.
 
     """
-    nonce = secrets.token_hex(8).upper()
+    fenced = fence_content()
     full_sweep_suffix = _FULL_SWEEP_SUFFIX.strip() if iteration == 2 else ""
     return PLAN_LOOP_REVIEW_PROMPT.format(
         rubric=_PLAN_LOOP_STRICT_RUBRIC.strip(),
@@ -298,17 +295,16 @@ def get_plan_loop_review_prompt(
         iteration_guidance=_iteration_guidance(iteration),
         issue_number=issue_number,
         issue_title=issue_title,
-        issue_body_block=_fence_untrusted("ISSUE_BODY", issue_body, nonce),
-        advise_findings_block=_fence_untrusted(
+        issue_body_block=fenced.fence("ISSUE_BODY", issue_body),
+        advise_findings_block=fenced.fence(
             "ADVISE_FINDINGS",
             advise_findings or "_(no prior advise findings supplied)_",
-            nonce,
         ),
-        plan_text_block=_fence_untrusted("PLAN_TEXT", plan_text, nonce),
+        plan_text_block=fenced.fence("PLAN_TEXT", plan_text),
         learnings=learnings or "_(no learnings captured this iteration)_",
         prior_review_block=_prior_review_block(prior_review),
         full_sweep_suffix=full_sweep_suffix,
         output_format=_STRICT_REVIEW_OUTPUT_FORMAT.strip(),
-        untrusted_notice=_UNTRUSTED_NOTICE,
+        untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )

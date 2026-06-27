@@ -8,6 +8,7 @@ than WARNING so they do not add routine noise to default runs (#1556).
 from __future__ import annotations
 
 import logging
+import secrets
 
 import pytest
 
@@ -68,3 +69,33 @@ def test_no_repo_root_logs_debug_not_warning(
 def test_empty_path_returned_unchanged() -> None:
     """An empty path short-circuits with no logging."""
     assert _shared._relativize_path("", "/repo") == ""
+
+
+def test_fence_content_generates_uppercase_nonce_and_notice(monkeypatch) -> None:
+    """The convenience helper owns nonce generation and the standard notice."""
+    calls: list[int] = []
+
+    def fake_token_hex(length: int) -> str:
+        calls.append(length)
+        return "abc123def456abcd"
+
+    monkeypatch.setattr(secrets, "token_hex", fake_token_hex)
+
+    fenced = _shared.fence_content()
+
+    assert calls == [8]
+    assert fenced.nonce == "ABC123DEF456ABCD"
+    assert fenced.untrusted_notice == _shared._UNTRUSTED_NOTICE
+    assert fenced.fence("ISSUE_BODY", "payload") == (
+        "BEGIN_ABC123DEF456ABCD_ISSUE_BODY\npayload\nEND_ABC123DEF456ABCD_ISSUE_BODY"
+    )
+
+
+def test_fence_content_reuses_nonce_for_prompt_blocks(monkeypatch) -> None:
+    """One helper instance fences multiple fields with the same prompt nonce."""
+    monkeypatch.setattr(secrets, "token_hex", lambda length: "feedfacecafebeef")
+
+    fenced = _shared.fence_content()
+
+    assert "BEGIN_FEEDFACECAFEBEEF_FIRST" in fenced.fence("FIRST", "one")
+    assert "BEGIN_FEEDFACECAFEBEEF_SECOND" in fenced.fence("SECOND", "two")
