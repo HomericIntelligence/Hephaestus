@@ -340,11 +340,6 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "agent_timeout",
             "Agent subprocess timeout in seconds (default: 7200).",
         ),
-        _timeout_spec(
-            "--learn-timeout",
-            "learn_timeout",
-            "Timeout for the /learn agent session (default: 7200).",
-        ),
         _verbose_spec("Enable verbose logging"),
         _json_spec(),
         _version_spec(),

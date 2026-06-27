@@ -95,7 +95,6 @@ OPTION_FIELD_CASES: tuple[tuple[type[BaseModel], frozenset[str]], ...] = (
                 "enable_learn",
                 "enable_ui",
                 "agent_timeout",
-                "learn_timeout",
             }
         ),
     ),

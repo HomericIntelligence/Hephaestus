@@ -35,7 +35,6 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.cli.utils import (
     add_agent_timeout_arg,
-    add_learn_timeout_arg,
     add_version_arg,
     configure_github_throttle_from_args,
     emit_json_status,
@@ -876,7 +875,6 @@ Examples:
     )
     add_version_arg(parser)
     add_agent_timeout_arg(parser)
-    add_learn_timeout_arg(parser)
     return parser
 
 
@@ -909,10 +907,9 @@ def main() -> int:
         max_workers=args.max_workers,
         dry_run=args.dry_run,
         enable_ui=not args.no_ui and not args.json,
-        # Only override when the CLI flag is set; otherwise the ReviewerOptions
-        # per-phase defaults (#1642, review 600s / learn 300s) apply.
+        # Only override when --agent-timeout is set; otherwise the ReviewerOptions
+        # per-phase default (#1642, review 600s) applies.
         **({"agent_timeout": args.agent_timeout} if args.agent_timeout is not None else {}),
-        **({"learn_timeout": args.learn_timeout} if args.learn_timeout is not None else {}),
     )
 
     with terminal_guard():

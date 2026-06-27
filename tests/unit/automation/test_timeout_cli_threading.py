@@ -565,31 +565,25 @@ class TestCIDriverOptionsTimeoutFields:
 
 
 class TestReviewerOptionsTimeoutFields:
-    """ReviewerOptions exposes agent_timeout and learn_timeout fields."""
+    """ReviewerOptions exposes an agent_timeout field."""
 
     def test_has_agent_timeout_field(self) -> None:
         """ReviewerOptions declares an agent_timeout field."""
         assert "agent_timeout" in ReviewerOptions.model_fields
 
-    def test_has_learn_timeout_field(self) -> None:
-        """ReviewerOptions declares a learn_timeout field."""
-        assert "learn_timeout" in ReviewerOptions.model_fields
+    def test_has_no_learn_timeout_field(self) -> None:
+        """ReviewerOptions does NOT expose learn_timeout (no consumer threads it)."""
+        assert "learn_timeout" not in ReviewerOptions.model_fields
 
     def test_agent_timeout_default(self) -> None:
         """ReviewerOptions.agent_timeout defaults to DEFAULT_AGENT_TIMEOUT."""
         opts = ReviewerOptions()
         assert opts.agent_timeout == DEFAULT_AGENT_TIMEOUT
 
-    def test_learn_timeout_default(self) -> None:
-        """ReviewerOptions.learn_timeout defaults to DEFAULT_AGENT_TIMEOUT."""
-        opts = ReviewerOptions()
-        assert opts.learn_timeout == DEFAULT_AGENT_TIMEOUT
-
-    def test_timeout_overrides(self) -> None:
-        """Timeout fields accept explicit override values."""
-        opts = ReviewerOptions(agent_timeout=111, learn_timeout=222)
+    def test_timeout_override(self) -> None:
+        """agent_timeout accepts an explicit override value."""
+        opts = ReviewerOptions(agent_timeout=111)
         assert opts.agent_timeout == 111
-        assert opts.learn_timeout == 222
 
 
 # ---------------------------------------------------------------------------
@@ -670,7 +664,7 @@ class TestImplementerMainTimeoutThreading:
 
         from hephaestus.automation import implementer
 
-        SENTINEL = 9977
+        sentinel = 9977
         captured: dict[str, object] = {}
 
         class FakeImplementer:
@@ -687,7 +681,7 @@ class TestImplementerMainTimeoutThreading:
             "--dry-run",
             "--no-ui",
             "--agent", "claude",
-            "--git-message-timeout", str(SENTINEL),
+            "--git-message-timeout", str(sentinel),
         ])
 
         with (
@@ -698,7 +692,7 @@ class TestImplementerMainTimeoutThreading:
 
         assert rc == 0
         assert "options" in captured, "IssueImplementer.__init__ was never called"
-        assert captured["options"].git_message_timeout == SENTINEL  # type: ignore[union-attr]
+        assert captured["options"].git_message_timeout == sentinel  # type: ignore[union-attr]
 
     def test_agent_timeout_from_cli_reaches_options(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory
@@ -709,7 +703,7 @@ class TestImplementerMainTimeoutThreading:
 
         from hephaestus.automation import implementer
 
-        SENTINEL = 1234
+        sentinel = 1234
 
         captured: dict[str, object] = {}
 
@@ -727,7 +721,7 @@ class TestImplementerMainTimeoutThreading:
             "--dry-run",
             "--no-ui",
             "--agent", "claude",
-            "--agent-timeout", str(SENTINEL),
+            "--agent-timeout", str(sentinel),
         ])
 
         with (
@@ -737,7 +731,7 @@ class TestImplementerMainTimeoutThreading:
             rc = implementer.main()
 
         assert rc == 0
-        assert captured["options"].agent_timeout == SENTINEL  # type: ignore[union-attr]
+        assert captured["options"].agent_timeout == sentinel  # type: ignore[union-attr]
 
     def test_learn_timeout_from_cli_reaches_options(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory
@@ -748,7 +742,7 @@ class TestImplementerMainTimeoutThreading:
 
         from hephaestus.automation import implementer
 
-        SENTINEL = 5555
+        sentinel = 5555
 
         captured: dict[str, object] = {}
 
@@ -766,7 +760,7 @@ class TestImplementerMainTimeoutThreading:
             "--dry-run",
             "--no-ui",
             "--agent", "claude",
-            "--learn-timeout", str(SENTINEL),
+            "--learn-timeout", str(sentinel),
         ])
 
         with (
@@ -776,7 +770,7 @@ class TestImplementerMainTimeoutThreading:
             rc = implementer.main()
 
         assert rc == 0
-        assert captured["options"].learn_timeout == SENTINEL  # type: ignore[union-attr]
+        assert captured["options"].learn_timeout == sentinel  # type: ignore[union-attr]
 
 
 class TestCIDriverAddressThreadsTimeoutThreading:
@@ -798,8 +792,8 @@ class TestCIDriverAddressThreadsTimeoutThreading:
         from hephaestus.automation.ci_driver import CIDriver
         from hephaestus.automation.models import CIDriverOptions
 
-        SENTINEL_AGENT = 3737
-        SENTINEL_ADVISE = 2626
+        sentinel_agent = 3737
+        sentinel_advise = 2626
 
         captured: dict[str, object] = {}
 
@@ -807,7 +801,7 @@ class TestCIDriverAddressThreadsTimeoutThreading:
             captured.update(kwargs)
             return {"addressed": [], "replies": {}}
 
-        opts = CIDriverOptions(agent_timeout=SENTINEL_AGENT, advise_timeout=SENTINEL_ADVISE)
+        opts = CIDriverOptions(agent_timeout=sentinel_agent, advise_timeout=sentinel_advise)
 
         # Bypass __init__ (which calls get_repo_root / creates dirs) by constructing
         # the instance bare and setting only the attributes _address_threads_once needs.
@@ -834,11 +828,11 @@ class TestCIDriverAddressThreadsTimeoutThreading:
 
         # The session returned an empty addressed list → no commit pushed → False.
         # What matters is that the call forwarded the sentinel timeouts.
-        assert captured.get("timeout") == SENTINEL_AGENT, (
-            f"expected timeout={SENTINEL_AGENT}, got {captured.get('timeout')}"
+        assert captured.get("timeout") == sentinel_agent, (
+            f"expected timeout={sentinel_agent}, got {captured.get('timeout')}"
         )
-        assert captured.get("advise_timeout") == SENTINEL_ADVISE, (
-            f"expected advise_timeout={SENTINEL_ADVISE}, got {captured.get('advise_timeout')}"
+        assert captured.get("advise_timeout") == sentinel_advise, (
+            f"expected advise_timeout={sentinel_advise}, got {captured.get('advise_timeout')}"
         )
 
 
@@ -858,7 +852,7 @@ class TestPostMergeLearnTimeoutThreading:
         from hephaestus.automation.models import CIDriverOptions
         from hephaestus.automation.post_merge_processor import PostMergeProcessor
 
-        SENTINEL = 3399
+        sentinel = 3399
 
         captured: dict[str, object] = {}
 
@@ -868,7 +862,7 @@ class TestPostMergeLearnTimeoutThreading:
             result.stdout = ""
             return result
 
-        opts = CIDriverOptions(learn_timeout=SENTINEL, agent="codex")
+        opts = CIDriverOptions(learn_timeout=sentinel, agent="codex")
         saved: dict[int, dict] = {}
 
         proc = PostMergeProcessor(
@@ -880,17 +874,17 @@ class TestPostMergeLearnTimeoutThreading:
             save_arming_state=lambda i, r: saved.__setitem__(i, r),
         )
 
-        _MOD = "hephaestus.automation.post_merge_processor"
+        _mod = "hephaestus.automation.post_merge_processor"
         with (
-            patch(f"{_MOD}.uses_direct_agent_runner", return_value=True),
-            patch(f"{_MOD}.run_agent_session", side_effect=fake_run_agent_session),
-            patch(f"{_MOD}.direct_agent_model", return_value="test-model"),
-            patch(f"{_MOD}.build_learn_prompt", return_value="test prompt"),
-            patch(f"{_MOD}.get_repo_slug", return_value="test/repo"),
+            patch(f"{_mod}.uses_direct_agent_runner", return_value=True),
+            patch(f"{_mod}.run_agent_session", side_effect=fake_run_agent_session),
+            patch(f"{_mod}.direct_agent_model", return_value="test-model"),
+            patch(f"{_mod}.build_learn_prompt", return_value="test prompt"),
+            patch(f"{_mod}.get_repo_slug", return_value="test/repo"),
         ):
             result = proc.run_drive_green_learnings(issue_number=1, pr_number=2)
 
         assert result is True
-        assert captured.get("timeout") == SENTINEL, (
-            f"expected timeout={SENTINEL}, got {captured.get('timeout')}"
+        assert captured.get("timeout") == sentinel, (
+            f"expected timeout={sentinel}, got {captured.get('timeout')}"
         )
