@@ -333,8 +333,8 @@ def _merge_pr(repo_name: str, pr_number: int, head_sha: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {"merged": False, "message": str(payload)}
 
 
-def main() -> int:  # noqa: C901  # CLI dispatch: many command branches + retry paths for PR merge automation
-    """Serve as the main entry point for PR merge automation."""
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build the PR merge CLI argument parser."""
     parser = argparse.ArgumentParser(
         description="Merge open PRs with successful CI/CD into main (squash via PR API)"
     )
@@ -355,83 +355,122 @@ def main() -> int:  # noqa: C901  # CLI dispatch: many command branches + retry 
     add_github_throttle_args(parser)
     add_json_arg(parser)
     add_version_arg(parser)
-    args = parser.parse_args()
-    configure_github_throttle_from_args(args)
+    return parser
 
-    # Detect or use provided repo name
+
+def _emit_json_error_if_requested(args: argparse.Namespace) -> None:
+    """Emit the existing JSON error envelope when --json is active."""
+    if args.json:
+        emit_json_status(1)
+
+
+def _prepare_repo(args: argparse.Namespace) -> str | None:
+    """Detect, verify, and update the repository for PR merge processing."""
     repo_name = args.repo or detect_repo_from_remote()
     if not repo_name:
         logger.error(
             "Could not detect repository name. Please provide --repo OWNER/REPO or "
             "ensure you're in a git repository with a GitHub remote."
         )
-        if args.json:
-            emit_json_status(1)
-        return 1
+        _emit_json_error_if_requested(args)
+        return None
 
     logger.info("Working with repository: %s", repo_name)
     if not _verify_repo_access(repo_name):
-        if args.json:
-            emit_json_status(1)
-        return 1
+        _emit_json_error_if_requested(args)
+        return None
 
-    # Update local main
     logger.info("Updating local 'main'...")
     run_git_cmd(["git", "checkout", "main"], dry_run=args.dry_run)
     run_git_cmd(["git", "pull", "origin", "main"], dry_run=args.dry_run)
+    return repo_name
 
+
+def _list_prs_or_emit(repo_name: str, args: argparse.Namespace) -> list[dict[str, Any]] | None:
+    """List open PRs, emitting the existing JSON error envelope on failure."""
     try:
-        prs = _list_open_prs(repo_name)
+        return _list_open_prs(repo_name)
     except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as exc:
         logger.error("Error listing open PRs for %s: %s", repo_name, exc)
-        if args.json:
-            emit_json_status(1)
+        _emit_json_error_if_requested(args)
+        return None
+
+
+def _pr_checks_passed(repo_name: str, pr_number: int, head_sha: str) -> bool:
+    """Return whether checks or legacy status allow merging a PR."""
+    logger.info("  Checks API results:")
+    success = _checks_success_and_log(repo_name, pr_number)
+    if success is None:
+        logger.info("  No check runs found; falling back to legacy status contexts:")
+        state = _legacy_status_and_log(repo_name, head_sha)
+        return state == "success"
+    return success
+
+
+def _merge_ready_pr(
+    args: argparse.Namespace,
+    repo_name: str,
+    pr_number: int,
+    head_branch: str,
+    head_sha: str,
+    base_branch: str,
+) -> None:
+    """Push and merge a PR whose checks have passed."""
+    logger.info("  CI/CD checks passed for PR #%d. Attempting merge...", pr_number)
+    if not args.push_all and not args.dry_run:
+        try_push_head_branch(head_branch, args.dry_run)
+    if args.dry_run:
+        logger.info("[DRY-RUN] Would merge PR #%d via squash", pr_number)
+        return
+    try:
+        result = _merge_pr(repo_name, pr_number, head_sha)
+        handle_merge_result(result, pr_number, base_branch)
+    except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as exc:
+        logger.error("  Error merging PR #%d: %s", pr_number, exc)
+
+
+def _process_pr(args: argparse.Namespace, repo_name: str, pr: dict[str, Any]) -> None:
+    """Process one open PR, preserving skip/push/merge behavior."""
+    pr_number = int(pr["number"])
+    head_branch = str(pr.get("headRefName") or "")
+    head_sha = str(pr.get("headRefOid") or "")
+    base_branch = str(pr.get("baseRefName") or "main")
+    if not head_sha:
+        logger.error("  Unable to retrieve head commit for PR #%d", pr_number)
+        return
+    logger.info("\nChecking PR #%d: %s -> %s", pr_number, head_branch, base_branch)
+    success = _pr_checks_passed(repo_name, pr_number, head_sha)
+    if args.push_all:
+        logger.info("  Pushing head branch '%s' (--push-all mode)...", head_branch)
+        try_push_head_branch(head_branch, args.dry_run)
+    if success:
+        _merge_ready_pr(args, repo_name, pr_number, head_branch, head_sha, base_branch)
+    else:
+        logger.warning("  CI/CD checks not successful for PR #%d. Skipping merge.", pr_number)
+
+
+def _run_merge_workflow(args: argparse.Namespace) -> int:
+    """Run repository preparation, PR listing, and per-PR merge processing."""
+    repo_name = _prepare_repo(args)
+    if repo_name is None:
         return 1
-
+    prs = _list_prs_or_emit(repo_name, args)
+    if prs is None:
+        return 1
     for pr in prs:
-        pr_number = int(pr["number"])
-        head_branch = str(pr.get("headRefName") or "")
-        head_sha = str(pr.get("headRefOid") or "")
-        base_branch = str(pr.get("baseRefName") or "main")
-        if not head_sha:
-            logger.error("  Unable to retrieve head commit for PR #%d", pr_number)
-            continue
-        logger.info("\nChecking PR #%d: %s -> %s", pr_number, head_branch, base_branch)
-
-        logger.info("  Checks API results:")
-        success = _checks_success_and_log(repo_name, pr_number)
-
-        if success is None:
-            logger.info("  No check runs found; falling back to legacy status contexts:")
-            state = _legacy_status_and_log(repo_name, head_sha)
-            success = state == "success"
-
-        # Handle push-all flag
-        if args.push_all:
-            logger.info("  Pushing head branch '%s' (--push-all mode)...", head_branch)
-            try_push_head_branch(head_branch, args.dry_run)
-
-        # Merge if checks passed
-        if success:
-            logger.info("  CI/CD checks passed for PR #%d. Attempting merge...", pr_number)
-            if not args.push_all and not args.dry_run:
-                try_push_head_branch(head_branch, args.dry_run)
-
-            if args.dry_run:
-                logger.info("[DRY-RUN] Would merge PR #%d via squash", pr_number)
-            else:
-                try:
-                    result = _merge_pr(repo_name, pr_number, head_sha)
-                    handle_merge_result(result, pr_number, base_branch)
-                except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as e:
-                    logger.error("  Error merging PR #%d: %s", pr_number, e)
-        else:
-            logger.warning("  CI/CD checks not successful for PR #%d. Skipping merge.", pr_number)
+        _process_pr(args, repo_name, pr)
 
     logger.info("\nDone processing all open PRs.")
     if args.json:
         emit_json_status(0)
     return 0
+
+
+def main() -> int:
+    """Serve as the main entry point for PR merge automation."""
+    args = _build_arg_parser().parse_args()
+    configure_github_throttle_from_args(args)
+    return _run_merge_workflow(args)
 
 
 if __name__ == "__main__":

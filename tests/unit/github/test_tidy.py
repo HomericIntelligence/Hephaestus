@@ -238,6 +238,34 @@ class TestMain:
         assert payload["status"] == "error"
         assert payload["swarm"] == "skipped"
 
+    def test_handle_problem_branches_no_swarm_json(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """Extracted problem-branch handler emits the existing no-swarm JSON."""
+        import json
+
+        args = tidy_module._build_arg_parser().parse_args(
+            ["--json", "--no-swarm", "--agent", "claude"]
+        )
+
+        assert (
+            tidy_module._handle_tidy_problem_branches(
+                args=args,
+                agent="claude",
+                problem_branches=["feature/a"],
+                trunk="main",
+                repo_path=tmp_path,
+                repo_slug="owner/repo",
+            )
+            == 1
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert payload["problem_branches"] == ["feature/a"]
+        assert payload["swarm"] == "skipped"
+
     def test_dry_run_with_problems_json(
         self,
         monkeypatch: pytest.MonkeyPatch,

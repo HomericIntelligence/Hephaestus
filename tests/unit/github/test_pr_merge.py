@@ -441,6 +441,8 @@ class TestMain:
 
                 assert main() == 0
 
+        legacy_status_args = mock_gh_call.call_args_list[3].args[0]
+        assert legacy_status_args == ["api", "/repos/owner/repo/commits/abc123/status"]
         assert mock_gh_call.call_args_list[-1].args[0][:4] == [
             "api",
             "-X",
@@ -493,17 +495,47 @@ class TestMain:
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
     @patch("hephaestus.github.pr_merge.gh_call")
-    def test_merge_exception_continues(self, mock_gh_call, _mock_git, _mock_push) -> None:
-        """main() logs and continues when the merge API call raises."""
+    def test_merge_exception_continues_to_next_pr(self, mock_gh_call, _mock_git, mock_push) -> None:
+        """main() logs a merge API exception and still processes later PRs."""
         mock_gh_call.side_effect = [
-            *self._make_pr()[:3],
+            _gh_result({"nameWithOwner": "owner/repo"}),
+            _gh_result(
+                [
+                    {
+                        "number": 1,
+                        "headRefName": "feature-one",
+                        "headRefOid": "sha-one",
+                        "baseRefName": "main",
+                    },
+                    {
+                        "number": 2,
+                        "headRefName": "feature-two",
+                        "headRefOid": "sha-two",
+                        "baseRefName": "main",
+                    },
+                ]
+            ),
+            _gh_result([{"name": "ci", "state": "SUCCESS", "bucket": "pass", "workflow": "CI"}]),
             subprocess.CalledProcessError(1, ["gh"], stderr="merge conflict"),
+            _gh_result([{"name": "ci", "state": "SUCCESS", "bucket": "pass", "workflow": "CI"}]),
+            _gh_result({"merged": True, "sha": "merged-two", "message": "ok"}),
         ]
         with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"):
             with patch("sys.argv", ["prog"]):
                 from hephaestus.github.pr_merge import main
 
                 assert main() == 0
+
+        merge_paths = [
+            call.args[0][3]
+            for call in mock_gh_call.call_args_list
+            if call.args[0][:3] == ["api", "-X", "PUT"]
+        ]
+        assert merge_paths == [
+            "/repos/owner/repo/pulls/1/merge",
+            "/repos/owner/repo/pulls/2/merge",
+        ]
+        assert mock_push.call_count == 2
 
 
 class TestMainJson:
