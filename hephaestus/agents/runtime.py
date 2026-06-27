@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from hephaestus.utils.helpers import strip_null_bytes
+
 AgentName = Literal["claude", "codex", "pi"]
 SubprocessCommandPart = str | bytes | os.PathLike[str] | os.PathLike[bytes]
 SubprocessCommand = SubprocessCommandPart | Sequence[SubprocessCommandPart]
@@ -314,9 +316,12 @@ def run_claude_text(
     cid = get_current_correlation_id()
     if cid:
         env["GH_TRACE_ID"] = cid
+    # A NUL in the prompt would make subprocess.run raise ``ValueError: embedded
+    # null byte`` while marshaling text stdin, before the child runs (#1661). The
+    # prompt is assembled from untrusted multi-source text; strip defensively.
     return subprocess.run(
         cmd,
-        input=prompt,
+        input=strip_null_bytes(prompt),
         cwd=cwd,
         text=True,
         stdout=subprocess.PIPE,
@@ -904,7 +909,10 @@ def _communicate_codex_process(
     )
     started_at = time.monotonic()
     final_seen_at: float | None = None
-    input_text: str | None = prompt
+    # Strip NUL bytes: proc.communicate(input=...) marshals text stdin and would
+    # raise ``ValueError: embedded null byte`` on a stray NUL, before Codex runs
+    # (#1661) — the same crash the Claude path guards against.
+    input_text: str | None = strip_null_bytes(prompt)
     grace_seconds = _codex_final_message_grace_seconds()
 
     while True:
