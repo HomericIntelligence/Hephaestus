@@ -79,7 +79,8 @@ def load_state_file(
     model_class: type[_StateModelT],
     *,
     state_logger: logging.Logger | None = None,
-) -> _StateModelT | None: ...
+) -> _StateModelT | None:
+    pass
 
 
 @overload
@@ -90,7 +91,8 @@ def load_state_file(
     model_class: None = None,
     *,
     state_logger: logging.Logger | None = None,
-) -> dict[str, Any] | None: ...
+) -> dict[str, Any] | None:
+    pass
 
 
 def load_state_file(
