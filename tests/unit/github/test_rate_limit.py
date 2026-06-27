@@ -495,15 +495,22 @@ class TestGhRateLimitResetEpoch:
 
     def test_returns_reset_from_gh_api(self) -> None:
         payload = '{"resources": {"graphql": {"reset": 1700000000, "remaining": 0}}}'
-        with patch("subprocess.run") as mock_run:
+        with patch("hephaestus.github.rate_limit.run_subprocess") as mock_run:
             mock_run.return_value.stdout = payload
             mock_run.return_value.returncode = 0
             assert gh_rate_limit_reset_epoch() == 1700000000
 
+        mock_run.assert_called_once_with(
+            ["gh", "api", "rate_limit"],
+            check=True,
+            timeout=10,
+            log_on_error=False,
+        )
+
     def test_caches_within_ttl(self) -> None:
         """Second call within TTL must not re-invoke gh."""
         payload = '{"resources": {"graphql": {"reset": 1700000000}}}'
-        with patch("subprocess.run") as mock_run:
+        with patch("hephaestus.github.rate_limit.run_subprocess") as mock_run:
             mock_run.return_value.stdout = payload
             mock_run.return_value.returncode = 0
             gh_rate_limit_reset_epoch()
@@ -513,17 +520,20 @@ class TestGhRateLimitResetEpoch:
     def test_returns_none_on_subprocess_failure(self) -> None:
         import subprocess as sp
 
-        with patch("subprocess.run", side_effect=sp.CalledProcessError(1, "gh")):
+        with patch(
+            "hephaestus.github.rate_limit.run_subprocess",
+            side_effect=sp.CalledProcessError(1, "gh"),
+        ):
             assert gh_rate_limit_reset_epoch() is None
 
     def test_returns_none_on_invalid_json(self) -> None:
-        with patch("subprocess.run") as mock_run:
+        with patch("hephaestus.github.rate_limit.run_subprocess") as mock_run:
             mock_run.return_value.stdout = "not json"
             mock_run.return_value.returncode = 0
             assert gh_rate_limit_reset_epoch() is None
 
     def test_returns_none_when_resource_missing(self) -> None:
-        with patch("subprocess.run") as mock_run:
+        with patch("hephaestus.github.rate_limit.run_subprocess") as mock_run:
             mock_run.return_value.stdout = '{"resources": {}}'
             mock_run.return_value.returncode = 0
             assert gh_rate_limit_reset_epoch() is None
