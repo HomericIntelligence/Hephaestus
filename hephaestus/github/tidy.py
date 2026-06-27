@@ -41,7 +41,7 @@ from hephaestus.constants import agent_rebase_timeout
 from hephaestus.github.client import gh_call
 from hephaestus.github.pr_merge import detect_repo_from_remote
 from hephaestus.logging.utils import get_logger
-from hephaestus.utils.helpers import METADATA_TIMEOUT
+from hephaestus.utils.helpers import METADATA_TIMEOUT, run_subprocess
 
 logger = get_logger(__name__)
 
@@ -93,10 +93,8 @@ def _detect_default_branch(override: str | None) -> str:
 def _working_tree_clean() -> bool:
     """Return True if the git working tree has no uncommitted changes."""
     try:
-        result = subprocess.run(
+        result = run_subprocess(
             ["git", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
             check=False,
             timeout=METADATA_TIMEOUT,
         )
@@ -110,9 +108,8 @@ def _in_git_repo() -> bool:
     """Return True if cwd is inside a git repository."""
     try:
         return (
-            subprocess.run(
+            run_subprocess(
                 ["git", "rev-parse", "--git-dir"],
-                capture_output=True,
                 check=False,
                 timeout=METADATA_TIMEOUT,
             ).returncode
@@ -131,11 +128,8 @@ def _repo_root() -> Path:
     CalledProcessError path: both failures propagate as unhandled exceptions to
     the CLI entrypoint.
     """
-    result = subprocess.run(
+    result = run_subprocess(
         ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
-        check=True,
         timeout=METADATA_TIMEOUT,
     )
     return Path(result.stdout.strip())
