@@ -392,7 +392,7 @@ def _gh(
         logger.info("[dry-run] gh %s", " ".join(full_args))
         return subprocess.CompletedProcess(full_args, 0, stdout="[]", stderr="")
 
-    return gh_call(full_args, check=check)
+    return gh_call(full_args, check=check, timeout=NETWORK_TIMEOUT)
 
 
 def _git(
@@ -643,8 +643,9 @@ def merge_pr(pr: PRInfo, org: str, dry_run: bool = False) -> bool:
             dry_run=dry_run,
         )
         return True
-    except subprocess.CalledProcessError as e:
-        logger.error("  Failed to merge PR #%d: %s", pr.number, e.stderr)
+    except (subprocess.CalledProcessError, RuntimeError) as e:
+        stderr = getattr(e, "stderr", "") or str(e)
+        logger.error("  Failed to merge PR #%d: %s", pr.number, stderr)
         return False
 
 
