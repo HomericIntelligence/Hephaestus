@@ -28,6 +28,7 @@
       "Write"
     ],
     "websiteURL": "https://github.com/HomericIntelligence/ProjectHephaestus",
-    "defaultPrompt": "Use Hephaestus to route this task to the right Codex skill."
+    "defaultPrompt": "Use Hephaestus to route this task to the right Codex skill.",
+    "composerIcon": "./assets/icon.svg"
   }
 }

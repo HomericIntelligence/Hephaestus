@@ -1,0 +1,7 @@
+[scanner]
+# The HOL scanner runs in repository mode to validate the Codex marketplace
+# wrapper. These files are repo tooling fixtures, not plugin payload.
+ignore_paths = [
+  "scripts/shell/setup_api_key.sh",
+  "tests/unit/scripts/test_check_private_denylist.py",
+]

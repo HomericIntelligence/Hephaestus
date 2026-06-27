@@ -165,8 +165,8 @@ class TestCheckNoUnsanctionedTestDirs:
         assert unsanctioned == set()
 
     def test_real_repo_extras_are_sanctioned(self) -> None:
-        """The four real tests/unit/ extras are all in the shipped allowlist."""
-        assert {"constants", "docs", "scripts", "shell"} <= SANCTIONED_EXTRA_TEST_DIRS
+        """The real tests/unit/ extras are all in the shipped allowlist."""
+        assert {"constants", "docs", "plugins", "scripts", "shell"} <= SANCTIONED_EXTRA_TEST_DIRS
 
 
 class TestCheckTestStructure:
