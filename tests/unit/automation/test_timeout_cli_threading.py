@@ -646,3 +646,251 @@ class TestAddressReviewOptionsTimeoutFields:
         opts = AddressReviewOptions(agent_timeout=333, advise_timeout=444)
         assert opts.agent_timeout == 333
         assert opts.advise_timeout == 444
+
+
+# ---------------------------------------------------------------------------
+# End-to-end threading: CLI flag values reach the downstream leaf kwarg
+# ---------------------------------------------------------------------------
+
+
+class TestImplementerMainTimeoutThreading:
+    """Prove implementer main() wires CLI timeout flags into ImplementerOptions."""
+
+    def test_git_message_timeout_from_cli_reaches_options(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory
+    ) -> None:
+        """--git-message-timeout N from the CLI reaches ImplementerOptions.git_message_timeout.
+
+        This is the critical threading test for the implementer.py:855 gap: the
+        ImplementerOptions(...) constructor in main() must include git_message_timeout
+        from the parsed args, not just the fields wired before this fix.
+        """
+        import sys
+        from unittest.mock import patch
+
+        from hephaestus.automation import implementer
+
+        SENTINEL = 9977
+        captured: dict[str, object] = {}
+
+        class FakeImplementer:
+            def __init__(self, options: object) -> None:
+                captured["options"] = options
+                self.options = options
+
+            def run(self) -> dict:
+                return {}
+
+        monkeypatch.setattr(sys, "argv", [
+            "impl",
+            "--issues", "42",
+            "--dry-run",
+            "--no-ui",
+            "--agent", "claude",
+            "--git-message-timeout", str(SENTINEL),
+        ])
+
+        with (
+            patch.object(implementer, "get_repo_root", return_value=tmp_path),
+            patch.object(implementer, "IssueImplementer", FakeImplementer),
+        ):
+            rc = implementer.main()
+
+        assert rc == 0
+        assert "options" in captured, "IssueImplementer.__init__ was never called"
+        assert captured["options"].git_message_timeout == SENTINEL  # type: ignore[union-attr]
+
+    def test_agent_timeout_from_cli_reaches_options(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory
+    ) -> None:
+        """--agent-timeout N from the CLI reaches ImplementerOptions.agent_timeout."""
+        import sys
+        from unittest.mock import patch
+
+        from hephaestus.automation import implementer
+
+        SENTINEL = 1234
+
+        captured: dict[str, object] = {}
+
+        class FakeImplementer:
+            def __init__(self, options: object) -> None:
+                captured["options"] = options
+                self.options = options
+
+            def run(self) -> dict:
+                return {}
+
+        monkeypatch.setattr(sys, "argv", [
+            "impl",
+            "--issues", "7",
+            "--dry-run",
+            "--no-ui",
+            "--agent", "claude",
+            "--agent-timeout", str(SENTINEL),
+        ])
+
+        with (
+            patch.object(implementer, "get_repo_root", return_value=tmp_path),
+            patch.object(implementer, "IssueImplementer", FakeImplementer),
+        ):
+            rc = implementer.main()
+
+        assert rc == 0
+        assert captured["options"].agent_timeout == SENTINEL  # type: ignore[union-attr]
+
+    def test_learn_timeout_from_cli_reaches_options(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory
+    ) -> None:
+        """--learn-timeout N from the CLI reaches ImplementerOptions.learn_timeout."""
+        import sys
+        from unittest.mock import patch
+
+        from hephaestus.automation import implementer
+
+        SENTINEL = 5555
+
+        captured: dict[str, object] = {}
+
+        class FakeImplementer:
+            def __init__(self, options: object) -> None:
+                captured["options"] = options
+                self.options = options
+
+            def run(self) -> dict:
+                return {}
+
+        monkeypatch.setattr(sys, "argv", [
+            "impl",
+            "--issues", "5",
+            "--dry-run",
+            "--no-ui",
+            "--agent", "claude",
+            "--learn-timeout", str(SENTINEL),
+        ])
+
+        with (
+            patch.object(implementer, "get_repo_root", return_value=tmp_path),
+            patch.object(implementer, "IssueImplementer", FakeImplementer),
+        ):
+            rc = implementer.main()
+
+        assert rc == 0
+        assert captured["options"].learn_timeout == SENTINEL  # type: ignore[union-attr]
+
+
+class TestCIDriverAddressThreadsTimeoutThreading:
+    """Prove CIDriverOptions.agent_timeout reaches run_address_fix_session(timeout=...)."""
+
+    def test_agent_timeout_forwarded_to_run_address_fix_session(
+        self, tmp_path: pytest.TempPathFactory
+    ) -> None:
+        """CIDriverOptions.agent_timeout reaches run_address_fix_session timeout= kwarg.
+
+        This is the critical threading test for the ci_driver.py:1089 gap:
+        _address_threads_once must forward self.options.agent_timeout as timeout=
+        to run_address_fix_session.  Before the fix, the call omitted both
+        timeout= and advise_timeout=, so agent timeouts were silently ignored.
+        """
+        import threading
+        from unittest.mock import patch
+
+        from hephaestus.automation.ci_driver import CIDriver
+        from hephaestus.automation.models import CIDriverOptions
+
+        SENTINEL_AGENT = 3737
+        SENTINEL_ADVISE = 2626
+
+        captured: dict[str, object] = {}
+
+        def fake_run_address_fix_session(**kwargs: object) -> dict:
+            captured.update(kwargs)
+            return {"addressed": [], "replies": {}}
+
+        opts = CIDriverOptions(agent_timeout=SENTINEL_AGENT, advise_timeout=SENTINEL_ADVISE)
+
+        # Bypass __init__ (which calls get_repo_root / creates dirs) by constructing
+        # the instance bare and setting only the attributes _address_threads_once needs.
+        driver = object.__new__(CIDriver)
+        driver.options = opts
+        driver.repo_root = tmp_path
+        driver.state_dir = tmp_path
+        driver.lock = threading.Lock()
+
+        # Stub helper methods called by _address_threads_once before run_address_fix_session.
+        driver._get_worktree_path = lambda issue, pr: tmp_path / "wt"
+        driver._get_pr_branch = lambda pr: "branch"
+        driver._sync_worktree_and_snapshot_sha = lambda issue, wt, branch: "abc123"
+        # Stub the push helper so execution does not need _fix_orchestrator.
+        driver._push_ci_fix = lambda **kw: False
+
+        with patch(
+            "hephaestus.automation.ci_driver.run_address_fix_session",
+            side_effect=fake_run_address_fix_session,
+        ):
+            driver._address_threads_once(
+                issue_number=1, pr_number=2, threads=[{"id": "T1"}]
+            )
+
+        # The session returned an empty addressed list → no commit pushed → False.
+        # What matters is that the call forwarded the sentinel timeouts.
+        assert captured.get("timeout") == SENTINEL_AGENT, (
+            f"expected timeout={SENTINEL_AGENT}, got {captured.get('timeout')}"
+        )
+        assert captured.get("advise_timeout") == SENTINEL_ADVISE, (
+            f"expected advise_timeout={SENTINEL_ADVISE}, got {captured.get('advise_timeout')}"
+        )
+
+
+class TestPostMergeLearnTimeoutThreading:
+    """Prove CIDriverOptions.learn_timeout reaches agent call in run_drive_green_learnings."""
+
+    def test_learn_timeout_reaches_run_agent_session(
+        self, tmp_path: pytest.TempPathFactory
+    ) -> None:
+        """CIDriverOptions.learn_timeout reaches the timeout= kwarg in run_agent_session.
+
+        PostMergeProcessor.run_drive_green_learnings reads options.learn_timeout from
+        the CIDriverOptions provider and passes it as timeout= to the agent runner.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from hephaestus.automation.models import CIDriverOptions
+        from hephaestus.automation.post_merge_processor import PostMergeProcessor
+
+        SENTINEL = 3399
+
+        captured: dict[str, object] = {}
+
+        def fake_run_agent_session(**kwargs: object) -> MagicMock:
+            captured.update(kwargs)
+            result = MagicMock()
+            result.stdout = ""
+            return result
+
+        opts = CIDriverOptions(learn_timeout=SENTINEL, agent="codex")
+        saved: dict[int, dict] = {}
+
+        proc = PostMergeProcessor(
+            options_provider=lambda: opts,
+            repo_root_provider=lambda: tmp_path,
+            # Let the worktree lookup raise so the fallback to repo_root is taken.
+            get_worktree_path=lambda i, pr: (_ for _ in ()).throw(RuntimeError("gone")),
+            load_arming_state=lambda i: saved.get(i),
+            save_arming_state=lambda i, r: saved.__setitem__(i, r),
+        )
+
+        _MOD = "hephaestus.automation.post_merge_processor"
+        with (
+            patch(f"{_MOD}.uses_direct_agent_runner", return_value=True),
+            patch(f"{_MOD}.run_agent_session", side_effect=fake_run_agent_session),
+            patch(f"{_MOD}.direct_agent_model", return_value="test-model"),
+            patch(f"{_MOD}.build_learn_prompt", return_value="test prompt"),
+            patch(f"{_MOD}.get_repo_slug", return_value="test/repo"),
+        ):
+            result = proc.run_drive_green_learnings(issue_number=1, pr_number=2)
+
+        assert result is True
+        assert captured.get("timeout") == SENTINEL, (
+            f"expected timeout={SENTINEL}, got {captured.get('timeout')}"
+        )

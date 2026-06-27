@@ -1095,6 +1095,8 @@ class CIDriver:
                 parse_fn=_parse_addressed_block,
                 log_file=log_file,
                 dry_run=self.options.dry_run,
+                timeout=self.options.agent_timeout,
+                advise_timeout=self.options.advise_timeout,
             )
         except RuntimeError as exc:
             logger.warning(

@@ -837,6 +837,19 @@ def main() -> int:
         enable_follow_up=not args.no_follow_up,
         enable_ui=not args.no_ui and not args.json,
         include_nitpicks=args.nitpick,
+        **({"agent_timeout": args.agent_timeout} if args.agent_timeout is not None else {}),
+        **({"advise_timeout": args.advise_timeout} if args.advise_timeout is not None else {}),
+        **({"learn_timeout": args.learn_timeout} if args.learn_timeout is not None else {}),
+        **(
+            {"follow_up_timeout": args.follow_up_timeout}
+            if args.follow_up_timeout is not None
+            else {}
+        ),
+        **(
+            {"git_message_timeout": args.git_message_timeout}
+            if args.git_message_timeout is not None
+            else {}
+        ),
     )
 
     if args.health_check:
