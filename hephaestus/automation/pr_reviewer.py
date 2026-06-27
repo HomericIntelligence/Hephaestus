@@ -34,6 +34,8 @@ from hephaestus.agents.runtime import (
     uses_direct_agent_runner,
 )
 from hephaestus.cli.utils import (
+    add_agent_timeout_arg,
+    add_learn_timeout_arg,
     add_version_arg,
     configure_github_throttle_from_args,
     emit_json_status,
@@ -53,7 +55,7 @@ from ._review_utils import (
 from ._reviewer_base import BaseReviewer
 from .claude_invoke import invoke_claude_with_session, raise_for_error_envelope
 from .claude_models import reviewer_model
-from .claude_timeouts import pr_reviewer_claude_timeout
+from .claude_timeouts import DEFAULT_AGENT_TIMEOUT
 from .curses_ui import CursesUI
 from .git_utils import get_repo_root, get_repo_slug, issue_ref, pr_ref
 from .github_api import _gh_call, fetch_issue_info, gh_pr_review_post
@@ -74,6 +76,7 @@ def run_pr_review_analysis(
     review_agent: str = AGENT_PR_REVIEWER,
     state_dir: Path,
     dry_run: bool = False,
+    timeout: int = DEFAULT_AGENT_TIMEOUT,
 ) -> dict[str, Any]:
     """Run a read-only reviewer session and return its parsed analysis.
 
@@ -133,7 +136,7 @@ def run_pr_review_analysis(
                 agent=agent,
                 prompt=prompt,
                 cwd=worktree_path,
-                timeout=pr_reviewer_claude_timeout(),
+                timeout=timeout,
                 model=direct_agent_model(agent, "HEPH_REVIEWER_MODEL"),
                 sandbox="read-only",
             )
@@ -157,7 +160,7 @@ def run_pr_review_analysis(
             prompt=prompt,
             model=reviewer_model(),
             cwd=worktree_path,
-            timeout=pr_reviewer_claude_timeout(),
+            timeout=timeout,
             output_format="json",
             permission_mode="dontAsk",
             allowed_tools="Read,Glob,Grep",
@@ -276,6 +279,7 @@ def review_pr_inline(
     iteration: int,
     state_dir: Path,
     dry_run: bool = False,
+    timeout: int = DEFAULT_AGENT_TIMEOUT,
 ) -> tuple[str, list[str]]:
     """Review an impl PR in-loop: run analysis, post inline threads, return verdict.
 
@@ -320,6 +324,7 @@ def review_pr_inline(
         review_agent=review_token,
         state_dir=state_dir,
         dry_run=dry_run,
+        timeout=timeout,
     )
     comments: list[dict[str, Any]] = analysis.get("comments", [])
     summary: str = analysis.get("summary", "")
@@ -589,6 +594,7 @@ class PRReviewer(BaseReviewer):
             review_agent=AGENT_PR_REVIEWER,
             state_dir=self.state_dir,
             dry_run=self.options.dry_run,
+            timeout=self.options.agent_timeout,
         )
 
     def _get_or_create_state(self, issue_number: int, pr_number: int) -> ReviewState:
@@ -869,6 +875,8 @@ Examples:
         dry_run_prefix="Show what would be done without actually posting any review comments.",
     )
     add_version_arg(parser)
+    add_agent_timeout_arg(parser)
+    add_learn_timeout_arg(parser)
     return parser
 
 
@@ -901,6 +909,10 @@ def main() -> int:
         max_workers=args.max_workers,
         dry_run=args.dry_run,
         enable_ui=not args.no_ui and not args.json,
+        # Only override when the CLI flag is set; otherwise the ReviewerOptions
+        # per-phase defaults (#1642, review 600s / learn 300s) apply.
+        **({"agent_timeout": args.agent_timeout} if args.agent_timeout is not None else {}),
+        **({"learn_timeout": args.learn_timeout} if args.learn_timeout is not None else {}),
     )
 
     with terminal_guard():

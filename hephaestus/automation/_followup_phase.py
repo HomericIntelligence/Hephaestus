@@ -134,6 +134,7 @@ class FollowUpPhase(StageMixin):
             dry_run=self.options.dry_run,
             agent=self.options.agent,
             session_agent=session_agent,
+            timeout=self.options.follow_up_timeout,
         )
 
     def _learn_needs_rerun(self, issue_number: int) -> bool:
@@ -224,4 +225,5 @@ class FollowUpPhase(StageMixin):
             agent=self.options.agent,
             session_agent=session_agent,
             model=implementer_model(),
+            timeout=self.options.learn_timeout,
         )

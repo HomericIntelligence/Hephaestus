@@ -18,6 +18,24 @@ from pydantic import BaseModel, Field
 # comment is now defined in :mod:`hephaestus.automation.protocol` together
 # with :data:`PLAN_REVIEW_PREFIX`. Re-exported here for backward compatibility
 # with the historical ``from .models import PLAN_COMMENT_MARKER`` import path.
+# Per-phase timeout defaults are preserved from #1642 (planner 300s,
+# implementer 1800s, plan/PR reviewer 600s, /learn 300s). ``DEFAULT_AGENT_TIMEOUT``
+# (7200s) remains the default only for the phases #1642 did NOT differentiate
+# (advise, address-review, CI-driver, follow-up). A ``--*-timeout`` CLI flag, when
+# provided, overrides the field; otherwise these defaults apply (and the
+# corresponding ``HEPH_*`` env var still overrides via ``read_timeout_env``).
+from hephaestus.constants import (
+    AGENT_IMPL_TIMEOUT,
+    AGENT_LEARN_TIMEOUT,
+    AGENT_PLAN_TIMEOUT,
+    AGENT_REVIEW_TIMEOUT,
+)
+
+from .claude_timeouts import (
+    DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_CI_POLL_MAX_WAIT,
+    DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
+)
 from .protocol import PLAN_COMMENT_MARKER as PLAN_COMMENT_MARKER
 
 __all__ = ["PLAN_COMMENT_MARKER"]
@@ -179,6 +197,9 @@ class PlannerOptions(WorkerOptionsBase):
     system_prompt_file: Path | None = None
     skip_closed: bool = True
     enable_advise: bool = True
+    agent_timeout: int = AGENT_PLAN_TIMEOUT  # 300 (#1642 planner default)
+    advise_timeout: int = DEFAULT_AGENT_TIMEOUT  # 7200 (not phase-differentiated)
+    git_message_timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
 
 
 class ImplementerOptions(ParallelWorkerOptionsBase):
@@ -201,6 +222,11 @@ class ImplementerOptions(ParallelWorkerOptionsBase):
     # #1083: when False (default) the reviewer omits nitpick-severity comments;
     # --nitpick re-enables them.
     include_nitpicks: bool = False
+    agent_timeout: int = AGENT_IMPL_TIMEOUT  # 1800 (#1642 implementer default)
+    advise_timeout: int = DEFAULT_AGENT_TIMEOUT  # 7200 (not phase-differentiated)
+    git_message_timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
+    learn_timeout: int = AGENT_LEARN_TIMEOUT  # 300 (#1642 learn default)
+    follow_up_timeout: int = DEFAULT_AGENT_TIMEOUT  # 7200 (not phase-differentiated)
 
 
 class ReviewPhase(str, Enum):
@@ -243,6 +269,8 @@ class ReviewerOptions(ParallelWorkerOptionsBase):
     agent: str = "claude"
     enable_learn: bool = True
     enable_ui: bool = True
+    agent_timeout: int = AGENT_REVIEW_TIMEOUT  # 600 (#1642 PR-reviewer default)
+    learn_timeout: int = AGENT_LEARN_TIMEOUT  # 300 (#1642 learn default)
 
 
 class PlanReviewerOptions(VerboseParallelWorkerOptionsBase):
@@ -251,6 +279,7 @@ class PlanReviewerOptions(VerboseParallelWorkerOptionsBase):
     issues: list[int] = Field(default_factory=list)
     agent: str = "claude"
     enable_ui: bool = True
+    agent_timeout: int = AGENT_REVIEW_TIMEOUT  # 600 (#1642 plan-reviewer default)
 
 
 class AddressReviewOptions(VerboseParallelWorkerOptionsBase):
@@ -260,6 +289,8 @@ class AddressReviewOptions(VerboseParallelWorkerOptionsBase):
     agent: str = "claude"
     enable_ui: bool = True
     resume_impl_session: bool = True  # attempt to resume implementer's saved agent session
+    agent_timeout: int = DEFAULT_AGENT_TIMEOUT  # 7200 (not phase-differentiated)
+    advise_timeout: int = DEFAULT_AGENT_TIMEOUT  # 7200 (not phase-differentiated)
 
 
 class CIDriverOptions(VerboseParallelWorkerOptionsBase):
@@ -292,6 +323,10 @@ class CIDriverOptions(VerboseParallelWorkerOptionsBase):
     # the result with --force-with-lease — no agent spend. Only PRs whose rebase
     # hits real conflicts fall through to the Claude/Codex agent (#871).
     enable_mechanical_rebase: bool = True
+    agent_timeout: int = DEFAULT_AGENT_TIMEOUT  # 7200 (not phase-differentiated)
+    advise_timeout: int = DEFAULT_AGENT_TIMEOUT  # 7200 (not phase-differentiated)
+    learn_timeout: int = AGENT_LEARN_TIMEOUT  # 300 (#1642 learn default)
+    poll_max_wait: int = DEFAULT_CI_POLL_MAX_WAIT
 
 
 class DependencyGraph(BaseModel):

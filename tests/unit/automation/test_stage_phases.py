@@ -36,6 +36,11 @@ def _make_ctx(tmp_path: Path, **option_overrides: Any) -> StageContext:
         "enable_follow_up": True,
         "run_pre_pr_tests": False,
         "include_nitpicks": False,
+        "agent_timeout": 7200,
+        "advise_timeout": 7200,
+        "git_message_timeout": 300,
+        "learn_timeout": 7200,
+        "follow_up_timeout": 7200,
     }
     option_values.update(option_overrides)
     options = SimpleNamespace(**option_values)

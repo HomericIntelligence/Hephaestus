@@ -27,11 +27,7 @@ from hephaestus.io.utils import write_secure
 from ._review_utils import ensure_state_dir, log_file_path
 from .claude_invoke import INFRA_ERROR_REVIEW_TEXT, parse_review_verdict
 from .claude_models import planner_model, reviewer_model
-from .claude_timeouts import (
-    learn_claude_timeout,
-    plan_reviewer_claude_timeout,
-    planner_claude_timeout,
-)
+from .claude_timeouts import plan_reviewer_claude_timeout
 from .git_utils import get_repo_root, issue_ref
 from .github_api import (
     gh_issue_add_labels,
@@ -561,7 +557,7 @@ class PlanReviewLoop:
             model=planner_model(),
             agent=AGENT_PLANNER,
             issue_number=issue_number,
-            timeout=planner_claude_timeout(),
+            timeout=self.options.agent_timeout,
         )
 
         return plan
@@ -611,7 +607,7 @@ class PlanReviewLoop:
                 model=planner_model(),
                 agent=AGENT_PLANNER,
                 issue_number=issue_number,
-                timeout=learn_claude_timeout(),
+                timeout=self.options.agent_timeout,
             )
             self._write_planner_learn_record(
                 issue_number, succeeded=True, output=output, start=_learn_start

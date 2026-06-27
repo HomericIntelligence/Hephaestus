@@ -20,7 +20,6 @@ from hephaestus.agents.runtime import (
 
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
-from .claude_timeouts import learn_claude_timeout
 from .git_utils import get_repo_slug, issue_ref, pr_ref
 from .learn import build_learn_prompt, compact_session, mnemosyne_update_evidence
 from .session_naming import AGENT_CI_DRIVER
@@ -155,7 +154,7 @@ class PostMergeProcessor:
                     agent=options.agent,
                     prompt=prompt,
                     cwd=cwd,
-                    timeout=learn_claude_timeout(),
+                    timeout=options.learn_timeout,
                     model=direct_agent_model(options.agent, "HEPH_LEARN_MODEL"),
                     sandbox="workspace-write",
                 )
@@ -176,7 +175,7 @@ class PostMergeProcessor:
                 # the model that created it, so we must use implementer_model().
                 model=implementer_model(),
                 cwd=cwd,
-                timeout=learn_claude_timeout(),
+                timeout=options.learn_timeout,
                 output_format="text",
                 allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
                 extra_args=["--dangerously-skip-permissions"],

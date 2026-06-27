@@ -45,7 +45,7 @@ from hephaestus.io.utils import write_secure
 from ._review_utils import log_file_path, parse_json_block
 from .claude_invoke import invoke_claude_with_session, raise_for_error_envelope
 from .claude_models import reviewer_model
-from .claude_timeouts import pr_reviewer_claude_timeout
+from .claude_timeouts import DEFAULT_AGENT_TIMEOUT
 from .git_utils import get_repo_root, get_repo_slug, pr_ref
 from .github_api import gh_pr_resolve_thread, gh_pr_review_post
 from .prompts import get_review_validation_prompt
@@ -162,6 +162,7 @@ def _run_validation_session(
     agent: str,
     review_agent: str,
     state_dir: Path,
+    timeout: int = DEFAULT_AGENT_TIMEOUT,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Run the read-only validation sub-agent; return ``(unaddressed, wont_fix)``.
 
@@ -183,7 +184,7 @@ def _run_validation_session(
                 agent=agent,
                 prompt=prompt,
                 cwd=worktree_path,
-                timeout=pr_reviewer_claude_timeout(),
+                timeout=timeout,
                 model=direct_agent_model(agent, "HEPH_REVIEWER_MODEL"),
                 sandbox="read-only",
             )
@@ -198,7 +199,7 @@ def _run_validation_session(
                 prompt=prompt,
                 model=reviewer_model(),
                 cwd=worktree_path,
-                timeout=pr_reviewer_claude_timeout(),
+                timeout=timeout,
                 output_format="json",
                 permission_mode="dontAsk",
                 allowed_tools="Read,Glob,Grep",
@@ -248,6 +249,7 @@ def validate_prior_comments_addressed(
     state_dir: Path,
     dry_run: bool = False,
     prior_reopened_keys: set[str] | None = None,
+    timeout: int = DEFAULT_AGENT_TIMEOUT,
 ) -> tuple[list[str], bool, set[str]]:
     """Re-open prior review comments the current diff does not address.
 
@@ -320,6 +322,7 @@ def validate_prior_comments_addressed(
         agent=agent,
         review_agent=reviewer_agent(AGENT_PR_REVIEWER, iteration),
         state_dir=state_dir,
+        timeout=timeout,
     )
 
     # Won't-fix dismissals (#1163): resolve each thread the agent judged

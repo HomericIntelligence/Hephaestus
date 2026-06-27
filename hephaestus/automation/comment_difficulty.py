@@ -33,7 +33,7 @@ from hephaestus.io.utils import write_secure
 from ._review_utils import log_file_path, parse_json_block
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import HAIKU, OPUS, SONNET, advise_model
-from .claude_timeouts import advise_claude_timeout
+from .claude_timeouts import DEFAULT_AGENT_TIMEOUT
 from .git_utils import get_repo_slug
 from .prompts import get_comment_difficulty_prompt
 from .session_naming import AGENT_COMMENT_CLASSIFIER
@@ -101,6 +101,7 @@ def _run_classifier_session(
     worktree_path: Path,
     repo_root: Path,
     state_dir: Path,
+    advise_timeout: int = DEFAULT_AGENT_TIMEOUT,
 ) -> dict[str, str]:
     """Run the read-only classifier sub-agent; return ``{thread_id: difficulty}``.
 
@@ -129,7 +130,7 @@ def _run_classifier_session(
                 agent=agent,
                 prompt=prompt,
                 cwd=worktree_path,
-                timeout=advise_claude_timeout(),
+                timeout=advise_timeout,
                 model=direct_agent_model(agent, "HEPH_ADVISE_MODEL"),
                 sandbox="read-only",
             )
@@ -143,7 +144,7 @@ def _run_classifier_session(
                 prompt=prompt,
                 model=advise_model(),
                 cwd=worktree_path,
-                timeout=advise_claude_timeout(),
+                timeout=advise_timeout,
                 output_format="json",
                 permission_mode="dontAsk",
                 allowed_tools="Read,Glob,Grep",
@@ -182,6 +183,7 @@ def classify_comments(
     repo_root: Path,
     state_dir: Path,
     dry_run: bool = False,
+    advise_timeout: int = DEFAULT_AGENT_TIMEOUT,
 ) -> dict[str, str]:
     """Classify each thread's difficulty; return ``{thread_id: difficulty}``.
 
@@ -201,5 +203,6 @@ def classify_comments(
         worktree_path=worktree_path,
         repo_root=repo_root,
         state_dir=state_dir,
+        advise_timeout=advise_timeout,
     )
     return {t["id"]: classified.get(t["id"], _DEFAULT_DIFFICULTY) for t in threads}

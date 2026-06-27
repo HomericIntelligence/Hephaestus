@@ -132,10 +132,11 @@ __all__ = [
     "main",
 ]
 
-# Default implementation timeout in seconds. Actual runtime value is read from
-# ``HEPH_AGENT_IMPL_TIMEOUT`` by
-# :func:`.claude_timeouts.implementer_claude_timeout`; this constant serves as
-# the documented default and can be used in tests.
+# Default implementation timeout in seconds. The actual runtime value comes from
+# ``options.agent_timeout`` (set via the ``--agent-timeout`` CLI flag or the
+# ``ImplementerOptions.agent_timeout`` default, which is ``AGENT_IMPL_TIMEOUT``
+# and remains ``HEPH_AGENT_IMPL_TIMEOUT``-overridable via ``read_timeout_env``).
+# This constant serves as the documented default and is used in tests.
 _CLAUDE_IMPL_TIMEOUT: int = AGENT_IMPL_TIMEOUT
 _FUTURE_POLL_INTERVAL_SECONDS: float = 1.0
 
@@ -240,7 +241,12 @@ class IssueImplementer:
         if name == "_commit_changes":
 
             def _commit_changes(issue_number: int, worktree_path: Path) -> None:
-                commit_changes(issue_number, worktree_path, self.options.agent)
+                commit_changes(
+                    issue_number,
+                    worktree_path,
+                    self.options.agent,
+                    git_message_timeout=self.options.git_message_timeout,
+                )
 
             return _commit_changes
 
@@ -252,6 +258,7 @@ class IssueImplementer:
                     branch_name,
                     auto_merge=False,
                     agent=self.options.agent,
+                    git_message_timeout=self.options.git_message_timeout,
                 )
 
             return _create_pr

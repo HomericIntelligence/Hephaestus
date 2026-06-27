@@ -237,6 +237,7 @@ class TestEnsurePRCreated:
                 agent="claude",
                 base="master",
                 worktree_path=Path("/tmp/wt"),
+                git_message_timeout=300,
             )
 
     def test_creates_pr_with_selected_agent_metadata(self) -> None:
@@ -262,6 +263,7 @@ class TestEnsurePRCreated:
                 agent="codex",
                 base="master",
                 worktree_path=Path("/tmp/wt"),
+                git_message_timeout=300,
             )
 
 
@@ -363,7 +365,6 @@ class TestMessageAgentInvocation:
         with (
             patch.object(pr_manager, "get_repo_slug", return_value="ProjectHephaestus"),
             patch.object(pr_manager, "git_message_model", return_value="claude-haiku-4-5"),
-            patch.object(pr_manager, "git_message_agent_timeout", return_value=120),
             patch.object(
                 pr_manager,
                 "invoke_claude_with_session",
@@ -377,6 +378,7 @@ class TestMessageAgentInvocation:
                     prompt="prompt",
                     worktree_path=Path("/tmp/wt"),
                     agent="claude",
+                    timeout=120,
                 )
                 == "{}"
             )
@@ -393,7 +395,6 @@ class TestMessageAgentInvocation:
         )
         with (
             patch.dict("os.environ", {"HEPH_GIT_MESSAGE_MODEL": "gpt-5.4-mini"}),
-            patch.object(pr_manager, "git_message_agent_timeout", return_value=120),
             patch.object(pr_manager, "run_agent_text", return_value=completed) as run_agent,
         ):
             assert (
@@ -403,6 +404,7 @@ class TestMessageAgentInvocation:
                     prompt="prompt",
                     worktree_path=Path("/tmp/wt"),
                     agent="codex",
+                    timeout=120,
                 )
                 == "{}"
             )
@@ -417,7 +419,6 @@ class TestMessageAgentInvocation:
         completed = subprocess.CompletedProcess(args=["pi"], returncode=0, stdout="{}", stderr="")
         with (
             patch.object(pr_manager, "uses_direct_agent_runner", return_value=True),
-            patch.object(pr_manager, "git_message_agent_timeout", return_value=120),
             patch.object(pr_manager, "run_agent_text", return_value=completed) as run_agent,
         ):
             assert (
@@ -427,6 +428,7 @@ class TestMessageAgentInvocation:
                     prompt="prompt",
                     worktree_path=Path("/tmp/wt"),
                     agent="pi",
+                    timeout=120,
                 )
                 == "{}"
             )

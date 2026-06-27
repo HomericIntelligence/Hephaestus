@@ -22,6 +22,13 @@ import logging
 from pathlib import Path
 
 from hephaestus.automation._review_utils import build_automation_parser
+from hephaestus.cli.utils import (
+    add_advise_timeout_arg,
+    add_agent_timeout_arg,
+    add_follow_up_timeout_arg,
+    add_git_message_timeout_arg,
+    add_learn_timeout_arg,
+)
 
 
 def _setup_logging(verbose: bool = False, log_dir: Path | None = None) -> None:
@@ -134,6 +141,11 @@ Examples:
         action="store_true",
         help="Let the reviewer emit nitpick-severity comments (suppressed by default)",
     )
+    add_agent_timeout_arg(parser)
+    add_advise_timeout_arg(parser)
+    add_git_message_timeout_arg(parser)
+    add_learn_timeout_arg(parser)
+    add_follow_up_timeout_arg(parser)
     return parser
 
 
