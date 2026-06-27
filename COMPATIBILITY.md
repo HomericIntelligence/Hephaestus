@@ -81,7 +81,7 @@ may change incompatibly in a minor release.
 
 ## Console-Script Stability Tiers
 
-ProjectHephaestus installs 49 console scripts via `[project.scripts]` in
+ProjectHephaestus installs 50 console scripts via `[project.scripts]` in
 `pyproject.toml`. Each is classified into one of three tiers:
 
 - **Stable** — covered by the [deprecation policy](#deprecation-policy). CLI
@@ -158,6 +158,7 @@ bypass a misfiring hook locally use
 | `hephaestus-validate-agents` | Internal | Repo CI agent-frontmatter validator |
 | `hephaestus-check-repo-analyze-skills` | Internal | Repo CI repo-analyze skill generator validator |
 | `hephaestus-check-cli-tier-docs` | Internal | Enforces this very table; added in #766 |
+| `hephaestus-check-api-table-docs` | Internal | Enforces per-symbol __all__ documentation in COMPATIBILITY.md |
 
 ## Public API
 
@@ -207,11 +208,19 @@ removal):
 
 | Symbol | Added | Notes |
 |--------|-------|-------|
+| `check_dep_sync` | 0.3.0 | Check pixi.toml ↔ requirements drift |
+| `check_requirements_up_to_date` | 0.3.0 | Verify requirements file is current |
+| `generate_requirements_content` | 0.3.0 | Render requirements.txt content from pixi deps |
 | `get_config_value` | 0.2.0 | High-level config lookup with env overlay — **(deprecated)**, use `load_config` + `merge_with_env` + `get_setting` |
 | `get_setting` | 0.1.0 | Dot-notation access to nested config dict |
 | `load_config` | 0.1.0 | Load YAML/JSON config file |
+| `load_yaml_config` | 0.1.0 | Load a YAML config file |
 | `merge_configs` | 0.1.0 | Deep-merge multiple config dicts |
 | `merge_with_env` | 0.2.0 | Overlay env vars onto config |
+| `parse_pixi_toml` | 0.3.0 | Parse pixi.toml dependency tables |
+| `parse_requirements` | 0.3.0 | Parse a requirements.txt file |
+| `sync_requirements` | 0.3.0 | Sync requirements.txt from pixi deps |
+| `validate_config` | 0.1.0 | Validate a config dict against a schema |
 
 **Deprecated symbols** (covered by the deprecation policy until removal):
 
@@ -236,10 +245,19 @@ removal):
 | Symbol | Added | Notes |
 |--------|-------|-------|
 | `flatten_dict` | 0.1.0 | Flatten nested dict |
+| `get_proj_root` | 0.1.0 | Locate the project root directory |
+| `get_repo_root` | 0.1.0 | Locate the git repository root |
 | `human_readable_size` | 0.1.0 | Format byte count as human-readable string |
+| `install_package` | 0.2.0 | Install a Python package at runtime via pip |
+| `install_signal_handlers` | 0.3.0 | Register terminal-restoring signal handlers |
+| `is_network_error` | 0.2.0 | Classify an exception as a transient network error |
+| `restore_terminal` | 0.3.0 | Restore terminal state after a raw-mode session |
+| `retry_on_network_error` | 0.2.0 | Retry decorator scoped to network errors |
 | `retry_with_backoff` | 0.1.0 | Exponential backoff retry decorator |
+| `retry_with_jitter` | 0.1.0 | Jittered backoff retry decorator — **(deprecated)**, use `retry_with_backoff(jitter=True, max_delay=...)` |
 | `run_subprocess` | 0.1.0 | Execute shell commands with error handling |
 | `slugify` | 0.1.0 | Convert text to URL-friendly slug |
+| `terminal_guard` | 0.3.0 | Context manager that saves/restores terminal state |
 
 ## Deprecation Policy
 
