@@ -35,6 +35,7 @@ from hephaestus.utils.file_lock import file_lock
 from ._review_utils import (
     _discover_prs_simple,
     build_automation_parser,
+    ensure_state_dir,
     find_pr_for_issue,
     load_impl_session_id,
     parse_json_block,
@@ -139,8 +140,7 @@ class CIDriver:
         """
         self.options = options
         self.repo_root = get_repo_root()
-        self.state_dir = self.repo_root / "build" / ".issue_implementer"
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir = ensure_state_dir(self.repo_root)
         self._arming_store = ArmingStateStore(lambda: self.state_dir)
 
         self.worktree_manager = WorktreeManager()

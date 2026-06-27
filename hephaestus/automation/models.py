@@ -143,6 +143,7 @@ class PlanResult(BaseModel):
 
 
 DEFAULT_WORKER_COUNT = 3
+DEFAULT_STATE_DIR = "build/.issue_implementer"
 
 
 class WorkerOptionsBase(BaseModel):

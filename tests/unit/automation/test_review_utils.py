@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.automation import _review_utils as review_utils, models
 from hephaestus.automation._review_utils import (
     _discover_prs_simple,
     add_max_workers_arg,
@@ -179,6 +180,27 @@ class TestPrintWorkerSummary:
             )
 
         assert "\nFailed issues:" in caplog.messages
+
+
+class TestEnsureStateDir:
+    """Tests for the canonical automation state-dir helper."""
+
+    def test_ensure_state_dir_creates_default_state_dir_under_repo_root(
+        self, tmp_path: Path
+    ) -> None:
+        """Default state dir is created under the provided repo root."""
+        state_dir = review_utils.ensure_state_dir(tmp_path)
+
+        assert models.DEFAULT_STATE_DIR == "build/.issue_implementer"
+        assert state_dir == tmp_path / Path(models.DEFAULT_STATE_DIR)
+        assert state_dir.is_dir()
+
+    def test_ensure_state_dir_accepts_custom_subdir(self, tmp_path: Path) -> None:
+        """Callers can override the subdir while reusing mkdir behavior."""
+        state_dir = review_utils.ensure_state_dir(tmp_path, subdir="custom/state")
+
+        assert state_dir == tmp_path / "custom" / "state"
+        assert state_dir.is_dir()
 
 
 # ---------------------------------------------------------------------------
