@@ -16,16 +16,14 @@ Usage::
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg
+from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 from hephaestus.io.toml import import_tomllib
-from hephaestus.utils.helpers import get_repo_root
 
 VALID_TIERS: frozenset[str] = frozenset({"Stable", "Provisional", "Internal"})
 _SECTION_HEADER_RE = re.compile(r"^##\s+Console-Script Stability Tiers", re.IGNORECASE)
@@ -230,12 +228,9 @@ def format_json(findings: list[TierDocFinding]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     """Entry point for ``hephaestus-check-cli-tier-docs``."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo-root", type=Path, default=None)
-    add_json_arg(parser)
-    add_version_arg(parser)
+    parser = create_validation_parser(__doc__)
     args = parser.parse_args(argv)
-    repo_root = args.repo_root or get_repo_root()
+    repo_root = resolve_repo_root(args)
     scripts = load_pyproject_scripts(repo_root / "pyproject.toml")
     tiers, occurrences, section_count = load_documented_tiers(repo_root / "COMPATIBILITY.md")
     duplicates = find_duplicate_tiers(occurrences)

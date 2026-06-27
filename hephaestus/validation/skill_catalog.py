@@ -24,15 +24,13 @@ Exit codes:
 
 from __future__ import annotations
 
-import argparse
 import re
 import sys
 from pathlib import Path
 
 from hephaestus.agents.frontmatter import check_agent_file, extract_frontmatter_parsed
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.cli.utils import create_validation_parser, emit_json_status, resolve_repo_root
 from hephaestus.discovery.skills import discover_skills
-from hephaestus.utils.helpers import get_repo_root
 
 # Matches a markdown table row of the form ``| cell | cell | ... |``. We pull
 # out the leftmost non-empty cell as the skill name. Table header and the
@@ -216,9 +214,9 @@ def main(argv: list[str] | None = None) -> int:
         Exit code (0 on match, 1 on mismatch).
 
     """
-    parser = argparse.ArgumentParser(
+    parser = create_validation_parser(
+        "Verify docs/plugin-installation.md lists every shipped skill.",
         prog="hephaestus-check-skill-catalog",
-        description=("Verify docs/plugin-installation.md lists every shipped skill."),
     )
     parser.add_argument(
         "--table",
@@ -232,17 +230,9 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Path to the skills directory (default: skills/)",
     )
-    parser.add_argument(
-        "--repo-root",
-        type=Path,
-        default=None,
-        help="Repository root (default: auto-detect)",
-    )
-    add_json_arg(parser)
-    add_version_arg(parser)
     args = parser.parse_args(argv)
 
-    repo_root: Path = args.repo_root or get_repo_root()
+    repo_root: Path = resolve_repo_root(args)
     table_path: Path = args.table or (repo_root / "docs" / "plugin-installation.md")
     skills_dir: Path = args.skills_dir or (repo_root / "skills")
 

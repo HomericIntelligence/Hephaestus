@@ -35,7 +35,6 @@ Exit codes:
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
 import sys
@@ -43,8 +42,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg
-from hephaestus.utils.helpers import get_repo_root
+from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -347,8 +345,8 @@ def main() -> int:
         Exit code (0 if no violations, 1 if violations found).
 
     """
-    parser = argparse.ArgumentParser(
-        description="Audit documentation command examples for policy violations",
+    parser = create_validation_parser(
+        "Audit documentation command examples for policy violations",
         epilog="Example: %(prog)s --directory docs/ --verbose",
     )
     parser.add_argument(
@@ -356,12 +354,6 @@ def main() -> int:
         type=Path,
         default=None,
         help="Directory to scan (default: repository root)",
-    )
-    parser.add_argument(
-        "--repo-root",
-        type=Path,
-        default=None,
-        help="Repository root (default: auto-detect)",
     )
     parser.add_argument(
         "--verbose",
@@ -376,11 +368,9 @@ def main() -> int:
         default=None,
         help="Additional path prefix to exclude (may be repeated)",
     )
-    add_json_arg(parser)
-    add_version_arg(parser)
 
     args = parser.parse_args()
-    repo_root: Path = args.repo_root or get_repo_root()
+    repo_root: Path = resolve_repo_root(args)
     scan_root: Path = args.directory or repo_root
 
     excluded: tuple[str, ...] = EXCLUDED_PREFIXES

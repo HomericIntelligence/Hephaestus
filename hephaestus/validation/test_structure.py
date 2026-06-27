@@ -20,12 +20,10 @@ Usage::
 
 from __future__ import annotations
 
-import argparse
 import sys
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
-from hephaestus.utils.helpers import get_repo_root
+from hephaestus.cli.utils import create_validation_parser, emit_json_status, resolve_repo_root
 
 ALLOWED_ROOT_FILES: frozenset[str] = frozenset({"__init__.py", "conftest.py"})
 
@@ -311,15 +309,9 @@ def main() -> int:
         Exit code (0 if clean, 1 if violations found).
 
     """
-    parser = argparse.ArgumentParser(
-        description="Validate unit test directory structure",
+    parser = create_validation_parser(
+        "Validate unit test directory structure",
         epilog="Example: %(prog)s --src-package mypackage --verbose",
-    )
-    parser.add_argument(
-        "--repo-root",
-        type=Path,
-        default=None,
-        help="Repository root directory (default: auto-detect)",
     )
     parser.add_argument(
         "--src-package",
@@ -333,11 +325,9 @@ def main() -> int:
         action="store_true",
         help="Print detailed output",
     )
-    add_json_arg(parser)
-    add_version_arg(parser)
 
     args = parser.parse_args()
-    repo_root = args.repo_root or get_repo_root()
+    repo_root = resolve_repo_root(args)
 
     passed = check_test_structure(repo_root, src_package=args.src_package, verbose=args.verbose)
     exit_code = 0 if passed else 1

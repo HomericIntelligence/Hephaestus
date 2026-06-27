@@ -22,14 +22,13 @@ Exit codes:
 
 from __future__ import annotations
 
-import argparse
 import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, cast
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
+from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
 from hephaestus.io.toml import import_tomllib
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
@@ -442,15 +441,9 @@ def main() -> int:
         Exit code (0 if all checks pass, 1 if any fail).
 
     """
-    parser = argparse.ArgumentParser(
-        description="Enforce consistency between doc metric values and pyproject.toml",
+    parser = create_validation_parser(
+        "Enforce consistency between doc metric values and pyproject.toml",
         epilog="Example: %(prog)s --repo-root /path/to/repo --verbose",
-    )
-    parser.add_argument(
-        "--repo-root",
-        type=Path,
-        default=None,
-        help="Repository root (default: auto-detected via git)",
     )
     parser.add_argument(
         "--verbose",
@@ -463,17 +456,9 @@ def main() -> int:
         action="store_true",
         help="Skip the live pytest --collect-only test count check",
     )
-    add_json_arg(parser)
-    add_version_arg(parser)
 
     args = parser.parse_args()
-
-    if args.repo_root is not None:
-        repo_root: Path = args.repo_root
-    else:
-        from hephaestus.utils.helpers import get_repo_root
-
-        repo_root = get_repo_root()
+    repo_root = resolve_repo_root(args)
 
     if args.json:
         expected_threshold = load_coverage_threshold(repo_root)

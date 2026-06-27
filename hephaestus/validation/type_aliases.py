@@ -16,12 +16,11 @@ Examples of allowed patterns::
 
 from __future__ import annotations
 
-import argparse
 import re
 import sys
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
+from hephaestus.cli.utils import create_validation_parser, format_output
 
 
 def is_shadowing_pattern(alias: str, target: str) -> bool:
@@ -163,8 +162,9 @@ def main() -> int:
         Exit code (0 if clean, 1 if violations found).
 
     """
-    parser = argparse.ArgumentParser(
-        description="Detect type alias shadowing patterns in Python code",
+    parser = create_validation_parser(
+        "Detect type alias shadowing patterns in Python code",
+        include_repo_root=False,
         epilog="Example: %(prog)s src/ tests/ scripts/",
     )
     parser.add_argument(
@@ -179,8 +179,6 @@ def main() -> int:
         action="store_true",
         help="Print verbose output",
     )
-    add_json_arg(parser)
-    add_version_arg(parser)
 
     args = parser.parse_args()
 

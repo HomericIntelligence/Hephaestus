@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status, format_output
+from hephaestus.cli.utils import create_validation_parser, emit_json_status, format_output
 from hephaestus.utils.helpers import get_repo_root
 
 HIGH_THRESHOLD: float = 7.0
@@ -157,8 +157,6 @@ def main() -> int:
 
     """
     parser = _build_parser()
-    add_json_arg(parser)
-    add_version_arg(parser)
     args = parser.parse_args()
 
     ignore_ids = load_ignore_list(args.ignore_file)
@@ -233,8 +231,9 @@ def _emit_audit_json(blocking: list[AuditEntry], suppressed: list[AuditEntry]) -
 
 def _build_parser() -> argparse.ArgumentParser:
     """Build argument parser for the filter-audit CLI."""
-    parser = argparse.ArgumentParser(
-        description="Filter pip-audit JSON to fail only on HIGH/CRITICAL vulnerabilities",
+    parser = create_validation_parser(
+        "Filter pip-audit JSON to fail only on HIGH/CRITICAL vulnerabilities",
+        include_repo_root=False,
         epilog="Usage: pip-audit --format json | %(prog)s",
     )
     parser.add_argument(

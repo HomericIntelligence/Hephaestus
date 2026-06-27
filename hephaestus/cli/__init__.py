@@ -13,10 +13,12 @@ from hephaestus.cli.utils import (
     configure_github_throttle_from_args,
     confirm_action,
     create_parser,
+    create_validation_parser,
     emit_json_status,
     format_output,
     format_table,
     register_command,
+    resolve_repo_root,
 )
 
 __all__ = [
@@ -32,8 +34,10 @@ __all__ = [
     "configure_github_throttle_from_args",
     "confirm_action",
     "create_parser",
+    "create_validation_parser",
     "emit_json_status",
     "format_output",
     "format_table",
     "register_command",
+    "resolve_repo_root",
 ]

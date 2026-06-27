@@ -15,9 +15,11 @@ import json
 import math
 import sys
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 from hephaestus._version_lookup import get_version
+from hephaestus.utils.helpers import get_repo_root
 
 __version__ = get_version()
 
@@ -33,10 +35,12 @@ __all__ = [
     "configure_github_throttle_from_args",
     "confirm_action",
     "create_parser",
+    "create_validation_parser",
     "emit_json_status",
     "format_output",
     "format_table",
     "register_command",
+    "resolve_repo_root",
 ]
 
 
@@ -145,6 +149,53 @@ def add_json_arg(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Emit machine-readable JSON output instead of human-readable text",
     )
+
+
+def create_validation_parser(
+    description: str | None = None,
+    *,
+    include_repo_root: bool = True,
+    prog: str | None = None,
+    usage: str | None = None,
+    epilog: str | None = None,
+    formatter_class: type[argparse.HelpFormatter] = argparse.HelpFormatter,
+) -> argparse.ArgumentParser:
+    """Create a standardized parser for validation-style CLIs.
+
+    Args:
+        description: Parser description text.
+        include_repo_root: Whether to add the standard ``--repo-root`` option.
+        prog: Optional program name override.
+        usage: Optional usage string override.
+        epilog: Optional parser epilog text.
+        formatter_class: Argparse help formatter class.
+
+    Returns:
+        Configured ArgumentParser instance with shared validation flags.
+
+    """
+    parser = argparse.ArgumentParser(
+        prog=prog,
+        usage=usage,
+        description=description,
+        epilog=epilog,
+        formatter_class=formatter_class,
+    )
+    if include_repo_root:
+        parser.add_argument(
+            "--repo-root",
+            type=Path,
+            default=None,
+            help="Repository root (default: auto-detect)",
+        )
+    add_json_arg(parser)
+    add_version_arg(parser)
+    return parser
+
+
+def resolve_repo_root(args: argparse.Namespace) -> Path:
+    """Return the explicit CLI repository root or auto-detect it."""
+    return args.repo_root if args.repo_root is not None else get_repo_root()
 
 
 DRY_RUN_HELP_CAVEAT = (

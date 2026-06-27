@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status, format_output
+from hephaestus.cli.utils import create_validation_parser, emit_json_status, format_output
 from hephaestus.io.toml import import_tomllib
 from hephaestus.utils.helpers import get_repo_root
 
@@ -314,8 +314,9 @@ def main() -> int:
         Exit code (0 if coverage meets threshold, 1 otherwise).
 
     """
-    parser = argparse.ArgumentParser(
-        description="Check test coverage against threshold",
+    parser = create_validation_parser(
+        "Check test coverage against threshold",
+        include_repo_root=False,
         epilog="Example: %(prog)s --threshold 80 --path mypackage/",
     )
     parser.add_argument(
@@ -347,8 +348,6 @@ def main() -> int:
         action="store_true",
         help="Enable verbose output",
     )
-    add_json_arg(parser)
-    add_version_arg(parser)
 
     args = parser.parse_args()
 

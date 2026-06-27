@@ -13,14 +13,12 @@ Usage::
 
 from __future__ import annotations
 
-import argparse
 import re
 import sys
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
+from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
 from hephaestus.io.toml import import_tomllib
-from hephaestus.utils.helpers import get_repo_root
 
 tomllib = import_tomllib()
 
@@ -486,15 +484,9 @@ def main() -> int:
         Exit code (0 if consistent, 1 if mismatch).
 
     """
-    parser = argparse.ArgumentParser(
-        description="Check Python version consistency across config files",
+    parser = create_validation_parser(
+        "Check Python version consistency across config files",
         epilog="Example: %(prog)s --repo-root /path/to/repo --verbose",
-    )
-    parser.add_argument(
-        "--repo-root",
-        type=Path,
-        default=None,
-        help="Repository root directory (default: auto-detect)",
     )
     parser.add_argument(
         "--check-dockerfile",
@@ -507,11 +499,9 @@ def main() -> int:
         action="store_true",
         help="Print parsed versions even when consistent",
     )
-    add_json_arg(parser)
-    add_version_arg(parser)
 
     args = parser.parse_args()
-    repo_root = args.repo_root or get_repo_root()
+    repo_root = resolve_repo_root(args)
 
     consistent, versions = check_python_version_consistency(
         repo_root,

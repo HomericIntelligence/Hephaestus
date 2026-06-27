@@ -281,10 +281,12 @@ removal):
 | `configure_github_throttle_from_args` | 0.9.0 | Apply parsed throttle args to the GitHub client |
 | `confirm_action` | 0.1.0 | Interactive yes/no confirmation prompt |
 | `create_parser` | 0.1.0 | Build a standard `ArgumentParser` |
+| `create_validation_parser` | 0.9.8 | Build a standardized parser for validation-style CLIs |
 | `emit_json_status` | 0.6.0 | Emit a structured JSON status envelope |
 | `format_output` | 0.1.0 | Format a value for human-readable output |
 | `format_table` | 0.1.0 | Render rows as an aligned text table |
 | `register_command` | 0.1.0 | Decorator registering a CLI subcommand |
+| `resolve_repo_root` | 0.9.8 | Return the explicit CLI repo-root arg or auto-detect it |
 
 ### `hephaestus.system`
 

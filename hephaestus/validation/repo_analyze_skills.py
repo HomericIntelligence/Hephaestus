@@ -8,7 +8,6 @@ Entry point: ``hephaestus-check-repo-analyze-skills`` (see pyproject.toml).
 
 from __future__ import annotations
 
-import argparse
 import re
 import sys
 from pathlib import Path
@@ -16,7 +15,7 @@ from string import Template
 
 import yaml
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.cli.utils import create_validation_parser, emit_json_status
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMMON_DIR = REPO_ROOT / "skills" / "_repo_analyze_common"
@@ -134,8 +133,9 @@ def _render(variant: dict[str, str]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     """Generate repo-analyze* skill SKILL.md files from partials."""
-    parser = argparse.ArgumentParser(
-        description="Generate repo-analyze* skill SKILL.md files from partials"
+    parser = create_validation_parser(
+        "Generate repo-analyze* skill SKILL.md files from partials",
+        include_repo_root=False,
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
@@ -149,8 +149,6 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Regenerate SKILL.md files in place",
     )
-    add_json_arg(parser)
-    add_version_arg(parser)
     args = parser.parse_args(argv)
 
     spec = yaml.safe_load((COMMON_DIR / "variants.yaml").read_text(encoding="utf-8"))

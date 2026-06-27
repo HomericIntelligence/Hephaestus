@@ -12,7 +12,6 @@ Usage::
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
 import sys
@@ -21,7 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
+from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
 from hephaestus.logging.utils import get_logger
 from hephaestus.markdown.utils import find_markdown_files
 
@@ -480,8 +479,9 @@ def check_readmes_main() -> int:
         Exit code (0 if all pass, 1 if any failures).
 
     """
-    parser = argparse.ArgumentParser(
-        description="Validate README files for required sections and formatting",
+    parser = create_validation_parser(
+        "Validate README files for required sections and formatting",
+        include_repo_root=False,
     )
     parser.add_argument(
         "--directory",
@@ -501,8 +501,6 @@ def check_readmes_main() -> int:
         action="store_true",
         help="Print each README path as it is checked",
     )
-    add_json_arg(parser)
-    add_version_arg(parser)
 
     args = parser.parse_args()
     directory = args.directory or Path.cwd()
@@ -712,10 +710,8 @@ def main() -> int:
         Exit code (0 if all links valid, 1 if broken links found).
 
     """
-    from hephaestus.utils.helpers import get_repo_root
-
-    parser = argparse.ArgumentParser(
-        description="Validate markdown links in documentation",
+    parser = create_validation_parser(
+        "Validate markdown links in documentation",
         epilog="Example: %(prog)s docs/ --verbose",
     )
     parser.add_argument(
@@ -726,22 +722,14 @@ def main() -> int:
         help="Directory to scan (default: repo root)",
     )
     parser.add_argument(
-        "--repo-root",
-        type=Path,
-        default=None,
-        help="Repository root directory (default: auto-detect)",
-    )
-    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
         help="Print verbose output",
     )
-    add_json_arg(parser)
-    add_version_arg(parser)
 
     args = parser.parse_args()
-    repo_root = args.repo_root or get_repo_root()
+    repo_root = resolve_repo_root(args)
     directory = args.directory or repo_root
 
     if not directory.exists():

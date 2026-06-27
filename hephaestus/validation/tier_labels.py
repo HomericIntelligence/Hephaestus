@@ -36,8 +36,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg
-from hephaestus.utils.helpers import get_repo_root
+from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 
 # ---------------------------------------------------------------------------
 # Canonical mapping (source of truth)
@@ -308,8 +307,8 @@ def main() -> int:
         Exit code: 0 clean, 1 mismatches found, 2 I/O error.
 
     """
-    parser = argparse.ArgumentParser(
-        description=(
+    parser = create_validation_parser(
+        (
             "Enforce tier label consistency in Markdown files.  "
             "By default scans all *.md files in the repository."
         ),
@@ -330,12 +329,6 @@ def main() -> int:
         help="Directory to scan (default: repository root).",
     )
     parser.add_argument(
-        "--repo-root",
-        type=Path,
-        default=None,
-        help="Repository root to scan from (default: auto-detect via git).",
-    )
-    parser.add_argument(
         "--glob",
         default="**/*.md",
         help="Glob pattern to match Markdown files (default: **/*.md).",
@@ -354,14 +347,12 @@ def main() -> int:
         action="store_true",
         help="Print details for each mismatch found.",
     )
-    add_json_arg(parser)
-    add_version_arg(parser)
 
     args = parser.parse_args()
 
     # Resolve repository root.
     try:
-        repo_root = args.repo_root if args.repo_root is not None else get_repo_root()
+        repo_root = resolve_repo_root(args)
     except Exception as exc:
         print(f"ERROR: Could not determine repository root: {exc}", file=sys.stderr)
         return 2

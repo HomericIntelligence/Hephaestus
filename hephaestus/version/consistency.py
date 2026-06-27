@@ -23,16 +23,19 @@ Usage:
     hephaestus-bump-version {major,minor,patch} [--repo-root PATH] [--dry-run] [--verbose]
 """
 
-import argparse
 import re
 import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status, format_output
+from hephaestus.cli.utils import (
+    create_validation_parser,
+    emit_json_status,
+    format_output,
+    resolve_repo_root,
+)
 from hephaestus.io.toml import import_tomllib
-from hephaestus.utils.helpers import get_repo_root
 from hephaestus.version.manager import VersionManager, parse_version
 from hephaestus.version.parsing import parse_version_tuple
 
@@ -503,15 +506,9 @@ def check_version_consistency_main() -> int:
         Exit code (0 if consistent, 1 on mismatch).
 
     """
-    parser = argparse.ArgumentParser(
-        description="Detect version drift between pyproject.toml and pixi.toml",
+    parser = create_validation_parser(
+        "Detect version drift between pyproject.toml and pixi.toml",
         epilog="Example: %(prog)s --repo-root /path/to/repo --verbose",
-    )
-    parser.add_argument(
-        "--repo-root",
-        type=Path,
-        default=None,
-        help="Repository root directory (default: auto-detected from pyproject.toml)",
     )
     parser.add_argument(
         "--verbose",
@@ -519,10 +516,8 @@ def check_version_consistency_main() -> int:
         action="store_true",
         help="Print parsed versions even when they match",
     )
-    add_json_arg(parser)
-    add_version_arg(parser)
     args = parser.parse_args()
-    root = args.repo_root or get_repo_root()
+    root = resolve_repo_root(args)
     if args.json:
         canonical = _version_from_git_tag(root) or _version_from_metadata()
         pixi_version = _get_pixi_version(root)
@@ -544,15 +539,9 @@ def check_package_versions_main() -> int:
         Exit code (0 if all checks pass, 1 otherwise).
 
     """
-    parser = argparse.ArgumentParser(
-        description=("Enforce package version consistency across all version declaration sites"),
+    parser = create_validation_parser(
+        "Enforce package version consistency across all version declaration sites",
         epilog="Example: %(prog)s --scan-skills --verbose",
-    )
-    parser.add_argument(
-        "--repo-root",
-        type=Path,
-        default=None,
-        help="Repository root directory (default: auto-detected)",
     )
     parser.add_argument(
         "--package-init",
@@ -574,10 +563,8 @@ def check_package_versions_main() -> int:
         action="store_true",
         help="Print passing check names and canonical version",
     )
-    add_json_arg(parser)
-    add_version_arg(parser)
     args = parser.parse_args()
-    root = args.repo_root or get_repo_root()
+    root = resolve_repo_root(args)
     init_path: Path | None = args.package_init
     if init_path is not None and not init_path.is_absolute():
         init_path = root / init_path
@@ -613,20 +600,14 @@ def bump_version_main() -> int:
         Exit code (0 on success, 1 on failure).
 
     """
-    parser = argparse.ArgumentParser(
-        description=("Bump project version in pyproject.toml (and secondary files) atomically"),
+    parser = create_validation_parser(
+        "Bump project version in pyproject.toml (and secondary files) atomically",
         epilog="Example: %(prog)s patch --verbose",
     )
     parser.add_argument(
         "part",
         choices=["major", "minor", "patch"],
         help="Which version part to bump",
-    )
-    parser.add_argument(
-        "--repo-root",
-        type=Path,
-        default=None,
-        help="Repository root directory (default: auto-detected)",
     )
     parser.add_argument(
         "--dry-run",
@@ -639,10 +620,8 @@ def bump_version_main() -> int:
         action="store_true",
         help="Print additional details",
     )
-    add_json_arg(parser)
-    add_version_arg(parser)
     args = parser.parse_args()
-    root = args.repo_root or get_repo_root()
+    root = resolve_repo_root(args)
     if args.json:
         exit_code = bump_version(root, part=args.part, dry_run=args.dry_run, verbose=False)
         emit_json_status(

@@ -11,7 +11,6 @@ Usage::
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
 import sys
@@ -20,7 +19,7 @@ from typing import Any
 
 import yaml
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.cli.utils import create_validation_parser, emit_json_status, resolve_repo_root
 
 SchemaMapping = list[tuple[re.Pattern[str], Path]]
 
@@ -176,8 +175,8 @@ def main() -> int:
         Exit code (0 if clean or ``--dry-run``, 1 if violations found).
 
     """
-    parser = argparse.ArgumentParser(
-        description="Validate config files against their JSON schemas",
+    parser = create_validation_parser(
+        "Validate config files against their JSON schemas",
         epilog="Example: %(prog)s --schema-map schemas.json config/*.yaml",
     )
     parser.add_argument(
@@ -199,18 +198,10 @@ def main() -> int:
         help="Print passing file names",
     )
     parser.add_argument(
-        "--repo-root",
-        type=Path,
-        default=None,
-        help="Repository root (default: auto-detect)",
-    )
-    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print errors but exit 0",
     )
-    add_json_arg(parser)
-    add_version_arg(parser)
 
     args = parser.parse_args()
 
@@ -219,9 +210,7 @@ def main() -> int:
             emit_json_status(0, message="no files to validate", error_count=0)
         return 0
 
-    from hephaestus.utils.helpers import get_repo_root as _get_repo_root
-
-    repo_root = args.repo_root or _get_repo_root()
+    repo_root = resolve_repo_root(args)
 
     if args.schema_map is None:
         if args.json:

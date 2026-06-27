@@ -13,15 +13,13 @@ Usage::
 
 from __future__ import annotations
 
-import argparse
 import ast
 import json
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg
-from hephaestus.utils.helpers import get_repo_root
+from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 
 _CONTINUATION_STARTERS = frozenset(
     {
@@ -282,8 +280,8 @@ def main() -> int:
         Exit code (0 if no violations, 1 if violations found).
 
     """
-    parser = argparse.ArgumentParser(
-        description="Check Python docstrings for genuine sentence fragments",
+    parser = create_validation_parser(
+        "Check Python docstrings for genuine sentence fragments",
         epilog="Example: %(prog)s --directory mypackage/",
     )
     parser.add_argument(
@@ -293,21 +291,13 @@ def main() -> int:
         help="Directory to scan (default: auto-detect source package)",
     )
     parser.add_argument(
-        "--repo-root",
-        type=Path,
-        default=None,
-        help="Repository root (default: auto-detect)",
-    )
-    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print detailed output",
     )
-    add_json_arg(parser)
-    add_version_arg(parser)
 
     args = parser.parse_args()
-    repo_root = args.repo_root or get_repo_root()
+    repo_root = resolve_repo_root(args)
     directory = args.directory or repo_root
 
     findings = scan_directory(directory, repo_root)

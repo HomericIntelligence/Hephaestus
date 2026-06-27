@@ -19,12 +19,11 @@ Exit codes:
 
 from __future__ import annotations
 
-import argparse
 import subprocess
 import sys
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.cli.utils import create_validation_parser, emit_json_status
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
 # mypy flags that consume the next argument as their value.
@@ -140,13 +139,11 @@ def main() -> int:
         Aggregated exit code from all mypy runs.
 
     """
-    parser = argparse.ArgumentParser(
-        description="Run mypy on each file individually (avoids duplicate-module-name errors)",
+    parser = create_validation_parser(
+        "Run mypy on each file individually (avoids duplicate-module-name errors)",
+        include_repo_root=False,
         usage="%(prog)s [mypy-flags...] file1.py file2.py ...",
-        add_help=True,
     )
-    add_json_arg(parser)
-    add_version_arg(parser)
     # We parse just --help / -h / --json normally; all remaining args are passed through.
     parser.parse_known_args(sys.argv[1:])
 
