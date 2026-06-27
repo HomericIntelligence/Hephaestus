@@ -43,7 +43,8 @@ Codex. It provides:
 - Claude is invoked via `hephaestus.automation.claude_invoke.invoke_claude_with_session`.
 
 Per-agent timeouts are centralised in `hephaestus.automation.claude_timeouts`, all
-operator-tunable via `HEPH_*` environment variables.
+operator-tunable via explicit CLI flags on each automation command (e.g.,
+`--agent-timeout`, `--poll-max-wait`, `--git-message-timeout`, etc.).
 
 ## Prompt safety
 

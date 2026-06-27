@@ -697,9 +697,21 @@ def main() -> int:
                 system_prompt_file=args.system_prompt,
                 skip_closed=not args.no_skip_closed,
                 enable_advise=not args.no_advise,
-                agent_timeout=args.agent_timeout or DEFAULT_AGENT_TIMEOUT,
-                advise_timeout=args.advise_timeout or DEFAULT_AGENT_TIMEOUT,
-                git_message_timeout=args.git_message_timeout or DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
+                agent_timeout=(
+                    args.agent_timeout
+                    if args.agent_timeout is not None
+                    else DEFAULT_AGENT_TIMEOUT
+                ),
+                advise_timeout=(
+                    args.advise_timeout
+                    if args.advise_timeout is not None
+                    else DEFAULT_AGENT_TIMEOUT
+                ),
+                git_message_timeout=(
+                    args.git_message_timeout
+                    if args.git_message_timeout is not None
+                    else DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
+                ),
             )
 
             planner = Planner(options)

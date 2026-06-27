@@ -907,7 +907,11 @@ def main() -> int:
         max_workers=args.max_workers,
         dry_run=args.dry_run,
         enable_ui=not args.no_ui and not args.json,
-        agent_timeout=args.agent_timeout or DEFAULT_AGENT_TIMEOUT,
+        agent_timeout=(
+            args.agent_timeout
+            if args.agent_timeout is not None
+            else DEFAULT_AGENT_TIMEOUT
+        ),
     )
 
     with terminal_guard():
