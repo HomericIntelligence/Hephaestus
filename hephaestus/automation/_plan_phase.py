@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from hephaestus.github.client import gh_call
 
 from ._stage_context import StageMixin
-from .claude_timeouts import planner_claude_timeout
+from .claude_timeouts import plan_stage_timeout
 from .git_utils import run
 from .planner_state import _comments_contain_plan
 
@@ -57,17 +57,15 @@ class PlanPhase(StageMixin):
     def _generate(self, issue_number: int) -> None:
         """Generate plan for an issue using hephaestus-plan-issues.
 
-        The plan-issues subprocess is bounded by the centralized
-        :func:`hephaestus.automation.claude_timeouts.planner_claude_timeout`
-        (default 7200s, ``HEPH_PLANNER_AGENT_TIMEOUT``-tunable) rather than a
-        hard-coded 600s. A heavy god-class issue can exceed 600s of agent time
-        while still inside the planner's own 7200s budget; the old 600s wrapper
-        killed the subprocess prematurely and the loop retried the whole phase
-        with no backoff (#1374).
+        The plan-issues subprocess is bounded by a stage-level wrapper timeout
+        (default 7200s, ``HEPH_PLAN_STAGE_TIMEOUT``-tunable) instead of the
+        inner planner-agent timeout. A heavy god-class issue can exceed 600s of
+        total planner runtime while individual planner agent calls still use
+        their shorter ``AGENT_PLAN_TIMEOUT`` budget (#1374).
         """
         import shutil
 
-        plan_timeout = planner_claude_timeout()
+        plan_timeout = plan_stage_timeout()
 
         # Prefer the installed entry point (works in any repo)
         entry_point = shutil.which("hephaestus-plan-issues")

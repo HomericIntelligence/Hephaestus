@@ -71,6 +71,7 @@ from hephaestus.agents.runtime import (
 # Imports for the Test-Patch Contract — see module docstring for the full table.
 # Each symbol here is either a real call site in IssueImplementer/main or an
 # explicit re-export required by tests or the public API.
+from .claude_timeouts import AGENT_IMPL_TIMEOUT
 from .curses_ui import CursesUI, ThreadLogManager
 from .dependency_resolver import CyclicDependencyError, DependencyResolver
 
@@ -122,10 +123,11 @@ __all__ = [
 ]
 
 # Default implementation timeout in seconds. Actual runtime value is read from
-# ``HEPH_IMPLEMENTER_AGENT_TIMEOUT`` by
+# ``HEPH_AGENT_IMPL_TIMEOUT`` by
 # :func:`.claude_timeouts.implementer_claude_timeout`; this constant serves as
 # the documented default and can be used in tests.
-_CLAUDE_IMPL_TIMEOUT: int = 1800
+_CLAUDE_IMPL_TIMEOUT: int = AGENT_IMPL_TIMEOUT
+_FUTURE_POLL_INTERVAL_SECONDS: float = 1.0
 
 
 logger = logging.getLogger(__name__)
@@ -473,7 +475,11 @@ class IssueImplementer:
 
                 # Wait for at least one to complete
                 try:
-                    done, _pending = wait(futures.keys(), timeout=1.0, return_when=FIRST_COMPLETED)
+                    done, _pending = wait(
+                        futures.keys(),
+                        timeout=_FUTURE_POLL_INTERVAL_SECONDS,
+                        return_when=FIRST_COMPLETED,
+                    )
                 except Exception:  # broad catch: thread pool can raise various internal errors
                     # Timeout or error - check if we should continue
                     if not submitted_any and not futures:

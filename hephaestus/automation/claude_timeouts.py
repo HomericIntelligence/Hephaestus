@@ -16,7 +16,17 @@ from __future__ import annotations
 import logging
 import os
 
+from hephaestus.constants import (
+    AGENT_IMPL_TIMEOUT,
+    AGENT_LEARN_TIMEOUT,
+    AGENT_PLAN_TIMEOUT,
+    AGENT_REVIEW_TIMEOUT,
+    read_timeout_env,
+)
+
 logger = logging.getLogger(__name__)
+
+PLAN_STAGE_TIMEOUT = 7200
 
 
 def _read_int_env(name: str, default: int) -> int:
@@ -32,18 +42,39 @@ def _read_int_env(name: str, default: int) -> int:
 
 
 def planner_claude_timeout() -> int:
-    """Timeout for agent calls inside the planner (default 7200s)."""
-    return _read_int_env("HEPH_PLANNER_AGENT_TIMEOUT", 7200)
+    """Timeout for planner agent calls (default 300s)."""
+    return read_timeout_env(
+        "HEPH_AGENT_PLAN_TIMEOUT",
+        AGENT_PLAN_TIMEOUT,
+        legacy_names=("HEPH_PLANNER_AGENT_TIMEOUT",),
+    )
+
+
+def plan_stage_timeout() -> int:
+    """Timeout for the outer ``hephaestus-plan-issues`` stage (default 7200s)."""
+    return read_timeout_env(
+        "HEPH_PLAN_STAGE_TIMEOUT",
+        PLAN_STAGE_TIMEOUT,
+        legacy_names=("HEPH_PLANNER_AGENT_TIMEOUT",),
+    )
 
 
 def plan_reviewer_claude_timeout() -> int:
-    """Timeout for agent calls inside the plan reviewer (default 7200s)."""
-    return _read_int_env("HEPH_PLAN_REVIEWER_AGENT_TIMEOUT", 7200)
+    """Timeout for agent calls inside the plan reviewer (default 600s)."""
+    return read_timeout_env(
+        "HEPH_AGENT_REVIEW_TIMEOUT",
+        AGENT_REVIEW_TIMEOUT,
+        legacy_names=("HEPH_PLAN_REVIEWER_AGENT_TIMEOUT",),
+    )
 
 
 def implementer_claude_timeout() -> int:
-    """Timeout for the implementer's agent invocation (default 7200s)."""
-    return _read_int_env("HEPH_IMPLEMENTER_AGENT_TIMEOUT", 7200)
+    """Timeout for the implementer's agent invocation (default 1800s)."""
+    return read_timeout_env(
+        "HEPH_AGENT_IMPL_TIMEOUT",
+        AGENT_IMPL_TIMEOUT,
+        legacy_names=("HEPH_IMPLEMENTER_AGENT_TIMEOUT",),
+    )
 
 
 def advise_claude_timeout() -> int:
@@ -52,8 +83,12 @@ def advise_claude_timeout() -> int:
 
 
 def pr_reviewer_claude_timeout() -> int:
-    """Timeout for the PR reviewer's agent analysis (default 7200s)."""
-    return _read_int_env("HEPH_PR_REVIEWER_AGENT_TIMEOUT", 7200)
+    """Timeout for the PR reviewer's agent analysis (default 600s)."""
+    return read_timeout_env(
+        "HEPH_AGENT_REVIEW_TIMEOUT",
+        AGENT_REVIEW_TIMEOUT,
+        legacy_names=("HEPH_PR_REVIEWER_AGENT_TIMEOUT",),
+    )
 
 
 def address_review_claude_timeout() -> int:
@@ -67,8 +102,12 @@ def ci_driver_claude_timeout() -> int:
 
 
 def learn_claude_timeout() -> int:
-    """Timeout for ``/learn`` agent calls (default 7200s)."""
-    return _read_int_env("HEPH_LEARN_AGENT_TIMEOUT", 7200)
+    """Timeout for ``/learn`` agent calls (default 300s)."""
+    return read_timeout_env(
+        "HEPH_AGENT_LEARN_TIMEOUT",
+        AGENT_LEARN_TIMEOUT,
+        legacy_names=("HEPH_LEARN_AGENT_TIMEOUT",),
+    )
 
 
 def follow_up_claude_timeout() -> int:
@@ -86,6 +125,11 @@ def git_message_agent_timeout() -> int:
 from hephaestus.github.client import gh_cli_timeout  # noqa: E402
 
 __all__ = [
+    "AGENT_IMPL_TIMEOUT",
+    "AGENT_LEARN_TIMEOUT",
+    "AGENT_PLAN_TIMEOUT",
+    "AGENT_REVIEW_TIMEOUT",
+    "PLAN_STAGE_TIMEOUT",
     "address_review_claude_timeout",
     "advise_claude_timeout",
     "ci_driver_claude_timeout",
@@ -96,8 +140,10 @@ __all__ = [
     "implementer_claude_timeout",
     "learn_claude_timeout",
     "plan_reviewer_claude_timeout",
+    "plan_stage_timeout",
     "planner_claude_timeout",
     "pr_reviewer_claude_timeout",
+    "read_timeout_env",
 ]
 
 

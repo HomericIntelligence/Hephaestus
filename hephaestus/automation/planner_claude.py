@@ -22,6 +22,7 @@ from hephaestus.agents.runtime import (
 from hephaestus.github.rate_limit import wait_until
 
 from .claude_invoke import detect_server_overload, invoke_claude_with_session, scan_quota_reset
+from .claude_timeouts import planner_claude_timeout
 from .git_utils import get_repo_root, get_repo_slug
 
 if TYPE_CHECKING:
@@ -65,7 +66,7 @@ class PlannerClaudeRunner:
         agent: str,
         issue_number: int | str,
         max_retries: int = 3,
-        timeout: int = 300,
+        timeout: int | None = None,
         extra_args: list[str] | None = None,
     ) -> str:
         """Call Claude CLI on a deterministic session with rate-limit retry.
@@ -94,6 +95,7 @@ class PlannerClaudeRunner:
             RuntimeError: If Claude call fails.
 
         """
+        timeout_s = planner_claude_timeout() if timeout is None else timeout
         if uses_direct_agent_runner(self.options.agent):
             return self.call_direct_agent(
                 prompt,
@@ -103,7 +105,7 @@ class PlannerClaudeRunner:
                     codex_default=model,
                 ),
                 max_retries=max_retries,
-                timeout=timeout,
+                timeout=timeout_s,
             )
 
         repo_root = get_repo_root()
@@ -117,7 +119,7 @@ class PlannerClaudeRunner:
                 prompt=prompt,
                 model=model,
                 cwd=repo_root,
-                timeout=timeout,
+                timeout=timeout_s,
                 system_prompt_file=self.options.system_prompt_file,
                 allowed_tools="Read,Glob,Grep,Bash",
                 extra_args=extra_args,
@@ -147,7 +149,7 @@ class PlannerClaudeRunner:
                     agent=agent,
                     issue_number=issue_number,
                     max_retries=max_retries - 1,
-                    timeout=timeout,
+                    timeout=timeout_s,
                     extra_args=extra_args,
                 )
 
@@ -173,7 +175,7 @@ class PlannerClaudeRunner:
                     agent=agent,
                     issue_number=issue_number,
                     max_retries=max_retries - 1,
-                    timeout=timeout,
+                    timeout=timeout_s,
                     extra_args=extra_args,
                 )
 
@@ -181,7 +183,7 @@ class PlannerClaudeRunner:
             raise RuntimeError(f"Claude failed: {detail}") from e
 
         except subprocess.TimeoutExpired as e:
-            raise RuntimeError(f"Claude timed out after {timeout}s") from e
+            raise RuntimeError(f"Claude timed out after {timeout_s}s") from e
 
     def call_direct_agent(
         self,
@@ -189,17 +191,18 @@ class PlannerClaudeRunner:
         *,
         model: str,
         max_retries: int = 3,
-        timeout: int = 300,
+        timeout: int | None = None,
         sandbox: str = "workspace-write",
     ) -> str:
         """Call a non-Claude direct agent with retry logic for rate limits."""
         agent = self.options.agent
+        timeout_s = planner_claude_timeout() if timeout is None else timeout
         try:
             result = run_agent_text(
                 agent=agent,
                 prompt=prompt,
                 cwd=get_repo_root(),
-                timeout=timeout,
+                timeout=timeout_s,
                 model=model,
                 sandbox=sandbox,
             )
@@ -214,13 +217,13 @@ class PlannerClaudeRunner:
                     prompt,
                     model=model,
                     max_retries=max_retries - 1,
-                    timeout=timeout,
+                    timeout=timeout_s,
                     sandbox=sandbox,
                 )
             detail = stderr or stdout or str(e)
             raise RuntimeError(f"{agent} failed: {detail}") from e
         except subprocess.TimeoutExpired as e:
-            raise RuntimeError(f"{agent} timed out after {timeout}s") from e
+            raise RuntimeError(f"{agent} timed out after {timeout_s}s") from e
 
         response = (result.stdout or "").strip()
         if not response:

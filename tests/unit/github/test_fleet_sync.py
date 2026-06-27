@@ -483,6 +483,18 @@ class TestTimeoutHandling:
             assert "timeout" in call_kwargs
             assert call_kwargs["timeout"] == fleet_sync_module.NETWORK_TIMEOUT
 
+    def test_conflict_agent_uses_env_configured_rebase_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Direct fleet conflict agents use the centralized rebase timeout."""
+        monkeypatch.setenv("HEPH_AGENT_REBASE_TIMEOUT", "1234")
+        with patch("hephaestus.github.fleet_sync.run_agent_text") as run_agent:
+            run_agent.return_value = MagicMock(stdout="resolved")
+
+            assert fleet_sync_module._run_conflict_agent("codex", "prompt", Path("/repo"), 7)
+
+        assert run_agent.call_args.kwargs["timeout"] == 1234
+
 
 def _pr(number: int, status: PRStatus, head: str = "feat") -> PRInfo:
     """Build a minimal PRInfo for the given number/status."""

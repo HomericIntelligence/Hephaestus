@@ -393,3 +393,15 @@ class TestTimeoutHandling:
             call_kwargs = mock_run.call_args[1]
             assert "timeout" in call_kwargs
             assert call_kwargs["timeout"] == tidy_module.METADATA_TIMEOUT
+
+    def test_direct_rebase_agent_uses_env_configured_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Direct tidy conflict agents use the centralized rebase timeout."""
+        monkeypatch.setenv("HEPH_AGENT_REBASE_TIMEOUT", "1234")
+        with patch("hephaestus.github.tidy.run_agent_text") as run_agent:
+            run_agent.return_value = MagicMock(stdout="rebased")
+
+            tidy_module._run_direct_rebase_agent("codex", "prompt", "feature/a", Path("/repo"))
+
+        assert run_agent.call_args.kwargs["timeout"] == 1234

@@ -13,37 +13,84 @@ TWO_HOURS_S = 7200
 
 
 def _clear_planner_timeout_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HEPH_AGENT_PLAN_TIMEOUT", raising=False)
     monkeypatch.delenv("HEPH_PLANNER_AGENT_TIMEOUT", raising=False)
     monkeypatch.delenv("HEPH_PLANNER_CLAUDE_TIMEOUT", raising=False)
+
+
+def _clear_plan_stage_timeout_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HEPH_AGENT_PLAN_TIMEOUT", raising=False)
+    monkeypatch.delenv("HEPH_PLAN_STAGE_TIMEOUT", raising=False)
+    monkeypatch.delenv("HEPH_PLANNER_AGENT_TIMEOUT", raising=False)
 
 
 def test_planner_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Planner timeout uses the documented default when unset."""
     _clear_planner_timeout_env(monkeypatch)
 
-    assert claude_timeouts.planner_claude_timeout() == TWO_HOURS_S
+    assert claude_timeouts.planner_claude_timeout() == 300
+
+
+def test_plan_stage_timeout_default_stays_long(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The outer plan stage keeps its historical long wrapper timeout."""
+    _clear_plan_stage_timeout_env(monkeypatch)
+
+    assert claude_timeouts.plan_stage_timeout() == TWO_HOURS_S
+
+
+def test_plan_stage_timeout_ignores_inner_agent_plan_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HEPH_AGENT_PLAN_TIMEOUT only controls planner agent calls, not the stage."""
+    _clear_plan_stage_timeout_env(monkeypatch)
+    monkeypatch.setenv("HEPH_AGENT_PLAN_TIMEOUT", "333")
+
+    assert claude_timeouts.plan_stage_timeout() == TWO_HOURS_S
+    assert claude_timeouts.planner_claude_timeout() == 333
+
+
+def test_plan_stage_timeout_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HEPH_PLAN_STAGE_TIMEOUT tunes the outer plan-stage wrapper."""
+    _clear_plan_stage_timeout_env(monkeypatch)
+    monkeypatch.setenv("HEPH_PLAN_STAGE_TIMEOUT", "9000")
+
+    assert claude_timeouts.plan_stage_timeout() == 9000
+
+
+def test_plan_stage_timeout_legacy_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The old planner-specific env name still tunes the wrapper for compatibility."""
+    _clear_plan_stage_timeout_env(monkeypatch)
+    monkeypatch.setenv("HEPH_PLANNER_AGENT_TIMEOUT", "9000")
+
+    assert claude_timeouts.plan_stage_timeout() == 9000
 
 
 @pytest.mark.parametrize(
-    ("generic_env", "legacy_env", "timeout_fn", "default"),
+    ("primary_env", "claude_env", "timeout_fn", "default"),
     [
         (
-            "HEPH_PLANNER_AGENT_TIMEOUT",
+            "HEPH_AGENT_PLAN_TIMEOUT",
             "HEPH_PLANNER_CLAUDE_TIMEOUT",
             claude_timeouts.planner_claude_timeout,
-            TWO_HOURS_S,
+            300,
         ),
         (
-            "HEPH_PLAN_REVIEWER_AGENT_TIMEOUT",
+            "HEPH_AGENT_REVIEW_TIMEOUT",
             "HEPH_PLAN_REVIEWER_CLAUDE_TIMEOUT",
             claude_timeouts.plan_reviewer_claude_timeout,
-            TWO_HOURS_S,
+            600,
         ),
         (
-            "HEPH_IMPLEMENTER_AGENT_TIMEOUT",
+            "HEPH_AGENT_IMPL_TIMEOUT",
             "HEPH_IMPLEMENTER_CLAUDE_TIMEOUT",
             claude_timeouts.implementer_claude_timeout,
-            TWO_HOURS_S,
+            1800,
         ),
         (
             "HEPH_ADVISE_AGENT_TIMEOUT",
@@ -52,10 +99,10 @@ def test_planner_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
             TWO_HOURS_S,
         ),
         (
-            "HEPH_PR_REVIEWER_AGENT_TIMEOUT",
+            "HEPH_AGENT_REVIEW_TIMEOUT",
             "HEPH_PR_REVIEWER_CLAUDE_TIMEOUT",
             claude_timeouts.pr_reviewer_claude_timeout,
-            TWO_HOURS_S,
+            600,
         ),
         (
             "HEPH_ADDRESS_REVIEW_AGENT_TIMEOUT",
@@ -70,10 +117,10 @@ def test_planner_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
             TWO_HOURS_S,
         ),
         (
-            "HEPH_LEARN_AGENT_TIMEOUT",
+            "HEPH_AGENT_LEARN_TIMEOUT",
             "HEPH_LEARN_CLAUDE_TIMEOUT",
             claude_timeouts.learn_claude_timeout,
-            TWO_HOURS_S,
+            300,
         ),
         (
             "HEPH_FOLLOW_UP_AGENT_TIMEOUT",
@@ -91,25 +138,93 @@ def test_planner_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
 )
 def test_legacy_claude_timeout_envs_are_ignored(
     monkeypatch: pytest.MonkeyPatch,
-    generic_env: str,
-    legacy_env: str,
+    primary_env: str,
+    claude_env: str,
     timeout_fn: Callable[[], int],
     default: int,
 ) -> None:
     """Legacy Claude-named timeout env vars are no longer supported."""
-    monkeypatch.delenv(generic_env, raising=False)
-    monkeypatch.setenv(legacy_env, "444")
+    monkeypatch.delenv(primary_env, raising=False)
+    monkeypatch.setenv(claude_env, "444")
 
     assert timeout_fn() == default
 
 
-def test_planner_timeout_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Generic agent timeout env vars tune planner calls."""
+@pytest.mark.parametrize(
+    ("primary_env", "timeout_fn"),
+    [
+        ("HEPH_AGENT_PLAN_TIMEOUT", claude_timeouts.planner_claude_timeout),
+        ("HEPH_AGENT_REVIEW_TIMEOUT", claude_timeouts.plan_reviewer_claude_timeout),
+        ("HEPH_AGENT_IMPL_TIMEOUT", claude_timeouts.implementer_claude_timeout),
+        ("HEPH_AGENT_REVIEW_TIMEOUT", claude_timeouts.pr_reviewer_claude_timeout),
+        ("HEPH_AGENT_LEARN_TIMEOUT", claude_timeouts.learn_claude_timeout),
+    ],
+)
+def test_agent_timeout_envs_are_read_per_call(
+    monkeypatch: pytest.MonkeyPatch,
+    primary_env: str,
+    timeout_fn: Callable[[], int],
+) -> None:
+    """New generic agent timeout env vars are read on every function call."""
+    monkeypatch.setenv(primary_env, "333")
+    assert timeout_fn() == 333
+
+    monkeypatch.setenv(primary_env, "444")
+    assert timeout_fn() == 444
+
+
+@pytest.mark.parametrize(
+    ("primary_env", "legacy_env", "timeout_fn"),
+    [
+        (
+            "HEPH_AGENT_PLAN_TIMEOUT",
+            "HEPH_PLANNER_AGENT_TIMEOUT",
+            claude_timeouts.planner_claude_timeout,
+        ),
+        (
+            "HEPH_AGENT_REVIEW_TIMEOUT",
+            "HEPH_PLAN_REVIEWER_AGENT_TIMEOUT",
+            claude_timeouts.plan_reviewer_claude_timeout,
+        ),
+        (
+            "HEPH_AGENT_IMPL_TIMEOUT",
+            "HEPH_IMPLEMENTER_AGENT_TIMEOUT",
+            claude_timeouts.implementer_claude_timeout,
+        ),
+        (
+            "HEPH_AGENT_REVIEW_TIMEOUT",
+            "HEPH_PR_REVIEWER_AGENT_TIMEOUT",
+            claude_timeouts.pr_reviewer_claude_timeout,
+        ),
+        (
+            "HEPH_AGENT_LEARN_TIMEOUT",
+            "HEPH_LEARN_AGENT_TIMEOUT",
+            claude_timeouts.learn_claude_timeout,
+        ),
+    ],
+)
+def test_phase_specific_agent_envs_are_legacy_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+    primary_env: str,
+    legacy_env: str,
+    timeout_fn: Callable[[], int],
+) -> None:
+    """Old phase-specific HEPH_*_AGENT_TIMEOUT names remain supported."""
+    monkeypatch.delenv(primary_env, raising=False)
+    monkeypatch.setenv(legacy_env, "555")
+
+    assert timeout_fn() == 555
+
+
+def test_planner_timeout_primary_env_wins_over_legacy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The new HEPH_AGENT_PLAN_TIMEOUT wins over the old planner-specific name."""
     _clear_planner_timeout_env(monkeypatch)
-    monkeypatch.setenv("HEPH_PLANNER_CLAUDE_TIMEOUT", "444")
+    monkeypatch.setenv("HEPH_AGENT_PLAN_TIMEOUT", "444")
     monkeypatch.setenv("HEPH_PLANNER_AGENT_TIMEOUT", "555")
 
-    assert claude_timeouts.planner_claude_timeout() == 555
+    assert claude_timeouts.planner_claude_timeout() == 444
 
 
 def test_planner_timeout_invalid_agent_env_logs_and_defaults(
@@ -118,12 +233,12 @@ def test_planner_timeout_invalid_agent_env_logs_and_defaults(
 ) -> None:
     """Malformed timeout values warn and fall back to the default."""
     _clear_planner_timeout_env(monkeypatch)
-    monkeypatch.setenv("HEPH_PLANNER_AGENT_TIMEOUT", "slow")
+    monkeypatch.setenv("HEPH_AGENT_PLAN_TIMEOUT", "slow")
 
-    with caplog.at_level(logging.WARNING, logger="hephaestus.automation.claude_timeouts"):
-        assert claude_timeouts.planner_claude_timeout() == TWO_HOURS_S
+    with caplog.at_level(logging.WARNING, logger="hephaestus.constants"):
+        assert claude_timeouts.planner_claude_timeout() == 300
 
-    assert any("HEPH_PLANNER_AGENT_TIMEOUT" in record.message for record in caplog.records)
+    assert any("HEPH_AGENT_PLAN_TIMEOUT" in record.message for record in caplog.records)
 
 
 def test_advise_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:

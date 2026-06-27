@@ -4,6 +4,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pytest
+
 from hephaestus.automation.learn import compact_session
 from hephaestus.automation.session_naming import AGENT_CI_DRIVER, session_uuid
 
@@ -95,6 +97,18 @@ class TestCompactSession:
             compact_session("test-repo", 42, AGENT_CI_DRIVER, tmp_path)
 
             assert mock_run.call_args[1]["timeout"] == 300
+
+    def test_compact_session_uses_env_configured_learn_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The default compact timeout is read from HEPH_AGENT_LEARN_TIMEOUT per call."""
+        monkeypatch.setenv("HEPH_AGENT_LEARN_TIMEOUT", "333")
+        with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0, stderr="")
+
+            compact_session("test-repo", 42, AGENT_CI_DRIVER, tmp_path)
+
+            assert mock_run.call_args[1]["timeout"] == 333
 
     def test_compact_failure_returns_false_on_timeout(self, tmp_path: Path) -> None:
         """Verify compact_session returns False on timeout (non-fatal)."""

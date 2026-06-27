@@ -100,3 +100,68 @@ def test_scripts_dir_matches_repo_root(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HEPHAESTUS_REPO_ROOT", raising=False)
     assert constants.scripts_dir() == constants.repo_root() / "scripts"
     assert constants.scripts_dir().is_dir()
+
+
+@pytest.mark.parametrize(
+    ("constant_name", "value"),
+    [
+        ("AGENT_IMPL_TIMEOUT", 1800),
+        ("AGENT_REVIEW_TIMEOUT", 600),
+        ("AGENT_PLAN_TIMEOUT", 300),
+        ("AGENT_LEARN_TIMEOUT", 300),
+        ("AGENT_GIT_TIMEOUT", 30),
+        ("AGENT_CLONE_TIMEOUT", 120),
+        ("AGENT_AUTH_STATUS_TIMEOUT", 10),
+        ("AGENT_REBASE_TIMEOUT", 2400),
+        ("DIFF_COLLECT_TIMEOUT", 60),
+        ("PRE_PR_TEST_TIMEOUT", 600),
+    ],
+)
+def test_agent_timeout_defaults_are_importable(constant_name: str, value: int) -> None:
+    """Agent timeout defaults are named constants in the library layer."""
+    assert getattr(constants, constant_name) == value
+
+
+def test_read_timeout_env_reads_primary_env_per_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timeout env helpers re-read env vars every call instead of caching at import."""
+    monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", "41")
+    assert constants.agent_git_timeout() == 41
+
+    monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", "42")
+    assert constants.agent_git_timeout() == 42
+
+
+def test_read_timeout_env_supports_legacy_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Callers can preserve old phase-specific env names while using new defaults."""
+    monkeypatch.delenv("HEPH_AGENT_PLAN_TIMEOUT", raising=False)
+    monkeypatch.setenv("HEPH_PLANNER_AGENT_TIMEOUT", "901")
+
+    assert (
+        constants.read_timeout_env(
+            "HEPH_AGENT_PLAN_TIMEOUT",
+            constants.AGENT_PLAN_TIMEOUT,
+            legacy_names=("HEPH_PLANNER_AGENT_TIMEOUT",),
+        )
+        == 901
+    )
+
+
+def test_read_timeout_env_prefers_primary_over_legacy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The new generic env name wins when both primary and legacy names are set."""
+    monkeypatch.setenv("HEPH_AGENT_PLAN_TIMEOUT", "301")
+    monkeypatch.setenv("HEPH_PLANNER_AGENT_TIMEOUT", "901")
+
+    assert (
+        constants.read_timeout_env(
+            "HEPH_AGENT_PLAN_TIMEOUT",
+            constants.AGENT_PLAN_TIMEOUT,
+            legacy_names=("HEPH_PLANNER_AGENT_TIMEOUT",),
+        )
+        == 301
+    )

@@ -797,6 +797,25 @@ class TestRunPlanReview:
         # Each iteration is a distinct session token.
         assert len(set(captured)) == 3
 
+    def test_review_uses_env_configured_review_timeout(
+        self, planner: Planner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Plan-review calls use the centralized review timeout, not the plan timeout."""
+        monkeypatch.setenv("HEPH_AGENT_PLAN_TIMEOUT", "333")
+        monkeypatch.setenv("HEPH_AGENT_REVIEW_TIMEOUT", "777")
+        with patch.object(planner, "_call_claude", return_value=_go_review()) as mock_call:
+            planner._run_plan_review(
+                issue_number=1,
+                issue_title="t",
+                issue_body="b",
+                plan_text="p",
+                learnings="",
+                iteration=0,
+                prior_review=None,
+            )
+
+        assert mock_call.call_args.kwargs["timeout"] == 777
+
 
 class TestPostPlanWithReview:
     """The final plan comment must be UPSERTED and include the final-review block.

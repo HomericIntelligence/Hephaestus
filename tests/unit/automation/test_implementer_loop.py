@@ -1351,6 +1351,67 @@ class TestRunImplReviewFailsSafe:
         assert verdict.is_error is True
         assert "Verdict: NOGO" not in out
 
+    def test_direct_reviewer_uses_env_configured_review_timeout(
+        self, implementer: IssueImplementer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Direct-agent implementation reviews use the centralized review timeout."""
+        monkeypatch.setenv("HEPH_AGENT_REVIEW_TIMEOUT", "777")
+        implementer.options.agent = "codex"
+
+        with (
+            patch("hephaestus.automation._review_phase.run_agent_text") as run_agent,
+            patch(
+                "hephaestus.automation._review_phase.direct_agent_model",
+                return_value="review-model",
+            ),
+        ):
+            run_agent.return_value = subprocess.CompletedProcess(
+                ["codex"], 0, stdout="Grade: A\nVerdict: GO\n", stderr=""
+            )
+
+            out = implementer._run_impl_review(
+                issue_number=1,
+                issue_title="t",
+                issue_body="b",
+                diff_text="d",
+                files_changed="f",
+                iteration=0,
+                prior_review=None,
+            )
+
+        assert "Verdict: GO" in out
+        assert run_agent.call_args.kwargs["timeout"] == 777
+
+    def test_collect_diff_uses_env_configured_timeout(
+        self, implementer: IssueImplementer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Diff collection uses the centralized diff timeout helper."""
+        monkeypatch.setenv("HEPH_DIFF_COLLECT_TIMEOUT", "88")
+        with patch("hephaestus.automation._review_phase.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                ["git", "diff"], 0, stdout="diff --git a/x b/x\n", stderr=""
+            )
+
+            assert implementer._collect_diff(tmp_path, "branch") == "diff --git a/x b/x\n"
+
+        assert mock_run.call_args.kwargs["timeout"] == 88
+
+    def test_collect_changed_files_uses_env_configured_git_timeout(
+        self, implementer: IssueImplementer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Changed-file collection uses the centralized agent git timeout helper."""
+        monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", "99")
+        with patch("hephaestus.automation._review_phase.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                ["git", "diff"], 0, stdout="hephaestus/constants.py\n", stderr=""
+            )
+
+            assert implementer._collect_changed_files(tmp_path, "branch") == (
+                "hephaestus/constants.py"
+            )
+
+        assert mock_run.call_args.kwargs["timeout"] == 99
+
 
 class TestResumeImplWithFeedback:
     """Resume routes through invoke_claude_with_session.
