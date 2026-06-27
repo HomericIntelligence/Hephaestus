@@ -29,7 +29,7 @@ from hephaestus.agents.runtime import (
     uses_direct_agent_runner,
 )
 
-from ._review_utils import parse_json_block
+from ._review_utils import log_file_path, parse_json_block
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import HAIKU, OPUS, SONNET, advise_model
 from .claude_timeouts import advise_claude_timeout
@@ -121,7 +121,7 @@ def _run_classifier_session(
         issue_number=issue_number,
         comments_json=comments_json,
     )
-    log_file = state_dir / f"comment-difficulty-{issue_number}.log"
+    log_file = log_file_path(state_dir, "comment-difficulty", issue_number)
     try:
         if uses_direct_agent_runner(agent):
             result = run_agent_text(

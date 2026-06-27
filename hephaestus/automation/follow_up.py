@@ -40,6 +40,7 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 
+from ._review_utils import log_file_path
 from .claude_timeouts import follow_up_claude_timeout
 from .git_utils import issue_ref, run
 from .github_api import gh_issue_comment, gh_issue_create
@@ -401,7 +402,7 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
     - In ``dry_run`` mode, all GitHub side effects are suppressed.
     """
     state_dir.mkdir(parents=True, exist_ok=True)
-    follow_up_log = state_dir / f"follow-up-{issue_number}.log"
+    follow_up_log = log_file_path(state_dir, "follow-up", issue_number)
     if not session_agent_matches(session_agent, agent):
         message = (
             f"Session belongs to {session_agent or 'claude'}, "

@@ -22,6 +22,7 @@ Provides:
   the reviewer classes (#599 dedupe).
 - ``load_impl_session_id``: Shared implementer-session state loader for
   drive-green and address-review.
+- ``log_file_path``: Standard per-issue automation log filename builder.
 """
 
 from __future__ import annotations
@@ -331,6 +332,20 @@ def instance_log(
     prefix = {"error": "ERROR", "warning": "WARN", "info": ""}.get(level, "")
     ui_msg = f"{prefix}: {msg}" if prefix else msg
     log_manager.log(tid, ui_msg)
+
+
+def log_file_path(
+    state_dir: Path,
+    prefix: str,
+    issue_number: int,
+    *,
+    iteration: int | None = None,
+) -> Path:
+    """Return the standard per-issue automation log path."""
+    stem = f"{prefix}-{issue_number}"
+    if iteration is not None:
+        stem = f"{stem}-r{iteration}"
+    return state_dir / f"{stem}.log"
 
 
 def _copy_default(default: Mapping[str, Any]) -> dict[str, Any]:

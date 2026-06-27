@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from ._review_utils import ensure_state_dir
+from ._review_utils import ensure_state_dir, log_file_path
 from .claude_invoke import INFRA_ERROR_REVIEW_TEXT, parse_review_verdict
 from .claude_models import planner_model, reviewer_model
 from .claude_timeouts import (
@@ -647,7 +647,7 @@ class PlanReviewLoop:
             timestamp = datetime.now(timezone.utc).isoformat()
             duration = round(time.monotonic() - start, 3) if start else None
             record_file = state_dir / f"planner-learn-{issue_number}.json"
-            log_file = state_dir / f"planner-learn-{issue_number}.log"
+            log_file = log_file_path(state_dir, "planner-learn", issue_number)
             record = {
                 "issue_number": issue_number,
                 "learn_attempted_at": timestamp,

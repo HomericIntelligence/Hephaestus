@@ -25,6 +25,7 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 
+from ._review_utils import log_file_path
 from .claude_models import learn_model
 from .claude_timeouts import learn_claude_timeout
 from .git_utils import run
@@ -208,7 +209,7 @@ def run_learn(
 
     """
     state_dir.mkdir(parents=True, exist_ok=True)
-    log_file = state_dir / f"learn-{issue_number}.log"
+    log_file = log_file_path(state_dir, "learn", issue_number)
     if not session_agent_matches(session_agent, agent):
         message = (
             f"Session belongs to {session_agent or 'claude'}, "
@@ -363,7 +364,7 @@ def learn_needs_rerun(issue_number: int, state_dir: Path) -> bool:
         True if learn needs to be re-run (missing or failed log)
 
     """
-    log_file = state_dir / f"learn-{issue_number}.log"
+    log_file = log_file_path(state_dir, "learn", issue_number)
     if not log_file.exists():
         return True
     try:

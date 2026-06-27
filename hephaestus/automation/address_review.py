@@ -42,6 +42,7 @@ from ._review_utils import (
     find_pr_for_issue,
     instance_log,
     load_impl_session_id,
+    log_file_path,
     print_worker_summary,
     setup_review_logging,
 )
@@ -849,7 +850,7 @@ class AddressReviewer(BaseReviewer):
             Parsed dict with "addressed" and "replies" keys
 
         """
-        log_file = self.state_dir / f"address-review-{issue_number}.log"
+        log_file = log_file_path(self.state_dir, "address-review", issue_number)
 
         def parse_with_trace(text: str) -> dict[str, Any]:
             return _review_utils.parse_json_block(

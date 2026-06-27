@@ -27,6 +27,7 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.github.rate_limit import wait_until
 
+from ._review_utils import log_file_path
 from ._stage_context import StageMixin
 from .advise_runner import run_advise
 from .claude_invoke import invoke_claude_with_session
@@ -190,7 +191,7 @@ class ImplementPhase(StageMixin):
                 # silently logging a useless session_id.
                 if isinstance(data, dict) and data.get("is_error"):
                     err_text = str(data.get("result") or "")
-                    log_file = self.state_dir / f"claude-{issue_number}.log"
+                    log_file = log_file_path(self.state_dir, "claude", issue_number)
                     log_file.write_text(result.stdout or "")
                     reset_epoch = _claude_quota_reset_epoch(err_text)
                     if reset_epoch is not None and reset_epoch > 0:
@@ -203,7 +204,7 @@ class ImplementPhase(StageMixin):
                 session_id = data.get("session_id")
 
                 # Save successful output to log file
-                log_file = self.state_dir / f"claude-{issue_number}.log"
+                log_file = log_file_path(self.state_dir, "claude", issue_number)
                 log_file.write_text(result.stdout or "")
 
                 return cast("str | None", session_id)
@@ -212,7 +213,7 @@ class ImplementPhase(StageMixin):
                 logger.debug("Claude stdout: %s", result.stdout[:500])
 
                 # Save output even if JSON parsing failed
-                log_file = self.state_dir / f"claude-{issue_number}.log"
+                log_file = log_file_path(self.state_dir, "claude", issue_number)
                 log_file.write_text(result.stdout or "")
 
                 return None
@@ -225,7 +226,7 @@ class ImplementPhase(StageMixin):
                 logger.error("Stderr: %s", e.stderr[:1000])
 
             # Save failure output to log file
-            log_file = self.state_dir / f"claude-{issue_number}.log"
+            log_file = log_file_path(self.state_dir, "claude", issue_number)
             stdout = e.stdout or ""
             stderr = e.stderr or ""
             output = f"EXIT CODE: {e.returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
@@ -244,7 +245,7 @@ class ImplementPhase(StageMixin):
             raise RuntimeError(f"Claude Code failed: {e.stderr or e.stdout}") from e
         except subprocess.TimeoutExpired as e:
             # Save timeout info to log file
-            log_file = self.state_dir / f"claude-{issue_number}.log"
+            log_file = log_file_path(self.state_dir, "claude", issue_number)
             log_file.write_text(f"TIMEOUT after {e.timeout}s\n\nOutput:\n{e.output or ''}")
 
             raise RuntimeError("Claude Code timed out") from e
@@ -262,7 +263,7 @@ class ImplementPhase(StageMixin):
     ) -> str | None:
         """Run a direct-runner implementation prompt in a worktree."""
         agent = self.options.agent
-        log_file = self.state_dir / f"{agent}-{issue_number}.log"
+        log_file = log_file_path(self.state_dir, agent, issue_number)
         try:
             result = run_agent_session(
                 agent=agent,

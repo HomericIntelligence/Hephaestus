@@ -45,6 +45,7 @@ from ._review_utils import (
     build_review_parser,
     find_pr_for_issue,
     instance_log,
+    log_file_path,
     print_worker_summary,
     setup_review_logging,
 )
@@ -123,7 +124,7 @@ def run_pr_review_analysis(
     prompt_file = worktree_path / f".claude-pr-review-{issue_number}.md"
     prompt_file.write_text(prompt)
 
-    log_file = state_dir / f"pr-review-analysis-{issue_number}.log"
+    log_file = log_file_path(state_dir, "pr-review-analysis", issue_number)
 
     try:
         if uses_direct_agent_runner(agent):

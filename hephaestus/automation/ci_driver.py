@@ -38,6 +38,7 @@ from ._review_utils import (
     ensure_state_dir,
     find_pr_for_issue,
     load_impl_session_id,
+    log_file_path,
     parse_json_block,
     print_worker_summary,
 )
@@ -1080,7 +1081,7 @@ class CIDriver:
         if pre_agent_sha is None:
             return False
 
-        log_file = self.state_dir / f"address-review-blocked-{issue_number}.log"
+        log_file = log_file_path(self.state_dir, "address-review-blocked", issue_number)
         try:
             fix_result = run_address_fix_session(
                 issue_number=issue_number,

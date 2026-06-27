@@ -18,10 +18,32 @@ from hephaestus.automation._review_utils import (
     find_pr_for_issue,
     get_pr_head_branch,
     load_impl_session_id,
+    log_file_path,
     parse_json_block,
     print_worker_summary,
 )
 from hephaestus.automation.models import DEFAULT_WORKER_COUNT, WorkerResult
+
+# ---------------------------------------------------------------------------
+# log_file_path
+# ---------------------------------------------------------------------------
+
+
+class TestLogFilePath:
+    """Tests for standard per-issue automation log paths."""
+
+    def test_without_iteration(self, tmp_path: Path) -> None:
+        assert log_file_path(tmp_path, "learn", 42) == tmp_path / "learn-42.log"
+
+    def test_with_iteration(self, tmp_path: Path) -> None:
+        assert log_file_path(tmp_path, "review", 42, iteration=3) == tmp_path / "review-42-r3.log"
+
+    def test_prefix_can_include_hyphen(self, tmp_path: Path) -> None:
+        assert (
+            log_file_path(tmp_path, "pr-review-analysis", 42)
+            == tmp_path / "pr-review-analysis-42.log"
+        )
+
 
 # ---------------------------------------------------------------------------
 # parse_json_block

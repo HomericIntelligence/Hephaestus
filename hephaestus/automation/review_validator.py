@@ -41,7 +41,7 @@ from hephaestus.agents.runtime import (
     uses_direct_agent_runner,
 )
 
-from ._review_utils import parse_json_block
+from ._review_utils import log_file_path, parse_json_block
 from .claude_invoke import invoke_claude_with_session, raise_for_error_envelope
 from .claude_models import reviewer_model
 from .claude_timeouts import pr_reviewer_claude_timeout
@@ -175,7 +175,7 @@ def _run_validation_session(
         prior_comments_json=prior_comments_json,
         diff_text=diff_text,
     )
-    log_file = state_dir / f"review-validation-{issue_number}.log"
+    log_file = log_file_path(state_dir, "review-validation", issue_number)
     try:
         if uses_direct_agent_runner(agent):
             result = run_agent_text(
