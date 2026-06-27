@@ -31,7 +31,7 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 
-from ._review_utils import build_automation_parser
+from ._review_utils import build_automation_parser, ensure_state_dir
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import reviewer_model
 from .claude_timeouts import pr_reviewer_claude_timeout
@@ -203,7 +203,7 @@ class AuditReviewer:
     def __post_init__(self) -> None:
         """Set default state_dir if not provided."""
         if self.state_dir is None:
-            self.state_dir = get_repo_root() / "build" / ".issue_implementer"
+            self.state_dir = ensure_state_dir(get_repo_root())
 
     def run(self) -> tuple[int, list[dict[str, Any]]]:
         """Run the coordinator audit and post a summary review per PR."""

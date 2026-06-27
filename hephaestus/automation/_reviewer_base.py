@@ -20,7 +20,7 @@ from typing import Any
 
 from hephaestus.io.utils import write_secure
 
-from ._review_utils import instance_log
+from ._review_utils import ensure_state_dir, instance_log
 from .curses_ui import CursesUI, ThreadLogManager
 from .git_utils import get_repo_root as _default_get_repo_root, issue_ref
 from .models import ReviewPhase, ReviewState, WorkerResult
@@ -79,8 +79,7 @@ class BaseReviewer(ABC):
         """
         self.options = options
         self.repo_root: Path = Path(get_repo_root())
-        self.state_dir: Path = self.repo_root / "build" / ".issue_implementer"
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir: Path = ensure_state_dir(self.repo_root)
 
         self.worktree_manager: WorktreeManager = worktree_manager_factory()
         self.status_tracker: StatusTracker = status_tracker_factory(options.max_workers)
