@@ -57,6 +57,10 @@ dev = [
     # tests/unit/scripts/test_dependency_floor_consistency.py.
     "mypy>=1.8.0,<3",
     "build>=1.0,<2",
+    # tests/integration/test_sdist_contents.py builds with --no-isolation, so
+    # pip-based dev installs need the backend requirements in the runtime env.
+    "hatchling>=1.27.0,<2",
+    "hatch-vcs>=0.4.0,<1",
     "pip-audit>=2.7,<3",
     "tomli>=2.0,<3;python_version<'3.11'",
 ]
