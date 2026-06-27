@@ -173,6 +173,19 @@ repos:
         pass_filenames: false
         files: ^(pyproject\.toml|COMPATIBILITY\.md)$
 
+  # Per-symbol API table documentation enforcement (#1507)
+  - repo: local
+    hooks:
+      - id: hephaestus-check-api-table-docs
+        name: Every guarded subpackage __all__ must be documented in COMPATIBILITY.md
+        description: Fails the build if a guarded subpackage's __all__ and its API table in COMPATIBILITY.md drift apart
+        # --environment default is explicit because the pre-commit CI job runs
+        # in the lint env; the hephaestus-* console scripts live in default.
+        entry: pixi run --environment default hephaestus-check-api-table-docs
+        language: system
+        pass_filenames: false
+        files: ^(hephaestus/(config|utils)/__init__\.py|COMPATIBILITY\.md)$
+
   # Complexity check
   - repo: local
     hooks:
