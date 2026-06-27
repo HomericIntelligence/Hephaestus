@@ -259,6 +259,51 @@ removal):
 | `slugify` | 0.1.0 | Convert text to URL-friendly slug |
 | `terminal_guard` | 0.3.0 | Context manager that saves/restores terminal state |
 
+### `hephaestus.cli`
+
+> The `Added` version for pre-1.0 symbols is a best-effort historical anchor
+> (inferred from the introducing commit/PR), not an authoritative record.
+
+| Symbol | Added | Notes |
+|--------|-------|-------|
+| `Colors` | 0.1.0 | ANSI color constants for terminal output |
+| `CommandRegistry` | 0.1.0 | Registry type for CLI subcommands |
+| `COMMAND_REGISTRY` | 0.1.0 | Default shared `CommandRegistry` instance |
+| `DRY_RUN_HELP_CAVEAT` | 0.9.0 | Standard help text appended for dry-run flags |
+| `add_dry_run_arg` | 0.9.0 | Add a `--dry-run` flag to a parser |
+| `add_github_throttle_args` | 0.9.0 | Add GitHub API throttle flags to a parser |
+| `add_json_arg` | 0.6.0 | Add a `--json` output flag to a parser |
+| `add_logging_args` | 0.1.0 | Add `--verbose`/`--quiet` logging flags |
+| `add_version_arg` | 0.1.0 | Add a `--version` flag to a parser |
+| `configure_github_throttle_from_args` | 0.9.0 | Apply parsed throttle args to the GitHub client |
+| `confirm_action` | 0.1.0 | Interactive yes/no confirmation prompt |
+| `create_parser` | 0.1.0 | Build a standard `ArgumentParser` |
+| `emit_json_status` | 0.6.0 | Emit a structured JSON status envelope |
+| `format_output` | 0.1.0 | Format a value for human-readable output |
+| `format_table` | 0.1.0 | Render rows as an aligned text table |
+| `register_command` | 0.1.0 | Decorator registering a CLI subcommand |
+
+### `hephaestus.system`
+
+> The `Added` version for pre-1.0 symbols is a best-effort historical anchor, not an authoritative record.
+
+| Symbol | Added | Notes |
+|--------|-------|-------|
+| `format_system_info` | 0.3.0 | Format collected system info for display |
+| `get_system_info` | 0.3.0 | Collect system/environment information |
+
+### `hephaestus.version`
+
+> The `Added` version for pre-1.0 symbols is a best-effort historical anchor, not an authoritative record.
+
+| Symbol | Added | Notes |
+|--------|-------|-------|
+| `VersionManager` | 0.1.0 | Read/write/bump the project version |
+| `bump_version` | 0.1.0 | Increment a semantic version component |
+| `check_package_version_consistency` | 0.1.0 | Verify installed-package versions agree |
+| `check_version_consistency` | 0.1.0 | Verify project version files agree |
+| `parse_version` | 0.1.0 | Parse a semantic version string |
+
 ## Deprecation Policy
 
 1. Deprecated symbols are announced at least one minor version before removal.

@@ -173,7 +173,7 @@ repos:
         pass_filenames: false
         files: ^(pyproject\.toml|COMPATIBILITY\.md)$
 
-  # Per-symbol API table documentation enforcement (#1507)
+  # Per-symbol API table documentation enforcement (#1506, #1507)
   - repo: local
     hooks:
       - id: hephaestus-check-api-table-docs
@@ -184,7 +184,7 @@ repos:
         entry: pixi run --environment default hephaestus-check-api-table-docs
         language: system
         pass_filenames: false
-        files: ^(hephaestus/(config|utils)/__init__\.py|COMPATIBILITY\.md)$
+        files: ^(hephaestus/(cli|config|system|utils|version)/.*\.py|COMPATIBILITY\.md)$
 
   # Complexity check
   - repo: local

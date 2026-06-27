@@ -31,7 +31,13 @@ from hephaestus.utils.helpers import get_repo_root
 
 # Subpackages whose API tables are completeness-guarded. Add a name here only
 # after authoring its table in COMPATIBILITY.md.
-GUARDED_PACKAGES: tuple[str, ...] = ("hephaestus.config", "hephaestus.utils")
+GUARDED_PACKAGES: tuple[str, ...] = (
+    "hephaestus.cli",
+    "hephaestus.config",
+    "hephaestus.system",
+    "hephaestus.utils",
+    "hephaestus.version",
+)
 
 _HEADER_RE = re.compile(r"^###\s+`(hephaestus\.[a-z_]+)`\s*$")
 _SEPARATOR_RE = re.compile(r"^\|[\s\-:|]+\|?\s*$")
