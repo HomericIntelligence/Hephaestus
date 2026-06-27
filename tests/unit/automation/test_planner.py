@@ -91,6 +91,26 @@ class TestCallClaude:
             assert "--output-format" in args
             assert "text" in args
 
+    def test_omitted_timeout_uses_env_configured_plan_timeout(
+        self, planner: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Planner._call_claude fills omitted timeouts from HEPH_AGENT_PLAN_TIMEOUT."""
+        monkeypatch.setenv("HEPH_AGENT_PLAN_TIMEOUT", "333")
+        with (
+            self._patch_repo(),
+            patch("hephaestus.automation.claude_invoke.subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(stdout="This is a plan", returncode=0)
+
+            planner._call_claude(
+                "Test prompt",
+                model="claude-opus-4-7",
+                agent="planner",
+                issue_number=123,
+            )
+
+        assert mock_run.call_args.kwargs["timeout"] == 333
+
     def test_model_kwarg_pins_argv(self, planner: Any) -> None:
         with (
             self._patch_repo(),

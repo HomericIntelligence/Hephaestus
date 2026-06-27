@@ -118,20 +118,20 @@ def test_plan_phase_generate_uses_entry_point(tmp_path: Path) -> None:
     assert "--issues" in args and "7" in args
 
 
-def test_plan_phase_generate_uses_centralized_timeout(tmp_path: Path) -> None:
-    """_generate bounds the subprocess by planner_claude_timeout, not 600s (#1374).
+def test_plan_phase_generate_uses_long_stage_timeout(tmp_path: Path) -> None:
+    """_generate bounds the subprocess by the long stage timeout (#1374).
 
     output.log L834 showed ``Command timed out after 600s:
     hephaestus-plan-issues --issues 1357`` — the heavy issue exhausted a
-    hard-coded 600s wrapper while the planner's own budget is 7200s. The call
-    must now route through the centralized helper.
+    hard-coded 600s wrapper while the planner's stage budget is 7200s. The call
+    must now route through the distinct stage-level helper.
     """
     phase = PlanPhase(_make_ctx(tmp_path))
     with (
         mock.patch("shutil.which", return_value="/usr/bin/hpi"),
         mock.patch("hephaestus.automation._plan_phase.run") as mock_run,
         mock.patch(
-            "hephaestus.automation._plan_phase.planner_claude_timeout",
+            "hephaestus.automation._plan_phase.plan_stage_timeout",
             return_value=7200,
         ),
     ):
@@ -142,8 +142,9 @@ def test_plan_phase_generate_uses_centralized_timeout(tmp_path: Path) -> None:
 def test_plan_phase_generate_timeout_respects_env_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The HEPH_PLANNER_AGENT_TIMEOUT override flows through to the subprocess."""
-    monkeypatch.setenv("HEPH_PLANNER_AGENT_TIMEOUT", "9000")
+    """The HEPH_PLAN_STAGE_TIMEOUT override flows through to the subprocess."""
+    monkeypatch.setenv("HEPH_PLAN_STAGE_TIMEOUT", "9000")
+    monkeypatch.setenv("HEPH_AGENT_PLAN_TIMEOUT", "300")
     phase = PlanPhase(_make_ctx(tmp_path))
     with (
         mock.patch("shutil.which", return_value="/usr/bin/hpi"),
@@ -151,6 +152,22 @@ def test_plan_phase_generate_timeout_respects_env_override(
     ):
         phase._generate(1357)
     assert mock_run.call_args.kwargs["timeout"] == 9000
+
+
+def test_plan_phase_generate_ignores_inner_agent_plan_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HEPH_AGENT_PLAN_TIMEOUT must not shorten the outer plan-stage wrapper."""
+    monkeypatch.delenv("HEPH_PLAN_STAGE_TIMEOUT", raising=False)
+    monkeypatch.delenv("HEPH_PLANNER_AGENT_TIMEOUT", raising=False)
+    monkeypatch.setenv("HEPH_AGENT_PLAN_TIMEOUT", "333")
+    phase = PlanPhase(_make_ctx(tmp_path))
+    with (
+        mock.patch("shutil.which", return_value="/usr/bin/hpi"),
+        mock.patch("hephaestus.automation._plan_phase.run") as mock_run,
+    ):
+        phase._generate(1357)
+    assert mock_run.call_args.kwargs["timeout"] == 7200
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +268,20 @@ def test_pr_create_finalize_runs_pre_pr_tests_when_enabled(tmp_path: Path) -> No
     ):
         phase._finalize_pr(7, "b", tmp_path, cast(Any, state), slot_id=None)
     ctx.impl._run_tests_in_worktree.assert_called_once()
+
+
+def test_pr_create_run_tests_uses_env_configured_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pre-PR test subprocess timeout is centralized and env-tunable."""
+    monkeypatch.setenv("HEPH_PRE_PR_TEST_TIMEOUT", "777")
+    phase = PRCreatePhase(_make_ctx(tmp_path))
+    with mock.patch("hephaestus.automation._pr_create_phase.subprocess.run") as mock_run:
+        mock_run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        assert phase._run_tests_in_worktree(tmp_path, 7) is True
+
+    assert mock_run.call_args.kwargs["timeout"] == 777
 
 
 # ---------------------------------------------------------------------------

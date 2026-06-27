@@ -24,7 +24,11 @@ from typing import Any, Protocol
 
 from .claude_invoke import INFRA_ERROR_REVIEW_TEXT, parse_review_verdict
 from .claude_models import planner_model, reviewer_model
-from .claude_timeouts import learn_claude_timeout, planner_claude_timeout
+from .claude_timeouts import (
+    learn_claude_timeout,
+    plan_reviewer_claude_timeout,
+    planner_claude_timeout,
+)
 from .git_utils import get_repo_root, issue_ref
 from .github_api import (
     gh_issue_add_labels,
@@ -147,7 +151,7 @@ class PlannerHost(Protocol):
         agent: str,
         issue_number: int | str,
         max_retries: int = 3,
-        timeout: int = 300,
+        timeout: int | None = None,
         extra_args: list[str] | None = None,
     ) -> str:
         """Call Claude with the given prompt."""
@@ -726,7 +730,7 @@ class PlanReviewLoop:
                 model=reviewer_model(),
                 agent=reviewer_agent(AGENT_PLAN_REVIEWER, iteration),
                 issue_number=issue_number,
-                timeout=planner_claude_timeout(),
+                timeout=plan_reviewer_claude_timeout(),
             )
         except Exception as e:
             logger.error(

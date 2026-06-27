@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
@@ -42,69 +41,65 @@ class TestWriteWorkReport:
         # Call with env unset — this is a no-op; no file path to write to
         write_work_report(5)
 
-    def test_env_set_writes_int(self) -> None:
+    def test_env_set_writes_int(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """When HEPH_WORK_REPORT is set, writes the integer to that file."""
         from hephaestus.automation.work_report import write_work_report
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = os.path.join(tmpdir, "report.txt")
-            os.environ["HEPH_WORK_REPORT"] = path
+        path = tmp_path / "report.txt"
+        monkeypatch.setenv("HEPH_WORK_REPORT", str(path))
 
-            write_work_report(42)
+        write_work_report(42)
 
-            assert Path(path).read_text(encoding="utf-8") == "42"
+        assert path.read_text(encoding="utf-8") == "42"
 
-            os.environ.pop("HEPH_WORK_REPORT", None)
-
-    def test_oserror_swallowed(self) -> None:
+    def test_oserror_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """OSError (e.g., permission denied) is silently swallowed."""
         from hephaestus.automation.work_report import write_work_report
 
-        os.environ["HEPH_WORK_REPORT"] = "/nonexistent/path/report.txt"
+        monkeypatch.setenv("HEPH_WORK_REPORT", "/nonexistent/path/report.txt")
 
         # Should not raise
         write_work_report(7)
-
-        os.environ.pop("HEPH_WORK_REPORT", None)
 
 
 class TestMakeWorkReportPath:
     """Tests for _make_work_report_path helper."""
 
-    def test_creates_path_under_build(self) -> None:
+    def test_creates_path_under_build(self, tmp_path: Path) -> None:
         """Path is created under build/ directory."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            build_dir = Path(tmpdir) / "build"
-            build_dir.mkdir()
+        build_dir = tmp_path / "build"
+        build_dir.mkdir()
 
-            path = _make_work_report_path(str(build_dir))
+        path = _make_work_report_path(str(build_dir))
 
-            assert Path(path).parent == build_dir
-            assert Path(path).name.startswith("work_report_")
+        assert Path(path).parent == build_dir
+        assert Path(path).name.startswith("work_report_")
 
 
 class TestReadWorkReport:
     """Tests for _read_work_report helper."""
 
-    def test_present_valid_int(self) -> None:
+    def test_present_valid_int(self, tmp_path: Path) -> None:
         """Present file with valid int is parsed correctly."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = os.path.join(tmpdir, "report.txt")
-            Path(path).write_text("3", encoding="utf-8")
+        path = tmp_path / "report.txt"
+        path.write_text("3", encoding="utf-8")
 
-            result = _read_work_report(path)
+        result = _read_work_report(str(path))
 
-            assert result == 3
+        assert result == 3
 
-    def test_present_zero(self) -> None:
+    def test_present_zero(self, tmp_path: Path) -> None:
         """File containing '0' is parsed as 0."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = os.path.join(tmpdir, "report.txt")
-            Path(path).write_text("0", encoding="utf-8")
+        path = tmp_path / "report.txt"
+        path.write_text("0", encoding="utf-8")
 
-            result = _read_work_report(path)
+        result = _read_work_report(str(path))
 
-            assert result == 0
+        assert result == 0
 
     def test_missing_returns_none(self) -> None:
         """Missing file returns None."""
@@ -112,35 +107,32 @@ class TestReadWorkReport:
 
         assert result is None
 
-    def test_empty_file_returns_none(self) -> None:
+    def test_empty_file_returns_none(self, tmp_path: Path) -> None:
         """Empty file returns None."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = os.path.join(tmpdir, "report.txt")
-            Path(path).write_text("", encoding="utf-8")
+        path = tmp_path / "report.txt"
+        path.write_text("", encoding="utf-8")
 
-            result = _read_work_report(path)
+        result = _read_work_report(str(path))
 
-            assert result is None
+        assert result is None
 
-    def test_malformed_returns_none(self) -> None:
+    def test_malformed_returns_none(self, tmp_path: Path) -> None:
         """Malformed content (non-int) returns None."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = os.path.join(tmpdir, "report.txt")
-            Path(path).write_text("not_an_int", encoding="utf-8")
+        path = tmp_path / "report.txt"
+        path.write_text("not_an_int", encoding="utf-8")
 
-            result = _read_work_report(path)
+        result = _read_work_report(str(path))
 
-            assert result is None
+        assert result is None
 
-    def test_whitespace_trimmed(self) -> None:
+    def test_whitespace_trimmed(self, tmp_path: Path) -> None:
         """Whitespace is trimmed before parsing."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = os.path.join(tmpdir, "report.txt")
-            Path(path).write_text("  5  \n", encoding="utf-8")
+        path = tmp_path / "report.txt"
+        path.write_text("  5  \n", encoding="utf-8")
 
-            result = _read_work_report(path)
+        result = _read_work_report(str(path))
 
-            assert result == 5
+        assert result == 5
 
 
 class TestPhaseResultProducedWork:

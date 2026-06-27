@@ -65,6 +65,41 @@ class TestEnsureMnemosyne:
         assert ["git", "-C", str(mnemosyne_root), "pull", "--ff-only"] in calls
         assert not any(call[:3] == ["gh", "repo", "clone"] for call in calls)
 
+    def test_existing_checkout_uses_env_configured_git_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Git validation/refresh calls use the centralized call-time timeout."""
+        monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", "44")
+        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        mnemosyne_root.mkdir()
+        timeouts: list[object] = []
+
+        def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            timeouts.append(kwargs.get("timeout"))
+            if "rev-parse" in argv:
+                return subprocess.CompletedProcess(argv, 0, stdout="true\n", stderr="")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        with patch("hephaestus.automation.advise_runner.subprocess.run", side_effect=fake_run):
+            assert advise_runner.ensure_mnemosyne(mnemosyne_root) is True
+
+        assert timeouts == [44, 44]
+
+    def test_clone_uses_env_configured_clone_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ProjectMnemosyne clone calls use the centralized clone timeout."""
+        monkeypatch.setenv("HEPH_AGENT_CLONE_TIMEOUT", "55")
+        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+
+        with patch("hephaestus.automation.advise_runner.gh_call") as gh_call:
+            gh_call.return_value = subprocess.CompletedProcess(
+                ["gh", "repo", "clone"], 0, stdout="", stderr=""
+            )
+            assert advise_runner._clone_mnemosyne(mnemosyne_root) is True
+
+        assert gh_call.call_args.kwargs["timeout"] == 55
+
     def test_existing_corrupt_checkout_is_removed_and_recloned(self, tmp_path: Path) -> None:
         mnemosyne_root = tmp_path / "ProjectMnemosyne"
         mnemosyne_root.mkdir()

@@ -52,8 +52,93 @@ TRANSIENT_ERROR_CORE: frozenset[str] = frozenset(
     }
 )
 
+AGENT_IMPL_TIMEOUT: int = 1800
+AGENT_REVIEW_TIMEOUT: int = 600
+AGENT_PLAN_TIMEOUT: int = 300
+AGENT_LEARN_TIMEOUT: int = 300
+AGENT_GIT_TIMEOUT: int = 30
+AGENT_CLONE_TIMEOUT: int = 120
+AGENT_AUTH_STATUS_TIMEOUT: int = 10
+AGENT_REBASE_TIMEOUT: int = 2400
+DIFF_COLLECT_TIMEOUT: int = 60
+PRE_PR_TEST_TIMEOUT: int = 600
+
 # Marker file that identifies the repo root in a dev checkout.
 _REPO_ROOT_MARKER = "pyproject.toml"
+
+
+def read_timeout_env(
+    env_name: str,
+    default: int,
+    *,
+    legacy_names: tuple[str, ...] = (),
+) -> int:
+    """Read a timeout env var at call time, falling back to ``default``."""
+    for name in (env_name, *legacy_names):
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        try:
+            return int(raw)
+        except ValueError:
+            _logger.warning(
+                "Ignoring non-integer %s=%r; using default %ds",
+                name,
+                raw,
+                default,
+            )
+            return default
+    return default
+
+
+def agent_impl_timeout() -> int:
+    """Return the implementation-agent timeout in seconds."""
+    return read_timeout_env("HEPH_AGENT_IMPL_TIMEOUT", AGENT_IMPL_TIMEOUT)
+
+
+def agent_review_timeout() -> int:
+    """Return the review-agent timeout in seconds."""
+    return read_timeout_env("HEPH_AGENT_REVIEW_TIMEOUT", AGENT_REVIEW_TIMEOUT)
+
+
+def agent_plan_timeout() -> int:
+    """Return the planning-agent timeout in seconds."""
+    return read_timeout_env("HEPH_AGENT_PLAN_TIMEOUT", AGENT_PLAN_TIMEOUT)
+
+
+def agent_learn_timeout() -> int:
+    """Return the learn-agent timeout in seconds."""
+    return read_timeout_env("HEPH_AGENT_LEARN_TIMEOUT", AGENT_LEARN_TIMEOUT)
+
+
+def agent_git_timeout() -> int:
+    """Return the timeout for short agent-adjacent git commands in seconds."""
+    return read_timeout_env("HEPH_AGENT_GIT_TIMEOUT", AGENT_GIT_TIMEOUT)
+
+
+def agent_clone_timeout() -> int:
+    """Return the timeout for ProjectMnemosyne clone setup in seconds."""
+    return read_timeout_env("HEPH_AGENT_CLONE_TIMEOUT", AGENT_CLONE_TIMEOUT)
+
+
+def agent_auth_status_timeout() -> int:
+    """Return the timeout for agent authentication status probes in seconds."""
+    return read_timeout_env("HEPH_AGENT_AUTH_STATUS_TIMEOUT", AGENT_AUTH_STATUS_TIMEOUT)
+
+
+def agent_rebase_timeout() -> int:
+    """Return the timeout for direct-agent rebase/conflict work in seconds."""
+    return read_timeout_env("HEPH_AGENT_REBASE_TIMEOUT", AGENT_REBASE_TIMEOUT)
+
+
+def diff_collect_timeout() -> int:
+    """Return the timeout for implementation-review diff collection in seconds."""
+    return read_timeout_env("HEPH_DIFF_COLLECT_TIMEOUT", DIFF_COLLECT_TIMEOUT)
+
+
+def pre_pr_test_timeout() -> int:
+    """Return the timeout for the optional pre-PR test gate in seconds."""
+    return read_timeout_env("HEPH_PRE_PR_TEST_TIMEOUT", PRE_PR_TEST_TIMEOUT)
 
 
 def repo_root() -> Path:

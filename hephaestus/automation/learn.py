@@ -378,7 +378,7 @@ def compact_session(
     issue: int | str,
     agent: str,
     cwd: Path,
-    timeout: int = 300,
+    timeout: int | None = None,
     model: str | None = None,
 ) -> bool:
     """Send ``/compact`` to the (repo, issue, agent, model) Claude session.
@@ -395,7 +395,7 @@ def compact_session(
         issue: Issue number
         agent: Agent identifier
         cwd: Working directory for session lookup
-        timeout: Subprocess timeout in seconds (default: 300)
+        timeout: Subprocess timeout in seconds.
 
     Returns:
         True on a zero-exit subprocess call, False on any failure including
@@ -403,6 +403,7 @@ def compact_session(
 
     """
     sid = session_uuid(repo, issue, agent, model)
+    timeout_s = learn_claude_timeout() if timeout is None else timeout
     try:
         result = subprocess.run(
             [
@@ -416,7 +417,7 @@ def compact_session(
                 "/compact",
             ],
             cwd=str(cwd),
-            timeout=timeout,
+            timeout=timeout_s,
             check=False,
             capture_output=True,
             text=True,

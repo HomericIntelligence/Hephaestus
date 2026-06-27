@@ -34,7 +34,7 @@ from ._review_utils import (
 )
 from .advise_runner import advise_skipped, ensure_mnemosyne, run_advise
 from .claude_models import advise_model, codex_advise_model
-from .claude_timeouts import advise_claude_timeout
+from .claude_timeouts import advise_claude_timeout, planner_claude_timeout
 from .git_utils import issue_ref
 from .github_api import (
     GitHubRateLimitError,
@@ -315,7 +315,7 @@ class Planner:
         agent: str,
         issue_number: int | str,
         max_retries: int = 3,
-        timeout: int = 300,
+        timeout: int | None = None,
         extra_args: list[str] | None = None,
     ) -> str:
         """Call Claude (delegates to claude_runner)."""
@@ -325,7 +325,7 @@ class Planner:
             agent=agent,
             issue_number=issue_number,
             max_retries=max_retries,
-            timeout=timeout,
+            timeout=planner_claude_timeout() if timeout is None else timeout,
             extra_args=extra_args,
         )
 

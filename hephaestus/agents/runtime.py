@@ -15,6 +15,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from hephaestus.constants import (
+    agent_auth_status_timeout,
+)
 from hephaestus.utils.helpers import strip_null_bytes
 
 AgentName = Literal["claude", "codex", "pi"]
@@ -22,7 +25,9 @@ SubprocessCommandPart = str | bytes | os.PathLike[str] | os.PathLike[bytes]
 SubprocessCommand = SubprocessCommandPart | Sequence[SubprocessCommandPart]
 AGENT_CHOICES: tuple[AgentName, ...] = ("claude", "codex", "pi")
 DEFAULT_AGENT: AgentName = "claude"
-AGENT_AUTH_STATUS_TIMEOUT = 10
+CODEX_HELP_PROBE_SECONDS = 10
+GIT_COMMON_DIR_PROBE_SECONDS = 5
+CODEX_TERMINATION_GRACE_SECONDS = 5
 CODEX_FINAL_MESSAGE_GRACE_ENV = "HEPH_CODEX_FINAL_MESSAGE_GRACE"
 CODEX_FINAL_MESSAGE_GRACE_SECONDS = 5.0
 CODEX_OPUS_MODEL = "gpt-5.5"
@@ -117,7 +122,7 @@ def is_agent_authenticated(agent: AgentName) -> bool:
                 list(cmd),
                 text=True,
                 capture_output=True,
-                timeout=AGENT_AUTH_STATUS_TIMEOUT,
+                timeout=agent_auth_status_timeout(),
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
@@ -340,7 +345,7 @@ def codex_approval_args(approval: str) -> list[str]:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=10,
+            timeout=CODEX_HELP_PROBE_SECONDS,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -409,7 +414,7 @@ def _codex_extra_writable_dirs(cwd: Path, sandbox: str | None) -> list[Path]:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            timeout=5,
+            timeout=GIT_COMMON_DIR_PROBE_SECONDS,
             check=True,
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
@@ -955,7 +960,7 @@ def _terminate_codex_process(proc: subprocess.Popen[str]) -> tuple[str, str]:
     if proc.poll() is None:
         proc.terminate()
     try:
-        stdout_text, stderr_text = proc.communicate(timeout=5)
+        stdout_text, stderr_text = proc.communicate(timeout=CODEX_TERMINATION_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
         proc.kill()
         stdout_text, stderr_text = proc.communicate()

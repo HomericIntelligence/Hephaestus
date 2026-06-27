@@ -829,6 +829,25 @@ def test_is_agent_authenticated_pi_rejects_missing_model_config(tmp_path: Path) 
         assert not agent_runtime.is_agent_authenticated("pi")
 
 
+def test_is_agent_authenticated_uses_env_configured_status_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auth status probes use the centralized call-time timeout reader."""
+    monkeypatch.setenv("HEPH_AGENT_AUTH_STATUS_TIMEOUT", "77")
+    with (
+        patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/claude"),
+        patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                ["claude", "auth", "status"], 0, stdout="", stderr=""
+            ),
+        ) as mock_run,
+    ):
+        assert agent_runtime.is_agent_authenticated("claude")
+
+    assert mock_run.call_args.kwargs["timeout"] == 77
+
+
 def test_resolve_agent_uses_pi_when_claude_and_codex_absent(tmp_path: Path) -> None:
     """Pi is the third auto-detected backend after Claude and Codex."""
     _write_pi_models_config(tmp_path)

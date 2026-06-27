@@ -29,6 +29,7 @@ from hephaestus.agents.runtime import (
     run_agent_text,
     uses_direct_agent_runner,
 )
+from hephaestus.constants import agent_git_timeout, diff_collect_timeout
 from hephaestus.github.client import ClaudeUsageCapError, gh_call
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 
@@ -43,7 +44,7 @@ from .claude_invoke import (
     parse_review_verdict,
 )
 from .claude_models import implementer_model, reviewer_model
-from .claude_timeouts import implementer_claude_timeout
+from .claude_timeouts import implementer_claude_timeout, pr_reviewer_claude_timeout
 from .git_utils import (
     commit_if_changes,
     get_repo_info,
@@ -1663,13 +1664,14 @@ class ReviewPhase(StageMixin):
             iteration=iteration,
             prior_review=prior_review,
         )
+        review_timeout = pr_reviewer_claude_timeout()
         try:
             if uses_direct_agent_runner(self.options.agent):
                 result = run_agent_text(
                     agent=self.options.agent,
                     prompt=prompt,
                     cwd=self.repo_root,
-                    timeout=600,
+                    timeout=review_timeout,
                     model=direct_agent_model(self.options.agent, "HEPH_REVIEWER_MODEL"),
                     sandbox="read-only",
                 )
@@ -1693,7 +1695,7 @@ class ReviewPhase(StageMixin):
                 capture_output=True,
                 text=True,
                 check=True,
-                timeout=600,
+                timeout=review_timeout,
                 env=env,
             )
             output = (result.stdout or "").strip()
@@ -1719,13 +1721,14 @@ class ReviewPhase(StageMixin):
 
     def _collect_diff(self, worktree_path: Path, branch_name: str) -> str:
         """Return the cumulative diff of *branch_name* against ``origin/main``."""
+        timeout_s = diff_collect_timeout()
         try:
             result = run(
                 ["git", "diff", "origin/main...HEAD"],
                 cwd=worktree_path,
                 capture_output=True,
                 check=False,
-                timeout=60,
+                timeout=timeout_s,
             )
             diff = result.stdout or ""
             if not diff.strip():
@@ -1734,7 +1737,7 @@ class ReviewPhase(StageMixin):
                     cwd=worktree_path,
                     capture_output=True,
                     check=False,
-                    timeout=60,
+                    timeout=timeout_s,
                 )
                 diff = fb.stdout or ""
         except Exception as e:
@@ -1753,13 +1756,14 @@ class ReviewPhase(StageMixin):
 
     def _collect_changed_files(self, worktree_path: Path, branch_name: str) -> str:
         """Return a newline-separated list of changed files vs ``origin/main``."""
+        timeout_s = agent_git_timeout()
         try:
             result = run(
                 ["git", "diff", "--name-only", "origin/main...HEAD"],
                 cwd=worktree_path,
                 capture_output=True,
                 check=False,
-                timeout=30,
+                timeout=timeout_s,
             )
             files = (result.stdout or "").strip()
             if files:
@@ -1769,7 +1773,7 @@ class ReviewPhase(StageMixin):
                 cwd=worktree_path,
                 capture_output=True,
                 check=False,
-                timeout=30,
+                timeout=timeout_s,
             )
             return (fb.stdout or "").strip()
         except Exception as e:
