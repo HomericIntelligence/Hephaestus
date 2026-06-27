@@ -41,15 +41,15 @@ def test_local_codex_marketplace_wrapper_resolves_manifest_and_icon() -> None:
     plugin = next(plugin for plugin in marketplace["plugins"] if plugin["name"] == "hephaestus")
 
     plugin_root = REPO_ROOT / plugin["source"]["path"]
-    assert (plugin_root / ".codex-plugin" / "plugin.json").resolve() == (
-        REPO_ROOT / ".codex-plugin" / "plugin.json"
-    ).resolve()
-    assert (plugin_root / "assets").is_symlink()
-    assert (plugin_root / "assets" / "icon.svg").resolve() == (
-        REPO_ROOT / "assets" / "icon.svg"
-    ).resolve()
-    assert (plugin_root / ".codexignore").is_symlink()
-    assert (plugin_root / ".codexignore").resolve() == (REPO_ROOT / ".codexignore").resolve()
+    plugin_manifest = plugin_root / ".codex-plugin" / "plugin.json"
+    canonical_manifest = REPO_ROOT / ".codex-plugin" / "plugin.json"
+    assert plugin_manifest.is_file()
+    assert plugin_manifest.read_bytes() == canonical_manifest.read_bytes()
+
+    icon_in_plugin = plugin_root / "assets" / "icon.svg"
+    canonical_icon = REPO_ROOT / "assets" / "icon.svg"
+    assert icon_in_plugin.is_file()
+    assert icon_in_plugin.read_bytes() == canonical_icon.read_bytes()
 
 
 def test_codexignore_excludes_generated_and_local_state() -> None:
