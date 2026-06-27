@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for GitHub utilities."""
 
-from subprocess import CalledProcessError
+from subprocess import CalledProcessError, CompletedProcess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -67,31 +67,46 @@ class TestDetectRepoFromRemote:
 class TestLocalBranchExists:
     """Tests for local_branch_exists."""
 
-    @patch("subprocess.check_output")
-    def test_branch_exists(self, mock_check_output):
+    @patch("hephaestus.github.pr_merge.run_subprocess")
+    def test_branch_exists(self, mock_run):
         """Returns True when branch exists."""
-        mock_check_output.return_value = b"  feature-branch\n"
+        mock_run.return_value = CompletedProcess(
+            ["git", "branch", "--list", "feature-branch"],
+            0,
+            stdout="  feature-branch\n",
+            stderr="",
+        )
         result = local_branch_exists("feature-branch")
         assert result is True
 
-    @patch("subprocess.check_output")
-    def test_branch_not_exists(self, mock_check_output):
+    @patch("hephaestus.github.pr_merge.run_subprocess")
+    def test_branch_not_exists(self, mock_run):
         """Returns False when branch doesn't exist (empty output)."""
-        mock_check_output.return_value = b""
+        mock_run.return_value = CompletedProcess(
+            ["git", "branch", "--list", "non-existent-branch"],
+            0,
+            stdout="",
+            stderr="",
+        )
         result = local_branch_exists("non-existent-branch")
         assert result is False
 
-    @patch("subprocess.check_output")
-    def test_branch_check_error_returns_false(self, mock_check_output):
+    @patch("hephaestus.github.pr_merge.run_subprocess")
+    def test_branch_check_error_returns_false(self, mock_run):
         """Returns False on CalledProcessError."""
-        mock_check_output.side_effect = CalledProcessError(1, ["git", "branch"])
+        mock_run.side_effect = CalledProcessError(1, ["git", "branch"])
         result = local_branch_exists("any-branch")
         assert result is False
 
-    @patch("subprocess.check_output")
-    def test_branch_with_whitespace_output(self, mock_check_output):
+    @patch("hephaestus.github.pr_merge.run_subprocess")
+    def test_branch_with_whitespace_output(self, mock_run):
         """Branch name with whitespace in output still returns True."""
-        mock_check_output.return_value = b"  main  \n"
+        mock_run.return_value = CompletedProcess(
+            ["git", "branch", "--list", "main"],
+            0,
+            stdout="  main  \n",
+            stderr="",
+        )
         result = local_branch_exists("main")
         assert result is True
 
@@ -99,17 +114,21 @@ class TestLocalBranchExists:
 class TestRunGitCmd:
     """Tests for run_git_cmd."""
 
-    def test_dry_run_does_not_call_subprocess(self):
-        """In dry-run mode, no subprocess is called."""
-        with patch("subprocess.run") as mock_run:
-            run_git_cmd(["git", "push", "origin", "main"], dry_run=True)
-            mock_run.assert_not_called()
+    @patch("hephaestus.github.pr_merge.run_subprocess")
+    def test_dry_run_delegates_to_shared_helper(self, mock_run):
+        """Dry-run handling is delegated to the shared subprocess helper."""
+        run_git_cmd(["git", "push", "origin", "main"], dry_run=True)
+        mock_run.assert_called_once_with(
+            ["git", "push", "origin", "main"],
+            cwd=None,
+            dry_run=True,
+        )
 
-    def test_non_dry_run_calls_subprocess(self):
-        """In non-dry-run mode, subprocess is called."""
-        with patch("subprocess.run") as mock_run:
-            run_git_cmd(["git", "status"], dry_run=False)
-            mock_run.assert_called_once()
+    @patch("hephaestus.github.pr_merge.run_subprocess")
+    def test_non_dry_run_delegates_to_shared_helper(self, mock_run):
+        """Non-dry-run execution is delegated to the shared subprocess helper."""
+        run_git_cmd(["git", "status"], dry_run=False)
+        mock_run.assert_called_once_with(["git", "status"], cwd=None, dry_run=False)
 
 
 class TestChecksSuccessAndPrint:

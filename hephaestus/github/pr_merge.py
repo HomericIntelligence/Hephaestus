@@ -150,12 +150,12 @@ def local_branch_exists(branch_name: str) -> bool:
 
     """
     try:
-        out = subprocess.check_output(
+        result = run_subprocess(
             ["git", "branch", "--list", branch_name],
-            stderr=subprocess.DEVNULL,
             timeout=METADATA_TIMEOUT,
+            log_on_error=False,
         )
-        return bool(out.strip())
+        return bool(result.stdout.strip())
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
 

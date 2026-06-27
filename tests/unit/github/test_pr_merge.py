@@ -240,35 +240,51 @@ class TestLegacyStatusAndPrint:
 class TestLocalBranchExists:
     """Tests for local_branch_exists."""
 
-    @patch("hephaestus.github.pr_merge.subprocess.check_output")
-    def test_returns_true_when_branch_exists(self, mock_check) -> None:
+    @patch("hephaestus.github.pr_merge.run_subprocess")
+    def test_returns_true_when_branch_exists(self, mock_run) -> None:
         """Returns True when git branch --list output is non-empty."""
-        mock_check.return_value = b"  my-feature\n"
+        mock_run.return_value = subprocess.CompletedProcess(
+            ["git", "branch", "--list", "my-feature"],
+            0,
+            stdout="  my-feature\n",
+            stderr="",
+        )
         assert local_branch_exists("my-feature") is True
 
-    @patch("hephaestus.github.pr_merge.subprocess.check_output")
-    def test_returns_false_when_branch_absent(self, mock_check) -> None:
+    @patch("hephaestus.github.pr_merge.run_subprocess")
+    def test_returns_false_when_branch_absent(self, mock_run) -> None:
         """Returns False when git branch --list output is empty."""
-        mock_check.return_value = b""
+        mock_run.return_value = subprocess.CompletedProcess(
+            ["git", "branch", "--list", "nonexistent"],
+            0,
+            stdout="",
+            stderr="",
+        )
         assert local_branch_exists("nonexistent") is False
 
-    @patch("hephaestus.github.pr_merge.subprocess.check_output")
-    def test_returns_false_on_subprocess_error(self, mock_check) -> None:
+    @patch("hephaestus.github.pr_merge.run_subprocess")
+    def test_returns_false_on_subprocess_error(self, mock_run) -> None:
         """Returns False when subprocess raises CalledProcessError."""
-        mock_check.side_effect = subprocess.CalledProcessError(1, "git")
+        mock_run.side_effect = subprocess.CalledProcessError(1, "git")
         assert local_branch_exists("branch") is False
 
-    @patch("hephaestus.github.pr_merge.subprocess.check_output")
-    def test_passes_timeout(self, mock_check) -> None:
-        """The git branch lookup is bounded by METADATA_TIMEOUT (#684)."""
-        mock_check.return_value = b"  my-feature\n"
+    @patch("hephaestus.github.pr_merge.run_subprocess")
+    def test_passes_timeout_and_suppresses_expected_error_logs(self, mock_run) -> None:
+        """The git branch lookup is bounded and avoids noisy expected-error logs."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            ["git", "branch", "--list", "my-feature"],
+            0,
+            stdout="  my-feature\n",
+            stderr="",
+        )
         local_branch_exists("my-feature")
-        assert mock_check.call_args.kwargs["timeout"] == METADATA_TIMEOUT
+        assert mock_run.call_args.kwargs["timeout"] == METADATA_TIMEOUT
+        assert mock_run.call_args.kwargs["log_on_error"] is False
 
-    @patch("hephaestus.github.pr_merge.subprocess.check_output")
-    def test_returns_false_on_timeout(self, mock_check) -> None:
+    @patch("hephaestus.github.pr_merge.run_subprocess")
+    def test_returns_false_on_timeout(self, mock_run) -> None:
         """A hung ``git branch --list`` degrades to False instead of hanging (#684)."""
-        mock_check.side_effect = subprocess.TimeoutExpired(cmd="git", timeout=10)
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="git", timeout=10)
         assert local_branch_exists("branch") is False
 
 
@@ -602,3 +618,18 @@ class TestSquashOnlyInvariant:
         source = inspect.getsource(pr_merge)
         assert "merge_method=rebase" not in source
         assert "merge_method=squash" in source
+
+
+class TestCanonicalRunSubprocess:
+    """Source-level regressions for subprocess helper consolidation."""
+
+    def test_pr_merge_uses_canonical_run_subprocess(self) -> None:
+        import inspect
+
+        from hephaestus.github import pr_merge
+        from hephaestus.utils import helpers
+
+        source = inspect.getsource(pr_merge)
+        assert vars(pr_merge)["run_subprocess"] is helpers.run_subprocess
+        assert "def run_subprocess(" not in source
+        assert "subprocess.check_output" not in source
