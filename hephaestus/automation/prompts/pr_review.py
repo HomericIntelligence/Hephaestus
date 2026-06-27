@@ -4,9 +4,7 @@ Contains the PR review analysis prompt (inline-comment generator) and the
 plain PR description template.
 """
 
-import secrets
-
-from ._shared import _TERSE_OUTPUT_DIRECTIVE, _UNTRUSTED_NOTICE, _fence_untrusted
+from ._shared import _TERSE_OUTPUT_DIRECTIVE, fence_content
 from ._strict_rubric import _PR_STRICT_RUBRIC
 
 PR_REVIEW_ANALYSIS_PROMPT = """
@@ -140,21 +138,20 @@ def get_pr_review_analysis_prompt(
         Formatted PR review analysis prompt
 
     """
-    nonce = secrets.token_hex(8).upper()
+    fenced = fence_content()
     nitpick_directive = _NITPICK_INCLUDE if include_nitpicks else _NITPICK_SUPPRESS
     return PR_REVIEW_ANALYSIS_PROMPT.format(
         pr_number=pr_number,
         issue_number=issue_number,
-        pr_diff_block=_fence_untrusted("PR_DIFF", pr_diff, nonce),
-        issue_body_block=_fence_untrusted("ISSUE_BODY", issue_body, nonce),
-        advise_findings_block=_fence_untrusted(
+        pr_diff_block=fenced.fence("PR_DIFF", pr_diff),
+        issue_body_block=fenced.fence("ISSUE_BODY", issue_body),
+        advise_findings_block=fenced.fence(
             "ADVISE_FINDINGS",
             advise_findings or "_(no prior advise findings supplied)_",
-            nonce,
         ),
-        ci_status_block=_fence_untrusted("CI_STATUS", ci_status, nonce),
-        pr_description_block=_fence_untrusted("PR_DESCRIPTION", pr_description, nonce),
-        untrusted_notice=_UNTRUSTED_NOTICE,
+        ci_status_block=fenced.fence("CI_STATUS", ci_status),
+        pr_description_block=fenced.fence("PR_DESCRIPTION", pr_description),
+        untrusted_notice=fenced.untrusted_notice,
         strict_rubric=_PR_STRICT_RUBRIC.strip(),
         nitpick_directive=nitpick_directive,
         terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
@@ -259,13 +256,13 @@ def get_review_validation_prompt(
         Formatted review-validation prompt.
 
     """
-    nonce = secrets.token_hex(8).upper()
+    fenced = fence_content()
     return REVIEW_VALIDATION_PROMPT.format(
         pr_number=pr_number,
         issue_number=issue_number,
-        prior_comments_block=_fence_untrusted("PRIOR_COMMENTS", prior_comments_json, nonce),
-        diff_block=_fence_untrusted("DIFF", diff_text, nonce),
-        untrusted_notice=_UNTRUSTED_NOTICE,
+        prior_comments_block=fenced.fence("PRIOR_COMMENTS", prior_comments_json),
+        diff_block=fenced.fence("DIFF", diff_text),
+        untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )
 
@@ -330,11 +327,11 @@ def get_comment_difficulty_prompt(
         Formatted comment-difficulty classification prompt.
 
     """
-    nonce = secrets.token_hex(8).upper()
+    fenced = fence_content()
     return COMMENT_DIFFICULTY_PROMPT.format(
         issue_number=issue_number,
-        comments_block=_fence_untrusted("REVIEW_COMMENTS", comments_json, nonce),
-        untrusted_notice=_UNTRUSTED_NOTICE,
+        comments_block=fenced.fence("REVIEW_COMMENTS", comments_json),
+        untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )
 

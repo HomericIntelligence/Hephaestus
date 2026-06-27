@@ -1,9 +1,8 @@
 """Address-review prompt: apply fixes for unresolved PR review threads."""
 
-import secrets
 from typing import Any
 
-from ._shared import _TERSE_OUTPUT_DIRECTIVE, _UNTRUSTED_NOTICE, _fence_untrusted
+from ._shared import _TERSE_OUTPUT_DIRECTIVE, _fence_untrusted, fence_content
 
 ADDRESS_REVIEW_PROMPT = """
 You are the COORDINATOR for addressing the review threads on PR #{pr_number}
@@ -223,15 +222,23 @@ def get_address_review_prompt(
         Formatted address review prompt
 
     """
-    nonce = secrets.token_hex(8).upper()
+    fenced = fence_content()
     return ADDRESS_REVIEW_PROMPT.format(
         pr_number=pr_number,
         issue_number=issue_number,
         worktree_path=worktree_path,
-        threads_json_block=_fence_untrusted("THREADS_JSON", threads_json, nonce),
-        todo_block=_fence_untrusted("TODO_LIST", todo_block or "_(no todo lines)_", nonce),
-        untrusted_notice=_UNTRUSTED_NOTICE,
-        context_block=_build_context_block(task_block, task_review_block, diff_text, nonce),
-        retry_directive_block=build_unaddressed_directive(unaddressed_findings or [], nonce),
+        threads_json_block=fenced.fence("THREADS_JSON", threads_json),
+        todo_block=fenced.fence("TODO_LIST", todo_block or "_(no todo lines)_"),
+        untrusted_notice=fenced.untrusted_notice,
+        context_block=_build_context_block(
+            task_block,
+            task_review_block,
+            diff_text,
+            fenced.nonce,
+        ),
+        retry_directive_block=build_unaddressed_directive(
+            unaddressed_findings or [],
+            fenced.nonce,
+        ),
         terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )

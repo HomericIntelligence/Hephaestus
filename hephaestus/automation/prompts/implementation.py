@@ -4,16 +4,13 @@ Contains the canonical implementation prompt, the iteration-aware impl-loop
 review prompt, and the resume-after-NOGO feedback prompt.
 """
 
-import secrets
-
 from ._shared import (
     _TERSE_OUTPUT_DIRECTIVE,
-    _UNTRUSTED_NOTICE,
-    _fence_untrusted,
     _iteration_guidance,
     _iteration_label,
     _prior_review_block,
     _relativize_path,
+    fence_content,
 )
 from ._strict_rubric import (
     _FULL_SWEEP_SUFFIX,
@@ -223,14 +220,14 @@ def get_implementation_prompt(
 
     """
     safe_worktree_path = _relativize_path(worktree_path, repo_root)
-    nonce = secrets.token_hex(8).upper()
+    fenced = fence_content()
     return IMPLEMENTATION_PROMPT.format(
         issue_number=issue_number,
         issue_title=issue_title,
-        issue_body_block=_fence_untrusted("ISSUE_BODY", issue_body, nonce),
+        issue_body_block=fenced.fence("ISSUE_BODY", issue_body),
         branch_name=branch_name,
         worktree_path=safe_worktree_path,
-        untrusted_notice=_UNTRUSTED_NOTICE,
+        untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )
 
@@ -260,7 +257,7 @@ def get_impl_loop_review_prompt(
         Formatted prompt for a fresh reviewer session.
 
     """
-    nonce = secrets.token_hex(8).upper()
+    fenced = fence_content()
     full_sweep_suffix = _FULL_SWEEP_SUFFIX.strip() if iteration == 2 else ""
     return IMPL_LOOP_REVIEW_PROMPT.format(
         rubric=_IMPL_LOOP_STRICT_RUBRIC.strip(),
@@ -269,13 +266,13 @@ def get_impl_loop_review_prompt(
         iteration_guidance=_iteration_guidance(iteration),
         issue_number=issue_number,
         issue_title=issue_title,
-        issue_body_block=_fence_untrusted("ISSUE_BODY", issue_body, nonce),
-        diff_text_block=_fence_untrusted("DIFF_TEXT", diff_text or "_(no diff produced)_", nonce),
+        issue_body_block=fenced.fence("ISSUE_BODY", issue_body),
+        diff_text_block=fenced.fence("DIFF_TEXT", diff_text or "_(no diff produced)_"),
         files_changed=files_changed or "_(no files changed)_",
         prior_review_block=_prior_review_block(prior_review),
         full_sweep_suffix=full_sweep_suffix,
         output_format=_STRICT_REVIEW_OUTPUT_FORMAT.strip(),
-        untrusted_notice=_UNTRUSTED_NOTICE,
+        untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=_TERSE_OUTPUT_DIRECTIVE,
     )
 
@@ -297,16 +294,15 @@ def get_dirty_reused_worktree_decision_prompt(
     Fenced prompt asking for an exact final-line COMMIT/STASH decision.
 
     """
-    nonce = secrets.token_hex(8).upper()
+    fenced = fence_content()
     return DIRTY_REUSED_WORKTREE_DECISION_PROMPT.format(
-        branch_block=_fence_untrusted("BRANCH_NAME", branch_name, nonce),
-        status_block=_fence_untrusted("GIT_STATUS", status_text.strip() or "_(empty)_", nonce),
-        diff_block=_fence_untrusted(
+        branch_block=fenced.fence("BRANCH_NAME", branch_name),
+        status_block=fenced.fence("GIT_STATUS", status_text.strip() or "_(empty)_"),
+        diff_block=fenced.fence(
             "GIT_DIFF_HEAD",
             (diff_text or "")[:6000] or "_(empty)_",
-            nonce,
         ),
-        untrusted_notice=_UNTRUSTED_NOTICE,
+        untrusted_notice=fenced.untrusted_notice,
     )
 
 

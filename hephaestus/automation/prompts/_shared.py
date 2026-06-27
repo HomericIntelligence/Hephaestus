@@ -9,6 +9,8 @@ build on these primitives.
 """
 
 import logging
+import secrets
+from dataclasses import dataclass
 from pathlib import Path
 
 _prompts_logger = logging.getLogger("hephaestus.automation.prompts")
@@ -70,6 +72,27 @@ def _fence_untrusted(label: str, content: str, nonce: str) -> str:
     each block self-describing in logs.
     """
     return f"BEGIN_{nonce}_{label}\n{content}\nEND_{nonce}_{label}"
+
+
+@dataclass(frozen=True)
+class FencedContent:
+    """Prompt-scoped helper for fencing untrusted fields with one nonce."""
+
+    nonce: str
+
+    @property
+    def untrusted_notice(self) -> str:
+        """Return the standard untrusted-content notice for prompt templates."""
+        return _UNTRUSTED_NOTICE
+
+    def fence(self, label: str, content: str) -> str:
+        """Fence one untrusted prompt field using this prompt's nonce."""
+        return _fence_untrusted(label, content, self.nonce)
+
+
+def fence_content() -> FencedContent:
+    """Create a prompt-scoped fencer with a fresh random nonce."""
+    return FencedContent(secrets.token_hex(8).upper())
 
 
 def _iteration_label(iteration: int) -> str:

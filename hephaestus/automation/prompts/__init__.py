@@ -28,12 +28,14 @@ importers continue to work unchanged.
 from ._shared import (
     _TERSE_OUTPUT_DIRECTIVE as _TERSE_OUTPUT_DIRECTIVE,
     _UNTRUSTED_NOTICE as _UNTRUSTED_NOTICE,
+    FencedContent as FencedContent,
     _fence_untrusted as _fence_untrusted,
     _iteration_guidance as _iteration_guidance,
     _iteration_label as _iteration_label,
     _prior_review_block as _prior_review_block,
     _prompts_logger as _prompts_logger,
     _relativize_path as _relativize_path,
+    fence_content as fence_content,
 )
 from ._strict_rubric import (
     _FULL_SWEEP_SUFFIX as _FULL_SWEEP_SUFFIX,
@@ -102,7 +104,9 @@ __all__ = [
     "PLAN_PROMPT",
     "PLAN_REVIEW_PROMPT",
     "PR_REVIEW_ANALYSIS_PROMPT",
+    "FencedContent",
     "build_unaddressed_directive",
+    "fence_content",
     "get_address_review_prompt",
     "get_advise_prompt",
     "get_advise_prompt_builder",
