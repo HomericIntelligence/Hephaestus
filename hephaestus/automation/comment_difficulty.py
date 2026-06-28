@@ -28,6 +28,7 @@ from hephaestus.agents.runtime import (
     run_agent_text,
     uses_direct_agent_runner,
 )
+from hephaestus.io.utils import write_secure
 
 from ._review_utils import log_file_path, parse_json_block
 from .claude_invoke import invoke_claude_with_session
@@ -132,7 +133,7 @@ def _run_classifier_session(
                 model=direct_agent_model(agent, "HEPH_ADVISE_MODEL"),
                 sandbox="read-only",
             )
-            log_file.write_text(result.stdout or "")
+            write_secure(log_file, result.stdout or "")
             parsed = parse_json_block(result.stdout or "")
         else:
             stdout, _ = invoke_claude_with_session(
@@ -148,7 +149,7 @@ def _run_classifier_session(
                 allowed_tools="Read,Glob,Grep",
                 input_via_stdin=True,
             )
-            log_file.write_text(stdout or "")
+            write_secure(log_file, stdout or "")
             try:
                 data = json.loads(stdout or "{}")
                 response_text: str = data.get("result", stdout or "")

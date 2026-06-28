@@ -34,6 +34,7 @@ from hephaestus.agents.runtime import (
     uses_direct_agent_runner,
 )
 from hephaestus.cli.utils import emit_json_status
+from hephaestus.io.utils import write_secure
 
 from . import _review_utils
 from ._review_utils import (
@@ -211,7 +212,7 @@ def run_address_fix_session(
     )
 
     prompt_file = worktree_path / f".claude-address-review-{issue_number}.md"
-    prompt_file.write_text(prompt)
+    write_secure(prompt_file, prompt)
 
     try:
         if uses_direct_agent_runner(agent):
@@ -226,7 +227,7 @@ def run_address_fix_session(
             log = direct_result.stdout
             if direct_result.session_id:
                 log = f"SESSION_ID: {direct_result.session_id}\n\n{log}"
-            log_file.write_text(log)
+            write_secure(log_file, log)
             parsed = parse_fn(direct_result.stdout)
             logger.info(
                 "Fix session complete for PR #%s; addressed %s thread(s)",
@@ -254,7 +255,7 @@ def run_address_fix_session(
             allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
             input_via_stdin=True,
         )
-        log_file.write_text(stdout or "")
+        write_secure(log_file, stdout or "")
 
         # Extract response text from Claude's JSON wrapper
         try:
@@ -275,12 +276,12 @@ def run_address_fix_session(
         stdout = e.stdout or ""
         stderr = e.stderr or ""
         error_output = f"EXIT CODE: {e.returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
-        log_file.write_text(error_output)
+        write_secure(log_file, error_output)
         raise RuntimeError(
             f"Fix session failed for PR {pr_ref(pr_number)}: {e.stderr or e.stdout}"
         ) from e
     except subprocess.TimeoutExpired as e:
-        log_file.write_text(f"TIMEOUT after {e.timeout}s\n\nOutput:\n{e.output or ''}")
+        write_secure(log_file, f"TIMEOUT after {e.timeout}s\n\nOutput:\n{e.output or ''}")
         raise RuntimeError(f"Fix session timed out for PR {pr_ref(pr_number)}") from e
     finally:
         # Narrow exception: a missing prompt file is benign cleanup,
@@ -890,7 +891,7 @@ class AddressReviewer(BaseReviewer):
                 log = direct_result.stdout
                 if direct_result.session_id:
                     log = f"SESSION_ID: {direct_result.session_id}\n\n{log}"
-                log_file.write_text(log)
+                write_secure(log_file, log)
                 parsed = parse_with_trace(direct_result.stdout)
                 logger.info(
                     "Fix session complete for PR #%s; addressed %s thread(s)",

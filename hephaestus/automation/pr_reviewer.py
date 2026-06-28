@@ -38,6 +38,7 @@ from hephaestus.cli.utils import (
     configure_github_throttle_from_args,
     emit_json_status,
 )
+from hephaestus.io.utils import write_secure
 
 from . import _review_utils
 from ._review_utils import (
@@ -122,7 +123,7 @@ def run_pr_review_analysis(
     )
 
     prompt_file = worktree_path / f".claude-pr-review-{issue_number}.md"
-    prompt_file.write_text(prompt)
+    write_secure(prompt_file, prompt)
 
     log_file = log_file_path(state_dir, "pr-review-analysis", issue_number)
 
@@ -136,7 +137,7 @@ def run_pr_review_analysis(
                 model=direct_agent_model(agent, "HEPH_REVIEWER_MODEL"),
                 sandbox="read-only",
             )
-            log_file.write_text(result.stdout or "")
+            write_secure(log_file, result.stdout or "")
             review_text = result.stdout or ""
             parsed = _review_utils.parse_json_block(review_text)
             parsed["review_text"] = review_text
@@ -166,7 +167,7 @@ def run_pr_review_analysis(
             # Matches the plan reviewer / address-review / ci_driver invocations.
             input_via_stdin=True,
         )
-        log_file.write_text(stdout or "")
+        write_secure(log_file, stdout or "")
 
         # The CLI can exit 0 with an ``is_error: true`` envelope carrying a 429
         # quota cap; without this guard the cap message would be parsed as
@@ -197,12 +198,12 @@ def run_pr_review_analysis(
         stdout = e.stdout or ""
         stderr = e.stderr or ""
         error_output = f"EXIT CODE: {e.returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
-        log_file.write_text(error_output)
+        write_secure(log_file, error_output)
         raise RuntimeError(
             f"Analysis session failed for PR {pr_ref(pr_number)}: {e.stderr or e.stdout}"
         ) from e
     except subprocess.TimeoutExpired as e:
-        log_file.write_text(f"TIMEOUT after {e.timeout}s\n\nOutput:\n{e.output or ''}")
+        write_secure(log_file, f"TIMEOUT after {e.timeout}s\n\nOutput:\n{e.output or ''}")
         raise RuntimeError(f"Analysis session timed out for PR {pr_ref(pr_number)}") from e
     finally:
         with contextlib.suppress(Exception):

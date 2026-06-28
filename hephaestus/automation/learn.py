@@ -24,6 +24,7 @@ from hephaestus.agents.runtime import (
     uses_direct_agent_runner,
 )
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
+from hephaestus.io.utils import write_secure
 
 from ._review_utils import log_file_path
 from .claude_models import learn_model
@@ -99,7 +100,7 @@ def _write_learn_record(
         record["error"] = error
     record_file = state_dir / f"learn-{issue_number}.json"
     try:
-        record_file.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+        write_secure(record_file, json.dumps(record, indent=2, sort_keys=True) + "\n")
     except OSError as exc:
         logger.warning("Learn record write failed for issue #%s: %s", issue_number, exc)
 
@@ -124,7 +125,7 @@ def _record_learn_failure(
 ) -> None:
     """Write the FAILED: log + record for a non-recoverable ``/learn`` failure."""
     logger.warning("Learn failed for issue #%s: %s", issue_number, error)
-    log_file.write_text(log_text)
+    write_secure(log_file, log_text)
     _write_learn_record(
         state_dir,
         issue_number,
@@ -138,7 +139,7 @@ def _record_learn_success(
     state_dir: Path, issue_number: int, log_file: Path, *, stdout: str
 ) -> None:
     """Write the log + record for a successful ``/learn`` run."""
-    log_file.write_text(stdout)
+    write_secure(log_file, stdout)
     _write_learn_record(
         state_dir,
         issue_number,
@@ -216,7 +217,7 @@ def run_learn(
             f"but selected agent is {agent}; skipping learn resume"
         )
         logger.warning("Learn skipped for issue #%s: %s", issue_number, message)
-        log_file.write_text(f"FAILED: {message}\n")
+        write_secure(log_file, f"FAILED: {message}\n")
         _write_learn_record(
             state_dir,
             issue_number,
@@ -324,7 +325,7 @@ def _run_learn_with_retry(
             # reset and re-invoke. Only a genuine failure records FAILED:.
             reset_epoch = resolve_quota_reset_epoch(err_stderr, err_stdout, str(e))
             if reset_epoch is not None:
-                log_file.write_text(error_output)
+                write_secure(log_file, error_output)
                 _wait_for_quota_reset(reset_epoch, issue_number)
                 continue
             _record_learn_failure(
@@ -338,7 +339,7 @@ def _run_learn_with_retry(
         # a bogus success.
         reset_epoch = resolve_quota_reset_epoch(stdout)
         if reset_epoch is not None:
-            log_file.write_text(stdout)
+            write_secure(log_file, stdout)
             _wait_for_quota_reset(reset_epoch, issue_number)
             continue
         _record_learn_success(state_dir, issue_number, log_file, stdout=stdout)

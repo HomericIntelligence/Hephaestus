@@ -15,6 +15,7 @@ from hephaestus.agents.runtime import (
     uses_direct_agent_runner,
 )
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.io.utils import write_secure
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,7 +70,7 @@ def read_prompt(prompt_file: Path, skill_file: Path | None, stage: str) -> str:
 def write_log(log_file: Path | None, text: str) -> None:
     """Write a subprocess log when a log path was provided."""
     if log_file is not None:
-        log_file.write_text(text, encoding="utf-8")
+        write_secure(log_file, text)
 
 
 def run_claude(
@@ -95,7 +96,7 @@ def run_claude(
         write_log(log_file, str(exc))
         return 124
 
-    output_file.write_text(result.stdout or "", encoding="utf-8")
+    write_secure(output_file, result.stdout or "")
     write_log(log_file, result.stdout or "")
     return result.returncode
 
@@ -133,7 +134,7 @@ def run_direct_agent(
         write_log(log_file, log_text)
         return exc.returncode
 
-    output_file.write_text(result.stdout, encoding="utf-8")
+    write_secure(output_file, result.stdout)
     log = result.stdout
     if result.session_id:
         log = f"SESSION_ID: {result.session_id}\n\n{log}"

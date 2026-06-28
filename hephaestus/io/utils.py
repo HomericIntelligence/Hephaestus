@@ -175,7 +175,7 @@ def write_secure(
     )
     try:
         os.chmod(tmp_name, permissions)
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(content)
             fh.flush()
             os.fsync(fh.fileno())
