@@ -28,7 +28,7 @@ def test_provider_and_model_aliases_are_required_from_env(
     assert _mod.main([]) == 2
 
 
-def test_runs_pi_with_env_aliases_without_alias_kwargs(
+def test_runs_pi_with_env_aliases_model_via_kwarg_not_argv(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -62,7 +62,8 @@ def test_runs_pi_with_env_aliases_without_alias_kwargs(
     captured = capsys.readouterr()
     assert captured.out.strip() == "OK"
     assert "LOG_FILE=" in captured.err
-    log_path = Path(captured.err.strip().split("LOG_FILE=", 1)[1])
+    log_file_line = next(l for l in captured.err.splitlines() if l.startswith("LOG_FILE="))
+    log_path = Path(log_file_line.split("LOG_FILE=", 1)[1])
     log_text = log_path.read_text(encoding="utf-8")
     assert "stdout: OK" in log_text
     assert "private-provider-alias" not in log_text
