@@ -698,9 +698,7 @@ def main() -> int:
                 skip_closed=not args.no_skip_closed,
                 enable_advise=not args.no_advise,
                 agent_timeout=(
-                    args.agent_timeout
-                    if args.agent_timeout is not None
-                    else DEFAULT_AGENT_TIMEOUT
+                    args.agent_timeout if args.agent_timeout is not None else DEFAULT_AGENT_TIMEOUT
                 ),
                 advise_timeout=(
                     args.advise_timeout

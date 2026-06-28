@@ -8,6 +8,7 @@ defaults.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import pytest
 
@@ -36,6 +37,7 @@ from hephaestus.cli.utils import (
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
+
 
 def _fresh_parser() -> argparse.ArgumentParser:
     """Return a plain ArgumentParser for flag isolation tests."""
@@ -333,14 +335,22 @@ class TestCombinedFlags:
     def test_all_flags_parse_together(self) -> None:
         """All six timeout flags can be specified in a single parse_args call."""
         parser = self._build_full_parser()
-        args = parser.parse_args([
-            "--agent-timeout", "7200",
-            "--advise-timeout", "3600",
-            "--git-message-timeout", "300",
-            "--learn-timeout", "1800",
-            "--follow-up-timeout", "900",
-            "--poll-max-wait", "600",
-        ])
+        args = parser.parse_args(
+            [
+                "--agent-timeout",
+                "7200",
+                "--advise-timeout",
+                "3600",
+                "--git-message-timeout",
+                "300",
+                "--learn-timeout",
+                "1800",
+                "--follow-up-timeout",
+                "900",
+                "--poll-max-wait",
+                "600",
+            ]
+        )
         assert args.agent_timeout == 7200
         assert args.advise_timeout == 3600
         assert args.git_message_timeout == 300
@@ -651,7 +661,7 @@ class TestImplementerMainTimeoutThreading:
     """Prove implementer main() wires CLI timeout flags into ImplementerOptions."""
 
     def test_git_message_timeout_from_cli_reaches_options(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """--git-message-timeout N from the CLI reaches ImplementerOptions.git_message_timeout.
 
@@ -675,14 +685,21 @@ class TestImplementerMainTimeoutThreading:
             def run(self) -> dict:
                 return {}
 
-        monkeypatch.setattr(sys, "argv", [
-            "impl",
-            "--issues", "42",
-            "--dry-run",
-            "--no-ui",
-            "--agent", "claude",
-            "--git-message-timeout", str(sentinel),
-        ])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "impl",
+                "--issues",
+                "42",
+                "--dry-run",
+                "--no-ui",
+                "--agent",
+                "claude",
+                "--git-message-timeout",
+                str(sentinel),
+            ],
+        )
 
         with (
             patch.object(implementer, "get_repo_root", return_value=tmp_path),
@@ -692,10 +709,10 @@ class TestImplementerMainTimeoutThreading:
 
         assert rc == 0
         assert "options" in captured, "IssueImplementer.__init__ was never called"
-        assert captured["options"].git_message_timeout == sentinel  # type: ignore[union-attr]
+        assert captured["options"].git_message_timeout == sentinel  # type: ignore[attr-defined]
 
     def test_agent_timeout_from_cli_reaches_options(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """--agent-timeout N from the CLI reaches ImplementerOptions.agent_timeout."""
         import sys
@@ -715,14 +732,21 @@ class TestImplementerMainTimeoutThreading:
             def run(self) -> dict:
                 return {}
 
-        monkeypatch.setattr(sys, "argv", [
-            "impl",
-            "--issues", "7",
-            "--dry-run",
-            "--no-ui",
-            "--agent", "claude",
-            "--agent-timeout", str(sentinel),
-        ])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "impl",
+                "--issues",
+                "7",
+                "--dry-run",
+                "--no-ui",
+                "--agent",
+                "claude",
+                "--agent-timeout",
+                str(sentinel),
+            ],
+        )
 
         with (
             patch.object(implementer, "get_repo_root", return_value=tmp_path),
@@ -731,10 +755,10 @@ class TestImplementerMainTimeoutThreading:
             rc = implementer.main()
 
         assert rc == 0
-        assert captured["options"].agent_timeout == sentinel  # type: ignore[union-attr]
+        assert captured["options"].agent_timeout == sentinel  # type: ignore[attr-defined]
 
     def test_learn_timeout_from_cli_reaches_options(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """--learn-timeout N from the CLI reaches ImplementerOptions.learn_timeout."""
         import sys
@@ -754,14 +778,21 @@ class TestImplementerMainTimeoutThreading:
             def run(self) -> dict:
                 return {}
 
-        monkeypatch.setattr(sys, "argv", [
-            "impl",
-            "--issues", "5",
-            "--dry-run",
-            "--no-ui",
-            "--agent", "claude",
-            "--learn-timeout", str(sentinel),
-        ])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "impl",
+                "--issues",
+                "5",
+                "--dry-run",
+                "--no-ui",
+                "--agent",
+                "claude",
+                "--learn-timeout",
+                str(sentinel),
+            ],
+        )
 
         with (
             patch.object(implementer, "get_repo_root", return_value=tmp_path),
@@ -770,15 +801,13 @@ class TestImplementerMainTimeoutThreading:
             rc = implementer.main()
 
         assert rc == 0
-        assert captured["options"].learn_timeout == sentinel  # type: ignore[union-attr]
+        assert captured["options"].learn_timeout == sentinel  # type: ignore[attr-defined]
 
 
 class TestCIDriverAddressThreadsTimeoutThreading:
     """Prove CIDriverOptions.agent_timeout reaches run_address_fix_session(timeout=...)."""
 
-    def test_agent_timeout_forwarded_to_run_address_fix_session(
-        self, tmp_path: pytest.TempPathFactory
-    ) -> None:
+    def test_agent_timeout_forwarded_to_run_address_fix_session(self, tmp_path: Path) -> None:
         """CIDriverOptions.agent_timeout reaches run_address_fix_session timeout= kwarg.
 
         This is the critical threading test for the ci_driver.py:1089 gap:
@@ -812,19 +841,17 @@ class TestCIDriverAddressThreadsTimeoutThreading:
         driver.lock = threading.Lock()
 
         # Stub helper methods called by _address_threads_once before run_address_fix_session.
-        driver._get_worktree_path = lambda issue, pr: tmp_path / "wt"
-        driver._get_pr_branch = lambda pr: "branch"
-        driver._sync_worktree_and_snapshot_sha = lambda issue, wt, branch: "abc123"
+        driver._get_worktree_path = lambda issue, pr: tmp_path / "wt"  # type: ignore[method-assign,assignment]
+        driver._get_pr_branch = lambda pr: "branch"  # type: ignore[method-assign,assignment]
+        driver._sync_worktree_and_snapshot_sha = lambda issue, wt, branch: "abc123"  # type: ignore[method-assign,assignment]
         # Stub the push helper so execution does not need _fix_orchestrator.
-        driver._push_ci_fix = lambda **kw: False
+        driver._push_ci_fix = lambda **kw: False  # type: ignore[method-assign]
 
         with patch(
             "hephaestus.automation.ci_driver.run_address_fix_session",
             side_effect=fake_run_address_fix_session,
         ):
-            driver._address_threads_once(
-                issue_number=1, pr_number=2, threads=[{"id": "T1"}]
-            )
+            driver._address_threads_once(issue_number=1, pr_number=2, threads=[{"id": "T1"}])
 
         # The session returned an empty addressed list → no commit pushed → False.
         # What matters is that the call forwarded the sentinel timeouts.
@@ -839,9 +866,7 @@ class TestCIDriverAddressThreadsTimeoutThreading:
 class TestPostMergeLearnTimeoutThreading:
     """Prove CIDriverOptions.learn_timeout reaches agent call in run_drive_green_learnings."""
 
-    def test_learn_timeout_reaches_run_agent_session(
-        self, tmp_path: pytest.TempPathFactory
-    ) -> None:
+    def test_learn_timeout_reaches_run_agent_session(self, tmp_path: Path) -> None:
         """CIDriverOptions.learn_timeout reaches the timeout= kwarg in run_agent_session.
 
         PostMergeProcessor.run_drive_green_learnings reads options.learn_timeout from

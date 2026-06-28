@@ -682,9 +682,7 @@ def main() -> int:
                 enable_ui=not args.no_ui and not args.json,
                 verbose=args.verbose,
                 agent_timeout=(
-                    args.agent_timeout
-                    if args.agent_timeout is not None
-                    else DEFAULT_AGENT_TIMEOUT
+                    args.agent_timeout if args.agent_timeout is not None else DEFAULT_AGENT_TIMEOUT
                 ),
             )
 
