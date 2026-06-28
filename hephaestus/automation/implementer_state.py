@@ -17,6 +17,8 @@ import logging
 import threading
 from pathlib import Path
 
+from hephaestus.io.utils import write_secure
+
 from .models import ImplementationState
 
 logger = logging.getLogger(__name__)
@@ -74,9 +76,6 @@ class ImplementationStateManager:
 
     def save(self, state: ImplementationState) -> None:
         """Atomically persist *state* to ``issue-<n>.json`` under ``state_dir``."""
-        # Imported lazily to keep this state helper independent of automation.github_api.
-        from hephaestus.io.utils import write_secure
-
         state_file = self.state_dir / f"issue-{state.issue_number}.json"
         write_secure(state_file, state.model_dump_json(indent=2))
 
