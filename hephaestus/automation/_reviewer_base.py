@@ -18,6 +18,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from hephaestus.io.utils import (
+    write_secure,  # noqa: F401 — test contract (test_reviewer_base_contract.py)
+)
+
 from ._review_utils import ensure_state_dir, instance_log, load_state_file, save_state_file
 from .curses_ui import CursesUI, ThreadLogManager
 from .git_utils import get_repo_root as _default_get_repo_root, issue_ref
