@@ -18,11 +18,13 @@ from hephaestus.automation._review_utils import (
     find_pr_for_issue,
     get_pr_head_branch,
     load_impl_session_id,
+    load_state_file,
     log_file_path,
     parse_json_block,
     print_worker_summary,
+    save_state_file,
 )
-from hephaestus.automation.models import DEFAULT_WORKER_COUNT, WorkerResult
+from hephaestus.automation.models import DEFAULT_WORKER_COUNT, ImplementationState, WorkerResult
 
 # ---------------------------------------------------------------------------
 # log_file_path
@@ -596,6 +598,57 @@ class TestAddMaxWorkersArg:
         add_max_workers_arg(parser, default=8)
         args = parser.parse_args([])
         assert args.max_workers == 8
+
+
+# ---------------------------------------------------------------------------
+# state file helpers
+# ---------------------------------------------------------------------------
+
+
+class TestStateFileHelpers:
+    """Tests for shared issue/review state file persistence helpers."""
+
+    def test_load_state_file_missing_returns_none(self, tmp_path: Path) -> None:
+        assert load_state_file(tmp_path, "issue", 123) is None
+
+    def test_load_state_file_returns_raw_dict(self, tmp_path: Path) -> None:
+        (tmp_path / "issue-123.json").write_text(json.dumps({"session_id": "abc"}))
+
+        assert load_state_file(tmp_path, "issue", 123) == {"session_id": "abc"}
+
+    def test_load_state_file_validates_pydantic_model(self, tmp_path: Path) -> None:
+        state = ImplementationState(issue_number=123)
+        (tmp_path / "issue-123.json").write_text(state.model_dump_json())
+
+        loaded = load_state_file(tmp_path, "issue", 123, ImplementationState)
+
+        assert isinstance(loaded, ImplementationState)
+        assert loaded.issue_number == 123
+
+    def test_load_state_file_rejects_non_object_payload(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        (tmp_path / "issue-123.json").write_text(json.dumps([["session_id", "would-coerce"]]))
+        caplog.set_level("WARNING")
+
+        assert load_state_file(tmp_path, "issue", 123) is None
+        assert "expected JSON object" in caplog.text
+
+    def test_load_state_file_invalid_json_returns_none(self, tmp_path: Path) -> None:
+        (tmp_path / "issue-123.json").write_text("{not valid json")
+
+        assert load_state_file(tmp_path, "issue", 123) is None
+
+    def test_save_state_file_uses_secure_write(self, tmp_path: Path) -> None:
+        state = ImplementationState(issue_number=123)
+
+        with patch("hephaestus.automation._review_utils.write_secure") as mock_write:
+            save_state_file(tmp_path, "issue", 123, state)
+
+        mock_write.assert_called_once_with(
+            tmp_path / "issue-123.json",
+            state.model_dump_json(indent=2),
+        )
 
 
 # ---------------------------------------------------------------------------

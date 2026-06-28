@@ -1,55 +1,34 @@
-"""Tests for implementation-state persistence."""
+"""Tests for per-issue implementation state persistence."""
 
 from __future__ import annotations
 
 import stat
 from pathlib import Path
 
-import pytest
-
-import hephaestus.automation.implementer_state as implementer_state_module
-from hephaestus.automation.models import ImplementationState
-from hephaestus.io.utils import write_secure as io_write_secure
+from hephaestus.automation.implementer_state import ImplementationStateManager
+from hephaestus.automation.models import ImplementationPhase, ImplementationState
 
 
-def test_implementation_state_manager_imports_canonical_write_secure() -> None:
-    """The state manager imports the canonical secure writer directly."""
-    assert vars(implementer_state_module)["write_secure"] is io_write_secure
+def test_save_persists_issue_state_file(tmp_path: Path) -> None:
+    """ImplementationStateManager.save writes the expected issue state file."""
+    manager = ImplementationStateManager(tmp_path)
+    state = ImplementationState(issue_number=123, phase=ImplementationPhase.IMPLEMENTING)
 
-
-def test_save_imports_canonical_write_secure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Saving state should resolve the canonical IO write_secure helper.
-
-    Patches the module-level name in implementer_state (top-level import)
-    rather than the source module, since the reference is bound at import time.
-    """
-    calls: list[tuple[Path, str]] = []
-
-    def fake_write_secure(
-        path: str | Path,
-        content: str,
-        permissions: int = 0o600,
-    ) -> None:
-        del permissions
-        calls.append((Path(path), content))
-
-    monkeypatch.setattr(implementer_state_module, "write_secure", fake_write_secure)
-
-    manager = implementer_state_module.ImplementationStateManager(tmp_path)
-    state = ImplementationState(issue_number=1401)
     manager.save(state)
 
-    assert calls == [
-        (tmp_path / "issue-1401.json", state.model_dump_json(indent=2)),
-    ]
+    restored = ImplementationState.model_validate_json((tmp_path / "issue-123.json").read_text())
+    assert restored.issue_number == 123
+    assert restored.phase is ImplementationPhase.IMPLEMENTING
 
 
 def test_save_persists_issue_state_with_secure_permissions(tmp_path: Path) -> None:
-    """save() writes issue-<n>.json atomically through write_secure."""
-    manager = implementer_state_module.ImplementationStateManager(tmp_path)
+    """save() writes issue-<n>.json atomically with 0o600 permissions.
+
+    The state manager now routes writes through ``save_state_file`` (which
+    delegates to the canonical ``write_secure``), so this asserts the
+    observable secure-permission behavior rather than the import location.
+    """
+    manager = ImplementationStateManager(tmp_path)
     state = ImplementationState(issue_number=1402, branch_name="issue-1402")
 
     manager.save(state)
@@ -59,3 +38,16 @@ def test_save_persists_issue_state_with_secure_permissions(tmp_path: Path) -> No
     assert restored.issue_number == 1402
     assert restored.branch_name == "issue-1402"
     assert stat.S_IMODE(state_file.stat().st_mode) == 0o600
+
+
+def test_load_all_loads_valid_state_and_skips_corrupt_file(tmp_path: Path) -> None:
+    """ImplementationStateManager.load_all keeps valid files and skips corrupt files."""
+    valid = ImplementationState(issue_number=123, phase=ImplementationPhase.TESTING)
+    (tmp_path / "issue-123.json").write_text(valid.model_dump_json())
+    (tmp_path / "issue-456.json").write_text("{not valid json")
+
+    manager = ImplementationStateManager(tmp_path)
+    manager.load_all()
+
+    assert manager.states[123].phase is ImplementationPhase.TESTING
+    assert 456 not in manager.states

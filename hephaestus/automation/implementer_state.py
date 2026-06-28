@@ -12,13 +12,11 @@ without changing call sites.
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 from pathlib import Path
 
-from hephaestus.io.utils import write_secure
-
+from ._review_utils import load_state_file, save_state_file
 from .models import ImplementationState
 
 logger = logging.getLogger(__name__)
@@ -76,8 +74,7 @@ class ImplementationStateManager:
 
     def save(self, state: ImplementationState) -> None:
         """Atomically persist *state* to ``issue-<n>.json`` under ``state_dir``."""
-        state_file = self.state_dir / f"issue-{state.issue_number}.json"
-        write_secure(state_file, state.model_dump_json(indent=2))
+        save_state_file(self.state_dir, "issue", state.issue_number, state)
 
     def load_all(self) -> None:
         """Load every ``issue-*.json`` file under ``state_dir`` into memory.
@@ -87,10 +84,21 @@ class ImplementationStateManager:
         """
         for state_file in self.state_dir.glob("issue-*.json"):
             try:
-                with open(state_file) as f:
-                    state = ImplementationState.model_validate_json(f.read())
-                    with self._lock:
-                        self.states[state.issue_number] = state
-                logger.info("Loaded state for issue #%s", state.issue_number)
-            except (json.JSONDecodeError, ValueError, OSError) as e:
-                logger.error("Failed to load state from %s: %s", state_file, e)
+                issue_number = int(state_file.stem.removeprefix("issue-"))
+            except ValueError:
+                logger.error("Failed to load state from %s: invalid issue filename", state_file)
+                continue
+
+            state = load_state_file(
+                self.state_dir,
+                "issue",
+                issue_number,
+                ImplementationState,
+                state_logger=logger,
+            )
+            if state is None:
+                continue
+
+            with self._lock:
+                self.states[state.issue_number] = state
+            logger.info("Loaded state for issue #%s", state.issue_number)
