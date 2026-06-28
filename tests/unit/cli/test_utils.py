@@ -3,6 +3,7 @@
 
 import argparse
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -16,9 +17,11 @@ from hephaestus.cli.utils import (
     configure_github_throttle_from_args,
     confirm_action,
     create_parser,
+    create_validation_parser,
     emit_json_status,
     format_output,
     format_table,
+    resolve_repo_root,
 )
 
 
@@ -114,6 +117,57 @@ class TestCreateParser:
         """Prog name is set correctly."""
         parser = create_parser("myprog")
         assert parser.prog == "myprog"
+
+
+class TestCreateValidationParser:
+    """Tests for create_validation_parser."""
+
+    def test_default_flags_present(self) -> None:
+        """Parser includes --repo-root, --json, and --version by default."""
+        parser = create_validation_parser("demo")
+        args = parser.parse_args([])
+        assert args.repo_root is None
+        assert args.json is False
+
+    def test_explicit_repo_root_captured(self, tmp_path: Path) -> None:
+        """Explicit --repo-root is captured as a Path in the namespace."""
+        parser = create_validation_parser("demo")
+        args = parser.parse_args(["--repo-root", str(tmp_path)])
+        assert args.repo_root == tmp_path
+
+    def test_include_repo_root_false_omits_flag(self) -> None:
+        """include_repo_root=False suppresses the --repo-root flag."""
+        parser = create_validation_parser("demo", include_repo_root=False)
+        args = parser.parse_args([])
+        assert not hasattr(args, "repo_root")
+
+    def test_parse_known_args_preserves_unknown_flags(self, tmp_path: Path) -> None:
+        """parse_known_args() does not consume passthrough args."""
+        parser = create_validation_parser("demo")
+        args, unknown = parser.parse_known_args(["--json", "--strict-equality", "pkg/a.py"])
+        assert args.json is True
+        assert unknown == ["--strict-equality", "pkg/a.py"]
+
+
+class TestResolveRepoRoot:
+    """Tests for resolve_repo_root."""
+
+    def test_explicit_root_returned_directly(self, tmp_path: Path) -> None:
+        """resolve_repo_root returns the explicit --repo-root without discovery."""
+        parser = create_validation_parser("demo")
+        args = parser.parse_args(["--repo-root", str(tmp_path)])
+        with patch("hephaestus.utils.helpers.get_repo_root") as get_root:
+            result = resolve_repo_root(args)
+        assert result == tmp_path
+        get_root.assert_not_called()
+
+    def test_auto_detect_when_not_provided(self, tmp_path: Path) -> None:
+        """resolve_repo_root falls back to get_repo_root() when --repo-root is absent."""
+        parser = create_validation_parser("demo")
+        args = parser.parse_args([])
+        with patch("hephaestus.cli.utils.get_repo_root", return_value=tmp_path):
+            result = resolve_repo_root(args)
+        assert result == tmp_path
 
 
 class TestAddVersionArg:
