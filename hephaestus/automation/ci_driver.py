@@ -30,6 +30,7 @@ from hephaestus.cli.utils import (
     configure_github_throttle_from_args,
     emit_json_status,
 )
+from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import file_lock
 
 from ._review_utils import (
@@ -1243,8 +1244,9 @@ class CIDriver:
         if not head_sha:
             return
         try:
-            self._ci_fix_marker_path(pr_number).write_text(
-                json.dumps({"pr_number": pr_number, "head_sha": head_sha}) + "\n"
+            write_secure(
+                self._ci_fix_marker_path(pr_number),
+                json.dumps({"pr_number": pr_number, "head_sha": head_sha}) + "\n",
             )
         except OSError as exc:
             logger.warning(

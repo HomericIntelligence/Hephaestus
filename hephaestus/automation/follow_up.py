@@ -39,6 +39,7 @@ from hephaestus.agents.runtime import (
     uses_direct_agent_runner,
 )
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
+from hephaestus.io.utils import write_secure
 
 from ._review_utils import log_file_path
 from .claude_timeouts import follow_up_claude_timeout
@@ -370,7 +371,7 @@ def _persist_rejected(
     path = state_dir / f"follow-up-rejected-{issue_number}.json"
     payload = [{"title": r.title, "reason": r.reason} for r in rejected]
     with contextlib.suppress(Exception):
-        path.write_text(json.dumps(payload, indent=2) + "\n")
+        write_secure(path, json.dumps(payload, indent=2) + "\n")
 
 
 def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + file paths are unavoidably coupled
@@ -409,11 +410,11 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
             f"but selected agent is {agent}; skipping follow-up resume"
         )
         logger.warning("Follow-up skipped for issue #%d: %s", issue_number, message)
-        follow_up_log.write_text(f"FAILED: {message}\n")
+        write_secure(follow_up_log, f"FAILED: {message}\n")
         return None
 
     prompt_file = worktree_path / f".claude-followup-{issue_number}.md"
-    prompt_file.write_text(get_follow_up_prompt(issue_number))
+    write_secure(prompt_file, get_follow_up_prompt(issue_number))
 
     try:
         if uses_direct_agent_runner(agent):
@@ -441,7 +442,7 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
             )
             stdout = result.stdout or ""
 
-        follow_up_log.write_text(stdout)
+        write_secure(follow_up_log, stdout)
 
         try:
             data = json.loads(stdout)
@@ -531,7 +532,7 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
             error_output += f"\nSTDERR:\n{e.stderr or ''}"
         error_output += f"\nTRACEBACK:\n{traceback.format_exc()}"
         with contextlib.suppress(Exception):
-            follow_up_log.write_text(error_output)
+            write_secure(follow_up_log, error_output)
         return None
     finally:
         with contextlib.suppress(Exception):

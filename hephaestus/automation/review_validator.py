@@ -40,6 +40,7 @@ from hephaestus.agents.runtime import (
     run_agent_text,
     uses_direct_agent_runner,
 )
+from hephaestus.io.utils import write_secure
 
 from ._review_utils import log_file_path, parse_json_block
 from .claude_invoke import invoke_claude_with_session, raise_for_error_envelope
@@ -186,7 +187,7 @@ def _run_validation_session(
                 model=direct_agent_model(agent, "HEPH_REVIEWER_MODEL"),
                 sandbox="read-only",
             )
-            log_file.write_text(result.stdout or "")
+            write_secure(log_file, result.stdout or "")
             parsed = parse_json_block(result.stdout or "")
         else:
             repo_slug = get_repo_slug(get_repo_root())
@@ -203,7 +204,7 @@ def _run_validation_session(
                 allowed_tools="Read,Glob,Grep",
                 input_via_stdin=True,
             )
-            log_file.write_text(stdout or "")
+            write_secure(log_file, stdout or "")
             # Fail loudly on an ``is_error: true`` envelope (e.g. a 429 cap)
             # instead of validating against the cap message as if it were a
             # real review (#1528 follow-up).

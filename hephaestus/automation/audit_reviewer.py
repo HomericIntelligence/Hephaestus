@@ -30,6 +30,7 @@ from hephaestus.cli.utils import (
     configure_github_throttle_from_args,
     emit_json_status,
 )
+from hephaestus.io.utils import write_secure
 
 from ._review_utils import build_automation_parser, ensure_state_dir
 from .claude_invoke import invoke_claude_with_session
@@ -71,7 +72,7 @@ def write_audit_report(state_dir: Path, audits: list[dict[str, Any]]) -> Path:
     state_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = state_dir / f"audit-report-{ts}.json"
-    path.write_text(json.dumps({"audits": audits, "generated_at": ts}, indent=2))
+    write_secure(path, json.dumps({"audits": audits, "generated_at": ts}, indent=2))
     return path
 
 
@@ -177,12 +178,12 @@ def run_audit_coordinator(
                 response = json.loads(stdout or "{}").get("result", stdout or "")
             except (json.JSONDecodeError, AttributeError):
                 response = stdout or ""
-        log_file.write_text(response)
+        write_secure(log_file, response)
     except subprocess.CalledProcessError as e:
-        log_file.write_text(f"EXIT {e.returncode}\nSTDOUT:\n{e.stdout}\nSTDERR:\n{e.stderr}")
+        write_secure(log_file, f"EXIT {e.returncode}\nSTDOUT:\n{e.stdout}\nSTDERR:\n{e.stderr}")
         raise RuntimeError(f"Audit coordinator failed: {e.stderr or e.stdout}") from e
     except subprocess.TimeoutExpired as e:
-        log_file.write_text(f"TIMEOUT after {e.timeout}s\n{e.output or ''}")
+        write_secure(log_file, f"TIMEOUT after {e.timeout}s\n{e.output or ''}")
         raise RuntimeError("Audit coordinator timed out") from e
 
     audits = _parse_coordinator_results(response)

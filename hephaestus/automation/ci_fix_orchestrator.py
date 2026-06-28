@@ -29,6 +29,7 @@ from hephaestus.agents.runtime import (
     run_agent_session,
     uses_direct_agent_runner,
 )
+from hephaestus.io.utils import write_secure
 
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
@@ -224,7 +225,8 @@ class CIFixOrchestrator:
         """
         marker = self._state_dir() / f"repeated-no-commit-{pr_number}.json"
         try:
-            marker.write_text(
+            write_secure(
+                marker,
                 json.dumps(
                     {
                         "issue_number": issue_number,
@@ -235,7 +237,7 @@ class CIFixOrchestrator:
                     },
                     indent=2,
                 )
-                + "\n"
+                + "\n",
             )
         except OSError as exc:
             logger.warning(

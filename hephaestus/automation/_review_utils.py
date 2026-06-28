@@ -45,6 +45,7 @@ from hephaestus.cli.utils import (
     add_json_arg,
     add_version_arg,
 )
+from hephaestus.io.utils import write_secure
 
 from .github_api import _gh_call
 from .models import DEFAULT_STATE_DIR, DEFAULT_WORKER_COUNT
@@ -369,7 +370,8 @@ def _write_json_parse_trace(
     trace_path = trace_dir / trace_name
     try:
         trace_dir.mkdir(parents=True, exist_ok=True)
-        trace_path.write_text(
+        write_secure(
+            trace_path,
             "\n".join(
                 [
                     f"reason: {reason}",
@@ -380,7 +382,7 @@ def _write_json_parse_trace(
                     "=== full response ===",
                     text,
                 ]
-            )
+            ),
         )
         return trace_path, None
     except OSError as exc:

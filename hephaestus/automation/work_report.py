@@ -13,6 +13,8 @@ import os
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
+from hephaestus.io.utils import write_secure
+
 
 def write_work_report(work_units: int) -> None:
     """Write the phase's work-unit count to the path in $HEPH_WORK_REPORT.
@@ -29,7 +31,7 @@ def write_work_report(work_units: int) -> None:
         return
     # best-effort; absence ⇒ "unknown" ⇒ treated as work
     with contextlib.suppress(OSError):
-        Path(path).write_text(str(int(work_units)), encoding="utf-8")
+        write_secure(Path(path), str(int(work_units)))
 
 
 @contextlib.contextmanager

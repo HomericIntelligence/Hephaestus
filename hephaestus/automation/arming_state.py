@@ -26,6 +26,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from hephaestus.io.utils import write_secure
+
 logger = logging.getLogger(__name__)
 
 
@@ -75,7 +77,7 @@ class ArmingStateStore:
         """Persist the arming record. Best-effort; logs and swallows IO errors."""
         path = self.path(issue_number)
         try:
-            path.write_text(json.dumps(record, indent=2, sort_keys=True))
+            write_secure(path, json.dumps(record, indent=2, sort_keys=True))
         except OSError as exc:
             logger.warning(
                 "Could not write arming record for issue #%s: %s",

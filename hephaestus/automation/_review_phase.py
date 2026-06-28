@@ -32,6 +32,7 @@ from hephaestus.agents.runtime import (
 from hephaestus.constants import agent_git_timeout, diff_collect_timeout
 from hephaestus.github.client import ClaudeUsageCapError, gh_call
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
+from hephaestus.io.utils import write_secure
 
 from . import review_state
 from ._review_utils import log_file_path
@@ -1484,9 +1485,10 @@ class ReviewPhase(StageMixin):
         if not matches.get("addressed") and "```json" not in text:
             with contextlib.suppress(Exception):
                 trace_path = self.state_dir / f"address-{issue_number}-r{iteration}.parse-error.log"
-                trace_path.write_text(
+                write_secure(
+                    trace_path,
                     f"reason: no fenced ```json block found in response\n\n"
-                    f"=== full response ===\n{text}"
+                    f"=== full response ===\n{text}",
                 )
         return matches
 
@@ -1573,7 +1575,7 @@ class ReviewPhase(StageMixin):
                     issue_number,
                     iteration=prev_iteration + 1,
                 )
-                log_file.write_text(result.stdout or "")
+                write_secure(log_file, result.stdout or "")
                 return True
             except subprocess.CalledProcessError as e:
                 logger.error(
@@ -1797,7 +1799,7 @@ class ReviewPhase(StageMixin):
                 issue_number,
                 iteration=iteration,
             )
-            log_file.write_text(review_text)
+            write_secure(log_file, review_text)
         except Exception as e:
             logger.warning("#%s: failed to save review log r%s: %s", issue_number, iteration, e)
 
@@ -1807,12 +1809,12 @@ class ReviewPhase(StageMixin):
         """Persist review loop progress for ``--resume`` continuity (A2-005)."""
         try:
             iter_file = self.state_dir / f"review-iter-{issue_number}.json"
-            iter_file.write_text(json.dumps({"iterations_run": iterations_run}))
+            write_secure(iter_file, json.dumps({"iterations_run": iterations_run}))
         except Exception as e:
             logger.warning("#%d: failed to persist review iteration count: %s", issue_number, e)
         try:
             prior_file = self.state_dir / f"review-prior-{issue_number}.txt"
-            prior_file.write_text(prior_review)
+            write_secure(prior_file, prior_review)
         except Exception as e:
             logger.warning("#%d: failed to persist prior review text: %s", issue_number, e)
 

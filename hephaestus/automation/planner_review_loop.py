@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+from hephaestus.io.utils import write_secure
+
 from ._review_utils import ensure_state_dir, log_file_path
 from .claude_invoke import INFRA_ERROR_REVIEW_TEXT, parse_review_verdict
 from .claude_models import planner_model, reviewer_model
@@ -667,8 +669,8 @@ class PlanReviewLoop:
                 )
             if error:
                 record["error"] = error
-            record_file.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
-            log_file.write_text(output if succeeded else f"FAILED: {error}\n")
+            write_secure(record_file, json.dumps(record, indent=2, sort_keys=True) + "\n")
+            write_secure(log_file, output if succeeded else f"FAILED: {error}\n")
         except OSError as exc:
             logger.warning(
                 "%s: failed to write planner-learnings state (non-fatal): %s",
