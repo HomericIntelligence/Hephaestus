@@ -33,7 +33,6 @@ from ._stage_context import StageMixin
 from .advise_runner import run_advise
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import advise_model, codex_advise_model, implementer_model
-from .claude_timeouts import advise_claude_timeout, implementer_claude_timeout
 from .git_utils import get_repo_slug
 from .learn import compact_session
 from .prompts import get_advise_prompt_builder
@@ -87,7 +86,7 @@ class ImplementPhase(StageMixin):
                     agent=self.options.agent,
                     prompt=prompt,
                     cwd=self.repo_root,
-                    timeout=advise_claude_timeout(),
+                    timeout=self.options.advise_timeout,
                     model=direct_agent_model(
                         self.options.agent,
                         "HEPH_ADVISE_MODEL",
@@ -104,7 +103,7 @@ class ImplementPhase(StageMixin):
                 prompt=prompt,
                 model=advise_model(),
                 cwd=self.repo_root,
-                timeout=advise_claude_timeout(),
+                timeout=self.options.advise_timeout,
                 output_format="text",
             )
             return (stdout or "").strip()
@@ -179,7 +178,7 @@ class ImplementPhase(StageMixin):
                 prompt=prompt,
                 model=implementer_model(),
                 cwd=worktree_path,
-                timeout=implementer_claude_timeout(),
+                timeout=self.options.agent_timeout,
                 output_format="json",
                 permission_mode="dontAsk",
                 allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
@@ -273,7 +272,7 @@ class ImplementPhase(StageMixin):
                 agent=agent,
                 prompt=prompt,
                 cwd=worktree_path,
-                timeout=implementer_claude_timeout(),
+                timeout=self.options.agent_timeout,
                 model=direct_agent_model(agent, "HEPH_IMPLEMENTER_MODEL"),
                 sandbox="workspace-write",
             )

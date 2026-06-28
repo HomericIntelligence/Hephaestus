@@ -42,7 +42,7 @@ from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 from hephaestus.io.utils import write_secure
 
 from ._review_utils import log_file_path
-from .claude_timeouts import follow_up_claude_timeout
+from .claude_timeouts import DEFAULT_AGENT_TIMEOUT
 from .git_utils import issue_ref, run
 from .github_api import gh_issue_comment, gh_issue_create
 from .prompts import get_follow_up_prompt
@@ -384,6 +384,7 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
     dry_run: bool = False,
     agent: str = "claude",
     session_agent: str | None = None,
+    timeout: int = DEFAULT_AGENT_TIMEOUT,
 ) -> FollowUpResponse | None:
     """Resume the implementation Claude session and file ONE consolidated follow-up issue.
 
@@ -423,7 +424,7 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
                 session_id=session_id,
                 prompt=prompt_file.read_text(),
                 cwd=worktree_path,
-                timeout=follow_up_claude_timeout(),
+                timeout=timeout,
                 model=direct_agent_model(agent, "HEPH_LEARN_MODEL"),
             )
             stdout = agent_json_stdout(direct_result.stdout, direct_result.session_id)
@@ -438,7 +439,7 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
                     "json",
                 ],
                 cwd=worktree_path,
-                timeout=follow_up_claude_timeout(),
+                timeout=timeout,
             )
             stdout = result.stdout or ""
 

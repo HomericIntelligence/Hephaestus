@@ -28,6 +28,15 @@ logger = logging.getLogger(__name__)
 
 PLAN_STAGE_TIMEOUT = 7200
 
+# Defaults for the explicit CLI timeout options (#1657). The non-phase-
+# differentiated agent phases (advise, address-review, ci-driver, follow-up)
+# and the options-object fallbacks default to DEFAULT_AGENT_TIMEOUT; per-phase
+# timeouts keep their #1642 values via the AGENT_* constants in
+# ``hephaestus.constants``.
+DEFAULT_AGENT_TIMEOUT: int = 7200
+DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT: int = 300
+DEFAULT_CI_POLL_MAX_WAIT: int = 600
+
 
 def _read_int_env(name: str, default: int) -> int:
     """Return ``int(os.environ[name])`` or ``default`` if unset/invalid."""
@@ -129,6 +138,9 @@ __all__ = [
     "AGENT_LEARN_TIMEOUT",
     "AGENT_PLAN_TIMEOUT",
     "AGENT_REVIEW_TIMEOUT",
+    "DEFAULT_AGENT_TIMEOUT",
+    "DEFAULT_CI_POLL_MAX_WAIT",
+    "DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT",
     "PLAN_STAGE_TIMEOUT",
     "address_review_claude_timeout",
     "advise_claude_timeout",

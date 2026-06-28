@@ -28,7 +28,7 @@ from hephaestus.io.utils import write_secure
 
 from ._review_utils import log_file_path
 from .claude_models import learn_model
-from .claude_timeouts import learn_claude_timeout
+from .claude_timeouts import DEFAULT_AGENT_TIMEOUT, learn_claude_timeout
 from .git_utils import run
 from .session_naming import session_uuid
 
@@ -193,6 +193,8 @@ def run_learn(
     agent: str = "claude",
     session_agent: str | None = None,
     model: str | None = None,
+    *,
+    timeout: int = DEFAULT_AGENT_TIMEOUT,
 ) -> bool:
     """Resume agent session to run /learn.
 
@@ -241,7 +243,7 @@ def run_learn(
                     session_id=session_id,
                     prompt=build_learn_prompt(""),
                     cwd=worktree_path,
-                    timeout=learn_claude_timeout(),
+                    timeout=timeout,
                     model=direct_agent_model(agent, "HEPH_LEARN_MODEL"),
                 ).stdout
                 or ""
@@ -276,7 +278,7 @@ def run_learn(
     ]
 
     def _invoke_claude() -> str:
-        return run(learn_command, cwd=worktree_path, timeout=learn_claude_timeout()).stdout or ""
+        return run(learn_command, cwd=worktree_path, timeout=timeout).stdout or ""
 
     return _run_learn_with_retry(
         _invoke_claude, state_dir=state_dir, issue_number=issue_number, log_file=log_file

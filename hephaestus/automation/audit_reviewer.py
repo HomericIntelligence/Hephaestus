@@ -35,7 +35,7 @@ from hephaestus.io.utils import write_secure
 from ._review_utils import build_automation_parser, ensure_state_dir
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import reviewer_model
-from .claude_timeouts import pr_reviewer_claude_timeout
+from .claude_timeouts import DEFAULT_AGENT_TIMEOUT
 from .git_utils import get_repo_root, get_repo_slug
 from .github_api import _gh_call, fetch_open_prs, gh_pr_review_post
 from .session_naming import AGENT_PR_REVIEWER
@@ -126,6 +126,7 @@ def run_audit_coordinator(
     agent: str,
     state_dir: Path,
     dry_run: bool = False,
+    timeout: int = DEFAULT_AGENT_TIMEOUT,
 ) -> list[dict[str, Any]]:
     """Dispatch the coordinator agent; return parsed audit results.
 
@@ -152,7 +153,7 @@ def run_audit_coordinator(
                 agent=agent,
                 prompt=prompt,
                 cwd=get_repo_root(),
-                timeout=pr_reviewer_claude_timeout(),
+                timeout=timeout,
                 model=direct_agent_model(agent, "HEPH_REVIEWER_MODEL"),
                 sandbox="read-only",
             )
@@ -168,7 +169,7 @@ def run_audit_coordinator(
                 prompt=prompt,
                 model=reviewer_model(),
                 cwd=get_repo_root(),
-                timeout=pr_reviewer_claude_timeout(),
+                timeout=timeout,
                 output_format="json",
                 permission_mode="dontAsk",
                 allowed_tools="Read,Glob,Grep",
@@ -200,6 +201,7 @@ class AuditReviewer:
     pr_numbers: list[int] = field(default_factory=list)
     state_dir: Path | None = None
     dry_run: bool = False
+    timeout: int = DEFAULT_AGENT_TIMEOUT
 
     def __post_init__(self) -> None:
         """Set default state_dir if not provided."""
@@ -221,6 +223,7 @@ class AuditReviewer:
                 agent=self.agent,
                 state_dir=self.state_dir,
                 dry_run=self.dry_run,
+                timeout=self.timeout,
             )
         except RuntimeError as exc:
             logger.error("Coordinator failed: %s", exc)

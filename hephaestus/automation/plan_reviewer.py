@@ -26,12 +26,12 @@ from hephaestus.agents.runtime import (
     uses_direct_agent_runner,
 )
 from hephaestus.automation._review_utils import build_automation_parser, print_worker_summary
-from hephaestus.cli.utils import emit_json_status
+from hephaestus.cli.utils import add_agent_timeout_arg, emit_json_status
 from hephaestus.github.rate_limit import wait_until
 
 from .claude_invoke import invoke_claude_with_session, parse_review_verdict, scan_quota_reset
 from .claude_models import reviewer_model
-from .claude_timeouts import plan_reviewer_claude_timeout
+from .claude_timeouts import DEFAULT_AGENT_TIMEOUT
 from .git_utils import get_repo_info, get_repo_root, get_repo_slug, issue_ref
 from .github_api import _gh_call, gh_issue_json, gh_issue_upsert_comment
 from .models import PLAN_COMMENT_MARKER, PlanReviewerOptions, WorkerResult
@@ -451,7 +451,7 @@ class PlanReviewer:
                 prompt=prompt,
                 model=reviewer_model(),
                 cwd=repo_root,
-                timeout=plan_reviewer_claude_timeout(),
+                timeout=self.options.agent_timeout,
                 allowed_tools="Read,Glob,Grep",
                 input_via_stdin=True,
             )
@@ -509,7 +509,7 @@ class PlanReviewer:
                 agent=agent,
                 prompt=prompt,
                 cwd=Path.cwd(),
-                timeout=plan_reviewer_claude_timeout(),
+                timeout=self.options.agent_timeout,
                 model=direct_agent_model(agent, "HEPH_REVIEWER_MODEL"),
                 sandbox="read-only",
             )
@@ -643,6 +643,7 @@ Examples:
         required=True,
         help="Issue numbers whose plans should be reviewed",
     )
+    add_agent_timeout_arg(parser)
     return parser
 
 
@@ -680,6 +681,9 @@ def main() -> int:
                 dry_run=args.dry_run,
                 enable_ui=not args.no_ui and not args.json,
                 verbose=args.verbose,
+                agent_timeout=(
+                    args.agent_timeout if args.agent_timeout is not None else DEFAULT_AGENT_TIMEOUT
+                ),
             )
 
             reviewer = PlanReviewer(options)

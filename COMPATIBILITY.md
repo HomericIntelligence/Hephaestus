@@ -273,10 +273,16 @@ removal):
 | `CommandRegistry` | 0.1.0 | Registry type for CLI subcommands |
 | `COMMAND_REGISTRY` | 0.1.0 | Default shared `CommandRegistry` instance |
 | `DRY_RUN_HELP_CAVEAT` | 0.9.0 | Standard help text appended for dry-run flags |
+| `add_advise_timeout_arg` | 0.9.8 | Add an `--advise-timeout` flag to a parser |
+| `add_agent_timeout_arg` | 0.9.8 | Add an `--agent-timeout` flag to a parser |
 | `add_dry_run_arg` | 0.9.0 | Add a `--dry-run` flag to a parser |
+| `add_follow_up_timeout_arg` | 0.9.8 | Add a `--follow-up-timeout` flag to a parser |
+| `add_git_message_timeout_arg` | 0.9.8 | Add a `--git-message-timeout` flag to a parser |
 | `add_github_throttle_args` | 0.9.0 | Add GitHub API throttle flags to a parser |
 | `add_json_arg` | 0.6.0 | Add a `--json` output flag to a parser |
+| `add_learn_timeout_arg` | 0.9.8 | Add a `--learn-timeout` flag to a parser |
 | `add_logging_args` | 0.1.0 | Add `--verbose`/`--quiet` logging flags |
+| `add_poll_max_wait_arg` | 0.9.8 | Add a `--poll-max-wait` flag to a parser |
 | `add_version_arg` | 0.1.0 | Add a `--version` flag to a parser |
 | `configure_github_throttle_from_args` | 0.9.0 | Apply parsed throttle args to the GitHub client |
 | `confirm_action` | 0.1.0 | Interactive yes/no confirmation prompt |

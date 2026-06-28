@@ -22,6 +22,9 @@ from hephaestus.agents.runtime import (
     uses_direct_agent_runner,
 )
 from hephaestus.cli.utils import (
+    add_advise_timeout_arg,
+    add_agent_timeout_arg,
+    add_git_message_timeout_arg,
     configure_github_throttle_from_args,
     emit_json_status,
 )
@@ -34,7 +37,11 @@ from ._review_utils import (
 )
 from .advise_runner import advise_skipped, ensure_mnemosyne, run_advise
 from .claude_models import advise_model, codex_advise_model
-from .claude_timeouts import advise_claude_timeout, planner_claude_timeout
+from .claude_timeouts import (
+    DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
+    planner_claude_timeout,
+)
 from .git_utils import issue_ref
 from .github_api import (
     GitHubRateLimitError,
@@ -374,7 +381,7 @@ class Planner:
                         "HEPH_ADVISE_MODEL",
                         codex_default=codex_advise_model(),
                     ),
-                    timeout=advise_claude_timeout(),
+                    timeout=self.options.advise_timeout,
                     sandbox="read-only",
                 )
             # Advise is light search work, so it runs on the cheap model with a
@@ -384,7 +391,7 @@ class Planner:
                 model=advise_model(),
                 agent=AGENT_ADVISE,
                 issue_number=issue_number,
-                timeout=advise_claude_timeout(),
+                timeout=self.options.advise_timeout,
             )
 
         return run_advise(
@@ -621,6 +628,9 @@ Examples:
         action="store_true",
         help="Skip the advise step (don't search team knowledge base before planning)",
     )
+    add_agent_timeout_arg(parser)
+    add_advise_timeout_arg(parser)
+    add_git_message_timeout_arg(parser)
     return parser
 
 
@@ -687,6 +697,19 @@ def main() -> int:
                 system_prompt_file=args.system_prompt,
                 skip_closed=not args.no_skip_closed,
                 enable_advise=not args.no_advise,
+                agent_timeout=(
+                    args.agent_timeout if args.agent_timeout is not None else DEFAULT_AGENT_TIMEOUT
+                ),
+                advise_timeout=(
+                    args.advise_timeout
+                    if args.advise_timeout is not None
+                    else DEFAULT_AGENT_TIMEOUT
+                ),
+                git_message_timeout=(
+                    args.git_message_timeout
+                    if args.git_message_timeout is not None
+                    else DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
+                ),
             )
 
             planner = Planner(options)

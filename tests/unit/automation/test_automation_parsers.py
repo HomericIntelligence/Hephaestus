@@ -200,6 +200,17 @@ def _store_true(option: str, dest: str, help_text: str) -> ActionSpec:
     )
 
 
+def _timeout_spec(flag: str, dest: str, help_text: str) -> ActionSpec:
+    """Return a timeout integer option spec (default=None)."""
+    return _action_spec(
+        (flag,),
+        dest,
+        "_StoreAction",
+        None,
+        help_text=help_text,
+    )
+
+
 def _specs(parser: argparse.ArgumentParser) -> tuple[ActionSpec, ...]:
     """Return comparable action specs for a parser, excluding argparse help."""
     return tuple(
@@ -265,6 +276,21 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "no_advise",
             "Skip the advise step (don't search team knowledge base before planning)",
         ),
+        _timeout_spec(
+            "--agent-timeout",
+            "agent_timeout",
+            "Agent subprocess timeout in seconds (default: 7200).",
+        ),
+        _timeout_spec(
+            "--advise-timeout",
+            "advise_timeout",
+            "Timeout for the advise sub-agent in seconds (default: 7200).",
+        ),
+        _timeout_spec(
+            "--git-message-timeout",
+            "git_message_timeout",
+            "Timeout for the lightweight commit/PR message agent (default: 300).",
+        ),
         _verbose_spec("Enable verbose logging"),
         *_github_throttle_specs(),
         _json_spec(),
@@ -284,6 +310,11 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         _max_workers_spec(COMMON_REVIEW_MAX_WORKERS),
         _dry_run_spec(_dry_help("Suppress GitHub mutations (no review comments posted).")),
         _no_ui_spec(),
+        _timeout_spec(
+            "--agent-timeout",
+            "agent_timeout",
+            "Agent subprocess timeout in seconds (default: 7200).",
+        ),
         _verbose_spec("Enable verbose logging"),
         _json_spec(),
     ),
@@ -304,6 +335,11 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             _dry_help("Show what would be done without actually posting any review comments.")
         ),
         _no_ui_spec(),
+        _timeout_spec(
+            "--agent-timeout",
+            "agent_timeout",
+            "Agent subprocess timeout in seconds (default: 7200).",
+        ),
         _verbose_spec("Enable verbose logging"),
         _json_spec(),
         _version_spec(),
@@ -325,6 +361,16 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             _dry_help("Show what would be done without actually resolving threads or pushing code.")
         ),
         _no_ui_spec(),
+        _timeout_spec(
+            "--agent-timeout",
+            "agent_timeout",
+            "Agent subprocess timeout in seconds (default: 7200).",
+        ),
+        _timeout_spec(
+            "--advise-timeout",
+            "advise_timeout",
+            "Timeout for the advise sub-agent in seconds (default: 7200).",
+        ),
         _verbose_spec("Enable verbose logging"),
         _json_spec(),
     ),
@@ -409,6 +455,26 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
                 "will not go green is abandoned after N tries."
             ),
         ),
+        _timeout_spec(
+            "--agent-timeout",
+            "agent_timeout",
+            "Agent subprocess timeout in seconds (default: 7200).",
+        ),
+        _timeout_spec(
+            "--advise-timeout",
+            "advise_timeout",
+            "Timeout for the advise sub-agent in seconds (default: 7200).",
+        ),
+        _timeout_spec(
+            "--learn-timeout",
+            "learn_timeout",
+            "Timeout for the /learn agent session (default: 7200).",
+        ),
+        _timeout_spec(
+            "--poll-max-wait",
+            "poll_max_wait",
+            "Max wall-clock seconds to poll CI before backing off (default: 600).",
+        ),
         *_github_throttle_specs(),
         _json_spec(),
     ),
@@ -465,6 +531,31 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "--nitpick",
             "nitpick",
             "Let the reviewer emit nitpick-severity comments (suppressed by default)",
+        ),
+        _timeout_spec(
+            "--agent-timeout",
+            "agent_timeout",
+            "Agent subprocess timeout in seconds (default: 7200).",
+        ),
+        _timeout_spec(
+            "--advise-timeout",
+            "advise_timeout",
+            "Timeout for the advise sub-agent in seconds (default: 7200).",
+        ),
+        _timeout_spec(
+            "--git-message-timeout",
+            "git_message_timeout",
+            "Timeout for the lightweight commit/PR message agent (default: 300).",
+        ),
+        _timeout_spec(
+            "--learn-timeout",
+            "learn_timeout",
+            "Timeout for the /learn agent session (default: 7200).",
+        ),
+        _timeout_spec(
+            "--follow-up-timeout",
+            "follow_up_timeout",
+            "Timeout for the follow-up-issue agent session (default: 7200).",
         ),
         _no_ui_spec(),
         _verbose_spec("Enable verbose logging"),

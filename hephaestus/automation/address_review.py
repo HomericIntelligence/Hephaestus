@@ -33,7 +33,11 @@ from hephaestus.agents.runtime import (
     run_agent_session,
     uses_direct_agent_runner,
 )
-from hephaestus.cli.utils import emit_json_status
+from hephaestus.cli.utils import (
+    add_advise_timeout_arg,
+    add_agent_timeout_arg,
+    emit_json_status,
+)
 from hephaestus.io.utils import write_secure
 
 from . import _review_utils
@@ -50,7 +54,7 @@ from ._review_utils import (
 from ._reviewer_base import BaseReviewer
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
-from .claude_timeouts import address_review_claude_timeout
+from .claude_timeouts import DEFAULT_AGENT_TIMEOUT
 from .comment_difficulty import classify_comments, format_todo_line
 from .curses_ui import CursesUI
 from .git_utils import (
@@ -127,6 +131,8 @@ def run_address_fix_session(
     task_review_block: str = "",
     diff_text: str = "",
     unaddressed_findings: list[dict[str, Any]] | None = None,
+    timeout: int = DEFAULT_AGENT_TIMEOUT,
+    advise_timeout: int = DEFAULT_AGENT_TIMEOUT,
 ) -> dict[str, Any]:
     """Run the address-review fix session and return the agent's parsed result.
 
@@ -194,6 +200,7 @@ def run_address_fix_session(
         worktree_path=worktree_path,
         repo_root=repo_root,
         state_dir=log_file.parent,
+        advise_timeout=advise_timeout,
     )
     todo_block = "\n".join(
         format_todo_line(t, difficulties.get(t["id"], "medium")) for t in threads
@@ -220,7 +227,7 @@ def run_address_fix_session(
                 agent=agent,
                 prompt=prompt,
                 cwd=worktree_path,
-                timeout=address_review_claude_timeout(),
+                timeout=timeout,
                 model=direct_agent_model(agent, "HEPH_IMPLEMENTER_MODEL"),
                 sandbox="workspace-write",
             )
@@ -244,7 +251,7 @@ def run_address_fix_session(
             prompt=prompt,
             model=implementer_model(),
             cwd=worktree_path,
-            timeout=address_review_claude_timeout(),
+            timeout=timeout,
             output_format="json",
             permission_mode="dontAsk",
             # Task: the session acts as a coordinator that dispatches one
@@ -874,7 +881,7 @@ class AddressReviewer(BaseReviewer):
                     session_id=session_id,
                     prompt=prompt,
                     cwd=worktree_path,
-                    timeout=address_review_claude_timeout(),
+                    timeout=self.options.agent_timeout,
                     model=direct_agent_model(self.options.agent, "HEPH_IMPLEMENTER_MODEL"),
                 )
             except subprocess.CalledProcessError as e:
@@ -910,6 +917,8 @@ class AddressReviewer(BaseReviewer):
             parse_fn=parse_with_trace,
             log_file=log_file,
             dry_run=self.options.dry_run,
+            timeout=self.options.agent_timeout,
+            advise_timeout=self.options.advise_timeout,
         )
 
     def _resolve_addressed_threads(
@@ -1007,6 +1016,8 @@ Examples:
             "Show what would be done without actually resolving threads or pushing code."
         ),
     )
+    add_agent_timeout_arg(parser)
+    add_advise_timeout_arg(parser)
     return parser
 
 
@@ -1041,6 +1052,12 @@ def main() -> int:
         dry_run=args.dry_run,
         enable_ui=not args.no_ui and not args.json,
         verbose=args.verbose,
+        agent_timeout=(
+            args.agent_timeout if args.agent_timeout is not None else DEFAULT_AGENT_TIMEOUT
+        ),
+        advise_timeout=(
+            args.advise_timeout if args.advise_timeout is not None else DEFAULT_AGENT_TIMEOUT
+        ),
     )
 
     with terminal_guard():

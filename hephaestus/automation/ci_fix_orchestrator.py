@@ -33,7 +33,6 @@ from hephaestus.io.utils import write_secure
 
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
-from .claude_timeouts import ci_driver_claude_timeout
 from .git_utils import (
     get_repo_slug,
     issue_ref,
@@ -279,7 +278,7 @@ class CIFixOrchestrator:
                         session_id=session_id,
                         prompt=prompt,
                         cwd=worktree_path,
-                        timeout=ci_driver_claude_timeout(),
+                        timeout=options.agent_timeout,
                         model=direct_agent_model(options.agent, "HEPH_IMPLEMENTER_MODEL"),
                     )
                 except subprocess.CalledProcessError as exc:
@@ -297,7 +296,7 @@ class CIFixOrchestrator:
                             agent=options.agent,
                             prompt=prompt,
                             cwd=worktree_path,
-                            timeout=ci_driver_claude_timeout(),
+                            timeout=options.agent_timeout,
                             model=direct_agent_model(options.agent, "HEPH_IMPLEMENTER_MODEL"),
                             sandbox="workspace-write",
                         )
@@ -314,7 +313,7 @@ class CIFixOrchestrator:
                         agent=options.agent,
                         prompt=prompt,
                         cwd=worktree_path,
-                        timeout=ci_driver_claude_timeout(),
+                        timeout=options.agent_timeout,
                         model=direct_agent_model(options.agent, "HEPH_IMPLEMENTER_MODEL"),
                         sandbox="workspace-write",
                     )
@@ -338,7 +337,7 @@ class CIFixOrchestrator:
                 prompt=prompt,
                 model=implementer_model(),
                 cwd=worktree_path,
-                timeout=ci_driver_claude_timeout(),
+                timeout=options.agent_timeout,
                 output_format="json",
                 allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
                 extra_args=["--dangerously-skip-permissions"],

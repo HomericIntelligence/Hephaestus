@@ -132,10 +132,11 @@ __all__ = [
     "main",
 ]
 
-# Default implementation timeout in seconds. Actual runtime value is read from
-# ``HEPH_AGENT_IMPL_TIMEOUT`` by
-# :func:`.claude_timeouts.implementer_claude_timeout`; this constant serves as
-# the documented default and can be used in tests.
+# Default implementation timeout in seconds. Actual runtime value comes from
+# ``options.agent_timeout`` (set via ``--agent-timeout`` CLI flag or the
+# ``ImplementerOptions.agent_timeout`` default, which defaults to
+# ``AGENT_IMPL_TIMEOUT``). This constant serves as the documented default and
+# can be used in tests.
 _CLAUDE_IMPL_TIMEOUT: int = AGENT_IMPL_TIMEOUT
 _FUTURE_POLL_INTERVAL_SECONDS: float = 1.0
 
@@ -240,7 +241,12 @@ class IssueImplementer:
         if name == "_commit_changes":
 
             def _commit_changes(issue_number: int, worktree_path: Path) -> None:
-                commit_changes(issue_number, worktree_path, self.options.agent)
+                commit_changes(
+                    issue_number,
+                    worktree_path,
+                    self.options.agent,
+                    git_message_timeout=self.options.git_message_timeout,
+                )
 
             return _commit_changes
 
@@ -252,6 +258,7 @@ class IssueImplementer:
                     branch_name,
                     auto_merge=False,
                     agent=self.options.agent,
+                    git_message_timeout=self.options.git_message_timeout,
                 )
 
             return _create_pr
@@ -830,6 +837,19 @@ def main() -> int:
         enable_follow_up=not args.no_follow_up,
         enable_ui=not args.no_ui and not args.json,
         include_nitpicks=args.nitpick,
+        **({"agent_timeout": args.agent_timeout} if args.agent_timeout is not None else {}),
+        **({"advise_timeout": args.advise_timeout} if args.advise_timeout is not None else {}),
+        **({"learn_timeout": args.learn_timeout} if args.learn_timeout is not None else {}),
+        **(
+            {"follow_up_timeout": args.follow_up_timeout}
+            if args.follow_up_timeout is not None
+            else {}
+        ),
+        **(
+            {"git_message_timeout": args.git_message_timeout}
+            if args.git_message_timeout is not None
+            else {}
+        ),
     )
 
     if args.health_check:

@@ -46,7 +46,7 @@ from .claude_invoke import (
     parse_review_verdict,
 )
 from .claude_models import implementer_model, reviewer_model
-from .claude_timeouts import implementer_claude_timeout, pr_reviewer_claude_timeout
+from .claude_timeouts import pr_reviewer_claude_timeout
 from .git_utils import (
     commit_if_changes,
     get_repo_info,
@@ -1442,6 +1442,8 @@ class ReviewPhase(StageMixin):
             task_review_block=task_review_block,
             diff_text=diff_text,
             unaddressed_findings=unaddressed_findings,
+            timeout=self.options.agent_timeout,
+            advise_timeout=self.options.advise_timeout,
         )
         addressed: list[str] = fix_result.get("addressed", [])
 
@@ -1566,7 +1568,7 @@ class ReviewPhase(StageMixin):
                     session_id=session_id,
                     prompt=prompt,
                     cwd=worktree_path,
-                    timeout=implementer_claude_timeout(),
+                    timeout=self.options.agent_timeout,
                     model=direct_agent_model(self.options.agent, "HEPH_IMPLEMENTER_MODEL"),
                 )
                 log_file = log_file_path(
@@ -1612,7 +1614,7 @@ class ReviewPhase(StageMixin):
                 prompt=prompt,
                 model=implementer_model(),
                 cwd=worktree_path,
-                timeout=implementer_claude_timeout(),
+                timeout=self.options.agent_timeout,
                 permission_mode="dontAsk",
                 allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
                 recreate_on_resume_failure=False,

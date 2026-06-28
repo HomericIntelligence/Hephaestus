@@ -53,7 +53,6 @@ from ._review_utils import find_pr_for_issue, get_pr_head_branch
 from ._stage_context import StageContext
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import advise_model
-from .claude_timeouts import advise_claude_timeout
 from .git_utils import (
     commit_if_changes,
     get_repo_slug,
@@ -891,7 +890,7 @@ class ImplementationPhaseRunner:
                     agent=self.options.agent,
                     prompt=prompt,
                     cwd=worktree_path,
-                    timeout=advise_claude_timeout(),
+                    timeout=self.options.advise_timeout,
                     model=direct_agent_model(self.options.agent, "HEPH_ADVISE_MODEL"),
                     sandbox="read-only",
                 )
@@ -905,7 +904,7 @@ class ImplementationPhaseRunner:
                     prompt=prompt,
                     model=advise_model(),
                     cwd=worktree_path,
-                    timeout=advise_claude_timeout(),
+                    timeout=self.options.advise_timeout,
                     output_format="text",
                     allowed_tools="Read,Glob,Grep,Bash",
                 )

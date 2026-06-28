@@ -50,6 +50,9 @@ OPTION_FIELD_CASES: tuple[tuple[type[BaseModel], frozenset[str]], ...] = (
                 "system_prompt_file",
                 "skip_closed",
                 "enable_advise",
+                "agent_timeout",
+                "advise_timeout",
+                "git_message_timeout",
             }
         ),
     ),
@@ -73,16 +76,41 @@ OPTION_FIELD_CASES: tuple[tuple[type[BaseModel], frozenset[str]], ...] = (
                 "enable_ui",
                 "run_pre_pr_tests",
                 "include_nitpicks",
+                "agent_timeout",
+                "advise_timeout",
+                "git_message_timeout",
+                "learn_timeout",
+                "follow_up_timeout",
             }
         ),
     ),
     (
         ReviewerOptions,
-        frozenset({"issues", "agent", "max_workers", "dry_run", "enable_learn", "enable_ui"}),
+        frozenset(
+            {
+                "issues",
+                "agent",
+                "max_workers",
+                "dry_run",
+                "enable_learn",
+                "enable_ui",
+                "agent_timeout",
+            }
+        ),
     ),
     (
         PlanReviewerOptions,
-        frozenset({"issues", "agent", "max_workers", "dry_run", "enable_ui", "verbose"}),
+        frozenset(
+            {
+                "issues",
+                "agent",
+                "max_workers",
+                "dry_run",
+                "enable_ui",
+                "verbose",
+                "agent_timeout",
+            }
+        ),
     ),
     (
         AddressReviewOptions,
@@ -95,6 +123,8 @@ OPTION_FIELD_CASES: tuple[tuple[type[BaseModel], frozenset[str]], ...] = (
                 "enable_ui",
                 "verbose",
                 "resume_impl_session",
+                "agent_timeout",
+                "advise_timeout",
             }
         ),
     ),
@@ -116,6 +146,10 @@ OPTION_FIELD_CASES: tuple[tuple[type[BaseModel], frozenset[str]], ...] = (
                 "include_bot_prs",
                 "include_all_authors",
                 "enable_mechanical_rebase",
+                "agent_timeout",
+                "advise_timeout",
+                "learn_timeout",
+                "poll_max_wait",
             }
         ),
     ),

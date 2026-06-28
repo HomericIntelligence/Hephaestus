@@ -27,6 +27,10 @@ from hephaestus.agents.runtime import (
     uses_direct_agent_runner,
 )
 from hephaestus.cli.utils import (
+    add_advise_timeout_arg,
+    add_agent_timeout_arg,
+    add_learn_timeout_arg,
+    add_poll_max_wait_arg,
     configure_github_throttle_from_args,
     emit_json_status,
 )
@@ -59,8 +63,8 @@ from .ci_fix_orchestrator import CIFixOrchestrator
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import advise_model, codex_advise_model
 from .claude_timeouts import (
-    advise_claude_timeout,
-    ci_poll_max_wait,
+    DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_CI_POLL_MAX_WAIT,
 )
 from .git_utils import (
     get_repo_root,
@@ -742,7 +746,7 @@ class CIDriver:
             self.status_tracker.update_slot(acquired_slot, f"{pr_ref(pr_number)}: fetching checks")
 
             poll_result = self._poll_ci_until_concluded(
-                issue_number, pr_number, acquired_slot, ci_poll_max_wait()
+                issue_number, pr_number, acquired_slot, self.options.poll_max_wait
             )
             if poll_result is None:
                 return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
@@ -792,7 +796,7 @@ class CIDriver:
                     agent=self.options.agent,
                     prompt=prompt,
                     cwd=self.repo_root,
-                    timeout=advise_claude_timeout(),
+                    timeout=self.options.advise_timeout,
                     model=direct_agent_model(
                         self.options.agent,
                         "HEPH_ADVISE_MODEL",
@@ -809,7 +813,7 @@ class CIDriver:
                 prompt=prompt,
                 model=advise_model(),
                 cwd=self.repo_root,
-                timeout=advise_claude_timeout(),
+                timeout=self.options.advise_timeout,
                 output_format="text",
                 allowed_tools="Read,Glob,Grep,Bash",
             )
@@ -857,7 +861,7 @@ class CIDriver:
 
         # Bounded poll for the freshly-pushed run to conclude. Reuse the same
         # backoff/cap pattern as the main poll loop.
-        max_wait = ci_poll_max_wait()
+        max_wait = self.options.poll_max_wait
         elapsed = 0
         attempt = 0
         while True:
@@ -1095,6 +1099,8 @@ class CIDriver:
                 parse_fn=_parse_addressed_block,
                 log_file=log_file,
                 dry_run=self.options.dry_run,
+                timeout=self.options.agent_timeout,
+                advise_timeout=self.options.advise_timeout,
             )
         except RuntimeError as exc:
             logger.warning(
@@ -2360,6 +2366,10 @@ Examples:
             "here so a PR that will not go green is abandoned after N tries."
         ),
     )
+    add_agent_timeout_arg(parser)
+    add_advise_timeout_arg(parser)
+    add_learn_timeout_arg(parser)
+    add_poll_max_wait_arg(parser)
     return parser
 
 
@@ -2544,6 +2554,18 @@ def main() -> int:
             include_all_authors=args.include_all_authors,
             enable_mechanical_rebase=args.enable_mechanical_rebase,
             max_fix_iterations=args.max_fix_iterations,
+            agent_timeout=(
+                args.agent_timeout if args.agent_timeout is not None else DEFAULT_AGENT_TIMEOUT
+            ),
+            advise_timeout=(
+                args.advise_timeout if args.advise_timeout is not None else DEFAULT_AGENT_TIMEOUT
+            ),
+            learn_timeout=(
+                args.learn_timeout if args.learn_timeout is not None else DEFAULT_AGENT_TIMEOUT
+            ),
+            poll_max_wait=(
+                args.poll_max_wait if args.poll_max_wait is not None else DEFAULT_CI_POLL_MAX_WAIT
+            ),
         )
 
         driver = CIDriver(options)

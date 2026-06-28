@@ -27,10 +27,16 @@ __all__ = [
     "COMMAND_REGISTRY",
     "DRY_RUN_HELP_CAVEAT",
     "CommandRegistry",
+    "add_advise_timeout_arg",
+    "add_agent_timeout_arg",
     "add_dry_run_arg",
+    "add_follow_up_timeout_arg",
+    "add_git_message_timeout_arg",
     "add_github_throttle_args",
     "add_json_arg",
+    "add_learn_timeout_arg",
     "add_logging_args",
+    "add_poll_max_wait_arg",
     "add_version_arg",
     "configure_github_throttle_from_args",
     "confirm_action",
@@ -464,3 +470,117 @@ def register_command(
 
     """
     return COMMAND_REGISTRY.register(name, description, aliases)
+
+
+def add_agent_timeout_arg(
+    parser: argparse.ArgumentParser,
+    *,
+    flag: str = "--agent-timeout",
+    dest: str = "agent_timeout",
+    default_doc: int = 7200,
+    help_extra: str = "",
+) -> None:
+    """Add an optional agent subprocess timeout flag to a CLI parser.
+
+    Args:
+        parser: ArgumentParser instance to add the flag to
+        flag: The CLI flag name (default: ``--agent-timeout``)
+        dest: The argparse destination attribute (default: ``agent_timeout``)
+        default_doc: Default value shown in help text (default: 7200)
+        help_extra: Optional extra help text appended after the default note
+
+    """
+    extra = f" {help_extra}" if help_extra else ""
+    parser.add_argument(
+        flag,
+        dest=dest,
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help=f"Agent subprocess timeout in seconds (default: {default_doc}).{extra}",
+    )
+
+
+def add_advise_timeout_arg(parser: argparse.ArgumentParser) -> None:
+    """Add ``--advise-timeout`` flag to a CLI parser.
+
+    Args:
+        parser: ArgumentParser instance to add the flag to
+
+    """
+    parser.add_argument(
+        "--advise-timeout",
+        dest="advise_timeout",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Timeout for the advise sub-agent in seconds (default: 7200).",
+    )
+
+
+def add_poll_max_wait_arg(parser: argparse.ArgumentParser) -> None:
+    """Add ``--poll-max-wait`` flag to a CLI parser.
+
+    Args:
+        parser: ArgumentParser instance to add the flag to
+
+    """
+    parser.add_argument(
+        "--poll-max-wait",
+        dest="poll_max_wait",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Max wall-clock seconds to poll CI before backing off (default: 600).",
+    )
+
+
+def add_git_message_timeout_arg(parser: argparse.ArgumentParser) -> None:
+    """Add ``--git-message-timeout`` flag to a CLI parser.
+
+    Args:
+        parser: ArgumentParser instance to add the flag to
+
+    """
+    parser.add_argument(
+        "--git-message-timeout",
+        dest="git_message_timeout",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Timeout for the lightweight commit/PR message agent (default: 300).",
+    )
+
+
+def add_learn_timeout_arg(parser: argparse.ArgumentParser) -> None:
+    """Add ``--learn-timeout`` flag to a CLI parser.
+
+    Args:
+        parser: ArgumentParser instance to add the flag to
+
+    """
+    parser.add_argument(
+        "--learn-timeout",
+        dest="learn_timeout",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Timeout for the /learn agent session (default: 7200).",
+    )
+
+
+def add_follow_up_timeout_arg(parser: argparse.ArgumentParser) -> None:
+    """Add ``--follow-up-timeout`` flag to a CLI parser.
+
+    Args:
+        parser: ArgumentParser instance to add the flag to
+
+    """
+    parser.add_argument(
+        "--follow-up-timeout",
+        dest="follow_up_timeout",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Timeout for the follow-up-issue agent session (default: 7200).",
+    )
