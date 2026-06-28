@@ -9,6 +9,7 @@ mock all external collaborators (GitHub API + Claude calls).
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -65,10 +66,12 @@ def test_parse_args_default_parallel_uses_shared_worker_default() -> None:
     assert args.parallel == DEFAULT_WORKER_COUNT
 
 
-def test_main_returns_zero_when_rate_limited(monkeypatch: Any) -> None:
-    """If issue discovery is rate-limited, ``main()`` exits cleanly with 0."""
+def test_main_returns_zero_when_rate_limited(monkeypatch: Any, tmp_path: Path) -> None:
+    """If issue discovery is rate-limited, main() exits cleanly and writes 0 work."""
     from hephaestus.automation.github_api import GitHubRateLimitError
 
+    report = tmp_path / "report.txt"
+    monkeypatch.setenv("HEPH_WORK_REPORT", str(report))
     monkeypatch.setattr("sys.argv", ["planner", "--agent", "claude"])
     with patch(
         "hephaestus.automation.planner.gh_list_open_issues",
@@ -76,6 +79,7 @@ def test_main_returns_zero_when_rate_limited(monkeypatch: Any) -> None:
     ):
         rc = planner_mod.main()
     assert rc == 0
+    assert report.read_text(encoding="utf-8") == "0"
 
 
 def test_run_skips_issue_with_existing_plan() -> None:

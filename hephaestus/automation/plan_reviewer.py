@@ -42,7 +42,7 @@ from .review_state import (
 )
 from .session_naming import AGENT_PLAN_REVIEWER
 from .status_tracker import StatusTracker
-from .work_report import write_work_report
+from .work_report import work_report_context
 
 logger = logging.getLogger(__name__)
 
@@ -670,40 +670,41 @@ def main() -> int:
 
     log.info("Starting plan review for issues: %s", args.issues)
 
-    try:
-        options = PlanReviewerOptions(
-            issues=args.issues,
-            agent=agent,
-            max_workers=args.max_workers,
-            dry_run=args.dry_run,
-            enable_ui=not args.no_ui and not args.json,
-            verbose=args.verbose,
-        )
+    work_units = 0
+    with work_report_context(lambda: work_units):
+        try:
+            options = PlanReviewerOptions(
+                issues=args.issues,
+                agent=agent,
+                max_workers=args.max_workers,
+                dry_run=args.dry_run,
+                enable_ui=not args.no_ui and not args.json,
+                verbose=args.verbose,
+            )
 
-        reviewer = PlanReviewer(options)
-        results = reviewer.run()
+            reviewer = PlanReviewer(options)
+            results = reviewer.run()
 
-        # Compute work units for loop convergence (#613): non-skipped reviews
-        work_units = sum(1 for r in results.values() if r.success and not r.already_reviewed)
-        write_work_report(work_units)
+            # Compute work units for loop convergence (#613): non-skipped reviews
+            work_units = sum(1 for r in results.values() if r.success and not r.already_reviewed)
 
-        failed = [num for num, result in results.items() if not result.success]
-        if failed:
-            log.error("Failed to review %s plan(s) for issue(s): %s", len(failed), failed)
+            failed = [num for num, result in results.items() if not result.success]
+            if failed:
+                log.error("Failed to review %s plan(s) for issue(s): %s", len(failed), failed)
+                if args.json:
+                    emit_json_status(1, issues=args.issues, failed=failed)
+                return 1
+
+            log.info("Plan review complete")
             if args.json:
-                emit_json_status(1, issues=args.issues, failed=failed)
-            return 1
+                emit_json_status(0, issues=args.issues, failed=[])
+            return 0
 
-        log.info("Plan review complete")
-        if args.json:
-            emit_json_status(0, issues=args.issues, failed=[])
-        return 0
-
-    except KeyboardInterrupt:
-        log.warning("Interrupted by user")
-        if args.json:
-            emit_json_status(130, message="interrupted")
-        return 130
+        except KeyboardInterrupt:
+            log.warning("Interrupted by user")
+            if args.json:
+                emit_json_status(130, message="interrupted")
+            return 130
 
 
 if __name__ == "__main__":

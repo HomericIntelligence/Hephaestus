@@ -736,13 +736,18 @@ class TestMain:
         assert payload["failed"] == [2]
 
     def test_keyboard_interrupt_json(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
     ) -> None:
         """KeyboardInterrupt with --json emits a 130 envelope."""
         import json as _json
 
         from hephaestus.automation import plan_reviewer
 
+        report = tmp_path / "report.txt"
+        monkeypatch.setenv("HEPH_WORK_REPORT", str(report))
         monkeypatch.setattr(
             "sys.argv",
             [
@@ -765,6 +770,7 @@ class TestMain:
         payload = _json.loads(capsys.readouterr().out)
         assert payload["exit_code"] == 130
         assert payload["message"] == "interrupted"
+        assert report.read_text(encoding="utf-8") == "0"
 
     def test_dedupes_issue_numbers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Duplicate --issues values are de-duplicated before review runs."""
