@@ -682,11 +682,7 @@ def main() -> int:
                 verbose=args.verbose,
                 # Only override when --agent-timeout is set; otherwise the
                 # PlanReviewerOptions per-phase default (#1642, 600s) applies.
-                **(
-                    {"agent_timeout": args.agent_timeout}
-                    if args.agent_timeout is not None
-                    else {}
-                ),
+                **({"agent_timeout": args.agent_timeout} if args.agent_timeout is not None else {}),
             )
 
             reviewer = PlanReviewer(options)

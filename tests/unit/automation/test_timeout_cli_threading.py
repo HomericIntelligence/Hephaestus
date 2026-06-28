@@ -33,6 +33,12 @@ from hephaestus.cli.utils import (
     add_learn_timeout_arg,
     add_poll_max_wait_arg,
 )
+from hephaestus.constants import (
+    AGENT_IMPL_TIMEOUT,
+    AGENT_LEARN_TIMEOUT,
+    AGENT_PLAN_TIMEOUT,
+    AGENT_REVIEW_TIMEOUT,
+)
 
 # ---------------------------------------------------------------------------
 # Helper
@@ -412,9 +418,9 @@ class TestPlannerOptionsTimeoutFields:
         assert "git_message_timeout" in PlannerOptions.model_fields
 
     def test_agent_timeout_default(self) -> None:
-        """PlannerOptions.agent_timeout defaults to DEFAULT_AGENT_TIMEOUT."""
+        """PlannerOptions.agent_timeout defaults to the #1642 planner default (300s)."""
         opts = PlannerOptions(issues=[1])
-        assert opts.agent_timeout == DEFAULT_AGENT_TIMEOUT
+        assert opts.agent_timeout == AGENT_PLAN_TIMEOUT == 300
 
     def test_advise_timeout_default(self) -> None:
         """PlannerOptions.advise_timeout defaults to DEFAULT_AGENT_TIMEOUT."""
@@ -471,9 +477,9 @@ class TestImplementerOptionsTimeoutFields:
         assert "follow_up_timeout" in ImplementerOptions.model_fields
 
     def test_agent_timeout_default(self) -> None:
-        """ImplementerOptions.agent_timeout defaults to DEFAULT_AGENT_TIMEOUT."""
+        """ImplementerOptions.agent_timeout defaults to the #1642 implementer default (1800s)."""
         opts = ImplementerOptions()
-        assert opts.agent_timeout == DEFAULT_AGENT_TIMEOUT
+        assert opts.agent_timeout == AGENT_IMPL_TIMEOUT == 1800
 
     def test_advise_timeout_default(self) -> None:
         """ImplementerOptions.advise_timeout defaults to DEFAULT_AGENT_TIMEOUT."""
@@ -486,9 +492,9 @@ class TestImplementerOptionsTimeoutFields:
         assert opts.git_message_timeout == DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
 
     def test_learn_timeout_default(self) -> None:
-        """ImplementerOptions.learn_timeout defaults to DEFAULT_AGENT_TIMEOUT."""
+        """ImplementerOptions.learn_timeout defaults to the #1642 learn default (300s)."""
         opts = ImplementerOptions()
-        assert opts.learn_timeout == DEFAULT_AGENT_TIMEOUT
+        assert opts.learn_timeout == AGENT_LEARN_TIMEOUT == 300
 
     def test_follow_up_timeout_default(self) -> None:
         """ImplementerOptions.follow_up_timeout defaults to DEFAULT_AGENT_TIMEOUT."""
@@ -546,9 +552,9 @@ class TestCIDriverOptionsTimeoutFields:
         assert opts.advise_timeout == DEFAULT_AGENT_TIMEOUT
 
     def test_learn_timeout_default(self) -> None:
-        """CIDriverOptions.learn_timeout defaults to DEFAULT_AGENT_TIMEOUT."""
+        """CIDriverOptions.learn_timeout defaults to the #1642 learn default (300s)."""
         opts = CIDriverOptions()
-        assert opts.learn_timeout == DEFAULT_AGENT_TIMEOUT
+        assert opts.learn_timeout == AGENT_LEARN_TIMEOUT == 300
 
     def test_poll_max_wait_default(self) -> None:
         """CIDriverOptions.poll_max_wait defaults to DEFAULT_CI_POLL_MAX_WAIT."""
@@ -586,9 +592,9 @@ class TestReviewerOptionsTimeoutFields:
         assert "learn_timeout" not in ReviewerOptions.model_fields
 
     def test_agent_timeout_default(self) -> None:
-        """ReviewerOptions.agent_timeout defaults to DEFAULT_AGENT_TIMEOUT."""
+        """ReviewerOptions.agent_timeout defaults to the #1642 review default (600s)."""
         opts = ReviewerOptions()
-        assert opts.agent_timeout == DEFAULT_AGENT_TIMEOUT
+        assert opts.agent_timeout == AGENT_REVIEW_TIMEOUT == 600
 
     def test_timeout_override(self) -> None:
         """agent_timeout accepts an explicit override value."""
@@ -609,9 +615,9 @@ class TestPlanReviewerOptionsTimeoutFields:
         assert "agent_timeout" in PlanReviewerOptions.model_fields
 
     def test_agent_timeout_default(self) -> None:
-        """PlanReviewerOptions.agent_timeout defaults to DEFAULT_AGENT_TIMEOUT."""
+        """PlanReviewerOptions.agent_timeout defaults to the #1642 review default (600s)."""
         opts = PlanReviewerOptions()
-        assert opts.agent_timeout == DEFAULT_AGENT_TIMEOUT
+        assert opts.agent_timeout == AGENT_REVIEW_TIMEOUT == 600
 
     def test_agent_timeout_override(self) -> None:
         """PlanReviewerOptions.agent_timeout can be overridden at construction time."""
