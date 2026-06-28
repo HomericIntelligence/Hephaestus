@@ -37,16 +37,25 @@ CODEX_SONNET_REASONING_EFFORT = "medium"
 CODEX_HAIKU_MODEL = "gpt-5.4-mini"
 CODEX_DEFAULT_MODEL = CODEX_OPUS_MODEL
 CODEX_DEFAULT_REASONING_EFFORT = CODEX_OPUS_REASONING_EFFORT
+PI_PROVIDER_ENV = "HEPH_PI_PROVIDER"
 PI_MODEL_ENV = "HEPH_PI_MODEL"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
 PI_PRIVATE_DENYLIST_FILENAME = ".heph-private-denylist"
 PI_PRIVATE_REDACTION = "<redacted-pi-private-value>"
 PI_READ_ONLY_TOOLS = "read,grep,find,ls"
+REQUIRED_ALIAS_ENVS: tuple[str, ...] = (PI_PROVIDER_ENV, PI_MODEL_ENV)
 AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
     "claude": (("claude", "auth", "status"),),
     "codex": (("codex", "login", "status"),),
     "pi": (("pi", "--version"),),
 }
+
+
+def missing_pi_alias_env(
+    required: tuple[str, ...] = REQUIRED_ALIAS_ENVS,
+) -> list[str]:
+    """Return required Pi alias env vars that are unset or blank."""
+    return [name for name in required if not os.environ.get(name, "").strip()]
 
 
 @dataclass(frozen=True)
@@ -647,14 +656,11 @@ def _run_codex_command(
     return AgentRunResult(stdout=stdout, stderr=stderr_text, session_id=session_id)
 
 
-def _pi_base_cmd(*, model: str = "", session_id: str | None = None) -> list[str]:
-    """Build a Pi JSON-mode command."""
-    resolved_model = model or os.environ.get(PI_MODEL_ENV, "")
+def _pi_base_cmd(*, session_id: str | None = None) -> list[str]:
+    """Build a Pi JSON-mode command without alias values in argv."""
     cmd = ["pi", "--mode", "json"]
     if session_id:
         cmd.extend(["--session", session_id])
-    if resolved_model:
-        cmd.extend(["--model", resolved_model])
     return cmd
 
 
@@ -678,9 +684,11 @@ def _pi_sandbox_args(sandbox: str) -> list[str]:
     raise ValueError(f"Unsupported Pi sandbox mode: {sandbox}")
 
 
-def _pi_env() -> dict[str, str]:
+def _pi_env(*, model: str = "") -> dict[str, str]:
     """Return a privacy-biased environment for Pi subprocesses."""
     env = os.environ.copy()
+    if model:
+        env[PI_MODEL_ENV] = model
     env.setdefault("PI_TELEMETRY", "0")
     env.setdefault("PI_SKIP_VERSION_CHECK", "1")
     return env
@@ -693,6 +701,7 @@ def _run_pi_command(
     cwd: Path,
     timeout: int,
     sandbox: str,
+    model: str = "",
 ) -> subprocess.CompletedProcess[str]:
     """Run Pi with prompt content attached via an ephemeral file, not argv."""
     prompt_path: Path | None = None
@@ -716,7 +725,7 @@ def _run_pi_command(
                 text=True,
                 capture_output=True,
                 timeout=timeout,
-                env=_pi_env(),
+                env=_pi_env(model=model),
                 check=True,
             )
         except subprocess.CalledProcessError as exc:
@@ -773,13 +782,14 @@ def run_pi_session(
 ) -> AgentRunResult:
     """Run a new Pi JSON-mode session and capture its id."""
     del approval
-    cmd = _pi_base_cmd(model=model)
+    cmd = _pi_base_cmd()
     result = _run_pi_command(
         cmd,
         prompt=prompt,
         cwd=cwd,
         timeout=timeout,
         sandbox=sandbox,
+        model=model,
     )
     session_id, event_message = _parse_pi_json_events(result.stdout or "")
     stdout = (event_message or result.stdout or "").strip()
@@ -795,13 +805,14 @@ def resume_pi_session(
     model: str = "",
 ) -> AgentRunResult:
     """Resume a Pi JSON-mode session by id."""
-    cmd = _pi_base_cmd(model=model, session_id=session_id)
+    cmd = _pi_base_cmd(session_id=session_id)
     result = _run_pi_command(
         cmd,
         prompt=prompt,
         cwd=cwd,
         timeout=timeout,
         sandbox="workspace-write",
+        model=model,
     )
     parsed_session_id, event_message = _parse_pi_json_events(result.stdout or "")
     stdout = (event_message or result.stdout or "").strip()
