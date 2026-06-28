@@ -438,6 +438,19 @@ class TestFindPrForIssue:
 
         assert result is None
 
+    def test_body_search_query_uses_closes_in_body(self) -> None:
+        """The body-search strategy queries exact Closes lines in PR bodies."""
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            return_value=_make_gh_result([]),
+        ) as mock_gh:
+            result = find_pr_for_issue(42)
+
+        assert result is None
+        search_calls = [call for call in mock_gh.call_args_list if "--search" in call.args[0]]
+        assert search_calls
+        assert "Closes #42 in:body" in search_calls[0].args[0]
+
     def test_extra_strategies_uses_review_state(self) -> None:
         """extra_strategies=True checks review state when branch-name fails."""
         # Branch-name returns empty; review-state lookup succeeds

@@ -445,7 +445,7 @@ class CIDriver:
         # input list.
         raw_map = _discover_prs_simple(
             issue_numbers,
-            self._find_pr_for_issue,
+            find_pr_for_issue,
             on_missing=lambda issue_num: logger.info(
                 "Issue #%s: no open PR found, skipping", issue_num
             ),
@@ -1272,23 +1272,6 @@ class CIDriver:
         gh_state = self._gh_pr_state(pr_number) or {}
         current = str(gh_state.get("headRefOid") or "")
         return bool(current) and current == recorded
-
-    def _find_pr_for_issue(self, issue_number: int) -> int | None:
-        """Find the open PR for a single issue.
-
-        Delegates to :func:`_review_utils.find_pr_for_issue` (two-strategy
-        branch-name + body search). Sharing the helper with
-        :class:`AddressReviewer` and :class:`PRReviewer` keeps strategy
-        evolution in one place.
-
-        Args:
-            issue_number: GitHub issue number.
-
-        Returns:
-            PR number if found, None otherwise.
-
-        """
-        return find_pr_for_issue(issue_number)
 
     def _validate_pr_open(self, pr_number: int) -> bool:
         """Return True iff ``pr_number`` exists and is in OPEN state.

@@ -425,7 +425,11 @@ class AddressReviewer(BaseReviewer):
         """
         return _discover_prs_simple(
             issue_numbers,
-            self._find_pr_for_issue,
+            lambda issue_num: find_pr_for_issue(
+                issue_num,
+                extra_strategies=True,
+                _load_review_state_fn=lambda: self._load_review_state(issue_num),
+            ),
             on_missing=lambda issue_num: logger.info(
                 "Issue #%s: no open PR found, skipping", issue_num
             ),
@@ -723,27 +727,6 @@ class AddressReviewer(BaseReviewer):
         finally:
             time.sleep(1)
             self.status_tracker.release_slot(slot_id)
-
-    def _find_pr_for_issue(self, issue_number: int) -> int | None:
-        """Find the open PR for a single issue.
-
-        Delegates to :func:`_review_utils.find_pr_for_issue` using the
-        three-strategy variant (branch-name, on-disk review state, body
-        search) so that the stored ``pr_number`` from a previous reviewer
-        run is also consulted.
-
-        Args:
-            issue_number: GitHub issue number
-
-        Returns:
-            PR number if found, None otherwise
-
-        """
-        return find_pr_for_issue(
-            issue_number,
-            extra_strategies=True,
-            _load_review_state_fn=lambda: self._load_review_state(issue_number),
-        )
 
     def _load_impl_session_id(self, issue_number: int) -> str | None:
         """Load the implementer's agent session ID from state file.
