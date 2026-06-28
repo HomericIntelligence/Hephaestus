@@ -72,6 +72,11 @@ htmlcov/
 # Root-level log files
 /*.log
 
+# Pi smoke validation logs
+/pi-smoke-*.out
+/pi-smoke-*.err
+/pi-smoke-logs/
+
 # Automation runtime directories
 .worktrees/
 .issue_implementer/

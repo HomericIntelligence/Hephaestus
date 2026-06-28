@@ -59,6 +59,13 @@ module — most users invoke the `hephaestus-*` console scripts instead.
 - **`demo_cli.py`** — Demo CLI functionality.
 - **`example_usage.py`** — Usage examples.
 
+### Pi smoke validation
+
+- **`pi_smoke.py`** — Run a read-only Pi smoke prompt using
+  `HEPH_PI_PROVIDER` and `HEPH_PI_MODEL` from the environment.
+- **`pi_smoke_slurm.py`** — Submit `scripts/slurm/pi_smoke.sbatch` with
+  `sbatch` while exporting only env var names, not alias values.
+
 ## Usage
 
 ```bash

@@ -500,20 +500,17 @@ def test_run_pi_session_uses_json_mode_and_captures_session(tmp_path: Path) -> N
 
     assert result.session_id == "pi-session-789"
     assert result.stdout == "pi output"
-    assert captured["cmd"][:-1] == [
-        "pi",
-        "--mode",
-        "json",
-        "--model",
-        "private-alias",
-    ]
+    assert captured["cmd"][:-1] == ["pi", "--mode", "json"]
     assert captured["cmd"][-1].startswith("@")
+    assert "--model" not in captured["cmd"]
+    assert "private-alias" not in captured["cmd"]
     assert "private prompt content" not in captured["cmd"]
     assert captured["prompt_text"] == "private prompt content"
     assert captured["prompt_mode"] == 0o600
     assert captured["kwargs"]["cwd"] == tmp_path
     assert captured["kwargs"]["timeout"] == 30
     assert captured["kwargs"]["check"] is True
+    assert captured["kwargs"]["env"]["HEPH_PI_MODEL"] == "private-alias"
     assert captured["kwargs"]["env"]["PI_TELEMETRY"] == "0"
     assert captured["kwargs"]["env"]["PI_SKIP_VERSION_CHECK"] == "1"
 
@@ -629,7 +626,7 @@ def test_run_pi_session_read_only_restricts_tools(tmp_path: Path) -> None:
     assert "review prompt" not in captured_cmd
 
 
-def test_resume_pi_session_passes_resume_id(tmp_path: Path) -> None:
+def test_resume_pi_session_passes_resume_id_without_alias_argv_leak(tmp_path: Path) -> None:
     """Pi feedback loops should resume the captured session id."""
     captured: dict[str, Any] = {}
     stdout = "\n".join(
@@ -640,8 +637,8 @@ def test_resume_pi_session_passes_resume_id(tmp_path: Path) -> None:
     )
 
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        del kwargs
         captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
         prompt_arg = next(arg for arg in cmd if arg.startswith("@"))
         captured["prompt_text"] = Path(prompt_arg[1:]).read_text(encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
@@ -655,12 +652,16 @@ def test_resume_pi_session_passes_resume_id(tmp_path: Path) -> None:
             "private feedback content",
             cwd=tmp_path,
             timeout=30,
+            model="private-alias",
         )
 
     assert captured["cmd"][:-1] == ["pi", "--mode", "json", "--session", "pi-session-789"]
     assert captured["cmd"][-1].startswith("@")
+    assert "--model" not in captured["cmd"]
+    assert "private-alias" not in captured["cmd"]
     assert "private feedback content" not in captured["cmd"]
     assert captured["prompt_text"] == "private feedback content"
+    assert captured["kwargs"]["env"]["HEPH_PI_MODEL"] == "private-alias"
     assert result.stdout == "resumed"
     assert result.session_id == "pi-session-789"
 
