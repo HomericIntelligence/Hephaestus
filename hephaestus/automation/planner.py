@@ -49,7 +49,7 @@ from .prompts import get_advise_prompt_builder
 from .review_state import is_plan_review_go
 from .session_naming import AGENT_ADVISE
 from .status_tracker import StatusTracker
-from .work_report import write_work_report
+from .work_report import work_report_context
 
 __all__ = ["MAX_REVIEW_ITERATIONS", "Planner", "main"]
 
@@ -647,69 +647,72 @@ def main() -> int:
     # Capture explicitness before auto-discovery overwrites ``args.issues``.
     issues_explicit = bool(args.issues)
 
-    if not args.issues:
-        try:
-            discovered = gh_list_open_issues()
-        except GitHubRateLimitError as e:
-            # Don't smear a 100-line traceback across the driver's loop output
-            # when the only problem is that the GraphQL hourly budget is gone.
-            # Exit cleanly so run_automation_loop.sh moves on to the next repo.
-            log.error(
-                "GitHub API rate-limited; cannot discover issues this run "
-                "(reset at epoch %s). Skipping cleanly.",
-                e.reset_epoch,
+    work_units = 0
+    with work_report_context(lambda: work_units):
+        if not args.issues:
+            try:
+                discovered = gh_list_open_issues()
+            except GitHubRateLimitError as e:
+                # Don't smear a 100-line traceback across the driver's loop output
+                # when the only problem is that the GraphQL hourly budget is gone.
+                # Exit cleanly so run_automation_loop.sh moves on to the next repo.
+                log.error(
+                    "GitHub API rate-limited; cannot discover issues this run "
+                    "(reset at epoch %s). Skipping cleanly.",
+                    e.reset_epoch,
+                )
+                if args.json:
+                    emit_json_status(0, message="rate-limited; skipped", reset_epoch=e.reset_epoch)
+                return 0
+            log.info(
+                "No --issues given; discovered %s open issues: %s", len(discovered), discovered
             )
+            args.issues = discovered
+
+        # Dedupe while preserving first-seen order. dict.fromkeys is the
+        # canonical "ordered set" trick. Without this, ``--issues 123 123``
+        # would race two workers on the same issue and produce double-posts.
+        args.issues = list(dict.fromkeys(args.issues))
+
+        log.info("Issues to plan: %s", args.issues)
+
+        try:
+            options = PlannerOptions(
+                issues=args.issues,
+                issues_explicit=issues_explicit,
+                agent=agent,
+                dry_run=args.dry_run,
+                force=args.force,
+                parallel=args.parallel,
+                system_prompt_file=args.system_prompt,
+                skip_closed=not args.no_skip_closed,
+                enable_advise=not args.no_advise,
+            )
+
+            planner = Planner(options)
+            results = planner.run()
+
+            # Compute work units for loop convergence (#613): new plans
+            successful = sum(1 for r in results.values() if r.success)
+            already_planned = sum(1 for r in results.values() if r.plan_already_exists)
+            work_units = max(0, successful - already_planned)
+
+            failed = [num for num, result in results.items() if not result.success]
+            if failed:
+                log.error("Failed to plan %s issue(s): %s", len(failed), failed)
+                if args.json:
+                    emit_json_status(1, issues=args.issues, failed=failed)
+                return 1
+
+            log.info("Planning complete")
             if args.json:
-                emit_json_status(0, message="rate-limited; skipped", reset_epoch=e.reset_epoch)
+                emit_json_status(0, issues=args.issues, failed=[])
             return 0
-        log.info("No --issues given; discovered %s open issues: %s", len(discovered), discovered)
-        args.issues = discovered
-
-    # Dedupe while preserving first-seen order. dict.fromkeys is the
-    # canonical "ordered set" trick. Without this, ``--issues 123 123``
-    # would race two workers on the same issue and produce double-posts.
-    args.issues = list(dict.fromkeys(args.issues))
-
-    log.info("Issues to plan: %s", args.issues)
-
-    try:
-        options = PlannerOptions(
-            issues=args.issues,
-            issues_explicit=issues_explicit,
-            agent=agent,
-            dry_run=args.dry_run,
-            force=args.force,
-            parallel=args.parallel,
-            system_prompt_file=args.system_prompt,
-            skip_closed=not args.no_skip_closed,
-            enable_advise=not args.no_advise,
-        )
-
-        planner = Planner(options)
-        results = planner.run()
-
-        # Compute work units for loop convergence (#613): new plans
-        successful = sum(1 for r in results.values() if r.success)
-        already_planned = sum(1 for r in results.values() if r.plan_already_exists)
-        work_units = max(0, successful - already_planned)
-        write_work_report(work_units)
-
-        failed = [num for num, result in results.items() if not result.success]
-        if failed:
-            log.error("Failed to plan %s issue(s): %s", len(failed), failed)
+        except KeyboardInterrupt:
+            logging.getLogger(__name__).warning("Interrupted by user")
             if args.json:
-                emit_json_status(1, issues=args.issues, failed=failed)
-            return 1
-
-        log.info("Planning complete")
-        if args.json:
-            emit_json_status(0, issues=args.issues, failed=[])
-        return 0
-    except KeyboardInterrupt:
-        logging.getLogger(__name__).warning("Interrupted by user")
-        if args.json:
-            emit_json_status(130, message="interrupted")
-        return 130
+                emit_json_status(130, message="interrupted")
+            return 130
 
 
 if __name__ == "__main__":
