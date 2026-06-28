@@ -50,7 +50,7 @@ def reviewer(mock_options: ReviewerOptions, base_deps: dict) -> PRReviewer:
 
 
 # ---------------------------------------------------------------------------
-# _find_pr_for_issue helpers
+# find_pr_for_issue helpers
 # ---------------------------------------------------------------------------
 
 
@@ -93,7 +93,7 @@ class TestNoPrFoundSkipsGracefully:
         """
         gh_diff_failure = RuntimeError("no diff for PR #0 (test fixture)")
         with (
-            patch.object(reviewer, "_find_pr_for_issue", return_value=None),
+            patch("hephaestus.automation.pr_reviewer.find_pr_for_issue", return_value=None),
             patch(
                 "hephaestus.automation.pr_reviewer._gh_call",
                 side_effect=gh_diff_failure,

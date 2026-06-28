@@ -405,7 +405,7 @@ class TestAddressIssue:
 
     def test_no_pr_found_skips_run(self, reviewer: AddressReviewer) -> None:
         """No PR for any issue → run() returns {} without launching any workers."""
-        with patch.object(reviewer, "_find_pr_for_issue", return_value=None):
+        with patch("hephaestus.automation.address_review.find_pr_for_issue", return_value=None):
             results = reviewer.run()
 
         assert results == {}

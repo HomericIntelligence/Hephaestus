@@ -167,7 +167,7 @@ class TestIssueScopedOverridesAuthor:
     def test_explicit_issue_with_other_author_pr(self, viewer_driver: CIDriver) -> None:
         viewer_driver.options.include_all_authors = False
         with (
-            patch.object(viewer_driver, "_find_pr_for_issue", return_value=101),
+            patch("hephaestus.automation.ci_driver.find_pr_for_issue", return_value=101),
             patch.object(viewer_driver, "_discover_bot_prs", return_value={}),
         ):
             assert viewer_driver._discover_prs([814]) == {814: 101}

@@ -436,26 +436,11 @@ class PRReviewer(BaseReviewer):
         """
         return _discover_prs_simple(
             issue_numbers,
-            self._find_pr_for_issue,
+            find_pr_for_issue,
             on_missing=lambda issue_num: logger.warning(
                 "No open PR found for issue #%s", issue_num
             ),
         )
-
-    def _find_pr_for_issue(self, issue_number: int) -> int | None:
-        """Find the open PR for a single issue.
-
-        Delegates to :func:`_review_utils.find_pr_for_issue` (two-strategy
-        variant: branch-name lookup then body search).
-
-        Args:
-            issue_number: GitHub issue number
-
-        Returns:
-            PR number if found, None otherwise
-
-        """
-        return find_pr_for_issue(issue_number)
 
     def _gather_pr_context(
         self,

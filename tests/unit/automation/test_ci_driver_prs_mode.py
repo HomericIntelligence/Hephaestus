@@ -57,7 +57,7 @@ class TestDiscoverPrsDirectMode:
         # Mock _validate_pr_open to return True for these PRs
         # Also mock _discover_failing_prs: empty issues triggers the failing-PR path (#819)
         with patch.object(driver, "_validate_pr_open", return_value=True) as mock_validate:
-            with patch.object(driver, "_find_pr_for_issue", return_value=None):
+            with patch("hephaestus.automation.ci_driver.find_pr_for_issue", return_value=None):
                 with patch.object(driver, "_discover_failing_prs", return_value={}):
                     result = driver._discover_prs([])
 
@@ -76,7 +76,7 @@ class TestDiscoverPrsDirectMode:
         driver.options.prs = [661]
 
         with patch.object(driver, "_validate_pr_open", return_value=True):
-            with patch.object(driver, "_find_pr_for_issue", return_value=None):
+            with patch("hephaestus.automation.ci_driver.find_pr_for_issue", return_value=None):
                 with patch.object(driver, "_discover_failing_prs", return_value={}):
                     driver._discover_prs([])
 
@@ -88,9 +88,8 @@ class TestDiscoverPrsDirectMode:
         driver.options.include_bot_prs = False
 
         # Mock find_pr_for_issue to return 661 for issue 918
-        with patch.object(
-            driver,
-            "_find_pr_for_issue",
+        with patch(
+            "hephaestus.automation.ci_driver.find_pr_for_issue",
             return_value=661,
         ):
             with patch.object(driver, "_validate_pr_open", return_value=True) as mock_validate:
@@ -111,9 +110,8 @@ class TestDiscoverPrsDirectMode:
         driver.options.include_bot_prs = False
 
         # Issue 918 maps to PR 999
-        with patch.object(
-            driver,
-            "_find_pr_for_issue",
+        with patch(
+            "hephaestus.automation.ci_driver.find_pr_for_issue",
             return_value=999,
         ):
             with patch.object(driver, "_validate_pr_open", return_value=True):
@@ -136,7 +134,7 @@ class TestDiscoverPrsDirectMode:
             return pr_num != 662  # 662 is closed/non-existent
 
         with patch.object(driver, "_validate_pr_open", side_effect=validate_side_effect):
-            with patch.object(driver, "_find_pr_for_issue", return_value=None):
+            with patch("hephaestus.automation.ci_driver.find_pr_for_issue", return_value=None):
                 with patch.object(driver, "_discover_failing_prs", return_value={}):
                     result = driver._discover_prs([])
 
@@ -152,7 +150,7 @@ class TestDiscoverPrsDirectMode:
         driver.options.include_bot_prs = False
 
         with patch.object(driver, "_validate_pr_open", return_value=True):
-            with patch.object(driver, "_find_pr_for_issue", return_value=None):
+            with patch("hephaestus.automation.ci_driver.find_pr_for_issue", return_value=None):
                 with patch.object(driver, "_discover_failing_prs", return_value={}):
                     result = driver._discover_prs([])
 
@@ -164,7 +162,7 @@ class TestDiscoverPrsDirectMode:
         driver.options.include_bot_prs = False
 
         with patch.object(driver, "_validate_pr_open", return_value=True):
-            with patch.object(driver, "_find_pr_for_issue", return_value=None):
+            with patch("hephaestus.automation.ci_driver.find_pr_for_issue", return_value=None):
                 with patch.object(driver, "_discover_failing_prs", return_value={}):
                     result = driver._discover_prs([])
 

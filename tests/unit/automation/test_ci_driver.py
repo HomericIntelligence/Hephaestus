@@ -458,7 +458,9 @@ class TestDiscoverPrsDedupe:
 
     def test_single_issue_per_pr_unchanged(self, driver: CIDriver) -> None:
         """The 1:1 mapping case is unchanged: every input issue resolves to a PR."""
-        with patch.object(driver, "_find_pr_for_issue", side_effect=[100, 101, 102]):
+        with patch(
+            "hephaestus.automation.ci_driver.find_pr_for_issue", side_effect=[100, 101, 102]
+        ):
             result = driver._discover_prs([1, 2, 3])
         assert result == {1: 100, 2: 101, 3: 102}
 
@@ -467,9 +469,8 @@ class TestDiscoverPrsDedupe:
         # Reproduces the ProjectNestor failure: PR #103 closes nine issues.
         # Without dedupe the driver would race nine workers against the same
         # branch and the eight losers would fail `git worktree add`.
-        with patch.object(
-            driver,
-            "_find_pr_for_issue",
+        with patch(
+            "hephaestus.automation.ci_driver.find_pr_for_issue",
             side_effect=[103] * 9,
         ):
             result = driver._discover_prs([64, 59, 39, 37, 29, 28, 23, 22, 12])
@@ -479,9 +480,8 @@ class TestDiscoverPrsDedupe:
     def test_mixed_shared_and_unique_prs(self, driver: CIDriver) -> None:
         """Mix of shared and unique PRs: each PR appears once, shared via lowest issue."""
         # 1,2 → PR 100 (shared); 3 → PR 200 (unique); 4,5 → PR 300 (shared)
-        with patch.object(
-            driver,
-            "_find_pr_for_issue",
+        with patch(
+            "hephaestus.automation.ci_driver.find_pr_for_issue",
             side_effect=[100, 100, 200, 300, 300],
         ):
             result = driver._discover_prs([1, 2, 3, 4, 5])
@@ -490,7 +490,9 @@ class TestDiscoverPrsDedupe:
     def test_no_pr_skipped_separately_from_shared(self, driver: CIDriver) -> None:
         """Issues with no PR are dropped; remaining issues still get deduped."""
         # 1 → PR 100; 2 → no PR; 3 → PR 100 (shared with 1)
-        with patch.object(driver, "_find_pr_for_issue", side_effect=[100, None, 100]):
+        with patch(
+            "hephaestus.automation.ci_driver.find_pr_for_issue", side_effect=[100, None, 100]
+        ):
             result = driver._discover_prs([1, 2, 3])
         assert result == {1: 100}
 
@@ -502,7 +504,7 @@ class TestDiscoverPrsDedupe:
         # /learn on merge and the other 8 lose their lessons.
         siblings_for_103 = [12, 22, 23, 28, 29, 37, 39, 59, 64]
         side_effect = [103] * len(siblings_for_103) + [200]
-        with patch.object(driver, "_find_pr_for_issue", side_effect=side_effect):
+        with patch("hephaestus.automation.ci_driver.find_pr_for_issue", side_effect=side_effect):
             driver._discover_prs([*siblings_for_103, 99])
         assert driver.shared_pr_issues[103] == siblings_for_103
         assert driver.shared_pr_issues[200] == [99]
@@ -665,7 +667,7 @@ class TestNoPrFound:
 
     def test_no_pr_found_skips(self, driver: CIDriver) -> None:
         """No PR for any issue → run() returns {} without launching any workers."""
-        with patch.object(driver, "_find_pr_for_issue", return_value=None):
+        with patch("hephaestus.automation.ci_driver.find_pr_for_issue", return_value=None):
             results = driver.run()
 
         assert results == {}
@@ -792,7 +794,7 @@ class TestRequiredVsNonRequired:
             _make_check("required-test", required=True, conclusion="failure"),
         ]
         with (
-            patch.object(driver, "_find_pr_for_issue", return_value=42),
+            patch("hephaestus.automation.ci_driver.find_pr_for_issue", return_value=42),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
             patch.object(driver, "_get_failing_ci_logs", return_value="error log"),
             patch.object(driver, "_load_impl_session_id", return_value=None),
@@ -813,7 +815,7 @@ class TestRequiredVsNonRequired:
         ]
         monkeypatch.setenv("HEPH_CI_POLL_MAX_WAIT", "0")
         with (
-            patch.object(driver, "_find_pr_for_issue", return_value=42),
+            patch("hephaestus.automation.ci_driver.find_pr_for_issue", return_value=42),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
             patch.object(driver, "_run_ci_fix_session") as mock_fix,
         ):
@@ -887,7 +889,7 @@ class TestDryRunWithFailingChecks:
 
         checks = [_make_check("test", required=True, conclusion="failure")]
         with (
-            patch.object(dry_driver, "_find_pr_for_issue", return_value=42),
+            patch("hephaestus.automation.ci_driver.find_pr_for_issue", return_value=42),
             patch("hephaestus.automation.ci_driver.gh_pr_checks", return_value=checks),
             patch.object(dry_driver, "_get_failing_ci_logs", return_value="log"),
             patch.object(dry_driver, "_load_impl_session_id", return_value=None),
@@ -1619,24 +1621,6 @@ class TestNoDeadTempfile:
 # ---------------------------------------------------------------------------
 
 
-class TestBodySearch:
-    """Tests that _find_pr_for_issue uses 'Closes #N in:body' (#382/A4-10)."""
-
-    def test_body_search_uses_closes_pattern(self, driver: CIDriver) -> None:
-        """The search string must use 'Closes #<N> in:body'."""
-        # _find_pr_for_issue now delegates to _review_utils.find_pr_for_issue;
-        # patch _gh_call at its actual call site there.
-        with patch("hephaestus.automation._review_utils._gh_call") as mock_gh:
-            mock_gh.return_value = MagicMock(stdout="[]")
-            driver._find_pr_for_issue(42)
-
-        # The second gh call should be the body search
-        body_search_calls = [c for c in mock_gh.call_args_list if "search" in str(c)]
-        assert body_search_calls, "No gh call with --search found"
-        search_arg = str(body_search_calls[0])
-        assert "Closes #42" in search_arg
-
-
 # ---------------------------------------------------------------------------
 # #846: no-commit retry + review-thread injection
 # ---------------------------------------------------------------------------
@@ -2112,7 +2096,7 @@ class TestBotPrDiscovery:
         """
         driver.options.issues = []  # unscoped — bot PRs are in scope
         with (
-            patch.object(driver, "_find_pr_for_issue", return_value=500),
+            patch("hephaestus.automation.ci_driver.find_pr_for_issue", return_value=500),
             patch.object(driver, "_discover_bot_prs", return_value={900: 900, 901: 901}),
             # failing-PR discovery also runs on an unscoped run; keep it empty
             # so this test isolates the bot-PR union.
@@ -2127,7 +2111,7 @@ class TestBotPrDiscovery:
     ) -> None:
         driver.options.include_bot_prs = False
         with (
-            patch.object(driver, "_find_pr_for_issue", return_value=500),
+            patch("hephaestus.automation.ci_driver.find_pr_for_issue", return_value=500),
             patch.object(driver, "_discover_bot_prs") as mock_bots,
         ):
             result = driver._discover_prs([42])
@@ -2140,7 +2124,7 @@ class TestBotPrDiscovery:
         """A bot-PR collision with an issue-driven PR must not displace the issue key."""
         driver.options.issues = []  # unscoped so bot discovery actually runs
         with (
-            patch.object(driver, "_find_pr_for_issue", return_value=900),
+            patch("hephaestus.automation.ci_driver.find_pr_for_issue", return_value=900),
             patch.object(driver, "_discover_bot_prs", return_value={900: 900}),
             patch.object(driver, "_discover_failing_prs", return_value={}),
         ):

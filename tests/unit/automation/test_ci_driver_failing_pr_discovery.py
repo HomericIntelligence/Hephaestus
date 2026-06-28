@@ -267,7 +267,7 @@ class TestDiscoverPrsUnion:
             mock_bot.return_value = {10: 10}
             with patch.object(ci_driver, "_discover_failing_prs") as mock_failing:
                 mock_failing.return_value = {20: 20}
-                with patch.object(ci_driver, "_find_pr_for_issue") as mock_find:
+                with patch("hephaestus.automation.ci_driver.find_pr_for_issue") as mock_find:
                     mock_find.return_value = None
                     result = ci_driver._discover_prs([])
         assert result == {10: 10, 20: 20}
@@ -284,7 +284,7 @@ class TestDiscoverPrsUnion:
         ci_driver.options.include_bot_prs = True  # default-on, must be suppressed when scoped
 
         with patch.object(ci_driver, "_discover_failing_prs") as mock_failing:
-            with patch.object(ci_driver, "_find_pr_for_issue") as mock_find:
+            with patch("hephaestus.automation.ci_driver.find_pr_for_issue") as mock_find:
                 mock_find.return_value = 200
                 with patch.object(ci_driver, "_discover_bot_prs") as mock_bot:
                     mock_bot.return_value = {999: 999}  # would leak in if not suppressed
@@ -302,7 +302,7 @@ class TestDiscoverPrsUnion:
             mock_bot.return_value = {15: 15}
             with patch.object(ci_driver, "_discover_failing_prs") as mock_failing:
                 mock_failing.return_value = {15: 15, 25: 25}
-                with patch.object(ci_driver, "_find_pr_for_issue") as mock_find:
+                with patch("hephaestus.automation.ci_driver.find_pr_for_issue") as mock_find:
                     mock_find.return_value = None
                     result = ci_driver._discover_prs([])
         assert result == {15: 15, 25: 25}
