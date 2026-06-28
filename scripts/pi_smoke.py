@@ -50,7 +50,6 @@ def main(argv: list[str] | None = None) -> int:
             cwd=args.cwd,
             timeout=args.timeout,
             model=model,
-            sandbox="read-only",
         )
     except subprocess.CalledProcessError as exc:
         detail = exc.stderr or exc.stdout or f"Pi smoke failed with exit {exc.returncode}"
@@ -59,6 +58,9 @@ def main(argv: list[str] | None = None) -> int:
     except subprocess.TimeoutExpired as exc:
         print(f"ERROR: Pi smoke timed out after {exc.timeout}s", file=sys.stderr)
         return 124
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     print(redact_pi_private_values(result.stdout, redaction_tokens))
     if result.session_id:
         print(f"SESSION_ID={result.session_id}", file=sys.stderr)

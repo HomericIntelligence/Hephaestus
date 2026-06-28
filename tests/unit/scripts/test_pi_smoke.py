@@ -88,3 +88,17 @@ def test_success_output_redacts_private_values(
     assert "private-test-alias" not in output
     assert "PRIVATE_ENDPOINT_TOKEN" not in output
     assert "<redacted-pi-private-value>" in output
+
+
+def test_reports_pi_runtime_contract_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Pi JSON contract failures should produce an actionable smoke error."""
+    monkeypatch.setenv("HEPH_PI_MODEL", "private-test-alias")
+    run_pi = Mock(side_effect=RuntimeError("missing session id"))
+    monkeypatch.setattr(_mod, "run_pi_session", run_pi)
+
+    assert _mod.main(["--cwd", str(tmp_path)]) == 1
+    assert "missing session id" in capsys.readouterr().err
