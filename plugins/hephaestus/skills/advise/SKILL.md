@@ -11,11 +11,25 @@ Search the skills registry for relevant prior learnings before starting work.
 
 ## Target Repository
 
-**Repository**: `HomericIntelligence/ProjectMnemosyne`
+**Repository**: resolved per gh-authenticated user — the user's own
+`<gh-login>/ProjectMnemosyne` fork when available, otherwise upstream
+`HomericIntelligence/ProjectMnemosyne`.
 **Clone location**: `$HOME/.agent-brain/ProjectMnemosyne/`
 
-Single shared clone in user's home directory. Automatically updated before searches.
-Automatically skipped if already running in the ProjectMnemosyne repository.
+Single shared clone in the user's home directory. Automatically updated before
+searches. Automatically skipped if already running inside a ProjectMnemosyne
+checkout.
+
+Resolution ladder (mirrors `hephaestus.github.mnemosyne_repo.resolve_mnemosyne_target`):
+
+1. Reuse an existing `$HOME/.agent-brain/ProjectMnemosyne` checkout as-is.
+2. Else clone `<gh-login>/ProjectMnemosyne` if it exists on GitHub.
+3. Else fork `HomericIntelligence/ProjectMnemosyne` into the gh user's
+   namespace, then clone the fork. If the gh user **is** `HomericIntelligence`,
+   clone upstream directly (cannot fork a repo into its own org).
+
+Override the resolved owner with the `HEPH_MNEMOSYNE_OWNER` environment
+variable. PRs target the resolved repository (the fork itself).
 
 ## Instructions
 
@@ -26,19 +40,50 @@ When the user invokes this command:
 1. **Setup repository** (if not already cloned):
 
    ```bash
-   # Detect if already in ProjectMnemosyne
+   # ensure_precommit_installed: do NOT test [ -f .git/hooks/pre-commit ] — in a worktree .git
+   # is a file, and a stray core.hooksPath can fake the path. Ask the resolved hook instead:
+   ensure_precommit_installed() {
+     local hooks_dir; hooks_dir="$(git rev-parse --git-path hooks)"
+     grep -qs 'pre-commit' "$hooks_dir/pre-commit" || pre-commit install --install-hooks
+     pre-commit validate-config >/dev/null 2>&1 \
+       || echo "WARNING: pre-commit config invalid — run 'pre-commit install --install-hooks' here"
+   }
+
+   # resolve_mnemosyne_target: pick the owner/ProjectMnemosyne slug to clone/PR
+   # against. Mirrors hephaestus.github.mnemosyne_repo.resolve_mnemosyne_target.
+   # 1) HEPH_MNEMOSYNE_OWNER override; 2) gh login's own fork (create if needed);
+   # 3) upstream when login is HomericIntelligence or undeterminable.
+   resolve_mnemosyne_target() {
+     local upstream="HomericIntelligence/ProjectMnemosyne"
+     local owner="${HEPH_MNEMOSYNE_OWNER:-$(gh api user --jq .login 2>/dev/null)}"
+     if [ -z "$owner" ] || [ "$owner" = "HomericIntelligence" ]; then
+       echo "$upstream"; return
+     fi
+     if gh repo view "$owner/ProjectMnemosyne" --json name >/dev/null 2>&1; then
+       echo "$owner/ProjectMnemosyne"; return
+     fi
+     # No personal fork yet — create one (forks into the gh user's namespace).
+     if gh repo fork "$upstream" --clone=false >/dev/null 2>&1; then
+       echo "$owner/ProjectMnemosyne"; return
+     fi
+     echo "$upstream"  # fork failed — fall back to upstream
+   }
+
+   # Detect if already inside a ProjectMnemosyne checkout (fast path).
    CURRENT_REMOTE=$(git remote get-url origin 2>/dev/null || echo "")
    if [[ "$CURRENT_REMOTE" == *"ProjectMnemosyne"* ]] && [[ "$CURRENT_REMOTE" != *"ProjectMnemosyne-"* ]]; then
      # Already in ProjectMnemosyne - use current directory
      MNEMOSYNE_DIR="."
+     TARGET_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
    else
      # Use shared home directory location
      MNEMOSYNE_DIR="$HOME/.agent-brain/ProjectMnemosyne"
+     TARGET_SLUG="$(resolve_mnemosyne_target)"
 
      if [ ! -d "$MNEMOSYNE_DIR" ]; then
-       # Clone fresh
+       # Clone fresh (existing checkout is reused as-is, regardless of remote)
        mkdir -p "$HOME/.agent-brain"
-       gh repo clone HomericIntelligence/ProjectMnemosyne "$MNEMOSYNE_DIR"
+       gh repo clone "$TARGET_SLUG" "$MNEMOSYNE_DIR"
        ( cd "$MNEMOSYNE_DIR" && ensure_precommit_installed )  # so any later /learn has hooks
      fi
 
@@ -50,16 +95,10 @@ When the user invokes this command:
      # Verify pre-commit is genuinely installed; (re)install if not.
      ( cd "$MNEMOSYNE_DIR" && ensure_precommit_installed )
    fi
-
-   # ensure_precommit_installed: do NOT test [ -f .git/hooks/pre-commit ] — in a worktree .git
-   # is a file, and a stray core.hooksPath can fake the path. Ask the resolved hook instead:
-   ensure_precommit_installed() {
-     local hooks_dir; hooks_dir="$(git rev-parse --git-path hooks)"
-     grep -qs 'pre-commit' "$hooks_dir/pre-commit" || pre-commit install --install-hooks
-     pre-commit validate-config >/dev/null 2>&1 \
-       || echo "WARNING: pre-commit config invalid — run 'pre-commit install --install-hooks' here"
-   }
    ```
+
+   `$TARGET_SLUG` holds the resolved `owner/ProjectMnemosyne` for any later
+   `gh pr ...` calls in this skill.
 
 2. **Parse the user's goal** from $ARGUMENTS
 3. **Read `.claude-plugin/marketplace.json`** to find available plugins
@@ -128,9 +167,9 @@ for the most relevant matches.
 >
 > ```bash
 > # For each matched skill <name>, surface open PRs already amending it:
-> gh pr list --repo HomericIntelligence/ProjectMnemosyne --state open \
+> gh pr list --repo "$TARGET_SLUG" --state open \
 >   --search "<name> in:title" --json number,headRefName,title
-> gh pr list --repo HomericIntelligence/ProjectMnemosyne --state open \
+> gh pr list --repo "$TARGET_SLUG" --state open \
 >   --json number,headRefName,files \
 >   --jq '.[] | select(.files[].path == "skills/<name>.md") | {number, headRefName}'
 > ```

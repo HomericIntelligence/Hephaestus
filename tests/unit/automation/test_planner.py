@@ -10,6 +10,7 @@ import pytest
 
 from hephaestus.automation.models import PlannerOptions
 from hephaestus.automation.planner import Planner
+from hephaestus.github.mnemosyne_repo import MnemosyneTarget
 
 
 @pytest.fixture
@@ -533,10 +534,21 @@ class TestEnsureMnemosyne:
     """Tests for _ensure_mnemosyne method."""
 
     def test_clone_success(self, planner: Any, tmp_path: Any) -> None:
-        """Test successful clone returns True and runs correct command."""
+        """Test successful clone returns True and clones the resolved slug."""
         mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        target = MnemosyneTarget(
+            owner="HomericIntelligence",
+            slug="HomericIntelligence/ProjectMnemosyne",
+            is_fork_of_upstream=False,
+        )
 
-        with patch("hephaestus.automation.advise_runner.gh_call") as mock_gh:
+        with (
+            patch("hephaestus.automation.advise_runner.gh_call") as mock_gh,
+            patch(
+                "hephaestus.automation.advise_runner.resolve_mnemosyne_target",
+                return_value=target,
+            ),
+        ):
             mock_gh.return_value = MagicMock(returncode=0)
 
             result = planner._ensure_mnemosyne(mnemosyne_root)
@@ -546,7 +558,7 @@ class TestEnsureMnemosyne:
         cmd = mock_gh.call_args[0][0]
         assert "repo" in cmd
         assert "clone" in cmd
-        assert "HomericIntelligence/ProjectMnemosyne" in cmd
+        assert target.slug in cmd
         assert str(mnemosyne_root) in cmd
 
     def test_clone_failure(self, planner: Any, tmp_path: Any) -> None:

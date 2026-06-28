@@ -74,13 +74,26 @@ class TestRunLearn:
         ]
         assert evidence["mnemosyne_update_pr_numbers"] == [46]
 
+    def test_mnemosyne_update_evidence_recognizes_fork_owner(self) -> None:
+        """A push to a user's fork (<login>/ProjectMnemosyne) still counts."""
+        evidence = mnemosyne_update_evidence(
+            "Opened https://github.com/mvillmow/ProjectMnemosyne/pull/7 "
+            "and referenced mvillmow/ProjectMnemosyne#8"
+        )
+
+        assert evidence["mnemosyne_update_status"] == "confirmed"
+        assert evidence["mnemosyne_update_urls"] == [
+            "https://github.com/mvillmow/ProjectMnemosyne/pull/7"
+        ]
+        assert evidence["mnemosyne_update_pr_numbers"] == [8]
+
     def test_build_learn_prompt_uses_user_facing_command(self) -> None:
         prompt = build_learn_prompt("Capture what happened.")
 
         assert prompt.startswith("/learn EXECUTE")
         assert "Capture what happened." in prompt
         assert "/skills-registry-commands:learn" not in prompt
-        assert "Only push skills to ProjectMnemosyne" in prompt
+        assert "Only push skills to the resolved ProjectMnemosyne" in prompt
         # Directives must appear before the context detail
         assert prompt.index("Do NOT return a plan") < prompt.index("Capture what happened.")
 

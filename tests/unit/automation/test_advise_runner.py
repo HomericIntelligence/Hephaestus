@@ -14,6 +14,7 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.automation import advise_runner
+from hephaestus.github.mnemosyne_repo import MnemosyneTarget
 
 
 def _build_prompt(**kwargs: object) -> str:
@@ -91,14 +92,27 @@ class TestEnsureMnemosyne:
         """ProjectMnemosyne clone calls use the centralized clone timeout."""
         monkeypatch.setenv("HEPH_AGENT_CLONE_TIMEOUT", "55")
         mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        target = MnemosyneTarget(
+            owner="HomericIntelligence",
+            slug="HomericIntelligence/ProjectMnemosyne",
+            is_fork_of_upstream=False,
+        )
 
-        with patch("hephaestus.automation.advise_runner.gh_call") as gh_call:
+        with (
+            patch("hephaestus.automation.advise_runner.gh_call") as gh_call,
+            patch(
+                "hephaestus.automation.advise_runner.resolve_mnemosyne_target",
+                return_value=target,
+            ),
+        ):
             gh_call.return_value = subprocess.CompletedProcess(
                 ["gh", "repo", "clone"], 0, stdout="", stderr=""
             )
             assert advise_runner._clone_mnemosyne(mnemosyne_root) is True
 
         assert gh_call.call_args.kwargs["timeout"] == 55
+        # The clone targets the resolved slug, not a hardcoded upstream literal.
+        assert gh_call.call_args[0][0][:3] == ["repo", "clone", target.slug]
 
     def test_existing_corrupt_checkout_is_removed_and_recloned(self, tmp_path: Path) -> None:
         mnemosyne_root = tmp_path / "ProjectMnemosyne"

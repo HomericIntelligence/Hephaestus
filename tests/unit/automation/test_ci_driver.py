@@ -1397,7 +1397,7 @@ class TestDriveGreenLearnings:
         prompt = mock_codex.call_args.kwargs["prompt"]
         assert prompt.startswith("/learn ")
         assert "/skills-registry-commands:learn" not in prompt
-        assert "Only push skills to ProjectMnemosyne" in prompt
+        assert "Only push skills to the resolved ProjectMnemosyne" in prompt
         assert mock_codex.call_args.kwargs["cwd"] == tmp_path
         mock_invoke.assert_not_called()
         # The learn-evidence cache moved into PostMergeProcessor (#1357).

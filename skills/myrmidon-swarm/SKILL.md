@@ -255,7 +255,10 @@ Instruct sub-agents to report back (not attempt to fix) when they encounter:
 
 **During Phase 3 (per agent)**: Each spawned agent invokes `/hephaestus:learn` as its mandatory final step, capturing its own fixes, patterns, pitfalls, and parameters where the context is freshest. The commander does NOT run `/hephaestus:learn` afterward — learning is delegated, not centralized.
 
-**Clone location**: `$HOME/.agent-brain/ProjectMnemosyne/`
+**Clone location**: `$HOME/.agent-brain/ProjectMnemosyne/` — the repository is
+resolved per gh-authenticated user (the user's own `<gh-login>/ProjectMnemosyne`
+fork when available, else upstream `HomericIntelligence/ProjectMnemosyne`) by
+`/advise` and `/learn`; override with `HEPH_MNEMOSYNE_OWNER`.
 
 ## AI Maestro (Optional)
 

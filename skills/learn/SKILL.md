@@ -11,14 +11,27 @@ Capture session learnings and amend an existing skill or create a new one in the
 
 ## Target Repository
 
-**Repository**: `HomericIntelligence/ProjectMnemosyne`
+**Repository**: resolved per gh-authenticated user — the user's own
+`<gh-login>/ProjectMnemosyne` fork when available, otherwise upstream
+`HomericIntelligence/ProjectMnemosyne`. Branches are pushed and PRs are opened
+against the **resolved repository (the fork itself)**, not upstream.
 **Base branch**: `main`
 **Clone location**: `$HOME/.agent-brain/ProjectMnemosyne/`
 
-Single shared clone in user's home directory. Skill branches are created in temporary
-worktrees (`/tmp/mnemosyne-skill-<name>`) for isolation — the shared clone stays on main.
-Worktrees are cleaned up after PR creation. Automatically detected if already running in
-the ProjectMnemosyne repository.
+Single shared clone in the user's home directory. Skill branches are created in
+temporary worktrees (`/tmp/mnemosyne-skill-<name>`) for isolation — the shared
+clone stays on main. Worktrees are cleaned up after PR creation. Automatically
+detected if already running inside a ProjectMnemosyne checkout.
+
+Resolution ladder (mirrors `hephaestus.github.mnemosyne_repo.resolve_mnemosyne_target`):
+
+1. Reuse an existing `$HOME/.agent-brain/ProjectMnemosyne` checkout as-is.
+2. Else clone `<gh-login>/ProjectMnemosyne` if it exists on GitHub.
+3. Else fork `HomericIntelligence/ProjectMnemosyne` into the gh user's
+   namespace, then clone the fork. If the gh user **is** `HomericIntelligence`,
+   clone upstream directly (cannot fork a repo into its own org).
+
+Override the resolved owner with the `HEPH_MNEMOSYNE_OWNER` environment variable.
 
 ## Execution Model
 
@@ -41,11 +54,14 @@ Agent(
     description="Create/amend skill in ProjectMnemosyne",
     isolation="worktree",  # Isolated copy — no branch conflicts
     prompt="""Execute the /learn workflow for ProjectMnemosyne:
-    1. Clone/update ProjectMnemosyne at $HOME/.agent-brain/ProjectMnemosyne
+    1. Resolve the target repo (the gh user's own <login>/ProjectMnemosyne fork,
+       created if needed, else upstream) and clone/update it at
+       $HOME/.agent-brain/ProjectMnemosyne — see the Setup step's
+       resolve_mnemosyne_target helper
     2. Search for existing skills to amend
     3. Create/amend the skill file in a worktree branch
     4. Validate with scripts/validate_plugins.py
-    5. Commit, push, create PR, enable auto-merge
+    5. Commit, push, create PR against the resolved repo, enable auto-merge
     6. Clean up the worktree
 
     Session learnings to capture: <extracted learnings from conversation>"""
@@ -105,8 +121,19 @@ Agent(description="Create skill C", prompt="...skill C content...")
    Before creating a new file, search the registry for skills covering the same topic:
 
    ```bash
+   # Resolve the target slug (defined in the Setup step below) so the amend-lock
+   # check queries the same repo we will push to. The clone itself is created in
+   # the Setup step; if it already exists, search it now.
+   TARGET_SLUG="${TARGET_SLUG:-$(
+     owner="${HEPH_MNEMOSYNE_OWNER:-$(gh api user --jq .login 2>/dev/null)}"
+     if [ -z "$owner" ] || [ "$owner" = "HomericIntelligence" ]; then
+       echo "HomericIntelligence/ProjectMnemosyne"
+     else
+       echo "$owner/ProjectMnemosyne"
+     fi
+   )}"
    MNEMOSYNE_DIR="$HOME/.agent-brain/ProjectMnemosyne"
-   # Search by keywords from the skill name
+   # Search by keywords from the skill name (only if the clone is already present)
    ls "$MNEMOSYNE_DIR/skills/" | grep -i "<keyword1>\|<keyword2>\|<keyword3>" | grep -v ".notes.md" | grep -v ".history"
    # Also search descriptions in frontmatter
    grep -l "<keyword>" "$MNEMOSYNE_DIR/skills/"*.md 2>/dev/null | head -20
@@ -121,10 +148,10 @@ Agent(description="Create skill C", prompt="...skill C content...")
 
    ```bash
    # (a) Open PRs whose title names the skill
-   gh pr list --repo HomericIntelligence/ProjectMnemosyne --state open \
+   gh pr list --repo "$TARGET_SLUG" --state open \
      --search "<name> in:title" --json number,headRefName,title
    # (b) Open PRs that touch the file even if the title differs
-   gh pr list --repo HomericIntelligence/ProjectMnemosyne --state open \
+   gh pr list --repo "$TARGET_SLUG" --state open \
      --json number,headRefName,files \
      --jq '.[] | select(.files[].path == "skills/<name>.md") | {number, headRefName}'
    ```
@@ -229,7 +256,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
    (`validate` **and** `markdownlint`) is observed **green** on the open PR:
 
    ```bash
-   gh pr view <PR> --repo HomericIntelligence/ProjectMnemosyne \
+   gh pr view <PR> --repo "$TARGET_SLUG" \
      --json mergeStateStatus,statusCheckRollup \
      --jq '{state: .mergeStateStatus, failing: [.statusCheckRollup[] | select(.conclusion=="FAILURE") | .name]}'
    ```
@@ -250,19 +277,40 @@ Agent(description="Create skill C", prompt="...skill C content...")
 5. **Setup repository using worktrees** (CRITICAL — always use worktrees for branch isolation):
 
    ```bash
-   # Detect if already in ProjectMnemosyne
+   # resolve_mnemosyne_target: pick the owner/ProjectMnemosyne slug to clone/PR
+   # against. Mirrors hephaestus.github.mnemosyne_repo.resolve_mnemosyne_target.
+   # 1) HEPH_MNEMOSYNE_OWNER override; 2) gh login's own fork (create if needed);
+   # 3) upstream when login is HomericIntelligence or undeterminable.
+   resolve_mnemosyne_target() {
+     local upstream="HomericIntelligence/ProjectMnemosyne"
+     local owner="${HEPH_MNEMOSYNE_OWNER:-$(gh api user --jq .login 2>/dev/null)}"
+     if [ -z "$owner" ] || [ "$owner" = "HomericIntelligence" ]; then
+       echo "$upstream"; return
+     fi
+     if gh repo view "$owner/ProjectMnemosyne" --json name >/dev/null 2>&1; then
+       echo "$owner/ProjectMnemosyne"; return
+     fi
+     if gh repo fork "$upstream" --clone=false >/dev/null 2>&1; then
+       echo "$owner/ProjectMnemosyne"; return
+     fi
+     echo "$upstream"  # fork failed — fall back to upstream
+   }
+
+   # Detect if already inside a ProjectMnemosyne checkout (fast path).
    CURRENT_REMOTE=$(git remote get-url origin 2>/dev/null || echo "")
    if [[ "$CURRENT_REMOTE" == *"ProjectMnemosyne"* ]] && [[ "$CURRENT_REMOTE" != *"ProjectMnemosyne-"* ]]; then
      # Already in ProjectMnemosyne - use worktree from current repo
      MNEMOSYNE_DIR="."
+     TARGET_SLUG="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
    else
      # Use shared home directory location
      MNEMOSYNE_DIR="$HOME/.agent-brain/ProjectMnemosyne"
+     TARGET_SLUG="${TARGET_SLUG:-$(resolve_mnemosyne_target)}"
 
      if [ ! -d "$MNEMOSYNE_DIR" ]; then
-       # Clone fresh
+       # Clone fresh (existing checkout is reused as-is, regardless of remote)
        mkdir -p "$HOME/.agent-brain"
-       gh repo clone HomericIntelligence/ProjectMnemosyne "$MNEMOSYNE_DIR"
+       gh repo clone "$TARGET_SLUG" "$MNEMOSYNE_DIR"
        ( cd "$MNEMOSYNE_DIR" && ensure_precommit_installed )  # see helper below
      fi
 
@@ -502,7 +550,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
 9. **Create PR** (only if push succeeded):
 
     ```bash
-    gh pr create --repo HomericIntelligence/ProjectMnemosyne --base main \
+    gh pr create --repo "$TARGET_SLUG" --base main \
       --title "feat: <add|amend> <name> skill" \
       --body "## Summary
 
@@ -539,7 +587,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
 
     # Enable auto-merge so the PR merges automatically once CI passes
     # Note: gh pr merge requires a PR number when using --repo
-    PR_NUMBER=$(gh pr list --repo HomericIntelligence/ProjectMnemosyne --head "skill/<name>" --json number --jq '.[0].number')
+    PR_NUMBER=$(gh pr list --repo "$TARGET_SLUG" --head "skill/<name>" --json number --jq '.[0].number')
     HELPER=""
     for cand in \
         "${HEPHAESTUS_REPO_ROOT:-}/scripts/choose_merge_flag.sh" \
@@ -549,11 +597,11 @@ Agent(description="Create skill C", prompt="...skill C content...")
     done
     if [ -n "$HELPER" ]; then
         . "$HELPER"
-        MERGE_FLAG=$(choose_merge_flag HomericIntelligence/ProjectMnemosyne) || MERGE_FLAG="--squash"
+        MERGE_FLAG=$(choose_merge_flag "$TARGET_SLUG") || MERGE_FLAG="--squash"
     else
         MERGE_FLAG="--squash"
     fi
-    gh pr merge "$PR_NUMBER" --auto "$MERGE_FLAG" --repo HomericIntelligence/ProjectMnemosyne
+    gh pr merge "$PR_NUMBER" --auto "$MERGE_FLAG" --repo "$TARGET_SLUG"
     ```
 
 10. **Cleanup worktree** (always clean up after PR creation):
@@ -571,7 +619,7 @@ Agent(description="Create skill C", prompt="...skill C content...")
     checks — never assume success because auto-merge was armed:
 
     ```bash
-    gh pr view "$PR_NUMBER" --repo HomericIntelligence/ProjectMnemosyne \
+    gh pr view "$PR_NUMBER" --repo "$TARGET_SLUG" \
       --json mergeStateStatus,statusCheckRollup \
       --jq '{state: .mergeStateStatus, failing: [.statusCheckRollup[] | select(.conclusion=="FAILURE") | .name]}'
     ```

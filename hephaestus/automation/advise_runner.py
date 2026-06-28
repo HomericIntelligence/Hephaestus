@@ -31,6 +31,7 @@ from pathlib import Path
 
 from hephaestus.constants import agent_clone_timeout, agent_git_timeout
 from hephaestus.github.client import gh_call
+from hephaestus.github.mnemosyne_repo import resolve_mnemosyne_target
 
 # fcntl is POSIX-only; CPython does not bundle it on Windows. Import lazily so
 # this module stays importable on Windows for tests that only need its
@@ -81,21 +82,28 @@ def default_mnemosyne_root() -> Path:
 
 
 def _clone_mnemosyne(mnemosyne_root: Path) -> bool:
-    """Clone the ProjectMnemosyne repository into ``mnemosyne_root``."""
+    """Clone the resolved ProjectMnemosyne repository into ``mnemosyne_root``.
+
+    The clone target is resolved via
+    :func:`hephaestus.github.mnemosyne_repo.resolve_mnemosyne_target`, which
+    prefers the gh-authenticated user's own fork (creating it if needed) and
+    falls back to the upstream ``HomericIntelligence/ProjectMnemosyne``.
+    """
     timeout_s = agent_clone_timeout()
+    target = resolve_mnemosyne_target()
     try:
-        logger.info("Cloning ProjectMnemosyne to %s...", mnemosyne_root)
+        logger.info("Cloning %s to %s...", target.slug, mnemosyne_root)
         gh_call(
             [
                 "repo",
                 "clone",
-                "HomericIntelligence/ProjectMnemosyne",
+                target.slug,
                 str(mnemosyne_root),
             ],
             check=True,
             timeout=timeout_s,
         )
-        logger.info("ProjectMnemosyne cloned successfully")
+        logger.info("%s cloned successfully", target.slug)
         return True
     except subprocess.TimeoutExpired:
         logger.warning(
