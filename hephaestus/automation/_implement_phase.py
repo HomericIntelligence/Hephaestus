@@ -156,7 +156,10 @@ class ImplementPhase(StageMixin):
         if uses_direct_agent_runner(self.options.agent):
             return self._run_direct_agent_code(issue_number, worktree_path, prompt)
 
-        return self.impl._run_claude_impl_session(issue_number, worktree_path, prompt)
+        return cast(
+            str | None,
+            self.impl._run_claude_impl_session(issue_number, worktree_path, prompt),
+        )
 
     def _run_claude_impl_session(
         self, issue_number: int, worktree_path: Path, prompt: str
