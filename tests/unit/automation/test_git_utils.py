@@ -198,7 +198,7 @@ class TestCommitIfChanges:
             cwd=tmp_path,
             capture_output=True,
         )
-        mock_commit.assert_called_once_with(123, tmp_path, "codex")
+        mock_commit.assert_called_once_with(123, tmp_path, "codex", allowed_paths=None)
 
     @patch("hephaestus.automation.git_utils.run")
     @patch("hephaestus.automation.pr_manager.commit_changes")

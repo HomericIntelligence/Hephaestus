@@ -206,10 +206,7 @@ def commit_if_changes(
     try:
         from .pr_manager import commit_changes
 
-        if allowed_paths is None:
-            commit_changes(issue_number, worktree_path, agent)
-        else:
-            commit_changes(issue_number, worktree_path, agent, allowed_paths=allowed_paths)
+        commit_changes(issue_number, worktree_path, agent, allowed_paths=allowed_paths)
         logger.info(committed_log_message, issue_number)
         return True
     except RuntimeError as e:

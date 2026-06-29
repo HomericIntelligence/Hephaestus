@@ -270,33 +270,7 @@ do NOT push, do NOT delete anything.
 git -C {worktree_path} push --force-with-lease --force-if-includes origin {branch}
 ```
 
-### 7. Re-arm auto-merge only for implementation-approved PRs
-```bash
-GH_BIN="hephaestus-gh"
-ANY_PR=$("$GH_BIN" pr list --repo {repo_slug} --head {branch} --json number --jq \
-  '.[0].number // empty')
-PR=$("$GH_BIN" pr list --repo {repo_slug} --head {branch} --json number,labels --jq \
-  'map(select(any(.labels[]?; .name == "state:implementation-go"))) | .[0].number // empty')
-if [ -n "$PR" ]; then
-  HELPER=""
-  for cand in \
-      "$(git rev-parse --show-toplevel 2>/dev/null)/scripts/choose_merge_flag.sh" \
-      "$HOME/Projects/ProjectHephaestus/scripts/choose_merge_flag.sh"; do
-    if [ -r "$cand" ]; then HELPER="$cand"; break; fi
-  done
-  if [ -n "$HELPER" ]; then
-    . "$HELPER"
-    MERGE_FLAG=$(choose_merge_flag --gh-bin "$GH_BIN" {repo_slug}) || MERGE_FLAG="--squash"
-  else
-    MERGE_FLAG="--squash"
-  fi
-  "$GH_BIN" pr merge --auto "$MERGE_FLAG" "$PR"
-elif [ -n "$ANY_PR" ]; then
-  echo "PR #$ANY_PR lacks state:implementation-go; leaving auto-merge disabled"
-fi
-```
-
-### 8. Clean up worktree (no --force)
+### 7. Clean up worktree (no --force)
 ```bash
 git -C {repo_path} worktree remove {worktree_path}
 ```
