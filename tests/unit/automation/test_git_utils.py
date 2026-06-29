@@ -198,7 +198,31 @@ class TestCommitIfChanges:
             cwd=tmp_path,
             capture_output=True,
         )
-        mock_commit.assert_called_once_with(123, tmp_path, "codex")
+        mock_commit.assert_called_once_with(123, tmp_path, "codex", allowed_paths=None)
+
+    @patch("hephaestus.automation.git_utils.run")
+    @patch("hephaestus.automation.pr_manager.commit_changes")
+    def test_dirty_tree_forwards_allowed_paths(
+        self, mock_commit: Any, mock_run: Any, tmp_path: Path
+    ) -> None:
+        mock_run.return_value = Mock(stdout=" M fixed.py\n?? output.log\n")
+
+        assert (
+            commit_if_changes(
+                123,
+                tmp_path,
+                "codex",
+                allowed_paths=("fixed.py",),
+            )
+            is True
+        )
+
+        mock_commit.assert_called_once_with(
+            123,
+            tmp_path,
+            "codex",
+            allowed_paths=("fixed.py",),
+        )
 
     @patch("hephaestus.automation.git_utils.run")
     @patch("hephaestus.automation.pr_manager.commit_changes")

@@ -34,6 +34,7 @@ from hephaestus.io.utils import write_secure
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
 from .git_utils import (
+    commit_if_changes,
     get_repo_slug,
     issue_ref,
     pr_ref,
@@ -82,6 +83,18 @@ _IGNORED_UNTRACKED_PREFIXES: tuple[str, ...] = (
     "dist/",
     "htmlcov/",
 )
+_UNMERGED_STATUS_CODES: frozenset[str] = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
+
+
+def _porcelain_path(line: str) -> str:
+    """Return the target path from one ``git status --porcelain`` line."""
+    status = line[:2]
+    filename_part = line[3:] if len(line) > 3 else ""
+    if status.startswith("R") and " -> " in filename_part:
+        filename_part = filename_part.split(" -> ", 1)[1]
+    if filename_part.startswith('"') and filename_part.endswith('"'):
+        filename_part = filename_part[1:-1]
+    return filename_part
 
 
 class CIFixOrchestrator:
@@ -378,7 +391,18 @@ class CIFixOrchestrator:
             ):
                 return False
         if not self._ci_fix_head_is_pushable(worktree_path, issue_number):
-            return False
+            if not self._ci_fix_residual_commit_is_safe(
+                worktree_path=worktree_path,
+                issue_number=issue_number,
+            ):
+                return False
+            if not self._commit_residual_ci_fix_changes(
+                worktree_path=worktree_path,
+                issue_number=issue_number,
+            ):
+                return False
+            if not self._ci_fix_head_is_pushable(worktree_path, issue_number):
+                return False
         try:
             push_current_branch_with_lease_on_divergence(
                 worktree_path,
@@ -389,6 +413,99 @@ class CIFixOrchestrator:
             return True
         except Exception as push_err:
             logger.error("Issue #%s: git push failed after CI fix: %s", issue_number, push_err)
+            return False
+
+    def _ci_fix_residual_commit_is_safe(
+        self,
+        *,
+        worktree_path: Path,
+        issue_number: int,
+        base_ref: str = "origin/main",
+    ) -> bool:
+        """Return True when dirty tracked CI-fix leftovers may be committed."""
+        unmerged = self._git_stdout_for_push_guard(
+            worktree_path,
+            issue_number,
+            ["git", "diff", "--name-only", "--diff-filter=U"],
+            "failed to inspect merge state before residual commit",
+        )
+        if unmerged is None:
+            return False
+        unmerged_paths = [line for line in unmerged.splitlines() if line.strip()]
+        if unmerged_paths:
+            logger.error(
+                "Issue #%s: refusing to commit CI-fix residuals with unresolved merge paths: %s",
+                issue_number,
+                ", ".join(unmerged_paths[:10]),
+            )
+            return False
+
+        ahead = self._git_stdout_for_push_guard(
+            worktree_path,
+            issue_number,
+            ["git", "rev-list", "--count", f"{base_ref}..HEAD"],
+            f"failed to inspect HEAD ahead of {base_ref} before residual commit",
+        )
+        if ahead is None:
+            return False
+        try:
+            ahead_count = int(ahead.strip() or "0")
+        except ValueError:
+            logger.error(
+                "Issue #%s: refusing to commit CI-fix residuals with invalid ahead count: %r",
+                issue_number,
+                ahead,
+            )
+            return False
+        if ahead_count <= 0:
+            logger.error(
+                "Issue #%s: refusing to commit CI-fix residuals because HEAD has no commits "
+                "ahead of %s",
+                issue_number,
+                base_ref,
+            )
+            return False
+        return True
+
+    def _commit_residual_ci_fix_changes(self, *, worktree_path: Path, issue_number: int) -> bool:
+        """Commit resolved tracked leftovers from a CI-fix agent turn.
+
+        A CI-fix session can advance HEAD and still leave tracked files dirty
+        (for example ``MM`` after resolving conflicts). Those resolved changes
+        are part of the fix and must be signed/DCO committed before push. True
+        unmerged paths stay blocked: porcelain status codes containing ``U`` are
+        unresolved conflict state, not committable residual work.
+        """
+        dirty_changes = self._tracked_worktree_changes(worktree_path, issue_number)
+        if not dirty_changes:
+            return False
+        unmerged = [line for line in dirty_changes if line[:2] in _UNMERGED_STATUS_CODES]
+        if unmerged:
+            logger.error(
+                "Issue #%s: refusing to commit CI-fix residuals with unresolved merge status: %s",
+                issue_number,
+                ", ".join(unmerged[:10]),
+            )
+            return False
+        tracked_paths = tuple(
+            path for line in dirty_changes if line[:2] != "??" and (path := _porcelain_path(line))
+        )
+        if not tracked_paths:
+            logger.error(
+                "Issue #%s: CI-fix residuals contained no tracked files to commit",
+                issue_number,
+            )
+            return False
+        try:
+            return commit_if_changes(
+                issue_number,
+                worktree_path,
+                self._options().agent,
+                committed_log_message="Committed CI-fix residual changes for issue #%s",
+                allowed_paths=tracked_paths,
+            )
+        except Exception as exc:
+            logger.error("Issue #%s: failed to commit CI-fix residuals: %s", issue_number, exc)
             return False
 
     def retry_no_commit_once(

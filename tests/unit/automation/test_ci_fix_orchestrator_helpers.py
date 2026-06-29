@@ -9,6 +9,7 @@ decision branches. The full agent-session paths are exercised through
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -177,6 +178,284 @@ class TestRetryWorktreeChanges:
         assert "?? tests/unit/scripts/test_check_conventional_commit.py" in changes
         assert all("uv.lock" not in line for line in changes)
         assert all(".pytest_cache" not in line for line in changes)
+
+
+class TestPushCiFix:
+    """The post-agent push path normalizes dirty but resolved tracked changes."""
+
+    def test_commits_resolved_dirty_tracked_changes_before_push(
+        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    ) -> None:
+        with (
+            patch.object(orchestrator, "_head_advanced", return_value=True),
+            patch.object(
+                orchestrator,
+                "_ci_fix_head_is_pushable",
+                side_effect=[False, True],
+            ),
+            patch.object(orchestrator, "_ci_fix_residual_commit_is_safe", return_value=True),
+            patch.object(
+                orchestrator,
+                "_tracked_worktree_changes",
+                return_value=["MM hephaestus/automation/ci_driver.py"],
+            ),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.commit_if_changes",
+                return_value=True,
+            ) as commit,
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator."
+                "push_current_branch_with_lease_on_divergence"
+            ) as push,
+        ):
+            pushed = orchestrator.push_ci_fix(
+                worktree_path=tmp_path,
+                pre_agent_sha="abc123",
+                issue_number=1405,
+                pr_number=1633,
+                pr_head_branch="1405-auto-impl",
+                session_id=None,
+            )
+
+        assert pushed is True
+        commit.assert_called_once_with(
+            1405,
+            tmp_path,
+            "claude",
+            committed_log_message="Committed CI-fix residual changes for issue #%s",
+            allowed_paths=("hephaestus/automation/ci_driver.py",),
+        )
+        push.assert_called_once()
+
+    def test_ignores_untracked_residual_artifacts_when_committing(
+        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    ) -> None:
+        with (
+            patch.object(orchestrator, "_head_advanced", return_value=True),
+            patch.object(
+                orchestrator,
+                "_ci_fix_head_is_pushable",
+                side_effect=[False, True],
+            ),
+            patch.object(orchestrator, "_ci_fix_residual_commit_is_safe", return_value=True),
+            patch.object(
+                orchestrator,
+                "_tracked_worktree_changes",
+                return_value=[
+                    "MM hephaestus/automation/ci_driver.py",
+                    "?? output.log",
+                ],
+            ),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.commit_if_changes",
+                return_value=True,
+            ) as commit,
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator."
+                "push_current_branch_with_lease_on_divergence"
+            ),
+        ):
+            pushed = orchestrator.push_ci_fix(
+                worktree_path=tmp_path,
+                pre_agent_sha="abc123",
+                issue_number=1405,
+                pr_number=1633,
+                pr_head_branch="1405-auto-impl",
+                session_id=None,
+            )
+
+        assert pushed is True
+        commit.assert_called_once_with(
+            1405,
+            tmp_path,
+            "claude",
+            committed_log_message="Committed CI-fix residual changes for issue #%s",
+            allowed_paths=("hephaestus/automation/ci_driver.py",),
+        )
+
+    def test_returns_false_when_residual_commit_fails(
+        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    ) -> None:
+        commit_error = subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["git", "commit"],
+            stderr="signing failed",
+        )
+        with (
+            patch.object(orchestrator, "_head_advanced", return_value=True),
+            patch.object(orchestrator, "_ci_fix_head_is_pushable", return_value=False),
+            patch.object(orchestrator, "_ci_fix_residual_commit_is_safe", return_value=True),
+            patch.object(
+                orchestrator,
+                "_tracked_worktree_changes",
+                return_value=["MM hephaestus/automation/ci_driver.py"],
+            ),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.commit_if_changes",
+                side_effect=commit_error,
+            ),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator."
+                "push_current_branch_with_lease_on_divergence"
+            ) as push,
+        ):
+            pushed = orchestrator.push_ci_fix(
+                worktree_path=tmp_path,
+                pre_agent_sha="abc123",
+                issue_number=1405,
+                pr_number=1633,
+                pr_head_branch="1405-auto-impl",
+                session_id=None,
+            )
+
+        assert pushed is False
+        push.assert_not_called()
+
+    def test_returns_false_when_residual_commit_does_not_restore_pushability(
+        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    ) -> None:
+        with (
+            patch.object(orchestrator, "_head_advanced", return_value=True),
+            patch.object(
+                orchestrator,
+                "_ci_fix_head_is_pushable",
+                side_effect=[False, False],
+            ),
+            patch.object(orchestrator, "_ci_fix_residual_commit_is_safe", return_value=True),
+            patch.object(
+                orchestrator,
+                "_tracked_worktree_changes",
+                return_value=["MM hephaestus/automation/ci_driver.py"],
+            ),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.commit_if_changes",
+                return_value=True,
+            ),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator."
+                "push_current_branch_with_lease_on_divergence"
+            ) as push,
+        ):
+            pushed = orchestrator.push_ci_fix(
+                worktree_path=tmp_path,
+                pre_agent_sha="abc123",
+                issue_number=1405,
+                pr_number=1633,
+                pr_head_branch="1405-auto-impl",
+                session_id=None,
+            )
+
+        assert pushed is False
+        push.assert_not_called()
+
+    def test_does_not_commit_residuals_when_head_is_not_ahead(
+        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    ) -> None:
+        responses = [
+            MagicMock(stdout="", stderr="", returncode=0),  # no unmerged paths
+            MagicMock(stdout="0\n", stderr="", returncode=0),  # no commits ahead of origin/main
+        ]
+        with (
+            patch.object(orchestrator, "_head_advanced", return_value=True),
+            patch.object(orchestrator, "_ci_fix_head_is_pushable", return_value=False),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.run",
+                side_effect=responses,
+            ),
+            patch.object(
+                orchestrator,
+                "_tracked_worktree_changes",
+                return_value=["MM hephaestus/automation/ci_driver.py"],
+            ) as tracked,
+            patch("hephaestus.automation.ci_fix_orchestrator.commit_if_changes") as commit,
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator."
+                "push_current_branch_with_lease_on_divergence"
+            ) as push,
+        ):
+            pushed = orchestrator.push_ci_fix(
+                worktree_path=tmp_path,
+                pre_agent_sha="abc123",
+                issue_number=1405,
+                pr_number=1633,
+                pr_head_branch="1405-auto-impl",
+                session_id=None,
+            )
+
+        assert pushed is False
+        tracked.assert_not_called()
+        commit.assert_not_called()
+        push.assert_not_called()
+
+    def test_does_not_commit_residuals_when_push_guard_cannot_inspect_ahead(
+        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    ) -> None:
+        responses = [
+            MagicMock(stdout="", stderr="", returncode=0),  # no unmerged paths
+            MagicMock(stdout="fatal: bad revision\n", stderr="", returncode=128),
+        ]
+        with (
+            patch.object(orchestrator, "_head_advanced", return_value=True),
+            patch.object(orchestrator, "_ci_fix_head_is_pushable", return_value=False),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.run",
+                side_effect=responses,
+            ),
+            patch.object(
+                orchestrator,
+                "_tracked_worktree_changes",
+                return_value=["MM hephaestus/automation/ci_driver.py"],
+            ) as tracked,
+            patch("hephaestus.automation.ci_fix_orchestrator.commit_if_changes") as commit,
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator."
+                "push_current_branch_with_lease_on_divergence"
+            ) as push,
+        ):
+            pushed = orchestrator.push_ci_fix(
+                worktree_path=tmp_path,
+                pre_agent_sha="abc123",
+                issue_number=1405,
+                pr_number=1633,
+                pr_head_branch="1405-auto-impl",
+                session_id=None,
+            )
+
+        assert pushed is False
+        tracked.assert_not_called()
+        commit.assert_not_called()
+        push.assert_not_called()
+
+    def test_does_not_commit_unresolved_merge_residuals(
+        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    ) -> None:
+        with (
+            patch.object(orchestrator, "_head_advanced", return_value=True),
+            patch.object(orchestrator, "_ci_fix_head_is_pushable", return_value=False),
+            patch.object(orchestrator, "_ci_fix_residual_commit_is_safe", return_value=True),
+            patch.object(
+                orchestrator,
+                "_tracked_worktree_changes",
+                return_value=["AA hephaestus/automation/ci_driver.py"],
+            ),
+            patch("hephaestus.automation.ci_fix_orchestrator.commit_if_changes") as commit,
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator."
+                "push_current_branch_with_lease_on_divergence"
+            ) as push,
+        ):
+            pushed = orchestrator.push_ci_fix(
+                worktree_path=tmp_path,
+                pre_agent_sha="abc123",
+                issue_number=1405,
+                pr_number=1633,
+                pr_head_branch="1405-auto-impl",
+                session_id=None,
+            )
+
+        assert pushed is False
+        commit.assert_not_called()
+        push.assert_not_called()
 
 
 class TestRecordRepeatedNoCommit:

@@ -62,6 +62,37 @@ class TestCommitChanges:
         assert ".env" not in add_call
         assert "data.key" not in add_call
 
+    def test_allowed_paths_prevent_staging_unlisted_artifacts(self) -> None:
+        porcelain = " M hephaestus/automation/ci_driver.py\n?? output.log\n"
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status("M\thephaestus/automation/ci_driver.py\n"),  # changed files context
+                _status(" hephaestus/automation/ci_driver.py | 1 +\n"),  # stat context
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="Fix CI driver")
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(
+                1405,
+                Path("/tmp/wt"),
+                allowed_paths=("hephaestus/automation/ci_driver.py",),
+            )
+
+        add_call = run_mock.call_args_list[1].args[0]
+        assert add_call == [
+            "git",
+            "add",
+            "--",
+            "hephaestus/automation/ci_driver.py",
+        ]
+
     def test_commit_uses_cryptographic_signature_and_dco_signoff(self) -> None:
         porcelain = " M src/foo.py\n"
         run_mock = MagicMock(
@@ -105,6 +136,28 @@ class TestCommitChanges:
             pr_manager.commit_changes(4, Path("/tmp/wt"))
         add_call = run_mock.call_args_list[1].args[0]
         assert "new.py" in add_call
+
+    def test_stages_deleted_files_without_pathspec(self) -> None:
+        porcelain = " D hephaestus/github/fleet_sync.py\n"
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),
+                _status(""),
+                _status("D\thephaestus/github/fleet_sync.py\n"),
+                _status(" hephaestus/github/fleet_sync.py | 10 ----------\n"),
+                _status(""),
+            ]
+        )
+        issue = MagicMock(title="Delete obsolete module")
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(1406, Path("/tmp/wt"))
+
+        add_call = run_mock.call_args_list[1].args[0]
+        assert add_call == ["git", "add", "-u", "--", "hephaestus/github/fleet_sync.py"]
 
     def test_uses_message_agent_for_commit_subject_and_body(self) -> None:
         porcelain = " M LICENSE\n M NOTICE\n"

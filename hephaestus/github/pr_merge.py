@@ -334,6 +334,7 @@ def _merge_pr(repo_name: str, pr_number: int, head_sha: str) -> dict[str, Any]:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build the PR merge CLI argument parser."""
     parser = argparse.ArgumentParser(
         description="Merge open PRs with successful CI/CD into main (squash via PR API)"
     )

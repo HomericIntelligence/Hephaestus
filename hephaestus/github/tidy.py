@@ -270,28 +270,7 @@ do NOT push, do NOT delete anything.
 git -C {worktree_path} push --force-with-lease --force-if-includes origin {branch}
 ```
 
-### 7. Re-arm auto-merge (if a PR exists)
-```bash
-GH_BIN="hephaestus-gh"
-PR=$("$GH_BIN" pr list --repo {repo_slug} --head {branch} --json number --jq '.[0].number // empty')
-if [ -n "$PR" ]; then
-  HELPER=""
-  for cand in \
-      "$(git rev-parse --show-toplevel 2>/dev/null)/scripts/choose_merge_flag.sh" \
-      "$HOME/Projects/ProjectHephaestus/scripts/choose_merge_flag.sh"; do
-    if [ -r "$cand" ]; then HELPER="$cand"; break; fi
-  done
-  if [ -n "$HELPER" ]; then
-    . "$HELPER"
-    MERGE_FLAG=$(choose_merge_flag --gh-bin "$GH_BIN" {repo_slug}) || MERGE_FLAG="--squash"
-  else
-    MERGE_FLAG="--squash"
-  fi
-  "$GH_BIN" pr merge --auto "$MERGE_FLAG" "$PR"
-fi
-```
-
-### 8. Clean up worktree (no --force)
+### 7. Clean up worktree (no --force)
 ```bash
 git -C {repo_path} worktree remove {worktree_path}
 ```
@@ -521,6 +500,7 @@ def _print_summary(results: dict[str, str]) -> int:
 
 
 def _configure_logging(verbose: bool) -> None:
+    """Configure CLI logging for tidy output."""
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(message)s",
@@ -620,6 +600,18 @@ def _handle_problem_branches(
         return _handle_dry_run_problem_branches(problem_branches, args.json)
 
     return _dispatch_tidy_swarm(args, problem_branches, trunk, repo_path, repo_slug, agent)
+
+
+def _handle_tidy_problem_branches(
+    args: argparse.Namespace,
+    agent: str,
+    problem_branches: list[str],
+    trunk: str,
+    repo_path: Path,
+    repo_slug: str,
+) -> int:
+    """Compatibility wrapper for the pre-extraction tidy handler name."""
+    return _handle_problem_branches(args, problem_branches, trunk, repo_path, repo_slug, agent)
 
 
 def main() -> int:

@@ -707,7 +707,7 @@ class IssueImplementer:
     def _resume_impl_with_feedback(
         self,
         *,
-        session_id: str,
+        session_id: str | None,
         worktree_path: Path,
         issue_number: int,
         review_text: str,

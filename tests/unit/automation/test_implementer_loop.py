@@ -928,6 +928,53 @@ class TestRunImplReviewLoop:
         assert mock_addr.call_args.kwargs["include_bootstrap_context"] is True
         assert mock_rev.call_count == 2
 
+    def test_no_session_conflict_gate_dispatches_fresh_agent(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """A conflicted existing PR with no session still gets an agent pass.
+
+        Existing-PR review can start without an implementer transcript. The
+        conflict gate must mirror address-review's fresh-session behavior
+        instead of dead-ending with "no implementer session to resume".
+        """
+        review_phase = implementer.phase_runner.review_phase
+
+        with (
+            patch.object(
+                review_phase,
+                "_pr_merge_state",
+                side_effect=[("DIRTY", "CONFLICTING"), ("CLEAN", "MERGEABLE")],
+            ),
+            patch("hephaestus.automation._review_phase.gh_call") as gh_call,
+            patch("hephaestus.automation._review_phase.sync_worktree_to_remote_branch"),
+            patch(
+                "hephaestus.automation._review_phase.rebase_worktree_onto",
+                return_value=False,
+            ),
+            patch.object(review_phase, "_resume_impl_with_feedback") as resume,
+            patch.object(implementer.phase_runner, "_commit_if_changes", return_value=True),
+            patch.object(implementer.phase_runner, "_push_branch") as push,
+        ):
+            gh_call.return_value = MagicMock(stdout='{"baseRefName": "main"}')
+            resume.return_value = True
+
+            resolved = review_phase._resolve_conflict_before_review(
+                issue_number=1,
+                pr_number=42,
+                worktree_path=tmp_path,
+                branch_name="1-auto-impl",
+                session_id=None,
+                slot_id=None,
+                thread_id=None,
+                state=None,
+            )
+
+        assert resolved is True
+        resume.assert_called_once()
+        assert resume.call_args.kwargs["session_id"] is None
+        assert "MERGE CONFLICT" in resume.call_args.kwargs["review_text"]
+        push.assert_called_once_with("1-auto-impl", tmp_path)
+
     def test_prior_review_passed_to_next_reviewer(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:
@@ -1453,6 +1500,36 @@ class TestResumeImplWithFeedback:
         assert kwargs["issue"] == 1
         assert kwargs["recreate_on_resume_failure"] is False
         assert "Grade: D" in kwargs["prompt"] or "NOGO" in kwargs["prompt"]
+
+    def test_direct_no_session_starts_fresh_session(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        implementer.options.agent = "codex"
+        result = subprocess.CompletedProcess(
+            args=["codex", "exec"], returncode=0, stdout="ok", stderr=""
+        )
+        with (
+            patch(
+                "hephaestus.automation._review_phase.run_agent_session", return_value=result
+            ) as run_session,
+            patch("hephaestus.automation._review_phase.resume_agent_session") as resume_session,
+            patch(
+                "hephaestus.automation._review_phase.direct_agent_model",
+                return_value="gpt-test",
+            ),
+        ):
+            ok = implementer._resume_impl_with_feedback(
+                session_id=None,
+                worktree_path=tmp_path,
+                issue_number=1,
+                review_text="Grade: D\nVerdict: NOGO",
+                prev_iteration=0,
+                verdict="NOGO",
+            )
+
+        assert ok is True
+        run_session.assert_called_once()
+        resume_session.assert_not_called()
 
     def test_resume_failure_returns_false(
         self, implementer: IssueImplementer, tmp_path: Path

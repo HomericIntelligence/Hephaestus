@@ -9,6 +9,7 @@ Provides helpers for:
 
 import logging
 import subprocess
+from collections.abc import Collection
 from pathlib import Path
 
 # ``get_repo_root`` is re-exported (not redefined) so that the single canonical
@@ -177,6 +178,7 @@ def commit_if_changes(
     agent: str = "claude",
     *,
     committed_log_message: str = "Committed changes for issue #%s",
+    allowed_paths: Collection[str] | None = None,
 ) -> bool:
     """Commit pending changes in *worktree_path* if the worktree is dirty.
 
@@ -185,6 +187,8 @@ def commit_if_changes(
         worktree_path: Path to the git worktree to inspect.
         agent: Agent name forwarded to the commit helper.
         committed_log_message: ``logging`` format string for a successful commit.
+        allowed_paths: Optional exact path allowlist forwarded to the commit
+            helper. When set, only those porcelain paths may be staged.
 
     Returns:
         True if a commit was created, otherwise False.
@@ -202,7 +206,7 @@ def commit_if_changes(
     try:
         from .pr_manager import commit_changes
 
-        commit_changes(issue_number, worktree_path, agent)
+        commit_changes(issue_number, worktree_path, agent, allowed_paths=allowed_paths)
         logger.info(committed_log_message, issue_number)
         return True
     except RuntimeError as e:

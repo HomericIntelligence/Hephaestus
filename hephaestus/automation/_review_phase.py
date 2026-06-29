@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 from hephaestus.agents.runtime import (
     direct_agent_model,
     resume_agent_session,
+    run_agent_session,
     run_agent_text,
     uses_direct_agent_runner,
 )
@@ -633,18 +634,9 @@ class ReviewPhase(StageMixin):
 
         # 2. Rebase still conflicts → the implementation agent resolves it. Reuse
         #    the same conflict_context wording as ci_driver._resolve_dirty_pr.
-        if session_id is None:
-            # Without an implementer session to resume there is no agent seam in
-            # this phase to drive a code-level conflict resolution; bail so the
-            # PR is treated as not-GO rather than reviewed-while-conflicted.
-            impl._log(
-                "warning",
-                f"{issue_ref(issue_number)}: {pr_ref(pr_number)} still conflicts after rebase and "
-                "has no implementer session to resume — skipping review (not-GO)",
-                thread_id,
-            )
-            return False
-
+        #    Existing-PR review can start without a saved implementer transcript;
+        #    in that case _resume_impl_with_feedback starts/uses the deterministic
+        #    implementer session instead of dead-ending the conflict gate.
         conflict_context = (
             f"This PR has a MERGE CONFLICT with `origin/{base_branch}` "
             f"(mergeStateStatus=DIRTY) — it cannot merge until the conflict is "
@@ -1545,7 +1537,7 @@ class ReviewPhase(StageMixin):
     def _resume_impl_with_feedback(
         self,
         *,
-        session_id: str,
+        session_id: str | None,
         worktree_path: Path,
         issue_number: int,
         review_text: str,
@@ -1563,14 +1555,23 @@ class ReviewPhase(StageMixin):
         )
         if uses_direct_agent_runner(self.options.agent):
             try:
-                result = resume_agent_session(
-                    agent=self.options.agent,
-                    session_id=session_id,
-                    prompt=prompt,
-                    cwd=worktree_path,
-                    timeout=self.options.agent_timeout,
-                    model=direct_agent_model(self.options.agent, "HEPH_IMPLEMENTER_MODEL"),
-                )
+                if session_id is None:
+                    result = run_agent_session(
+                        agent=self.options.agent,
+                        prompt=prompt,
+                        cwd=worktree_path,
+                        timeout=self.options.agent_timeout,
+                        model=direct_agent_model(self.options.agent, "HEPH_IMPLEMENTER_MODEL"),
+                    )
+                else:
+                    result = resume_agent_session(
+                        agent=self.options.agent,
+                        session_id=session_id,
+                        prompt=prompt,
+                        cwd=worktree_path,
+                        timeout=self.options.agent_timeout,
+                        model=direct_agent_model(self.options.agent, "HEPH_IMPLEMENTER_MODEL"),
+                    )
                 log_file = log_file_path(
                     self.state_dir,
                     f"{self.options.agent}-feedback",
