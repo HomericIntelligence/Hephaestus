@@ -9,6 +9,7 @@ subsequent phases from being attempted.
 
 from __future__ import annotations
 
+import json
 import signal
 import subprocess
 import sys
@@ -1124,15 +1125,78 @@ def test_gh_list_repos_does_not_filter_by_name() -> None:
     assert sorted(names) == ["AnyName", "Hephaestus", "Odysseus"]
 
 
+def _issue_json(*issues: dict[str, object]) -> str:
+    """Render a ``gh issue list --json number,labels,title`` style payload."""
+    return json.dumps(list(issues))
+
+
 def test_list_open_issue_numbers_returns_all_open_sorted() -> None:
-    """A single all-open query is parsed and sorted ascending."""
+    """A single all-open query is parsed (as JSON) and sorted ascending."""
+    payload = _issue_json(
+        {"number": 12, "labels": [], "title": "c"},
+        {"number": 7, "labels": [], "title": "a"},
+        {"number": 10, "labels": [], "title": "b"},
+    )
 
     def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="12\n7\n10\n", stderr="")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=payload, stderr="")
 
     with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
         nums = loop_runner._list_open_issue_numbers("MyOrg", "MyRepo")
     assert nums == [7, 10, 12]
+
+
+def test_list_open_issue_numbers_excludes_epics_and_tags_skip() -> None:
+    """Epic/roadmap issues (by label or title) are excluded and tagged state:skip (#1669)."""
+    payload = _issue_json(
+        {"number": 5, "labels": [{"name": "bug"}], "title": "Fix crash"},
+        {"number": 6, "labels": [{"name": "epic"}], "title": "Umbrella"},
+        {"number": 7, "labels": [{"name": "feature"}], "title": "Q3 Roadmap rollup"},
+    )
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=payload, stderr="")
+
+    with (
+        patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run),
+        patch("hephaestus.automation.loop_repo_manager.skip_epics") as mock_skip,
+    ):
+        nums = loop_runner._list_open_issue_numbers("Org", "Repo")
+
+    assert nums == [5]
+    # Both the epic-labelled (#6) and roadmap-titled (#7) issues were handed to skip_epics.
+    mock_skip.assert_called_once()
+    tagged = mock_skip.call_args[0][0]
+    assert set(tagged.keys()) == {6, 7}
+
+
+def test_list_open_issue_numbers_no_epics_skips_nothing() -> None:
+    """When there are no epics, skip_epics is never invoked."""
+    payload = _issue_json(
+        {"number": 1, "labels": [{"name": "bug"}], "title": "a"},
+        {"number": 2, "labels": [], "title": "b"},
+    )
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=payload, stderr="")
+
+    with (
+        patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run),
+        patch("hephaestus.automation.loop_repo_manager.skip_epics") as mock_skip,
+    ):
+        nums = loop_runner._list_open_issue_numbers("Org", "Repo")
+    assert nums == [1, 2]
+    mock_skip.assert_not_called()
+
+
+def test_list_open_issue_numbers_returns_empty_on_bad_json() -> None:
+    """Malformed JSON yields the safe-fallback empty list."""
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="not json", stderr="")
+
+    with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
+        assert loop_runner._list_open_issue_numbers("Org", "Repo") == []
 
 
 def test_list_open_issue_numbers_queries_all_open_no_me_filter() -> None:
@@ -1145,7 +1209,7 @@ def test_list_open_issue_numbers_queries_all_open_no_me_filter() -> None:
 
     def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         seen_argv.extend(argv)
-        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="[]", stderr="")
 
     with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
         loop_runner._list_open_issue_numbers("Org", "Repo")
@@ -1155,6 +1219,8 @@ def test_list_open_issue_numbers_queries_all_open_no_me_filter() -> None:
     assert "--repo" in seen_argv
     assert "Org/Repo" in seen_argv
     assert seen_argv[seen_argv.index("--state") + 1] == "open"
+    # Discovery now fetches labels + title so epics can be filtered (#1669).
+    assert seen_argv[seen_argv.index("--json") + 1] == "number,labels,title"
 
 
 def test_resolve_org_and_repos_cwd_default() -> None:
@@ -1470,7 +1536,9 @@ class TestSubprocessTimeouts:
     def test_gh_issue_numbers_passes_timeout(self) -> None:
         """``gh issue list`` is routed through gh_call's bounded adapter."""
         with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh_call:
-            mock_gh_call.return_value = _completed(stdout="1\n2\n")
+            mock_gh_call.return_value = _completed(
+                stdout='[{"number": 1, "labels": [], "title": "a"}]'
+            )
             loop_runner._list_open_issue_numbers("Org", "Repo")
         assert mock_gh_call.call_args.kwargs.get("timeout") is None
 

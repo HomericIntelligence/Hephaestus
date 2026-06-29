@@ -12,6 +12,7 @@ import pytest
 from hephaestus.automation.state_labels import (
     ALL_IMPLEMENTATION_STATE_LABELS,
     ALL_STATE_LABELS,
+    EPIC_LABELS,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_LABEL_SPECS,
@@ -20,11 +21,13 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_NO_GO,
     STATE_SKIP,
     has_label,
+    is_epic,
     is_implementation_go,
     is_plan_go,
     is_plan_no_go,
     is_skipped,
     needs_plan,
+    partition_epics,
 )
 
 
@@ -164,3 +167,94 @@ class TestNeedsPlan:
         False even when ``state:needs-plan`` was not yet removed.
         """
         assert needs_plan(labels) is False
+
+
+class TestIsEpic:
+    """``is_epic`` excludes epic/roadmap TRACKING issues from the planning loop.
+
+    An issue is an epic iff it carries an ``epic``/``roadmap`` label
+    (case-insensitive) OR its title contains ``epic``/``roadmap``. Native
+    GitHub issue types are not exposed by the installed ``gh``, so label +
+    title are the only available signals.
+    """
+
+    def test_epic_label_marks_epic(self) -> None:
+        assert is_epic(["epic"]) is True
+
+    def test_roadmap_label_marks_epic(self) -> None:
+        assert is_epic(["roadmap"]) is True
+
+    def test_label_match_is_case_insensitive(self) -> None:
+        assert is_epic(["Epic"]) is True
+        assert is_epic(["ROADMAP"]) is True
+
+    def test_title_substring_marks_epic(self) -> None:
+        """Belt-and-suspenders: catch the convention even when unlabelled."""
+        assert is_epic([], title="Epic: ship the new pipeline") is True
+        assert is_epic([], title="Q3 Roadmap tracking") is True
+
+    def test_title_match_is_case_insensitive(self) -> None:
+        assert is_epic([], title="EPIC umbrella issue") is True
+
+    def test_plain_bug_is_not_epic(self) -> None:
+        assert is_epic(["bug", "severity:major"], title="Fix crash in parser") is False
+
+    def test_empty_inputs_not_epic(self) -> None:
+        assert is_epic([]) is False
+        assert is_epic([], title="") is False
+
+    def test_other_state_labels_not_epic(self) -> None:
+        assert is_epic([STATE_NEEDS_PLAN, STATE_PLAN_GO]) is False
+
+    def test_epic_labels_constant_contents(self) -> None:
+        assert set(EPIC_LABELS) == {"epic", "roadmap"}
+
+
+class TestPartitionEpics:
+    """``partition_epics`` splits issue metadata into (kept, epics).
+
+    Pure function shared by both discovery chokepoints (the loop's
+    ``_list_open_issue_numbers`` and the planner's ``filter``). Input is a list
+    of ``{"number", "labels", "title"}`` dicts; output is two ascending number
+    lists so callers stay deterministic.
+    """
+
+    def test_keeps_real_issues_and_extracts_epics(self) -> None:
+        meta = [
+            {"number": 3, "labels": ["bug"], "title": "Fix crash"},
+            {"number": 1, "labels": ["epic"], "title": "Umbrella"},
+            {"number": 2, "labels": ["feature"], "title": "Q3 Roadmap"},
+        ]
+        kept, epics = partition_epics(meta)
+        assert kept == [3]
+        assert epics == [1, 2]
+
+    def test_no_epics_returns_all_kept(self) -> None:
+        meta = [
+            {"number": 5, "labels": ["bug"], "title": "a"},
+            {"number": 4, "labels": [], "title": "b"},
+        ]
+        kept, epics = partition_epics(meta)
+        assert kept == [4, 5]
+        assert epics == []
+
+    def test_results_sorted_ascending(self) -> None:
+        meta = [
+            {"number": 30, "labels": [], "title": "x"},
+            {"number": 10, "labels": ["epic"], "title": "y"},
+            {"number": 20, "labels": [], "title": "z"},
+            {"number": 5, "labels": ["roadmap"], "title": "w"},
+        ]
+        kept, epics = partition_epics(meta)
+        assert kept == [20, 30]
+        assert epics == [5, 10]
+
+    def test_empty_input(self) -> None:
+        assert partition_epics([]) == ([], [])
+
+    def test_missing_keys_default_safely(self) -> None:
+        """Missing labels/title must not raise — treat as absent signals."""
+        meta = [{"number": 7}]
+        kept, epics = partition_epics(meta)
+        assert kept == [7]
+        assert epics == []

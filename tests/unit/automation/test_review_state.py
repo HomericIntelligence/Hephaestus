@@ -489,6 +489,91 @@ class TestFetchAllIssueLabelsGraphql:
         assert "n0=10" in argv and "n1=11" in argv
         assert "issue(number:$n0)" in query_arg
 
+
+class TestFetchAllIssueTitlesGraphql:
+    """Batched title fetch used by the planner to detect epic/roadmap issues (#1669)."""
+
+    def test_empty_input_returns_empty(self) -> None:
+        from hephaestus.automation.review_state import fetch_all_issue_titles_graphql
+
+        assert fetch_all_issue_titles_graphql([]) == {}
+
+    def test_parses_aliased_titles(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from hephaestus.automation.review_state import fetch_all_issue_titles_graphql
+
+        payload = {
+            "data": {
+                "repository": {
+                    "issue0": {"title": "Epic: pipeline overhaul"},
+                    "issue1": {"title": "Fix crash"},
+                }
+            }
+        }
+        with (
+            patch("hephaestus.automation.review_state.get_repo_root", return_value="/tmp/repo"),
+            patch(
+                "hephaestus.automation.review_state.get_repo_info",
+                return_value=("owner", "repo"),
+            ),
+            patch("hephaestus.automation.review_state._gh_call") as mock_gh,
+        ):
+            mock_gh.return_value = MagicMock(stdout=json.dumps(payload))
+            result = fetch_all_issue_titles_graphql([10, 11])
+
+        assert result == {10: "Epic: pipeline overhaul", 11: "Fix crash"}
+
+    def test_fetch_failure_returns_empty_strings(self) -> None:
+        from unittest.mock import patch
+
+        from hephaestus.automation.review_state import fetch_all_issue_titles_graphql
+
+        with (
+            patch("hephaestus.automation.review_state.get_repo_root", return_value="/tmp/repo"),
+            patch(
+                "hephaestus.automation.review_state.get_repo_info",
+                return_value=("owner", "repo"),
+            ),
+            patch(
+                "hephaestus.automation.review_state._gh_call",
+                side_effect=RuntimeError("gh down"),
+            ),
+        ):
+            result = fetch_all_issue_titles_graphql([10, 11])
+
+        assert result == {10: "", 11: ""}
+
+    def test_owner_name_passed_as_graphql_variables_not_interpolated(self) -> None:
+        """Title fetch must parameterize owner/name/numbers (no injection)."""
+        from unittest.mock import MagicMock, patch
+
+        from hephaestus.automation.review_state import fetch_all_issue_titles_graphql
+
+        with (
+            patch("hephaestus.automation.review_state.get_repo_root", return_value="/tmp/repo"),
+            patch(
+                "hephaestus.automation.review_state.get_repo_info",
+                return_value=("HomericIntelligence", "ProjectHephaestus"),
+            ),
+            patch("hephaestus.automation.review_state._gh_call") as mock_gh,
+        ):
+            mock_gh.return_value = MagicMock(stdout=json.dumps({"data": {"repository": {}}}))
+            fetch_all_issue_titles_graphql([10, 11])
+
+        argv = mock_gh.call_args.args[0]
+        query_arg = next(a for a in argv if a.startswith("query="))
+        assert "'HomericIntelligence'" not in query_arg
+        assert query_arg.startswith("query=query($owner:String!,$name:String!")
+        assert "owner=HomericIntelligence" in argv
+        assert "name=ProjectHephaestus" in argv
+        assert "n0=10" in argv and "n1=11" in argv
+        assert "issue(number:$n0)" in query_arg
+
+
+class TestFetchAllIssueCommentsGraphqlVars:
+    """Regression guard for the batched comments fetch's GraphQL parameterization."""
+
     def test_comments_owner_name_passed_as_graphql_variables(self) -> None:
         """Same regression guard for the batched comments fetch."""
         from unittest.mock import MagicMock, patch

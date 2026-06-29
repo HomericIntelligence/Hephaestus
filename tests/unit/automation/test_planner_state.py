@@ -20,6 +20,26 @@ from hephaestus.automation.planner_state import PlannerStateManager
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _default_title_and_skip_patches() -> Any:
+    """Default the epic-detection helpers to no-ops (#1669).
+
+    ``PlannerStateManager.filter`` now also batch-fetches titles and may tag
+    excluded epics ``state:skip``. Tests that don't care about epics get a
+    safe default: no titles (so nothing reads as an epic by title) and a
+    no-op skip-tagging call. Tests that DO exercise epic exclusion override
+    these with their own ``patch`` context.
+    """
+    with (
+        patch(
+            "hephaestus.automation.planner_state.fetch_all_issue_titles_graphql",
+            return_value={},
+        ),
+        patch("hephaestus.automation.planner_state.skip_epics"),
+    ):
+        yield
+
+
 def _make_options(issues: list[int] | None = None) -> PlannerOptions:
     return PlannerOptions(
         issues=issues or [1, 2, 3],
@@ -225,6 +245,57 @@ class TestFilterDropsPlanGoIssues:
     def test_labels_cache_none_before_filter(self) -> None:
         mgr = PlannerStateManager(_make_options())
         assert mgr.get_cached_labels(1) is None
+
+
+class TestFilterEpicExclusion:
+    """``filter()`` drops epic/roadmap issues and tags them state:skip (#1669)."""
+
+    def test_drops_epic_by_label_and_title_and_tags_skip(self) -> None:
+        opts = _make_options(issues=[10, 11, 12])
+        opts.skip_closed = False
+        mgr = PlannerStateManager(opts)
+
+        labels = {10: ["bug"], 11: ["epic"], 12: ["feature"]}
+        titles = {10: "Fix crash", 11: "Umbrella", 12: "Q3 Roadmap rollup"}
+
+        with (
+            patch(
+                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                return_value=labels,
+            ),
+            patch(
+                "hephaestus.automation.planner_state.fetch_all_issue_titles_graphql",
+                return_value=titles,
+            ),
+            patch("hephaestus.automation.planner_state.skip_epics") as mock_skip,
+        ):
+            kept = mgr.filter()
+
+        assert kept == [10]  # 11 (epic label) and 12 (roadmap title) excluded
+        mock_skip.assert_called_once()
+        tagged = mock_skip.call_args[0][0]
+        assert set(tagged.keys()) == {11, 12}
+
+    def test_no_epics_does_not_tag(self) -> None:
+        opts = _make_options(issues=[10, 11])
+        opts.skip_closed = False
+        mgr = PlannerStateManager(opts)
+
+        with (
+            patch(
+                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                return_value={10: ["bug"], 11: []},
+            ),
+            patch(
+                "hephaestus.automation.planner_state.fetch_all_issue_titles_graphql",
+                return_value={10: "a", 11: "b"},
+            ),
+            patch("hephaestus.automation.planner_state.skip_epics") as mock_skip,
+        ):
+            kept = mgr.filter()
+
+        assert kept == [10, 11]
+        mock_skip.assert_not_called()
 
 
 class TestFilterAllFilteredWarning:

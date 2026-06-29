@@ -20,14 +20,15 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from .git_utils import issue_ref
-from .github_api import _gh_call, prefetch_issue_states
+from .github_api import _gh_call, prefetch_issue_states, skip_epics
 from .models import PLAN_COMMENT_MARKER
 from .review_state import (
     PLAN_REVIEW_PREFIX,
     fetch_all_issue_comments_graphql,
     fetch_all_issue_labels_graphql,
+    fetch_all_issue_titles_graphql,
 )
-from .state_labels import STATE_PLAN_GO
+from .state_labels import STATE_PLAN_GO, is_epic
 
 if TYPE_CHECKING:
     from .models import PlannerOptions
@@ -78,10 +79,12 @@ class PlannerStateManager:
     def filter(self) -> list[int]:
         """Filter issues based on options.
 
-        Two cheap, batched checks here, each one GraphQL call per 100 issues:
+        Cheap, batched checks here, each one GraphQL call per 100 issues:
 
         1. Skip **closed** issues (:func:`prefetch_issue_states`).
-        2. Skip issues already in ``state:plan-go`` (:func:`fetch_all_issue_labels_graphql`).
+        2. Skip **epic/roadmap** tracking issues (:func:`is_epic`) and tag them
+           ``state:skip`` (#1669) — they are checklists, not code tasks.
+        3. Skip issues already in ``state:plan-go`` (:func:`fetch_all_issue_labels_graphql`).
 
         Dropping ``state:plan-go`` issues up front means the loop stops
         re-evaluating every open issue every pass — previously each surviving
@@ -102,7 +105,10 @@ class PlannerStateManager:
         # Batch-fetch labels so we can cheaply drop already-GO issues here and
         # also serve them to is_plan_review_go inside the worker (no extra call).
         self._labels_cache = fetch_all_issue_labels_graphql(self.options.issues)
+        # Titles back the epic title-signal (catches epics carrying no label).
+        titles = fetch_all_issue_titles_graphql(self.options.issues)
 
+        skip_epics_meta: dict[int, list[str]] = {}
         issues_to_plan = []
         for issue_num in self.options.issues:
             if self.options.skip_closed:
@@ -111,16 +117,37 @@ class PlannerStateManager:
                     logger.info("Issue #%s is closed, skipping", issue_num)
                     continue
 
+            labels = self._labels_cache.get(issue_num) or []
+
+            # Epic/roadmap tracking issues are never planned (#1669). Collect
+            # them for one idempotent state:skip tagging pass after the loop.
+            if is_epic(labels, titles.get(issue_num, "")):
+                logger.info(
+                    "Issue #%s is an epic/roadmap tracking issue; excluding from planning",
+                    issue_num,
+                )
+                skip_epics_meta[issue_num] = labels
+                continue
+
             # Already-planned fast path: a state:plan-go label is the single
             # source of truth (#704). Drop it now without a per-issue round-trip.
             # ``force`` re-plans everything, so don't pre-filter then.
-            if not self.options.force:
-                labels = self._labels_cache.get(issue_num)
-                if labels is not None and STATE_PLAN_GO in labels:
-                    logger.info("Issue #%s already has a plan (state:plan-go), skipping", issue_num)
-                    continue
+            if (
+                not self.options.force
+                and self._labels_cache.get(issue_num) is not None
+                and STATE_PLAN_GO in labels
+            ):
+                logger.info("Issue #%s already has a plan (state:plan-go), skipping", issue_num)
+                continue
 
             issues_to_plan.append(issue_num)
+
+        # Best-effort skip-tagging of excluded epics; never block planning on it.
+        if skip_epics_meta:
+            try:
+                skip_epics(skip_epics_meta)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Could not tag excluded epics state:skip: %s", exc)
 
         # Make a mis-scoped explicit run obvious. An explicit ``--issues`` set
         # that fully filters out (all closed and/or already-planned) otherwise

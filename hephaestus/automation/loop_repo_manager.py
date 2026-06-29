@@ -19,6 +19,8 @@ from urllib.parse import urlparse
 
 from hephaestus.automation.ci_driver import _pr_is_failing
 from hephaestus.automation.git_utils import COMMIT_POLICY_REWRITE_EXEC
+from hephaestus.automation.github_api import skip_epics
+from hephaestus.automation.state_labels import partition_epics
 from hephaestus.github.client import gh_call
 from hephaestus.resilience.subprocess_resilience import resilient_call
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
@@ -110,7 +112,7 @@ def _gh_list_repos(org: str) -> list[str]:
 
 
 def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
-    """Return ALL open issue numbers in ``org/repo``, sorted ascending.
+    """Return open NON-epic issue numbers in ``org/repo``, sorted ascending.
 
     This is the loop's single canonical issue-discovery call: the result is
     passed down to the plan/implement child phases via ``--issues`` so they do
@@ -118,6 +120,14 @@ def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
     (no ``@me`` author/assignee filter) so it matches the child phases'
     ``gh_list_open_issues`` semantics exactly — the loop's convergence and
     failing-PR gates then agree with the work the phases actually do.
+
+    Epic/roadmap **tracking** issues are excluded (#1669): they are checklists
+    of child work, not code tasks, so the loop must never plan/implement them.
+    Each excluded epic is tagged ``state:skip`` (best-effort) via
+    :func:`skip_epics` so dashboards see it as intentionally bypassed; that
+    tagging never raises and never affects the returned list. Detection uses
+    label names + title because native GitHub issue types are not exposed by the
+    installed ``gh`` — see :func:`~hephaestus.automation.state_labels.is_epic`.
 
     Sorted ascending so the implementer phase processes oldest-first. Returns
     an empty list on any failure (rate limit, auth error, timeout) so callers
@@ -135,14 +145,38 @@ def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
                 "--limit",
                 "500",
                 "--json",
-                "number",
-                "--jq",
-                ".[].number",
+                "number,labels,title",
             ],
         )
-    except (subprocess.SubprocessError, RuntimeError, OSError):
+        entries = json.loads(out.stdout or "[]")
+    except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
         return []
-    return sorted(int(x) for x in out.stdout.split() if x.strip().isdigit())
+
+    meta = [
+        {
+            "number": e["number"],
+            "labels": [lbl["name"] for lbl in e.get("labels", [])],
+            "title": e.get("title", ""),
+        }
+        for e in entries
+        if isinstance(e, dict) and "number" in e
+    ]
+    kept, epics = partition_epics(meta)
+    if epics:
+        epic_set = set(epics)
+        for num in epics:
+            LOG.info(
+                "[%s] issue #%s is an epic/roadmap tracking issue; excluding from planning loop",
+                repo,
+                num,
+            )
+        epic_labels = {m["number"]: m["labels"] for m in meta if m["number"] in epic_set}
+        # Best-effort skip-tagging: never let a label write break discovery.
+        try:
+            skip_epics(epic_labels)
+        except Exception as exc:  # pragma: no cover - defensive
+            LOG.warning("[%s] could not tag excluded epics state:skip: %s", repo, exc)
+    return kept
 
 
 def _count_open_issues(org: str, repo: str) -> int:

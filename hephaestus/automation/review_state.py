@@ -428,6 +428,84 @@ def fetch_all_issue_labels_graphql(
     return result_map
 
 
+def fetch_all_issue_titles_graphql(
+    issue_numbers: list[int],
+) -> dict[int, str]:
+    """Batch-fetch issue titles in one aliased GraphQL call.
+
+    Sibling of :func:`fetch_all_issue_labels_graphql`. The planner uses it
+    alongside the labels fetch so :func:`~hephaestus.automation.state_labels.
+    is_epic` can apply its title-based signal (catching epics/roadmaps that
+    carry no label) without a per-issue ``gh issue view`` (#1669).
+
+    Falls back to an empty string per issue on any failure (caller then treats
+    the title as "unknown" and relies on labels alone).
+
+    Args:
+        issue_numbers: List of GitHub issue numbers to fetch.
+
+    Returns:
+        Mapping of ``issue_number → title``. Issues that could not be fetched
+        map to ``""``.
+
+    """
+    if not issue_numbers:
+        return {}
+
+    owner, name = get_repo_info(get_repo_root())
+
+    # owner/name and each issue number as GraphQL variables (never interpolated);
+    # mirrors fetch_all_issue_labels_graphql.
+    var_decls = ",".join(f"$n{idx}:Int!" for idx in range(len(issue_numbers)))
+    fragments = " ".join(
+        f"issue{idx}: issue(number:$n{idx}){{title}}" for idx in range(len(issue_numbers))
+    )
+    query = (
+        f"query($owner:String!,$name:String!,{var_decls})"
+        f"{{repository(owner:$owner,name:$name){{{fragments}}}}}"
+    )
+
+    idx_to_num = dict(enumerate(issue_numbers))
+    result_map: dict[int, str] = dict.fromkeys(issue_numbers, "")
+
+    args = [
+        "api",
+        "graphql",
+        "-f",
+        f"query={query}",
+        "-F",
+        f"owner={owner}",
+        "-F",
+        f"name={name}",
+    ]
+    for idx, issue_num in enumerate(issue_numbers):
+        args.extend(["-F", f"n{idx}={int(issue_num)}"])
+
+    try:
+        result = _gh_call(args)
+        data = json.loads(result.stdout)
+        repo_data = data.get("data", {}).get("repository", {})
+        for alias, issue_data in repo_data.items():
+            if not alias.startswith("issue"):
+                continue
+            try:
+                idx = int(alias[len("issue") :])
+            except ValueError:
+                continue
+            num = idx_to_num.get(idx)
+            if num is None or issue_data is None:
+                continue
+            result_map[num] = issue_data.get("title", "") or ""
+    except Exception as exc:  # pragma: no cover - logged, callers get empty strings
+        logger.warning(
+            "Failed to batch-fetch titles for issues %s: %s",
+            issue_numbers,
+            exc,
+        )
+
+    return result_map
+
+
 def is_plan_review_go(  # noqa: C901  # validation: labels-first gate with comment-scan backfill; many independent rule checks
     issue_number: int,
     comments: list[dict[str, Any]] | None = None,

@@ -32,6 +32,7 @@ from hephaestus.automation.github_api import (
     is_issue_closed,
     parse_issue_dependencies,
     prefetch_issue_states,
+    skip_epics,
 )
 from hephaestus.automation.models import IssueState
 from hephaestus.io import utils as io_utils
@@ -1205,6 +1206,37 @@ class TestGhIssueAddLabels:
         assert args.count("--add-label") == 2
         assert "state:plan-go" in args
         assert "state:plan-no-go" in args
+
+
+class TestSkipEpics:
+    """Tests for skip_epics — idempotent ``state:skip`` tagging of excluded epics."""
+
+    def teardown_method(self) -> None:
+        _github_api_module._label_cache = None
+
+    @patch("hephaestus.automation.github_api.gh_issue_add_labels")
+    def test_tags_unskipped_epics(self, mock_add: Any) -> None:
+        """Each epic without state:skip gets exactly one add-label call."""
+        skip_epics({10: ["epic"], 11: ["roadmap", "bug"]})
+        assert mock_add.call_count == 2
+        mock_add.assert_any_call(10, ["state:skip"])
+        mock_add.assert_any_call(11, ["state:skip"])
+
+    @patch("hephaestus.automation.github_api.gh_issue_add_labels")
+    def test_skips_already_skipped_epic(self, mock_add: Any) -> None:
+        """An epic already carrying state:skip is not re-tagged (no API write)."""
+        skip_epics({10: ["epic", "state:skip"]})
+        mock_add.assert_not_called()
+
+    @patch("hephaestus.automation.github_api.gh_issue_add_labels")
+    def test_mixed_skipped_and_unskipped(self, mock_add: Any) -> None:
+        skip_epics({10: ["epic", "state:skip"], 11: ["roadmap"]})
+        mock_add.assert_called_once_with(11, ["state:skip"])
+
+    @patch("hephaestus.automation.github_api.gh_issue_add_labels")
+    def test_empty_mapping_is_noop(self, mock_add: Any) -> None:
+        skip_epics({})
+        mock_add.assert_not_called()
 
 
 class TestGhIssueRemoveLabels:

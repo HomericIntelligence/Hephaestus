@@ -31,7 +31,8 @@ each apply-state helper removes the other two as it sets its own.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
+from typing import Any
 
 # Single source of truth for the three plan-state labels. All label-aware code
 # in the pipeline imports these constants; do not hard-code the names.
@@ -60,6 +61,14 @@ ALL_IMPLEMENTATION_STATE_LABELS = (STATE_IMPLEMENTATION_NO_GO, STATE_IMPLEMENTAT
 #: The implementer has one narrow stale-state recovery path for explicitly
 #: selected issues that also carry ``state:plan-go`` and have no open PR.
 STATE_SKIP = "state:skip"
+
+#: Label names that mark a TRACKING issue (an epic / roadmap) rather than a code
+#: task. Epics and roadmaps are checklists of child work; the planning loop must
+#: not plan or implement them directly (their deliverable is a body edit, not a
+#: PR). Matched case-insensitively. Native GitHub issue types are not exposed by
+#: the installed ``gh`` CLI, so a label name or a title substring is the only
+#: available signal — see :func:`is_epic`.
+EPIC_LABELS = ("epic", "roadmap")
 
 #: Per-label colour (hex without leading ``#``) and short description. The
 #: provisioning script (``hephaestus-ensure-state-labels``) uses these when
@@ -137,6 +146,65 @@ def is_skipped(labels: Iterable[str]) -> bool:
     policy where they have enough context.
     """
     return has_label(labels, STATE_SKIP)
+
+
+def is_epic(labels: Iterable[str], title: str = "") -> bool:
+    """Return ``True`` iff the issue is an epic/roadmap tracking issue.
+
+    An issue is treated as an epic when **either** signal matches (both
+    case-insensitive):
+
+    * it carries a label whose name is in :data:`EPIC_LABELS`
+      (``epic`` / ``roadmap``), **or**
+    * its ``title`` contains one of those markers as a substring.
+
+    The title fallback catches the convention even when the label was not
+    applied. Pure function (no I/O) so both discovery paths and unit tests can
+    call it directly.
+
+    Args:
+        labels: Label names on the issue.
+        title: The issue title (optional; empty disables the title signal).
+
+    Returns:
+        ``True`` if the issue should be excluded from the planning loop.
+
+    """
+    if {label.lower() for label in labels} & set(EPIC_LABELS):
+        return True
+    lowered_title = title.lower()
+    return any(marker in lowered_title for marker in EPIC_LABELS)
+
+
+def partition_epics(
+    issues_meta: Sequence[dict[str, Any]],
+) -> tuple[list[int], list[int]]:
+    """Split issue metadata into ``(kept, epics)`` by :func:`is_epic`.
+
+    Pure helper shared by both discovery chokepoints so the loop and the
+    standalone planner exclude epics identically (DRY). Each element is a
+    metadata dict with ``number`` and the optional ``labels`` / ``title``
+    signals; missing keys are treated as absent (an issue with no labels and
+    no title is simply kept).
+
+    Args:
+        issues_meta: Issue metadata dicts, each with at least ``number`` and
+            optionally ``labels`` (list of names) and ``title``.
+
+    Returns:
+        ``(kept_numbers, epic_numbers)``, both sorted ascending. ``kept`` are
+        the real work items the loop should plan; ``epics`` are the tracking
+        issues to exclude (and tag ``state:skip``).
+
+    """
+    kept: list[int] = []
+    epics: list[int] = []
+    for meta in issues_meta:
+        number = int(meta["number"])
+        labels = meta.get("labels") or []
+        title = meta.get("title") or ""
+        (epics if is_epic(labels, title) else kept).append(number)
+    return sorted(kept), sorted(epics)
 
 
 def needs_plan(labels: Iterable[str]) -> bool:

@@ -35,6 +35,7 @@ from hephaestus.utils.helpers import strip_null_bytes
 
 from .git_utils import get_repo_info, run
 from .models import IssueInfo, IssueState
+from .state_labels import STATE_SKIP, is_skipped
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,27 @@ def gh_issue_add_labels(issue_number: int, labels: list[str]) -> None:
         cmd += ["--add-label", label]
     _gh_call(cmd)
     logger.info("Added labels %s to issue #%s", labels, issue_number)
+
+
+def skip_epics(epics_labels: dict[int, list[str]]) -> None:
+    """Tag excluded epic/roadmap issues with ``state:skip``, idempotently.
+
+    Called by the discovery chokepoints after :func:`~hephaestus.automation.
+    state_labels.partition_epics` separates the epics out. Applies the
+    ``state:skip`` override so dashboards and other tooling see the epic as
+    intentionally bypassed and the loop never re-attempts it. An epic that
+    already carries ``state:skip`` is left untouched — no redundant API write
+    each loop.
+
+    Args:
+        epics_labels: Mapping of epic issue number → its current label names.
+
+    """
+    for number, labels in epics_labels.items():
+        if is_skipped(labels):
+            continue
+        gh_issue_add_labels(number, [STATE_SKIP])
+        logger.info("Issue #%s is an epic/roadmap tracking issue; tagged state:skip", number)
 
 
 def gh_issue_remove_labels(issue_number: int, labels: list[str]) -> None:
