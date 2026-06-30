@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from hephaestus.validation.type_aliases import (
+from hephaestus.validation.code.type_aliases import (
     _update_string_state,
     check_files,
     detect_shadowing,
