@@ -21,7 +21,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -44,6 +44,7 @@ from . import _review_utils
 from ._review_utils import (
     _discover_prs_simple,
     build_review_parser,
+    drain_completed_futures,
     find_pr_for_issue,
     instance_log,
     load_impl_session_id,
@@ -466,43 +467,22 @@ class AddressReviewer(BaseReviewer):
                 future = executor.submit(self._address_issue, issue_num, pr_num)
                 futures[future] = issue_num
 
-            # Backoff on repeated wait() failures so a flapping condition
-            # doesn't busy-loop silently. Resets to 0.1s on the first
-            # successful wait().
-            wait_backoff = 0.1
-            while futures:
+            for future in drain_completed_futures(futures):
+                issue_num = futures.pop(future)
                 try:
-                    done, _pending = wait(futures.keys(), timeout=1.0, return_when=FIRST_COMPLETED)
-                    wait_backoff = 0.1
-                except Exception as exc:
-                    logger.warning(
-                        "futures.wait() raised %s: %s — backing off %.1fs",
-                        type(exc).__name__,
-                        exc,
-                        wait_backoff,
+                    result = future.result()
+                    results[issue_num] = result
+                    if result.success:
+                        logger.info("Issue #%s address review completed", issue_num)
+                    else:
+                        logger.error("Issue #%s address review failed: %s", issue_num, result.error)
+                except Exception as e:
+                    logger.error("Issue #%s raised exception: %s", issue_num, e)
+                    results[issue_num] = WorkerResult(
+                        issue_number=issue_num,
+                        success=False,
+                        error=str(e),
                     )
-                    time.sleep(wait_backoff)
-                    wait_backoff = min(wait_backoff * 2, 5.0)
-                    continue
-
-                for future in done:
-                    issue_num = futures.pop(future)
-                    try:
-                        result = future.result()
-                        results[issue_num] = result
-                        if result.success:
-                            logger.info("Issue #%s address review completed", issue_num)
-                        else:
-                            logger.error(
-                                "Issue #%s address review failed: %s", issue_num, result.error
-                            )
-                    except Exception as e:
-                        logger.error("Issue #%s raised exception: %s", issue_num, e)
-                        results[issue_num] = WorkerResult(
-                            issue_number=issue_num,
-                            success=False,
-                            error=str(e),
-                        )
 
         self._print_summary(results)
         return results

@@ -14,6 +14,7 @@ from hephaestus.automation._review_utils import (
     _discover_prs_simple,
     add_max_workers_arg,
     close_issue_as_covered,
+    drain_completed_futures,
     find_merged_closing_pr,
     find_pr_for_issue,
     get_pr_head_branch,
@@ -799,3 +800,55 @@ class TestCloseIssueAsCovered:
             result = close_issue_as_covered(1357, 1358)
 
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# drain_completed_futures
+# ---------------------------------------------------------------------------
+
+
+class TestDrainCompletedFutures:
+    """Tests for the shared concurrent-futures drain helper (#1463)."""
+
+    def test_yields_all_completed_futures(self) -> None:
+        from concurrent.futures import Future, ThreadPoolExecutor
+
+        def _identity(n: int) -> int:
+            return n
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            futures: dict[Future[Any], int] = {ex.submit(_identity, n): n for n in (1, 2, 3)}
+            seen = []
+            for fut in drain_completed_futures(futures, timeout=0.1):
+                seen.append(futures.pop(fut))
+            assert sorted(seen) == [1, 2, 3]
+            assert futures == {}
+
+    def test_backs_off_and_logs_on_wait_failure(self, caplog: pytest.LogCaptureFixture) -> None:
+        from concurrent.futures import Future
+
+        # First wait() raises, then succeeds -> one WARNING, one sleep, no busy-loop.
+        fut = MagicMock(spec=Future)
+        futures: dict[Future[Any], int] = {fut: 1}
+
+        calls = {"n": 0}
+
+        def fake_wait(_keys: Any, timeout: float, return_when: Any) -> tuple[set[Any], set[Any]]:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transient")
+            futures.pop(fut)  # caller's pop, simulated
+            return ({fut}, set())
+
+        with (
+            patch("hephaestus.automation._review_utils.wait", side_effect=fake_wait),
+            patch("hephaestus.automation._review_utils.time.sleep") as sleep_mock,
+            caplog.at_level(logging.WARNING),
+        ):
+            list(drain_completed_futures(futures, timeout=0.1))
+
+        sleep_mock.assert_called_once_with(0.1)
+        assert any("futures.wait() raised RuntimeError" in r.message for r in caplog.records)
+
+    def test_empty_futures_yields_nothing(self) -> None:
+        assert list(drain_completed_futures({})) == []
