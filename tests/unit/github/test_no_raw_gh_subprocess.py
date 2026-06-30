@@ -9,6 +9,12 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+# Explicit allowlist of library modules that MUST route gh through gh_call —
+# NOT the whole github/ package. tidy.py (interactive ``gh tidy``) and
+# rate_limit.py (the rate-limit reset probe, which cannot re-enter gh_call while
+# classifying a rate-limit error) are the documented sanctioned exceptions; see
+# the hephaestus/github/client.py docstring. Adding them here would wrongly fail
+# CI. severity_label.py is covered here per issue #1456.
 _TARGETS = (
     _REPO_ROOT / "hephaestus" / "github" / "fleet_sync.py",
     _REPO_ROOT / "hephaestus" / "github" / "severity_label.py",
