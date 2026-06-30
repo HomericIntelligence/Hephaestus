@@ -253,45 +253,28 @@ def validate_prior_comments_addressed(
 ) -> tuple[list[str], bool, set[str]]:
     """Re-open prior review comments the current diff does not address.
 
-    Runs a fresh read-only sub-agent that compares each ``prior_threads`` comment
-    against ``diff_text``. For each comment judged NOT addressed, posts a NEW
-    inline review thread on the same path/line citing the original comment, then
-    reports the validation as not-clean so the caller drives another address
-    iteration.
+    Runs a read-only sub-agent comparing each ``prior_threads`` comment against
+    ``diff_text``; for each judged NOT addressed, posts a NEW inline thread on
+    the same path/line and reports not-clean so the caller drives another
+    address iteration.
 
-    Convergence (#1329): an unaddressed finding that was ALREADY re-opened in a
-    prior round (same :func:`_thread_key`) is treated as RECURRING. A recurring
-    finding is accepted-by-design and NOT re-added when either (a) the validator
-    marked it won't-fix, or (b) the current source at its ``path``:``line``
-    documents the design decision (:func:`_source_documents_decision`). Only a
-    genuinely unaddressed AND undocumented finding still re-opens — converting
-    the formerly unwinnable re-open loop into convergence so the review loop can
-    reach GO.
+    Convergence (#1329): a finding already re-opened in a prior round (same
+    :func:`_thread_key`) is RECURRING and is NOT re-added when the validator
+    marked it won't-fix or the current source documents the design decision
+    (:func:`_source_documents_decision`); only a genuinely unaddressed,
+    undocumented finding re-opens.
 
     Args:
-        pr_number: GitHub PR number.
-        issue_number: Linked GitHub issue number.
-        worktree_path: Worktree CWD for the read-only sub-agent.
-        prior_threads: The previous iteration's posted threads, each a dict with
-            ``path`` / ``line`` / ``body``.
-        diff_text: Current cumulative PR diff to validate against.
-        agent: Selected implementation agent (``"claude"`` / ``"codex"``).
-        iteration: Zero-based review-loop iteration (selects a fresh token).
-        state_dir: Directory for the validation log file.
-        dry_run: When True, skip the agent call and posting.
-        prior_reopened_keys: Stable keys (:func:`_thread_key`) of findings the
-            validator re-opened in EARLIER rounds, threaded forward by the loop
-            so recurrence can be detected. ``None`` on the first round.
+        pr_number / issue_number / worktree_path / prior_threads / diff_text /
+        agent / iteration / state_dir / timeout: see the validation pipeline.
+        dry_run: skip the agent call and posting.
+        prior_reopened_keys: stable keys re-opened in EARLIER rounds, threaded
+            forward by the loop (``None`` on the first round).
 
     Returns:
         ``(reopened_thread_ids, is_clean, reopened_keys)``. ``is_clean`` is True
-        when nothing was re-opened (every prior comment is addressed, dismissed
-        as documented-by-design, or there was nothing to validate); False when
-        at least one comment was re-opened. ``reopened_keys`` is the set of
-        stable keys re-opened across this and all prior rounds — the caller
-        passes it back in as ``prior_reopened_keys`` next round. As a side
-        effect, every prior thread the validator confirms addressed is resolved
-        in place (#1083).
+        when nothing was re-opened; addressed prior threads are resolved in place
+        (#1083). ``reopened_keys`` is fed back as ``prior_reopened_keys``.
 
     """
     seen_keys: set[str] = set(prior_reopened_keys or set())
@@ -301,6 +284,65 @@ def validate_prior_comments_addressed(
         logger.info("[DRY RUN] Would validate prior comments on PR #%s", pr_number)
         return [], True, seen_keys
 
+    unaddressed = _run_validation_and_reconcile(
+        pr_number=pr_number,
+        issue_number=issue_number,
+        worktree_path=worktree_path,
+        prior_threads=prior_threads,
+        diff_text=diff_text,
+        agent=agent,
+        iteration=iteration,
+        state_dir=state_dir,
+        timeout=timeout,
+    )
+    if not unaddressed:
+        return [], True, seen_keys
+
+    comments, pathless, new_keys = _classify_unaddressed_findings(
+        unaddressed=unaddressed,
+        seen_keys=seen_keys,
+        worktree_path=worktree_path,
+        pr_number=pr_number,
+        iteration=iteration,
+    )
+    if not comments and not pathless:
+        # Everything unaddressed was a documented-by-design recurrence → clean.
+        return [], True, seen_keys
+
+    thread_ids = _post_reopened_findings(
+        pr_number=pr_number,
+        iteration=iteration,
+        comments=comments,
+        pathless=pathless,
+    )
+    return thread_ids, False, seen_keys | new_keys
+
+
+def _run_validation_and_reconcile(
+    *,
+    pr_number: int,
+    issue_number: int,
+    worktree_path: Path,
+    prior_threads: list[dict[str, Any]],
+    diff_text: str,
+    agent: str,
+    iteration: int,
+    state_dir: Path,
+    timeout: int,
+) -> list[dict[str, Any]]:
+    """Run the validation sub-agent and reconcile prior threads; return unaddressed.
+
+    Serializes ``prior_threads`` to JSON, runs the read-only validation session
+    (:func:`_run_validation_session`), then (a) dismisses each won't-fix thread
+    with a durable marker (#1163) and (b) resolves every prior thread the agent
+    confirmed addressed (#1083), matching on GraphQL thread_id not (path,line)
+    (#1085).
+
+    Returns:
+        The list of unaddressed finding dicts the sub-agent flagged (possibly
+        empty — caller treats empty as clean).
+
+    """
     prior_comments_json = json.dumps(
         [
             {
@@ -349,10 +391,29 @@ def validate_prior_comments_addressed(
         if isinstance(item, dict) and item.get("thread_id")
     }
     _resolve_addressed_prior_threads(prior_threads, unaddressed_ids | wont_fix_ids)
+    return unaddressed
 
-    if not unaddressed:
-        return [], True, seen_keys
 
+def _classify_unaddressed_findings(
+    *,
+    unaddressed: list[dict[str, Any]],
+    seen_keys: set[str],
+    worktree_path: Path,
+    pr_number: int,
+    iteration: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
+    """Split unaddressed sub-agent findings into postable comments + PR-level items.
+
+    Applies the #1329 convergence rule: a recurring finding (key already in
+    ``seen_keys``) whose source now documents the design decision
+    (:func:`_source_documents_decision`) is dropped rather than re-added.
+
+    Returns:
+        ``(comments, pathless, new_keys)``. When both ``comments`` and
+        ``pathless`` are empty, every unaddressed finding was a
+        documented-by-design recurrence and the caller treats the pass as clean.
+
+    """
     comments: list[dict[str, Any]] = []
     pathless: list[dict[str, Any]] = []
     new_keys: set[str] = set()
@@ -407,11 +468,23 @@ def validate_prior_comments_addressed(
         if isinstance(line, int):
             comment["line"] = line
         comments.append(comment)
+    return comments, pathless, new_keys
 
-    if not comments and not pathless:
-        # Everything unaddressed was a documented-by-design recurrence → clean.
-        return [], True, seen_keys
 
+def _post_reopened_findings(
+    *,
+    pr_number: int,
+    iteration: int,
+    comments: list[dict[str, Any]],
+    pathless: list[dict[str, Any]],
+) -> list[str]:
+    """Post re-opened inline comments + a PR-level summary; return new thread IDs.
+
+    PR-level (pathless) findings cannot be inline threads, so they are appended
+    to the review summary rather than dropped (#1329). Inline comments use
+    ``dedupe_existing=True`` so an existing bot comment on a line is edited in
+    place instead of stacking a duplicate (#1083).
+    """
     summary_parts = []
     if comments:
         summary_parts.append(
@@ -440,7 +513,7 @@ def validate_prior_comments_addressed(
         len(thread_ids),
         len(pathless),
     )
-    return thread_ids, False, seen_keys | new_keys
+    return thread_ids
 
 
 def _dismiss_wont_fix_prior_threads(

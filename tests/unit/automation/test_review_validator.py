@@ -550,3 +550,128 @@ class TestResolveAddressedPriorThreads:
             resolved = review_validator._resolve_addressed_prior_threads(threads, set())
         resolve.assert_not_called()
         assert resolved == []
+
+
+class TestRunValidationAndReconcile:
+    """Tests for _run_validation_and_reconcile."""
+
+    def test_returns_unaddressed_and_reconciles_threads(self, tmp_path: Path) -> None:
+        threads = [{"id": "T1", "path": "a.py", "line": 3, "body": "x"}]
+        unaddr = [{"thread_id": "T2", "path": "a.py", "line": 3, "detail": "d"}]
+        with (
+            patch.object(review_validator, "_run_validation_session", return_value=(unaddr, [])),
+            patch.object(review_validator, "_dismiss_wont_fix_prior_threads") as dismiss,
+            patch.object(review_validator, "_resolve_addressed_prior_threads") as resolve,
+        ):
+            out = review_validator._run_validation_and_reconcile(
+                pr_number=1,
+                issue_number=1,
+                worktree_path=tmp_path,
+                prior_threads=threads,
+                diff_text="diff",
+                agent="claude",
+                iteration=0,
+                state_dir=tmp_path,
+                timeout=60,
+            )
+        assert out == unaddr
+        dismiss.assert_called_once()
+        resolve.assert_called_once()
+
+    def test_empty_unaddressed_still_resolves(self, tmp_path: Path) -> None:
+        threads = [{"id": "T1", "path": "a.py", "line": 3, "body": "x"}]
+        with (
+            patch.object(review_validator, "_run_validation_session", return_value=([], [])),
+            patch.object(review_validator, "_dismiss_wont_fix_prior_threads"),
+            patch.object(review_validator, "_resolve_addressed_prior_threads") as resolve,
+        ):
+            out = review_validator._run_validation_and_reconcile(
+                pr_number=1,
+                issue_number=1,
+                worktree_path=tmp_path,
+                prior_threads=threads,
+                diff_text="diff",
+                agent="claude",
+                iteration=0,
+                state_dir=tmp_path,
+                timeout=60,
+            )
+        assert out == []
+        resolve.assert_called_once()
+
+
+class TestClassifyUnaddressedFindings:
+    """Tests for _classify_unaddressed_findings."""
+
+    def test_recurring_documented_finding_is_dropped(self, tmp_path: Path) -> None:
+        unaddressed = [
+            {
+                "thread_id": "T1",
+                "path": "a.py",
+                "line": 3,
+                "detail": "x",
+                "original_body": "x",
+            }
+        ]
+        key = review_validator._thread_key(path="a.py", line=3, body="x")
+        with patch.object(review_validator, "_source_documents_decision", return_value=True):
+            comments, pathless, new_keys = review_validator._classify_unaddressed_findings(
+                unaddressed=unaddressed,
+                seen_keys={key},
+                worktree_path=tmp_path,
+                pr_number=1,
+                iteration=2,
+            )
+        assert comments == [] and pathless == [] and new_keys == set()
+
+    def test_pathless_finding_goes_to_pr_level(self, tmp_path: Path) -> None:
+        unaddressed = [{"thread_id": "T1", "path": "", "line": None, "detail": "global note"}]
+        comments, pathless, new_keys = review_validator._classify_unaddressed_findings(
+            unaddressed=unaddressed,
+            seen_keys=set(),
+            worktree_path=tmp_path,
+            pr_number=1,
+            iteration=0,
+        )
+        assert comments == [] and len(pathless) == 1 and len(new_keys) == 1
+
+    def test_inline_finding_builds_comment_with_line(self, tmp_path: Path) -> None:
+        unaddressed = [
+            {
+                "thread_id": "T1",
+                "path": "a.py",
+                "line": 7,
+                "detail": "guard",
+                "original_body": "orig",
+            }
+        ]
+        comments, pathless, _ = review_validator._classify_unaddressed_findings(
+            unaddressed=unaddressed,
+            seen_keys=set(),
+            worktree_path=tmp_path,
+            pr_number=1,
+            iteration=0,
+        )
+        assert pathless == []
+        assert (
+            comments[0]["path"] == "a.py"
+            and comments[0]["line"] == 7
+            and comments[0]["side"] == "RIGHT"
+        )
+
+
+class TestPostReopenedFindings:
+    """Tests for _post_reopened_findings."""
+
+    def test_posts_comments_and_appends_pathless_to_summary(self) -> None:
+        with patch.object(review_validator, "gh_pr_review_post", return_value=["NEW"]) as post:
+            ids = review_validator._post_reopened_findings(
+                pr_number=1,
+                iteration=0,
+                comments=[{"path": "a.py", "body": "b", "side": "RIGHT", "line": 3}],
+                pathless=[{"body": "pr-level note"}],
+            )
+        assert ids == ["NEW"]
+        kwargs = post.call_args.kwargs
+        assert kwargs["dedupe_existing"] is True
+        assert "pr-level note" in kwargs["summary"]
