@@ -82,8 +82,6 @@ def test_project_scripts_do_not_flip_repository_to_bare_mode() -> None:
     for path in _tracked_files():
         try:
             text = path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            continue
         except UnicodeDecodeError:
             continue
 

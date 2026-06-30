@@ -9,10 +9,10 @@ through installed `hephaestus-*` console scripts.
 > The former thin wrappers (`plan_issues.py`, `implement_issues.py`,
 > `drive_prs_green.py`, `merge_prs.py`, `audit_doc_policy.py`,
 > `check_tier_labels.py`, `check_cli_table_sync.py`,
-> `check_python_version_consistency.py`, `check_version_single_source.py`,
-> `check_unit_test_structure.py`)
-> were removed in #1445 — invoke the installed `hephaestus-*` console scripts
-> or `python3 -m hephaestus.<module>` instead.
+> `check_python_version_consistency.py`, `check_version_single_source.py`)
+> were removed in #1445. The former `check_unit_test_structure.py` wrapper was
+> also removed — invoke the installed `hephaestus-*` console scripts or
+> `python3 -m hephaestus.<module>` instead.
 
 ### Validation / pre-commit checks
 
