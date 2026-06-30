@@ -71,6 +71,20 @@ Library subpackages of `hephaestus` may not import from
 `hephaestus.automation`. The dependency arrow points only one way:
 automation → library. See `docs/adr/0001-automation-library-boundary.md`.
 
+### Coverage omit-list invariant
+
+A small set of `hephaestus/automation/*` orchestration modules whose loops
+shell out to live `claude`/`gh` CLIs are excluded from coverage via
+`[tool.coverage.run].omit`. The contract: an omitted module's pure-function
+helpers MUST still be unit-tested in `tests/unit/automation/`. This is enforced
+executably — `tests/unit/validation/test_omit_allowlist.py` freezes the list's
+membership, and `tests/unit/validation/test_omit_justification.py` (using `ast`
+import-parsing) fails CI if any omitted module lacks a backing unit-test suite.
+That guard checks a *proxy* (a test file imports the module and defines a test),
+not that every helper is asserted. Reducing the omit list (target: −50% over two
+releases, issue #1422) means promoting a module's orchestration logic to
+mocked-subprocess unit coverage and removing its `omit` entry.
+
 ## Python Development Guidelines
 
 ### Language Preference
