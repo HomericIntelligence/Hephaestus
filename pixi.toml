@@ -86,6 +86,8 @@ msgpack = ">=1.2.1,<2"
 [feature.dev.dependencies]
 pytest = ">=9.0.0,<10"
 pytest-cov = ">=7.0.0,<8"
+# Property-based fuzz testing of LLM-output parsers (issue #1470).
+hypothesis = ">=6.0,<7"
 just = ">=1.25.0,<2"
 bats-core = ">=1.11.0,<2"
 

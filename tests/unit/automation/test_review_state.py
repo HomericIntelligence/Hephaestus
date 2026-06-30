@@ -17,6 +17,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from hypothesis import given, strategies as st
 
 from hephaestus.automation.review_state import (
     MAX_UNPARSEABLE_VERDICT_PASSES,
@@ -641,3 +642,24 @@ class TestFetchAllIssueCommentsGraphqlVars:
         assert "owner:'" not in query_arg
         assert "n0=10" in argv
         assert "issue(number:$n0)" in query_arg
+
+
+class TestLatestVerdictProperties:
+    """Property-based fuzz coverage for latest_verdict (#1470)."""
+
+    @given(st.text())
+    def test_never_raises_returns_go_nogo_or_none(self, body: str) -> None:
+        assert latest_verdict(body) in {"GO", "NOGO", None}
+
+    @given(st.text())
+    def test_no_verdict_line_is_none(self, body: str) -> None:
+        if "verdict" not in body.lower():
+            assert latest_verdict(body) is None
+
+    @given(st.lists(st.sampled_from(["GO", "NOGO", "NO-GO"]), min_size=1, max_size=6))
+    def test_last_matching_line_wins(self, tokens: list[str]) -> None:
+        # Contract: a body with several Verdict lines resolves to the LAST one
+        # (review_state.py:92 — _GATE_VERDICT_RE.findall(...)[-1]).
+        body = "\n".join(f"Verdict: {t}" for t in tokens) + "\n"
+        last = tokens[-1].replace("-", "")
+        assert latest_verdict(body) == ("GO" if last == "GO" else "NOGO")

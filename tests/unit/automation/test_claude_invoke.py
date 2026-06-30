@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from hypothesis import given, strategies as st
 
 from hephaestus.automation.claude_invoke import (
     INFRA_ERROR_REVIEW_TEXT,
@@ -196,3 +197,32 @@ class TestRaiseForErrorEnvelope:
 
         raise_for_error_envelope("just some prose")
         raise_for_error_envelope("")
+
+
+# Verdict fragments Hypothesis interleaves with arbitrary text to exercise the
+# structured branches of the parser, not just unicode noise (issue #1470).
+_VERDICT_TOKENS = ["GO", "NOGO", "NO-GO", "NO GO", "ERROR"]
+
+
+class TestParseReviewVerdictProperties:
+    """Property-based fuzz coverage for parse_review_verdict (#1470)."""
+
+    @given(st.text())
+    def test_never_raises_and_preserves_raw(self, text: str) -> None:
+        result = parse_review_verdict(text)
+        assert isinstance(result, ReviewVerdict)
+        assert result.raw == text
+        assert result.verdict in {"GO", "NOGO", "ERROR", "AMBIGUOUS"}
+
+    @given(st.text())
+    def test_no_verdict_marker_is_ambiguous(self, text: str) -> None:
+        # Text with no "verdict" token must resolve to AMBIGUOUS (fail-safe).
+        if "verdict" not in text.lower():
+            assert parse_review_verdict(text).verdict == "AMBIGUOUS"
+
+    @given(st.sampled_from(_VERDICT_TOKENS), st.text(max_size=200))
+    def test_anchored_verdict_line_classifies(self, token: str, noise: str) -> None:
+        body = f"{noise}\nVerdict: {token}\n"
+        normalized = token.replace("-", "").replace(" ", "")
+        expected = {"GO": "GO", "ERROR": "ERROR"}.get(normalized, "NOGO")
+        assert parse_review_verdict(body).verdict == expected

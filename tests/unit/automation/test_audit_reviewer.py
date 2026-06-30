@@ -8,6 +8,7 @@ from typing import Any
 from unittest import mock
 
 import pytest
+from hypothesis import given, strategies as st
 
 from hephaestus.automation.audit_reviewer import (
     AuditReviewer,
@@ -492,3 +493,30 @@ class TestParser:
         with pytest.raises(SystemExit) as exc_info:
             parser.parse_args(["--help"])
         assert exc_info.value.code == 0
+
+
+class TestParseCoordinatorResultsProperties:
+    """Property-based fuzz coverage for _parse_coordinator_results (#1470)."""
+
+    @given(st.text())
+    def test_never_raises_returns_list_of_dicts(self, text: str) -> None:
+        result = _parse_coordinator_results(text)
+        assert isinstance(result, list)
+        assert all(isinstance(item, dict) for item in result)
+
+    @given(st.text())
+    def test_no_json_fence_returns_empty(self, text: str) -> None:
+        if "```json" not in text:
+            assert _parse_coordinator_results(text) == []
+
+    @given(st.text(max_size=200))
+    def test_malformed_fence_is_skipped_not_raised(self, junk: str) -> None:
+        # A malformed JSON fence must be dropped, never raise (audit_reviewer.py:60).
+        body = f"```json\n{junk}\n```"
+        assert isinstance(_parse_coordinator_results(body), list)
+
+    @given(st.integers(), st.text(max_size=120))
+    def test_wellformed_pr_block_parsed(self, pr_number: int, summary: str) -> None:
+        body = f'```json\n{{"pr_number": {pr_number}, "summary": {json.dumps(summary)}}}\n```'
+        result = _parse_coordinator_results(body)
+        assert result and result[0]["pr_number"] == pr_number
