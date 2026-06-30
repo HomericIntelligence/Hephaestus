@@ -645,150 +645,151 @@ class PRReviewer(BaseReviewer):
             WorkerResult
 
         """
-        slot_id = self.status_tracker.acquire_slot()
-        if slot_id is None:
-            return WorkerResult(
-                issue_number=issue_number,
-                success=False,
-                error="Failed to acquire worker slot",
-            )
+        with self.status_tracker.slot() as slot_id:
+            if slot_id is None:
+                return WorkerResult(
+                    issue_number=issue_number,
+                    success=False,
+                    error="Failed to acquire worker slot",
+                )
 
-        thread_id = threading.get_ident()
+            thread_id = threading.get_ident()
 
-        try:
-            self.status_tracker.update_slot(
-                slot_id, f"{issue_ref(issue_number)}: PR {pr_ref(pr_number)} Creating worktree"
-            )
-            self._log(
-                "info",
-                f"Starting review of PR {pr_ref(pr_number)} for issue {issue_ref(issue_number)}",
-                thread_id,
-            )
-
-            state = self._get_or_create_state(issue_number, pr_number)
-
-            # Idempotency guard: skip if this PR was already fully reviewed (#374)
-            if state.phase == ReviewPhase.COMPLETED:
+            try:
+                self.status_tracker.update_slot(
+                    slot_id, f"{issue_ref(issue_number)}: PR {pr_ref(pr_number)} Creating worktree"
+                )
                 self._log(
                     "info",
-                    f"PR {pr_ref(pr_number)} for issue {issue_ref(issue_number)} already reviewed "
-                    "(state.phase=COMPLETED) — skipping to avoid duplicate comments",
+                    f"Starting review of PR {pr_ref(pr_number)} "
+                    f"for issue {issue_ref(issue_number)}",
                     thread_id,
                 )
+
+                state = self._get_or_create_state(issue_number, pr_number)
+
+                # Idempotency guard: skip if this PR was already fully reviewed (#374)
+                if state.phase == ReviewPhase.COMPLETED:
+                    self._log(
+                        "info",
+                        f"PR {pr_ref(pr_number)} for issue {issue_ref(issue_number)} "
+                        "already reviewed (state.phase=COMPLETED) — "
+                        "skipping to avoid duplicate comments",
+                        thread_id,
+                    )
+                    self.status_tracker.update_slot(
+                        slot_id, f"{issue_ref(issue_number)}: already reviewed, skipped"
+                    )
+                    return WorkerResult(
+                        issue_number=issue_number,
+                        success=True,
+                        pr_number=pr_number,
+                    )
+
+                # Create worktree on the PR branch (read-only usage)
+                branch_name = f"{issue_number}-auto-impl"
+                worktree_path = self.worktree_manager.create_worktree(issue_number, branch_name)
+
+                with self.state_lock:
+                    state.worktree_path = str(worktree_path)
+                    state.branch_name = branch_name
+                self._save_state(state)
+
+                # Gather context
                 self.status_tracker.update_slot(
-                    slot_id, f"{issue_ref(issue_number)}: already reviewed, skipped"
+                    slot_id, f"{issue_ref(issue_number)}: PR {pr_ref(pr_number)} Gathering context"
                 )
+                context = self._gather_pr_context(pr_number, issue_number, worktree_path)
+
+                # Phase: ANALYZING — run Claude read-only analysis
+                self.status_tracker.update_slot(
+                    slot_id, f"{issue_ref(issue_number)}: PR {pr_ref(pr_number)} Analyzing"
+                )
+                with self.state_lock:
+                    state.phase = ReviewPhase.ANALYZING
+                self._save_state(state)
+
+                analysis = self._run_analysis_session(
+                    pr_number, issue_number, worktree_path, context, slot_id
+                )
+
+                comments: list[dict[str, Any]] = analysis.get("comments", [])
+                summary: str = analysis.get("summary", "")
+
+                # Phase: POSTING — post inline review comments to GitHub
+                self.status_tracker.update_slot(
+                    slot_id, f"{issue_ref(issue_number)}: PR {pr_ref(pr_number)} Posting"
+                )
+                with self.state_lock:
+                    state.phase = ReviewPhase.POSTING
+                self._save_state(state)
+
+                if self.options.dry_run:
+                    pref = pr_ref(pr_number)
+                    self._log(
+                        "info",
+                        f"[DRY RUN] Would post {len(comments)} inline comment(s) on PR {pref}",
+                        thread_id,
+                    )
+                    thread_ids: list[str] = []
+                else:
+                    thread_ids = gh_pr_review_post(
+                        pr_number=pr_number,
+                        comments=comments,
+                        summary=summary,
+                        dry_run=False,
+                        # #1083: edit an existing comment on a line instead of
+                        # duplicating it on re-review.
+                        dedupe_existing=True,
+                    )
+                    self._log(
+                        "info",
+                        f"Posted {len(thread_ids)} review thread(s) on PR {pr_ref(pr_number)}",
+                        thread_id,
+                    )
+
+                with self.state_lock:
+                    state.posted_thread_ids = thread_ids
+                    state.phase = ReviewPhase.COMPLETED
+                    state.completed_at = datetime.now(timezone.utc)
+                self._save_state(state)
+
+                self._log(
+                    "info",
+                    f"PR {pr_ref(pr_number)} review complete for issue {issue_ref(issue_number)}",
+                    thread_id,
+                )
+
                 return WorkerResult(
                     issue_number=issue_number,
                     success=True,
                     pr_number=pr_number,
+                    branch_name=branch_name,
+                    worktree_path=str(worktree_path),
                 )
 
-            # Create worktree on the PR branch (read-only usage)
-            branch_name = f"{issue_number}-auto-impl"
-            worktree_path = self.worktree_manager.create_worktree(issue_number, branch_name)
+            except subprocess.TimeoutExpired as e:
+                error_msg = f"Timeout: {' '.join(str(c) for c in e.cmd[:3])} exceeded {e.timeout}s"
+                self._log("error", error_msg, thread_id)
+                return self._fail(issue_number, error_msg, slot_id)
 
-            with self.state_lock:
-                state.worktree_path = str(worktree_path)
-                state.branch_name = branch_name
-            self._save_state(state)
-
-            # Gather context
-            self.status_tracker.update_slot(
-                slot_id, f"{issue_ref(issue_number)}: PR {pr_ref(pr_number)} Gathering context"
-            )
-            context = self._gather_pr_context(pr_number, issue_number, worktree_path)
-
-            # Phase: ANALYZING — run Claude read-only analysis
-            self.status_tracker.update_slot(
-                slot_id, f"{issue_ref(issue_number)}: PR {pr_ref(pr_number)} Analyzing"
-            )
-            with self.state_lock:
-                state.phase = ReviewPhase.ANALYZING
-            self._save_state(state)
-
-            analysis = self._run_analysis_session(
-                pr_number, issue_number, worktree_path, context, slot_id
-            )
-
-            comments: list[dict[str, Any]] = analysis.get("comments", [])
-            summary: str = analysis.get("summary", "")
-
-            # Phase: POSTING — post inline review comments to GitHub
-            self.status_tracker.update_slot(
-                slot_id, f"{issue_ref(issue_number)}: PR {pr_ref(pr_number)} Posting"
-            )
-            with self.state_lock:
-                state.phase = ReviewPhase.POSTING
-            self._save_state(state)
-
-            if self.options.dry_run:
-                pref = pr_ref(pr_number)
-                self._log(
-                    "info",
-                    f"[DRY RUN] Would post {len(comments)} inline comment(s) on PR {pref}",
-                    thread_id,
+            except subprocess.CalledProcessError as e:
+                error_msg = (
+                    f"Command failed (exit {e.returncode}): {' '.join(str(c) for c in e.cmd[:3])}"
                 )
-                thread_ids: list[str] = []
-            else:
-                thread_ids = gh_pr_review_post(
-                    pr_number=pr_number,
-                    comments=comments,
-                    summary=summary,
-                    dry_run=False,
-                    # #1083: edit an existing comment on a line instead of
-                    # duplicating it on re-review.
-                    dedupe_existing=True,
-                )
-                self._log(
-                    "info",
-                    f"Posted {len(thread_ids)} review thread(s) on PR {pr_ref(pr_number)}",
-                    thread_id,
-                )
+                self._log("error", error_msg, thread_id)
+                return self._fail(issue_number, error_msg, slot_id)
 
-            with self.state_lock:
-                state.posted_thread_ids = thread_ids
-                state.phase = ReviewPhase.COMPLETED
-                state.completed_at = datetime.now(timezone.utc)
-            self._save_state(state)
+            except RuntimeError as e:
+                self._log("error", f"Runtime error: {e}", thread_id)
+                return self._fail(issue_number, str(e)[:80], slot_id)
 
-            self._log(
-                "info",
-                f"PR {pr_ref(pr_number)} review complete for issue {issue_ref(issue_number)}",
-                thread_id,
-            )
+            except Exception as e:
+                self._log("error", f"Unexpected {type(e).__name__}: {e}", thread_id)
+                return self._fail(issue_number, str(e)[:80], slot_id)
 
-            return WorkerResult(
-                issue_number=issue_number,
-                success=True,
-                pr_number=pr_number,
-                branch_name=branch_name,
-                worktree_path=str(worktree_path),
-            )
-
-        except subprocess.TimeoutExpired as e:
-            error_msg = f"Timeout: {' '.join(str(c) for c in e.cmd[:3])} exceeded {e.timeout}s"
-            self._log("error", error_msg, thread_id)
-            return self._fail(issue_number, error_msg, slot_id)
-
-        except subprocess.CalledProcessError as e:
-            error_msg = (
-                f"Command failed (exit {e.returncode}): {' '.join(str(c) for c in e.cmd[:3])}"
-            )
-            self._log("error", error_msg, thread_id)
-            return self._fail(issue_number, error_msg, slot_id)
-
-        except RuntimeError as e:
-            self._log("error", f"Runtime error: {e}", thread_id)
-            return self._fail(issue_number, str(e)[:80], slot_id)
-
-        except Exception as e:
-            self._log("error", f"Unexpected {type(e).__name__}: {e}", thread_id)
-            return self._fail(issue_number, str(e)[:80], slot_id)
-
-        finally:
-            time.sleep(1)
-            self.status_tracker.release_slot(slot_id)
+            finally:
+                time.sleep(1)
 
     def _review_all(self, pr_map: dict[int, int]) -> dict[int, WorkerResult]:
         """Review all PRs in parallel.

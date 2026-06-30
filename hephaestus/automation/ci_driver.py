@@ -729,42 +729,46 @@ class CIDriver:
             WorkerResult indicating success or failure.
 
         """
-        acquired_slot: int | None = self.status_tracker.acquire_slot()
-        if acquired_slot is None:
-            return WorkerResult(
-                issue_number=issue_number, success=False, error="Failed to acquire worker slot"
-            )
+        with self.status_tracker.slot() as acquired_slot:
+            if acquired_slot is None:
+                return WorkerResult(
+                    issue_number=issue_number, success=False, error="Failed to acquire worker slot"
+                )
 
-        try:
-            armed_result = self._check_arming_on_drive_start(issue_number, pr_number)
-            if armed_result is not None:
-                return armed_result
+            try:
+                armed_result = self._check_arming_on_drive_start(issue_number, pr_number)
+                if armed_result is not None:
+                    return armed_result
 
-            if self.options.enable_mechanical_rebase and not self.options.dry_run:
-                self._attempt_mechanical_rebase(issue_number, pr_number, acquired_slot)
+                if self.options.enable_mechanical_rebase and not self.options.dry_run:
+                    self._attempt_mechanical_rebase(issue_number, pr_number, acquired_slot)
 
-            self.status_tracker.update_slot(acquired_slot, f"{pr_ref(pr_number)}: fetching checks")
+                self.status_tracker.update_slot(
+                    acquired_slot, f"{pr_ref(pr_number)}: fetching checks"
+                )
 
-            poll_result = self._poll_ci_until_concluded(
-                issue_number, pr_number, acquired_slot, self.options.poll_max_wait
-            )
-            if poll_result is None:
-                return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
-            _checks, required_checks = poll_result
+                poll_result = self._poll_ci_until_concluded(
+                    issue_number, pr_number, acquired_slot, self.options.poll_max_wait
+                )
+                if poll_result is None:
+                    return WorkerResult(
+                        issue_number=issue_number, success=True, pr_number=pr_number
+                    )
+                _checks, required_checks = poll_result
 
-            all_green = all(
-                c.get("conclusion") in ("success", "skipped", "neutral") for c in required_checks
-            )
-            if all_green:
-                return self._handle_green_pr(issue_number, pr_number, acquired_slot)
-            return self._handle_failing_pr(issue_number, pr_number, acquired_slot, required_checks)
+                all_green = all(
+                    c.get("conclusion") in ("success", "skipped", "neutral")
+                    for c in required_checks
+                )
+                if all_green:
+                    return self._handle_green_pr(issue_number, pr_number, acquired_slot)
+                return self._handle_failing_pr(
+                    issue_number, pr_number, acquired_slot, required_checks
+                )
 
-        except Exception as e:
-            logger.error("Issue #%s: unexpected error: %s", issue_number, e)
-            return WorkerResult(issue_number=issue_number, success=False, error=str(e)[:200])
-
-        finally:
-            self.status_tracker.release_slot(acquired_slot)
+            except Exception as e:
+                logger.error("Issue #%s: unexpected error: %s", issue_number, e)
+                return WorkerResult(issue_number=issue_number, success=False, error=str(e)[:200])
 
     def _attempt_mechanical_rebase(
         self,

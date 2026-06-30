@@ -230,90 +230,89 @@ class Planner:
             PlanResult
 
         """
-        slot_id = self.status_tracker.acquire_slot()
-        if slot_id is None:
-            return PlanResult(
-                issue_number=issue_number,
-                success=False,
-                error="Failed to acquire worker slot",
-            )
-
-        try:
-            # Idempotency guard (FM1): never (re-)plan an issue whose work is
-            # already covered by a PR. Runs BEFORE the existing-plan/force gates
-            # because an open/merged closing PR makes planning pure churn — the
-            # 2026-06-15 loop burned ~5.5h re-planning #1357/#1289/#1179 while
-            # their PRs were open (and again after they merged). This mirrors the
-            # implementer phase's "Skipped (open PR already exists)" semantics so
-            # plan and implement agree on what to skip. Localized to this guard
-            # block (no _call_claude changes) for FM3 retry-logic coordination.
-            covered = self._pr_coverage_skip(issue_number, slot_id)
-            if covered is not None:
-                return covered
-
-            # Skip-if-already-planned moved here from _filter_issues (#548) so
-            # the check runs inside the thread pool (parallel, overlapped with
-            # actual planning work) instead of as a serial pre-pass that
-            # blocked all workers behind N ``gh issue view --comments`` calls.
-            if not self.options.force:
-                self.status_tracker.update_slot(
-                    slot_id, f"{issue_ref(issue_number)}: checking existing plan"
-                )
-                if self._has_existing_plan(issue_number):
-                    logger.info("Issue #%s already has a plan, skipping", issue_number)
-                    self.status_tracker.update_slot(
-                        slot_id, f"{issue_ref(issue_number)}: plan exists, skipped"
-                    )
-                    return PlanResult(
-                        issue_number=issue_number,
-                        success=True,
-                        plan_already_exists=True,
-                    )
-
-            self.status_tracker.update_slot(slot_id, f"Planning {issue_ref(issue_number)}")
-
-            if self.options.dry_run:
-                logger.info("[DRY RUN] Would plan %s", issue_ref(issue_number))
-                return PlanResult(issue_number=issue_number, success=True)
-
-            # Run the strict review loop: advise → loop[plan → learn → review]
-            # → post final plan with last review attached. Loop terminates on
-            # the first unambiguous GO or after MAX_REVIEW_ITERATIONS.
-            plan, final_review, iterations, verdict_is_go = self._run_plan_review_loop(
-                issue_number, slot_id
-            )
-
-            # Post final plan + review to issue regardless of verdict so
-            # operators can see what was produced (NOGO banner is appended
-            # inside _post_plan when verdict_is_go is False).
-            self._post_plan(
-                issue_number, plan, final_review=final_review, verdict_is_go=verdict_is_go
-            )
-
-            self.status_tracker.update_slot(
-                slot_id, f"Completed {issue_ref(issue_number)} ({iterations} iter)"
-            )
-
-            if not verdict_is_go:
+        with self.status_tracker.slot() as slot_id:
+            if slot_id is None:
                 return PlanResult(
                     issue_number=issue_number,
                     success=False,
-                    error=(
-                        "review loop exhausted all iterations without a GO verdict (NOGO-exhausted)"
-                    ),
+                    error="Failed to acquire worker slot",
                 )
 
-            return PlanResult(issue_number=issue_number, success=True)
+            try:
+                # Idempotency guard (FM1): never (re-)plan an issue whose work is
+                # already covered by a PR. Runs BEFORE the existing-plan/force gates
+                # because an open/merged closing PR makes planning pure churn — the
+                # 2026-06-15 loop burned ~5.5h re-planning #1357/#1289/#1179 while
+                # their PRs were open (and again after they merged). This mirrors the
+                # implementer phase's "Skipped (open PR already exists)" semantics so
+                # plan and implement agree on what to skip. Localized to this guard
+                # block (no _call_claude changes) for FM3 retry-logic coordination.
+                covered = self._pr_coverage_skip(issue_number, slot_id)
+                if covered is not None:
+                    return covered
 
-        except Exception as e:
-            logger.error("Failed to plan %s: %s", issue_ref(issue_number), e)
-            return PlanResult(
-                issue_number=issue_number,
-                success=False,
-                error=str(e),
-            )
-        finally:
-            self.status_tracker.release_slot(slot_id)
+                # Skip-if-already-planned moved here from _filter_issues (#548) so
+                # the check runs inside the thread pool (parallel, overlapped with
+                # actual planning work) instead of as a serial pre-pass that
+                # blocked all workers behind N ``gh issue view --comments`` calls.
+                if not self.options.force:
+                    self.status_tracker.update_slot(
+                        slot_id, f"{issue_ref(issue_number)}: checking existing plan"
+                    )
+                    if self._has_existing_plan(issue_number):
+                        logger.info("Issue #%s already has a plan, skipping", issue_number)
+                        self.status_tracker.update_slot(
+                            slot_id, f"{issue_ref(issue_number)}: plan exists, skipped"
+                        )
+                        return PlanResult(
+                            issue_number=issue_number,
+                            success=True,
+                            plan_already_exists=True,
+                        )
+
+                self.status_tracker.update_slot(slot_id, f"Planning {issue_ref(issue_number)}")
+
+                if self.options.dry_run:
+                    logger.info("[DRY RUN] Would plan %s", issue_ref(issue_number))
+                    return PlanResult(issue_number=issue_number, success=True)
+
+                # Run the strict review loop: advise → loop[plan → learn → review]
+                # → post final plan with last review attached. Loop terminates on
+                # the first unambiguous GO or after MAX_REVIEW_ITERATIONS.
+                plan, final_review, iterations, verdict_is_go = self._run_plan_review_loop(
+                    issue_number, slot_id
+                )
+
+                # Post final plan + review to issue regardless of verdict so
+                # operators can see what was produced (NOGO banner is appended
+                # inside _post_plan when verdict_is_go is False).
+                self._post_plan(
+                    issue_number, plan, final_review=final_review, verdict_is_go=verdict_is_go
+                )
+
+                self.status_tracker.update_slot(
+                    slot_id, f"Completed {issue_ref(issue_number)} ({iterations} iter)"
+                )
+
+                if not verdict_is_go:
+                    return PlanResult(
+                        issue_number=issue_number,
+                        success=False,
+                        error=(
+                            "review loop exhausted all iterations without a GO verdict "
+                            "(NOGO-exhausted)"
+                        ),
+                    )
+
+                return PlanResult(issue_number=issue_number, success=True)
+
+            except Exception as e:
+                logger.error("Failed to plan %s: %s", issue_ref(issue_number), e)
+                return PlanResult(
+                    issue_number=issue_number,
+                    success=False,
+                    error=str(e),
+                )
 
     def _call_claude(
         self,
