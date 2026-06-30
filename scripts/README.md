@@ -9,14 +9,13 @@ through installed `hephaestus-*` console scripts.
 > The former thin wrappers (`plan_issues.py`, `implement_issues.py`,
 > `drive_prs_green.py`, `merge_prs.py`, `audit_doc_policy.py`,
 > `check_tier_labels.py`, `check_cli_table_sync.py`,
-> `check_python_version_consistency.py`, `check_version_single_source.py`)
+> `check_python_version_consistency.py`, `check_version_single_source.py`,
+> `check_unit_test_structure.py`)
 > were removed in #1445 — invoke the installed `hephaestus-*` console scripts
 > or `python3 -m hephaestus.<module>` instead.
 
 ### Validation / pre-commit checks
 
-- **`check_unit_test_structure.py`** — Verify `tests/unit/` mirrors the
-  `hephaestus/` subpackage layout. Wired into pre-commit.
 - **`validate_readme_commands.py`** — Validate that commands shown in README
   code blocks actually run.
 - **`check-symlinks.sh`** — Detect broken symlinks in the repo.
@@ -49,7 +48,7 @@ through installed `hephaestus-*` console scripts.
 
 ```bash
 # Pre-commit-checked validators
-python3 scripts/check_unit_test_structure.py
+hephaestus-check-test-structure
 python3 -m hephaestus.scripts_lib.check_version_single_source
 python3 -m hephaestus.scripts_lib.check_cli_table_sync
 

@@ -530,6 +530,34 @@ class TestMain:
         assert main() == 1
 
 
+class TestScriptsCoverageWiredIntoEntryPoint:
+    """check_test_structure runs the scripts-coverage check."""
+
+    def test_failing_scripts_coverage_fails_overall(self, tmp_path: Path, capsys) -> None:
+        src = tmp_path / "mypkg"
+        _make_package(src, "utils")
+        (src / "__init__.py").touch()
+        test_root = tmp_path / "tests" / "unit"
+        _make_test_dir(test_root, "utils")
+        scripts_root = tmp_path / "scripts"
+        scripts_root.mkdir()
+        (scripts_root / "foo.py").write_text("# script\n", encoding="utf-8")
+
+        passed = check_test_structure(tmp_path, src_package="mypkg")
+
+        assert passed is False
+        assert "scripts/ smoke harness is required" in capsys.readouterr().err
+
+    def test_absent_scripts_dir_is_skipped(self, tmp_path: Path) -> None:
+        src = tmp_path / "mypkg"
+        _make_package(src, "utils")
+        (src / "__init__.py").touch()
+        test_root = tmp_path / "tests" / "unit"
+        _make_test_dir(test_root, "utils")
+
+        assert check_test_structure(tmp_path, src_package="mypkg") is True
+
+
 class TestCheckScriptsCoverage:
     """Tests for check_scripts_coverage()."""
 

@@ -1,6 +1,6 @@
 """Validate unit test directory structure.
 
-Provides four complementary checks:
+Provides six complementary checks:
 
 1. **Mirror check**: Every subpackage in the source directory has a corresponding
    directory under ``tests/unit/``.
@@ -18,6 +18,9 @@ Provides four complementary checks:
    under ``tests/`` root. Such files fall outside
    ``testpaths = ["tests/unit", "tests/integration"]`` and are silently never
    collected by pytest (issue #1467).
+6. **Scripts-coverage check**: When top-level ``scripts/`` exists, the
+   ``tests/unit/scripts/`` smoke harness must exist and keep auto-discovering
+   every ``scripts/*.py`` file.
 
 Usage::
 
@@ -382,12 +385,29 @@ def _report_stray_tests_root_files_check(tests_root: Path, verbose: bool) -> boo
     return False
 
 
+def _report_scripts_coverage_check(
+    scripts_root: Path,
+    test_root: Path,
+    verbose: bool,
+) -> bool:
+    ok_scripts, errors = check_scripts_coverage(scripts_root, test_root)
+    if ok_scripts:
+        if verbose:
+            n_scripts = sum(1 for _ in scripts_root.glob("*.py"))
+            print(f"OK: {n_scripts} scripts/*.py covered by the smoke harness.")
+        return True
+    print("ERROR: scripts/ test coverage is incomplete:", file=sys.stderr)
+    for line in errors:
+        print(line, file=sys.stderr)
+    return False
+
+
 def check_test_structure(
     repo_root: Path,
     src_package: str | None = None,
     verbose: bool = False,
 ) -> bool:
-    """Run all test structure checks.
+    """Run all configured test structure checks.
 
     Args:
         repo_root: Repository root directory.
@@ -405,6 +425,7 @@ def check_test_structure(
     src_root = repo_root / src_package
     tests_root = repo_root / "tests"
     test_root = tests_root / "unit"
+    scripts_root = repo_root / "scripts"
 
     if not src_root.is_dir():
         print(f"ERROR: Source root not found: {src_root}", file=sys.stderr)
@@ -421,6 +442,8 @@ def check_test_structure(
         _report_ghost_packages_check(src_root, test_root, verbose),
         _report_stray_tests_root_files_check(tests_root, verbose),
     ]
+    if scripts_root.is_dir():
+        results.append(_report_scripts_coverage_check(scripts_root, test_root, verbose))
     return all(results)
 
 
