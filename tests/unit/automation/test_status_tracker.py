@@ -3,6 +3,8 @@
 import threading
 import time
 
+import pytest
+
 from hephaestus.automation.status_tracker import StatusTracker
 
 
@@ -121,6 +123,7 @@ class TestStatusTracker:
         tracker.release_slot(slot1)
         assert tracker.get_active_count() == 1
 
+    @pytest.mark.slow
     def test_wait_for_available(self) -> None:
         """Test waiting for slot availability."""
         tracker = StatusTracker(num_slots=1)
@@ -154,6 +157,7 @@ class TestStatusTracker:
         result = tracker.wait_for_available(timeout=0.1)
         assert result is False
 
+    @pytest.mark.slow
     def test_wait_all_complete(self) -> None:
         """Test waiting for all slots to complete."""
         tracker = StatusTracker(num_slots=2)
@@ -206,6 +210,7 @@ class TestStatusTracker:
         assert all(slot is None for slot in tracker.slots)
         assert tracker.get_active_count() == 0
 
+    @pytest.mark.slow
     def test_concurrent_acquire_release(self) -> None:
         """Test concurrent slot acquisition and release."""
         tracker = StatusTracker(num_slots=5)
@@ -232,6 +237,7 @@ class TestStatusTracker:
         # All slots should be released
         assert tracker.get_active_count() == 0
 
+    @pytest.mark.slow
     def test_notify_all_on_release(self) -> None:
         """Test that release_slot wakes all waiting threads."""
         tracker = StatusTracker(num_slots=1)
@@ -264,6 +270,7 @@ class TestStatusTracker:
         # All waiters should have been notified
         assert len(results) == 3
 
+    @pytest.mark.slow
     def test_notify_all_on_clear(self) -> None:
         """Test that clear wakes waiting threads."""
         tracker = StatusTracker(num_slots=1)
