@@ -42,17 +42,35 @@ SANCTIONED_EXTRA_TEST_DIRS: frozenset[str] = frozenset(
 )
 
 
+def _has_python_source(directory: Path) -> bool:
+    """Return True if *directory* directly contains a Python source file.
+
+    A package directory must hold an ``__init__.py`` or at least one ``*.py``
+    module. A directory whose only remaining content is ``__pycache__`` (stale
+    ``.pyc`` files left after the source was deleted) is a *ghost* package and
+    must NOT be treated as a subpackage — doing so implies an importable
+    subpackage that does not exist (POLA).
+    """
+    if (directory / "__init__.py").exists():
+        return True
+    return any(directory.glob("*.py"))
+
+
 def _get_subpackages(root: Path) -> set[str]:
     """Return the set of direct subpackage names under *root*.
 
-    Ignores directories starting with ``_`` or ``.``.
+    Ignores directories starting with ``_`` or ``.``, and ghost directories
+    that contain no Python source file (only ``__pycache__``/``.pyc``).
     """
     if not root.is_dir():
         return set()
     return {
         d.name
         for d in root.iterdir()
-        if d.is_dir() and not d.name.startswith("_") and not d.name.startswith(".")
+        if d.is_dir()
+        and not d.name.startswith("_")
+        and not d.name.startswith(".")
+        and _has_python_source(d)
     }
 
 
