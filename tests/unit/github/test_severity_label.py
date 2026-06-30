@@ -103,6 +103,19 @@ def test_gh_wrapper_delegates_to_gh_call() -> None:
     )
 
 
+def test_gh_wrapper_does_not_bypass_circuit_breaker() -> None:
+    """Regression for #1433: _gh must route through gh_call, never bare subprocess.run."""
+    completed = subprocess.CompletedProcess(["gh"], 0, stdout="ok\n", stderr="")
+    with (
+        mock.patch.object(sl, "gh_call", return_value=completed) as mock_gh_call,
+        mock.patch("subprocess.run") as mock_run,
+    ):
+        sl._gh("api", "repos/o/r/issues/1/labels")
+
+    mock_gh_call.assert_called_once()
+    mock_run.assert_not_called()
+
+
 def test_apply_idempotent_when_already_correct() -> None:
     """An already-correct label triggers neither a DELETE nor a POST."""
 

@@ -78,7 +78,11 @@ def parse_severity(issue_body: str) -> str | None:
 
 
 def _gh(*args: str) -> str:
-    """Run ``gh`` through the shared adapter."""
+    """Run ``gh`` through :func:`gh_call` (circuit breaker + rate-limit retry).
+
+    Routing through the shared adapter — never bare ``subprocess.run`` — is the
+    invariant #1433 established for this module.
+    """
     return gh_call(list(args), check=True).stdout
 
 
