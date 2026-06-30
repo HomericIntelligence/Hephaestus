@@ -201,6 +201,16 @@ class TestIssueImplementerDynamicDelegates:
         save_state.assert_called_once()
         assert "_save_state" not in dry_run_implementer.__dict__
 
+    def test_patch_object_intercepts_former_shim(
+        self, dry_run_implementer: IssueImplementer
+    ) -> None:
+        # #1439: _run_advise was an explicit shim; now resolves via __getattr__.
+        assert "_run_advise" not in type(dry_run_implementer).__dict__
+        with patch.object(dry_run_implementer, "_run_advise", return_value="x") as advise:
+            assert dry_run_implementer._run_advise(1, "t", "b") == "x"
+        advise.assert_called_once_with(1, "t", "b")
+        assert "_run_advise" not in dry_run_implementer.__dict__
+
     def test_instance_assignment_still_shadows_dynamic_commit_delegate(
         self, dry_run_implementer: IssueImplementer, tmp_path: Path
     ) -> None:
