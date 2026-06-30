@@ -299,10 +299,10 @@ class TestStatusTracker:
 
 
 class TestSlotContextManager:
-    """Tests for StatusTracker.slot() context manager (#1437)."""
+    """Tests for the slot() context manager (#1435)."""
 
-    def test_slot_yields_and_releases(self) -> None:
-        """Slot is acquired in the block and released on exit."""
+    def test_slot_acquires_and_releases(self) -> None:
+        """slot() acquires on entry and releases on exit."""
         tracker = StatusTracker(num_slots=2)
         with tracker.slot() as slot_id:
             assert slot_id is not None
@@ -310,37 +310,60 @@ class TestSlotContextManager:
         assert tracker.get_active_count() == 0
 
     def test_slot_releases_on_exception(self) -> None:
-        """Slot is released even when the block raises."""
-        tracker = StatusTracker(num_slots=2)
-        # Explicit try/except avoids the unreachable-code false positive from pytest.raises.
-        # The test asserts cleanup AFTER the exception is caught, not that it escapes.
-        try:
+        """slot() releases even when the body raises (no leak)."""
+        tracker = StatusTracker(num_slots=1)
+        with pytest.raises(ValueError):
             with tracker.slot() as slot_id:
                 assert slot_id is not None
                 raise ValueError("boom")
-        except ValueError:
-            pass
-        assert tracker.get_active_count() == 0
+        assert tracker.get_active_count() == 0  # no leak
 
-    def test_slot_sets_initial_msg(self) -> None:
-        """A non-empty initial_msg is set as the slot status."""
-        tracker = StatusTracker(num_slots=2)
-        with tracker.slot("Starting") as slot_id:
+    def test_slot_sets_initial_message(self) -> None:
+        """A non-empty initial_msg is applied right after acquire."""
+        tracker = StatusTracker(num_slots=1)
+        with tracker.slot("Starting work") as slot_id:
             assert slot_id is not None
-            assert tracker.slots[slot_id] == "Starting"
+            assert tracker.slots[slot_id] == "Starting work"
 
-    def test_slot_no_msg_leaves_acquired_marker(self) -> None:
-        """Without initial_msg the slot keeps the 'acquired' marker."""
-        tracker = StatusTracker(num_slots=2)
+    def test_slot_no_initial_message_keeps_acquired(self) -> None:
+        """Without initial_msg the slot keeps its 'acquired' marker."""
+        tracker = StatusTracker(num_slots=1)
         with tracker.slot() as slot_id:
             assert slot_id is not None
             assert tracker.slots[slot_id] == "acquired"
 
     def test_slot_yields_none_on_timeout(self) -> None:
-        """When acquisition times out, slot() yields None and releases nothing."""
+        """On acquisition timeout slot() yields None and release is a no-op."""
         tracker = StatusTracker(num_slots=1)
         tracker.acquire_slot()  # exhaust the only slot
         with tracker.slot(timeout=0.1) as slot_id:
-            assert slot_id is None
-        # The still-held real slot must not be spuriously released.
+            assert slot_id is None  # caller must guard
+        # release_slot(None) must be a safe no-op (no TypeError)
         assert tracker.get_active_count() == 1
+
+    def test_slot_post_sleep_runs_before_release(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """post_sleep runs before release by the requested duration."""
+        tracker = StatusTracker(num_slots=1)
+
+        sleep_calls: list[float] = []
+
+        def fake_sleep(delay: float) -> None:
+            sleep_calls.append(delay)
+            assert tracker.get_active_count() == 1
+
+        monkeypatch.setattr("hephaestus.automation.status_tracker.time.sleep", fake_sleep)
+
+        with tracker.slot(post_sleep=0.2):
+            pass
+
+        assert sleep_calls == [0.2]
+        assert tracker.get_active_count() == 0
+
+    def test_slot_initial_message_skipped_on_timeout(self) -> None:
+        """No update_slot is attempted when acquisition times out."""
+        tracker = StatusTracker(num_slots=1)
+        held_slot = tracker.acquire_slot()
+        assert held_slot is not None
+        with tracker.slot("should not set", timeout=0.1) as slot_id:
+            assert slot_id is None  # no update_slot attempted on None
+        assert tracker.slots[held_slot] == "acquired"

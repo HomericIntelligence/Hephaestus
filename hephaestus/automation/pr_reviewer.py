@@ -21,7 +21,6 @@ import json
 import logging
 import subprocess
 import threading
-import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -646,7 +645,7 @@ class PRReviewer(BaseReviewer):
             WorkerResult
 
         """
-        with self.status_tracker.slot() as slot_id:
+        with self.status_tracker.slot(post_sleep=1.0) as slot_id:
             if slot_id is None:
                 return WorkerResult(
                     issue_number=issue_number,
@@ -662,8 +661,8 @@ class PRReviewer(BaseReviewer):
                 )
                 self._log(
                     "info",
-                    f"Starting review of PR {pr_ref(pr_number)} "
-                    f"for issue {issue_ref(issue_number)}",
+                    f"Starting review of PR {pr_ref(pr_number)} for "
+                    f"issue {issue_ref(issue_number)}",
                     thread_id,
                 )
 
@@ -674,8 +673,8 @@ class PRReviewer(BaseReviewer):
                     self._log(
                         "info",
                         f"PR {pr_ref(pr_number)} for issue {issue_ref(issue_number)} "
-                        "already reviewed (state.phase=COMPLETED) — "
-                        "skipping to avoid duplicate comments",
+                        "already reviewed (state.phase=COMPLETED) — skipping to "
+                        "avoid duplicate comments",
                         thread_id,
                     )
                     self.status_tracker.update_slot(
@@ -788,9 +787,6 @@ class PRReviewer(BaseReviewer):
             except Exception as e:
                 self._log("error", f"Unexpected {type(e).__name__}: {e}", thread_id)
                 return self._fail(issue_number, str(e)[:80], slot_id)
-
-            finally:
-                time.sleep(1)
 
     def _review_all(self, pr_map: dict[int, int]) -> dict[int, WorkerResult]:
         """Review all PRs in parallel.

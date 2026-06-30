@@ -5,6 +5,7 @@ Provides slot-based tracking with condition variables for coordination.
 
 import logging
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -68,17 +69,24 @@ class StatusTracker:
                 logger.error("Invalid slot_id: %d", slot_id)
 
     @contextmanager
-    def slot(self, initial_msg: str = "", timeout: float | None = None) -> Iterator[int | None]:
+    def slot(
+        self,
+        initial_msg: str = "",
+        timeout: float | None = None,
+        *,
+        post_sleep: float = 0.0,
+    ) -> Iterator[int | None]:
         """Acquire a slot for the duration of the ``with`` block, then release it.
 
-        Yields the acquired slot id, or ``None`` if acquisition timed out. The
-        caller MUST handle the ``None`` case (e.g. return a failure result);
-        the slot is released automatically on block exit, including on exception.
+        Yields the acquired slot id, or ``None`` if acquisition timed out. The caller
+        MUST handle the ``None`` case (e.g. return a failure result); the slot is
+        released automatically on block exit, including on exception.
 
         Args:
             initial_msg: If non-empty and a slot was acquired, set as the slot's
                 initial status immediately after acquisition.
             timeout: Optional acquisition timeout in seconds.
+            post_sleep: Seconds to sleep before releasing the slot.
 
         Yields:
             The acquired slot index, or ``None`` on acquisition timeout.
@@ -90,6 +98,8 @@ class StatusTracker:
                 self.update_slot(slot_id, initial_msg)
             yield slot_id
         finally:
+            if post_sleep:
+                time.sleep(post_sleep)
             if slot_id is not None:
                 self.release_slot(slot_id)
 
