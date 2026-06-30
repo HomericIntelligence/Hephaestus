@@ -23,7 +23,7 @@ Adopt a **dual-layer package** with four guarantees:
 
 1. **Library layer** — `hephaestus.{utils, io, config, logging, cli, system,
    github, validation, resilience, markdown, ci, benchmarks, datasets,
-   discovery, forensics, nats, version, agents}`. Loaded via PEP 562 lazy
+   discovery, forensics, nats, version, agents, scripts_lib}`. Loaded via PEP 562 lazy
    imports (`hephaestus/__init__.py`). `import hephaestus` MUST NOT
    transitively import `curses`, `fcntl`, `pydantic`, or any
    `hephaestus.automation.*` module. Verified empirically and locked in
