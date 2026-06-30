@@ -107,9 +107,11 @@ class TestLoadNATSConfig:
         config = load_nats_config({})
         assert config.backoff_multiplier == 3.0
 
-    def test_env_override_invalid_float_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_env_override_invalid_float_names_variable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv("NATS_INITIAL_BACKOFF_SECONDS", "not-a-number")
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="NATS_INITIAL_BACKOFF_SECONDS"):
             load_nats_config({})
 
     def test_env_override_disabled_ignores_backoff_vars(
@@ -118,3 +120,53 @@ class TestLoadNATSConfig:
         monkeypatch.setenv("NATS_INITIAL_BACKOFF_SECONDS", "9.9")
         config = load_nats_config({}, env_override=False)
         assert config.initial_backoff_seconds == 1.0
+
+
+class TestFromEnv:
+    """Tests for NATSConfig.from_env()."""
+
+    def test_no_env_uses_defaults(self) -> None:
+        config = NATSConfig.from_env()
+        assert config.url == "nats://localhost:4222"
+        assert config.stream == "TASKS"
+        assert config.initial_backoff_seconds == 1.0
+
+    def test_reads_string_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NATS_URL", "nats://env:4222")
+        monkeypatch.setenv("NATS_STREAM", "EVENTS")
+        monkeypatch.setenv("NATS_DURABLE_NAME", "env-durable")
+        config = NATSConfig.from_env()
+        assert config.url == "nats://env:4222"
+        assert config.stream == "EVENTS"
+        assert config.durable_name == "env-durable"
+
+    def test_reads_numeric_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NATS_INITIAL_BACKOFF_SECONDS", "0.5")
+        monkeypatch.setenv("NATS_MAX_BACKOFF_SECONDS", "30")
+        monkeypatch.setenv("NATS_BACKOFF_MULTIPLIER", "1.5")
+        config = NATSConfig.from_env()
+        assert config.initial_backoff_seconds == 0.5
+        assert config.max_backoff_seconds == 30.0
+        assert config.backoff_multiplier == 1.5
+
+    def test_overrides_kwargs_are_base(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NATS_URL", "nats://env-wins:4222")
+        config = NATSConfig.from_env(enabled=True, url="nats://kwarg:4222")
+        assert config.enabled is True  # kwarg with no env var survives
+        assert config.url == "nats://env-wins:4222"  # env overrides kwarg
+
+    def test_invalid_numeric_names_variable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NATS_BACKOFF_MULTIPLIER", "abc")
+        with pytest.raises(ValueError, match="NATS_BACKOFF_MULTIPLIER"):
+            NATSConfig.from_env()
+
+    def test_invalid_backoff_bounds_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NATS_INITIAL_BACKOFF_SECONDS", "10")
+        monkeypatch.setenv("NATS_MAX_BACKOFF_SECONDS", "5")
+        with pytest.raises(ValueError, match="max_backoff_seconds"):
+            NATSConfig.from_env()
+
+    def test_empty_string_var_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NATS_URL", "")
+        config = NATSConfig.from_env()
+        assert config.url == "nats://localhost:4222"

@@ -41,6 +41,19 @@ class NATSConfig(BaseModel):
         max_backoff_seconds: Upper bound for exponential reconnect backoff.
         backoff_multiplier: Multiplier applied to backoff after each reconnect.
 
+    Environment variables (read by :meth:`from_env` and by
+    :func:`load_nats_config` when ``env_override=True``):
+
+    - ``NATS_URL`` → ``url`` (str)
+    - ``NATS_STREAM`` → ``stream`` (str)
+    - ``NATS_DURABLE_NAME`` → ``durable_name`` (str)
+    - ``NATS_INITIAL_BACKOFF_SECONDS`` → ``initial_backoff_seconds`` (float > 0)
+    - ``NATS_MAX_BACKOFF_SECONDS`` → ``max_backoff_seconds`` (float > 0)
+    - ``NATS_BACKOFF_MULTIPLIER`` → ``backoff_multiplier`` (float > 1)
+
+    ``enabled``, ``subjects``, and ``deliver_policy`` are not env-configurable
+    and must be set via the constructor or YAML.
+
     """
 
     enabled: bool = Field(default=False, description="Enable NATS event subscription")
@@ -83,6 +96,88 @@ class NATSConfig(BaseModel):
             )
         return self
 
+    @classmethod
+    def from_env(cls, **overrides: Any) -> NATSConfig:
+        """Build a :class:`NATSConfig` from ``NATS_*`` environment variables.
+
+        Reads the six ``NATS_*`` variables documented on this class. Keyword
+        ``overrides`` are applied first (acting as defaults/base values) and
+        any matching environment variable then overrides them, mirroring
+        :func:`load_nats_config`.
+
+        Args:
+            **overrides: Base field values applied before env vars are read.
+
+        Returns:
+            Validated :class:`NATSConfig` instance.
+
+        Raises:
+            ValueError: If a numeric env var is not a valid number, or if the
+                resulting backoff bounds are invalid.
+
+        """
+        data = _apply_env_overrides(dict(overrides))
+        return cls(**data)
+
+
+def _coerce_float(name: str, raw: str) -> float:
+    """Coerce an env var string to ``float`` with a variable-named error.
+
+    Args:
+        name: Environment variable name (used in the error message).
+        raw: Raw string value to coerce.
+
+    Returns:
+        The parsed float value.
+
+    Raises:
+        ValueError: If *raw* is not a valid float, naming *name*.
+
+    """
+    try:
+        return float(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from None
+
+
+def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
+    """Apply ``NATS_*`` env var overrides onto *data* in place and return it.
+
+    String vars use a truthy guard (an empty value is ignored); numeric vars
+    use an ``is not None`` guard (an explicit empty value raises).
+
+    Args:
+        data: Field-value mapping to overlay env vars onto.
+
+    Returns:
+        The same *data* dict, mutated with any present env-var overrides.
+
+    Raises:
+        ValueError: If a numeric env var is not a valid number.
+
+    """
+    str_vars = {
+        "NATS_URL": "url",
+        "NATS_STREAM": "stream",
+        "NATS_DURABLE_NAME": "durable_name",
+    }
+    for env_name, field in str_vars.items():
+        value = os.environ.get(env_name)
+        if value:
+            data[field] = value
+
+    float_vars = {
+        "NATS_INITIAL_BACKOFF_SECONDS": "initial_backoff_seconds",
+        "NATS_MAX_BACKOFF_SECONDS": "max_backoff_seconds",
+        "NATS_BACKOFF_MULTIPLIER": "backoff_multiplier",
+    }
+    for env_name, field in float_vars.items():
+        raw = os.environ.get(env_name)
+        if raw is not None:
+            data[field] = _coerce_float(env_name, raw)
+
+    return data
+
 
 def load_nats_config(
     yaml_config: dict[str, Any],
@@ -111,28 +206,6 @@ def load_nats_config(
     data: dict[str, Any] = dict(yaml_config)
 
     if env_override:
-        env_url = os.environ.get("NATS_URL")
-        if env_url:
-            data["url"] = env_url
-
-        env_stream = os.environ.get("NATS_STREAM")
-        if env_stream:
-            data["stream"] = env_stream
-
-        env_durable = os.environ.get("NATS_DURABLE_NAME")
-        if env_durable:
-            data["durable_name"] = env_durable
-
-        env_initial = os.environ.get("NATS_INITIAL_BACKOFF_SECONDS")
-        if env_initial is not None:
-            data["initial_backoff_seconds"] = float(env_initial)
-
-        env_max = os.environ.get("NATS_MAX_BACKOFF_SECONDS")
-        if env_max is not None:
-            data["max_backoff_seconds"] = float(env_max)
-
-        env_mult = os.environ.get("NATS_BACKOFF_MULTIPLIER")
-        if env_mult is not None:
-            data["backoff_multiplier"] = float(env_mult)
+        data = _apply_env_overrides(data)
 
     return NATSConfig(**data)
