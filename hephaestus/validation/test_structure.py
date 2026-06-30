@@ -14,6 +14,10 @@ Provides four complementary checks:
    ``hephaestus/<name>/`` subpackage where both are content-free (source has
    no module beyond ``__init__.py`` AND the test dir has no ``test_*.py``) —
    the name-only mirror check would otherwise treat the pair as valid.
+5. **No-stray-tests-root-files check**: No ``test_*.py`` files exist directly
+   under ``tests/`` root. Such files fall outside
+   ``testpaths = ["tests/unit", "tests/integration"]`` and are silently never
+   collected by pytest (issue #1467).
 
 Usage::
 
@@ -166,6 +170,35 @@ def check_no_loose_test_files(
         return True, []
 
     violations = sorted(p for p in unit_root.glob("test_*.py") if p.name not in allowed_names)
+    return len(violations) == 0, violations
+
+
+def check_no_stray_tests_root_files(
+    tests_root: Path,
+    allowed_names: frozenset[str] = ALLOWED_ROOT_FILES,
+) -> tuple[bool, list[Path]]:
+    """Check that no ``test_*.py`` files exist directly under ``tests/`` root.
+
+    A ``test_*.py`` file at ``tests/`` (above ``tests/unit/``) falls outside
+    ``testpaths = ["tests/unit", "tests/integration"]`` and is silently never
+    collected by pytest — the exact regression in issue #1467. Such files must
+    live under ``tests/unit/`` or ``tests/integration/`` in a mirroring
+    sub-package.
+
+    Args:
+        tests_root: Root of the ``tests/`` directory to inspect.
+        allowed_names: Filenames that are allowed at the ``tests/`` root level.
+
+    Returns:
+        Tuple of ``(no_violations, violating_paths)`` where *violating_paths*
+        is a sorted list of files that should be moved under ``tests/unit/`` or
+        ``tests/integration/``.
+
+    """
+    if not tests_root.is_dir():
+        return True, []
+
+    violations = sorted(p for p in tests_root.glob("test_*.py") if p.name not in allowed_names)
     return len(violations) == 0, violations
 
 
@@ -331,12 +364,30 @@ def _report_ghost_packages_check(
     return False
 
 
+def _report_stray_tests_root_files_check(tests_root: Path, verbose: bool) -> bool:
+    no_stray, violations = check_no_stray_tests_root_files(tests_root)
+    if no_stray:
+        if verbose:
+            print("OK: No stray test_*.py files at tests/ root.")
+        return True
+    print(
+        "ERROR: test_*.py files found directly under tests/ (outside testpaths).\n"
+        "These are silently never collected by pytest. Move them into\n"
+        "tests/unit/ or tests/integration/ under a mirroring sub-package.\n"
+        "Violation(s):",
+        file=sys.stderr,
+    )
+    for p in violations:
+        print(f"  {p}", file=sys.stderr)
+    return False
+
+
 def check_test_structure(
     repo_root: Path,
     src_package: str | None = None,
     verbose: bool = False,
 ) -> bool:
-    """Run both test structure checks.
+    """Run all test structure checks.
 
     Args:
         repo_root: Repository root directory.
@@ -352,7 +403,8 @@ def check_test_structure(
         src_package = _detect_src_package(repo_root)
 
     src_root = repo_root / src_package
-    test_root = repo_root / "tests" / "unit"
+    tests_root = repo_root / "tests"
+    test_root = tests_root / "unit"
 
     if not src_root.is_dir():
         print(f"ERROR: Source root not found: {src_root}", file=sys.stderr)
@@ -367,6 +419,7 @@ def check_test_structure(
         _report_loose_files_check(test_root, verbose),
         _report_unsanctioned_dirs_check(src_root, test_root, verbose),
         _report_ghost_packages_check(src_root, test_root, verbose),
+        _report_stray_tests_root_files_check(tests_root, verbose),
     ]
     return all(results)
 
