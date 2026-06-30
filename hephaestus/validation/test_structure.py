@@ -1,6 +1,6 @@
 """Validate unit test directory structure.
 
-Provides three complementary checks:
+Provides four complementary checks:
 
 1. **Mirror check**: Every subpackage in the source directory has a corresponding
    directory under ``tests/unit/``.
@@ -10,6 +10,10 @@ Provides three complementary checks:
 3. **No-unsanctioned-dirs check**: Every directory under ``tests/unit/`` either
    mirrors a source subpackage or is in the ``SANCTIONED_EXTRA_TEST_DIRS``
    allowlist (for non-package targets like top-level ``scripts/``/``docs/``).
+4. **No-ghost-packages check**: No ``tests/unit/<name>/`` dir mirrors a
+   ``hephaestus/<name>/`` subpackage where both are content-free (source has
+   no module beyond ``__init__.py`` AND the test dir has no ``test_*.py``) —
+   the name-only mirror check would otherwise treat the pair as valid.
 
 Usage::
 
@@ -72,6 +76,51 @@ def _get_subpackages(root: Path) -> set[str]:
         and not d.name.startswith(".")
         and _has_python_source(d)
     }
+
+
+def _has_source_modules(pkg_dir: Path) -> bool:
+    """Return True if *pkg_dir* holds at least one module beyond ``__init__.py``."""
+    if not pkg_dir.is_dir():
+        return False
+    return any(p.name != "__init__.py" for p in pkg_dir.glob("*.py"))
+
+
+def _has_test_files(test_dir: Path) -> bool:
+    """Return True if *test_dir* holds at least one ``test_*.py`` file."""
+    if not test_dir.is_dir():
+        return False
+    return any(test_dir.glob("test_*.py"))
+
+
+def check_no_ghost_packages(
+    src_root: Path,
+    test_root: Path,
+) -> tuple[bool, set[str]]:
+    """Flag *ghost* mirror pairs the name-only mirror check misses.
+
+    A name-only mirror (:func:`check_test_directory_mirrors`) passes when a
+    ``tests/unit/<name>/`` dir and a ``<src>/<name>/`` dir share a name — even
+    if BOTH are content-free. Such a pair (source has no module beyond
+    ``__init__.py`` AND the test dir has no ``test_*.py``) is a false-positive
+    "valid mirror" that hides that neither side has any content. This detects
+    that case directly.
+
+    Args:
+        src_root: Path to the source package (e.g. ``hephaestus/``).
+        test_root: Path to the unit test root (e.g. ``tests/unit/``).
+
+    Returns:
+        Tuple of ``(ok, ghosts)`` where *ghosts* is the set of subpackage names
+        whose source dir has no module AND whose test dir has no ``test_*.py``.
+
+    """
+    shared = _get_subpackages(src_root) & _get_subpackages(test_root)
+    ghosts = {
+        name
+        for name in shared
+        if not _has_source_modules(src_root / name) and not _has_test_files(test_root / name)
+    }
+    return len(ghosts) == 0, ghosts
 
 
 def check_test_directory_mirrors(
@@ -257,6 +306,31 @@ def _report_unsanctioned_dirs_check(
     return False
 
 
+def _report_ghost_packages_check(
+    src_root: Path,
+    test_root: Path,
+    verbose: bool,
+) -> bool:
+    ok, ghosts = check_no_ghost_packages(src_root, test_root)
+    if ok:
+        if verbose:
+            print("OK: No ghost (content-free) mirror directories.")
+        return True
+    print(
+        "ERROR: tests/unit/ has directories mirroring a source subpackage where\n"
+        "BOTH the source package (no module beyond __init__.py) and the test dir\n"
+        "(no test_*.py) are content-free. Remove both ghost dirs, or add real\n"
+        "content.\nGhost(s):",
+        file=sys.stderr,
+    )
+    for name in sorted(ghosts):
+        print(
+            f"  hephaestus/{name}/ (no modules)  <->  tests/unit/{name}/ (no tests)",
+            file=sys.stderr,
+        )
+    return False
+
+
 def check_test_structure(
     repo_root: Path,
     src_package: str | None = None,
@@ -292,6 +366,7 @@ def check_test_structure(
         _report_mirror_check(src_root, test_root, src_package, verbose),
         _report_loose_files_check(test_root, verbose),
         _report_unsanctioned_dirs_check(src_root, test_root, verbose),
+        _report_ghost_packages_check(src_root, test_root, verbose),
     ]
     return all(results)
 
