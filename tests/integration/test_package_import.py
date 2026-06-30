@@ -21,7 +21,6 @@ TOP_LEVEL_SYMBOLS = [
     "format_output",
     "format_system_info",
     "format_table",
-    "get_config_value",
     "get_logger",
     "get_proj_root",
     "get_repo_root",
@@ -43,6 +42,10 @@ TOP_LEVEL_SYMBOLS = [
     "write_file",
 ]
 
+# Deprecated symbols removed in issue #1420. Guards against re-introduction at
+# the top-level package surface.
+REMOVED_DEPRECATED_SYMBOLS = ("get_config_value", "retry_with_jitter")
+
 SUBPACKAGE_SYMBOLS = [
     (
         "hephaestus.io",
@@ -52,7 +55,7 @@ SUBPACKAGE_SYMBOLS = [
     ("hephaestus.system", ["get_system_info", "format_system_info"]),
     ("hephaestus.datasets", ["DatasetDownloader"]),
     ("hephaestus.github", ["detect_repo_from_remote", "local_branch_exists", "collect_stats"]),
-    ("hephaestus.config", ["load_config", "get_setting", "get_config_value", "merge_configs"]),
+    ("hephaestus.config", ["load_config", "get_setting", "merge_configs"]),
     ("hephaestus.cli", ["Colors"]),
     ("hephaestus.utils", ["slugify", "retry_with_backoff", "flatten_dict", "get_repo_root"]),
     ("hephaestus.markdown", ["MarkdownFixer", "LinkFixer"]),
@@ -108,6 +111,18 @@ class TestTopLevelImports:
         assert hasattr(hephaestus, "__all__")
         assert len(hephaestus.__all__) > 0
 
+    @pytest.mark.parametrize("symbol", REMOVED_DEPRECATED_SYMBOLS)
+    def test_removed_deprecated_top_level_symbols_unavailable(self, symbol):
+        """Removed deprecated symbols (#1420) must be absent from the top-level surface."""
+        import hephaestus
+
+        hephaestus.__dict__.pop(symbol, None)  # bust any PEP 562 cache
+        assert symbol not in hephaestus._LAZY_IMPORTS
+        assert symbol not in dir(hephaestus)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            assert not hasattr(hephaestus, symbol)
+
 
 class TestDirDiscoverability:
     """Verify dir(hephaestus) exposes the lazy public surface (PEP 562, #1512)."""
@@ -139,7 +154,7 @@ class TestDirDiscoverability:
         """dir() returns names only — no lazy import, no DeprecationWarning."""
         import hephaestus
 
-        hephaestus.__dict__.pop("retry_with_jitter", None)  # bust PEP 562 cache
+        hephaestus.__dict__.pop("retry_with_backoff", None)  # bust PEP 562 cache
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             _ = dir(hephaestus)
@@ -147,7 +162,7 @@ class TestDirDiscoverability:
         assert not [w for w in caught if issubclass(w.category, DeprecationWarning)], (
             "dir() must not trigger deprecation warnings"
         )
-        assert "retry_with_jitter" not in hephaestus.__dict__, (
+        assert "retry_with_backoff" not in hephaestus.__dict__, (
             "dir() must not eagerly resolve lazy symbols into module globals"
         )
 

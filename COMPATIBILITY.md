@@ -183,17 +183,10 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 `check_coverage`, `check_max_complexity`, `check_python_version_consistency`,
 `check_test_structure`, `COMMAND_REGISTRY`, `confirm_action`, `create_parser`,
 `detect_rate_limit`, `filter_audit_results`, `flatten_dict`, `format_output`,
-`format_system_info`, `format_table`, `get_config_value`, `get_proj_root`,
+`format_system_info`, `format_table`, `get_proj_root`,
 `get_repo_root`, `get_setting`, `human_readable_size`, `install_package`,
 `load_data`, `merge_configs`, `parse_reset_epoch`, `read_file`, `register_command`,
 `run_subprocess`, `safe_write`, `save_data`, `wait_until`, `write_file`, `write_secure`.
-
-**Deprecated lazy-loaded symbols** (covered by the deprecation policy until
-removal):
-
-- `retry_with_jitter` — superseded by `retry_with_backoff(jitter=True, max_delay=...)`.
-  Emits a `DeprecationWarning` both when accessed via `hephaestus.retry_with_jitter`
-  and when called. Scheduled for removal no earlier than the next major version after 1.0.
 
 ### `hephaestus.logging`
 
@@ -214,7 +207,6 @@ removal):
 | `check_dep_sync` | 0.3.0 | Check pixi.toml ↔ requirements drift |
 | `check_requirements_up_to_date` | 0.3.0 | Verify requirements file is current |
 | `generate_requirements_content` | 0.3.0 | Render requirements.txt content from pixi deps |
-| `get_config_value` | 0.2.0 | High-level config lookup with env overlay — **(deprecated)**, use `load_config` + `merge_with_env` + `get_setting` |
 | `get_setting` | 0.1.0 | Dot-notation access to nested config dict |
 | `load_config` | 0.1.0 | Load YAML/JSON config file |
 | `load_yaml_config` | 0.1.0 | Load a YAML config file |
@@ -224,12 +216,6 @@ removal):
 | `parse_requirements` | 0.3.0 | Parse a requirements.txt file |
 | `sync_requirements` | 0.3.0 | Sync requirements.txt from pixi deps |
 | `validate_config` | 0.1.0 | Validate a config dict against a schema |
-
-**Deprecated symbols** (covered by the deprecation policy until removal):
-
-- `get_config_value` — superseded by the explicit pipeline `load_config()` →
-  `merge_with_env()` → `get_setting()`. Emits a `DeprecationWarning` when called.
-  Scheduled for removal no earlier than the next major version after 1.0.
 
 ### `hephaestus.io`
 
@@ -258,7 +244,6 @@ removal):
 | `restore_terminal` | 0.3.0 | Restore terminal state after a raw-mode session |
 | `retry_on_network_error` | 0.2.0 | Retry decorator scoped to network errors |
 | `retry_with_backoff` | 0.1.0 | Exponential backoff retry decorator |
-| `retry_with_jitter` | 0.1.0 | Jittered backoff retry decorator — **(deprecated)**, use `retry_with_backoff(jitter=True, max_delay=...)` |
 | `run_subprocess` | 0.1.0 | Execute shell commands with error handling |
 | `slugify` | 0.1.0 | Convert text to URL-friendly slug |
 | `terminal_guard` | 0.3.0 | Context manager that saves/restores terminal state |

@@ -56,16 +56,17 @@ behavior (you should not have), review these:
 | `hephaestus.io.write_secure` | Restrictive permissions but non-atomic write | Atomic **and** `0o600`-permissioned |
 | `hephaestus.github.wait_until` | Raised `ValueError` when called from a worker thread | Safe to call from any thread |
 
-### Deprecated symbols
+### Removed deprecated symbols
 
-- `retry_with_jitter` — deprecated in favor of `retry_with_backoff(jitter=True,
-  max_delay=...)`. It still works and emits a `DeprecationWarning`; it is retained for
-  backwards compatibility and is not removed in 1.0. See the
-  [deprecation policy](../COMPATIBILITY.md#deprecation-policy).
-- `get_config_value` — deprecated in favor of the explicit pipeline `load_config()`
-  → `merge_with_env()` → `get_setting()`. It still works and emits a
-  `DeprecationWarning`; it is retained for backwards compatibility and is not removed
-  in 1.0. See the [deprecation policy](../COMPATIBILITY.md#deprecation-policy).
+The following previously-deprecated symbols have been **removed**. Imports such as
+`from hephaestus.config import get_config_value`, `from hephaestus.utils import
+retry_with_jitter`, `hephaestus.get_config_value`, and `hephaestus.retry_with_jitter`
+will now raise `ImportError`/`AttributeError`. Migrate to the canonical replacements:
+
+| Removed symbol | Replacement |
+|----------------|-------------|
+| `get_config_value` | `load_config()`, `merge_with_env()`, then `get_setting()` |
+| `retry_with_jitter` | `retry_with_backoff(jitter=True, max_delay=...)` |
 
 ### Questions
 
