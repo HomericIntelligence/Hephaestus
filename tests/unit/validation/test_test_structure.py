@@ -8,6 +8,7 @@ from hephaestus.validation.test_structure import (
     _get_subpackages,
     check_no_ghost_packages,
     check_no_loose_test_files,
+    check_no_stray_tests_root_files,
     check_no_unsanctioned_test_dirs,
     check_scripts_coverage,
     check_test_directory_mirrors,
@@ -132,6 +133,52 @@ class TestCheckNoLooseTestFiles:
         no_loose, violations = check_no_loose_test_files(unit_root)
         assert no_loose is False
         assert len(violations) == 2
+
+
+class TestCheckNoStrayTestsRootFiles:
+    """Tests for check_no_stray_tests_root_files (issue #1467)."""
+
+    def test_clean_tests_root_passes(self, tmp_path: Path) -> None:
+        """A tests/ root holding only allowed files passes."""
+        (tmp_path / "__init__.py").write_text("", encoding="utf-8")
+        (tmp_path / "conftest.py").write_text("", encoding="utf-8")
+        ok, violations = check_no_stray_tests_root_files(tmp_path)
+        assert ok is True
+        assert violations == []
+
+    def test_stray_test_file_detected(self, tmp_path: Path) -> None:
+        """A test_*.py directly at tests/ root is flagged (the #1467 defect)."""
+        (tmp_path / "test_show_prompt.py").write_text("def test_x(): pass\n", encoding="utf-8")
+        ok, violations = check_no_stray_tests_root_files(tmp_path)
+        assert ok is False
+        assert [p.name for p in violations] == ["test_show_prompt.py"]
+
+    def test_allowed_files_not_flagged(self, tmp_path: Path) -> None:
+        """__init__.py and conftest.py at tests/ root are allowed."""
+        (tmp_path / "conftest.py").write_text("", encoding="utf-8")
+        ok, violations = check_no_stray_tests_root_files(tmp_path)
+        assert ok is True
+        assert violations == []
+
+    def test_multiple_stray_files_all_detected(self, tmp_path: Path) -> None:
+        """Multiple stray files are all reported, sorted."""
+        (tmp_path / "test_a.py").write_text("", encoding="utf-8")
+        (tmp_path / "test_b.py").write_text("", encoding="utf-8")
+        ok, violations = check_no_stray_tests_root_files(tmp_path)
+        assert ok is False
+        assert [p.name for p in violations] == ["test_a.py", "test_b.py"]
+
+    def test_missing_directory(self, tmp_path: Path) -> None:
+        """A missing tests/ directory yields no violations."""
+        ok, violations = check_no_stray_tests_root_files(tmp_path / "nope")
+        assert ok is True
+        assert violations == []
+
+    def test_real_repo_tests_root_is_clean(self) -> None:
+        """The shipped tests/ root must have no stray test_*.py (gate ships green)."""
+        repo_root = Path(__file__).resolve().parents[3]
+        ok, violations = check_no_stray_tests_root_files(repo_root / "tests")
+        assert ok is True, f"stray test files at tests/ root: {violations}"
 
 
 class TestCheckNoUnsanctionedTestDirs:
@@ -398,6 +445,26 @@ class TestCheckTestStructure:
         err = capsys.readouterr().err
         assert "tests/unit/git/ (no tests)" in err
         assert "hephaestus/git/ (no modules)" in err
+
+    def test_stray_tests_root_file_fails(self, tmp_path: Path, capsys) -> None:
+        """check_test_structure fails and prints when a test_*.py sits at tests/ root.
+
+        Exercises Check 5's failure branch (the stray-file print loop). The
+        structure passes every other check; only a stray ``test_*.py`` at
+        ``tests/`` root (outside testpaths) triggers the failure — the #1467
+        regression.
+        """
+        src = tmp_path / "mypackage"
+        _make_package(src, "utils")
+        (src / "__init__.py").touch()
+        test_root = tmp_path / "tests" / "unit"
+        _make_test_dir(test_root, "utils")
+        (tmp_path / "tests" / "test_orphan.py").write_text("def test_x(): pass\n", encoding="utf-8")
+        passed = check_test_structure(tmp_path, src_package="mypackage")
+        assert passed is False
+        err = capsys.readouterr().err
+        assert "test_orphan.py" in err
+        assert "outside testpaths" in err
 
 
 class TestDetectSrcPackage:
