@@ -6,7 +6,7 @@
 #
 # Workaround for the structural bugs filed as #818–#821 in
 # HomericIntelligence/ProjectHephaestus:
-#   - drive_prs_green.py has no --repos / --org flag (this script loops)
+#   - the CI driver has no --repos / --org flag (this script loops)
 #   - issue-driven discovery only: PRs without `Closes #<open-issue>` are invisible
 #
 # Pre-reqs:
@@ -25,7 +25,7 @@
 #   ~/drive-prs-green-ecosystem.sh --gh-global-burst 20
 #   ~/drive-prs-green-ecosystem.sh -- --max-workers 5  # everything after `--` goes to driver
 #
-# All non-script-flag args before `--` are forwarded to drive_prs_green.py as well.
+# All non-script-flag args before `--` are forwarded to the CI driver as well.
 #
 # Log directory layout (run is anchored at <log-dir>/<UTC-timestamp>/):
 #   _run.meta.json        — top-level run metadata (host, git rev, env, args)
@@ -106,7 +106,8 @@ done
 
 # ── Environment ──────────────────────────────────────────────────────────────
 PROJECTS_ROOT="${PROJECTS_ROOT:-/home/mvillmow/Projects}"
-DRIVER="$PROJECT_ROOT/scripts/drive_prs_green.py"
+# Canonical entry point; the legacy wrapper was removed.
+DRIVER_MODULE="hephaestus.automation.ci_driver"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_VERSION="$(cd "$(dirname "$SCRIPT_PATH")" && md5sum "$(basename "$SCRIPT_PATH")" 2>/dev/null | cut -d' ' -f1 || echo unknown)"
 
@@ -123,8 +124,8 @@ hephaestus_gh() {
 }
 
 # ── Sanity checks ────────────────────────────────────────────────────────────
-if [[ ! -f "$DRIVER" ]]; then
-  echo "ERROR: driver script not found at $DRIVER" >&2
+if [[ ! -f "$PROJECT_ROOT/pyproject.toml" ]]; then
+  echo "ERROR: ProjectHephaestus root not found at $PROJECT_ROOT" >&2
   exit 1
 fi
 if ! hephaestus_gh --version >/dev/null 2>&1; then
@@ -155,7 +156,7 @@ write_run_meta() {
     --arg projects_root "$PROJECTS_ROOT" \
     --arg project_root "$PROJECT_ROOT" \
     --arg hephaestus_rev "$hep_rev" \
-    --arg driver_path "$DRIVER" \
+    --arg driver_module "$DRIVER_MODULE" \
     --arg log_root "$LOG_ROOT" \
     --arg script_path "$SCRIPT_PATH" \
     --arg script_md5 "$SCRIPT_VERSION" \
@@ -169,7 +170,7 @@ write_run_meta() {
       projects_root: $projects_root,
       project_root: $project_root,
       hephaestus_rev: $hephaestus_rev,
-      driver_path: $driver_path,
+      driver_module: $driver_module,
       log_root: $log_root,
       script_path: $script_path,
       script_md5: $script_md5,
@@ -332,7 +333,7 @@ for REPO in "${REPOS[@]}"; do
   banner "$REPO_LOG" "$REPO" "driver" "${ISSUES[*]}"
   {
     printf 'repo_dir : %s\n' "$REPO_DIR"
-    printf 'driver   : %s\n' "$DRIVER"
+    printf 'driver   : python -m %s\n' "$DRIVER_MODULE"
     printf 'issues   : %s\n' "${ISSUES[*]:-<none>}"
     printf 'bot PRs  : %s\n' "$BOT_PR_COUNT"
     printf '\n══════ driver stdout+stderr below ══════\n\n'
@@ -345,14 +346,14 @@ for REPO in "${REPOS[@]}"; do
     cd "$REPO_DIR"
     if ((${#ISSUES[@]})); then
       pixi run --manifest-path "$PROJECT_ROOT/pixi.toml" python -u \
-        "$DRIVER" \
+        -m "$DRIVER_MODULE" \
         --issues "${ISSUES[@]}" \
         --no-ui \
         "${GH_ARGS[@]}" \
         "${DRIVER_ARGS[@]}"
     else
       pixi run --manifest-path "$PROJECT_ROOT/pixi.toml" python -u \
-        "$DRIVER" \
+        -m "$DRIVER_MODULE" \
         --no-ui \
         "${GH_ARGS[@]}" \
         "${DRIVER_ARGS[@]}"

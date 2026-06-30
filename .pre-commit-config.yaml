@@ -118,7 +118,7 @@ repos:
       - id: check-cli-table-sync
         name: Check README CLI table sync
         description: Ensure README.md CLI table documents every pyproject.toml [project.scripts] entry
-        entry: pixi run --environment default python3 scripts/check_cli_table_sync.py
+        entry: pixi run --environment default python3 -m hephaestus.scripts_lib.check_cli_table_sync
         language: system
         pass_filenames: false
         files: ^(README\.md|pyproject\.toml)$
@@ -204,7 +204,7 @@ repos:
       - id: check-python-version-consistency
         name: Check Python version consistency
         description: Ensure Python version is consistent across pyproject.toml, pixi.toml, and CI
-        entry: pixi run --environment default python3 scripts/check_python_version_consistency.py
+        entry: pixi run --environment default hephaestus-check-python-version
         language: system
         pass_filenames: false
         files: ^(pyproject\.toml|pixi\.toml|\.github/workflows/.*\.yml)$
@@ -230,7 +230,7 @@ repos:
       - id: check-version-single-source
         name: Check version single source of truth
         description: Ensure pyproject.toml is the sole version authority, pixi.toml has no version
-        entry: pixi run --environment default python3 scripts/check_version_single_source.py
+        entry: pixi run --environment default python3 -m hephaestus.scripts_lib.check_version_single_source
         language: system
         pass_filenames: false
         files: ^(pyproject\.toml|pixi\.toml)$

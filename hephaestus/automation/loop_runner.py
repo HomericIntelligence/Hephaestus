@@ -78,7 +78,7 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 from hephaestus.config.paths import DEFAULT_PROJECTS_DIR, resolve_projects_dir
-from hephaestus.constants import read_timeout_env, scripts_dir as _scripts_dir
+from hephaestus.constants import read_timeout_env
 from hephaestus.github.client import gh_call
 
 LOG = logging.getLogger(__name__)
@@ -678,7 +678,6 @@ def _resolve_phase_bin(phase: str) -> tuple[str, list[str]] | None:
     Known phases fall back to this source checkout when console scripts are
     not installed on PATH. Unknown phases still return ``None``.
     """
-    script_dir = _scripts_dir()
     if phase == "plan":
         return _resolve_console_or_module("hephaestus-plan-issues", "hephaestus.automation.planner")
     if phase == "implement":
@@ -687,8 +686,7 @@ def _resolve_phase_bin(phase: str) -> tuple[str, list[str]] | None:
             "hephaestus.automation.implementer",
         )
     if phase == "drive-green":
-        py = sys.executable
-        return (py, [str(script_dir / "drive_prs_green.py")])
+        return (sys.executable, ["-m", "hephaestus.automation.ci_driver"])
     return None
 
 

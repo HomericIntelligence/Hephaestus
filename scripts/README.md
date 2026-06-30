@@ -1,27 +1,22 @@
 # Scripts Directory
 
-CLI wrapper scripts and shell helpers for ProjectHephaestus. Most Python
-scripts here are thin wrappers around the corresponding `hephaestus.*` module
-exposed via a `[project.scripts]` entry — they exist for local invocation
-without needing the console script on `$PATH`.
+Shell helpers and standalone maintenance scripts for ProjectHephaestus. Most
+Python command-line interfaces live in `hephaestus.*` modules and are exposed
+through installed `hephaestus-*` console scripts.
 
 ## Available Scripts
 
+> The former thin wrappers (`plan_issues.py`, `implement_issues.py`,
+> `drive_prs_green.py`, `merge_prs.py`, `audit_doc_policy.py`,
+> `check_tier_labels.py`, `check_cli_table_sync.py`,
+> `check_python_version_consistency.py`, `check_version_single_source.py`)
+> were removed in #1445 — invoke the installed `hephaestus-*` console scripts
+> or `python3 -m hephaestus.<module>` instead.
+
 ### Validation / pre-commit checks
 
-- **`check_cli_table_sync.py`** — Verify the README CLI table documents every
-  `[project.scripts]` entry. Wired into pre-commit.
-- **`check_python_version_consistency.py`** — Check the Python version is
-  consistent across pyproject.toml, pixi.toml, and CI configs.
-- **`check_tier_labels.py`** — Check the `tier-X` issue/PR labels match the
-  policy.
 - **`check_unit_test_structure.py`** — Verify `tests/unit/` mirrors the
   `hephaestus/` subpackage layout. Wired into pre-commit.
-- **`check_version_single_source.py`** — Validate the project has a single
-  authoritative version source (hatch-vcs git tags) and `pixi.toml` has no
-  version field. Wired into pre-commit.
-- **`audit_doc_policy.py`** — Audit documentation against the CLAUDE.md doc
-  policy (e.g. no CHANGELOG.md).
 - **`validate_readme_commands.py`** — Validate that commands shown in README
   code blocks actually run.
 - **`check-symlinks.sh`** — Detect broken symlinks in the repo.
@@ -30,22 +25,6 @@ without needing the console script on `$PATH`.
 
 - **`fix_invalid_links.py`** — Fix invalid absolute-path links in markdown
   files (wraps `hephaestus.markdown.link_fixer`).
-
-### Automation pipeline (Claude/Codex agent orchestration)
-
-Each of these is a tiny wrapper around the matching `hephaestus.automation.*`
-module — most users invoke the `hephaestus-*` console scripts instead.
-
-- **`plan_issues.py`** → `hephaestus-plan-issues` (bulk issue planning;
-  the planner owns its plan-review loop internally).
-- **`implement_issues.py`** → `hephaestus-implement-issues` (bulk issue
-  implementation in parallel worktrees; absorbs PR-review +
-  thread-addressing in-loop).
-- **`drive_prs_green.py`** → drive open PRs to green CI.
-
-### GitHub
-
-- **`merge_prs.py`** → `hephaestus-merge-prs` (merge open PRs with green CI).
 
 ### Versioning
 
@@ -71,8 +50,8 @@ module — most users invoke the `hephaestus-*` console scripts instead.
 ```bash
 # Pre-commit-checked validators
 python3 scripts/check_unit_test_structure.py
-python3 scripts/check_version_single_source.py
-python3 scripts/check_cli_table_sync.py
+python3 -m hephaestus.scripts_lib.check_version_single_source
+python3 -m hephaestus.scripts_lib.check_cli_table_sync
 
 # Markdown link fixer
 python3 scripts/fix_invalid_links.py .

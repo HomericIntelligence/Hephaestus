@@ -37,7 +37,7 @@ first and treat every value in this skill as a derived copy that must follow.
 - An existing repo is on flake8/black/`src/`/`requirements.txt` and is being
   brought onto the ruff + pixi + pyproject.toml reference stack.
 - Adding a new supported Python version (must update matrix here AND
-  classifiers in `pyproject.toml`; `scripts/check_python_version_consistency.py`
+  classifiers in `pyproject.toml`; `hephaestus-check-python-version`
   enforces the invariant via pre-commit).
 
 Do NOT use this skill for:

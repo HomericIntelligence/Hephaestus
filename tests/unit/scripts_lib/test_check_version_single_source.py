@@ -1,4 +1,4 @@
-"""Tests for scripts/check_version_single_source.py.
+"""Tests for hephaestus.scripts_lib.check_version_single_source.
 
 This project uses hatch-vcs dynamic versioning. The checker validates that the
 version has exactly one authority (git tags via hatch-vcs): no static

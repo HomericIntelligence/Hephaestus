@@ -14,7 +14,7 @@ README.md claimed 42 and docs/index.md claimed 37+ even though the real count
 was 44.
 
 Usage:
-    python3 scripts/check_cli_table_sync.py
+    python3 -m hephaestus.scripts_lib.check_cli_table_sync
 
 Exit codes:
     0  All pyproject.toml scripts are documented in README.md AND the prose

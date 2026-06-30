@@ -1,4 +1,4 @@
-"""Tests for scripts/check_cli_table_sync.py.
+"""Tests for hephaestus.scripts_lib.check_cli_table_sync.
 
 The script verifies two invariants:
 

@@ -926,6 +926,12 @@ def test_resolve_phase_bin_falls_back_to_python_module_when_console_script_absen
     assert leading == ["-m", "hephaestus.automation.planner"]
 
 
+def test_resolve_phase_bin_drive_green_uses_canonical_module() -> None:
+    """drive-green must not depend on the removed scripts wrapper."""
+    resolved = _resolve_phase_bin("drive-green")
+    assert resolved == (sys.executable, ["-m", "hephaestus.automation.ci_driver"])
+
+
 @pytest.mark.parametrize(
     ("phase", "script_name", "module"),
     [

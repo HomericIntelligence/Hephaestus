@@ -11,13 +11,12 @@ Policy enforced: exactly ONE supported (✅) X.Y.x row and exactly ONE EOL
 project moves to a multi-series support policy, update SECURITY.md AND
 relax this script's row-count check together.
 
-NOTE: get_repo_root() is duplicated across scripts/check_python_version_consistency.py
-and scripts/check_version_single_source.py. The reusable version at
+NOTE: get_repo_root() logic is also implemented in
+hephaestus.scripts_lib.check_version_single_source and
+hephaestus.validation.python_version. The reusable version at
 hephaestus/utils/helpers.py:99 is intentionally not imported here because
-pre-commit hooks run via raw `python3` (no `pixi run` wrapper) to avoid
-forcing a pixi env build on every commit; importing from `hephaestus`
-would require switching this hook to `pixi run --environment default`.
-A future consolidation PR can extract these into a stdlib helper.
+this pre-commit hook runs via raw `python3` (no `pixi run` wrapper) to avoid
+forcing a pixi env build on every commit.
 
 Usage:
     python3 scripts/check_security_version_consistency.py

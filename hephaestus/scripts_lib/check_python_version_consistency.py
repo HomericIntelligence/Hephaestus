@@ -2,9 +2,8 @@
 """Delegation shim — canonical implementation lives in ``hephaestus.validation.python_version``.
 
 All business logic has been consolidated into the canonical module.
-This shim exists so ``scripts/check_python_version_consistency.py`` and
-existing callers that use the string-signature ``extract_pyproject_versions``
-continue to work without changes.
+This shim exists so existing callers that use the string-signature
+``extract_pyproject_versions`` continue to work without changes.
 """
 
 from hephaestus.validation.python_version import (

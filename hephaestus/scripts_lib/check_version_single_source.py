@@ -13,7 +13,7 @@ Any deviation (a reintroduced static version, a removed dynamic declaration, a
 pixi workspace version) means the version now has two — or zero — authorities.
 
 Usage:
-    python scripts/check_version_single_source.py
+    python3 -m hephaestus.scripts_lib.check_version_single_source
 """
 
 from __future__ import annotations

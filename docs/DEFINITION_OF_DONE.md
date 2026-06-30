@@ -49,7 +49,7 @@ In addition to the universal checklist:
 | F1 | Public functions have Google-style docstrings | Convention (PR reviewer) |
 | F2 | New `main()` entry points have at least smoke tests (one happy-path, one error-path) | Coverage gate (rejects untested code if it drops total under 83%) |
 | F3 | New CLI scripts use `add_json_arg(parser)` and emit `emit_json_status(...)` on exit | CI integration test `TestCLIJsonFlag` in `tests/integration/test_cli_entry_points.py` |
-| F4 | New CLI scripts appear in `pyproject.toml [project.scripts]` AND in the CLI table of `README.md` | CI gate via `scripts/check_cli_table_sync.py` |
+| F4 | New CLI scripts appear in `pyproject.toml [project.scripts]` AND in the CLI table of `README.md` | CI gate via `hephaestus.scripts_lib.check_cli_table_sync` |
 | F5 | If the work touches deprecated APIs, update `COMPATIBILITY.md` | PR reviewer |
 
 ## For bug fixes

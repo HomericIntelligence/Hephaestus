@@ -32,7 +32,7 @@ name: Test
 # a lint job, coverage gating, or a build step to this file.
 #
 # NOTE: the full classifier set (3.10/3.11/3.12/3.13) is intentionally kept in
-# the matrix below. `scripts/check_python_version_consistency.py` (and its
+# the matrix below. The `hephaestus-check-python-version` check (and its
 # pre-commit hook) require this workflow's python-version matrix to cover every
 # `Programming Language :: Python :: 3.x` classifier in pyproject.toml. Adding a
 # new supported Python means adding it here AND to the classifiers.
