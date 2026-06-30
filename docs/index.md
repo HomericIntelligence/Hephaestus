@@ -30,14 +30,19 @@ ProjectHephaestus is the shared utilities and tooling library for the HomericInt
 
 ## API Reference
 
-Auto-generated API documentation can be produced with [pdoc](https://pdoc.dev/):
+Auto-generated API documentation is published to GitHub Pages on every release:
+
+- **Browse online:** <https://homericintelligence.github.io/ProjectHephaestus/>
+
+The published reference covers full function signatures, docstrings, and type
+annotations for all public modules and CLI entry points, regenerated from the
+released package via [pdoc](https://pdoc.dev/).
+
+To build the same reference locally (output to the git-ignored `docs/api/`):
 
 ```bash
 just docs        # outputs to docs/api/
 ```
-
-The generated `docs/api/` directory is git-ignored; run the command locally to browse
-full function signatures, docstrings, and type annotations for all 51 CLI entry points.
 
 ## Setup
 
