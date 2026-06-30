@@ -9,7 +9,6 @@ from hephaestus.config.dep_sync import (
     sync_requirements,
 )
 from hephaestus.config.utils import (
-    get_config_value,
     get_setting,
     load_config,
     load_yaml_config,
@@ -22,7 +21,6 @@ __all__ = [
     "check_dep_sync",
     "check_requirements_up_to_date",
     "generate_requirements_content",
-    "get_config_value",
     "get_setting",
     "load_config",
     "load_yaml_config",

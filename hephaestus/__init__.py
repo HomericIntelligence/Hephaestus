@@ -40,7 +40,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "format_output": ("hephaestus.cli.utils", "format_output"),
     "format_table": ("hephaestus.cli.utils", "format_table"),
     "register_command": ("hephaestus.cli.utils", "register_command"),
-    "get_config_value": ("hephaestus.config.utils", "get_config_value"),
     "get_setting": ("hephaestus.config.utils", "get_setting"),
     "load_config": ("hephaestus.config.utils", "load_config"),
     "merge_configs": ("hephaestus.config.utils", "merge_configs"),
@@ -65,9 +64,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "human_readable_size": ("hephaestus.utils", "human_readable_size"),
     "install_package": ("hephaestus.utils", "install_package"),
     "retry_with_backoff": ("hephaestus.utils", "retry_with_backoff"),
-    # Deprecated shim — prefer retry_with_backoff(jitter=True, max_delay=...) directly.
-    # Retained for backwards compatibility; will be removed in a future major version.
-    "retry_with_jitter": ("hephaestus.utils", "retry_with_jitter"),
     "run_subprocess": ("hephaestus.utils", "run_subprocess"),
     "slugify": ("hephaestus.utils", "slugify"),
     # validation (v0.5.0)
@@ -84,26 +80,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "filter_audit_results": ("hephaestus.validation.audit", "filter_audit_results"),
 }
 
-# Lazy symbols that are deprecated shims. Accessing any of these via the
-# top-level package surface (e.g. ``hephaestus.retry_with_jitter``) emits a
-# DeprecationWarning at *access* time, complementing the call-time warning the
-# shim itself raises. See COMPATIBILITY.md "Deprecated lazy-loaded symbols".
-_DEPRECATED_LAZY: dict[str, str] = {
-    "retry_with_jitter": (
-        "hephaestus.retry_with_jitter is deprecated; use "
-        "retry_with_backoff(jitter=True, max_delay=...) instead. "
-        "It will be removed no earlier than the next major version after 1.0."
-    ),
-}
-
-
 def __getattr__(name: str) -> Any:
     """Lazy-load public symbols on first access (PEP 562)."""
     if name in _LAZY_IMPORTS:
-        if name in _DEPRECATED_LAZY:
-            import warnings
-
-            warnings.warn(_DEPRECATED_LAZY[name], DeprecationWarning, stacklevel=2)
         module_name, attr = _LAZY_IMPORTS[name]
         import importlib
 

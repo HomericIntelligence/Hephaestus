@@ -26,7 +26,7 @@ Assuming audit remediation is complete:
 
 2. **Cross-Repository Coverage** — Expand hephaestus utility adoption across other HomericIntelligence projects. Standardize configuration loading, logging setup, and subprocess execution patterns.
 
-3. **API Surface Documentation** — Auto-generate API reference documentation for all public modules, including previously undocumented functions (e.g., `retry_with_jitter()`, complete CLI reference).
+3. **API Surface Documentation** — Auto-generate API reference documentation for all public modules, including stable subpackage surfaces and complete CLI reference.
 
 4. **Observability and Health Checks** — Add structured health reporting for long-running components (e.g., NATSSubscriberThread), supporting the broader ProjectArgus (observability) initiative.
 

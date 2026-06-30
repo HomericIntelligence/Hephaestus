@@ -16,7 +16,6 @@ from .retry import (
     is_network_error,
     retry_on_network_error,
     retry_with_backoff,
-    retry_with_jitter,
 )
 
 # Import from terminal
@@ -37,7 +36,6 @@ __all__ = [
     "restore_terminal",
     "retry_on_network_error",
     "retry_with_backoff",
-    "retry_with_jitter",
     "run_subprocess",
     "slugify",
     "terminal_guard",
