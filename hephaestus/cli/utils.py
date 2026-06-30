@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus._version_lookup import get_version
+from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 from hephaestus.utils.helpers import get_repo_root
 
 __version__ = get_version()
@@ -219,7 +220,8 @@ def configure_cli_logging(*, verbose: bool = False) -> None:
     """
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        format=AUTOMATION_LOG_FORMAT,
+        datefmt=LOG_DATEFMT,
     )
 
 

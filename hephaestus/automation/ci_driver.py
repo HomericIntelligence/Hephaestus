@@ -34,6 +34,7 @@ from hephaestus.cli.utils import (
     configure_github_throttle_from_args,
     emit_json_status,
 )
+from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import file_lock
 
@@ -2247,8 +2248,8 @@ def _setup_logging(verbose: bool = False) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+        format=AUTOMATION_LOG_FORMAT,
+        datefmt=LOG_DATEFMT,
     )
 
 

@@ -30,6 +30,7 @@ from hephaestus.cli.utils import (
     configure_github_throttle_from_args,
     emit_json_status,
 )
+from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 from hephaestus.io.utils import write_secure
 
 from ._review_utils import build_automation_parser, ensure_state_dir
@@ -272,7 +273,8 @@ def main(argv: list[str] | None = None) -> int:
     configure_github_throttle_from_args(args)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        format=AUTOMATION_LOG_FORMAT,
+        datefmt=LOG_DATEFMT,
     )
     selected_agent = "codex" if args.codex else args.agent
     agent = (selected_agent or "claude") if args.dry_run else resolve_agent(selected_agent)

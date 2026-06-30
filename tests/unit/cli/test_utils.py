@@ -173,6 +173,15 @@ class TestConfigureCliLogging:
         assert "%(levelname)s" in basic_config.call_args.kwargs["format"]
         assert "%(name)s" in basic_config.call_args.kwargs["format"]
 
+    def test_routes_through_canonical_constants(self) -> None:
+        """configure_cli_logging uses the shared AUTOMATION_LOG_FORMAT (#1427)."""
+        import hephaestus.constants as constants
+
+        with patch("hephaestus.cli.utils.logging.basicConfig") as basic_config:
+            configure_cli_logging()
+        assert basic_config.call_args.kwargs["format"] == constants.AUTOMATION_LOG_FORMAT
+        assert basic_config.call_args.kwargs["datefmt"] == constants.LOG_DATEFMT
+
 
 class TestResolveRepoRoot:
     """Tests for resolve_repo_root."""

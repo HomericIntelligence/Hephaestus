@@ -7,7 +7,12 @@ import os
 
 import pytest
 
-from hephaestus.constants import DEFAULT_EXCLUDE_DIRS, LOG_FORMAT
+from hephaestus.constants import (
+    AUTOMATION_LOG_FORMAT,
+    DEFAULT_EXCLUDE_DIRS,
+    LOG_DATEFMT,
+    LOG_FORMAT,
+)
 from hephaestus.utils import helpers
 
 
@@ -81,6 +86,39 @@ class TestLogFormat:
         assert "%(name)s" in LOG_FORMAT
         assert "%(levelname)s" in LOG_FORMAT
         assert "%(message)s" in LOG_FORMAT
+
+
+class TestAutomationLogFormat:
+    """Tests for AUTOMATION_LOG_FORMAT / LOG_DATEFMT (issue #1427)."""
+
+    def test_is_string(self) -> None:
+        """AUTOMATION_LOG_FORMAT and LOG_DATEFMT must be strings."""
+        assert isinstance(AUTOMATION_LOG_FORMAT, str)
+        assert isinstance(LOG_DATEFMT, str)
+
+    def test_valid_logging_formatter(self) -> None:
+        """AUTOMATION_LOG_FORMAT must build a usable logging.Formatter."""
+        formatter = logging.Formatter(AUTOMATION_LOG_FORMAT, datefmt=LOG_DATEFMT)
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="hello",
+            args=None,
+            exc_info=None,
+        )
+        formatted = formatter.format(record)
+        assert len(formatted) > 0
+
+    def test_uses_bracketed_level_layout(self) -> None:
+        """AUTOMATION_LOG_FORMAT uses the readable bracketed CLI layout."""
+        assert "[%(levelname)s]" in AUTOMATION_LOG_FORMAT
+        assert "%(name)s:" in AUTOMATION_LOG_FORMAT
+
+    def test_distinct_from_library_format(self) -> None:
+        """The automation format is intentionally distinct from LOG_FORMAT."""
+        assert AUTOMATION_LOG_FORMAT != LOG_FORMAT
 
 
 class TestSubprocessTimeouts:

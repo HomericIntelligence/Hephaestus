@@ -26,8 +26,22 @@ DEFAULT_EXCLUDE_DIRS: frozenset[str] = frozenset(
     }
 )
 
-# Standard log format used across all logging utilities.
+# Standard log format used across all library-layer logging utilities
+# (``logging.utils.setup_logging`` / ``get_logger``). Uses " - " field
+# separators. Library code logs with this format.
 LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Canonical log format for automation/CLI entry points (planner, reviewers,
+# ci_driver, implementer, the ``hephaestus-*`` CLIs, ...). The bracketed
+# "[LEVEL] name:" layout is more readable for interactive CLI output. Defined
+# here as the single source of truth so the format cannot drift across the
+# automation and CLI modules (issue #1427). Library code uses ``LOG_FORMAT``;
+# automation/CLI entry points use ``AUTOMATION_LOG_FORMAT``.
+AUTOMATION_LOG_FORMAT: str = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+# Shared ``datefmt`` for the automation/CLI ``basicConfig()`` calls that pair
+# with ``AUTOMATION_LOG_FORMAT``.
+LOG_DATEFMT: str = "%Y-%m-%d %H:%M:%S"
 
 # Base field names included in every JSON log record.
 JSON_LOG_FIELDS: tuple[str, ...] = ("timestamp", "level", "logger", "message")

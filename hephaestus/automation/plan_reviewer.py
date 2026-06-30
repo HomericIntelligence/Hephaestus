@@ -27,6 +27,7 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.automation._review_utils import build_automation_parser, print_worker_summary
 from hephaestus.cli.utils import add_agent_timeout_arg, emit_json_status
+from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 from hephaestus.github.rate_limit import wait_until
 
 from .claude_invoke import invoke_claude_with_session, parse_review_verdict, scan_quota_reset
@@ -606,8 +607,8 @@ def _setup_logging(verbose: bool = False) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+        format=AUTOMATION_LOG_FORMAT,
+        datefmt=LOG_DATEFMT,
     )
 
 

@@ -29,6 +29,7 @@ from hephaestus.cli.utils import (
     add_git_message_timeout_arg,
     add_learn_timeout_arg,
 )
+from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 
 
 def _setup_logging(verbose: bool = False, log_dir: Path | None = None) -> None:
@@ -40,15 +41,13 @@ def _setup_logging(verbose: bool = False, log_dir: Path | None = None) -> None:
 
     """
     level = logging.DEBUG if verbose else logging.INFO
-    fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    datefmt = "%Y-%m-%d %H:%M:%S"
-    logging.basicConfig(level=level, format=fmt, datefmt=datefmt)
+    logging.basicConfig(level=level, format=AUTOMATION_LOG_FORMAT, datefmt=LOG_DATEFMT)
 
     if log_dir:
         log_dir.mkdir(parents=True, exist_ok=True)
         fh = logging.FileHandler(log_dir / "run.log", mode="a")
         fh.setLevel(logging.DEBUG)
-        fh.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+        fh.setFormatter(logging.Formatter(AUTOMATION_LOG_FORMAT, datefmt=LOG_DATEFMT))
         logging.getLogger().addHandler(fh)
 
 
