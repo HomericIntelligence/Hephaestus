@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -24,8 +23,6 @@ from hephaestus.cli.utils import create_validation_parser, emit_json_status, for
 from hephaestus.utils.helpers import get_repo_root
 
 HIGH_THRESHOLD: float = 7.0
-
-CVSS_PATTERN = re.compile(r"CVSS:\d+\.\d+/.*")
 
 
 def load_ignore_list(path: Path | None = None) -> frozenset[str]:
@@ -74,8 +71,6 @@ def extract_cvss_score(severity_list: list[dict[str, Any]]) -> float | None:
         score_str = entry.get("score", "")
         if isinstance(score_str, (int, float)):
             scores.append(float(score_str))
-        elif isinstance(score_str, str) and CVSS_PATTERN.match(score_str):
-            pass
         numeric = entry.get("base_score") or entry.get("cvss_score")
         if numeric is not None:
             with contextlib.suppress(TypeError, ValueError):
