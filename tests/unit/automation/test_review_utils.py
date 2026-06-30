@@ -58,7 +58,9 @@ class TestSetupReviewLogging:
         def fake_basic_config(**kwargs: Any) -> None:
             captured.update(kwargs)
 
-        monkeypatch.setattr(review_utils.logging, "basicConfig", fake_basic_config)
+        monkeypatch.setattr(
+            "hephaestus.automation._review_utils.logging.basicConfig", fake_basic_config
+        )
         review_utils.setup_review_logging(verbose=False)
 
         assert captured["format"] == constants.AUTOMATION_LOG_FORMAT
@@ -71,7 +73,9 @@ class TestSetupReviewLogging:
         def fake_basic_config(**kwargs: Any) -> None:
             captured.update(kwargs)
 
-        monkeypatch.setattr(review_utils.logging, "basicConfig", fake_basic_config)
+        monkeypatch.setattr(
+            "hephaestus.automation._review_utils.logging.basicConfig", fake_basic_config
+        )
         review_utils.setup_review_logging(verbose=True)
 
         assert captured["level"] == logging.DEBUG
