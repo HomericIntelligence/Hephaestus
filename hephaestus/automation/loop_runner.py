@@ -43,6 +43,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -396,8 +397,6 @@ def _make_work_report_path(build_dir: str) -> str:
         Path to a new temp file for work reporting.
 
     """
-    import tempfile
-
     build_path = Path(build_dir)
     build_path.mkdir(parents=True, exist_ok=True)
     fd, path = tempfile.mkstemp(prefix="work_report_", dir=str(build_path))
