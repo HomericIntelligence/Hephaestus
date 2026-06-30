@@ -72,6 +72,9 @@ Library subpackages of `hephaestus` may not import from
 `hephaestus.automation`. The dependency arrow points only one way:
 automation → library. See `docs/adr/0001-automation-library-boundary.md`.
 
+Significant architectural decisions are recorded as ADRs in `docs/adr/`; see
+`docs/adr/README.md` for the enumerable index.
+
 ### Coverage omit-list invariant
 
 A small set of `hephaestus/automation/*` orchestration modules whose loops

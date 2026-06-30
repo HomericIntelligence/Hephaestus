@@ -390,9 +390,7 @@ class TestCircuitBreakerSuccessThreshold:
         assert cb.state == CircuitBreakerState.CLOSED
 
     @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
-    def test_success_threshold_two_requires_two_successes(
-        self, mock_monotonic: MagicMock
-    ) -> None:
+    def test_success_threshold_two_requires_two_successes(self, mock_monotonic: MagicMock) -> None:
         """success_threshold=2: first success keeps circuit HALF_OPEN, second closes it."""
         mock_monotonic.return_value = 1000.0
         cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=30.0, success_threshold=2)
@@ -410,9 +408,7 @@ class TestCircuitBreakerSuccessThreshold:
         assert cb.state == CircuitBreakerState.CLOSED
 
     @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
-    def test_failure_in_half_open_resets_success_counter(
-        self, mock_monotonic: MagicMock
-    ) -> None:
+    def test_failure_in_half_open_resets_success_counter(self, mock_monotonic: MagicMock) -> None:
         """A failure in HALF_OPEN re-opens the circuit and resets the success counter."""
         mock_monotonic.return_value = 1000.0
         cb = CircuitBreaker(
