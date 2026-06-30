@@ -68,7 +68,7 @@ class PRCreatePhase(StageMixin):
                     issue_number,
                 )
 
-        pr_number = impl._ensure_pr_created(issue_number, branch_name, worktree_path, slot_id)
+        pr_number: int = impl._ensure_pr_created(issue_number, branch_name, worktree_path, slot_id)
         with self.state_lock:
             state.pr_number = pr_number
         impl._save_state(state)

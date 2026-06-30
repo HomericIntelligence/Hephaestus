@@ -168,6 +168,24 @@ class IssueImplementer:
             "_run_codex_code",
             "_save_review_log",
             "_load_review_iteration_state",
+            # #1438: absorbed pure-forward phase delegates (were explicit methods)
+            "_finalize_pr",
+            "_run_post_pr_followup",
+            "_implement_issue",
+            "_has_plan",
+            "_generate_plan",
+            "_run_advise",
+            "_run_impl_review_loop",
+            "_run_impl_review_step",
+            "_run_address_review_step",
+            "_resume_impl_with_feedback",
+            "_run_impl_review",
+            "_collect_diff",
+            "_collect_changed_files",
+            "_save_review_iteration_state",
+            "_run_tests_in_worktree",
+            "_run_claude_code",
+            "_ensure_pr_created",
         }
     )
     _STATE_MANAGER_DYNAMIC_DELEGATES: ClassVar[dict[str, str]] = {
@@ -576,213 +594,6 @@ class IssueImplementer:
 
         self._print_summary(results)
         return results
-
-    # ------------------------------------------------------------------
-    # Explicit phase-runner shims retained for high-use test seams and
-    # signature-heavy implementation/review workflows. Mechanical delegates
-    # live in _PHASE_RUNNER_DYNAMIC_DELEGATES above.
-    # ------------------------------------------------------------------
-
-    def _finalize_pr(
-        self,
-        issue_number: int,
-        branch_name: str,
-        worktree_path: Path,
-        state: ImplementationState,
-        slot_id: int | None,
-    ) -> int:
-        """Ensure commit is pushed and PR is created, then persist the PR number."""
-        return self.phase_runner._finalize_pr(
-            issue_number, branch_name, worktree_path, state, slot_id
-        )
-
-    def _run_post_pr_followup(
-        self,
-        issue_number: int,
-        worktree_path: Path,
-        state: ImplementationState,
-        slot_id: int | None,
-    ) -> None:
-        """Run /learn and file follow-up issues after the PR is created."""
-        self.phase_runner._run_post_pr_followup(issue_number, worktree_path, state, slot_id)
-
-    def _implement_issue(self, issue_number: int) -> WorkerResult:
-        """Implement a single issue."""
-        return self.phase_runner._implement_issue(issue_number)
-
-    def _has_plan(self, issue_number: int) -> bool:
-        """Check if issue has an implementation plan."""
-        return self.phase_runner._has_plan(issue_number)
-
-    def _generate_plan(self, issue_number: int) -> None:
-        """Generate plan for an issue using hephaestus-plan-issues."""
-        self.phase_runner._generate_plan(issue_number)
-
-    def _run_advise(self, issue_number: int, issue_title: str, issue_body: str) -> str:
-        """Run the advise-first step before implementing (delegates to runner)."""
-        return self.phase_runner._run_advise(issue_number, issue_title, issue_body)
-
-    def _run_impl_review_loop(
-        self,
-        *,
-        issue_number: int,
-        worktree_path: Path,
-        branch_name: str,
-        issue_title: str,
-        issue_body: str,
-        session_id: str | None,
-        slot_id: int | None,
-        thread_id: int | None,
-        state: ImplementationState | None = None,
-        pr_number: int | None = None,
-        advise_findings: str = "",
-    ) -> tuple[int, str | None, str | None]:
-        """Run the bounded review loop for an implementation."""
-        return self.phase_runner._run_impl_review_loop(
-            issue_number=issue_number,
-            worktree_path=worktree_path,
-            branch_name=branch_name,
-            issue_title=issue_title,
-            issue_body=issue_body,
-            session_id=session_id,
-            slot_id=slot_id,
-            thread_id=thread_id,
-            state=state,
-            pr_number=pr_number,
-            advise_findings=advise_findings,
-        )
-
-    def _run_impl_review_step(
-        self,
-        *,
-        issue_number: int,
-        issue_title: str,
-        issue_body: str,
-        branch_name: str,
-        worktree_path: Path,
-        pr_number: int | None,
-        iteration: int,
-        prior_review: str | None,
-        advise_findings: str = "",
-    ) -> tuple[str, list[str]]:
-        """Run one in-loop review (posts inline PR threads) and return its verdict."""
-        return self.phase_runner._run_impl_review_step(
-            issue_number=issue_number,
-            issue_title=issue_title,
-            issue_body=issue_body,
-            branch_name=branch_name,
-            worktree_path=worktree_path,
-            pr_number=pr_number,
-            iteration=iteration,
-            prior_review=prior_review,
-            advise_findings=advise_findings,
-        )
-
-    def _run_address_review_step(
-        self,
-        *,
-        issue_number: int,
-        pr_number: int,
-        branch_name: str,
-        worktree_path: Path,
-        iteration: int,
-        include_bootstrap_context: bool = False,
-        issue_title: str = "",
-        issue_body: str = "",
-        unaddressed_findings: list[dict[str, Any]] | None = None,
-    ) -> bool:
-        """Address the posted PR threads in-loop, resuming Session 2."""
-        return self.phase_runner._run_address_review_step(
-            issue_number=issue_number,
-            pr_number=pr_number,
-            branch_name=branch_name,
-            worktree_path=worktree_path,
-            iteration=iteration,
-            include_bootstrap_context=include_bootstrap_context,
-            issue_title=issue_title,
-            issue_body=issue_body,
-            unaddressed_findings=unaddressed_findings,
-        )
-
-    def _resume_impl_with_feedback(
-        self,
-        *,
-        session_id: str | None,
-        worktree_path: Path,
-        issue_number: int,
-        review_text: str,
-        prev_iteration: int,
-        verdict: str,
-        state: ImplementationState | None = None,
-    ) -> bool:
-        """Resume the impl session and feed reviewer feedback as the next prompt."""
-        return self.phase_runner._resume_impl_with_feedback(
-            session_id=session_id,
-            worktree_path=worktree_path,
-            issue_number=issue_number,
-            review_text=review_text,
-            prev_iteration=prev_iteration,
-            verdict=verdict,
-            state=state,
-        )
-
-    def _run_impl_review(
-        self,
-        *,
-        issue_number: int,
-        issue_title: str,
-        issue_body: str,
-        diff_text: str,
-        files_changed: str,
-        iteration: int,
-        prior_review: str | None,
-    ) -> str:
-        """Run a fresh-session reviewer against the current impl diff."""
-        return self.phase_runner._run_impl_review(
-            issue_number=issue_number,
-            issue_title=issue_title,
-            issue_body=issue_body,
-            diff_text=diff_text,
-            files_changed=files_changed,
-            iteration=iteration,
-            prior_review=prior_review,
-        )
-
-    def _collect_diff(self, worktree_path: Path, branch_name: str) -> str:
-        """Return the cumulative diff of *branch_name* against ``origin/main``."""
-        return self.phase_runner._collect_diff(worktree_path, branch_name)
-
-    def _collect_changed_files(self, worktree_path: Path, branch_name: str) -> str:
-        """Return a newline-separated list of changed files vs ``origin/main``."""
-        return self.phase_runner._collect_changed_files(worktree_path, branch_name)
-
-    def _save_review_iteration_state(
-        self, issue_number: int, iterations_run: int, prior_review: str
-    ) -> None:
-        """Persist review loop progress for ``--resume`` continuity (A2-005)."""
-        self.phase_runner._save_review_iteration_state(issue_number, iterations_run, prior_review)
-
-    def _run_tests_in_worktree(self, worktree_path: Path, issue_number: int) -> bool:
-        """Run the unit test suite inside the worktree as a pre-PR gate (A2-004)."""
-        return self.phase_runner._run_tests_in_worktree(worktree_path, issue_number)
-
-    def _run_claude_code(
-        self, issue_number: int, worktree_path: Path, prompt: str, slot_id: int | None = None
-    ) -> str | None:
-        """Run the selected implementation agent in a worktree."""
-        return self.phase_runner._run_claude_code(issue_number, worktree_path, prompt, slot_id)
-
-    def _ensure_pr_created(
-        self,
-        issue_number: int,
-        branch_name: str,
-        worktree_path: Path,
-        slot_id: int | None = None,
-    ) -> int:
-        """Ensure an implementation commit is pushed and a PR exists."""
-        return self.phase_runner._ensure_pr_created(
-            issue_number, branch_name, worktree_path, slot_id
-        )
 
 
 def main() -> int:
