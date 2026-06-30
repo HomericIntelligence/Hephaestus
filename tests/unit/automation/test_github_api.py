@@ -1643,9 +1643,7 @@ class TestGhCommitIsVerified:
 
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_returns_true_when_github_reports_verified(
-        self, mock_gh: Any, _mock_info: Any
-    ) -> None:
+    def test_returns_true_when_github_reports_verified(self, mock_gh: Any, _mock_info: Any) -> None:
         from hephaestus.automation.github_api import _gh_commit_is_verified
 
         mock_gh.return_value = Mock(stdout="true\n")
