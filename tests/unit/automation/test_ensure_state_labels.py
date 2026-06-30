@@ -206,9 +206,7 @@ class TestMain:
     def test_main_configures_cli_logging(self, mock_gh_call: MagicMock) -> None:
         """main() routes log setup through the shared configure_cli_logging helper."""
         mock_gh_call.side_effect = [_ok_proc() for _ in range(len(STATE_LABEL_SPECS))]
-        with patch(
-            "hephaestus.automation.ensure_state_labels.configure_cli_logging"
-        ) as configure:
+        with patch("hephaestus.automation.ensure_state_labels.configure_cli_logging") as configure:
             rc = main(["--repo", "owner/name"])
         assert rc == 0
         configure.assert_called_once_with(verbose=False)
@@ -217,9 +215,7 @@ class TestMain:
 class TestCircuitBreakerBoundary:
     """Regression: all GitHub mutations stay on the circuit-breaker-wrapped gh_call."""
 
-    def test_label_create_uses_gh_call_not_subprocess_run(
-        self, mock_gh_call: MagicMock
-    ) -> None:
+    def test_label_create_uses_gh_call_not_subprocess_run(self, mock_gh_call: MagicMock) -> None:
         """ensure_labels_on_repo never bypasses gh_call with a bare subprocess.run."""
         mock_gh_call.return_value = _ok_proc()
         with patch("hephaestus.automation.ensure_state_labels.subprocess.run") as run:
@@ -228,9 +224,7 @@ class TestCircuitBreakerBoundary:
         assert issued == len(STATE_LABEL_SPECS)
         assert mock_gh_call.call_count == len(STATE_LABEL_SPECS)
 
-    def test_circuit_breaker_error_propagates_from_gh_call(
-        self, mock_gh_call: MagicMock
-    ) -> None:
+    def test_circuit_breaker_error_propagates_from_gh_call(self, mock_gh_call: MagicMock) -> None:
         """A GitHubUnavailableError from the open breaker surfaces to the caller."""
         from hephaestus.github.client import GitHubUnavailableError
 
