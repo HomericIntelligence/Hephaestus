@@ -1673,10 +1673,6 @@ class TestWriteSecureCompatibility:
         module = __import__("hephaestus.automation.github_api", fromlist=["write_secure"])
         assert module.write_secure is io_utils.write_secure
 
-    def test_internal_io_write_secure_patch_seam_uses_same_helper(self) -> None:
-        """The existing github_api patch seam should stay on the canonical helper."""
-        assert _github_api_module.io_write_secure is io_utils.write_secure
-
 
 class TestGhCallThrottle:
     """Tests for the per-thread `gh` call throttle inside _gh_call."""
@@ -2230,9 +2226,9 @@ class TestGhPrReviewPost:
 
     @staticmethod
     def _posted_comments(mock_write: Any) -> list[dict[str, Any]]:
-        """Extract the ``comments`` array from the review body io_write_secure saw."""
+        """Extract the ``comments`` array from the review body write_secure saw."""
         for call in mock_write.call_args_list:
-            # io_write_secure(path, body) — body is the JSON review payload.
+            # write_secure(path, body) — body is the JSON review payload.
             body = call.args[1] if len(call.args) > 1 else call.kwargs.get("content", "")
             if isinstance(body, str) and '"comments"' in body:
                 comments = json.loads(body)["comments"]
@@ -2240,7 +2236,7 @@ class TestGhPrReviewPost:
                 return comments
         raise AssertionError("no review body was written")
 
-    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.write_secure")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
     def test_out_of_hunk_comment_is_filtered_summary_still_posts(
@@ -2270,7 +2266,7 @@ class TestGhPrReviewPost:
         bodies = {c["body"] for c in posted}
         assert bodies == {"valid"}
 
-    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.write_secure")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
     def test_all_comments_out_of_hunk_posts_summary_only(
@@ -2292,7 +2288,7 @@ class TestGhPrReviewPost:
         # The review POST was still sent.
         self._review_post_call(mock_gh_call)
 
-    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.write_secure")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
     def test_empty_diff_fails_open_posts_all_comments(
@@ -2321,7 +2317,7 @@ class TestGhPrReviewPost:
 
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
-    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.write_secure")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
     def test_existing_line_comment_is_edited_not_duplicated(
@@ -2369,7 +2365,7 @@ class TestGhPrReviewPost:
 
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
-    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.write_secure")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
     def test_same_line_duplicate_comment_is_skipped_not_appended(
@@ -2424,7 +2420,7 @@ class TestGhPrReviewPost:
 
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
-    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.write_secure")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
     def test_semantic_same_line_duplicate_comment_is_skipped_not_appended(
@@ -2479,7 +2475,7 @@ class TestGhPrReviewPost:
 
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
-    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.write_secure")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
     def test_finding_matching_only_a_resolved_thread_is_reposted(
@@ -2532,7 +2528,7 @@ class TestGhPrReviewPost:
 
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
-    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.write_secure")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
     def test_actual_1116_codex_review_restatements_are_skipped(
@@ -2607,7 +2603,7 @@ class TestGhPrReviewPost:
 
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
-    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.write_secure")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
     def test_same_line_contract_restatement_is_skipped_not_appended(
@@ -2663,7 +2659,7 @@ class TestGhPrReviewPost:
 
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
-    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.write_secure")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
     def test_dedupe_disabled_posts_everything(
@@ -2692,7 +2688,7 @@ class TestGhPrReviewPost:
 
     @patch("hephaestus.automation.github_api.gh_pr_update_review_comment")
     @patch("hephaestus.automation.github_api.gh_pr_inline_comment_index")
-    @patch("hephaestus.automation.github_api.io_write_secure")
+    @patch("hephaestus.automation.github_api.write_secure")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
     def test_edit_in_place_falls_back_to_fresh_on_error(

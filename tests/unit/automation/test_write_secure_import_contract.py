@@ -11,8 +11,7 @@ import hephaestus.automation.github_api as github_api_module
 def test_github_api_does_not_export_write_secure_in_all() -> None:
     """write_secure is not part of the public API surface of github_api.
 
-    The module imports write_secure for internal use and defines an
-    io_write_secure alias for patch-seam compatibility, but the name
+    The module imports write_secure for internal use, but the name
     must not be part of the public ``__all__`` — callers should import
     from hephaestus.io.utils directly.
     """
