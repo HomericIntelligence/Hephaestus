@@ -58,9 +58,6 @@ _issue_state_cache: dict[int, IssueState] = {}
 _gh_call = gh_call
 _GH_BREAKER = _gh_client._GH_BREAKER
 _GH_THROTTLE = _gh_client._GH_THROTTLE
-# Compatibility alias for existing github_api patch seams and downstream named
-# imports. New code should import hephaestus.io.utils.write_secure directly.
-io_write_secure = write_secure
 
 __all__ = [
     "ClaudeUsageCapError",
@@ -1714,7 +1711,7 @@ def gh_pr_review_post(
     fd, input_path = tempfile.mkstemp(prefix="gh-review-", suffix=".json")
     try:
         os.close(fd)
-        io_write_secure(Path(input_path), request_body)
+        write_secure(Path(input_path), request_body)
         result = _gh_call(
             [
                 "api",
