@@ -22,6 +22,7 @@ from hephaestus.automation.review_state import (
     MAX_UNPARSEABLE_VERDICT_PASSES,
     PLAN_REVIEW_PREFIX,
     _extract_verdict_context,
+    _fetch_issue_comments_graphql,
     count_unparseable_verdict_passes,
     exceeds_unparseable_verdict_cap,
     fetch_all_issue_comments_graphql,
@@ -318,6 +319,24 @@ class TestIsPlanReviewGoWithFetch:
         assert "owner=HomericIntelligence" in joined
         assert "name=ProjectMnemosyne" in joined
 
+    def test_fetch_issue_comments_returns_empty_on_gh_failure(self) -> None:
+        """#1426: a ``_gh_call`` failure is logged and yields an empty list.
+
+        Covers the formerly ``# pragma: no cover`` fallback handler in
+        ``_fetch_issue_comments_graphql`` — callers treat ``[]`` as "no review".
+        """
+        with (
+            patch(
+                "hephaestus.automation.review_state.get_repo_info",
+                return_value=("HomericIntelligence", "ProjectMnemosyne"),
+            ),
+            patch(
+                "hephaestus.automation.review_state._gh_call",
+                side_effect=RuntimeError("gh down"),
+            ),
+        ):
+            assert _fetch_issue_comments_graphql(1928) == []
+
 
 # ---------------------------------------------------------------------------
 # count_unparseable_verdict_passes / exceeds_unparseable_verdict_cap (#615)
@@ -388,6 +407,26 @@ class TestUnparseableVerdictCap:
 def test_fetch_all_issue_comments_graphql_is_importable() -> None:
     """Guard the public import surface used by the planner's batch prefetch."""
     assert callable(fetch_all_issue_comments_graphql)
+
+
+def test_fetch_all_comments_returns_empty_map_on_gh_failure() -> None:
+    """#1426: a batch comment-fetch failure → every issue maps to ``[]``.
+
+    Covers the formerly ``# pragma: no cover`` fallback handler in
+    ``fetch_all_issue_comments_graphql``; callers get empty lists.
+    """
+    with (
+        patch("hephaestus.automation.review_state.get_repo_root", return_value="/tmp/repo"),
+        patch(
+            "hephaestus.automation.review_state.get_repo_info",
+            return_value=("HomericIntelligence", "ProjectMnemosyne"),
+        ),
+        patch(
+            "hephaestus.automation.review_state._gh_call",
+            side_effect=RuntimeError("gh down"),
+        ),
+    ):
+        assert fetch_all_issue_comments_graphql([1, 2]) == {1: [], 2: []}
 
 
 # ---------------------------------------------------------------------------

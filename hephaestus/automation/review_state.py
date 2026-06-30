@@ -240,7 +240,7 @@ def _fetch_issue_comments_graphql(issue_number: int) -> list[dict[str, Any]]:
             .get("nodes", [])
         )
         return list(reversed(nodes))
-    except Exception as exc:  # pragma: no cover - logged + treated as "no review"
+    except Exception as exc:  # logged + treated as "no review"
         logger.warning(
             "Failed to fetch comments for issue %s: %s",
             issue_ref(issue_number),
@@ -337,7 +337,7 @@ def fetch_all_issue_comments_graphql(
             nodes = issue_data.get("comments", {}).get("nodes", []) or []
             # GraphQL returns newest-first; reverse to chronological order.
             result_map[num] = list(reversed(nodes))
-    except Exception as exc:  # pragma: no cover - logged, callers get empty lists
+    except Exception as exc:  # logged, callers get empty lists
         logger.warning(
             "Failed to batch-fetch comments for issues %s: %s",
             issue_numbers,
@@ -418,7 +418,7 @@ def fetch_all_issue_labels_graphql(
                 continue
             nodes = issue_data.get("labels", {}).get("nodes", []) or []
             result_map[num] = [n.get("name", "") for n in nodes if n.get("name")]
-    except Exception as exc:  # pragma: no cover - logged, callers get empty lists
+    except Exception as exc:  # logged, callers get empty lists
         logger.warning(
             "Failed to batch-fetch labels for issues %s: %s",
             issue_numbers,

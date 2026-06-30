@@ -1638,6 +1638,35 @@ class TestAssertBranchCommitsSignedApiFallback:
         mock_verified.assert_not_called()
 
 
+class TestGhCommitIsVerified:
+    """``_gh_commit_is_verified`` fail-safe behavior (#1426)."""
+
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_returns_true_when_github_reports_verified(
+        self, mock_gh: Any, _mock_info: Any
+    ) -> None:
+        from hephaestus.automation.github_api import _gh_commit_is_verified
+
+        mock_gh.return_value = Mock(stdout="true\n")
+        assert _gh_commit_is_verified("deadbeef") is True
+
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    @patch(
+        "hephaestus.automation.github_api._gh_call",
+        side_effect=RuntimeError("api down"),
+    )
+    def test_returns_false_on_lookup_failure(self, _mock_gh: Any, _mock_info: Any) -> None:
+        """#1426: a gh lookup failure is logged and fail-safe returns False.
+
+        Covers the formerly ``# pragma: no cover`` fallback handler; the caller
+        falls back to the strict local verdict (treated as unverified).
+        """
+        from hephaestus.automation.github_api import _gh_commit_is_verified
+
+        assert _gh_commit_is_verified("deadbeef") is False
+
+
 class TestWriteSecureCompatibility:
     """Compatibility coverage for the historical github_api import path."""
 

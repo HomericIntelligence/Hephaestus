@@ -349,6 +349,25 @@ class TestAuditReviewerRun:
         assert len(audits) == 1
         assert mock_post.called
 
+    def test_post_init_always_sets_state_dir(self, tmp_path: Path) -> None:
+        """#1426: ``__post_init__`` guarantees ``state_dir`` is non-None.
+
+        This invariant is what makes the ``if self.state_dir is None`` guard in
+        ``run()`` a genuinely-unreachable mypy type-narrowing branch (kept
+        behind ``# pragma: no cover - mypy type-narrowing; unreachable``).
+        """
+        # An explicitly-provided value is preserved verbatim.
+        explicit = AuditReviewer(state_dir=tmp_path)
+        assert explicit.state_dir == tmp_path
+
+        # The default path is populated via ensure_state_dir(get_repo_root()).
+        with mock.patch(
+            "hephaestus.automation.audit_reviewer.ensure_state_dir",
+            return_value=tmp_path / "state",
+        ):
+            default = AuditReviewer()
+        assert default.state_dir is not None
+
     @mock.patch("hephaestus.automation.audit_reviewer.fetch_open_prs")
     def test_no_prs_returns_zero(self, mock_fetch: mock.Mock) -> None:
         mock_fetch.return_value = []

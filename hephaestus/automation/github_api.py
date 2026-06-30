@@ -626,7 +626,7 @@ def _gh_commit_is_verified(oid: str) -> bool:
             ],
         )
         return (result.stdout or "").strip().lower() == "true"
-    except Exception as exc:  # pragma: no cover - logged, treated as unverified
+    except Exception as exc:  # logged, treated as unverified
         logger.warning("Could not confirm GitHub signature for %s: %s", oid[:10], exc)
         return False
 
