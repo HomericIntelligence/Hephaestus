@@ -13,6 +13,8 @@ Provides:
   CLIs (#599 dedupe).
 - ``print_worker_summary``: Standard worker-run summary logging for reviewer
   and driver classes (#1381 dedupe).
+- ``drain_completed_futures``: Shared concurrent-futures drain loop with
+  exponential backoff and WARNING logging on ``wait()`` failure (#1463 dedupe).
 - ``ensure_state_dir``: Create and return the canonical automation state directory.
 - ``build_automation_parser``: Argparse parser builder for automation CLIs
   with opt-in common flags (#1392 dedupe).
@@ -35,7 +37,9 @@ import json
 import logging
 import re
 import threading
-from collections.abc import Callable, Mapping
+import time
+from collections.abc import Callable, Iterator, Mapping
+from concurrent.futures import FIRST_COMPLETED, Future, wait
 from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, overload
@@ -261,6 +265,53 @@ def print_worker_summary(
         for issue_num, result in results.items():
             if not result.success:
                 logger.info("  #%s: %s", issue_num, result.error)
+
+
+def drain_completed_futures(
+    futures: Mapping[Future[Any], int],
+    *,
+    timeout: float = 1.0,
+) -> Iterator[Future[Any]]:
+    """Yield completed futures, backing off on repeated ``wait()`` failures.
+
+    Encapsulates the drain scaffold previously duplicated across the four
+    worker loops (#1463). The canonical exponential-backoff-with-logging
+    behavior is taken from ``address_review.py`` — the prior bare
+    ``except Exception: time.sleep(0.1); continue`` variants in
+    ``ci_driver``/``pr_reviewer``/``plan_reviewer`` silently busy-looped.
+
+    The caller retains ownership of ``futures`` and MUST ``pop`` each yielded
+    future from its own dict; this generator stops when ``futures`` is empty,
+    so the caller's pops drive termination exactly as before.
+
+    Args:
+        futures: Live mapping of in-flight ``Future`` to issue number. The
+            caller mutates this (popping completed futures) between yields.
+        timeout: Per-``wait()`` poll timeout in seconds.
+
+    Yields:
+        Each ``Future`` reported done by ``concurrent.futures.wait``.
+
+    """
+    # Backoff on repeated wait() failures so a flapping condition doesn't
+    # busy-loop silently. Resets to 0.1s on the first successful wait().
+    wait_backoff = 0.1
+    while futures:
+        try:
+            done, _pending = wait(futures.keys(), timeout=timeout, return_when=FIRST_COMPLETED)
+            wait_backoff = 0.1
+        except Exception as exc:
+            logger.warning(
+                "futures.wait() raised %s: %s — backing off %.1fs",
+                type(exc).__name__,
+                exc,
+                wait_backoff,
+            )
+            time.sleep(wait_backoff)
+            wait_backoff = min(wait_backoff * 2, 5.0)
+            continue
+
+        yield from done
 
 
 def _automation_parser_kwargs(

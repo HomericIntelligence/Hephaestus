@@ -15,7 +15,7 @@ import logging
 import subprocess
 import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +40,7 @@ from hephaestus.utils.file_lock import file_lock
 from ._review_utils import (
     _discover_prs_simple,
     build_automation_parser,
+    drain_completed_futures,
     ensure_state_dir,
     find_pr_for_issue,
     load_impl_session_id,
@@ -260,35 +261,24 @@ class CIDriver:
                     future = executor.submit(self._drive_issue, issue_num, pr_num, idx)
                     futures[future] = issue_num
 
-                while futures:
+                for future in drain_completed_futures(futures):
+                    issue_num = futures.pop(future)
                     try:
-                        done, _pending = wait(
-                            futures.keys(), timeout=1.0, return_when=FIRST_COMPLETED
-                        )
-                    except Exception:
-                        time.sleep(0.1)
-                        continue
-
-                    for future in done:
-                        issue_num = futures.pop(future)
-                        try:
-                            result = future.result()
-                            with self.lock:
-                                results[issue_num] = result
-                            if result.success:
-                                logger.info("Issue #%s: CI drive completed", issue_num)
-                            else:
-                                logger.error(
-                                    "Issue #%s: CI drive failed: %s", issue_num, result.error
-                                )
-                        except Exception as e:
-                            logger.error("Issue #%s raised exception: %s", issue_num, e)
-                            with self.lock:
-                                results[issue_num] = WorkerResult(
-                                    issue_number=issue_num,
-                                    success=False,
-                                    error=str(e),
-                                )
+                        result = future.result()
+                        with self.lock:
+                            results[issue_num] = result
+                        if result.success:
+                            logger.info("Issue #%s: CI drive completed", issue_num)
+                        else:
+                            logger.error("Issue #%s: CI drive failed: %s", issue_num, result.error)
+                    except Exception as e:
+                        logger.error("Issue #%s raised exception: %s", issue_num, e)
+                        with self.lock:
+                            results[issue_num] = WorkerResult(
+                                issue_number=issue_num,
+                                success=False,
+                                error=str(e),
+                            )
         finally:
             # Always clean up worktrees, even on KeyboardInterrupt or exception.
             # Mirror the pattern from implementer.py:178-185.

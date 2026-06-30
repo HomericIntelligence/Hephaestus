@@ -15,7 +15,7 @@ import logging
 import subprocess
 import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +25,11 @@ from hephaestus.agents.runtime import (
     run_agent_text,
     uses_direct_agent_runner,
 )
-from hephaestus.automation._review_utils import build_automation_parser, print_worker_summary
+from hephaestus.automation._review_utils import (
+    build_automation_parser,
+    drain_completed_futures,
+    print_worker_summary,
+)
 from hephaestus.cli.utils import add_agent_timeout_arg, emit_json_status
 from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 from hephaestus.github.rate_limit import wait_until
@@ -126,35 +130,28 @@ class PlanReviewer:
                 future = executor.submit(self._review_issue, issue_num, idx)
                 futures[future] = issue_num
 
-            while futures:
+            for future in drain_completed_futures(futures):
+                issue_num = futures.pop(future)
                 try:
-                    done, _pending = wait(futures.keys(), timeout=1.0, return_when=FIRST_COMPLETED)
-                except Exception:
-                    time.sleep(0.1)
-                    continue
-
-                for future in done:
-                    issue_num = futures.pop(future)
-                    try:
-                        result = future.result()
-                        with self.lock:
-                            results[issue_num] = result
-                        if result.success:
-                            logger.info("Issue %s: plan review completed", issue_ref(issue_num))
-                        else:
-                            logger.error(
-                                "Issue %s: plan review failed: %s",
-                                issue_ref(issue_num),
-                                result.error,
-                            )
-                    except Exception as e:
-                        logger.error("Issue %s raised exception: %s", issue_ref(issue_num), e)
-                        with self.lock:
-                            results[issue_num] = WorkerResult(
-                                issue_number=issue_num,
-                                success=False,
-                                error=str(e),
-                            )
+                    result = future.result()
+                    with self.lock:
+                        results[issue_num] = result
+                    if result.success:
+                        logger.info("Issue %s: plan review completed", issue_ref(issue_num))
+                    else:
+                        logger.error(
+                            "Issue %s: plan review failed: %s",
+                            issue_ref(issue_num),
+                            result.error,
+                        )
+                except Exception as e:
+                    logger.error("Issue %s raised exception: %s", issue_ref(issue_num), e)
+                    with self.lock:
+                        results[issue_num] = WorkerResult(
+                            issue_number=issue_num,
+                            success=False,
+                            error=str(e),
+                        )
 
         self._print_summary(results)
         return results
