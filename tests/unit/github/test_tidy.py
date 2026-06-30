@@ -438,7 +438,17 @@ class TestTimeoutHandling:
     def test_direct_rebase_agent_uses_env_configured_timeout(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Direct tidy conflict agents use the configured default rebase timeout."""
+        """Direct tidy conflict agents honor HEPH_AGENT_REBASE_TIMEOUT (#1417)."""
+        monkeypatch.setenv("HEPH_AGENT_REBASE_TIMEOUT", "1234")
+        with patch("hephaestus.github.tidy.run_agent_text") as run_agent:
+            run_agent.return_value = MagicMock(stdout="rebased")
+
+            tidy_module._run_direct_rebase_agent("codex", "prompt", "feature/a", Path("/repo"))
+
+        assert run_agent.call_args.kwargs["timeout"] == 1234
+
+    def test_direct_rebase_agent_default_timeout(self) -> None:
+        """Default rebase-agent timeout is AGENT_REBASE_TIMEOUT (2400)."""
         with patch("hephaestus.github.tidy.run_agent_text") as run_agent:
             run_agent.return_value = MagicMock(stdout="rebased")
 
