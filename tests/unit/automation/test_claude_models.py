@@ -6,7 +6,7 @@ import importlib
 
 import pytest
 
-from hephaestus.automation import claude_models
+from hephaestus.automation import agent_config as claude_models
 
 
 class TestDefaults:
@@ -78,7 +78,7 @@ class TestEnvVarValidation:
         import logging
 
         monkeypatch.setenv("HEPH_PLANNER_MODEL", claude_models.HAIKU)
-        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.claude_models"):
+        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
             result = claude_models.planner_model()
         assert result == claude_models.HAIKU
         assert not caplog.records
@@ -90,7 +90,7 @@ class TestEnvVarValidation:
         import logging
 
         monkeypatch.setenv("HEPH_IMPLEMENTER_MODEL", "claude-preview-99-99")
-        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.claude_models"):
+        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
             result = claude_models.implementer_model()
         assert result == "claude-preview-99-99"
         assert any("Unknown model" in r.message for r in caplog.records)
@@ -135,7 +135,7 @@ class TestNewerModelsRecognized:
         import logging
 
         monkeypatch.setenv("HEPH_REVIEWER_MODEL", model_id)
-        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.claude_models"):
+        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
             result = claude_models.reviewer_model()
         assert result == model_id
         assert not caplog.records
@@ -151,7 +151,7 @@ class TestNewerModelsRecognized:
         import logging
 
         monkeypatch.setenv("HEPH_REVIEWER_MODEL", "claude-fbale-5")  # typo
-        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.claude_models"):
+        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
             result = claude_models.reviewer_model()
         assert result == "claude-fbale-5"
         assert any("Unknown model" in r.message for r in caplog.records)

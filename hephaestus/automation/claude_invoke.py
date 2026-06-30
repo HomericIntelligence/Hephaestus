@@ -27,7 +27,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from hephaestus.automation.session_naming import session_jsonl_path, session_name
+from hephaestus.automation.agent_config import session_jsonl_path, session_name
 from hephaestus.github.client import ClaudeUsageCapError
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch
 from hephaestus.utils.helpers import strip_null_bytes
