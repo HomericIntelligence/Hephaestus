@@ -110,6 +110,24 @@ class TestIssueImplementerDynamicDelegates:
             "_run_codex_code",
             "_save_review_log",
             "_load_review_iteration_state",
+            # #1438: absorbed pure-forward phase delegates (were explicit methods)
+            "_finalize_pr",
+            "_run_post_pr_followup",
+            "_implement_issue",
+            "_has_plan",
+            "_generate_plan",
+            "_run_advise",
+            "_run_impl_review_loop",
+            "_run_impl_review_step",
+            "_run_address_review_step",
+            "_resume_impl_with_feedback",
+            "_run_impl_review",
+            "_collect_diff",
+            "_collect_changed_files",
+            "_save_review_iteration_state",
+            "_run_tests_in_worktree",
+            "_run_claude_code",
+            "_ensure_pr_created",
         }
     )
     STATE_DELEGATES: ClassVar[dict[str, str]] = {
