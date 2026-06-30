@@ -6,6 +6,7 @@ from hephaestus.validation.test_structure import (
     SANCTIONED_EXTRA_TEST_DIRS,
     _detect_src_package,
     _get_subpackages,
+    check_no_ghost_packages,
     check_no_loose_test_files,
     check_no_unsanctioned_test_dirs,
     check_scripts_coverage,
@@ -183,6 +184,65 @@ class TestCheckNoUnsanctionedTestDirs:
         assert {"constants", "docs", "plugins", "scripts", "shell"} <= SANCTIONED_EXTRA_TEST_DIRS
 
 
+class TestCheckNoGhostPackages:
+    """Tests for check_no_ghost_packages()."""
+
+    def test_populated_pair_not_ghost(self, tmp_path: Path) -> None:
+        """A source pkg with a module + tests with test_*.py is not a ghost."""
+        src = tmp_path / "mypackage"
+        tests = tmp_path / "tests" / "unit"
+        _make_package(src, "utils")
+        (src / "utils" / "helpers.py").touch()
+        (tests / "utils").mkdir(parents=True)
+        (tests / "utils" / "test_helpers.py").touch()
+        ok, ghosts = check_no_ghost_packages(src, tests)
+        assert ok is True
+        assert ghosts == set()
+
+    def test_content_free_pair_flagged(self, tmp_path: Path) -> None:
+        """Both dirs name-mirror but neither has content -> ghost.
+
+        The test dir holds only ``__init__.py`` (so ``_get_subpackages``
+        enumerates it as a subpackage) and no ``test_*.py``, mirroring a
+        source pkg that holds only ``__init__.py`` — the exact ghost case.
+        """
+        src = tmp_path / "mypackage"
+        tests = tmp_path / "tests" / "unit"
+        _make_package(src, "git")  # only __init__.py
+        _make_package(tests, "git")  # only __init__.py, no test_*.py
+        ok, ghosts = check_no_ghost_packages(src, tests)
+        assert ok is False
+        assert ghosts == {"git"}
+
+    def test_source_has_module_not_ghost(self, tmp_path: Path) -> None:
+        """A source module beyond __init__.py disqualifies the ghost verdict."""
+        src = tmp_path / "mypackage"
+        tests = tmp_path / "tests" / "unit"
+        _make_package(src, "git")
+        (src / "git" / "changelog.py").touch()
+        (tests / "git").mkdir(parents=True)
+        ok, ghosts = check_no_ghost_packages(src, tests)
+        assert ok is True
+        assert ghosts == set()
+
+    def test_tests_present_not_ghost(self, tmp_path: Path) -> None:
+        """A test_*.py file disqualifies the ghost verdict."""
+        src = tmp_path / "mypackage"
+        tests = tmp_path / "tests" / "unit"
+        _make_package(src, "git")
+        (tests / "git").mkdir(parents=True)
+        (tests / "git" / "test_x.py").touch()
+        ok, ghosts = check_no_ghost_packages(src, tests)
+        assert ok is True
+        assert ghosts == set()
+
+    def test_real_repo_has_no_ghosts(self) -> None:
+        """The shipped tree must have zero ghost mirror pairs."""
+        repo_root = Path(__file__).resolve().parents[3]
+        ok, ghosts = check_no_ghost_packages(repo_root / "hephaestus", repo_root / "tests" / "unit")
+        assert ok is True, f"ghost dirs present: {ghosts}"
+
+
 class TestGetSubpackages:
     """_get_subpackages must ignore ghost (__pycache__-only) directories."""
 
@@ -320,6 +380,24 @@ class TestCheckTestStructure:
         err = capsys.readouterr().err
         assert "tests/unit/rogue/" in err
         assert "SANCTIONED_EXTRA_TEST_DIRS" in err
+
+    def test_ghost_package_fails(self, tmp_path: Path, capsys) -> None:
+        """check_test_structure fails and prints when a ghost mirror pair exists.
+
+        Exercises Check 4's failure branch (the ghost print loop). The source
+        ``git`` pkg holds only ``__init__.py`` and the test ``git`` dir holds
+        only ``__init__.py`` (no ``test_*.py``) — both content-free.
+        """
+        src = tmp_path / "mypackage"
+        _make_package(src, "git")  # source pkg with only __init__.py
+        (src / "__init__.py").touch()
+        test_root = tmp_path / "tests" / "unit"
+        _make_package(test_root, "git")  # mirror dir, only __init__.py, no test_*.py
+        passed = check_test_structure(tmp_path, src_package="mypackage")
+        assert passed is False
+        err = capsys.readouterr().err
+        assert "tests/unit/git/ (no tests)" in err
+        assert "hephaestus/git/ (no modules)" in err
 
 
 class TestDetectSrcPackage:
