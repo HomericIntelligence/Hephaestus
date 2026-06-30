@@ -16,6 +16,10 @@ expanding scope to tests that don't depend on automation primitives.
 
 from __future__ import annotations
 
+from collections.abc import Generator
+from dataclasses import dataclass
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from hephaestus.resilience.circuit_breaker import reset_all_circuit_breakers
@@ -29,3 +33,36 @@ def _reset_circuit_breakers_for_automation_tests() -> None:
     rate-limit retries.
     """
     reset_all_circuit_breakers()
+
+
+@dataclass
+class GitMocks:
+    """Started mocks for a module's ``run`` and ``get_repo_root`` symbols."""
+
+    run: MagicMock
+    repo_root: MagicMock
+
+
+def _patch_run_and_repo_root(module: str) -> Generator[GitMocks, None, None]:
+    """Patch ``<module>.run`` and ``<module>.get_repo_root`` for one test (#1417).
+
+    Replaces the 30+ duplicated ``@patch`` decorator pairs that every test
+    stacked to mock the module-local ``run``/``get_repo_root`` symbols.
+    """
+    with (
+        patch(f"{module}.run") as mock_run,
+        patch(f"{module}.get_repo_root") as mock_repo_root,
+    ):
+        yield GitMocks(run=mock_run, repo_root=mock_repo_root)
+
+
+@pytest.fixture
+def git_utils_mocks() -> Generator[GitMocks, None, None]:
+    """Mock ``run`` + ``get_repo_root`` as seen by ``git_utils`` (#1417)."""
+    yield from _patch_run_and_repo_root("hephaestus.automation.git_utils")
+
+
+@pytest.fixture
+def worktree_mocks() -> Generator[GitMocks, None, None]:
+    """Mock ``run`` + ``get_repo_root`` as seen by ``worktree_manager`` (#1417)."""
+    yield from _patch_run_and_repo_root("hephaestus.automation.worktree_manager")
