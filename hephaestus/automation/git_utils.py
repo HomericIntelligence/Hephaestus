@@ -18,6 +18,7 @@ from pathlib import Path
 # import path for the automation package and its tests. The ``X as X`` form
 # marks it an explicit re-export so mypy does not flag ``attr-defined`` at the
 # 13 import sites under --no-implicit-reexport.
+from hephaestus.utils.cache import ThreadSafeCache
 from hephaestus.utils.helpers import get_repo_root as get_repo_root, run_subprocess
 from hephaestus.utils.retry import retry_with_backoff
 
@@ -67,7 +68,7 @@ def run(
     )
 
 
-_repo_info_cache: dict[Path | None, tuple[str, str]] = {}
+_repo_info_cache: ThreadSafeCache[Path | None, tuple[str, str]] = ThreadSafeCache()
 
 
 def get_repo_info(repo_root: Path | None = None) -> tuple[str, str]:
@@ -87,46 +88,45 @@ def get_repo_info(repo_root: Path | None = None) -> tuple[str, str]:
         repo_root = get_repo_root()
 
     key = repo_root.resolve() if repo_root is not None else None
-    cached = _repo_info_cache.get(key)
-    if cached is not None:
-        return cached
 
-    try:
-        result = run(
-            ["git", "remote", "get-url", "origin"],
-            cwd=repo_root,
-            capture_output=True,
-            check=True,
-        )
-        remote_url = result.stdout.strip()
+    def _compute() -> tuple[str, str]:
+        try:
+            result = run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=repo_root,
+                capture_output=True,
+                check=True,
+            )
+            remote_url = result.stdout.strip()
 
-        # Parse various git URL formats
-        # SSH: git@github.com:owner/repo.git
-        # HTTPS: https://github.com/owner/repo.git
-        if "@" in remote_url and ":" in remote_url:
-            # SSH format
-            parts = remote_url.split(":")[-1].replace(".git", "").split("/")
-            owner, repo = parts[-2], parts[-1]
-        elif remote_url.startswith("https://"):
-            # HTTPS format
-            parts = remote_url.replace(".git", "").split("/")
-            owner, repo = parts[-2], parts[-1]
-        else:
-            raise RuntimeError(f"Unable to parse git remote URL: {remote_url}")
+            # Parse various git URL formats
+            # SSH: git@github.com:owner/repo.git
+            # HTTPS: https://github.com/owner/repo.git
+            if "@" in remote_url and ":" in remote_url:
+                # SSH format
+                parts = remote_url.split(":")[-1].replace(".git", "").split("/")
+                owner, repo = parts[-2], parts[-1]
+            elif remote_url.startswith("https://"):
+                # HTTPS format
+                parts = remote_url.replace(".git", "").split("/")
+                owner, repo = parts[-2], parts[-1]
+            else:
+                raise RuntimeError(f"Unable to parse git remote URL: {remote_url}")
 
-        logger.debug("Detected repo: %s/%s", owner, repo)
-        _repo_info_cache[key] = (owner, repo)
-        return owner, repo
+            logger.debug("Detected repo: %s/%s", owner, repo)
+            return owner, repo
 
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to get git remote URL: {e}") from e
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to get git remote URL: {e}") from e
+
+    return _repo_info_cache.get_or_compute(key, _compute)
 
 
 # Keyed by the *resolved* repo_root path so a process that iterates multiple
 # repositories (the automation loop, the myrmidon swarm) gets the right slug
 # per repo instead of the first-cached one for all of them. The ``None`` key
 # holds the result of the auto-detect branch.
-_repo_slug_cache: dict[Path | None, str] = {}
+_repo_slug_cache: ThreadSafeCache[Path | None, str] = ThreadSafeCache()
 
 
 def get_repo_slug(repo_root: Path | None = None) -> str:
@@ -145,15 +145,15 @@ def get_repo_slug(repo_root: Path | None = None) -> str:
 
     """
     key = repo_root.resolve() if repo_root is not None else None
-    cached = _repo_slug_cache.get(key)
-    if cached is not None:
-        return cached
-    try:
-        _, repo = get_repo_info(repo_root)
-    except (RuntimeError, subprocess.CalledProcessError):
-        repo = "repo"
-    _repo_slug_cache[key] = repo
-    return repo
+
+    def _compute() -> str:
+        try:
+            _, repo = get_repo_info(repo_root)
+        except (RuntimeError, subprocess.CalledProcessError):
+            return "repo"
+        return repo
+
+    return _repo_slug_cache.get_or_compute(key, _compute)
 
 
 def clear_repo_caches() -> None:

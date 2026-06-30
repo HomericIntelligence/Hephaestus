@@ -247,6 +247,7 @@ removal):
 
 | Symbol | Added | Notes |
 |--------|-------|-------|
+| `ThreadSafeCache` | 0.9.8 | Lock-protected TTL cache with `get_or_compute` |
 | `flatten_dict` | 0.1.0 | Flatten nested dict |
 | `get_proj_root` | 0.1.0 | Locate the project root directory |
 | `get_repo_root` | 0.1.0 | Locate the git repository root |

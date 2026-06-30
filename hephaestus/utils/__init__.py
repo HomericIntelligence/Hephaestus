@@ -1,5 +1,8 @@
 """Utility functions for ProjectHephaestus."""
 
+# Import from cache
+from .cache import ThreadSafeCache
+
 # Import from helpers
 from .helpers import (
     flatten_dict,
@@ -27,6 +30,7 @@ from .terminal import (
 )
 
 __all__ = [
+    "ThreadSafeCache",
     "flatten_dict",
     "get_proj_root",
     "get_repo_root",
