@@ -40,6 +40,8 @@ from hephaestus.github.mnemosyne_repo import resolve_mnemosyne_target
 try:
     import fcntl
 except ModuleNotFoundError:  # pragma: no cover - Windows fallback
+    # WHY justified: mypy types the stdlib `fcntl` module, so rebinding the
+    # name to None on the Windows fallback path needs [assignment].
     fcntl = None  # type: ignore[assignment]
 
 from .git_utils import get_repo_root

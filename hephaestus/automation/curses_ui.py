@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 try:
     import curses
 except ModuleNotFoundError:  # Windows: stdlib `curses` is not bundled with CPython.
+    # WHY justified: mypy types the imported `curses` module, so rebinding the
+    # name to None on the Windows fallback path needs [assignment].
     curses = None  # type: ignore[assignment]
 
 

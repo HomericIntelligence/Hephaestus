@@ -52,6 +52,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import BinaryIO
 
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 
@@ -224,7 +225,7 @@ def verify_crash_bundle(log_dir: Path) -> tuple[str, str]:
 
 
 def write_core(
-    stream: object,
+    stream: BinaryIO,
     pid: str,
     exe: str,
     crash_time: str,
@@ -257,7 +258,7 @@ def write_core(
     try:
         with open(out, "wb") as core_file:
             while written < max_bytes:
-                chunk = stream.read(min(chunk_size, max_bytes - written))  # type: ignore[attr-defined]
+                chunk = stream.read(min(chunk_size, max_bytes - written))
                 if not chunk:
                     break
                 core_file.write(chunk)

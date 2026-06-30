@@ -38,6 +38,9 @@ def _get_tomllib() -> types.ModuleType:
         RuntimeError: When neither ``tomllib`` nor ``tomli`` is importable.
 
     """
+    # WHY justified: tomllib is stdlib only on Python 3.11+; on 3.10 we fall
+    # back to the `tomli` backport. [no-any-return] — the imported module object
+    # is typed Any; [no-redef] — `tomli as tomllib` rebinds the same name.
     try:
         import tomllib  # Python 3.11+
 

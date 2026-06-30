@@ -22,6 +22,7 @@ Note: pixi.toml intentionally has no version field.
 
 import re
 from pathlib import Path
+from typing import cast
 
 from hephaestus.logging.utils import get_logger
 from hephaestus.utils.helpers import get_repo_root
@@ -102,8 +103,10 @@ class VersionManager:
         if pyproject_file is _UNSET:
             self.pyproject_file: Path | None = self.repo_root / "pyproject.toml"
         else:
-            # At this point pyproject_file is Path | None (not _UnsetType)
-            self.pyproject_file = pyproject_file  # type: ignore[assignment]
+            # The `is _UNSET` check above eliminates the sentinel, but mypy
+            # cannot narrow it out of the union; cast to Path | None so the
+            # assignment type-checks without a blanket suppression.
+            self.pyproject_file = cast("Path | None", pyproject_file)
         self.version_files = version_files or [self.repo_root / "VERSION"]
 
         # Auto-detect init files if not provided

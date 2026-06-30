@@ -36,6 +36,8 @@ logger = logging.getLogger(__name__)
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover – Python 3.8 backport
+    # WHY justified: the backports.zoneinfo fallback rebinds the same `ZoneInfo`
+    # name as the stdlib import above, which mypy flags as [no-redef].
     from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
 
 # Regex matching GitHub CLI rate-limit messages, e.g.:

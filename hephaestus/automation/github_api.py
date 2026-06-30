@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import tempfile
+from collections.abc import Iterator
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, cast
@@ -208,7 +209,7 @@ def gh_issue_remove_labels(issue_number: int, labels: list[str]) -> None:
 
 
 @contextlib.contextmanager
-def _body_file(body: str):  # type: ignore[no-untyped-def]
+def _body_file(body: str) -> Iterator[str]:
     """Yield a path to a temporary file containing *body*, deleted on exit.
 
     Use with ``gh <subcmd> --body-file <path>`` instead of ``--body <body>`` so

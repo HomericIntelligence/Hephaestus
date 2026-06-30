@@ -39,6 +39,9 @@ _correlation_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar
 )
 
 
+# WHY justified: logging.LoggerAdapter is non-generic at runtime on Python 3.10
+# (PEP 585-style subscription was added in 3.11); parameterizing it would break
+# at import time, so we suppress disallow_any_generics' [type-arg] here.
 class ContextLogger(logging.LoggerAdapter):  # type: ignore[type-arg]
     """Logger adapter that adds context information to log messages."""
 
