@@ -297,6 +297,7 @@ def run_address_fix_session(
         try:
             prompt_file.unlink()
         except FileNotFoundError:
+            # Already gone — benign; nothing to clean up.
             pass
         except OSError as exc:
             logger.warning("Could not unlink prompt file %s: %s", prompt_file, exc)
