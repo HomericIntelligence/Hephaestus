@@ -2,6 +2,8 @@
 
 from datetime import datetime
 
+import pytest
+
 from hephaestus.automation.models import (
     DEFAULT_WORKER_COUNT,
     AddressReviewOptions,
@@ -464,3 +466,44 @@ class TestImplementerOptions:
         assert options.dry_run is True
         assert options.enable_learn is True
         assert options.enable_follow_up is True
+
+
+def test_issueinfo_eq_with_non_issueinfo_returns_notimplemented() -> None:
+    """__eq__ against a non-IssueInfo returns NotImplemented (models.py:74)."""
+    issue = IssueInfo(number=1, title="t")
+    assert issue.__eq__("not-an-issue") is NotImplemented
+    assert (issue == 1) is False
+
+
+def test_add_issue_idempotent_when_edges_already_present() -> None:
+    """Re-adding an issue whose edges key exists skips re-init (models.py:327->exit)."""
+    graph = DependencyGraph()
+    a = IssueInfo(number=1, title="a")
+    graph.add_issue(a)
+    graph.add_dependency(1, 2)  # populate edges[1] = [2]
+    graph.add_issue(a)  # edges[1] already present -> false branch, no reset
+    assert graph.edges[1] == [2]
+
+
+def test_add_dependency_raises_when_issue_not_in_graph() -> None:
+    """add_dependency raises ValueError for an unknown source issue (models.py:346)."""
+    graph = DependencyGraph()
+    with pytest.raises(ValueError, match=r"Issue #99 not in graph"):
+        graph.add_dependency(99, 1)  # issue 99 absent -> raise ValueError
+
+
+def test_add_dependency_when_edges_key_missing_initializes_list() -> None:
+    """add_dependency seeds edges[] when issue present but edges key absent (models.py:349)."""
+    graph = DependencyGraph()
+    graph.issues[1] = IssueInfo(number=1, title="a")  # issue present, edges key absent
+    graph.add_dependency(1, 2)
+    assert graph.edges[1] == [2]
+
+
+def test_add_dependency_skips_duplicate_edge() -> None:
+    """Adding an existing edge is a no-op (models.py:350->exit, duplicate-edge guard false side)."""
+    graph = DependencyGraph()
+    graph.add_issue(IssueInfo(number=1, title="a"))  # add_issue seeds edges[1]=[]
+    graph.add_dependency(1, 2)
+    graph.add_dependency(1, 2)  # depends_on already in edges[1] -> false branch, no re-append
+    assert graph.edges[1] == [2]
