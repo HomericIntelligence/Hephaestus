@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import threading
-import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -82,24 +81,28 @@ class TestCircuitBreakerStates:
 
         assert cb.state == CircuitBreakerState.CLOSED
 
-    def test_open_to_half_open_after_recovery_timeout(self) -> None:
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_open_to_half_open_after_recovery_timeout(self, mock_monotonic: MagicMock) -> None:
         """Circuit transitions from OPEN to HALF_OPEN after recovery timeout."""
-        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.1)
+        mock_monotonic.return_value = 1000.0  # baseline stamped by _record_failure
+        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=30.0)
         failing_func = MagicMock(side_effect=RuntimeError("fail"))
 
         with pytest.raises(RuntimeError):
-            cb.call(failing_func)
+            cb.call(failing_func)  # stamps _last_failure_time = 1000.0
 
         assert cb.state == CircuitBreakerState.OPEN
 
-        # Wait for recovery timeout
-        time.sleep(0.15)
+        # Advance past recovery timeout
+        mock_monotonic.return_value = 1030.0
 
         assert cb.state == CircuitBreakerState.HALF_OPEN
 
-    def test_half_open_to_closed_on_success(self) -> None:
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_half_open_to_closed_on_success(self, mock_monotonic: MagicMock) -> None:
         """Successful call in HALF_OPEN transitions to CLOSED."""
-        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.1)
+        mock_monotonic.return_value = 1000.0
+        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=30.0)
 
         # Open the circuit
         with pytest.raises(RuntimeError):
@@ -107,24 +110,26 @@ class TestCircuitBreakerStates:
 
         assert cb.state == CircuitBreakerState.OPEN
 
-        # Wait for recovery
-        time.sleep(0.15)
+        # Advance past recovery timeout
+        mock_monotonic.return_value = 1030.0
 
         # Successful call should close
         result = cb.call(lambda: "recovered")
         assert result == "recovered"
         assert cb.state == CircuitBreakerState.CLOSED
 
-    def test_half_open_to_open_on_failure(self) -> None:
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_half_open_to_open_on_failure(self, mock_monotonic: MagicMock) -> None:
         """Failed call in HALF_OPEN transitions back to OPEN."""
-        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.1)
+        mock_monotonic.return_value = 1000.0
+        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=30.0)
 
         # Open the circuit
         with pytest.raises(RuntimeError):
             cb.call(MagicMock(side_effect=RuntimeError("fail")))
 
-        # Wait for recovery
-        time.sleep(0.15)
+        # Advance past recovery timeout
+        mock_monotonic.return_value = 1030.0
 
         # Fail again in half-open
         with pytest.raises(RuntimeError):
@@ -160,12 +165,14 @@ class TestCircuitBreakerOpenError:
         assert exc_info.value.name == "test"
         assert exc_info.value.reason is CircuitBreakerOpenReason.RECOVERY_TIMEOUT
 
-    def test_half_open_max_calls_exceeded(self) -> None:
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_half_open_max_calls_exceeded(self, mock_monotonic: MagicMock) -> None:
         """Exceeding half_open_max_calls raises CircuitBreakerOpenError."""
+        mock_monotonic.return_value = 1000.0
         cb = CircuitBreaker(
             "test",
             failure_threshold=1,
-            recovery_timeout=0.1,
+            recovery_timeout=30.0,
             half_open_max_calls=1,
         )
 
@@ -173,8 +180,8 @@ class TestCircuitBreakerOpenError:
         with pytest.raises(RuntimeError):
             cb.call(MagicMock(side_effect=RuntimeError("fail")))
 
-        # Wait for recovery
-        time.sleep(0.15)
+        # Advance past recovery timeout
+        mock_monotonic.return_value = 1030.0
 
         # First half-open call fails, re-opening circuit
         with pytest.raises(RuntimeError):
@@ -195,17 +202,22 @@ class TestCircuitBreakerOpenError:
         assert exc_info.value.reason is CircuitBreakerOpenReason.RECOVERY_TIMEOUT
         assert exc_info.value.time_until_recovery > 0
 
-    def test_half_open_exhausted_reports_distinct_reason(self) -> None:
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_half_open_exhausted_reports_distinct_reason(self, mock_monotonic: MagicMock) -> None:
         """HALF_OPEN with no slots raises HALF_OPEN_EXHAUSTED with time_until_recovery=0.0."""
+        mock_monotonic.return_value = 1000.0
         cb = CircuitBreaker(
             "test",
             failure_threshold=1,
-            recovery_timeout=0.05,
+            recovery_timeout=30.0,
             half_open_max_calls=1,
         )
         with pytest.raises(RuntimeError):
             cb.call(MagicMock(side_effect=RuntimeError("fail")))
-        time.sleep(0.1)  # allow OPEN -> HALF_OPEN transition on next call
+        # Advance past recovery timeout so the next call drives OPEN -> HALF_OPEN.
+        # The frozen value is read by both threads; safe here since the test
+        # asserts on reason/state/time_until_recovery==0.0, never elapsed time.
+        mock_monotonic.return_value = 1030.0
 
         barrier = threading.Event()
         release = threading.Event()
@@ -360,27 +372,35 @@ class TestCircuitBreakerThreadSafety:
 class TestCircuitBreakerSuccessThreshold:
     """Tests for success_threshold — N consecutive successes required to close from HALF_OPEN."""
 
-    def test_success_threshold_default_one_closes_immediately(self) -> None:
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_success_threshold_default_one_closes_immediately(
+        self, mock_monotonic: MagicMock
+    ) -> None:
         """Default success_threshold=1: single success in HALF_OPEN closes the circuit."""
-        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.1)
+        mock_monotonic.return_value = 1000.0
+        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=30.0)
 
         with pytest.raises(RuntimeError):
             cb.call(MagicMock(side_effect=RuntimeError("fail")))
 
-        time.sleep(0.15)
+        mock_monotonic.return_value = 1030.0
         assert cb.state == CircuitBreakerState.HALF_OPEN
 
         cb.call(lambda: "ok")
         assert cb.state == CircuitBreakerState.CLOSED
 
-    def test_success_threshold_two_requires_two_successes(self) -> None:
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_success_threshold_two_requires_two_successes(
+        self, mock_monotonic: MagicMock
+    ) -> None:
         """success_threshold=2: first success keeps circuit HALF_OPEN, second closes it."""
-        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.1, success_threshold=2)
+        mock_monotonic.return_value = 1000.0
+        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=30.0, success_threshold=2)
 
         with pytest.raises(RuntimeError):
             cb.call(MagicMock(side_effect=RuntimeError("fail")))
 
-        time.sleep(0.15)
+        mock_monotonic.return_value = 1030.0
         assert cb.state == CircuitBreakerState.HALF_OPEN
 
         cb.call(lambda: 1)
@@ -389,12 +409,16 @@ class TestCircuitBreakerSuccessThreshold:
         cb.call(lambda: 2)
         assert cb.state == CircuitBreakerState.CLOSED
 
-    def test_failure_in_half_open_resets_success_counter(self) -> None:
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_failure_in_half_open_resets_success_counter(
+        self, mock_monotonic: MagicMock
+    ) -> None:
         """A failure in HALF_OPEN re-opens the circuit and resets the success counter."""
+        mock_monotonic.return_value = 1000.0
         cb = CircuitBreaker(
             "test",
             failure_threshold=1,
-            recovery_timeout=0.1,
+            recovery_timeout=30.0,
             half_open_max_calls=3,
             success_threshold=2,
         )
@@ -402,7 +426,7 @@ class TestCircuitBreakerSuccessThreshold:
         with pytest.raises(RuntimeError):
             cb.call(MagicMock(side_effect=RuntimeError("fail")))
 
-        time.sleep(0.15)
+        mock_monotonic.return_value = 1030.0
 
         cb.call(lambda: "one success")  # half-open success counter = 1
 
@@ -411,14 +435,16 @@ class TestCircuitBreakerSuccessThreshold:
 
         assert cb.state == CircuitBreakerState.OPEN
 
-    def test_success_threshold_reset_clears_counter(self) -> None:
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_success_threshold_reset_clears_counter(self, mock_monotonic: MagicMock) -> None:
         """reset() clears the half-open success counter."""
-        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.1, success_threshold=2)
+        mock_monotonic.return_value = 1000.0
+        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=30.0, success_threshold=2)
 
         with pytest.raises(RuntimeError):
             cb.call(MagicMock(side_effect=RuntimeError("fail")))
 
-        time.sleep(0.15)
+        mock_monotonic.return_value = 1030.0
         cb.call(lambda: "one")  # counter = 1, still HALF_OPEN
         assert cb.state == CircuitBreakerState.HALF_OPEN
 
@@ -467,23 +493,27 @@ class TestCircuitBreakerTimeMocking:
 
 
 @pytest.mark.parametrize(
-    ("failure_threshold", "recovery_timeout", "success_threshold"),
+    ("failure_threshold", "success_threshold"),
+    # recovery_timeout axis dropped: it was 0.1 for every case, so it carries
+    # zero behavioral coverage once the monotonic clock is mocked.
     [
-        (1, 0.1, 1),
-        (3, 0.1, 1),
-        (5, 0.1, 2),
-        (10, 0.1, 3),
+        (1, 1),
+        (3, 1),
+        (5, 2),
+        (10, 3),
     ],
 )
+@patch("hephaestus.resilience.circuit_breaker.time.monotonic")
 def test_parametrized_thresholds_full_cycle(
-    failure_threshold: int, recovery_timeout: float, success_threshold: int
+    mock_monotonic: MagicMock, failure_threshold: int, success_threshold: int
 ) -> None:
     """Various threshold configurations follow the full CLOSED→OPEN→HALF_OPEN→CLOSED cycle."""
+    mock_monotonic.return_value = 500.0
     reset_all_circuit_breakers()
     cb = CircuitBreaker(
         "param_test",
         failure_threshold=failure_threshold,
-        recovery_timeout=recovery_timeout,
+        recovery_timeout=30.0,
         half_open_max_calls=success_threshold,  # allow enough probes
         success_threshold=success_threshold,
     )
@@ -494,7 +524,7 @@ def test_parametrized_thresholds_full_cycle(
 
     assert cb.state == CircuitBreakerState.OPEN
 
-    time.sleep(recovery_timeout + 0.05)
+    mock_monotonic.return_value = 530.0  # past recovery_timeout
     assert cb.state == CircuitBreakerState.HALF_OPEN
 
     for _ in range(success_threshold):
@@ -506,7 +536,8 @@ def test_parametrized_thresholds_full_cycle(
 class TestCircuitBreakerHalfOpenConcurrency:
     """Tests for half-open admission under concurrent access."""
 
-    def test_half_open_inflight_never_exceeds_max(self) -> None:
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_half_open_inflight_never_exceeds_max(self, mock_monotonic: MagicMock) -> None:
         """Peak concurrent in-flight calls never exceed half_open_max_calls.
 
         With success_threshold > 1, verifies that _half_open_calls is decremented
@@ -514,16 +545,20 @@ class TestCircuitBreakerHalfOpenConcurrency:
         executing outside the lock.
 
         Uses a threading.Barrier to guarantee concurrent execution and
-        deterministic peak measurement, eliminating timing dependencies.
+        deterministic peak measurement, eliminating timing dependencies. The
+        mocked monotonic clock is frozen at a single value read by every probe
+        thread; this is safe because the test asserts only on peak concurrency,
+        never on elapsed time.
         """
         half_open_max_calls = 2
         success_threshold = 10
         num_probe_threads = 8
 
+        mock_monotonic.return_value = 1000.0
         cb = CircuitBreaker(
             "concurrency_test",
             failure_threshold=1,
-            recovery_timeout=0.1,
+            recovery_timeout=30.0,
             half_open_max_calls=half_open_max_calls,
             success_threshold=success_threshold,
         )
@@ -534,8 +569,8 @@ class TestCircuitBreakerHalfOpenConcurrency:
 
         assert cb.state == CircuitBreakerState.OPEN
 
-        # Wait for recovery
-        time.sleep(0.15)
+        # Advance past recovery timeout before spawning the probe threads
+        mock_monotonic.return_value = 1030.0
         assert cb.state == CircuitBreakerState.HALF_OPEN
 
         # Track concurrent in-flight calls
@@ -579,15 +614,17 @@ class TestCircuitBreakerHalfOpenConcurrency:
             f"exceeded half_open_max_calls ({half_open_max_calls})"
         )
 
-    def test_half_open_slot_released_on_success(self) -> None:
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_half_open_slot_released_on_success(self, mock_monotonic: MagicMock) -> None:
         """In-flight slot is released on successful call, allowing reuse within half-open phase."""
         half_open_max_calls = 1
         success_threshold = 3
 
+        mock_monotonic.return_value = 1000.0
         cb = CircuitBreaker(
             "slot_reuse_test",
             failure_threshold=1,
-            recovery_timeout=0.1,
+            recovery_timeout=30.0,
             half_open_max_calls=half_open_max_calls,
             success_threshold=success_threshold,
         )
@@ -596,8 +633,8 @@ class TestCircuitBreakerHalfOpenConcurrency:
         with pytest.raises(RuntimeError):
             cb.call(MagicMock(side_effect=RuntimeError("fail")))
 
-        # Wait for recovery
-        time.sleep(0.15)
+        # Advance past recovery timeout
+        mock_monotonic.return_value = 1030.0
         assert cb.state == CircuitBreakerState.HALF_OPEN
 
         # First probe succeeds
@@ -618,15 +655,17 @@ class TestCircuitBreakerHalfOpenConcurrency:
         # After transition to CLOSED, counters are reset
         assert cb._half_open_calls == 0
 
-    def test_half_open_slot_released_on_failure(self) -> None:
+    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
+    def test_half_open_slot_released_on_failure(self, mock_monotonic: MagicMock) -> None:
         """In-flight slot is released on failed call in half-open state."""
         half_open_max_calls = 2
         success_threshold = 2
 
+        mock_monotonic.return_value = 1000.0
         cb = CircuitBreaker(
             "slot_failure_test",
             failure_threshold=1,
-            recovery_timeout=0.1,
+            recovery_timeout=30.0,
             half_open_max_calls=half_open_max_calls,
             success_threshold=success_threshold,
         )
@@ -635,8 +674,8 @@ class TestCircuitBreakerHalfOpenConcurrency:
         with pytest.raises(RuntimeError):
             cb.call(MagicMock(side_effect=RuntimeError("fail")))
 
-        # Wait for recovery
-        time.sleep(0.15)
+        # Advance past recovery timeout
+        mock_monotonic.return_value = 1030.0
         assert cb.state == CircuitBreakerState.HALF_OPEN
 
         # One probe fails
