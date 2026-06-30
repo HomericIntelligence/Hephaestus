@@ -3,7 +3,8 @@
 Checks that values documented in CLAUDE.md and README.md match what is configured in
 ``pyproject.toml``:
 
-1. Coverage threshold in CLAUDE.md matches ``fail_under`` in ``[tool.coverage.report]``.
+1. Coverage threshold in CLAUDE.md AND docs/DEFINITION_OF_DONE.md matches ``fail_under``
+   in ``[tool.coverage.report]``.
 2. ``--cov=<path>`` in README.md matches ``addopts`` in ``[tool.pytest.ini_options]``.
 3. If ``--cov-fail-under=N`` is present in ``addopts``, it must match ``fail_under`` in
    ``[tool.coverage.report]``.  Absent is OK — ``[tool.coverage.report].fail_under`` is
@@ -182,6 +183,47 @@ def check_claude_md_threshold(repo_root: Path, expected: int) -> list[str]:
     return errors
 
 
+def check_dod_threshold(repo_root: Path, expected: int) -> list[str]:
+    """Check that docs/DEFINITION_OF_DONE.md documents the correct coverage threshold.
+
+    The DoD references the gate in two distinct phrasings that differ from
+    CLAUDE.md's: ``--cov-fail-under=<N>`` (row 10) and ``drops total under <N>%``
+    (row F2). Both must match the authoritative *expected* value. The match is
+    anchored on these gate-specific shapes rather than a free ``<N>%`` scan so it
+    does not false-positive on unrelated numbers (the 10% tolerance, Python 3.10).
+
+    Args:
+        repo_root: Repository root.
+        expected: Authoritative threshold value from ``pyproject.toml``.
+
+    Returns:
+        List of error strings (empty if all checks pass).
+
+    """
+    dod = repo_root / "docs" / "DEFINITION_OF_DONE.md"
+    if not dod.exists():
+        return [f"DEFINITION_OF_DONE.md not found at {dod}"]
+
+    text = dod.read_text(encoding="utf-8")
+    matches = re.findall(r"--cov-fail-under=(\d+)", text)
+    matches += re.findall(r"drops total under (\d+)%", text)
+    if not matches:
+        return [
+            "DEFINITION_OF_DONE.md: No coverage threshold mention found "
+            "(expected '--cov-fail-under=<N>' or 'drops total under <N>%')"
+        ]
+
+    errors: list[str] = []
+    for raw in matches:
+        found = int(raw)
+        if found != expected:
+            errors.append(
+                f"DEFINITION_OF_DONE.md: Coverage threshold mismatch — "
+                f"DEFINITION_OF_DONE.md says {found}%, pyproject.toml says {expected}%"
+            )
+    return errors
+
+
 def check_readme_cov_path(repo_root: Path, expected_path: str) -> list[str]:
     """Check that all ``--cov=<path>`` occurrences in README.md match *expected_path*.
 
@@ -312,7 +354,8 @@ def check_doc_config_consistency(
     """Run all doc/config consistency checks and return an exit code.
 
     Checks:
-    1. CLAUDE.md coverage threshold vs ``[tool.coverage.report].fail_under``.
+    1. CLAUDE.md AND docs/DEFINITION_OF_DONE.md coverage threshold vs
+       ``[tool.coverage.report].fail_under``.
     2. README.md ``--cov=<path>`` vs ``[tool.pytest.ini_options].addopts``.
     3. ``--cov-fail-under`` in addopts (if present) vs ``fail_under``.
     4. README.md hardcoded test count vs ``pytest --collect-only`` (skipped if
@@ -349,7 +392,7 @@ def check_doc_config_consistency(
 
 
 def _run_threshold_check(repo_root: Path, expected: int, verbose: bool) -> list[str]:
-    """Run CLAUDE.md coverage threshold check and print verbose result.
+    """Run CLAUDE.md and DEFINITION_OF_DONE.md coverage threshold checks.
 
     Args:
         repo_root: Repository root.
@@ -361,8 +404,12 @@ def _run_threshold_check(repo_root: Path, expected: int, verbose: bool) -> list[
 
     """
     errors = check_claude_md_threshold(repo_root, expected)
+    errors += check_dod_threshold(repo_root, expected)
     if not errors and verbose:
-        print(f"PASS: CLAUDE.md coverage threshold matches pyproject.toml ({expected}%)")
+        print(
+            f"PASS: CLAUDE.md and DEFINITION_OF_DONE.md coverage threshold "
+            f"match pyproject.toml ({expected}%)"
+        )
     return errors
 
 
@@ -464,6 +511,7 @@ def main() -> int:
         expected_threshold = load_coverage_threshold(repo_root)
         all_errors: list[str] = []
         all_errors.extend(check_claude_md_threshold(repo_root, expected_threshold))
+        all_errors.extend(check_dod_threshold(repo_root, expected_threshold))
         cov_path = extract_cov_path(repo_root)
         all_errors.extend(check_readme_cov_path(repo_root, cov_path))
         all_errors.extend(check_addopts_cov_fail_under(repo_root, expected_threshold))

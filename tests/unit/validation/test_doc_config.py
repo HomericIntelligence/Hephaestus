@@ -13,6 +13,7 @@ from hephaestus.validation.doc_config import (
     check_addopts_cov_fail_under,
     check_claude_md_threshold,
     check_doc_config_consistency,
+    check_dod_threshold,
     check_readme_cov_path,
     check_readme_test_count,
     collect_actual_test_count,
@@ -145,6 +146,42 @@ class TestCheckClaudeMdThreshold:
         assert check_claude_md_threshold(tmp_path, 80) == []
 
 
+class TestCheckDodThreshold:
+    """Tests for check_dod_threshold()."""
+
+    def _write_dod(self, tmp_path: Path, text: str) -> None:
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "DEFINITION_OF_DONE.md").write_text(text)
+
+    def test_matching_threshold(self, tmp_path: Path) -> None:
+        self._write_dod(tmp_path, "`--cov-fail-under=83` and drops total under 83%.")
+        assert check_dod_threshold(tmp_path, 83) == []
+
+    def test_mismatch_cov_fail_under(self, tmp_path: Path) -> None:
+        self._write_dod(tmp_path, "`--cov-fail-under=80`")
+        errors = check_dod_threshold(tmp_path, 83)
+        assert len(errors) == 1
+        assert "80%" in errors[0]
+        assert "83%" in errors[0]
+
+    def test_mismatch_drops_under(self, tmp_path: Path) -> None:
+        self._write_dod(tmp_path, "drops total under 80%")
+        errors = check_dod_threshold(tmp_path, 83)
+        assert len(errors) == 1
+        assert "80%" in errors[0]
+
+    def test_no_mention(self, tmp_path: Path) -> None:
+        self._write_dod(tmp_path, "No coverage info here.")
+        errors = check_dod_threshold(tmp_path, 83)
+        assert len(errors) == 1
+        assert "No coverage threshold" in errors[0]
+
+    def test_missing_file(self, tmp_path: Path) -> None:
+        errors = check_dod_threshold(tmp_path, 83)
+        assert len(errors) == 1
+        assert "not found" in errors[0]
+
+
 class TestCheckReadmeCovPath:
     """Tests for check_readme_cov_path()."""
 
@@ -251,6 +288,10 @@ class TestCheckDocConfigConsistency:
         _write_pyproject(tmp_path, _minimal_pyproject(fail_under=80))
         (tmp_path / "CLAUDE.md").write_text("We maintain 80%+ test coverage.")
         (tmp_path / "README.md").write_text("Run pytest --cov=hephaestus")
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "DEFINITION_OF_DONE.md").write_text(
+            "`--cov-fail-under=80` and drops total under 80%."
+        )
 
     def test_all_pass(self, tmp_path: Path) -> None:
         self._setup_valid_repo(tmp_path)
@@ -263,6 +304,19 @@ class TestCheckDocConfigConsistency:
         (tmp_path / "README.md").write_text("")
         result = check_doc_config_consistency(tmp_path, skip_test_count=True)
         assert result == 1
+
+    def test_dod_threshold_mismatch_fails(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        """A stale threshold in DEFINITION_OF_DONE.md fails the consolidated run."""
+        self._setup_valid_repo(tmp_path)
+        # Rewrite the DoD with a threshold that no longer matches fail_under=80.
+        (tmp_path / "docs" / "DEFINITION_OF_DONE.md").write_text(
+            "`--cov-fail-under=83` and drops total under 83%."
+        )
+        result = check_doc_config_consistency(tmp_path, skip_test_count=True)
+        assert result == 1
+        assert "DEFINITION_OF_DONE.md" in capsys.readouterr().err
 
     def test_verbose_on_pass(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         self._setup_valid_repo(tmp_path)
@@ -289,6 +343,10 @@ class TestMain:
         _write_pyproject(tmp_path, _minimal_pyproject(fail_under=80))
         (tmp_path / "CLAUDE.md").write_text("We maintain 80%+ test coverage.")
         (tmp_path / "README.md").write_text("Run pytest --cov=hephaestus")
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "DEFINITION_OF_DONE.md").write_text(
+            "`--cov-fail-under=80` and drops total under 80%."
+        )
         monkeypatch.setattr(
             "sys.argv",
             [
