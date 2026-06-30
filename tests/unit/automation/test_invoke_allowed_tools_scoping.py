@@ -17,7 +17,7 @@ CALL_SITES = [
     ("pr_reviewer.py", {"Read", "Glob", "Grep"}, False),
     ("plan_reviewer.py", {"Read", "Glob", "Grep"}, False),
     ("review_validator.py", {"Read", "Glob", "Grep"}, False),
-    ("planner_claude.py", {"Read", "Glob", "Grep", "Bash"}, True),
+    ("planner.py", {"Read", "Glob", "Grep", "Bash"}, True),
     ("ci_driver.py", {"Read", "Glob", "Grep", "Bash"}, True),
     ("implementer_phase_runner.py", {"Read", "Glob", "Grep", "Bash"}, True),
     ("comment_difficulty.py", {"Read", "Glob", "Grep"}, False),
