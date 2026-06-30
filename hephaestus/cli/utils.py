@@ -12,6 +12,7 @@ Follows development principles:
 
 import argparse
 import json
+import logging
 import math
 import sys
 from collections.abc import Callable, Sequence
@@ -38,6 +39,7 @@ __all__ = [
     "add_logging_args",
     "add_poll_max_wait_arg",
     "add_version_arg",
+    "configure_cli_logging",
     "configure_github_throttle_from_args",
     "confirm_action",
     "create_parser",
@@ -202,6 +204,23 @@ def create_validation_parser(
 def resolve_repo_root(args: argparse.Namespace) -> Path:
     """Return the explicit CLI repository root or auto-detect it."""
     return args.repo_root if args.repo_root is not None else get_repo_root()
+
+
+def configure_cli_logging(*, verbose: bool = False) -> None:
+    """Configure standard stderr-safe logging for a ``hephaestus-*`` CLI.
+
+    Centralizes the ``logging.basicConfig(...)`` boilerplate repeated across
+    CLI entry points so the log level and format stay consistent. Use this
+    in a CLI ``main()`` instead of calling ``logging.basicConfig`` directly.
+
+    Args:
+        verbose: When True, set the root level to ``DEBUG``; otherwise ``INFO``.
+
+    """
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
 
 DRY_RUN_HELP_CAVEAT = (

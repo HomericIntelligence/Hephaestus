@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +15,7 @@ from hephaestus.cli.utils import (
     add_json_arg,
     add_logging_args,
     add_version_arg,
+    configure_cli_logging,
     configure_github_throttle_from_args,
     confirm_action,
     create_parser,
@@ -147,6 +149,29 @@ class TestCreateValidationParser:
         args, unknown = parser.parse_known_args(["--json", "--strict-equality", "pkg/a.py"])
         assert args.json is True
         assert unknown == ["--strict-equality", "pkg/a.py"]
+
+
+class TestConfigureCliLogging:
+    """Tests for configure_cli_logging."""
+
+    def test_default_uses_info_level(self) -> None:
+        """Without verbose, basicConfig is called at INFO level."""
+        with patch("hephaestus.cli.utils.logging.basicConfig") as basic_config:
+            configure_cli_logging()
+        assert basic_config.call_args.kwargs["level"] == logging.INFO
+
+    def test_verbose_uses_debug_level(self) -> None:
+        """verbose=True raises the configured level to DEBUG."""
+        with patch("hephaestus.cli.utils.logging.basicConfig") as basic_config:
+            configure_cli_logging(verbose=True)
+        assert basic_config.call_args.kwargs["level"] == logging.DEBUG
+
+    def test_sets_standard_format(self) -> None:
+        """A consistent stderr-safe format string is applied."""
+        with patch("hephaestus.cli.utils.logging.basicConfig") as basic_config:
+            configure_cli_logging()
+        assert "%(levelname)s" in basic_config.call_args.kwargs["format"]
+        assert "%(name)s" in basic_config.call_args.kwargs["format"]
 
 
 class TestResolveRepoRoot:

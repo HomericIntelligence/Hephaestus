@@ -33,7 +33,11 @@ import logging
 import subprocess
 import sys
 
-from hephaestus.cli.utils import configure_github_throttle_from_args, emit_json_status
+from hephaestus.cli.utils import (
+    configure_cli_logging,
+    configure_github_throttle_from_args,
+    emit_json_status,
+)
 from hephaestus.github.client import gh_call
 
 from ._review_utils import build_automation_parser
@@ -184,10 +188,7 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = _build_parser().parse_args(argv)
     configure_github_throttle_from_args(args)
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    configure_cli_logging(verbose=args.verbose)
 
     if args.org:
         repos = _gh_list_org_repos(args.org)

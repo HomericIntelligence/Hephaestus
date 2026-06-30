@@ -284,6 +284,7 @@ removal):
 | `add_logging_args` | 0.1.0 | Add `--verbose`/`--quiet` logging flags |
 | `add_poll_max_wait_arg` | 0.9.8 | Add a `--poll-max-wait` flag to a parser |
 | `add_version_arg` | 0.1.0 | Add a `--version` flag to a parser |
+| `configure_cli_logging` | 0.9.8 | Configure standard stderr-safe logging for a CLI |
 | `configure_github_throttle_from_args` | 0.9.0 | Apply parsed throttle args to the GitHub client |
 | `confirm_action` | 0.1.0 | Interactive yes/no confirmation prompt |
 | `create_parser` | 0.1.0 | Build a standard `ArgumentParser` |

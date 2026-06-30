@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Iterator
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -201,3 +202,47 @@ class TestMain:
         mock_gh_call.side_effect = subprocess.CalledProcessError(1, ["gh"], stderr="not in a repo")
         with pytest.raises(SystemExit):
             main([])
+
+    def test_main_configures_cli_logging(self, mock_gh_call: MagicMock) -> None:
+        """main() routes log setup through the shared configure_cli_logging helper."""
+        mock_gh_call.side_effect = [_ok_proc() for _ in range(len(STATE_LABEL_SPECS))]
+        with patch(
+            "hephaestus.automation.ensure_state_labels.configure_cli_logging"
+        ) as configure:
+            rc = main(["--repo", "owner/name"])
+        assert rc == 0
+        configure.assert_called_once_with(verbose=False)
+
+
+class TestCircuitBreakerBoundary:
+    """Regression: all GitHub mutations stay on the circuit-breaker-wrapped gh_call."""
+
+    def test_label_create_uses_gh_call_not_subprocess_run(
+        self, mock_gh_call: MagicMock
+    ) -> None:
+        """ensure_labels_on_repo never bypasses gh_call with a bare subprocess.run."""
+        mock_gh_call.return_value = _ok_proc()
+        with patch("hephaestus.automation.ensure_state_labels.subprocess.run") as run:
+            issued = ensure_labels_on_repo("owner/name")
+        run.assert_not_called()
+        assert issued == len(STATE_LABEL_SPECS)
+        assert mock_gh_call.call_count == len(STATE_LABEL_SPECS)
+
+    def test_circuit_breaker_error_propagates_from_gh_call(
+        self, mock_gh_call: MagicMock
+    ) -> None:
+        """A GitHubUnavailableError from the open breaker surfaces to the caller."""
+        from hephaestus.github.client import GitHubUnavailableError
+
+        mock_gh_call.side_effect = GitHubUnavailableError("breaker open")
+        with pytest.raises(GitHubUnavailableError):
+            ensure_labels_on_repo("owner/name")
+
+    def test_no_bare_gh_subprocess_in_source(self) -> None:
+        """Structural guard: the module issues no bare subprocess.run(["gh", ...]) call."""
+        import re
+
+        from hephaestus.automation import ensure_state_labels
+
+        source = Path(ensure_state_labels.__file__).read_text(encoding="utf-8")
+        assert not re.search(r"subprocess\.run\(\s*\[\s*[\"']gh[\"']", source)
