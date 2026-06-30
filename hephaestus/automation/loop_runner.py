@@ -78,7 +78,7 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 from hephaestus.config.paths import DEFAULT_PROJECTS_DIR, resolve_projects_dir
-from hephaestus.constants import scripts_dir as _scripts_dir
+from hephaestus.constants import read_timeout_env, scripts_dir as _scripts_dir
 from hephaestus.github.client import gh_call
 
 LOG = logging.getLogger(__name__)
@@ -1182,7 +1182,7 @@ def _maybe_sleep_for_rate_budget(loop_idx: int, total_loops: int) -> None:
         return
     if loop_idx >= total_loops:
         return
-    threshold = int(os.environ.get("HEPHAESTUS_RATE_GUARD_THRESHOLD", "200"))
+    threshold = read_timeout_env("HEPHAESTUS_RATE_GUARD_THRESHOLD", 200)
     rl = _rate_limit_remaining()
     if rl is None:
         return

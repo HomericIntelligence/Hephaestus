@@ -14,7 +14,6 @@ of a runtime startup error is higher than the cost of falling back.
 from __future__ import annotations
 
 import logging
-import os
 
 from hephaestus.constants import (
     AGENT_IMPL_TIMEOUT,
@@ -39,15 +38,12 @@ DEFAULT_CI_POLL_MAX_WAIT: int = 600
 
 
 def _read_int_env(name: str, default: int) -> int:
-    """Return ``int(os.environ[name])`` or ``default`` if unset/invalid."""
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        logger.warning("Ignoring non-integer %s=%r — using default %ds", name, raw, default)
-        return default
+    """Return ``int(os.environ[name])`` or ``default`` if unset/invalid.
+
+    Thin delegate to :func:`hephaestus.constants.read_timeout_env`, kept for the
+    in-module callers; that helper logs and falls back on a non-integer value.
+    """
+    return read_timeout_env(name, default)
 
 
 def planner_claude_timeout() -> int:
