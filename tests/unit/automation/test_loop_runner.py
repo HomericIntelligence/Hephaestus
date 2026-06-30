@@ -28,6 +28,7 @@ from hephaestus.automation.loop_runner import (
     RepoResult,
     _default_phase_timeout_s,
     _ensure_clone,
+    _maybe_sleep_for_rate_budget,
     _phase_order_warnings,
     _preflight_token_scopes,
     _rate_limit_remaining,
@@ -1690,6 +1691,28 @@ class TestSubprocessTimeouts:
         with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh_call:
             mock_gh_call.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=120)
             assert loop_runner._list_open_issue_numbers("Org", "Repo") == []
+
+
+class TestRateBudgetGuard:
+    """The GraphQL rate-budget guard tolerates malformed configuration."""
+
+    def test_malformed_threshold_falls_back_without_crashing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-numeric HEPHAESTUS_RATE_GUARD_THRESHOLD uses the default 200.
+
+        Regression for #1429: the bare ``int(os.environ.get(...))`` raised
+        ``ValueError`` on non-numeric input; the safe ``read_timeout_env`` helper
+        falls back to the default. With remaining (250) above the default
+        threshold (200) the guard returns without sleeping.
+        """
+        monkeypatch.setenv("HEPHAESTUS_RATE_GUARD_THRESHOLD", "not-a-number")
+        with (
+            patch.object(loop_runner, "_rate_limit_remaining", return_value=(250, 0)),
+            patch("hephaestus.automation.loop_runner.time.sleep") as mock_sleep,
+        ):
+            _maybe_sleep_for_rate_budget(0, 1)
+        mock_sleep.assert_not_called()
 
 
 class TestResilientCallAdoption:
