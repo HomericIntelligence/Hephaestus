@@ -18,29 +18,31 @@ Module enumeration and entry-point discovery verified at plan time:
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
-# All 17 omitted orchestration modules
-OMITTED_MODULES = [
-    "hephaestus.automation.implementer",
-    "hephaestus.automation.implementer_cli",
-    "hephaestus.automation.implementer_phase_runner",
-    "hephaestus.automation.implementer_summary",
-    "hephaestus.automation.planner",
-    "hephaestus.automation.address_review",
-    "hephaestus.automation.ci_driver",
-    "hephaestus.automation.pr_discovery",
-    "hephaestus.automation.ci_check_inspector",
-    "hephaestus.automation.ci_fix_orchestrator",
-    "hephaestus.automation.post_merge_processor",
-    "hephaestus.automation.loop_runner",
-    "hephaestus.automation.loop_repo_manager",
-    "hephaestus.automation.curses_ui",
-    "hephaestus.automation.github_api",
-    "hephaestus.automation.pr_reviewer",
-    "hephaestus.automation.audit_reviewer",
-]
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
+
+def _omitted_modules() -> list[str]:
+    """Derive omitted-module import paths from pyproject.toml (no drift)."""
+    root = Path(__file__).resolve().parents[2]
+    with open(root / "pyproject.toml", "rb") as f:
+        omit = tomllib.load(f)["tool"]["coverage"]["run"]["omit"]
+    prefix, suffix = "hephaestus/automation/", ".py"
+    return sorted(
+        entry[: -len(suffix)].replace("/", ".")
+        for entry in omit
+        if entry.startswith(prefix) and entry.endswith(suffix)
+    )
+
+
+# All omitted orchestration modules (derived from pyproject.toml omit list).
+OMITTED_MODULES = _omitted_modules()
 
 # Modules with console scripts (run --help to verify entry point works)
 CONSOLE_SCRIPTS = [
