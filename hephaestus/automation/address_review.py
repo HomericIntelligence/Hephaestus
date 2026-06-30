@@ -71,6 +71,7 @@ from .github_api import (
 from .models import AddressReviewOptions, ReviewPhase, ReviewState, WorkerResult
 from .prompts import get_address_review_prompt
 from .session_naming import AGENT_IMPLEMENTER
+from .status_tracker import SlotUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -650,91 +651,94 @@ class AddressReviewer(BaseReviewer):
 
     def _address_issue(self, issue_number: int, pr_number: int) -> WorkerResult:
         """Address unresolved review threads for a single issue."""
-        slot_id = self.status_tracker.acquire_slot()
-        if slot_id is None:
+        try:
+            with self.status_tracker.slot(
+                f"{issue_ref(issue_number)}: Starting", release_delay=1.0
+            ) as slot_id:
+                thread_id = threading.get_ident()
+                self._log(
+                    "info",
+                    f"Addressing PR {pr_ref(pr_number)} for issue {issue_ref(issue_number)}",
+                    thread_id,
+                )
+
+                try:
+                    threads = self._check_threads_for_address(issue_number, pr_number, thread_id)
+                    if threads is None:
+                        return WorkerResult(
+                            issue_number=issue_number, success=True, pr_number=pr_number
+                        )
+
+                    session_id, review_state, branch_name, worktree_path = (
+                        self._setup_address_state(issue_number, pr_number, slot_id)
+                    )
+
+                    self.status_tracker.update_slot(
+                        slot_id, f"{issue_ref(issue_number)}: Running Claude fix"
+                    )
+                    fix_result = self._run_fix_session(
+                        issue_number=issue_number,
+                        pr_number=pr_number,
+                        worktree_path=worktree_path,
+                        threads=threads,
+                        session_id=session_id if self.options.resume_impl_session else None,
+                    )
+                    addressed: list[str] = fix_result.get("addressed", [])
+                    replies: dict[str, str] = fix_result.get("replies", {})
+                    self._log(
+                        "info",
+                        f"Claude addressed {len(addressed)} thread(s) on PR {pr_ref(pr_number)}",
+                        thread_id,
+                    )
+                    self._commit_push_and_resolve(
+                        issue_number=issue_number,
+                        pr_number=pr_number,
+                        branch_name=branch_name,
+                        worktree_path=worktree_path,
+                        addressed=addressed,
+                        replies=replies,
+                        threads=threads,
+                        review_state=review_state,
+                        slot_id=slot_id,
+                        thread_id=thread_id,
+                    )
+                    return WorkerResult(
+                        issue_number=issue_number,
+                        success=True,
+                        pr_number=pr_number,
+                        branch_name=branch_name,
+                        worktree_path=str(worktree_path),
+                    )
+
+                except subprocess.TimeoutExpired as e:
+                    error_msg = (
+                        f"Timeout: {' '.join(str(c) for c in e.cmd[:3])} exceeded {e.timeout}s"
+                    )
+                    self._log("error", error_msg, thread_id)
+                    return self._fail(issue_number, error_msg, slot_id)
+
+                except subprocess.CalledProcessError as e:
+                    error_msg = (
+                        f"Command failed (exit {e.returncode}): "
+                        f"{' '.join(str(c) for c in e.cmd[:3])}"
+                    )
+                    self._log("error", error_msg, thread_id)
+                    return self._fail(issue_number, error_msg, slot_id)
+
+                except RuntimeError as e:
+                    self._log("error", f"Runtime error: {e}", thread_id)
+                    return self._fail(issue_number, str(e)[:80], slot_id)
+
+                except Exception as e:
+                    self._log("error", f"Unexpected {type(e).__name__}: {e}", thread_id)
+                    return self._fail(issue_number, str(e)[:80], slot_id)
+
+        except SlotUnavailable:
             return WorkerResult(
                 issue_number=issue_number,
                 success=False,
                 error="Failed to acquire worker slot",
             )
-
-        thread_id = threading.get_ident()
-        self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Starting")
-        self._log(
-            "info",
-            f"Addressing PR {pr_ref(pr_number)} for issue {issue_ref(issue_number)}",
-            thread_id,
-        )
-
-        try:
-            threads = self._check_threads_for_address(issue_number, pr_number, thread_id)
-            if threads is None:
-                return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
-
-            session_id, review_state, branch_name, worktree_path = self._setup_address_state(
-                issue_number, pr_number, slot_id
-            )
-
-            self.status_tracker.update_slot(
-                slot_id, f"{issue_ref(issue_number)}: Running Claude fix"
-            )
-            fix_result = self._run_fix_session(
-                issue_number=issue_number,
-                pr_number=pr_number,
-                worktree_path=worktree_path,
-                threads=threads,
-                session_id=session_id if self.options.resume_impl_session else None,
-            )
-            addressed: list[str] = fix_result.get("addressed", [])
-            replies: dict[str, str] = fix_result.get("replies", {})
-            self._log(
-                "info",
-                f"Claude addressed {len(addressed)} thread(s) on PR {pr_ref(pr_number)}",
-                thread_id,
-            )
-            self._commit_push_and_resolve(
-                issue_number=issue_number,
-                pr_number=pr_number,
-                branch_name=branch_name,
-                worktree_path=worktree_path,
-                addressed=addressed,
-                replies=replies,
-                threads=threads,
-                review_state=review_state,
-                slot_id=slot_id,
-                thread_id=thread_id,
-            )
-            return WorkerResult(
-                issue_number=issue_number,
-                success=True,
-                pr_number=pr_number,
-                branch_name=branch_name,
-                worktree_path=str(worktree_path),
-            )
-
-        except subprocess.TimeoutExpired as e:
-            error_msg = f"Timeout: {' '.join(str(c) for c in e.cmd[:3])} exceeded {e.timeout}s"
-            self._log("error", error_msg, thread_id)
-            return self._fail(issue_number, error_msg, slot_id)
-
-        except subprocess.CalledProcessError as e:
-            error_msg = (
-                f"Command failed (exit {e.returncode}): {' '.join(str(c) for c in e.cmd[:3])}"
-            )
-            self._log("error", error_msg, thread_id)
-            return self._fail(issue_number, error_msg, slot_id)
-
-        except RuntimeError as e:
-            self._log("error", f"Runtime error: {e}", thread_id)
-            return self._fail(issue_number, str(e)[:80], slot_id)
-
-        except Exception as e:
-            self._log("error", f"Unexpected {type(e).__name__}: {e}", thread_id)
-            return self._fail(issue_number, str(e)[:80], slot_id)
-
-        finally:
-            time.sleep(1)
-            self.status_tracker.release_slot(slot_id)
 
     def _load_impl_session_id(self, issue_number: int) -> str | None:
         """Load the implementer's agent session ID from state file.

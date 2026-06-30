@@ -3,7 +3,9 @@
 import threading
 import time
 
-from hephaestus.automation.status_tracker import StatusTracker
+import pytest
+
+from hephaestus.automation.status_tracker import SlotUnavailable, StatusTracker
 
 
 class TestStatusTracker:
@@ -289,3 +291,51 @@ class TestStatusTracker:
         thread.join()
 
         assert result == [True]
+
+
+class TestSlotContextManager:
+    """Tests for the slot() context manager."""
+
+    def test_slot_acquires_and_releases(self) -> None:
+        """CM acquires a slot and releases on normal exit."""
+        tracker = StatusTracker(num_slots=1)
+        with tracker.slot("working") as sid:
+            assert tracker.slots[sid] == "working"
+        assert tracker.get_active_count() == 0
+
+    def test_slot_releases_on_exception(self) -> None:
+        """Prevents slot leaks — release happens even when body raises."""
+        tracker = StatusTracker(num_slots=1)
+        with pytest.raises(ValueError):
+            with tracker.slot():
+                raise ValueError("boom")
+        assert tracker.get_active_count() == 0
+
+    def test_slot_no_initial_msg_does_not_update(self) -> None:
+        """Empty initial_msg leaves slot as the acquisition sentinel."""
+        tracker = StatusTracker(num_slots=1)
+        with tracker.slot() as sid:
+            assert tracker.slots[sid] == "acquired"
+
+    def test_slot_timeout_raises_slot_unavailable(self) -> None:
+        """None acquisition becomes a typed exception, not a yield."""
+        tracker = StatusTracker(num_slots=1)
+        tracker.acquire_slot()  # exhaust
+        with pytest.raises(SlotUnavailable):
+            with tracker.slot(timeout=0.1):
+                pass
+
+    def test_slot_release_delay_sleeps_then_releases(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """release_delay preserves the pre-release sleep behavior."""
+        calls: list[float] = []
+        monkeypatch.setattr(
+            "hephaestus.automation.status_tracker.time.sleep",
+            lambda s: calls.append(s),
+        )
+        tracker = StatusTracker(num_slots=1)
+        with tracker.slot(release_delay=1.0):
+            pass
+        assert calls == [1.0]
+        assert tracker.get_active_count() == 0

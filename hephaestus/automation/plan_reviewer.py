@@ -42,7 +42,7 @@ from .review_state import (
     is_plan_review_go,
 )
 from .session_naming import AGENT_PLAN_REVIEWER
-from .status_tracker import StatusTracker
+from .status_tracker import SlotUnavailable, StatusTracker
 from .work_report import work_report_context
 
 logger = logging.getLogger(__name__)
@@ -170,86 +170,93 @@ class PlanReviewer:
             WorkerResult indicating success or failure.
 
         """
-        acquired_slot: int | None = self.status_tracker.acquire_slot()
-        if acquired_slot is None:
+        try:
+            with self.status_tracker.slot() as acquired_slot:
+                self.status_tracker.update_slot(
+                    acquired_slot, f"{issue_ref(issue_number)}: checking"
+                )
+
+                # --- Read-only checks (safe in dry-run) ---
+
+                # Skip only when the LATEST plan review is a GO. A NOGO verdict, or
+                # any older convention without a parseable verdict, re-runs the
+                # reviewer so an amended plan gets a fresh evaluation. (Previously
+                # this short-circuited on any prior `## 🔍 Plan Review` comment,
+                # which locked an issue out of re-review forever after the first
+                # interim verdict.)
+                if self._latest_review_is_final(issue_number):
+                    logger.info(
+                        "Issue %s: latest plan review is APPROVED, skipping",
+                        issue_ref(issue_number),
+                    )
+                    return WorkerResult(
+                        issue_number=issue_number, success=True, already_reviewed=True
+                    )
+
+                # Skip if no plan exists
+                plan_text = self._get_latest_plan(issue_number)
+                if plan_text is None:
+                    logger.info(
+                        "Issue %s: no plan comment found, skipping", issue_ref(issue_number)
+                    )
+                    return WorkerResult(
+                        issue_number=issue_number, success=True, already_reviewed=True
+                    )
+
+                # Fetch issue details for context
+                self.status_tracker.update_slot(
+                    acquired_slot, f"{issue_ref(issue_number)}: fetching issue"
+                )
+                try:
+                    issue_data = gh_issue_json(issue_number)
+                except Exception as e:
+                    return WorkerResult(
+                        issue_number=issue_number,
+                        success=False,
+                        error=f"Failed to fetch issue: {e}",
+                    )
+
+                issue_title: str = issue_data.get("title", f"Issue #{issue_number}")
+                issue_body: str = issue_data.get("body", "")
+
+                # Run Claude analysis
+                self.status_tracker.update_slot(
+                    acquired_slot, f"{issue_ref(issue_number)}: running Claude"
+                )
+                review_text = self._run_claude_analysis(
+                    issue_number, issue_title, issue_body, plan_text
+                )
+                if review_text is None:
+                    return WorkerResult(
+                        issue_number=issue_number,
+                        success=False,
+                        error="Claude analysis returned no output",
+                    )
+
+                # --- DRY-RUN GUARD: no GitHub writes beyond this point ---
+                if self.options.dry_run:
+                    logger.info(
+                        "[DRY RUN] Would post plan review to issue #%s:\n%s\n%s...",
+                        issue_number,
+                        _REVIEW_PREFIX,
+                        review_text[:200],
+                    )
+                    return WorkerResult(issue_number=issue_number, success=True)
+
+                # Post review comment
+                self.status_tracker.update_slot(
+                    acquired_slot, f"{issue_ref(issue_number)}: posting review"
+                )
+                self._post_review(issue_number, review_text)
+
+                return WorkerResult(issue_number=issue_number, success=True)
+
+        except SlotUnavailable:
             return WorkerResult(
                 issue_number=issue_number,
                 success=False,
                 error="Failed to acquire worker slot",
             )
-
-        try:
-            self.status_tracker.update_slot(acquired_slot, f"{issue_ref(issue_number)}: checking")
-
-            # --- Read-only checks (safe in dry-run) ---
-
-            # Skip only when the LATEST plan review is a GO. A NOGO verdict, or
-            # any older convention without a parseable verdict, re-runs the
-            # reviewer so an amended plan gets a fresh evaluation. (Previously
-            # this short-circuited on any prior `## 🔍 Plan Review` comment,
-            # which locked an issue out of re-review forever after the first
-            # interim verdict.)
-            if self._latest_review_is_final(issue_number):
-                logger.info(
-                    "Issue %s: latest plan review is APPROVED, skipping",
-                    issue_ref(issue_number),
-                )
-                return WorkerResult(issue_number=issue_number, success=True, already_reviewed=True)
-
-            # Skip if no plan exists
-            plan_text = self._get_latest_plan(issue_number)
-            if plan_text is None:
-                logger.info("Issue %s: no plan comment found, skipping", issue_ref(issue_number))
-                return WorkerResult(issue_number=issue_number, success=True, already_reviewed=True)
-
-            # Fetch issue details for context
-            self.status_tracker.update_slot(
-                acquired_slot, f"{issue_ref(issue_number)}: fetching issue"
-            )
-            try:
-                issue_data = gh_issue_json(issue_number)
-            except Exception as e:
-                return WorkerResult(
-                    issue_number=issue_number,
-                    success=False,
-                    error=f"Failed to fetch issue: {e}",
-                )
-
-            issue_title: str = issue_data.get("title", f"Issue #{issue_number}")
-            issue_body: str = issue_data.get("body", "")
-
-            # Run Claude analysis
-            self.status_tracker.update_slot(
-                acquired_slot, f"{issue_ref(issue_number)}: running Claude"
-            )
-            review_text = self._run_claude_analysis(
-                issue_number, issue_title, issue_body, plan_text
-            )
-            if review_text is None:
-                return WorkerResult(
-                    issue_number=issue_number,
-                    success=False,
-                    error="Claude analysis returned no output",
-                )
-
-            # --- DRY-RUN GUARD: no GitHub writes beyond this point ---
-            if self.options.dry_run:
-                logger.info(
-                    "[DRY RUN] Would post plan review to issue #%s:\n%s\n%s...",
-                    issue_number,
-                    _REVIEW_PREFIX,
-                    review_text[:200],
-                )
-                return WorkerResult(issue_number=issue_number, success=True)
-
-            # Post review comment
-            self.status_tracker.update_slot(
-                acquired_slot, f"{issue_ref(issue_number)}: posting review"
-            )
-            self._post_review(issue_number, review_text)
-
-            return WorkerResult(issue_number=issue_number, success=True)
-
         except Exception as e:
             logger.error("Issue %s: unexpected error: %s", issue_ref(issue_number), e)
             return WorkerResult(
@@ -257,9 +264,6 @@ class PlanReviewer:
                 success=False,
                 error=str(e)[:80],
             )
-
-        finally:
-            self.status_tracker.release_slot(acquired_slot)
 
     def _fetch_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
         """Fetch all comments for an issue, caching the result per instance.

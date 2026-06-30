@@ -5,8 +5,15 @@ Provides slot-based tracking with condition variables for coordination.
 
 import logging
 import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
+
+
+class SlotUnavailable(RuntimeError):  # noqa: N818  # not an error-state; a control-flow signal
+    """Raised by :meth:`StatusTracker.slot` when no slot is acquired before timeout."""
 
 
 class StatusTracker:
@@ -50,6 +57,42 @@ class StatusTracker:
                 if not self.condition.wait(timeout=timeout):
                     logger.warning("Slot acquisition timed out")
                     return None
+
+    @contextmanager
+    def slot(
+        self,
+        initial_msg: str = "",
+        *,
+        timeout: float | None = None,
+        release_delay: float = 0.0,
+    ) -> Iterator[int]:
+        """Acquire a slot for the duration of the ``with`` block, then release it.
+
+        Args:
+            initial_msg: If non-empty, set as the slot's status immediately
+                after acquisition.
+            timeout: Optional acquisition timeout in seconds (see acquire_slot).
+            release_delay: Seconds to sleep before releasing the slot. Used by
+                workers that need a brief settle delay (default 0.0 = no sleep).
+
+        Yields:
+            The acquired slot index (always a valid ``int``).
+
+        Raises:
+            SlotUnavailable: If no slot becomes available before ``timeout``.
+
+        """
+        slot_id = self.acquire_slot(timeout=timeout)
+        if slot_id is None:
+            raise SlotUnavailable("Failed to acquire worker slot")
+        try:
+            if initial_msg:
+                self.update_slot(slot_id, initial_msg)
+            yield slot_id
+        finally:
+            if release_delay > 0:
+                time.sleep(release_delay)
+            self.release_slot(slot_id)
 
     def release_slot(self, slot_id: int) -> None:
         """Release a slot.
