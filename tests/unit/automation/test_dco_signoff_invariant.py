@@ -12,6 +12,12 @@ It uses an AST scan (not a text/regex scan) so it cannot misfire on
 mentioning ``git commit --amend``. It also skips the inner ``Constant``
 children of an f-string (``JoinedStr``) so an f-string command is counted
 exactly once, never twice.
+
+**Scope boundary (POLA)**: This guard detects only literal ``["git", ...]``
+argv list literals (first element the literal string ``"git"``) and literal
+``commit --amend`` string or f-string literals. Commit paths built via
+variable/list concatenation, a non-literal subprocess argv, or a ``"git"``
+bound to a variable are intentionally out of scope and silently escape the guard.
 """
 
 from __future__ import annotations
