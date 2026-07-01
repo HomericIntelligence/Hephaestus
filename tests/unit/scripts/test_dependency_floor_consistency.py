@@ -490,9 +490,7 @@ class TestAllExtraDocsInSync:
         # Isolate the aggregator comment block preceding the header.
         comment = text.split("[project.optional-dependencies]", 1)[0]
         missing = sorted(m for m in members if m not in comment)
-        assert not missing, (
-            f"pyproject.toml aggregator comment omits [all] member(s): {missing}"
-        )
+        assert not missing, f"pyproject.toml aggregator comment omits [all] member(s): {missing}"
 
     def test_readme_all_bullet_lists_all_members(self, repo_root: Path) -> None:
         """Assert the README `[all]` bullet lists every `[all]` member.
