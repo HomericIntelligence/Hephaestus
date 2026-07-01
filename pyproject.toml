@@ -152,6 +152,7 @@ hephaestus-validate-agents = "hephaestus.agents.frontmatter:validate_agents_main
 hephaestus-check-cli-tier-docs = "hephaestus.validation.tiers.cli_tier_docs:main"
 hephaestus-check-api-table-docs = "hephaestus.validation.api_table_docs:main"
 hephaestus-check-api-reference = "hephaestus.validation.docs.api_reference:main"
+hephaestus-check-unlinked-todo = "hephaestus.validation.unlinked_todo:main"
 
 [project.urls]
 Homepage = "https://github.com/HomericIntelligence/ProjectHephaestus"
