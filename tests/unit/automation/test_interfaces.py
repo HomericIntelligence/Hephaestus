@@ -1,6 +1,6 @@
 """Verify that all four reviewer classes satisfy ReviewerProtocol."""
 
-from hephaestus.automation._interfaces import ReviewerProtocol
+from hephaestus.automation.protocol import ReviewerProtocol
 
 
 class _ConcreteReviewer:

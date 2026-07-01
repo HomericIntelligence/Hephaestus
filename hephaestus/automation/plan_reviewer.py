@@ -29,6 +29,7 @@ from hephaestus.automation._review_utils import (
     build_automation_parser,
     drain_completed_futures,
     print_worker_summary,
+    work_report_context,
 )
 from hephaestus.cli.utils import add_agent_timeout_arg, emit_json_status
 from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
@@ -47,7 +48,6 @@ from .review_state import (
 )
 from .session_naming import AGENT_PLAN_REVIEWER
 from .status_tracker import StatusTracker
-from .work_report import work_report_context
 
 logger = logging.getLogger(__name__)
 

@@ -23,7 +23,6 @@ from hephaestus.agents.runtime import (
     uses_direct_agent_runner,
 )
 
-from ._secret_patterns import SECRET_FILE_EXTENSIONS, SECRET_FILE_NAMES
 from .agent_config import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
 from .ci_check_inspector import FAILING_CHECK_CONCLUSIONS
 from .claude_invoke import invoke_claude_with_session
@@ -47,6 +46,24 @@ from .state_labels import (
 from .status_tracker import StatusTracker
 
 logger = logging.getLogger(__name__)
+
+# Shared secret-file detection constants. These patterns identify files that
+# should never be staged or committed during automated workflows.
+# Exact basenames that are always considered secrets regardless of extension.
+SECRET_FILE_NAMES: frozenset[str] = frozenset(
+    {
+        ".env",
+        ".secret",
+        "credentials.json",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+    }
+)
+
+# File extensions whose presence indicates a cryptographic key or certificate.
+SECRET_FILE_EXTENSIONS: frozenset[str] = frozenset({".key", ".pem", ".pfx", ".p12"})
 
 _RESERVED_MESSAGE_LINE = re.compile(
     r"^\s*(?:Closes\s+#\d+|Implemented-By:|Co-Authored-By:)",

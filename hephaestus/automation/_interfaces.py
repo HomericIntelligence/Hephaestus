@@ -11,20 +11,6 @@ from typing import Any, Protocol, TypeAlias, runtime_checkable
 
 
 @runtime_checkable
-class ReviewerProtocol(Protocol):
-    """Structural contract satisfied by all four reviewer classes.
-
-    Verified: PRReviewer.run (pr_reviewer.py:396),
-              AddressReviewer.run (address_review.py:350),
-              AuditReviewer.run (audit_reviewer.py:197),
-              PlanReviewer.run (plan_reviewer.py:99).
-    """
-
-    def run(self) -> Any:
-        """Run the review phase for a single issue."""
-
-
-@runtime_checkable
 class PRDiscoveryProtocol(Protocol):
     """Structural contract for PR discovery (PRDiscovery, used by CIDriver).
 
