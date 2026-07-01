@@ -27,13 +27,12 @@ from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 # Dirs (relative to repo root) whose .py files the policy governs.
 SCANNED_ROOTS: tuple[str, ...] = ("hephaestus", "scripts")
 
-# The validator module and its test legitimately contain the literal marker
-# words in strings/docstrings; excluding them keeps the gate green on the
+# The validator module itself legitimately contains the literal marker
+# words in its docstring/strings; excluding it keeps the gate green on the
 # shipped tree (self-reference exemption).
 _EXCLUDED_RELPATHS: frozenset[str] = frozenset(
     {
         "hephaestus/validation/unlinked_todo.py",
-        "tests/unit/validation/test_unlinked_todo.py",
     }
 )
 
