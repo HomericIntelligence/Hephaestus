@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hephaestus.ci.workflows import (
     Violation,
@@ -22,6 +23,7 @@ AUTO_MERGE_ON_GO_WORKFLOW = (
     REPO_ROOT / ".github" / "workflows" / "enable-auto-merge-on-implementation-go.yml"
 )
 REQUIRED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "_required.yml"
+RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test.yml"
 SETUP_PI_ACTION = REPO_ROOT / ".github" / "actions" / "setup-pi-cli" / "action.yml"
 
@@ -282,6 +284,33 @@ class TestPiCliSetup:
         assert "node-version: 22.19.0" in text
         assert "npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.2" in text
         assert "pi --version" in text
+
+
+class TestReleaseAttestations:
+    """Regression tests for PEP 740 build attestations in the release workflow."""
+
+    def _publish_step(self) -> dict:
+        """Return the parsed ``gh-action-pypi-publish`` step from release.yml."""
+        workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        steps = workflow["jobs"]["build-and-publish"]["steps"]
+        publish = [s for s in steps if "gh-action-pypi-publish" in str(s.get("uses", ""))]
+        assert len(publish) == 1, "expected exactly one PyPI publish step"
+        return publish[0]
+
+    def test_publish_step_generates_attestations(self) -> None:
+        """The PyPI publish step must opt into PEP 740 / Sigstore provenance.
+
+        Parses the workflow and asserts the flag lives under the publish step's
+        ``with:`` block, not merely somewhere in the file text — a comment or
+        unrelated step containing the string would otherwise pass a substring
+        check while leaving attestations disabled.
+        """
+        assert self._publish_step()["with"]["generate_attestations"] is True
+
+    def test_id_token_write_permission_present(self) -> None:
+        """Attestation generation requires the ``id-token: write`` permission."""
+        workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        assert workflow["permissions"]["id-token"] == "write"
 
 
 class TestAutomationExtraInstall:

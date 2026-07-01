@@ -147,6 +147,10 @@ jobs:
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
         with:
           verbose: true
+          # PEP 740 / Sigstore provenance — lets consumers cryptographically
+          # verify the artifact was built by this workflow run. Requires only
+          # `id-token: write`, granted at the top of this file (release.yml:16).
+          generate_attestations: true
 
       - name: Check for existing release
         id: existing
