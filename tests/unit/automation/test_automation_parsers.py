@@ -625,6 +625,17 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "no_advise",
             "Pass --no-advise to phases that support the advise preflight",
         ),
+        _action_spec(
+            ("--no-serialize-file-overlap",),
+            "serialize_file_overlap",
+            "_StoreFalseAction",
+            True,
+            nargs=0,
+            help_text=(
+                "Disable file-overlap serialization; dispatch all issues in a round"
+                " concurrently even when their plans touch the same file (#1623)"
+            ),
+        ),
         _store_true(
             "--nitpick",
             "nitpick",
