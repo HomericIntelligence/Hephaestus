@@ -1395,6 +1395,56 @@ def test_detect_cwd_repo_parses_https_url() -> None:
     assert repo == "R"
 
 
+def test_detect_cwd_repo_uses_remote_repo_when_worktree_dir_differs() -> None:
+    """Automation worktree names like issue-1442 must not become repo names."""
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "rev-parse" in argv:
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout="/tmp/ProjectHephaestus/build/.worktrees/issue-1442\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="https://github.com/HomericIntelligence/ProjectHephaestus.git\n",
+            stderr="",
+        )
+
+    with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
+        org, repo = loop_runner._detect_cwd_repo()
+    assert org == "HomericIntelligence"
+    assert repo == "ProjectHephaestus"
+
+
+def test_resolve_org_and_repos_cwd_default_uses_remote_repo_not_worktree_dir() -> None:
+    """No flags should scope the loop to the GitHub repo, not worktree basename."""
+    args = loop_runner._parse_args([])
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "rev-parse" in argv:
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout="/tmp/ProjectHephaestus/build/.worktrees/issue-1442\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="git@github.com:HomericIntelligence/ProjectHephaestus.git\n",
+            stderr="",
+        )
+
+    with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
+        org, repos, err = loop_runner._resolve_org_and_repos(args)
+    assert err is None
+    assert org == "HomericIntelligence"
+    assert repos == ["ProjectHephaestus"]
+
+
 def test_detect_cwd_repo_returns_none_when_not_git() -> None:
     """``git rev-parse`` failure → ``(None, None)``."""
     with patch(

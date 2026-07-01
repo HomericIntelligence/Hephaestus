@@ -31,10 +31,12 @@ LOG = logging.getLogger(__name__)
 def _detect_cwd_repo() -> tuple[str | None, str | None]:
     """Return ``(org, repo_name)`` for the current working directory.
 
-    Returns ``(None, None)`` when cwd is not inside a git repo or has no
-    parseable github.com origin remote. ``org`` is parsed from
-    ``git remote get-url origin``; ``repo_name`` is the basename of
-    ``git rev-parse --show-toplevel``.
+    Returns ``(None, None)`` when cwd is not inside a git repo. For GitHub
+    origin remotes, both ``org`` and ``repo_name`` come from
+    ``git remote get-url origin`` so automation worktree names such as
+    ``issue-1442`` do not masquerade as repository names. Non-GitHub remotes
+    preserve the historical fallback of returning the local top-level basename
+    with ``org`` set to ``None``.
     """
     try:
         top = subprocess.run(
@@ -74,9 +76,11 @@ def _detect_cwd_repo() -> tuple[str | None, str | None]:
         path = path_part.lstrip("/")
 
     if host == "github.com":
-        parts = path.split("/", 1)
+        parts = path.strip("/").split("/", 1)
         if len(parts) == 2:
             org = parts[0] or None
+            remote_repo = parts[1].removesuffix(".git")
+            repo = remote_repo or repo
 
     return (org, repo)
 

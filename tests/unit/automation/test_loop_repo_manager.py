@@ -51,6 +51,22 @@ class TestDetectCwdRepo:
         assert org == "MyOrg"
         assert repo == "MyRepo"
 
+    def test_parses_repo_name_from_https_remote_not_worktree_dir(self) -> None:
+        """GitHub remote path is authoritative when worktree dir is issue-named."""
+
+        def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
+            m = MagicMock()
+            if "rev-parse" in cmd:
+                m.stdout = "/home/user/repos/ProjectHephaestus/build/.worktrees/issue-1442\n"
+            else:
+                m.stdout = "https://github.com/HomericIntelligence/ProjectHephaestus.git\n"
+            return m
+
+        with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
+            org, repo = _detect_cwd_repo()
+        assert org == "HomericIntelligence"
+        assert repo == "ProjectHephaestus"
+
     def test_parses_ssh_scp_url(self) -> None:
         def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
             m = MagicMock()
@@ -64,6 +80,22 @@ class TestDetectCwdRepo:
             org, repo = _detect_cwd_repo()
         assert org == "MyOrg"
         assert repo == "ProjectFoo"
+
+    def test_parses_repo_name_from_ssh_remote_not_worktree_dir(self) -> None:
+        """SCP-style GitHub remotes also override local worktree basenames."""
+
+        def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
+            m = MagicMock()
+            if "rev-parse" in cmd:
+                m.stdout = "/home/user/repos/ProjectHephaestus/build/.worktrees/issue-1442\n"
+            else:
+                m.stdout = "git@github.com:HomericIntelligence/ProjectHephaestus.git\n"
+            return m
+
+        with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
+            org, repo = _detect_cwd_repo()
+        assert org == "HomericIntelligence"
+        assert repo == "ProjectHephaestus"
 
     def test_returns_none_org_for_non_github_remote(self) -> None:
         def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
