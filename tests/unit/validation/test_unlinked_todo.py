@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from hephaestus.utils.helpers import get_repo_root
+from hephaestus.validation import unlinked_todo
 from hephaestus.validation.unlinked_todo import (
     SCANNED_ROOTS,
     find_violations,
@@ -110,7 +111,5 @@ class TestMain:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Cover the ``resolve_repo_root`` default branch (flag absent)."""
-        import hephaestus.validation.unlinked_todo as mod
-
-        monkeypatch.setattr(mod, "resolve_repo_root", lambda args: get_repo_root())
+        monkeypatch.setattr(unlinked_todo, "resolve_repo_root", lambda args: get_repo_root())
         assert main([]) == 0
