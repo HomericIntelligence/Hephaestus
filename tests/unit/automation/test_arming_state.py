@@ -58,7 +58,9 @@ def test_load_corrupt_json_returns_none(tmp_path: Path, caplog: pytest.LogCaptur
     store.path(5).write_text("{not json")
     with caplog.at_level("WARNING"):
         assert store.load(5) is None
-    assert "Could not read arming record" in caplog.text
+    # load() now routes through the canonical load_state_file helper (#1432),
+    # which emits the unified "Malformed <prefix> state" warning.
+    assert "Malformed drive-green-armed state" in caplog.text
 
 
 def test_save_unwritable_dir_swallows_and_warns(

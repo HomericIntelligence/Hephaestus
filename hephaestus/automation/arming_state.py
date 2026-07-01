@@ -28,6 +28,8 @@ from typing import Any
 
 from hephaestus.io.utils import write_secure
 
+from ._review_utils import load_state_file
+
 logger = logging.getLogger(__name__)
 
 
@@ -59,19 +61,19 @@ class ArmingStateStore:
         return self._state_dir_provider() / f"drive-green-armed-{issue_number}.json"
 
     def load(self, issue_number: int) -> dict[str, Any] | None:
-        """Return the parsed arming record for ``issue_number`` or ``None``."""
-        path = self.path(issue_number)
-        if not path.exists():
-            return None
-        try:
-            return dict(json.loads(path.read_text()))
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning(
-                "Could not read arming record for issue #%s: %s; ignoring",
-                issue_number,
-                exc,
-            )
-            return None
+        """Return the parsed arming record for ``issue_number`` or ``None``.
+
+        Routes through the canonical ``load_state_file`` helper (raw-dict
+        overload) so malformed-file handling matches the rest of the
+        automation state stores (#1432).
+        """
+        record = load_state_file(
+            self._state_dir_provider(),
+            "drive-green-armed",
+            issue_number,
+            state_logger=logger,
+        )
+        return dict(record) if record is not None else None
 
     def save(self, issue_number: int, record: dict[str, Any]) -> None:
         """Persist the arming record. Best-effort; logs and swallows IO errors."""
