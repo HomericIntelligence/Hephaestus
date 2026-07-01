@@ -7,6 +7,7 @@ does not address.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,6 +19,23 @@ def _threads() -> list[dict[str, object]]:
         {"id": "T1", "path": "a.py", "line": 3, "body": "guard the null case"},
         {"id": "T2", "path": "b.py", "line": 7, "body": "rename for clarity"},
     ]
+
+
+class TestReviewValidatorStructure:
+    """Structure regression tests for review_validator orchestration."""
+
+    def test_validate_prior_comments_addressed_stays_under_line_cap(self) -> None:
+        source = Path(review_validator.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        target = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "validate_prior_comments_addressed"
+        )
+
+        assert target.end_lineno is not None
+        assert target.end_lineno - target.lineno + 1 <= 80
 
 
 class TestValidatePriorCommentsAddressed:
