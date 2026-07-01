@@ -242,31 +242,36 @@ If you are a myrmidon-swarm subagent with a specific task prompt, skip this and 
 
 ### Skill Catalog
 
-| Skill | When to Use |
-|-------|-------------|
-| `skill-advisor` | Before any task — routes to the correct skill |
-| `advise` | Before starting work — search ProjectMnemosyne for prior learnings |
-| `learn` | After completing work — capture session learnings in ProjectMnemosyne |
-| `myrmidon-swarm` | Complex multi-step tasks requiring parallel agent coordination |
-| `brainstorm` | Before implementing a new feature — design before code |
-| `test-driven-development` | Before writing implementation code — RED-GREEN-REFACTOR |
-| `systematic-debugging` | Before proposing fixes — root cause first |
-| `verification` | Before claiming work is done — evidence before assertions |
-| `git-worktrees` | When needing isolated branch workspace |
-| `finish-branch` | When implementation is complete — branch completion workflow |
-| `code-review` | After major feature completion — Sonnet reviewer + feedback reception |
-| `repo-analyze` | Comprehensive 15-dimension repository audit |
-| `repo-analyze-quick` | Quick repository health check |
-| `repo-analyze-strict` | Ruthlessly thorough repository audit |
-| `repo-analyze-full` | Full-coverage audit — one swarm agent per section, no sampling cap |
-| `repo-analyze-quick-full` | Quick health check with full file coverage |
-| `repo-analyze-strict-full` | Strict audit with full file coverage (swarm per section) |
-| `review-pr-strict` | Ruthlessly thorough PR-alignment audit with full coverage |
-| `worktree-cleanup` | Audit + prune git worktrees (never deletes branches) |
-| `tidy` | Rebase all local branches with swarm conflict resolution |
-| `create-reusable-utilities` | Port/generalize utility scripts for cross-project reuse |
-| `github-actions-python-cicd` | Set up a Python GitHub Actions CI/CD pipeline |
-| `python-repo-modernization` | Bring a Python repo to production-grade quality |
+Invoke a skill with `Skill(skill: "hephaestus:<name>", args: "<argument>")`, or
+`/hephaestus:<name> <argument>` interactively. The **Arguments** column mirrors each
+skill's `argument-hint` frontmatter in `skills/<name>/SKILL.md`; `—` means the skill
+takes no argument.
+
+| Skill | Arguments | When to Use |
+|-------|-----------|-------------|
+| `skill-advisor` | `<task description>` | Before any task — routes to the correct skill |
+| `advise` | `<task description>` | Before starting work — search ProjectMnemosyne for prior learnings |
+| `learn` | — | After completing work — capture session learnings in ProjectMnemosyne |
+| `myrmidon-swarm` | `<task description>` | Complex multi-step tasks requiring parallel agent coordination |
+| `brainstorm` | `<idea or feature description>` | Before implementing a new feature — design before code |
+| `test-driven-development` | `<feature or bugfix description>` | Before writing implementation code — RED-GREEN-REFACTOR |
+| `systematic-debugging` | `<description of the bug or failure>` | Before proposing fixes — root cause first |
+| `verification` | `<what you are verifying>` | Before claiming work is done — evidence before assertions |
+| `git-worktrees` | `<branch-name or feature description>` | When needing isolated branch workspace |
+| `finish-branch` | `"<optional: base branch name>"` | When implementation is complete — branch completion workflow |
+| `code-review` | `<what was implemented>` | After major feature completion — Sonnet reviewer + feedback reception |
+| `repo-analyze` | — | Comprehensive 15-dimension repository audit |
+| `repo-analyze-quick` | — | Quick repository health check |
+| `repo-analyze-strict` | — | Ruthlessly thorough repository audit |
+| `repo-analyze-full` | — | Full-coverage audit — one swarm agent per section, no sampling cap |
+| `repo-analyze-quick-full` | — | Quick health check with full file coverage |
+| `repo-analyze-strict-full` | — | Strict audit with full file coverage (swarm per section) |
+| `review-pr-strict` | — | Ruthlessly thorough PR-alignment audit with full coverage |
+| `worktree-cleanup` | `"<optional: --dry-run>"` | Audit + prune git worktrees (never deletes branches) |
+| `tidy` | `"<optional: --dry-run \| --no-swarm \| --trunk BRANCH \| --max-concurrent N>"` | Rebase all local branches with swarm conflict resolution |
+| `create-reusable-utilities` | — | Port/generalize utility scripts for cross-project reuse |
+| `github-actions-python-cicd` | — | Set up a Python GitHub Actions CI/CD pipeline |
+| `python-repo-modernization` | `<path to Python repo to modernize>` | Bring a Python repo to production-grade quality |
 
 ### Agent Skills vs Sub-Agents Decision Tree
 

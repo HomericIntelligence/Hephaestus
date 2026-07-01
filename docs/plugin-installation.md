@@ -116,8 +116,15 @@ enabled.
 
 ## Usage Examples
 
+Skills that accept an argument declare it in their `argument-hint` frontmatter;
+pass it inline after the skill name. Skills without an `argument-hint` take no
+argument and are invoked bare.
+
 ```
 /advise implement retry logic with exponential backoff
+/brainstorm a plugin manifest validator
+/systematic-debugging pytest hangs on the NATS subscriber teardown
+/git-worktrees 1496-skill-argument-hints
 /repo-analyze
 /repo-analyze-strict
 /repo-analyze-quick
