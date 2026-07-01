@@ -1,6 +1,10 @@
 # ProjectHephaestus
 
-[![Test](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/test.yml)
+[![Test](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/test.yml/badge.svg)](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/test.yml)
+[![Pre-commit](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/pre-commit.yml/badge.svg)](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/pre-commit.yml)
+[![Security](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/security.yml/badge.svg)](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/security.yml)
+[![Release](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/release.yml/badge.svg)](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/release.yml)
+[![Auto Tag](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/auto-tag.yml/badge.svg)](https://github.com/HomericIntelligence/ProjectHephaestus/actions/workflows/auto-tag.yml)
 [![PyPI](https://img.shields.io/pypi/v/HomericIntelligence-Hephaestus.svg)](https://pypi.org/project/HomericIntelligence-Hephaestus/)
 [![Python](https://img.shields.io/pypi/pyversions/HomericIntelligence-Hephaestus.svg)](https://pypi.org/project/HomericIntelligence-Hephaestus/)
 [![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
