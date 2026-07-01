@@ -36,7 +36,7 @@ class TestWriteWorkReport:
         """When HEPH_WORK_REPORT is unset, no file is created."""
         # Ensure env var is unset
         os.environ.pop("HEPH_WORK_REPORT", None)
-        from hephaestus.automation.work_report import write_work_report
+        from hephaestus.automation._review_utils import write_work_report
 
         # Call with env unset — this is a no-op; no file path to write to
         write_work_report(5)
@@ -47,7 +47,7 @@ class TestWriteWorkReport:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When HEPH_WORK_REPORT is set, writes the integer to that file."""
-        from hephaestus.automation.work_report import write_work_report
+        from hephaestus.automation._review_utils import write_work_report
 
         path = tmp_path / "report.txt"
         monkeypatch.setenv("HEPH_WORK_REPORT", str(path))
@@ -58,7 +58,7 @@ class TestWriteWorkReport:
 
     def test_oserror_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """OSError (e.g., permission denied) is silently swallowed."""
-        from hephaestus.automation.work_report import write_work_report
+        from hephaestus.automation._review_utils import write_work_report
 
         monkeypatch.setenv("HEPH_WORK_REPORT", "/nonexistent/path/report.txt")
 
@@ -69,7 +69,7 @@ class TestWriteWorkReport:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """work_report_context no-ops when the loop runner did not request a report."""
-        from hephaestus.automation.work_report import work_report_context
+        from hephaestus.automation._review_utils import work_report_context
 
         monkeypatch.delenv("HEPH_WORK_REPORT", raising=False)
         called = False
@@ -88,7 +88,7 @@ class TestWriteWorkReport:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """work_report_context writes the callback result when exiting normally."""
-        from hephaestus.automation.work_report import work_report_context
+        from hephaestus.automation._review_utils import work_report_context
 
         report = tmp_path / "report.txt"
         monkeypatch.setenv("HEPH_WORK_REPORT", str(report))
@@ -102,7 +102,7 @@ class TestWriteWorkReport:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """work_report_context writes even when the protected block raises."""
-        from hephaestus.automation.work_report import work_report_context
+        from hephaestus.automation._review_utils import work_report_context
 
         report = tmp_path / "report.txt"
         monkeypatch.setenv("HEPH_WORK_REPORT", str(report))
@@ -117,7 +117,7 @@ class TestWriteWorkReport:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Reporting failures must not mask the protected block's exception."""
-        from hephaestus.automation.work_report import work_report_context
+        from hephaestus.automation._review_utils import work_report_context
 
         report = tmp_path / "report.txt"
         monkeypatch.setenv("HEPH_WORK_REPORT", str(report))
@@ -135,7 +135,7 @@ class TestWriteWorkReport:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Best-effort reporting failures are non-fatal on clean exit too."""
-        from hephaestus.automation.work_report import work_report_context
+        from hephaestus.automation._review_utils import work_report_context
 
         report = tmp_path / "report.txt"
         monkeypatch.setenv("HEPH_WORK_REPORT", str(report))

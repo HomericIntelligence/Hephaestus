@@ -1,10 +1,10 @@
-"""Tests for hephaestus.automation._secret_patterns."""
+"""Tests for the secret-file detection constants in pr_manager."""
 
 from __future__ import annotations
 
 import pytest
 
-from hephaestus.automation._secret_patterns import (
+from hephaestus.automation.pr_manager import (
     SECRET_FILE_EXTENSIONS,
     SECRET_FILE_NAMES,
 )

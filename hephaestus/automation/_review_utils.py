@@ -27,6 +27,9 @@ Provides:
 - ``log_file_path``: Standard per-issue automation log filename builder.
 - ``load_state_file``: Generic state file loader (raw dict or Pydantic model).
 - ``save_state_file``: Generic secure state file writer.
+- ``write_work_report``: Write a phase's work-unit count to $HEPH_WORK_REPORT.
+- ``work_report_context``: Context manager that writes a work report on exit
+  when the loop runner requested one (#613).
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ import argparse
 import contextlib
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -939,3 +943,50 @@ def get_pr_head_branch(pr_number: int) -> str | None:
     except Exception as e:
         logger.warning("Could not fetch head branch for PR #%d: %s", pr_number, e)
         return None
+
+
+def write_work_report(work_units: int) -> None:
+    """Write the phase's work-unit count to the path in $HEPH_WORK_REPORT.
+
+    The loop runner injects HEPH_WORK_REPORT (a temp file path) into subprocess
+    envs. Phases that understand the contract write their work-unit count to that
+    file; the runner reads it after the subprocess returns to measure
+    convergence (#613).
+
+    Args:
+        work_units: The number of work units (e.g., issues planned or reviewed).
+
+    Note:
+        No-op when the env var is unset (phase run outside the loop runner).
+
+    """
+    path = os.environ.get("HEPH_WORK_REPORT")
+    if not path:
+        return
+    # best-effort; absence ⇒ "unknown" ⇒ treated as work
+    with contextlib.suppress(OSError):
+        write_secure(Path(path), str(int(work_units)))
+
+
+@contextlib.contextmanager
+def work_report_context(work_units_fn: Callable[[], int]) -> Iterator[None]:
+    """Write a work report when the loop runner requested one.
+
+    The report env var remains optional so phases still run outside the loop
+    runner. When it is present on entry, the work-unit callback is evaluated on
+    exit and written through write_work_report().
+
+    Args:
+        work_units_fn: Callback returning the work-unit count to report.
+
+    """
+    if not os.environ.get("HEPH_WORK_REPORT"):
+        yield
+        return
+
+    try:
+        yield
+    finally:
+        # Best-effort reporting: suppress reporting failures without masking the block's exception.
+        with contextlib.suppress(Exception):
+            write_work_report(work_units_fn())
