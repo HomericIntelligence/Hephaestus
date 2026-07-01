@@ -1,6 +1,6 @@
 """NATS connection configuration.
 
-Provides the :class:`NATSConfig` Pydantic model and a loader function that
+Provides the :class:`NATSConfig` dataclass and a loader function that
 reads from a YAML dict with optional environment variable overrides.
 
 Usage::
@@ -15,9 +15,8 @@ Usage::
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass, field as dataclass_field, fields as dataclass_fields
 from typing import Any, Literal
-
-from pydantic import BaseModel, Field, model_validator
 
 # Valid JetStream first-subscription deliver policies. These string values match
 # nats.js.api.DeliverPolicy's enum values, so the subscriber can build the enum
@@ -26,8 +25,16 @@ DeliverPolicyStr = Literal[
     "all", "last", "new", "by_start_sequence", "by_start_time", "last_per_subject"
 ]
 
+# Runtime allowlist mirroring DeliverPolicyStr. pydantic enforced the Literal at
+# construction; a stdlib dataclass does not, so __post_init__ checks membership
+# explicitly (subscriber.py builds a DeliverPolicy enum from this string).
+_DELIVER_POLICIES = frozenset(
+    {"all", "last", "new", "by_start_sequence", "by_start_time", "last_per_subject"}
+)
 
-class NATSConfig(BaseModel):
+
+@dataclass
+class NATSConfig:
     """NATS JetStream connection configuration.
 
     Attributes:
@@ -56,45 +63,43 @@ class NATSConfig(BaseModel):
 
     """
 
-    enabled: bool = Field(default=False, description="Enable NATS event subscription")
-    url: str = Field(default="nats://localhost:4222", description="NATS server URL")
-    stream: str = Field(default="TASKS", description="JetStream stream name")
-    subjects: list[str] = Field(
-        default_factory=list,
-        description="Subject patterns to subscribe to",
-    )
-    durable_name: str = Field(
-        default="hephaestus-subscriber",
-        description="Durable consumer name for at-least-once delivery",
-    )
-    deliver_policy: DeliverPolicyStr = Field(
-        default="new",
-        description="JetStream deliver policy (new, all, last, etc.)",
-    )
-    initial_backoff_seconds: float = Field(
-        default=1.0,
-        gt=0.0,
-        description="Initial wait (seconds) before the first reconnect attempt.",
-    )
-    max_backoff_seconds: float = Field(
-        default=60.0,
-        gt=0.0,
-        description="Upper bound (seconds) for exponential reconnect backoff.",
-    )
-    backoff_multiplier: float = Field(
-        default=2.0,
-        gt=1.0,
-        description="Multiplier applied to the current backoff after each failed reconnect.",
-    )
+    enabled: bool = False
+    url: str = "nats://localhost:4222"
+    stream: str = "TASKS"
+    subjects: list[str] = dataclass_field(default_factory=list)
+    durable_name: str = "hephaestus-subscriber"
+    deliver_policy: DeliverPolicyStr = "new"
+    initial_backoff_seconds: float = 1.0
+    max_backoff_seconds: float = 60.0
+    backoff_multiplier: float = 2.0
 
-    @model_validator(mode="after")
-    def _check_backoff_bounds(self) -> NATSConfig:
+    def __post_init__(self) -> None:
+        """Validate deliver-policy membership and backoff bounds.
+
+        Raises:
+            ValueError: If ``deliver_policy`` is not a known policy, a backoff
+                field is out of range, or ``max_backoff_seconds`` is below
+                ``initial_backoff_seconds``.
+
+        """
+        if self.deliver_policy not in _DELIVER_POLICIES:
+            raise ValueError(
+                f"deliver_policy must be one of {sorted(_DELIVER_POLICIES)}, "
+                f"got {self.deliver_policy!r}"
+            )
+        if self.initial_backoff_seconds <= 0.0:
+            raise ValueError(
+                f"initial_backoff_seconds must be > 0, got {self.initial_backoff_seconds}"
+            )
+        if self.max_backoff_seconds <= 0.0:
+            raise ValueError(f"max_backoff_seconds must be > 0, got {self.max_backoff_seconds}")
+        if self.backoff_multiplier <= 1.0:
+            raise ValueError(f"backoff_multiplier must be > 1, got {self.backoff_multiplier}")
         if self.max_backoff_seconds < self.initial_backoff_seconds:
             raise ValueError(
                 "max_backoff_seconds must be >= initial_backoff_seconds "
                 f"(got max={self.max_backoff_seconds}, initial={self.initial_backoff_seconds})"
             )
-        return self
 
     @classmethod
     def from_env(cls, **overrides: Any) -> NATSConfig:
@@ -208,4 +213,11 @@ def load_nats_config(
     if env_override:
         data = _apply_env_overrides(data)
 
-    return NATSConfig(**data)
+    # Pydantic's BaseModel silently dropped unknown keys; a stdlib dataclass
+    # raises TypeError on them. Preserve the historical tolerant-YAML contract
+    # (issue #1458): drop keys that are not NATSConfig fields so a typo'd or
+    # forward-compatible config block still loads. Direct NATSConfig(...) calls
+    # remain strict, which is the desired behavior for code callers.
+    known = {f.name for f in dataclass_fields(NATSConfig)}
+    filtered = {k: v for k, v in data.items() if k in known}
+    return NATSConfig(**filtered)

@@ -46,6 +46,9 @@ python = ">=3.10,<3.14"
 # Floor 23.0: first stable PEP 660 editable-install release; cap blocks the
 # next untested major (installed 26.x in CI). Bump cap after testing 27.x.
 pip = ">=23.0,<27"
+# pydantic is the runtime dep of hephaestus.automation (the [automation] extra).
+# It is intentionally NOT in pyproject [project.dependencies] — see issue #1458 /
+# ADR-0001. Kept here so the dev/test env can import hephaestus.automation.
 pydantic = ">=2.12.5,<3"
 pygments = ">=2.20.0"  # CVE-2026-4539
 pygithub = ">=2.9.1,<3"

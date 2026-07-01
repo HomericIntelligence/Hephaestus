@@ -16,9 +16,7 @@ class TestNATSEvent:
         assert event.sequence == 0
 
     def test_sequence_non_negative(self) -> None:
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValueError):
             NATSEvent(subject="s", data={}, timestamp="", sequence=-1)
 
     def test_data_dict(self) -> None:

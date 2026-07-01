@@ -39,9 +39,9 @@ Adopt a **dual-layer package** with four guarantees:
    `hephaestus-implement-issues`, `hephaestus-review-prs`,
    `hephaestus-agent-stage`, `hephaestus-ensure-state-labels`. They require
    the `[automation]` extra to be honest about their dependency surface.
-   Today they happen to run from a base install because `pydantic` is
-   currently also a base dependency (via `hephaestus.nats`); this is a
-   transitional state.
+   As of issue #1458, `pydantic` is no longer a base dependency — it ships
+   only in the `[automation]` extra, so a base install does not provide it
+   and these scripts genuinely require `[automation]`.
 
 4. **Boundary contract** — `hephaestus.automation` may import from any
    library subpackage; library subpackages MUST NOT import from
@@ -72,6 +72,8 @@ Adopt a **dual-layer package** with four guarantees:
   `sys.modules`.
 - `tests/unit/test_automation_boundary.py` fails CI if any library
   subpackage gains a `from hephaestus.automation` import.
-- If `hephaestus.nats` is ever stripped of its pydantic use (or moved
-  out), the base dependency list can drop pydantic and `[automation]`
-  becomes load-bearing rather than transitional.
+- `hephaestus.nats` was migrated off pydantic to stdlib dataclasses
+  (issue #1458; `load_nats_config` filters unknown keys to preserve the
+  prior tolerant-YAML behavior), so pydantic was dropped from the base
+  dependency list and `[automation]` is now load-bearing: a base install
+  no longer pulls pydantic.

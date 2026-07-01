@@ -121,6 +121,13 @@ class TestLoadNATSConfig:
         config = load_nats_config({}, env_override=False)
         assert config.initial_backoff_seconds == 1.0
 
+    def test_extra_yaml_keys_ignored(self) -> None:
+        # Regression for issue #1458: NATSConfig moved from pydantic (which
+        # silently ignored extras) to a stdlib dataclass (which raises on
+        # unknown kwargs). load_nats_config must keep dropping unknown keys.
+        config = load_nats_config({"url": "nats://x:4222", "unknown_key": "ignored"})
+        assert config.url == "nats://x:4222"
+
 
 class TestFromEnv:
     """Tests for NATSConfig.from_env()."""

@@ -15,9 +15,8 @@ Usage::
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, NamedTuple
-
-from pydantic import BaseModel, Field
 
 
 class SubjectParts(NamedTuple):
@@ -35,7 +34,8 @@ class SubjectParts(NamedTuple):
     verb: str
 
 
-class NATSEvent(BaseModel):
+@dataclass
+class NATSEvent:
     """Incoming NATS JetStream message payload.
 
     Attributes:
@@ -46,10 +46,20 @@ class NATSEvent(BaseModel):
 
     """
 
-    subject: str = Field(..., description="Full NATS subject string")
-    data: dict[str, Any] = Field(..., description="Decoded JSON message body")
-    timestamp: str = Field(..., description="ISO-8601 timestamp")
-    sequence: int = Field(..., ge=0, description="JetStream sequence number")
+    subject: str
+    data: dict[str, Any]
+    timestamp: str
+    sequence: int
+
+    def __post_init__(self) -> None:
+        """Validate the JetStream sequence number.
+
+        Raises:
+            ValueError: If ``sequence`` is negative.
+
+        """
+        if self.sequence < 0:
+            raise ValueError(f"sequence must be >= 0, got {self.sequence}")
 
 
 def parse_subject(subject: str, prefix: str = "hi.tasks") -> SubjectParts:

@@ -28,7 +28,6 @@ keywords = ["utilities", "helpers", "tooling", "homericintelligence"]
 dependencies = [
     "packaging>=21.0,<27",
     "pyyaml>=6.0,<7",
-    "pydantic>=2.12.5,<3",
     # IANA timezone data is bundled with Python on POSIX but not on Windows;
     # rate_limit.py uses ZoneInfo which needs it on Windows.
     "tzdata; platform_system == 'Windows'",
@@ -84,11 +83,11 @@ nats = [
     "nats-py>=2.6,<3",
 ]
 # Product layer (hephaestus.automation). See docs/adr/0001-automation-library-boundary.md.
-# Explicitly declares the deps automation needs at runtime even though some are
-# also currently base deps (pydantic is pulled in transitionally via hephaestus.nats).
-# Listing them here means the extra is honest and forward-compatible: when the
-# base dep list shrinks, this extra remains load-bearing. CI verifies the
-# library-side import surface stays clean via tests/unit/test_import_surface.py.
+# pydantic is the runtime dependency of hephaestus/automation/models.py. As of
+# issue #1458 it is NO LONGER a base dependency (hephaestus.nats moved to stdlib
+# dataclasses), so this extra is now load-bearing: a base install does not get
+# pydantic. CI verifies the library-side import surface stays clean via
+# tests/unit/validation/test_import_surface.py.
 automation = [
     "pydantic>=2.12.5,<3",
 ]
