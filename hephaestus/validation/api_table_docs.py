@@ -18,7 +18,6 @@ Usage::
 
 from __future__ import annotations
 
-import argparse
 import importlib
 import json
 import re
@@ -26,8 +25,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from hephaestus.cli.utils import add_json_arg, add_version_arg
-from hephaestus.utils.helpers import get_repo_root
+from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 
 # Subpackages whose API tables are completeness-guarded. Add a name here only
 # after authoring its table in COMPATIBILITY.md.
@@ -189,12 +187,9 @@ def format_json(findings: list[ApiTableFinding]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     """Entry point for ``hephaestus-check-api-table-docs``."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo-root", type=Path, default=None)
-    add_json_arg(parser)
-    add_version_arg(parser)
+    parser = create_validation_parser(__doc__, prog="hephaestus-check-api-table-docs")
     args = parser.parse_args(argv)
-    repo_root = args.repo_root or get_repo_root()
+    repo_root = resolve_repo_root(args)
     documented = load_documented_symbols(repo_root / "COMPATIBILITY.md")
     findings = find_violations(documented)
     print(format_json(findings) if args.json else format_report(findings))

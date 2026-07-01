@@ -85,11 +85,31 @@ class CommandRegistry:
         return self.commands.get(name)
 
 
-def create_parser(prog_name: str = "hephaestus") -> argparse.ArgumentParser:
+_DEFAULT_CREATE_PARSER_EPILOG = """
+Examples:
+  %(prog)s command --help     Show help for a specific command
+  %(prog)s --version          Show version information
+""".strip()
+
+
+def create_parser(
+    prog_name: str | None = "hephaestus",
+    *,
+    description: str | None = None,
+    epilog: str | None = _DEFAULT_CREATE_PARSER_EPILOG,
+    usage: str | None = None,
+    formatter_class: type[argparse.HelpFormatter] = argparse.RawDescriptionHelpFormatter,
+    add_help: bool = True,
+) -> argparse.ArgumentParser:
     """Create a standardized argument parser with common options.
 
     Args:
         prog_name: Program name for the parser
+        description: Parser description text
+        epilog: Parser epilog text
+        usage: Optional usage string override
+        formatter_class: Help formatter class
+        add_help: Whether to add argparse's default help option
 
     Returns:
         Configured ArgumentParser instance
@@ -97,12 +117,11 @@ def create_parser(prog_name: str = "hephaestus") -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog=prog_name,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  %(prog)s command --help     Show help for a specific command
-  %(prog)s --version          Show version information
-        """.strip(),
+        description=description,
+        epilog=epilog,
+        usage=usage,
+        formatter_class=formatter_class,
+        add_help=add_help,
     )
 
     # Add standard options
@@ -183,8 +202,8 @@ def create_validation_parser(
         Configured ArgumentParser instance with shared validation flags.
 
     """
-    parser = argparse.ArgumentParser(
-        prog=prog,
+    parser = create_parser(
+        prog_name=prog,
         usage=usage,
         description=description,
         epilog=epilog,
@@ -198,7 +217,6 @@ def create_validation_parser(
             help="Repository root (default: auto-detect)",
         )
     add_json_arg(parser)
-    add_version_arg(parser)
     return parser
 
 

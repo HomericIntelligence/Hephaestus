@@ -120,6 +120,25 @@ class TestCreateParser:
         parser = create_parser("myprog")
         assert parser.prog == "myprog"
 
+    def test_accepts_description_epilog_and_usage(self) -> None:
+        """Parser metadata can be preserved while using the shared factory."""
+        parser = create_parser(
+            "demo",
+            description="Demo description",
+            epilog="Demo epilog",
+            usage="demo [options]",
+        )
+
+        assert parser.description == "Demo description"
+        assert parser.epilog == "Demo epilog"
+        assert parser.usage == "demo [options]"
+
+    def test_can_suppress_default_epilog(self) -> None:
+        """Call sites can opt out of the shared examples epilog."""
+        parser = create_parser("demo", epilog=None)
+
+        assert parser.epilog is None
+
 
 class TestCreateValidationParser:
     """Tests for create_validation_parser."""

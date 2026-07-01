@@ -391,49 +391,38 @@ class TestTimeoutHandling:
 
     def test_working_tree_clean_with_timeout(self) -> None:
         """_working_tree_clean propagates TimeoutExpired."""
-        with patch("hephaestus.github.tidy.run_subprocess", create=True) as mock_run:
-            mock_run.side_effect = subprocess.TimeoutExpired(["git"], 10)
+        with patch("hephaestus.github.tidy._shared_working_tree_clean") as shared_clean:
+            shared_clean.side_effect = subprocess.TimeoutExpired(["git"], 10)
             with pytest.raises(subprocess.TimeoutExpired):
                 _working_tree_clean()
 
-    def test_working_tree_clean_uses_run_subprocess(self) -> None:
-        """_working_tree_clean routes git status through run_subprocess."""
-        with patch("hephaestus.github.tidy.run_subprocess", create=True) as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="")
-            _working_tree_clean()
-            mock_run.assert_called_once_with(
-                ["git", "status", "--porcelain"],
-                check=False,
-                timeout=tidy_module.METADATA_TIMEOUT,
-            )
+    def test_working_tree_clean_uses_shared_helper(self) -> None:
+        """_working_tree_clean routes git status through the shared git helper."""
+        with patch("hephaestus.github.tidy._shared_working_tree_clean") as shared_clean:
+            shared_clean.return_value = True
+            assert _working_tree_clean() is True
+            shared_clean.assert_called_once_with()
 
     def test_in_git_repo_with_timeout(self) -> None:
         """_in_git_repo propagates TimeoutExpired."""
-        with patch("hephaestus.github.tidy.run_subprocess", create=True) as mock_run:
-            mock_run.side_effect = subprocess.TimeoutExpired(["git"], 10)
+        with patch("hephaestus.github.tidy._shared_in_git_repo") as shared_in_repo:
+            shared_in_repo.side_effect = subprocess.TimeoutExpired(["git"], 10)
             with pytest.raises(subprocess.TimeoutExpired):
                 _in_git_repo()
 
-    def test_in_git_repo_uses_run_subprocess(self) -> None:
-        """_in_git_repo routes git rev-parse through run_subprocess."""
-        with patch("hephaestus.github.tidy.run_subprocess", create=True) as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            _in_git_repo()
-            mock_run.assert_called_once_with(
-                ["git", "rev-parse", "--git-dir"],
-                check=False,
-                timeout=tidy_module.METADATA_TIMEOUT,
-            )
+    def test_in_git_repo_uses_shared_helper(self) -> None:
+        """_in_git_repo routes git rev-parse through the shared git helper."""
+        with patch("hephaestus.github.tidy._shared_in_git_repo") as shared_in_repo:
+            shared_in_repo.return_value = True
+            assert _in_git_repo() is True
+            shared_in_repo.assert_called_once_with()
 
-    def test_repo_root_uses_run_subprocess(self) -> None:
-        """_repo_root routes git root detection through run_subprocess."""
-        with patch("hephaestus.github.tidy.run_subprocess", create=True) as mock_run:
-            mock_run.return_value = MagicMock(stdout="/path/to/repo\n")
-            _repo_root()
-            mock_run.assert_called_once_with(
-                ["git", "rev-parse", "--show-toplevel"],
-                timeout=tidy_module.METADATA_TIMEOUT,
-            )
+    def test_repo_root_uses_shared_helper(self) -> None:
+        """_repo_root routes git root detection through the shared git helper."""
+        with patch("hephaestus.github.tidy._shared_repo_root") as shared_repo_root:
+            shared_repo_root.return_value = Path("/path/to/repo")
+            assert _repo_root() == Path("/path/to/repo")
+            shared_repo_root.assert_called_once_with()
 
     def test_direct_rebase_agent_uses_env_configured_timeout(
         self, monkeypatch: pytest.MonkeyPatch

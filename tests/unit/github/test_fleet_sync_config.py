@@ -159,7 +159,7 @@ class TestResolveFleetConfig:
         # Mock _find_default_config to return the tmp_path config file
         # This isolates the test from the development environment and makes it portable
         # to installed packages where the bundled .fleet.yml won't exist
-        with patch("hephaestus.github.fleet_sync._find_default_config") as mock_find:
+        with patch("hephaestus.github.fleet_sync.config._find_default_config") as mock_find:
             mock_find.return_value = cfg
             org, repos = resolve_fleet_config(cli_org=None, cli_repos=None, config_path=None)
 

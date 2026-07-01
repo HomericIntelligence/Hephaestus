@@ -16,7 +16,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 # the hephaestus/github/client.py docstring. Adding them here would wrongly fail
 # CI. severity_label.py is covered here per issue #1456.
 _TARGETS = (
-    _REPO_ROOT / "hephaestus" / "github" / "fleet_sync.py",
+    *_REPO_ROOT.joinpath("hephaestus", "github", "fleet_sync").glob("*.py"),
     _REPO_ROOT / "hephaestus" / "github" / "severity_label.py",
 )
 _RUNNERS = {"run", "Popen", "check_output", "check_call"}

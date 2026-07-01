@@ -29,7 +29,7 @@ PROVIDER_NEUTRAL_FILES = [
     "hephaestus/automation/follow_up.py",
     "hephaestus/automation/pr_manager.py",
     "hephaestus/github/tidy.py",
-    "hephaestus/github/fleet_sync.py",
+    "hephaestus/github/fleet_sync/conflict_resolver.py",
 ]
 
 CODEX_ONLY_NAMES = {

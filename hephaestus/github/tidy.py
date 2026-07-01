@@ -33,15 +33,19 @@ from hephaestus.agents.runtime import (
 from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
-    add_version_arg,
     configure_github_throttle_from_args,
+    create_parser,
     emit_json_status,
 )
 from hephaestus.constants import agent_rebase_timeout
 from hephaestus.github.client import gh_call
+from hephaestus.github.git_ops import (
+    in_git_repo as _shared_in_git_repo,
+    repo_root as _shared_repo_root,
+    working_tree_clean as _shared_working_tree_clean,
+)
 from hephaestus.github.pr_merge import detect_repo_from_remote
 from hephaestus.logging.utils import get_logger
-from hephaestus.utils.helpers import METADATA_TIMEOUT, run_subprocess
 
 logger = get_logger(__name__)
 
@@ -93,12 +97,7 @@ def _detect_default_branch(override: str | None) -> str:
 def _working_tree_clean() -> bool:
     """Return True if the git working tree has no uncommitted changes."""
     try:
-        result = run_subprocess(
-            ["git", "status", "--porcelain"],
-            check=False,
-            timeout=METADATA_TIMEOUT,
-        )
-        return result.returncode == 0 and result.stdout.strip() == ""
+        return _shared_working_tree_clean()
     except subprocess.TimeoutExpired as e:
         logger.error("git status timed out: %s", e)
         raise
@@ -107,14 +106,7 @@ def _working_tree_clean() -> bool:
 def _in_git_repo() -> bool:
     """Return True if cwd is inside a git repository."""
     try:
-        return (
-            run_subprocess(
-                ["git", "rev-parse", "--git-dir"],
-                check=False,
-                timeout=METADATA_TIMEOUT,
-            ).returncode
-            == 0
-        )
+        return _shared_in_git_repo()
     except subprocess.TimeoutExpired as e:
         logger.error("git rev-parse --git-dir timed out: %s", e)
         raise
@@ -128,11 +120,7 @@ def _repo_root() -> Path:
     CalledProcessError path: both failures propagate as unhandled exceptions to
     the CLI entrypoint.
     """
-    result = run_subprocess(
-        ["git", "rev-parse", "--show-toplevel"],
-        timeout=METADATA_TIMEOUT,
-    )
-    return Path(result.stdout.strip())
+    return _shared_repo_root()
 
 
 def parse_problem_branches(output: str) -> list[str]:
@@ -412,11 +400,12 @@ async def _run_claude_rebase_agent(
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = create_parser(
+        prog_name="hephaestus-tidy",
         description=(
             "Tidy the current repo's branches and fix failed rebases with a Myrmidon swarm"
         ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=None,
     )
     parser.add_argument(
         "--dry-run",
@@ -444,7 +433,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
     add_github_throttle_args(parser)
     add_json_arg(parser)
-    add_version_arg(parser)
     return parser
 
 
