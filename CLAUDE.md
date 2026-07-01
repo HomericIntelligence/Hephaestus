@@ -384,14 +384,27 @@ pixi run pytest tests/unit --cov=hephaestus --cov-report=html
 
 ## Environment Setup
 
-This project uses [Pixi](https://pixi.sh) for environment management:
+This project uses [Pixi](https://pixi.sh) for environment management. The
+one-command bootstrap (deps + editable install + pre-commit hooks) is
+`just bootstrap`:
 
 ```bash
-# Install dependencies and create environment
+# Install deps, the editable hephaestus package, and pre-commit hooks
+just bootstrap
+```
+
+`just bootstrap` wraps the three commands below. Run them manually if you do
+not have [`just`](https://just.systems/) installed:
+
+```bash
+# 1. Install dependencies and create the environment
 pixi install
 
-# Run pre-commit hooks (formatting, linting, etc.)
-pre-commit install
+# 2. Editable-install hephaestus so `import hephaestus` works at runtime
+pixi run dev-install
+
+# 3. Install the pre-commit hooks (pixi-managed binary)
+pixi run pre-commit install
 ```
 
 ## Common Commands
