@@ -35,7 +35,6 @@ from hephaestus.github.client import ClaudeUsageCapError, gh_call
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 from hephaestus.io.utils import write_secure
 
-from . import review_state
 from ._review_utils import log_file_path
 from ._stage_context import StageMixin
 from .address_review import run_address_fix_session
@@ -75,6 +74,7 @@ from .pr_reviewer import gather_impl_review_context, review_pr_inline
 from .prompts import get_impl_loop_review_prompt, get_impl_resume_feedback_prompt
 from .review_validator import validate_prior_comments_addressed
 from .session_naming import AGENT_IMPLEMENTER, current_trunk_githash  # noqa: F401
+from .state import review as review_state
 from .state_labels import STATE_SKIP
 
 if TYPE_CHECKING:

@@ -110,7 +110,7 @@ def test_run_skips_issue_with_existing_plan() -> None:
         # the worker, so _has_existing_plan never runs (#1156). Empty labels →
         # the issue reaches the worker, where the mocked guard returns True.
         patch(
-            "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+            "hephaestus.automation.state.planner.fetch_all_issue_labels_graphql",
             return_value={},
         ),
     ):

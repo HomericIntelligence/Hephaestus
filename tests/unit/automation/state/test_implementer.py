@@ -5,8 +5,8 @@ from __future__ import annotations
 import stat
 from pathlib import Path
 
-from hephaestus.automation.implementer_state import ImplementationStateManager
 from hephaestus.automation.models import ImplementationPhase, ImplementationState
+from hephaestus.automation.state.implementer import ImplementationStateManager
 
 
 def test_save_persists_issue_state_file(tmp_path: Path) -> None:

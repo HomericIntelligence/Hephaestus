@@ -1,4 +1,4 @@
-"""Unit tests for ``hephaestus.automation.planner_state``.
+"""Unit tests for ``hephaestus.automation.state.planner``.
 
 Covers the batched comment-prefetch path introduced by #616 and the
 ``has_existing_plan`` fallback behaviour.
@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation.models import PLAN_COMMENT_MARKER, PlannerOptions
-from hephaestus.automation.planner_state import PlannerStateManager
+from hephaestus.automation.state.planner import PlannerStateManager
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -32,10 +32,10 @@ def _default_title_and_skip_patches() -> Any:
     """
     with (
         patch(
-            "hephaestus.automation.planner_state.fetch_all_issue_titles_graphql",
+            "hephaestus.automation.state.planner.fetch_all_issue_titles_graphql",
             return_value={},
         ),
-        patch("hephaestus.automation.planner_state.skip_epics"),
+        patch("hephaestus.automation.state.planner.skip_epics"),
     ):
         yield
 
@@ -72,11 +72,11 @@ class TestPrefetchComments:
     def _patch_repo(self) -> Any:
         with (
             patch(
-                "hephaestus.automation.review_state.get_repo_root",
+                "hephaestus.automation.state.review.get_repo_root",
                 return_value="/tmp/repo",
             ),
             patch(
-                "hephaestus.automation.review_state.get_repo_info",
+                "hephaestus.automation.state.review.get_repo_info",
                 return_value=("owner", "repo"),
             ),
         ):
@@ -102,7 +102,7 @@ class TestPrefetchComments:
             12: [{"body": _other_body(), "updatedAt": "2025-01-01", "url": "u2"}],
         }
         with patch(
-            "hephaestus.automation.planner_state.fetch_all_issue_comments_graphql",
+            "hephaestus.automation.state.planner.fetch_all_issue_comments_graphql",
             return_value=expected,
         ):
             mgr.prefetch_comments([11, 12])
@@ -113,7 +113,7 @@ class TestPrefetchComments:
     def test_get_cached_returns_empty_list_for_missing_key(self) -> None:
         mgr = PlannerStateManager(_make_options(issues=[20]))
         with patch(
-            "hephaestus.automation.planner_state.fetch_all_issue_comments_graphql",
+            "hephaestus.automation.state.planner.fetch_all_issue_comments_graphql",
             return_value={},
         ):
             mgr.prefetch_comments([20])
@@ -133,11 +133,11 @@ class TestHasExistingPlanCached:
     def _patch_repo(self) -> Any:
         with (
             patch(
-                "hephaestus.automation.review_state.get_repo_root",
+                "hephaestus.automation.state.review.get_repo_root",
                 return_value="/tmp/repo",
             ),
             patch(
-                "hephaestus.automation.review_state.get_repo_info",
+                "hephaestus.automation.state.review.get_repo_info",
                 return_value=("owner", "repo"),
             ),
         ):
@@ -146,7 +146,7 @@ class TestHasExistingPlanCached:
     def _mgr_with_cache(self, cache: dict[int, list[dict[str, Any]]]) -> PlannerStateManager:
         mgr = PlannerStateManager(_make_options(issues=list(cache.keys())))
         with patch(
-            "hephaestus.automation.planner_state.fetch_all_issue_comments_graphql",
+            "hephaestus.automation.state.planner.fetch_all_issue_comments_graphql",
             return_value=cache,
         ):
             mgr.prefetch_comments(list(cache.keys()))
@@ -166,7 +166,7 @@ class TestHasExistingPlanCached:
 
     def test_does_not_call_gh_cli_when_cache_hit(self) -> None:
         mgr = self._mgr_with_cache({34: [{"body": _plan_body()}]})
-        with patch("hephaestus.automation.planner_state._gh_call") as mock_gh:
+        with patch("hephaestus.automation.state.planner._gh_call") as mock_gh:
             mgr.has_existing_plan(34)
         mock_gh.assert_not_called()
 
@@ -198,10 +198,10 @@ class TestFilterDropsPlanGoIssues:
         }
         with (
             patch(
-                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                "hephaestus.automation.state.planner.fetch_all_issue_labels_graphql",
                 return_value=labels,
             ),
-            patch("hephaestus.automation.planner_state._gh_call") as mock_gh,
+            patch("hephaestus.automation.state.planner._gh_call") as mock_gh,
         ):
             kept = mgr.filter()
 
@@ -218,7 +218,7 @@ class TestFilterDropsPlanGoIssues:
         mgr = PlannerStateManager(opts)
 
         with patch(
-            "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+            "hephaestus.automation.state.planner.fetch_all_issue_labels_graphql",
             return_value={10: [STATE_PLAN_GO]},
         ):
             kept = mgr.filter()
@@ -233,7 +233,7 @@ class TestFilterDropsPlanGoIssues:
         mgr = PlannerStateManager(opts)
 
         with patch(
-            "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+            "hephaestus.automation.state.planner.fetch_all_issue_labels_graphql",
             return_value={10: [STATE_PLAN_GO], 11: ["bug"]},
         ):
             mgr.filter()
@@ -260,14 +260,14 @@ class TestFilterEpicExclusion:
 
         with (
             patch(
-                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                "hephaestus.automation.state.planner.fetch_all_issue_labels_graphql",
                 return_value=labels,
             ),
             patch(
-                "hephaestus.automation.planner_state.fetch_all_issue_titles_graphql",
+                "hephaestus.automation.state.planner.fetch_all_issue_titles_graphql",
                 return_value=titles,
             ),
-            patch("hephaestus.automation.planner_state.skip_epics") as mock_skip,
+            patch("hephaestus.automation.state.planner.skip_epics") as mock_skip,
         ):
             kept = mgr.filter()
 
@@ -283,14 +283,14 @@ class TestFilterEpicExclusion:
 
         with (
             patch(
-                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                "hephaestus.automation.state.planner.fetch_all_issue_labels_graphql",
                 return_value={10: ["bug"], 11: []},
             ),
             patch(
-                "hephaestus.automation.planner_state.fetch_all_issue_titles_graphql",
+                "hephaestus.automation.state.planner.fetch_all_issue_titles_graphql",
                 return_value={10: "a", 11: "b"},
             ),
-            patch("hephaestus.automation.planner_state.skip_epics") as mock_skip,
+            patch("hephaestus.automation.state.planner.skip_epics") as mock_skip,
         ):
             kept = mgr.filter()
 
@@ -318,10 +318,10 @@ class TestFilterAllFilteredWarning:
 
         with (
             patch(
-                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                "hephaestus.automation.state.planner.fetch_all_issue_labels_graphql",
                 return_value={10: [STATE_PLAN_GO], 11: [STATE_PLAN_GO]},
             ),
-            caplog.at_level("WARNING", logger="hephaestus.automation.planner_state"),
+            caplog.at_level("WARNING", logger="hephaestus.automation.state.planner"),
         ):
             kept = mgr.filter()
 
@@ -336,10 +336,10 @@ class TestFilterAllFilteredWarning:
 
         with (
             patch(
-                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                "hephaestus.automation.state.planner.fetch_all_issue_labels_graphql",
                 return_value={10: [], 11: []},
             ),
-            caplog.at_level("WARNING", logger="hephaestus.automation.planner_state"),
+            caplog.at_level("WARNING", logger="hephaestus.automation.state.planner"),
         ):
             kept = mgr.filter()
 
@@ -357,10 +357,10 @@ class TestFilterAllFilteredWarning:
 
         with (
             patch(
-                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                "hephaestus.automation.state.planner.fetch_all_issue_labels_graphql",
                 return_value={10: [STATE_PLAN_GO], 11: [STATE_PLAN_GO]},
             ),
-            caplog.at_level("WARNING", logger="hephaestus.automation.planner_state"),
+            caplog.at_level("WARNING", logger="hephaestus.automation.state.planner"),
         ):
             kept = mgr.filter()
 
@@ -384,19 +384,19 @@ class TestHasExistingPlanFallback:
     def test_returns_true_via_gh_cli_when_plan_present(self) -> None:
         mgr = PlannerStateManager(_make_options(issues=[41]))
         mock_result = self._gh_comments_payload([_other_body(), _plan_body()])
-        with patch("hephaestus.automation.planner_state._gh_call", return_value=mock_result):
+        with patch("hephaestus.automation.state.planner._gh_call", return_value=mock_result):
             assert mgr.has_existing_plan(41) is True
 
     def test_returns_false_via_gh_cli_when_no_plan(self) -> None:
         mgr = PlannerStateManager(_make_options(issues=[42]))
         mock_result = self._gh_comments_payload([_other_body()])
-        with patch("hephaestus.automation.planner_state._gh_call", return_value=mock_result):
+        with patch("hephaestus.automation.state.planner._gh_call", return_value=mock_result):
             assert mgr.has_existing_plan(42) is False
 
     def test_returns_false_on_gh_call_exception(self) -> None:
         mgr = PlannerStateManager(_make_options(issues=[43]))
         with patch(
-            "hephaestus.automation.planner_state._gh_call",
+            "hephaestus.automation.state.planner._gh_call",
             side_effect=RuntimeError("network error"),
         ):
             assert mgr.has_existing_plan(43) is False

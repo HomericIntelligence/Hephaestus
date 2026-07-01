@@ -1,4 +1,4 @@
-"""Unit tests for ``hephaestus.automation.review_state``.
+"""Unit tests for ``hephaestus.automation.state.review``.
 
 The shared GO-plan-review gate is load-bearing — both
 ``plan_reviewer._latest_review_is_final`` (skip-on-GO) and
@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from hypothesis import given, strategies as st
 
-from hephaestus.automation.review_state import (
+from hephaestus.automation.state.review import (
     MAX_UNPARSEABLE_VERDICT_PASSES,
     PLAN_REVIEW_PREFIX,
     _extract_verdict_context,
@@ -251,11 +251,11 @@ class TestIsPlanReviewGoWithFetch:
     def _patch_repo_helpers(self) -> Any:
         with (
             patch(
-                "hephaestus.automation.review_state.get_repo_root",
+                "hephaestus.automation.state.review.get_repo_root",
                 return_value="/tmp/repo",
             ),
             patch(
-                "hephaestus.automation.review_state.get_repo_info",
+                "hephaestus.automation.state.review.get_repo_info",
                 return_value=("owner", "name"),
             ),
             # #704: is_plan_review_go also lazy-fetches labels via
@@ -263,7 +263,7 @@ class TestIsPlanReviewGoWithFetch:
             # Return an empty-labels issue so the comment-scan path is
             # exercised (which is what these legacy tests target).
             patch(
-                "hephaestus.automation.review_state.gh_issue_json",
+                "hephaestus.automation.state.review.gh_issue_json",
                 return_value={"labels": []},
             ),
         ):
@@ -273,19 +273,19 @@ class TestIsPlanReviewGoWithFetch:
         go_body = _review_comment("GO")["body"]
         mock_result = MagicMock()
         mock_result.stdout = _graphql_payload(["# Implementation Plan\n", go_body])
-        with patch("hephaestus.automation.review_state._gh_call", return_value=mock_result):
+        with patch("hephaestus.automation.state.review._gh_call", return_value=mock_result):
             assert is_plan_review_go(123) is True
 
     def test_fetches_and_returns_false_for_nogo(self) -> None:
         nogo_body = _review_comment("NOGO")["body"]
         mock_result = MagicMock()
         mock_result.stdout = _graphql_payload(["# Implementation Plan\n", nogo_body])
-        with patch("hephaestus.automation.review_state._gh_call", return_value=mock_result):
+        with patch("hephaestus.automation.state.review._gh_call", return_value=mock_result):
             assert is_plan_review_go(123) is False
 
     def test_returns_false_when_gh_raises(self) -> None:
         with patch(
-            "hephaestus.automation.review_state._gh_call",
+            "hephaestus.automation.state.review._gh_call",
             side_effect=RuntimeError("network down"),
         ):
             assert is_plan_review_go(123) is False
@@ -304,11 +304,11 @@ class TestIsPlanReviewGoWithFetch:
         mock_result.stdout = _graphql_payload([])
         with (
             patch(
-                "hephaestus.automation.review_state.get_repo_info",
+                "hephaestus.automation.state.review.get_repo_info",
                 return_value=("HomericIntelligence", "ProjectMnemosyne"),
             ) as mock_info,
             patch(
-                "hephaestus.automation.review_state._gh_call",
+                "hephaestus.automation.state.review._gh_call",
                 return_value=mock_result,
             ) as mock_gh,
         ):
@@ -328,11 +328,11 @@ class TestIsPlanReviewGoWithFetch:
         """
         with (
             patch(
-                "hephaestus.automation.review_state.get_repo_info",
+                "hephaestus.automation.state.review.get_repo_info",
                 return_value=("HomericIntelligence", "ProjectMnemosyne"),
             ),
             patch(
-                "hephaestus.automation.review_state._gh_call",
+                "hephaestus.automation.state.review._gh_call",
                 side_effect=RuntimeError("gh down"),
             ),
         ):
@@ -417,13 +417,13 @@ def test_fetch_all_comments_returns_empty_map_on_gh_failure() -> None:
     ``fetch_all_issue_comments_graphql``; callers get empty lists.
     """
     with (
-        patch("hephaestus.automation.review_state.get_repo_root", return_value="/tmp/repo"),
+        patch("hephaestus.automation.state.review.get_repo_root", return_value="/tmp/repo"),
         patch(
-            "hephaestus.automation.review_state.get_repo_info",
+            "hephaestus.automation.state.review.get_repo_info",
             return_value=("HomericIntelligence", "ProjectMnemosyne"),
         ),
         patch(
-            "hephaestus.automation.review_state._gh_call",
+            "hephaestus.automation.state.review._gh_call",
             side_effect=RuntimeError("gh down"),
         ),
     ):
@@ -439,14 +439,14 @@ class TestFetchAllIssueLabelsGraphql:
     """Batched label fetch used by the planner to drop already-GO issues."""
 
     def test_empty_input_returns_empty(self) -> None:
-        from hephaestus.automation.review_state import fetch_all_issue_labels_graphql
+        from hephaestus.automation.state.review import fetch_all_issue_labels_graphql
 
         assert fetch_all_issue_labels_graphql([]) == {}
 
     def test_parses_aliased_labels(self) -> None:
         from unittest.mock import MagicMock, patch
 
-        from hephaestus.automation.review_state import fetch_all_issue_labels_graphql
+        from hephaestus.automation.state.review import fetch_all_issue_labels_graphql
 
         payload = {
             "data": {
@@ -457,12 +457,12 @@ class TestFetchAllIssueLabelsGraphql:
             }
         }
         with (
-            patch("hephaestus.automation.review_state.get_repo_root", return_value="/tmp/repo"),
+            patch("hephaestus.automation.state.review.get_repo_root", return_value="/tmp/repo"),
             patch(
-                "hephaestus.automation.review_state.get_repo_info",
+                "hephaestus.automation.state.review.get_repo_info",
                 return_value=("owner", "repo"),
             ),
-            patch("hephaestus.automation.review_state._gh_call") as mock_gh,
+            patch("hephaestus.automation.state.review._gh_call") as mock_gh,
         ):
             mock_gh.return_value = MagicMock(stdout=json.dumps(payload))
             result = fetch_all_issue_labels_graphql([10, 11])
@@ -472,16 +472,16 @@ class TestFetchAllIssueLabelsGraphql:
     def test_fetch_failure_returns_empty_lists(self) -> None:
         from unittest.mock import patch
 
-        from hephaestus.automation.review_state import fetch_all_issue_labels_graphql
+        from hephaestus.automation.state.review import fetch_all_issue_labels_graphql
 
         with (
-            patch("hephaestus.automation.review_state.get_repo_root", return_value="/tmp/repo"),
+            patch("hephaestus.automation.state.review.get_repo_root", return_value="/tmp/repo"),
             patch(
-                "hephaestus.automation.review_state.get_repo_info",
+                "hephaestus.automation.state.review.get_repo_info",
                 return_value=("owner", "repo"),
             ),
             patch(
-                "hephaestus.automation.review_state._gh_call",
+                "hephaestus.automation.state.review._gh_call",
                 side_effect=RuntimeError("gh down"),
             ),
         ):
@@ -501,15 +501,15 @@ class TestFetchAllIssueLabelsGraphql:
         """
         from unittest.mock import MagicMock, patch
 
-        from hephaestus.automation.review_state import fetch_all_issue_labels_graphql
+        from hephaestus.automation.state.review import fetch_all_issue_labels_graphql
 
         with (
-            patch("hephaestus.automation.review_state.get_repo_root", return_value="/tmp/repo"),
+            patch("hephaestus.automation.state.review.get_repo_root", return_value="/tmp/repo"),
             patch(
-                "hephaestus.automation.review_state.get_repo_info",
+                "hephaestus.automation.state.review.get_repo_info",
                 return_value=("HomericIntelligence", "ProjectHephaestus"),
             ),
-            patch("hephaestus.automation.review_state._gh_call") as mock_gh,
+            patch("hephaestus.automation.state.review._gh_call") as mock_gh,
         ):
             mock_gh.return_value = MagicMock(stdout=json.dumps({"data": {"repository": {}}}))
             fetch_all_issue_labels_graphql([10, 11])
@@ -534,14 +534,14 @@ class TestFetchAllIssueTitlesGraphql:
     """Batched title fetch used by the planner to detect epic/roadmap issues (#1669)."""
 
     def test_empty_input_returns_empty(self) -> None:
-        from hephaestus.automation.review_state import fetch_all_issue_titles_graphql
+        from hephaestus.automation.state.review import fetch_all_issue_titles_graphql
 
         assert fetch_all_issue_titles_graphql([]) == {}
 
     def test_parses_aliased_titles(self) -> None:
         from unittest.mock import MagicMock, patch
 
-        from hephaestus.automation.review_state import fetch_all_issue_titles_graphql
+        from hephaestus.automation.state.review import fetch_all_issue_titles_graphql
 
         payload = {
             "data": {
@@ -552,12 +552,12 @@ class TestFetchAllIssueTitlesGraphql:
             }
         }
         with (
-            patch("hephaestus.automation.review_state.get_repo_root", return_value="/tmp/repo"),
+            patch("hephaestus.automation.state.review.get_repo_root", return_value="/tmp/repo"),
             patch(
-                "hephaestus.automation.review_state.get_repo_info",
+                "hephaestus.automation.state.review.get_repo_info",
                 return_value=("owner", "repo"),
             ),
-            patch("hephaestus.automation.review_state._gh_call") as mock_gh,
+            patch("hephaestus.automation.state.review._gh_call") as mock_gh,
         ):
             mock_gh.return_value = MagicMock(stdout=json.dumps(payload))
             result = fetch_all_issue_titles_graphql([10, 11])
@@ -567,16 +567,16 @@ class TestFetchAllIssueTitlesGraphql:
     def test_fetch_failure_returns_empty_strings(self) -> None:
         from unittest.mock import patch
 
-        from hephaestus.automation.review_state import fetch_all_issue_titles_graphql
+        from hephaestus.automation.state.review import fetch_all_issue_titles_graphql
 
         with (
-            patch("hephaestus.automation.review_state.get_repo_root", return_value="/tmp/repo"),
+            patch("hephaestus.automation.state.review.get_repo_root", return_value="/tmp/repo"),
             patch(
-                "hephaestus.automation.review_state.get_repo_info",
+                "hephaestus.automation.state.review.get_repo_info",
                 return_value=("owner", "repo"),
             ),
             patch(
-                "hephaestus.automation.review_state._gh_call",
+                "hephaestus.automation.state.review._gh_call",
                 side_effect=RuntimeError("gh down"),
             ),
         ):
@@ -588,15 +588,15 @@ class TestFetchAllIssueTitlesGraphql:
         """Title fetch must parameterize owner/name/numbers (no injection)."""
         from unittest.mock import MagicMock, patch
 
-        from hephaestus.automation.review_state import fetch_all_issue_titles_graphql
+        from hephaestus.automation.state.review import fetch_all_issue_titles_graphql
 
         with (
-            patch("hephaestus.automation.review_state.get_repo_root", return_value="/tmp/repo"),
+            patch("hephaestus.automation.state.review.get_repo_root", return_value="/tmp/repo"),
             patch(
-                "hephaestus.automation.review_state.get_repo_info",
+                "hephaestus.automation.state.review.get_repo_info",
                 return_value=("HomericIntelligence", "ProjectHephaestus"),
             ),
-            patch("hephaestus.automation.review_state._gh_call") as mock_gh,
+            patch("hephaestus.automation.state.review._gh_call") as mock_gh,
         ):
             mock_gh.return_value = MagicMock(stdout=json.dumps({"data": {"repository": {}}}))
             fetch_all_issue_titles_graphql([10, 11])
@@ -618,15 +618,15 @@ class TestFetchAllIssueCommentsGraphqlVars:
         """Same regression guard for the batched comments fetch."""
         from unittest.mock import MagicMock, patch
 
-        from hephaestus.automation.review_state import fetch_all_issue_comments_graphql
+        from hephaestus.automation.state.review import fetch_all_issue_comments_graphql
 
         with (
-            patch("hephaestus.automation.review_state.get_repo_root", return_value="/tmp/repo"),
+            patch("hephaestus.automation.state.review.get_repo_root", return_value="/tmp/repo"),
             patch(
-                "hephaestus.automation.review_state.get_repo_info",
+                "hephaestus.automation.state.review.get_repo_info",
                 return_value=("HomericIntelligence", "ProjectHephaestus"),
             ),
-            patch("hephaestus.automation.review_state._gh_call") as mock_gh,
+            patch("hephaestus.automation.state.review._gh_call") as mock_gh,
         ):
             mock_gh.return_value = MagicMock(stdout=json.dumps({"data": {"repository": {}}}))
             fetch_all_issue_comments_graphql([10])

@@ -2118,7 +2118,7 @@ class TestFetchPlanAndReview:
     def test_extracts_plan_and_review_bodies(
         self, implementer: IssueImplementer, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from hephaestus.automation import review_state as review_state_mod
+        from hephaestus.automation.state import review as review_state_mod
 
         comments = [
             {"body": "# Implementation Plan\n\nStep 1"},
@@ -2134,7 +2134,7 @@ class TestFetchPlanAndReview:
     def test_returns_empty_on_fetch_failure(
         self, implementer: IssueImplementer, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from hephaestus.automation import review_state as review_state_mod
+        from hephaestus.automation.state import review as review_state_mod
 
         def _boom(_n: int) -> list:
             raise RuntimeError("graphql down")

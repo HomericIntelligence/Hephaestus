@@ -980,14 +980,14 @@ class TestFilterIssues:
         with (
             patch.object(planner, "_has_existing_plan") as mock_check,
             patch(
-                "hephaestus.automation.planner_state.prefetch_issue_states",
+                "hephaestus.automation.state.planner.prefetch_issue_states",
                 return_value={},
             ),
             # Isolate from the live repo: the batched label fetch would otherwise
             # hit the network for the real issue #123 (which carries plan-go) and
             # drop it. Empty labels → issue falls through to the worker (#1156).
             patch(
-                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                "hephaestus.automation.state.planner.fetch_all_issue_labels_graphql",
                 return_value={},
             ),
         ):
@@ -1002,11 +1002,11 @@ class TestFilterIssues:
 
         with (
             patch(
-                "hephaestus.automation.planner_state.prefetch_issue_states",
+                "hephaestus.automation.state.planner.prefetch_issue_states",
                 return_value={123: IssueState.CLOSED},
             ),
             patch(
-                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                "hephaestus.automation.state.planner.fetch_all_issue_labels_graphql",
                 return_value={},
             ),
         ):
@@ -1020,12 +1020,12 @@ class TestFilterIssues:
 
         with (
             patch(
-                "hephaestus.automation.planner_state.prefetch_issue_states",
+                "hephaestus.automation.state.planner.prefetch_issue_states",
                 return_value={123: IssueState.OPEN},
             ),
             # Isolate from the live repo's label state for issue #123 (#1156).
             patch(
-                "hephaestus.automation.planner_state.fetch_all_issue_labels_graphql",
+                "hephaestus.automation.state.planner.fetch_all_issue_labels_graphql",
                 return_value={},
             ),
         ):
