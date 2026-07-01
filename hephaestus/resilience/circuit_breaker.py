@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
+def _default_clock() -> float:
+    """Return the production monotonic clock value."""
+    return time.monotonic()
+
+
 class CircuitBreakerState(enum.Enum):
     """States for the circuit breaker."""
 
@@ -96,6 +101,7 @@ class CircuitBreaker:
         half_open_max_calls: Maximum number of calls admitted concurrently in-flight
             while HALF_OPEN; each call releases its slot on completion (success or failure)
         success_threshold: Consecutive successes in HALF_OPEN required to close
+        clock: Monotonic clock function used for recovery-time calculations
 
     Example:
         >>> cb = CircuitBreaker("api", failure_threshold=3, recovery_timeout=30)
@@ -110,6 +116,8 @@ class CircuitBreaker:
         recovery_timeout: float = 60.0,
         half_open_max_calls: int = 1,
         success_threshold: int = 1,
+        *,
+        clock: Callable[[], float] = _default_clock,
     ) -> None:
         """Initialize circuit breaker.
 
@@ -120,6 +128,7 @@ class CircuitBreaker:
             half_open_max_calls: Maximum number of calls admitted concurrently
                 in-flight while HALF_OPEN; each call releases its slot on completion
             success_threshold: Consecutive successes in HALF_OPEN to close
+            clock: Monotonic clock function used for recovery-time calculations
 
         """
         self.name = name
@@ -127,6 +136,7 @@ class CircuitBreaker:
         self.recovery_timeout = recovery_timeout
         self.half_open_max_calls = half_open_max_calls
         self.success_threshold = success_threshold
+        self._clock = clock
 
         self._state = CircuitBreakerState.CLOSED
         self._failure_count = 0
@@ -144,7 +154,7 @@ class CircuitBreaker:
     def _effective_state(self) -> CircuitBreakerState:
         """Compute effective state (must hold lock)."""
         if self._state == CircuitBreakerState.OPEN:
-            elapsed = time.monotonic() - self._last_failure_time
+            elapsed = self._clock() - self._last_failure_time
             if elapsed >= self.recovery_timeout:
                 self._state = CircuitBreakerState.HALF_OPEN
                 self._half_open_calls = 0
@@ -176,7 +186,7 @@ class CircuitBreaker:
             state = self._effective_state()
 
             if state == CircuitBreakerState.OPEN:
-                time_until = self.recovery_timeout - (time.monotonic() - self._last_failure_time)
+                time_until = self.recovery_timeout - (self._clock() - self._last_failure_time)
                 raise CircuitBreakerOpenError(
                     self.name,
                     max(0.0, time_until),
@@ -225,7 +235,7 @@ class CircuitBreaker:
         """Record a failed call (releases this call's half-open slot)."""
         with self._lock:
             self._failure_count += 1
-            self._last_failure_time = time.monotonic()
+            self._last_failure_time = self._clock()
 
             if self._state == CircuitBreakerState.HALF_OPEN:
                 if self._half_open_calls > 0:

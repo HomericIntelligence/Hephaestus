@@ -18,10 +18,31 @@ from hephaestus.resilience.circuit_breaker import (
 )
 
 
+class FakeClock:
+    """Controllable monotonic clock for deterministic recovery-time tests."""
+
+    def __init__(self, now: float = 0.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        """Return the current fake monotonic time."""
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        """Move fake monotonic time forward by ``seconds``."""
+        self.now += seconds
+
+
 @pytest.fixture(autouse=True)
 def _clean_registry() -> None:
     """Reset circuit breaker registry before each test."""
     reset_all_circuit_breakers()
+
+
+@pytest.fixture
+def fake_clock() -> FakeClock:
+    """Provide a deterministic monotonic clock for a circuit breaker."""
+    return FakeClock()
 
 
 class TestCircuitBreakerStates:
@@ -81,11 +102,14 @@ class TestCircuitBreakerStates:
 
         assert cb.state == CircuitBreakerState.CLOSED
 
-    @patch("hephaestus.resilience.circuit_breaker.time.monotonic")
-    def test_open_to_half_open_after_recovery_timeout(self, mock_monotonic: MagicMock) -> None:
+    def test_open_to_half_open_after_recovery_timeout(self, fake_clock: FakeClock) -> None:
         """Circuit transitions from OPEN to HALF_OPEN after recovery timeout."""
-        mock_monotonic.return_value = 1000.0  # baseline stamped by _record_failure
-        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=30.0)
+        cb = CircuitBreaker(
+            "test",
+            failure_threshold=1,
+            recovery_timeout=0.1,
+            clock=fake_clock,
+        )
         failing_func = MagicMock(side_effect=RuntimeError("fail"))
 
         with pytest.raises(RuntimeError):
@@ -93,8 +117,7 @@ class TestCircuitBreakerStates:
 
         assert cb.state == CircuitBreakerState.OPEN
 
-        # Advance past recovery timeout
-        mock_monotonic.return_value = 1030.0
+        fake_clock.advance(0.15)
 
         assert cb.state == CircuitBreakerState.HALF_OPEN
 
