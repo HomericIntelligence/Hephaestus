@@ -34,3 +34,17 @@ def test_issue_1409_validation_clis_use_shared_parser() -> None:
         assert "add_json_arg" not in text, filename
         assert "add_version_arg" not in text, filename
         assert 'add_argument("--repo-root"' not in text, filename
+
+
+def test_issue_1413_validation_clis_use_shared_repo_root_resolver() -> None:
+    """Validation entry points should not duplicate repo-root fallback logic."""
+    root = Path(__file__).resolve().parents[3]
+    for filename in VALIDATION_MODULES:
+        text = (root / "hephaestus" / "validation" / filename).read_text()
+        if "create_validation_parser(" not in text or "include_repo_root=False" in text:
+            continue
+        assert "resolve_repo_root(args)" in text, filename
+        assert "args.repo_root or get_repo_root()" not in text, filename
+        assert (
+            "args.repo_root if args.repo_root is not None else get_repo_root()" not in text
+        ), filename
