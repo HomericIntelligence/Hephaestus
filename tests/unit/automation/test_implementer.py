@@ -172,7 +172,7 @@ class TestIssueImplementerDynamicDelegates:
         dry_run_implementer.options.agent = "codex"
         with patch("hephaestus.automation.implementer.commit_changes") as commit:
             dry_run_implementer._commit_changes(7, tmp_path)
-        commit.assert_called_once_with(7, tmp_path, "codex", git_message_timeout=300)
+        commit.assert_called_once_with(7, tmp_path, "codex", git_message_timeout=1200)
 
     def test_dynamic_create_pr_preserves_legacy_arguments(
         self, dry_run_implementer: IssueImplementer
@@ -181,7 +181,7 @@ class TestIssueImplementerDynamicDelegates:
         with patch("hephaestus.automation.implementer.create_pr", return_value=42) as create:
             assert dry_run_implementer._create_pr(7, "7-auto-impl") == 42
         create.assert_called_once_with(
-            7, "7-auto-impl", auto_merge=False, agent="codex", git_message_timeout=300
+            7, "7-auto-impl", auto_merge=False, agent="codex", git_message_timeout=1200
         )
 
     def test_dynamic_summary_printer_constructs_at_call_time(

@@ -570,7 +570,7 @@ def add_poll_max_wait_arg(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         metavar="SECONDS",
-        help="Max wall-clock seconds to poll CI before backing off (default: 600).",
+        help="Max wall-clock seconds to poll CI before backing off (default: 1200).",
     )
 
 
@@ -587,7 +587,7 @@ def add_git_message_timeout_arg(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         metavar="SECONDS",
-        help="Timeout for the lightweight commit/PR message agent (default: 300).",
+        help="Timeout for the lightweight commit/PR message agent (default: 1200).",
     )
 
 

@@ -167,8 +167,9 @@ PLAN_STAGE_TIMEOUT = 7200
 # timeouts keep their #1642 values via the AGENT_* constants in
 # ``hephaestus.constants``.
 DEFAULT_AGENT_TIMEOUT: int = 7200
-DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT: int = 300
-DEFAULT_CI_POLL_MAX_WAIT: int = 600
+DEFAULT_THROUGHPUT_TIMEOUT: int = 1200
+DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT: int = DEFAULT_THROUGHPUT_TIMEOUT
+DEFAULT_CI_POLL_MAX_WAIT: int = DEFAULT_THROUGHPUT_TIMEOUT
 
 
 def _read_int_env(name: str, default: int) -> int:
@@ -181,7 +182,7 @@ def _read_int_env(name: str, default: int) -> int:
 
 
 def planner_claude_timeout() -> int:
-    """Timeout for planner agent calls (default 300s)."""
+    """Timeout for planner agent calls (default 1200s)."""
     return read_timeout_env(
         "HEPH_AGENT_PLAN_TIMEOUT",
         AGENT_PLAN_TIMEOUT,
@@ -199,7 +200,7 @@ def plan_stage_timeout() -> int:
 
 
 def plan_reviewer_claude_timeout() -> int:
-    """Timeout for agent calls inside the plan reviewer (default 600s)."""
+    """Timeout for agent calls inside the plan reviewer (default 1200s)."""
     return read_timeout_env(
         "HEPH_AGENT_REVIEW_TIMEOUT",
         AGENT_REVIEW_TIMEOUT,
@@ -222,7 +223,7 @@ def advise_claude_timeout() -> int:
 
 
 def pr_reviewer_claude_timeout() -> int:
-    """Timeout for the PR reviewer's agent analysis (default 600s)."""
+    """Timeout for the PR reviewer's agent analysis (default 1200s)."""
     return read_timeout_env(
         "HEPH_AGENT_REVIEW_TIMEOUT",
         AGENT_REVIEW_TIMEOUT,
@@ -241,7 +242,7 @@ def ci_driver_claude_timeout() -> int:
 
 
 def learn_claude_timeout() -> int:
-    """Timeout for ``/learn`` agent calls (default 300s)."""
+    """Timeout for ``/learn`` agent calls (default 1200s)."""
     return read_timeout_env(
         "HEPH_AGENT_LEARN_TIMEOUT",
         AGENT_LEARN_TIMEOUT,
@@ -255,18 +256,18 @@ def follow_up_claude_timeout() -> int:
 
 
 def git_message_agent_timeout() -> int:
-    """Timeout for the lightweight commit/PR message writer (default 300s)."""
-    return _read_int_env("HEPH_GIT_MESSAGE_AGENT_TIMEOUT", 300)
+    """Timeout for the lightweight commit/PR message writer (default 1200s)."""
+    return _read_int_env("HEPH_GIT_MESSAGE_AGENT_TIMEOUT", DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT)
 
 
 def ci_poll_max_wait() -> int:
-    """Wall-clock seconds for the CI-driver poll loops (default 600s).
+    """Wall-clock seconds for the CI-driver poll loops (default 1200s).
 
     Bounds the exponential-backoff wait in :mod:`ci_driver` while CI checks
     are still pending. Re-read on each invocation so tests and operators can
     tune it at runtime via ``HEPH_CI_POLL_MAX_WAIT``.
     """
-    return _read_int_env("HEPH_CI_POLL_MAX_WAIT", 600)
+    return _read_int_env("HEPH_CI_POLL_MAX_WAIT", DEFAULT_CI_POLL_MAX_WAIT)
 
 
 # Re-exported from hephaestus.github.client so the gh-adapter timeout lives
@@ -510,6 +511,7 @@ __all__ = [
     "DEFAULT_AGENT_TIMEOUT",
     "DEFAULT_CI_POLL_MAX_WAIT",
     "DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT",
+    "DEFAULT_THROUGHPUT_TIMEOUT",
     "FABLE",
     "HAIKU",
     "OPUS",

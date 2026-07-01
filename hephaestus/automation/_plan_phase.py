@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from hephaestus.github.client import gh_call
 
 from ._stage_context import StageMixin
-from .claude_timeouts import plan_stage_timeout
+from .agent_config import plan_stage_timeout
 from .git_utils import run
 from .planner_state import _comments_contain_plan
 
@@ -59,7 +59,7 @@ class PlanPhase(StageMixin):
 
         The plan-issues subprocess is bounded by a stage-level wrapper timeout
         (default 7200s, ``HEPH_PLAN_STAGE_TIMEOUT``-tunable) instead of the
-        inner planner-agent timeout. A heavy god-class issue can exceed 600s of
+        inner planner-agent timeout. A heavy god-class issue can exceed 1200s of
         total planner runtime while individual planner agent calls still use
         their shorter ``AGENT_PLAN_TIMEOUT`` budget (#1374).
         """

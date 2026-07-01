@@ -289,7 +289,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         _timeout_spec(
             "--git-message-timeout",
             "git_message_timeout",
-            "Timeout for the lightweight commit/PR message agent (default: 300).",
+            "Timeout for the lightweight commit/PR message agent (default: 1200).",
         ),
         _verbose_spec("Enable verbose logging"),
         *_github_throttle_specs(),
@@ -473,7 +473,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         _timeout_spec(
             "--poll-max-wait",
             "poll_max_wait",
-            "Max wall-clock seconds to poll CI before backing off (default: 600).",
+            "Max wall-clock seconds to poll CI before backing off (default: 1200).",
         ),
         *_github_throttle_specs(),
         _json_spec(),
@@ -545,7 +545,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         _timeout_spec(
             "--git-message-timeout",
             "git_message_timeout",
-            "Timeout for the lightweight commit/PR message agent (default: 300).",
+            "Timeout for the lightweight commit/PR message agent (default: 1200).",
         ),
         _timeout_spec(
             "--learn-timeout",

@@ -34,9 +34,9 @@ from hephaestus.cli.utils import add_agent_timeout_arg, emit_json_status
 from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 from hephaestus.github.rate_limit import wait_until
 
+from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .claude_invoke import invoke_claude_with_session, parse_review_verdict, scan_quota_reset
 from .claude_models import reviewer_model
-from .claude_timeouts import DEFAULT_AGENT_TIMEOUT
 from .git_utils import get_repo_info, get_repo_root, get_repo_slug, issue_ref
 from .github_api import _gh_call, gh_issue_json, gh_issue_upsert_comment
 from .models import PLAN_COMMENT_MARKER, PlanReviewerOptions, WorkerResult

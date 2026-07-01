@@ -119,21 +119,36 @@ class TestEnsureMnemosyne:
         mnemosyne_root.mkdir()
         (mnemosyne_root / ".git").mkdir()
         calls: list[list[str]] = []
+        gh_calls: list[list[str]] = []
+        target = MnemosyneTarget(
+            owner="HomericIntelligence",
+            slug="HomericIntelligence/ProjectMnemosyne",
+            is_fork_of_upstream=False,
+        )
 
         def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             calls.append(argv)
             if "rev-parse" in argv:
                 return subprocess.CompletedProcess(argv, 128, stdout="", stderr="not a repo")
-            if argv[:3] == ["gh", "repo", "clone"]:
-                mnemosyne_root.mkdir(exist_ok=True)
-                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
-        with patch("hephaestus.automation.advise_runner.subprocess.run", side_effect=fake_run):
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            gh_calls.append(argv)
+            mnemosyne_root.mkdir(exist_ok=True)
+            return subprocess.CompletedProcess(["gh", *argv], 0, stdout="", stderr="")
+
+        with (
+            patch("hephaestus.automation.advise_runner.subprocess.run", side_effect=fake_run),
+            patch("hephaestus.automation.advise_runner.gh_call", side_effect=fake_gh_call),
+            patch(
+                "hephaestus.automation.advise_runner.resolve_mnemosyne_target",
+                return_value=target,
+            ),
+        ):
             assert advise_runner.ensure_mnemosyne(mnemosyne_root) is True
 
         assert any("rev-parse" in call for call in calls)
-        assert any(call[:3] == ["gh", "repo", "clone"] for call in calls)
+        assert gh_calls == [["repo", "clone", target.slug, str(mnemosyne_root)]]
         assert not any("pull" in call for call in calls)
 
 

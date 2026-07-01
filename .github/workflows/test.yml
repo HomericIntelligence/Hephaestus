@@ -93,7 +93,7 @@ jobs:
             pip-${{ runner.os }}-${{ matrix.python-version }}-
 
       - name: Install package
-        run: pip install -e ".[dev,schema]"
+        run: pip install -e ".[dev,schema,automation]"
 
       - name: Run unit tests
         if: matrix.test-type == 'unit'

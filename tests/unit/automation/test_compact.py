@@ -85,18 +85,18 @@ class TestCompactSession:
             output_fmt_idx = cmd.index("--output-format")
             assert cmd[output_fmt_idx + 1] == "text"
 
-    def test_compact_session_default_timeout_is_300(self, tmp_path: Path) -> None:
-        """Verify compact_session uses a 300s default subprocess timeout (#1349).
+    def test_compact_session_default_timeout_is_1200(self, tmp_path: Path) -> None:
+        """Verify compact_session uses a 1200s default subprocess timeout.
 
-        The original 60s default silently lost compaction work on slow
-        sessions; this guards the raised default.
+        Slow sessions should be allowed to finish because throughput matters
+        more than minimizing per-attempt latency.
         """
         with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=0, stderr="")
 
             compact_session("test-repo", 42, AGENT_CI_DRIVER, tmp_path)
 
-            assert mock_run.call_args[1]["timeout"] == 300
+            assert mock_run.call_args[1]["timeout"] == 1200
 
     def test_compact_session_uses_env_configured_learn_timeout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

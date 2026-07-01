@@ -196,7 +196,7 @@ class TestRunGateWithPrs:
 
     def test_run_gate_aborts_with_no_issues_no_prs_no_bot_prs(self) -> None:
         """run() aborts when all sources are empty."""
-        options = CIDriverOptions(issues=[], prs=[], include_bot_prs=False)
+        options = CIDriverOptions(issues=[], prs=[], include_bot_prs=False, dry_run=True)
         driver = CIDriver(options)
         result = driver.run()
         assert result == {}

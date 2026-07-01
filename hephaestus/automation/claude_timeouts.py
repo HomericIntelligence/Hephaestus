@@ -8,6 +8,7 @@ from hephaestus.automation.agent_config import (
     DEFAULT_AGENT_TIMEOUT as DEFAULT_AGENT_TIMEOUT,
     DEFAULT_CI_POLL_MAX_WAIT as DEFAULT_CI_POLL_MAX_WAIT,
     DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT as DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
+    DEFAULT_THROUGHPUT_TIMEOUT as DEFAULT_THROUGHPUT_TIMEOUT,
     PLAN_STAGE_TIMEOUT as PLAN_STAGE_TIMEOUT,
     address_review_claude_timeout as address_review_claude_timeout,
     advise_claude_timeout as advise_claude_timeout,

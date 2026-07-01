@@ -38,6 +38,7 @@ from hephaestus.io.utils import write_secure
 from ._review_utils import log_file_path
 from ._stage_context import StageMixin
 from .address_review import run_address_fix_session
+from .agent_config import pr_reviewer_claude_timeout
 from .claude_invoke import (
     INFRA_ERROR_REVIEW_TEXT,
     SESSION_EXPIRED_PHRASES,
@@ -46,7 +47,6 @@ from .claude_invoke import (
     parse_review_verdict,
 )
 from .claude_models import implementer_model, reviewer_model
-from .claude_timeouts import pr_reviewer_claude_timeout
 from .git_utils import (
     commit_if_changes,
     get_repo_info,

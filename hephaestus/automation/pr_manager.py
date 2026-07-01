@@ -24,10 +24,10 @@ from hephaestus.agents.runtime import (
 )
 
 from ._secret_patterns import SECRET_FILE_EXTENSIONS, SECRET_FILE_NAMES
+from .agent_config import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
 from .ci_check_inspector import FAILING_CHECK_CONCLUSIONS
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import git_message_model, implementer_model
-from .claude_timeouts import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
 from .git_utils import get_repo_slug, issue_ref, run
 from .github_api import (
     _gh_call,

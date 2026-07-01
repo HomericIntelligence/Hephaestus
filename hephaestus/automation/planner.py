@@ -41,13 +41,13 @@ from ._review_utils import (
     find_pr_for_issue,
 )
 from .advise_runner import advise_skipped, ensure_mnemosyne, run_advise
-from .claude_invoke import detect_server_overload, invoke_claude_with_session, scan_quota_reset
-from .claude_models import advise_model, codex_advise_model
-from .claude_timeouts import (
+from .agent_config import (
     DEFAULT_AGENT_TIMEOUT,
     DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
     planner_claude_timeout,
 )
+from .claude_invoke import detect_server_overload, invoke_claude_with_session, scan_quota_reset
+from .claude_models import advise_model, codex_advise_model
 from .git_utils import get_repo_root, get_repo_slug, issue_ref
 from .github_api import (
     GitHubRateLimitError,

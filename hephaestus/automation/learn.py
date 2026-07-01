@@ -27,8 +27,8 @@ from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 from hephaestus.io.utils import write_secure
 
 from ._review_utils import log_file_path
+from .agent_config import DEFAULT_AGENT_TIMEOUT, learn_claude_timeout
 from .claude_models import learn_model
-from .claude_timeouts import DEFAULT_AGENT_TIMEOUT, learn_claude_timeout
 from .git_utils import run
 from .session_naming import session_uuid
 

@@ -34,9 +34,9 @@ from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 from hephaestus.io.utils import write_secure
 
 from ._review_utils import build_automation_parser, ensure_state_dir
+from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import reviewer_model
-from .claude_timeouts import DEFAULT_AGENT_TIMEOUT
 from .git_utils import get_repo_root, get_repo_slug
 from .github_api import _gh_call, fetch_open_prs, gh_pr_review_post
 from .session_naming import AGENT_PR_REVIEWER

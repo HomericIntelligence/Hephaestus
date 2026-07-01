@@ -43,9 +43,9 @@ from hephaestus.agents.runtime import (
 from hephaestus.io.utils import write_secure
 
 from ._review_utils import log_file_path, parse_json_block
+from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .claude_invoke import invoke_claude_with_session, raise_for_error_envelope
 from .claude_models import reviewer_model
-from .claude_timeouts import DEFAULT_AGENT_TIMEOUT
 from .git_utils import get_repo_root, get_repo_slug, pr_ref
 from .github_api import gh_pr_resolve_thread, gh_pr_review_post
 from .prompts import get_review_validation_prompt

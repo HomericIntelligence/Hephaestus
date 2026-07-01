@@ -53,9 +53,9 @@ from ._review_utils import (
     setup_review_logging,
 )
 from ._reviewer_base import BaseReviewer
+from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
-from .claude_timeouts import DEFAULT_AGENT_TIMEOUT
 from .comment_difficulty import classify_comments, format_todo_line
 from .curses_ui import CursesUI
 from .git_utils import (

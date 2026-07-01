@@ -63,10 +63,10 @@ tools (`Read`, `Grep`, `Glob`).
 - Per-PR `gh_pr_review_post` failure → WARN log, run continues.
 - Empty PR list → exit `0` with no agent call.
 
-## Environment Variables
+## Timeout
 
-- `HEPHAESTUS_REVIEWER_TIMEOUT_S` — coordinator timeout
-  (read via `claude_timeouts.pr_reviewer_claude_timeout`).
+- The coordinator agent timeout defaults to
+  `hephaestus.automation.agent_config.DEFAULT_AGENT_TIMEOUT`.
 - All standard `gh` CLI auth vars apply for `fetch_open_prs`.
 
 ## Examples

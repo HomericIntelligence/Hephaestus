@@ -87,8 +87,8 @@ ProjectHephaestus ships two layers from one distribution:
 `import hephaestus` does **not** load `hephaestus.automation`, `curses`,
 `fcntl`, or `pydantic`, and a base `pip install` no longer pulls `pydantic`
 (it ships only in the `[automation]` extra). The boundary is enforced by
-`tests/unit/test_import_surface.py` and
-`tests/unit/test_automation_boundary.py`. See
+`tests/unit/validation/test_import_surface.py` and
+`tests/unit/validation/test_automation_boundary.py`. See
 [`docs/adr/0001-automation-library-boundary.md`](docs/adr/0001-automation-library-boundary.md).
 
 ## Directory Structure

@@ -66,6 +66,7 @@ def mock_options() -> CIDriverOptions:
         dry_run=False,
         enable_ui=False,
         enable_advise=False,
+        enable_mechanical_rebase=False,
         max_fix_iterations=1,
     )
 
@@ -81,6 +82,25 @@ def driver(mock_options: CIDriverOptions, tmp_path: Path) -> CIDriver:
         d = CIDriver(mock_options)
         d.state_dir = tmp_path
         return d
+
+
+@pytest.fixture(autouse=True)
+def _mock_default_pr_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep CI-driver unit tests from querying live GitHub PR state."""
+    monkeypatch.setattr(
+        CIDriver,
+        "_gh_pr_state",
+        lambda self, pr_number: {
+            "state": "OPEN",
+            "headRefOid": f"test-head-{pr_number}",
+            "mergeStateStatus": "CLEAN",
+        },
+    )
+    monkeypatch.setattr(
+        CIDriver,
+        "_get_pr_branch",
+        lambda self, pr_number: f"test-branch-{pr_number}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -800,6 +820,9 @@ class TestRequiredVsNonRequired:
             patch.object(driver, "_load_impl_session_id", return_value=None),
             patch.object(driver, "_get_worktree_path", return_value=Path("/tmp/wt")),
             patch.object(driver, "_run_ci_fix_session", return_value=True) as mock_fix,
+            patch.object(driver, "_record_ci_fix_head"),
+            patch.object(driver, "_reply_and_resolve_bot_threads"),
+            patch.object(driver, "_recheck_and_arm_after_fix", return_value=None),
         ):
             result = driver._drive_issue(123, 456, 0)
 
@@ -842,6 +865,8 @@ class TestCiDriverAdvise:
                 driver, "_run_advise", return_value="## Findings\n- mind X"
             ) as mock_advise,
             patch.object(driver, "_run_ci_fix_session", return_value=True) as mock_fix,
+            patch.object(driver, "_record_ci_fix_head"),
+            patch.object(driver, "_reply_and_resolve_bot_threads"),
         ):
             driver._attempt_ci_fixes(123, 456, 0)
 
@@ -858,6 +883,8 @@ class TestCiDriverAdvise:
             patch.object(driver, "_get_worktree_path", return_value=Path("/tmp/wt")),
             patch.object(driver, "_run_advise") as mock_advise,
             patch.object(driver, "_run_ci_fix_session", return_value=True) as mock_fix,
+            patch.object(driver, "_record_ci_fix_head"),
+            patch.object(driver, "_reply_and_resolve_bot_threads"),
         ):
             driver._attempt_ci_fixes(123, 456, 0)
 
@@ -2374,6 +2401,8 @@ class TestAdviseBotShortCircuit:
             patch.object(driver, "_run_ci_fix_session", return_value=True),
             patch.object(driver, "_run_advise") as mock_advise,
             patch.object(driver, "_enable_auto_merge", return_value=True),
+            patch.object(driver, "_record_ci_fix_head"),
+            patch.object(driver, "_reply_and_resolve_bot_threads"),
         ):
             driver._attempt_ci_fixes(issue_number=900, pr_number=900, acquired_slot=0)
         mock_advise.assert_not_called()
@@ -2388,6 +2417,8 @@ class TestAdviseBotShortCircuit:
             patch.object(driver, "_run_ci_fix_session", return_value=True),
             patch.object(driver, "_run_advise", return_value="") as mock_advise,
             patch.object(driver, "_enable_auto_merge", return_value=True),
+            patch.object(driver, "_record_ci_fix_head"),
+            patch.object(driver, "_reply_and_resolve_bot_threads"),
         ):
             driver._attempt_ci_fixes(issue_number=42, pr_number=900, acquired_slot=0)
         mock_advise.assert_called_once_with(42)

@@ -572,7 +572,7 @@ jobs:
             pip-${{ runner.os }}-3.12-
 
       - name: Install package
-        run: pip install -e ".[dev,schema]"
+        run: pip install -e ".[dev,schema,automation]"
 
       - name: Run unit tests
         run: |
@@ -610,7 +610,7 @@ jobs:
             pip-${{ runner.os }}-3.12-
 
       - name: Install package
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,automation]"
 
       - name: Run integration tests
         run: pytest tests/integration --override-ini="addopts=" -v --strict-markers

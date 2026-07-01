@@ -42,7 +42,7 @@ from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 from hephaestus.io.utils import write_secure
 
 from ._review_utils import log_file_path
-from .claude_timeouts import DEFAULT_AGENT_TIMEOUT
+from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .git_utils import issue_ref, run
 from .github_api import gh_issue_comment, gh_issue_create
 from .prompts import get_follow_up_prompt

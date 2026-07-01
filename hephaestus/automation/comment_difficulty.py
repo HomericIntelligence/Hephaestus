@@ -31,9 +31,9 @@ from hephaestus.agents.runtime import (
 from hephaestus.io.utils import write_secure
 
 from ._review_utils import log_file_path, parse_json_block
+from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import HAIKU, OPUS, SONNET, advise_model
-from .claude_timeouts import DEFAULT_AGENT_TIMEOUT
 from .git_utils import get_repo_slug
 from .prompts import get_comment_difficulty_prompt
 from .session_naming import AGENT_COMMENT_CLASSIFIER

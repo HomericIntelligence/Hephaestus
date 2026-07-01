@@ -284,6 +284,23 @@ class TestPiCliSetup:
         assert "pi --version" in text
 
 
+class TestAutomationExtraInstall:
+    """Regression tests for the automation extra in pip-based CI test jobs."""
+
+    def test_matrix_tests_install_automation_extra(self) -> None:
+        text = TEST_WORKFLOW.read_text(encoding="utf-8")
+        assert 'run: pip install -e ".[dev,schema,automation]"' in text
+
+    def test_required_tests_install_automation_extra(self) -> None:
+        text = REQUIRED_WORKFLOW.read_text(encoding="utf-8")
+        unit_section = text[text.index("  unit-tests:") : text.index("  integration-tests:")]
+        integration_section = text[
+            text.index("  integration-tests:") : text.index("  shell-tests:")
+        ]
+        assert 'run: pip install -e ".[dev,schema,automation]"' in unit_section
+        assert 'run: pip install -e ".[dev,automation]"' in integration_section
+
+
 class TestCollectWorkflowFiles:
     """Tests for collect_workflow_files()."""
 

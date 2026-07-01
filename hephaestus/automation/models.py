@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 # comment is now defined in :mod:`hephaestus.automation.protocol` together
 # with :data:`PLAN_REVIEW_PREFIX`. Re-exported here for backward compatibility
 # with the historical ``from .models import PLAN_COMMENT_MARKER`` import path.
-from .claude_timeouts import (
+from .agent_config import (
     DEFAULT_AGENT_TIMEOUT,
     DEFAULT_CI_POLL_MAX_WAIT,
     DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,

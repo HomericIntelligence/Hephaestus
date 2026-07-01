@@ -78,7 +78,7 @@ from ._review_utils import ensure_state_dir
 # Imports for the Test-Patch Contract — see module docstring for the full table.
 # Each symbol here is either a real call site in IssueImplementer/main or an
 # explicit re-export required by tests or the public API.
-from .claude_timeouts import AGENT_IMPL_TIMEOUT
+from .agent_config import AGENT_IMPL_TIMEOUT
 from .curses_ui import CursesUI, ThreadLogManager
 from .dependency_resolver import CyclicDependencyError, DependencyResolver
 

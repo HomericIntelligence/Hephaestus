@@ -53,9 +53,9 @@ from ._review_utils import (
     setup_review_logging,
 )
 from ._reviewer_base import BaseReviewer
+from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .claude_invoke import invoke_claude_with_session, raise_for_error_envelope
 from .claude_models import reviewer_model
-from .claude_timeouts import DEFAULT_AGENT_TIMEOUT
 from .curses_ui import CursesUI
 from .git_utils import get_repo_root, get_repo_slug, issue_ref, pr_ref
 from .github_api import _gh_call, fetch_issue_info, gh_pr_review_post

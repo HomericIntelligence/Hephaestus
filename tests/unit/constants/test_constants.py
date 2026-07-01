@@ -106,9 +106,9 @@ def test_scripts_dir_matches_repo_root(monkeypatch: pytest.MonkeyPatch) -> None:
     ("constant_name", "value"),
     [
         ("AGENT_IMPL_TIMEOUT", 1800),
-        ("AGENT_REVIEW_TIMEOUT", 600),
-        ("AGENT_PLAN_TIMEOUT", 300),
-        ("AGENT_LEARN_TIMEOUT", 300),
+        ("AGENT_REVIEW_TIMEOUT", 1200),
+        ("AGENT_PLAN_TIMEOUT", 1200),
+        ("AGENT_LEARN_TIMEOUT", 1200),
         ("AGENT_GIT_TIMEOUT", 30),
         ("AGENT_CLONE_TIMEOUT", 120),
         ("AGENT_AUTH_STATUS_TIMEOUT", 10),

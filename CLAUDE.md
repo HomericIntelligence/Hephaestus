@@ -65,8 +65,8 @@ codebase) co-located with the utility library. It is gated behind the
 `HomericIntelligence-Hephaestus[automation]` optional extra. The base
 `import hephaestus` surface MUST NOT pull `curses`, `fcntl`, `pydantic`,
 or any `hephaestus.automation.*` module. Enforced by
-`tests/unit/test_import_surface.py` (subprocess) and
-`tests/unit/test_automation_boundary.py` (static grep).
+`tests/unit/validation/test_import_surface.py` (subprocess) and
+`tests/unit/validation/test_automation_boundary.py` (static grep).
 
 Library subpackages of `hephaestus` may not import from
 `hephaestus.automation`. The dependency arrow points only one way:

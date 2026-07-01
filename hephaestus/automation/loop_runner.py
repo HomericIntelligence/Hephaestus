@@ -92,7 +92,7 @@ def _default_phase_timeout_s() -> float:
     on a network hang; a non-``None`` default ensures the worker thread is
     always bounded even when the operator does not pass ``--phase-timeout``.
     Overridable via ``HEPH_PHASE_TIMEOUT`` (seconds). Mirrors the
-    graceful-fallback contract of :mod:`hephaestus.automation.claude_timeouts`:
+    graceful-fallback contract of :mod:`hephaestus.automation.agent_config`:
     a malformed env value logs a warning and falls back to the default rather
     than crashing at startup.
 

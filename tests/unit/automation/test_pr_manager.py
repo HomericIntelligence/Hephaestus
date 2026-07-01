@@ -290,7 +290,7 @@ class TestEnsurePRCreated:
                 agent="claude",
                 base="master",
                 worktree_path=Path("/tmp/wt"),
-                git_message_timeout=300,
+                git_message_timeout=1200,
             )
 
     def test_creates_pr_with_selected_agent_metadata(self) -> None:
@@ -316,7 +316,7 @@ class TestEnsurePRCreated:
                 agent="codex",
                 base="master",
                 worktree_path=Path("/tmp/wt"),
-                git_message_timeout=300,
+                git_message_timeout=1200,
             )
 
 

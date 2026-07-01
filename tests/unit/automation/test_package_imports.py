@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -41,6 +42,8 @@ _PHASE_ENTRYPOINTS = (
     "hephaestus.automation.planner",
     "hephaestus.automation.pr_reviewer",
 )
+
+_AUTOMATION_ROOT = Path(__file__).resolve().parents[3] / "hephaestus" / "automation"
 
 
 def _run_python(code: str) -> subprocess.CompletedProcess[str]:
@@ -119,6 +122,26 @@ def test_public_surface_pins_expected_symbols() -> None:
     assert set(automation.__all__) == expected
     assert set(automation.__all__) <= set(automation._LAZY_EXPORTS), (
         "every __all__ entry must have a _LAZY_EXPORTS row"
+    )
+
+
+def test_production_modules_import_timeout_config_from_agent_config() -> None:
+    """Production automation modules must not depend on the timeout shim."""
+    offenders = []
+    for path in _AUTOMATION_ROOT.rglob("*.py"):
+        if path.name == "claude_timeouts.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        if (
+            "from .claude_timeouts import" in text
+            or "from hephaestus.automation.claude_timeouts import" in text
+            or "import claude_timeouts" in text
+        ):
+            offenders.append(path.relative_to(_AUTOMATION_ROOT).as_posix())
+
+    assert offenders == [], (
+        "production automation modules must import timeout config from "
+        f"agent_config, not claude_timeouts: {offenders}"
     )
 
 
