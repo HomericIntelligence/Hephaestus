@@ -49,7 +49,9 @@ and intentionally excludes `[dev]` (which carries test/lint tooling such as
 pytest, ruff, and mypy):
 
 - `pip install HomericIntelligence-Hephaestus[all]` — installs all runtime
-  extras: `github`, `nats`, `toml`, `xml`, `schema`.
+  extras: `automation`, `github`, `nats`, `toml`, `xml`, `schema`. Note that
+  `automation` is the product layer (`hephaestus.automation`) and pulls in
+  `pydantic`; see [ADR 0001](docs/adr/0001-automation-library-boundary.md).
 - `pip install HomericIntelligence-Hephaestus[dev]` — installs development and
   testing dependencies. Use this for contributors and CI.
 - `pip install "HomericIntelligence-Hephaestus[all,dev]"` — both, for a full

@@ -5,6 +5,7 @@ ensuring the published install contract does not permit API-incompatible
 versions that are never tested.
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -450,3 +451,58 @@ class TestPipPinning:
             f"pip cap {cap} must be > 26 (no downgrade) and <= 27 (block untested major); "
             "update when CI tests pip 27.x"
         )
+
+
+class TestAllExtraDocsInSync:
+    """Guard that `[all]`'s member extras are documented in both docs.
+
+    The `[all]` aggregator's member extras must be documented in both the
+    pyproject.toml aggregator comment and the README `[all]` bullet (#1498).
+
+    Guards a DRY/POLA invariant: `[all]` silently included the `automation`
+    product layer (and its pydantic dependency) while both docs omitted it.
+    The truth is derived from the manifest `all = [...]` spec rather than
+    hardcoded, so adding a future extra to `[all]` without documenting it
+    fails this test.
+    """
+
+    @staticmethod
+    def _all_members(repo_root: Path) -> set[str]:
+        """Return the set of extras named inside the `[all]` aggregator spec."""
+        pyproject_path = repo_root / "pyproject.toml"
+        with pyproject_path.open("rb") as f:
+            pyproject = tomllib.load(f)
+        all_specs = pyproject["project"]["optional-dependencies"]["all"]
+        assert all_specs, "[project.optional-dependencies.all] is empty"
+        # all = ["HomericIntelligence-Hephaestus[automation,github,nats,...]"]
+        inner = re.search(r"\[([^\]]+)\]", all_specs[0])
+        assert inner, f"No extras bracket found in [all] spec: {all_specs[0]!r}"
+        return {e.strip() for e in inner.group(1).split(",") if e.strip()}
+
+    def test_pyproject_comment_lists_all_members(self, repo_root: Path) -> None:
+        """Assert the pyproject aggregator comment lists every `[all]` member.
+
+        The comment block preceding [project.optional-dependencies] must
+        enumerate every member extra of `[all]`.
+        """
+        members = self._all_members(repo_root)
+        text = (repo_root / "pyproject.toml").read_text(encoding="utf-8")
+        # Isolate the aggregator comment block preceding the header.
+        comment = text.split("[project.optional-dependencies]", 1)[0]
+        missing = sorted(m for m in members if m not in comment)
+        assert not missing, (
+            f"pyproject.toml aggregator comment omits [all] member(s): {missing}"
+        )
+
+    def test_readme_all_bullet_lists_all_members(self, repo_root: Path) -> None:
+        """Assert the README `[all]` bullet lists every `[all]` member.
+
+        The bullet under "### Optional dependencies" must enumerate every
+        member extra of `[all]`.
+        """
+        members = self._all_members(repo_root)
+        readme = (repo_root / "README.md").read_text(encoding="utf-8")
+        # The `[all]` bullet enumerates the runtime extras just after the header.
+        section = readme.split("### Optional dependencies", 1)[1].split("###", 1)[0]
+        missing = sorted(m for m in members if m not in section)
+        assert not missing, f"README `[all]` section omits member(s): {missing}"

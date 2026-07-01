@@ -34,9 +34,11 @@ dependencies = [
 ]
 
 # Optional-dependency groups. The `all` aggregator below intentionally lists
-# only runtime extras (github, nats, toml, xml, schema) — `dev` is kept separate
-# so production installs of `[all]` do not pull pytest/ruff/mypy. If you change
-# this convention, update the "Optional dependencies" section in README.md.
+# all runtime extras (automation, github, nats, toml, xml, schema) — `dev` is
+# kept separate so production installs of `[all]` do not pull pytest/ruff/mypy.
+# `automation` is the product layer (hephaestus.automation) and pulls pydantic;
+# see docs/adr/0001-automation-library-boundary.md. If you change this
+# convention, update the "Optional dependencies" section in README.md.
 [project.optional-dependencies]
 dev = [
     # pytest 9.x and pytest-cov 7.x are the latest majors; tight floors are
