@@ -40,7 +40,7 @@ Resolve the public symbol surface **lazily** via PEP 562 module-level hooks in
 
 - **Eager top-level imports.** Rejected: importing every subpackage at load
   time pulls `curses`/`fcntl`/`pydantic` into the base surface and breaks the
-  ADR-0001 boundary that `tests/unit/validation/test_import_surface.py` enforces.
+  ADR-0001 boundary that `tests/unit/test_import_surface.py` enforces.
 - **Submodule-only access (`from hephaestus.utils import slugify`).** Rejected
   on POLA grounds: it removes the flat convenience surface that existing
   consumers rely on, with no boundary benefit over the lazy approach.
@@ -48,7 +48,7 @@ Resolve the public symbol surface **lazily** via PEP 562 module-level hooks in
 ## Consequences
 
 - `import hephaestus` stays fast and never imports the product layer; this is
-  locked in by `tests/unit/validation/test_import_surface.py`.
+  locked in by `tests/unit/test_import_surface.py`.
 - Adding a new public symbol means adding one row to `_LAZY_IMPORTS`, not a new
   top-level import.
 - Deprecations flow through `_DEPRECATED_LAZY` so removal is a documented,

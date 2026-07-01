@@ -26,12 +26,9 @@ per module:
    `is_codex` (`hephaestus/agents/runtime.py:205`) and `is_pi` so callers test
    capability through one named function rather than open-coded string
    comparisons.
-2. Automation modules select an agent and route provider-specific execution
-   through this shared layer instead of open-coding provider branches. Shared
-   model/session/timeout configuration lives in
-   `hephaestus.automation.agent_config`; legacy `claude_models`,
-   `claude_timeouts`, and `session_naming` modules are compatibility shims over
-   that canonical module.
+2. Automation modules select an agent and resolve its model/timeout/retry
+   behavior through this shared layer instead of importing
+   `claude_invoke`/`claude_models`/`claude_timeouts` directly.
 
 The tracked, load-bearing artifacts for this decision are `AgentName`,
 `AGENT_CHOICES`, and the `is_codex`/`is_pi` predicates in
@@ -51,10 +48,8 @@ canonical anchor for this ADR.
 
 ## Consequences
 
-- Automation modules do not add new direct dependencies on the legacy
-  `claude_models`/`claude_timeouts`/`session_naming` shims; they import shared
-  phase configuration from `agent_config` and route provider-specific execution
-  through the runtime abstraction.
+- Automation modules never import `claude_invoke`/`claude_models`/
+  `claude_timeouts` directly; they go through the runtime abstraction.
 - Adding a fourth provider means extending `AgentName`/`AGENT_CHOICES` and the
   predicate helpers in one place, not editing every pipeline stage.
 - `is_codex`/`is_pi` provide a single, testable seam for provider-specific
