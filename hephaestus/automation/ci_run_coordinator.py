@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any
+from typing import Any, cast
 
 from ._review_utils import drain_completed_futures, print_worker_summary
 from .auto_merge_coordinator import (
@@ -117,12 +117,15 @@ class CIDriveRunCoordinator:
     def _final_open_prs(self, pr_map: dict[int, int]) -> list[dict[str, Any]]:
         if self._options().dry_run:
             return []
-        remaining = self._discovery.list_open_prs_remaining()
+        remaining = cast(list[dict[str, Any]], self._discovery.list_open_prs_remaining())
         if self._options().issues and remaining:
             scoped_prs = set(pr_map.values())
             remaining = [pr for pr in remaining if pr.get("number") in scoped_prs]
         if remaining:
-            remaining = self._auto_merge.arm_all_unarmed_open_prs(remaining)
+            remaining = cast(
+                list[dict[str, Any]],
+                self._auto_merge.arm_all_unarmed_open_prs(remaining),
+            )
         if remaining:
             logger.warning("%d open PR(s) remain on the repo - not done:", len(remaining))
             for pr in remaining:
@@ -150,7 +153,10 @@ class CIDriveRunCoordinator:
                     error="Failed to acquire worker slot",
                 )
             try:
-                armed = self._arming.check_on_drive_start(issue_number, pr_number)
+                armed = cast(
+                    WorkerResult | None,
+                    self._arming.check_on_drive_start(issue_number, pr_number),
+                )
                 if armed is not None:
                     return armed
                 if self._options().enable_mechanical_rebase and not self._options().dry_run:
@@ -182,8 +188,11 @@ class CIDriveRunCoordinator:
                             success=True,
                             pr_number=pr_number,
                         )
-                    return self._auto_merge.arm_and_wait_for_merge(
-                        issue_number, pr_number, acquired_slot
+                    return cast(
+                        WorkerResult,
+                        self._auto_merge.arm_and_wait_for_merge(
+                            issue_number, pr_number, acquired_slot
+                        ),
                     )
                 return self.handle_failing_pr(
                     issue_number, pr_number, acquired_slot, required_checks
@@ -240,12 +249,17 @@ class CIDriveRunCoordinator:
         if not fixable_names and AUTO_MERGE_POLICY_CHECK in failing_names:
             if not self._auto_merge.pr_has_implementation_go(pr_number):
                 return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
-            return self._auto_merge.arm_and_wait_for_merge(issue_number, pr_number, acquired_slot)
-        fix_result = self._fix_flow.attempt_ci_fixes(issue_number, pr_number, acquired_slot)
+            return cast(
+                WorkerResult,
+                self._auto_merge.arm_and_wait_for_merge(issue_number, pr_number, acquired_slot),
+            )
+        fix_result = cast(
+            WorkerResult | None,
+            self._fix_flow.attempt_ci_fixes(issue_number, pr_number, acquired_slot),
+        )
         if fix_result is not None and fix_result.success:
             return (
-                self.recheck_and_arm_after_fix(issue_number, pr_number, acquired_slot)
-                or fix_result
+                self.recheck_and_arm_after_fix(issue_number, pr_number, acquired_slot) or fix_result
             )
         if fix_result is not None:
             return fix_result
@@ -300,7 +314,10 @@ class CIDriveRunCoordinator:
         )
         outcome = self._auto_merge.wait_for_pr_terminal(issue_number, pr_number)
         if resolve_dirty and outcome == "DIRTY":
-            return self._auto_merge.resolve_dirty_pr(issue_number, pr_number, acquired_slot)
+            return cast(
+                WorkerResult,
+                self._auto_merge.resolve_dirty_pr(issue_number, pr_number, acquired_slot),
+            )
         return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
 

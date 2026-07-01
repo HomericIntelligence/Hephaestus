@@ -18,24 +18,14 @@ class ClassBudget:
 
 _BUDGETS = {
     "hephaestus.automation.ci_driver.CIDriver": ClassBudget(240, 4, 120),
-    "hephaestus.automation.ci_run_coordinator.CIDriveRunCoordinator": ClassBudget(
-        360, 8, 80
-    ),
+    "hephaestus.automation.ci_run_coordinator.CIDriveRunCoordinator": ClassBudget(360, 8, 80),
     "hephaestus.automation.ci_fix_flow.CIFixFlow": ClassBudget(260, 5, 80),
-    "hephaestus.automation.auto_merge_coordinator.AutoMergeCoordinator": ClassBudget(
-        320, 7, 80
-    ),
-    "hephaestus.automation.drive_green_state.DriveGreenArmingCoordinator": ClassBudget(
-        320, 7, 80
-    ),
+    "hephaestus.automation.auto_merge_coordinator.AutoMergeCoordinator": ClassBudget(320, 7, 80),
+    "hephaestus.automation.drive_green_state.DriveGreenArmingCoordinator": ClassBudget(320, 7, 80),
     "hephaestus.automation.drive_green_state.LastCIFixStore": ClassBudget(140, 4, 60),
-    "hephaestus.automation.review_thread_resolver.ReviewThreadResolver": ClassBudget(
-        280, 7, 80
-    ),
+    "hephaestus.automation.review_thread_resolver.ReviewThreadResolver": ClassBudget(280, 7, 80),
     "hephaestus.automation.pr_discovery.PRDiscovery": ClassBudget(560, 14, 80),
-    "hephaestus.automation.ci_fix_orchestrator.CIFixOrchestrator": ClassBudget(
-        1050, 17, 80
-    ),
+    "hephaestus.automation.ci_fix_orchestrator.CIFixOrchestrator": ClassBudget(1050, 17, 80),
 }
 
 
@@ -54,17 +44,15 @@ def _class_node(dotted: str) -> ast.ClassDef:
 
 
 def _methods(node: ast.ClassDef) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
-    return [
-        item
-        for item in node.body
-        if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef)
-    ]
+    return [item for item in node.body if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef)]
 
 
 def _span(node: ast.AST) -> int:
-    assert node.end_lineno is not None
-    assert node.lineno is not None
-    return node.end_lineno - node.lineno + 1
+    lineno = getattr(node, "lineno", None)
+    end_lineno = getattr(node, "end_lineno", None)
+    assert isinstance(lineno, int)
+    assert isinstance(end_lineno, int)
+    return end_lineno - lineno + 1
 
 
 def test_ci_driver_architecture_budgets() -> None:
@@ -80,8 +68,7 @@ def test_ci_driver_architecture_budgets() -> None:
         for method in methods:
             if _span(method) > budget.max_method_lines:
                 failures.append(
-                    f"{dotted}.{method.name}: {_span(method)} lines > "
-                    f"{budget.max_method_lines}"
+                    f"{dotted}.{method.name}: {_span(method)} lines > {budget.max_method_lines}"
                 )
     assert failures == []
 

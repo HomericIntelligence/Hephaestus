@@ -7,7 +7,7 @@ import logging
 import subprocess
 import time
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from hephaestus.constants import read_timeout_env
 
@@ -132,7 +132,10 @@ class AutoMergeCoordinator:
         if outcome == "DIRTY":
             return self.resolve_dirty_pr(issue_number, pr_number, acquired_slot)
         if outcome == "BLOCKED":
-            return self._review_threads.resolve_blocked_pr(issue_number, pr_number, acquired_slot)
+            return cast(
+                WorkerResult,
+                self._review_threads.resolve_blocked_pr(issue_number, pr_number, acquired_slot),
+            )
         return WorkerResult(issue_number=issue_number, success=True, pr_number=pr_number)
 
     def wait_for_pr_terminal(self, issue_number: int, pr_number: int) -> TerminalOutcome:
@@ -237,9 +240,12 @@ class AutoMergeCoordinator:
             issue_number, pr_number, acquired_slot, extra_context=conflict_context
         )
         if fix_result is not None and fix_result.success:
-            return self._recheck_and_arm_after_fix(
-                issue_number, pr_number, acquired_slot, resolve_dirty=False
-            ) or fix_result
+            return (
+                self._recheck_and_arm_after_fix(
+                    issue_number, pr_number, acquired_slot, resolve_dirty=False
+                )
+                or fix_result
+            )
         return WorkerResult(
             issue_number=issue_number,
             success=False,

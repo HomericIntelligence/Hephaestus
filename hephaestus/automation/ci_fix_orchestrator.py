@@ -871,8 +871,7 @@ def _invoke_direct_agent_session(
         )
     except subprocess.CalledProcessError as exc:
         logger.warning(
-            "Issue #%s: %s resume session %r failed for PR #%s; "
-            "falling back to fresh session: %s",
+            "Issue #%s: %s resume session %r failed for PR #%s; falling back to fresh session: %s",
             issue_number,
             options.agent,
             session_id,
@@ -1096,9 +1095,7 @@ def _attempt_mechanical_rebase(
     ):
         return False
 
-    pr_head_branch = str(state.get("headRefName") or "") or orchestrator._get_pr_branch(
-        pr_number
-    )
+    pr_head_branch = str(state.get("headRefName") or "") or orchestrator._get_pr_branch(pr_number)
     base_branch = str(state.get("baseRefName") or "main") or "main"
     if not pr_head_branch:
         logger.warning(
