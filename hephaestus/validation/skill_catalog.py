@@ -1,25 +1,29 @@
-r"""Validate that docs/plugin-installation.md lists every shipped skill.
+r"""Validate that skill catalog docs match every shipped skill.
 
 Reads the markdown table under the "What the Plugin Provides" section and
 asserts each row matches a skill discovered by
 :func:`hephaestus.discovery.skills.discover_skills`. It also validates each
 shipped skill has loadable YAML frontmatter with a name matching its
-directory.
+directory, and checks that the ``CLAUDE.md`` Skill Catalog "Arguments" column
+matches each skill's raw ``argument-hint:`` frontmatter value.
 
 The check is wired into pre-commit (see ``.pre-commit-config.yaml``) and runs
-whenever ``docs/plugin-installation.md`` or anything under ``skills/`` changes,
-preventing silent drift between the shipped skill set and its catalog.
+whenever ``CLAUDE.md``, ``docs/plugin-installation.md``, or anything under
+``skills/`` changes, preventing silent drift between the shipped skill set and
+its catalogs.
 
 Usage::
 
     hephaestus-check-skill-catalog
     hephaestus-check-skill-catalog --table docs/plugin-installation.md \
-                                   --skills-dir skills/
+                                   --skills-dir skills/ \
+                                   --claude-md CLAUDE.md
     hephaestus-check-skill-catalog --json
 
 Exit codes:
     0: Table lists every shipped skill and no extras.
-    1: Mismatch — table is missing skills, lists removed skills, or a skill has invalid frontmatter.
+    1: Mismatch — a catalog is missing skills, lists removed skills, has stale
+       arguments, or a skill has invalid frontmatter.
 """
 
 from __future__ import annotations
@@ -28,7 +32,11 @@ import re
 import sys
 from pathlib import Path
 
-from hephaestus.agents.frontmatter import check_agent_file, extract_frontmatter_parsed
+from hephaestus.agents.frontmatter import (
+    check_agent_file,
+    extract_frontmatter_parsed,
+    extract_frontmatter_raw,
+)
 from hephaestus.cli.utils import create_validation_parser, emit_json_status, resolve_repo_root
 from hephaestus.discovery.skills import discover_skills
 
@@ -37,6 +45,57 @@ from hephaestus.discovery.skills import discover_skills
 # ``|---|---|`` divider rows are filtered out by checking for a dash-only
 # leftmost cell.
 _TABLE_ROW_RE = re.compile(r"^\s*\|([^|]+)\|")
+_ARGUMENT_HINT_RE = re.compile(r"^argument-hint:\s*(?P<value>.*)$")
+_NO_ARGUMENT_MARKER = "—"
+
+
+def _split_markdown_table_cells(raw_line: str) -> list[str]:
+    """Split a markdown table row while preserving escaped pipe characters."""
+    stripped = raw_line.strip()
+    if not stripped.startswith("|"):
+        return []
+
+    body = stripped[1:-1] if stripped.endswith("|") else stripped[1:]
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+
+    for char in body:
+        if escaped:
+            if char == "|":
+                current.append("|")
+            else:
+                current.append("\\")
+                current.append(char)
+            escaped = False
+            continue
+
+        if char == "\\":
+            escaped = True
+        elif char == "|":
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+
+    if escaped:
+        current.append("\\")
+    cells.append("".join(current).strip())
+    return cells
+
+
+def _is_markdown_divider_cell(cell: str) -> bool:
+    """Return True for markdown table divider cells such as ``---``."""
+    marker = cell.replace(":", "").strip()
+    return bool(marker) and set(marker) <= {"-"}
+
+
+def _strip_inline_code(cell: str) -> str:
+    """Remove a single wrapping inline-code pair from a markdown table cell."""
+    stripped = cell.strip()
+    if len(stripped) >= 2 and stripped.startswith("`") and stripped.endswith("`"):
+        return stripped[1:-1].strip()
+    return stripped
 
 
 def extract_skill_table_rows(markdown_path: Path) -> set[str]:
@@ -90,6 +149,58 @@ def extract_skill_table_rows(markdown_path: Path) -> set[str]:
     return rows
 
 
+def extract_claude_skill_arguments(markdown_path: Path) -> dict[str, str | None]:
+    """Parse the ``CLAUDE.md`` Skill Catalog Arguments column.
+
+    Args:
+        markdown_path: Path to ``CLAUDE.md``.
+
+    Returns:
+        Mapping of skill name to documented argument hint. A value of ``None``
+        represents the documented no-argument marker ``—``.
+
+    """
+    if not markdown_path.exists():
+        return {}
+
+    content = markdown_path.read_text(encoding="utf-8")
+    arguments_by_skill: dict[str, str | None] = {}
+    in_skill_catalog = False
+
+    for raw_line in content.splitlines():
+        cells = _split_markdown_table_cells(raw_line)
+        if not cells:
+            if in_skill_catalog:
+                break
+            continue
+
+        if not in_skill_catalog:
+            if (
+                len(cells) >= 2
+                and cells[0].strip().lower() == "skill"
+                and cells[1].strip().lower() == "arguments"
+            ):
+                in_skill_catalog = True
+            continue
+
+        if all(_is_markdown_divider_cell(cell) for cell in cells):
+            continue
+        if len(cells) < 2:
+            continue
+
+        skill_name = _strip_inline_code(cells[0])
+        if not skill_name:
+            continue
+
+        argument_cell = cells[1].strip()
+        argument_hint = (
+            None if argument_cell == _NO_ARGUMENT_MARKER else _strip_inline_code(argument_cell)
+        )
+        arguments_by_skill[skill_name] = argument_hint
+
+    return arguments_by_skill
+
+
 def _discover_skill_names(skills_dir: Path) -> set[str]:
     """Return the set of skill names shipped under *skills_dir*.
 
@@ -126,6 +237,51 @@ def check_skill_catalog(table_path: Path, skills_dir: Path) -> tuple[set[str], s
     missing = shipped - documented
     extra = documented - shipped
     return missing, extra
+
+
+def _raw_argument_hint(skill_file: Path) -> str | None:
+    """Return the raw single-line ``argument-hint:`` frontmatter value."""
+    raw_frontmatter = extract_frontmatter_raw(skill_file.read_text(encoding="utf-8"))
+    if raw_frontmatter is None:
+        return None
+
+    for line in raw_frontmatter.splitlines():
+        match = _ARGUMENT_HINT_RE.match(line)
+        if match is not None:
+            value = match.group("value").strip()
+            return value or None
+    return None
+
+
+def check_claude_skill_arguments(
+    claude_md_path: Path, skills_dir: Path
+) -> tuple[set[str], set[str], dict[str, tuple[str | None, str | None]]]:
+    """Compare ``CLAUDE.md`` skill arguments with raw skill frontmatter.
+
+    Args:
+        claude_md_path: Path to ``CLAUDE.md``.
+        skills_dir: Path to the ``skills/`` directory.
+
+    Returns:
+        ``(missing_in_claude, extra_in_claude, mismatched_arguments)``. The
+        mismatch mapping stores ``(expected_frontmatter, documented_argument)``
+        for each skill whose Arguments cell has drifted.
+
+    """
+    documented = extract_claude_skill_arguments(claude_md_path)
+    shipped = _discover_skill_names(skills_dir)
+    documented_names = set(documented)
+    missing = shipped - documented_names
+    extra = documented_names - shipped
+
+    mismatched: dict[str, tuple[str | None, str | None]] = {}
+    for skill_name in sorted(shipped & documented_names):
+        expected = _raw_argument_hint(skills_dir / skill_name / "SKILL.md")
+        actual = documented[skill_name]
+        if expected != actual:
+            mismatched[skill_name] = (expected, actual)
+
+    return missing, extra, mismatched
 
 
 def check_skill_frontmatter(skills_dir: Path) -> dict[str, list[str]]:
@@ -204,6 +360,41 @@ def _format_frontmatter_errors(errors_by_skill: dict[str, list[str]]) -> str:
     return "\n".join(lines)
 
 
+def _display_argument_hint(value: str | None) -> str:
+    """Format an argument hint for text reports."""
+    return _NO_ARGUMENT_MARKER if value is None else value
+
+
+def _format_claude_argument_errors(
+    missing: set[str],
+    extra: set[str],
+    mismatched: dict[str, tuple[str | None, str | None]],
+) -> str:
+    """Format ``CLAUDE.md`` Skill Catalog argument drift."""
+    lines: list[str] = []
+    if missing:
+        lines.append("Missing from CLAUDE.md Skill Catalog (shipped but not documented):")
+        for name in sorted(missing):
+            lines.append(f"  - {name}")
+    if extra:
+        if lines:
+            lines.append("")
+        lines.append("Extra in CLAUDE.md Skill Catalog (documented but not shipped):")
+        for name in sorted(extra):
+            lines.append(f"  - {name}")
+    if mismatched:
+        if lines:
+            lines.append("")
+        lines.append("Arguments out of sync in CLAUDE.md Skill Catalog:")
+        for name in sorted(mismatched):
+            expected, actual = mismatched[name]
+            lines.append(
+                f"  - {name}: expected {_display_argument_hint(expected)!r}, "
+                f"found {_display_argument_hint(actual)!r}"
+            )
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the skill-catalog sync check.
 
@@ -215,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
 
     """
     parser = create_validation_parser(
-        "Verify docs/plugin-installation.md lists every shipped skill.",
+        "Verify skill catalog docs match every shipped skill.",
         prog="hephaestus-check-skill-catalog",
     )
     parser.add_argument(
@@ -230,15 +421,37 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Path to the skills directory (default: skills/)",
     )
+    parser.add_argument(
+        "--claude-md",
+        type=Path,
+        default=None,
+        help="Path to CLAUDE.md (default: CLAUDE.md when present)",
+    )
     args = parser.parse_args(argv)
 
     repo_root: Path = resolve_repo_root(args)
     table_path: Path = args.table or (repo_root / "docs" / "plugin-installation.md")
     skills_dir: Path = args.skills_dir or (repo_root / "skills")
+    claude_md_path: Path = args.claude_md or (repo_root / "CLAUDE.md")
 
     missing, extra = check_skill_catalog(table_path, skills_dir)
     frontmatter_errors = check_skill_frontmatter(skills_dir)
-    ok = not missing and not extra and not frontmatter_errors
+    claude_missing: set[str] = set()
+    claude_extra: set[str] = set()
+    claude_argument_mismatches: dict[str, tuple[str | None, str | None]] = {}
+    check_default_claude_md = args.table is None and args.skills_dir is None
+    if args.claude_md is not None or (check_default_claude_md and claude_md_path.exists()):
+        claude_missing, claude_extra, claude_argument_mismatches = check_claude_skill_arguments(
+            claude_md_path, skills_dir
+        )
+    ok = (
+        not missing
+        and not extra
+        and not frontmatter_errors
+        and not claude_missing
+        and not claude_extra
+        and not claude_argument_mismatches
+    )
     exit_code = 0 if ok else 1
 
     if args.json:
@@ -247,27 +460,42 @@ def main(argv: list[str] | None = None) -> int:
             message=("skill catalog is in sync" if ok else "skill catalog is out of sync"),
             missing=sorted(missing),
             extra=sorted(extra),
+            claude_missing=sorted(claude_missing),
+            claude_extra=sorted(claude_extra),
+            claude_argument_mismatches={
+                name: {"expected": expected, "actual": actual}
+                for name, (expected, actual) in sorted(claude_argument_mismatches.items())
+            },
             frontmatter_errors=frontmatter_errors,
             table=str(table_path),
             skills_dir=str(skills_dir),
+            claude_md=str(claude_md_path),
         )
     elif ok:
         print(
             f"OK: skill catalog matches {len(_discover_skill_names(skills_dir))} shipped skill(s)."
         )
     else:
-        print("ERROR: docs/plugin-installation.md is out of sync with skills/.")
+        print("ERROR: skill catalogs are out of sync with skills/.")
         print()
         diff = _format_diff(missing, extra)
         frontmatter_report = _format_frontmatter_errors(frontmatter_errors)
+        claude_report = _format_claude_argument_errors(
+            claude_missing,
+            claude_extra,
+            claude_argument_mismatches,
+        )
         if diff:
             print(diff)
+            print()
+        if claude_report:
+            print(claude_report)
             print()
         if frontmatter_report:
             print(frontmatter_report)
             print()
         print(
-            "Fix by updating the catalog table, removing the deleted skill, "
+            "Fix by updating catalog tables, removing deleted skills, "
             "or correcting skill frontmatter."
         )
 

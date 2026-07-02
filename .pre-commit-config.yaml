@@ -128,12 +128,12 @@ repos:
     hooks:
       - id: hephaestus-check-skill-catalog
         name: hephaestus check skill catalog
-        description: Ensure docs/plugin-installation.md lists every shipped skill and skill frontmatter is valid
+        description: Ensure skill catalog docs list every shipped skill and skill frontmatter is valid
         # --environment default is explicit because the pre-commit CI job runs
         # in the lint env; the hephaestus-* console scripts live in default.
         entry: pixi run --environment default hephaestus-check-skill-catalog
         language: system
-        files: '^(docs/plugin-installation\.md|skills/)'
+        files: '^(CLAUDE\.md|docs/plugin-installation\.md|skills/)'
         pass_filenames: false
 
   # repo-analyze* skill generator drift check

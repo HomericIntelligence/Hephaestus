@@ -11,7 +11,9 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.validation.skill_catalog import (
+    check_claude_skill_arguments,
     check_skill_catalog,
+    extract_claude_skill_arguments,
     extract_skill_table_rows,
     main,
 )
@@ -58,6 +60,27 @@ def make_skills_dir(
             content = f"# {name}\n"
         (sub / "SKILL.md").write_text(content)
     return skills_dir
+
+
+def make_claude_md(tmp_path: Path, argument_rows: dict[str, str]) -> Path:
+    """Write a minimal CLAUDE.md skill catalog table."""
+    rows = "\n".join(
+        f"| `{name}` | {arguments} | Test skill |" for name, arguments in argument_rows.items()
+    )
+    content = textwrap.dedent(
+        f"""\
+        # Agent Guide
+
+        ## Skill Catalog
+
+        | Skill | Arguments | When to Use |
+        |-------|-----------|-------------|
+        {rows}
+        """
+    )
+    path = tmp_path / "CLAUDE.md"
+    path.write_text(content)
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +151,32 @@ class TestExtractSkillTableRows:
 
 
 # ---------------------------------------------------------------------------
+# extract_claude_skill_arguments
+# ---------------------------------------------------------------------------
+
+
+class TestExtractClaudeSkillArguments:
+    """Tests for extract_claude_skill_arguments."""
+
+    def test_extracts_arguments_dash_and_escaped_pipe(self, tmp_path: Path) -> None:
+        """Arguments cells are unwrapped, and ``—`` maps to no argument."""
+        path = make_claude_md(
+            tmp_path,
+            {
+                "alpha": "`<task description>`",
+                "learn": "—",
+                "tidy": '`"<optional: --dry-run \\| --no-swarm>"`',
+            },
+        )
+
+        assert extract_claude_skill_arguments(path) == {
+            "alpha": "<task description>",
+            "learn": None,
+            "tidy": '"<optional: --dry-run | --no-swarm>"',
+        }
+
+
+# ---------------------------------------------------------------------------
 # check_skill_catalog
 # ---------------------------------------------------------------------------
 
@@ -177,12 +226,77 @@ class TestCheckSkillCatalog:
 
 
 # ---------------------------------------------------------------------------
+# check_claude_skill_arguments
+# ---------------------------------------------------------------------------
+
+
+class TestCheckClaudeSkillArguments:
+    """Tests for check_claude_skill_arguments."""
+
+    def test_reports_missing_extra_and_argument_mismatch(self, tmp_path: Path) -> None:
+        """CLAUDE.md drift is classified by missing, extra, and mismatched rows."""
+        skills_dir = make_skills_dir(tmp_path, ["alpha", "beta"])
+        (skills_dir / "alpha" / "SKILL.md").write_text(
+            "---\n"
+            "name: alpha\n"
+            "description: Test skill alpha\n"
+            "argument-hint: <expected argument>\n"
+            "---\n\n"
+            "# alpha\n"
+        )
+        claude_md = make_claude_md(
+            tmp_path,
+            {
+                "alpha": "`<documented argument>`",
+                "removed": "—",
+            },
+        )
+
+        missing, extra, mismatched = check_claude_skill_arguments(claude_md, skills_dir)
+
+        assert missing == {"beta"}
+        assert extra == {"removed"}
+        assert mismatched == {"alpha": ("<expected argument>", "<documented argument>")}
+
+    def test_accepts_dash_for_missing_argument_hint(self, tmp_path: Path) -> None:
+        """A missing argument-hint matches the documented no-argument marker."""
+        skills_dir = make_skills_dir(tmp_path, ["learn"])
+        claude_md = make_claude_md(tmp_path, {"learn": "—"})
+
+        missing, extra, mismatched = check_claude_skill_arguments(claude_md, skills_dir)
+
+        assert missing == set()
+        assert extra == set()
+        assert mismatched == {}
+
+
+# ---------------------------------------------------------------------------
 # main — exit codes and output modes
 # ---------------------------------------------------------------------------
 
 
 class TestMainExitCodes:
     """main() returns the documented exit codes for sync/drift."""
+
+    def test_returns_nonzero_when_claude_arguments_drift(self, tmp_path: Path) -> None:
+        """Main exits 1 when CLAUDE.md Arguments drift from argument-hint."""
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        make_table(docs_dir, ["alpha"])
+        skills_dir = make_skills_dir(tmp_path, ["alpha"])
+        (skills_dir / "alpha" / "SKILL.md").write_text(
+            "---\n"
+            "name: alpha\n"
+            "description: Test skill alpha\n"
+            "argument-hint: <expected argument>\n"
+            "---\n\n"
+            "# alpha\n"
+        )
+        make_claude_md(tmp_path, {"alpha": "`<documented argument>`"})
+
+        result = main(["--repo-root", str(tmp_path)])
+
+        assert result == 1
 
     def test_returns_zero_when_complete(self, tmp_path: Path) -> None:
         """Main exits 0 when the table matches the skills directory."""
@@ -271,6 +385,36 @@ class TestMainJsonOutput:
         assert payload["exit_code"] == 1
         assert payload["missing"] == ["beta"]
         assert payload["extra"] == []
+
+    def test_json_error_envelope_lists_claude_argument_drift(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """--json + CLAUDE.md drift includes expected and actual arguments."""
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        make_table(docs_dir, ["alpha"])
+        skills_dir = make_skills_dir(tmp_path, ["alpha"])
+        (skills_dir / "alpha" / "SKILL.md").write_text(
+            "---\n"
+            "name: alpha\n"
+            "description: Test skill alpha\n"
+            "argument-hint: <expected argument>\n"
+            "---\n\n"
+            "# alpha\n"
+        )
+        make_claude_md(tmp_path, {"alpha": "`<documented argument>`"})
+
+        code = main(["--repo-root", str(tmp_path), "--json"])
+
+        payload = json.loads(capsys.readouterr().out)
+        assert code == 1
+        assert payload["status"] == "error"
+        assert payload["claude_argument_mismatches"] == {
+            "alpha": {
+                "expected": "<expected argument>",
+                "actual": "<documented argument>",
+            }
+        }
 
 
 class TestMainTextOutput:
