@@ -453,6 +453,37 @@ class TestPipPinning:
         )
 
 
+class TestSecurityFloorTransitivePinning:
+    """Security-fix transitive pins in pixi.toml must keep next-major caps."""
+
+    @pytest.mark.parametrize(
+        ("name", "minimum_floor"),
+        [
+            ("pygments", Version("2.20.0")),
+            ("urllib3", Version("2.7.0")),
+            ("pyjwt", Version("2.13.0")),
+        ],
+    )
+    def test_security_floor_transitives_have_next_major_caps(
+        self, repo_root: Path, name: str, minimum_floor: Version
+    ) -> None:
+        """Named security pins must keep their fix floor and block untested 3.x."""
+        pixi_path = repo_root / "pixi.toml"
+        with open(pixi_path, "rb") as f:
+            pixi = tomllib.load(f)
+
+        spec = pixi["dependencies"][name]
+        floor = Version(_floor(spec))
+        cap = Version(_upper_cap(spec))
+
+        assert floor >= minimum_floor, (
+            f"{name} floor {floor} is below required security floor {minimum_floor}"
+        )
+        assert cap == Version(str(floor.major + 1)), (
+            f"{name} cap {cap} must be the next major after floor {floor}"
+        )
+
+
 class TestAllExtraDocsInSync:
     """Guard that `[all]`'s member extras are documented in both docs.
 
