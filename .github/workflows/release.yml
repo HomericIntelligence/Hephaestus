@@ -14,6 +14,7 @@ on:
 permissions:
   contents: write
   id-token: write
+  pages: write
 
 # Serialize per-tag: this workflow builds, publishes to PyPI, and creates a
 # GitHub release — none idempotent. Two runs for the SAME tag must not race
@@ -208,3 +209,58 @@ jobs:
           else
             echo "::notice::Release $TAG is immutable — build artifacts not attached. The package is published to PyPI."
           fi
+
+  deploy-docs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [build-and-publish]
+    # Publish the pdoc API reference to GitHub Pages only after the package
+    # release succeeds, so the online docs always match a version on PyPI.
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_TAG: ${{ github.ref }}
+        run: |
+          # Priority: explicit input > tag-push ref > latest tag (mirrors build-and-publish)
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          elif [[ "$REF_TAG" == refs/tags/* ]]; then
+            TAG="${REF_TAG#refs/tags/}"
+          else
+            TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          fi
+          echo "Releasing docs for tag: ${TAG}"
+          git checkout "${TAG}"
+
+      - name: Install pixi
+        uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11  # v0.9.6
+        with:
+          pixi-version: v0.69.0
+          locked: true
+
+      - name: Editable install (pdoc imports hephaestus to introspect signatures)
+        run: pixi run dev-install
+
+      - name: Generate API reference (pdoc -> docs/api/)
+        run: pixi run docs
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa  # v3.0.1
+        with:
+          path: docs/api
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e  # v4.0.5
