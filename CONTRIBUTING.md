@@ -43,6 +43,10 @@ Before opening a PR, locate the work in:
   — the PR scaffolding (`Closes #N` line is enforced by the
   `pr-policy` CI gate).
 
+ProjectHephaestus uses trunk-based development: create one short-lived feature
+branch per issue, open a pull request, squash-merge it back to `main`, and cut
+releases from signed `vX.Y.Z` tags; there are no release branches.
+
 Keep PRs small: prefer one issue per PR so each change can be reviewed
 and reverted independently. As a rough guide, aim to keep PRs under
 ~500 changed lines (XS <10 · S <50 · M <250 · L <500 · XL 500+); split
