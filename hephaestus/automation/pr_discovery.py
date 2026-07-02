@@ -12,12 +12,106 @@ import json
 import logging
 import subprocess
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
+from ._review_utils import _discover_prs_simple, find_pr_for_issue
+from .ci_check_inspector import FAILING_CHECK_CONCLUSIONS
 from .git_utils import get_repo_info
 from .github_api import GitHubUnavailableError, _gh_call
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PRWorkset:
+    """Resolved PR workset for a drive-green run."""
+
+    pr_map: dict[int, int]
+    shared_pr_issues: dict[int, list[int]]
+
+
+def _dedupe_issue_prs(raw_map: dict[int, int]) -> PRWorkset:
+    """Collapse many issues that resolve to the same PR into one work item."""
+    pr_to_issues: dict[int, list[int]] = {}
+    for issue_num, pr_num in raw_map.items():
+        pr_to_issues.setdefault(pr_num, []).append(issue_num)
+
+    shared = {pr: sorted(issues) for pr, issues in pr_to_issues.items()}
+    deduped: dict[int, int] = {}
+    for pr_num, issues in pr_to_issues.items():
+        canonical = min(issues)
+        deduped[canonical] = pr_num
+        if len(issues) > 1:
+            deferred = sorted(i for i in issues if i != canonical)
+            logger.info(
+                "PR #%s closes multiple issues %s; driving via issue #%s, "
+                "deferring %s (single PR cannot be checked out into multiple "
+                "worktrees concurrently)",
+                pr_num,
+                sorted(issues),
+                canonical,
+                deferred,
+            )
+    return PRWorkset(pr_map=deduped, shared_pr_issues=shared)
+
+
+def _fetch_open_pulls(repo_root: Any, *, purpose: str) -> list[dict[str, Any]] | None:
+    """Fetch open REST pull rows, returning None on lookup failure."""
+    try:
+        owner, repo = get_repo_info(repo_root)
+    except RuntimeError as exc:
+        logger.info("%s skipped: could not resolve owner/name (%s)", purpose, exc)
+        return None
+    try:
+        result = _gh_call(
+            [
+                "api",
+                "--paginate",
+                f"/repos/{owner}/{repo}/pulls?state=open&per_page=100",
+            ],
+            check=False,
+        )
+        raw_pulls = json.loads(result.stdout or "[]")
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        logger.error("Could not list open PRs for %s: %s", purpose, exc)
+        return None
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.info("%s skipped: gh api failed (%s)", purpose, exc)
+        return None
+    return raw_pulls if isinstance(raw_pulls, list) else []
+
+
+def _normalise_open_pr(
+    pr: dict[str, Any],
+    *,
+    merge_state_fn: Callable[[Any], tuple[str, str]],
+) -> dict[str, Any]:
+    """Normalise a REST pull row to the gh-CLI shape consumed downstream."""
+    labels = pr.get("labels") or []
+    number = pr.get("number")
+    merge_state, mergeable = merge_state_fn(number)
+    user = pr.get("user") or {}
+    return {
+        "number": number,
+        "title": pr.get("title", ""),
+        "headRefName": (pr.get("head") or {}).get("ref", ""),
+        "autoMergeRequest": pr.get("auto_merge"),
+        "mergeStateStatus": merge_state,
+        "mergeable": mergeable,
+        "labels": [label.get("name", "") for label in labels if isinstance(label, dict)],
+        "isBot": user.get("type") == "Bot",
+    }
+
+
+def _pr_is_failing_row(pr: dict[str, Any]) -> bool:
+    """Return True iff a PR row should be picked up by failing-PR discovery."""
+    if pr.get("isDraft"):
+        return False
+    if pr.get("mergeStateStatus") == "BLOCKED":
+        return True
+    rollup = pr.get("statusCheckRollup") or []
+    return any(c.get("conclusion") in FAILING_CHECK_CONCLUSIONS for c in rollup)
 
 
 class PRDiscovery:
@@ -54,6 +148,60 @@ class PRDiscovery:
         self._pr_merge_state_fn = pr_merge_state_provider
         # Viewer-login cache owned here (#821). Empty string = not yet resolved.
         self._viewer_login: str = ""
+
+    def discover_workset(self, issue_numbers: list[int]) -> PRWorkset:
+        """Pre-discover open PRs from issue, direct-PR, bot, and failing sources."""
+        raw_map = _discover_prs_simple(
+            issue_numbers,
+            find_pr_for_issue,
+            on_missing=lambda issue_num: logger.info(
+                "Issue #%s: no open PR found, skipping", issue_num
+            ),
+        )
+        workset = _dedupe_issue_prs(raw_map)
+        deduped = dict(workset.pr_map)
+        shared = {pr: list(issues) for pr, issues in workset.shared_pr_issues.items()}
+
+        for pr_num in self._options().prs:
+            if pr_num in deduped.values():
+                logger.info(
+                    "Direct PR #%s already discovered via --issues; skipping duplicate",
+                    pr_num,
+                )
+                continue
+            if not self.validate_pr_open(pr_num):
+                logger.warning("Direct PR #%s is not OPEN or does not exist; skipping", pr_num)
+                continue
+            deduped[pr_num] = pr_num
+            shared.setdefault(pr_num, [pr_num])
+
+        if self._options().include_bot_prs and not self._options().issues:
+            for pr_num in self.discover_bot_prs():
+                if pr_num not in deduped.values():
+                    deduped[pr_num] = pr_num
+                    shared.setdefault(pr_num, [pr_num])
+
+        if not self._options().issues:
+            known = set(deduped.values())
+            for pr_num in self.discover_failing_prs(_pr_is_failing_row):
+                if pr_num not in known:
+                    deduped[pr_num] = pr_num
+                    known.add(pr_num)
+                    shared.setdefault(pr_num, [pr_num])
+        return PRWorkset(pr_map=deduped, shared_pr_issues=shared)
+
+    def validate_pr_open(self, pr_number: int) -> bool:
+        """Return True iff ``pr_number`` exists and is in OPEN state."""
+        try:
+            result = _gh_call(
+                ["pr", "view", str(pr_number), "--json", "number,state"],
+                check=False,
+            )
+            data = json.loads(result.stdout or "{}")
+            return str(data.get("state", "")).upper() == "OPEN"
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            logger.debug("PR #%s validation failed: %s", pr_number, exc)
+            return False
 
     def resolve_viewer_login(self) -> str:
         """Return the authenticated ``gh api user`` login. Fail CLOSED on error.
@@ -123,34 +271,10 @@ class PRDiscovery:
                 resolver entirely.
 
         """
-        options = self._options()
-        repo_root = self._repo_root()
-        try:
-            owner, repo = get_repo_info(repo_root)
-        except RuntimeError as exc:
-            logger.info("Bot-PR discovery skipped: could not resolve owner/name (%s)", exc)
+        raw_pulls = _fetch_open_pulls(self._repo_root(), purpose="Bot-PR discovery")
+        if raw_pulls is None:
             return {}
-
-        try:
-            result = _gh_call(
-                [
-                    "api",
-                    "--paginate",
-                    f"/repos/{owner}/{repo}/pulls?state=open&per_page=100",
-                ],
-                check=False,
-            )
-            raw_pulls: list[dict[str, Any]] = json.loads(result.stdout or "[]")
-        except (
-            subprocess.CalledProcessError,
-            subprocess.TimeoutExpired,
-            OSError,
-            json.JSONDecodeError,
-        ) as exc:
-            logger.info("Bot-PR discovery skipped: gh api failed (%s)", exc)
-            return {}
-
-        viewer = "" if options.include_all_authors else self.resolve_viewer_login()
+        viewer = "" if self._options().include_all_authors else self.resolve_viewer_login()
         bot_prs: dict[int, int] = {}
         for pr in raw_pulls:
             user = pr.get("user") or {}
@@ -299,41 +423,13 @@ class PRDiscovery:
             Empty list iff the repo is clean.
 
         """
-        options = self._options()
-        repo_root = self._repo_root()
-        try:
-            owner, repo = get_repo_info(repo_root)
-        except RuntimeError as exc:
-            logger.error("Could not resolve repo owner/name to list open PRs: %s", exc)
-            # Unknown ownership ⇒ treat as not-done so operators investigate.
-            return [{"number": -1, "title": "(unknown: cannot resolve repo)"}]
-
-        # ``gh api --paginate`` walks ``Link: rel="next"`` headers and emits
-        # a single concatenated JSON array across all pages. ``per_page=100``
-        # is GitHub's max page size; we issue the minimum number of calls.
-        # We use ``gh api`` directly (not ``gh pr list``) because the latter
-        # caps at ``--limit`` even with paginate semantics; gh's REST proxy
-        # paginates without an upper bound.
-        try:
-            result = _gh_call(
-                [
-                    "api",
-                    "--paginate",
-                    f"/repos/{owner}/{repo}/pulls?state=open&per_page=100",
-                ],
-                check=False,
-            )
-            raw_pulls: list[dict[str, Any]] = json.loads(result.stdout or "[]")
-        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
-            # If we cannot determine the open-PR count, the safest default is
-            # to assume the repo is NOT done — surface the unknown state as a
-            # failure so operators don't walk away on a false-green.
-            logger.error("Could not list open PRs to verify repo done-state: %s", exc)
+        raw_pulls = _fetch_open_pulls(self._repo_root(), purpose="open-PR done-state")
+        if raw_pulls is None:
             return [{"number": -1, "title": "(unknown: gh api pulls failed)"}]
+        if not raw_pulls:
+            return []
 
-        # The REST shape exposes ``head.ref`` and ``auto_merge`` (snake_case);
-        # normalise to the gh-CLI shape consumers downstream already use.
-        viewer = "" if options.include_all_authors else self.resolve_viewer_login()
+        viewer = "" if self._options().include_all_authors else self.resolve_viewer_login()
         normalised: list[dict[str, Any]] = []
         for pr in raw_pulls:
             user = pr.get("user") or {}
@@ -349,27 +445,11 @@ class PRDiscovery:
                         },
                     )
                 continue  # #821: hide other-author PRs from the done-gate sweep
-            labels = pr.get("labels") or []
-            number = pr.get("number")
             # Route through the injected provider (lambda → driver stub) so
             # ``patch.object(driver, "_pr_merge_state")`` intercepts (#1357);
             # fall back to the local method when unwired.
             merge_state_fn = self._pr_merge_state_fn or self.pr_merge_state
-            merge_state, mergeable = merge_state_fn(number)
-            normalised.append(
-                {
-                    "number": number,
-                    "title": pr.get("title", ""),
-                    "headRefName": (pr.get("head") or {}).get("ref", ""),
-                    "autoMergeRequest": pr.get("auto_merge"),
-                    "mergeStateStatus": merge_state,
-                    "mergeable": mergeable,
-                    "labels": [
-                        label.get("name", "") for label in labels if isinstance(label, dict)
-                    ],
-                    "isBot": user.get("type") == "Bot",
-                }
-            )
+            normalised.append(_normalise_open_pr(pr, merge_state_fn=merge_state_fn))
         return normalised
 
     def pr_merge_state(self, pr_number: Any) -> tuple[str, str]:
