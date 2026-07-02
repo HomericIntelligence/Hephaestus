@@ -14,7 +14,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from hephaestus.automation import loop_runner
-from hephaestus.automation.loop_runner import LoopConfig, RepoResult
+from hephaestus.automation.loop_runner import LoopConfig, PhaseResult, RepoResult
 
 # ---------------------------------------------------------------------------
 # _parse_planned_files — heading-anchored plan-body parsing
@@ -230,6 +230,53 @@ def test_serialize_disabled_dispatches_all(tmp_path: object) -> None:
 
     assert sorted(submitted) == [1, 2]
     assert out.deferred_issues == []
+
+
+def test_run_loop_replays_terminal_deferred_issues_serially() -> None:
+    """Final-round file-overlap deferrals are redispatched, not silently stranded."""
+    cfg = LoopConfig(
+        loops=1,
+        max_workers=3,
+        phases=loop_runner.ALL_SELECTABLE,
+        serialize_file_overlap=True,
+    )
+    calls: list[tuple[str, int, list[int], int, bool]] = []
+
+    def fake_process_repo(repo: str, loop_idx: int, cfg: LoopConfig) -> RepoResult:
+        calls.append(
+            (
+                repo,
+                loop_idx,
+                list(cfg.issues),
+                cfg.max_workers,
+                cfg.serialize_file_overlap,
+            )
+        )
+        if not cfg.issues:
+            return RepoResult(
+                repo=repo,
+                loop_idx=loop_idx,
+                phases=[PhaseResult(name="plan", rc=0, work_units=1)],
+                deferred_issues=[2, 3],
+            )
+        return RepoResult(
+            repo=repo,
+            loop_idx=loop_idx,
+            phases=[PhaseResult(name="plan", rc=0, work_units=1)],
+        )
+
+    with (
+        patch.object(loop_runner, "process_repo", side_effect=fake_process_repo),
+        patch.object(loop_runner, "_run_post_loop_stages", return_value=[]),
+    ):
+        results = loop_runner.run_loop(cfg, repos=["Repo"])
+
+    assert calls == [
+        ("Repo", 1, [], 3, True),
+        ("Repo", 1, [2], 1, False),
+        ("Repo", 1, [3], 1, False),
+    ]
+    assert [r.deferred_issues for r in results] == [[2, 3], [], []]
 
 
 # ---------------------------------------------------------------------------

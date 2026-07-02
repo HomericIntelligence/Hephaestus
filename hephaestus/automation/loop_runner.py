@@ -49,7 +49,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from hephaestus.agents.runtime import resolve_agent
@@ -1456,6 +1456,64 @@ def _run_post_loop_stages(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]
     return results
 
 
+def _run_terminal_deferred_issues(
+    cfg: LoopConfig,
+    terminal_results: list[RepoResult],
+) -> list[RepoResult]:
+    """Redispatch final-round file-overlap deferrals serially.
+
+    File-overlap serialization normally relies on the next configured loop to
+    pick up deferred siblings. On the terminal loop there is no next iteration,
+    so replay the withheld issue numbers one at a time through the normal
+    repo processor. Serial replay disables the overlap guard for the forced
+    catch-up and lets each issue re-enter via the same filtering/rebase path as
+    an ordinary loop body.
+    """
+    deferred_by_repo: dict[str, list[int]] = {}
+    for result in terminal_results:
+        if result.deferred_issues:
+            deferred_by_repo.setdefault(result.repo, []).extend(result.deferred_issues)
+
+    if not deferred_by_repo:
+        return []
+
+    total_deferred = sum(len(issues) for issues in deferred_by_repo.values())
+    LOG.warning(
+        "Terminal loop left %d file-overlap deferred issue(s); redispatching serial catch-up.",
+        total_deferred,
+    )
+
+    catchup_results: list[RepoResult] = []
+    for repo, issues in deferred_by_repo.items():
+        for issue in dict.fromkeys(issues):
+            if _shutdown_requested():
+                LOG.warning(
+                    "[%s] terminal deferred catch-up stopped before issue #%s (shutdown requested)",
+                    repo,
+                    issue,
+                )
+                return catchup_results
+
+            catchup_cfg = replace(
+                cfg,
+                issues=[issue],
+                max_workers=1,
+                serialize_file_overlap=False,
+            )
+            LOG.warning("[%s] redispatching terminal deferred issue #%s", repo, issue)
+            result = process_repo(repo, cfg.loops, catchup_cfg)
+            catchup_results.append(result)
+            if result.deferred_issues:
+                LOG.warning(
+                    "[%s] terminal deferred catch-up for issue #%s still deferred: %s",
+                    repo,
+                    issue,
+                    result.deferred_issues,
+                )
+
+    return catchup_results
+
+
 def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
     """Drive ``cfg.loops`` iterations across ``repos``. Returns flat result list.
 
@@ -1466,6 +1524,7 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
     safety net for the rare case where the work submission itself dies.
     """
     all_results: list[RepoResult] = []
+    terminal_loop_results: list[RepoResult] = []
 
     for loop_idx in range(1, cfg.loops + 1):
         if _shutdown_requested():
@@ -1506,6 +1565,7 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
                     )
 
         elapsed_s = time.monotonic() - loop_t0
+        terminal_loop_results = loop_results
         LOG.info("%s", _summarize_loop(loop_results, loop_idx, elapsed_s))
         LOG.info("Loop %d complete.", loop_idx)
 
@@ -1529,6 +1589,9 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
             break
 
         _maybe_sleep_for_rate_budget(loop_idx, cfg.loops)
+
+    catchup_results = _run_terminal_deferred_issues(cfg, terminal_loop_results)
+    all_results.extend(catchup_results)
 
     # Each worker already ran drive-green for only its current issue. Run one
     # final sequential catch-up sweep per repo so transient CI or ordering
