@@ -18,6 +18,7 @@ import sys
 from hephaestus.automation.mesh.config import MeshConfig
 from hephaestus.automation.mesh.roles import resolve_handler
 from hephaestus.automation.mesh.worker import MeshWorker
+from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,6 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--domain", help="Override MESH_DOMAIN")
     parser.add_argument("--role", help="Override MESH_ROLE")
     parser.add_argument("--verbose", action="store_true", help="Debug logging")
+    add_version_arg(parser)
+    add_json_arg(parser)
     return parser
 
 
@@ -48,12 +51,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = MeshConfig.from_env()
     except KeyError as exc:
-        print(f"missing required environment variable: {exc}", file=sys.stderr)
+        if args.json:
+            emit_json_status(2, message=f"missing environment variable: {exc}")
+        else:
+            print(f"missing required environment variable: {exc}", file=sys.stderr)
         return 2
     try:
         handler = resolve_handler(config.domain, config.role)
     except KeyError as exc:
-        print(str(exc), file=sys.stderr)
+        if args.json:
+            emit_json_status(2, message=str(exc))
+        else:
+            print(str(exc), file=sys.stderr)
         return 2
 
     worker = MeshWorker(config, handler)
