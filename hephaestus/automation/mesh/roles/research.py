@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 INTAKE_MARKER = "<!-- hi:intake {intake_id} -->"
 INTAKE_LABEL = "intake"
+MESH_WORK_DIR = Path("build/.mesh")
 
 QUESTIONS_PROMPT = """You are the research intake interviewer for this repository.
 A user submitted this high-level task:
@@ -122,6 +123,16 @@ def extract_workflow_yaml(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _workflow_path_for_intake(intake_id: str) -> Path:
+    """Return a traversal-safe workflow path for an untrusted intake id."""
+    filename_id = re.sub(r"[^A-Za-z0-9._-]+", "-", intake_id).strip(".-") or "unknown"
+    workflow_path = MESH_WORK_DIR / f"intake-{filename_id}.workflow.yaml"
+    mesh_dir = MESH_WORK_DIR.resolve()
+    if not workflow_path.resolve().is_relative_to(mesh_dir):
+        raise ValueError(f"workflow path escaped mesh work directory: {workflow_path}")
+    return workflow_path
+
+
 class ResearchHandler:
     """Runs intake → interview → research → epic registration."""
 
@@ -179,7 +190,7 @@ class ResearchHandler:
             )
 
         # Describe via Telemachy → GitHub epic → hi.pipeline.epic.*.registered.
-        workflow_path = Path("build/.mesh") / f"intake-{intake_id}.workflow.yaml"
+        workflow_path = _workflow_path_for_intake(intake_id)
         workflow_path.parent.mkdir(parents=True, exist_ok=True)
         write_secure(workflow_path, workflow_yaml)
         registered = self._register_epic(workflow_path, repo)

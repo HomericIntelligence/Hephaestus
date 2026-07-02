@@ -22,6 +22,16 @@ class FakeWorkerResult:
     plan_review_not_go: bool = False
 
 
+@dataclass
+class FakeCIDriverResult:
+    """CIDriver per-issue result double."""
+
+    issue_number: int
+    success: bool = True
+    error: str | None = None
+    pr_number: int | None = None
+
+
 class FakeImplementer:
     """Implementer double returning canned results."""
 
@@ -50,17 +60,27 @@ def _ctx(payload: dict[str, Any], attempt: int = 1) -> TaskContext:
 class FakeDriver:
     """CIDriver double."""
 
-    def __init__(self, log: list[int], issue: int) -> None:
+    def __init__(
+        self,
+        log: list[int],
+        issue: int,
+        results: dict[int, FakeCIDriverResult],
+        open_prs_remaining: list[dict[str, Any]],
+    ) -> None:
         self._log = log
         self._issue = issue
+        self._results = results
+        self.open_prs_remaining = open_prs_remaining
 
     def run(self) -> dict[int, Any]:
         self._log.append(self._issue)
-        return {}
+        return self._results
 
 
 def _handler(
-    results: dict[int, FakeWorkerResult], pr_state: str = "MERGED"
+    results: dict[int, FakeWorkerResult],
+    ci_results: dict[int, FakeCIDriverResult] | None = None,
+    open_prs_remaining: list[dict[str, Any]] | None = None,
 ) -> tuple[TaskAgentHandler, list[Any], list[int]]:
     calls: list[Any] = []
     driven: list[int] = []
@@ -71,8 +91,19 @@ def _handler(
 
     handler = TaskAgentHandler(
         implementer_factory=factory,
-        ci_driver_factory=lambda issue: FakeDriver(driven, issue),
-        pr_state=lambda pr: pr_state,
+        ci_driver_factory=lambda issue: FakeDriver(
+            driven,
+            issue,
+            ci_results
+            or {
+                issue: FakeCIDriverResult(
+                    issue_number=issue,
+                    success=True,
+                    pr_number=results[issue].pr_number,
+                )
+            },
+            open_prs_remaining or [],
+        ),
     )
     return handler, calls, driven
 
@@ -87,22 +118,55 @@ class TestTaskAgentHandler:
         assert result.error_kind == "BadDispatch"
         assert not result.retryable
 
-    def test_success_drives_pr_to_merge(self) -> None:
+    def test_success_drives_pr_to_merge_ready(self) -> None:
         handler, calls, driven = _handler({9: FakeWorkerResult(success=True, pr_number=42)})
         result = handler.handle(_ctx({"issue": 9}))
         assert result.ok
-        assert result.pr == {"number": 42, "merged": True}
+        assert result.pr == {"number": 42, "merge_ready": True}
         assert calls == [(9, False)]
         assert driven == [9]  # drive-green phase ran
 
-    def test_unmerged_pr_is_retryable_failure(self) -> None:
+    def test_open_armed_pr_completes_after_successful_ci_driver(self) -> None:
         handler, _, driven = _handler(
-            {9: FakeWorkerResult(success=True, pr_number=42)}, pr_state="OPEN"
+            {9: FakeWorkerResult(success=True, pr_number=42)},
+            ci_results={
+                9: FakeCIDriverResult(
+                    issue_number=9,
+                    success=False,
+                    error="timed out waiting for merge",
+                    pr_number=42,
+                )
+            },
+            open_prs_remaining=[
+                {
+                    "number": 42,
+                    "autoMergeRequest": {"enabledAt": "2026-07-02T00:00:00Z"},
+                    "mergeStateStatus": "BLOCKED",
+                }
+            ],
+        )
+        result = handler.handle(_ctx({"issue": 9}))
+        assert result.ok
+        assert result.pr == {"number": 42, "merge_ready": True}
+        assert driven == [9]
+
+    def test_failed_ci_driver_is_retryable_failure(self) -> None:
+        handler, _, driven = _handler(
+            {9: FakeWorkerResult(success=True, pr_number=42)},
+            ci_results={
+                9: FakeCIDriverResult(
+                    issue_number=9,
+                    success=False,
+                    error="required check failed",
+                    pr_number=42,
+                )
+            },
         )
         result = handler.handle(_ctx({"issue": 9}))
         assert not result.ok
-        assert result.error_kind == "PRNotMerged"
+        assert result.error_kind == "CIDriveFailed"
         assert result.retryable
+        assert "required check failed" in result.error_message
         assert driven == [9]
 
     def test_success_without_pr_skips_drive_phase(self) -> None:

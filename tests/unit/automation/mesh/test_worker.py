@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -205,6 +206,31 @@ class TestHandleMessage:
 
         assert msg.progressed >= 1
         assert msg.acked
+
+
+class TestMeshWorkerInit:
+    """Tests for worker dependency initialization."""
+
+    def test_default_agamemnon_uses_config_url_and_env_api_key(self) -> None:
+        handler = StubHandler(RoleResult(ok=True))
+        config = MeshConfig(
+            domain="pipeline",
+            role="task-agent",
+            agent_id="a-1",
+            agamemnon_url="http://configured:9000",
+        )
+        prior = os.environ.get("AGAMEMNON_API_KEY")
+        os.environ["AGAMEMNON_API_KEY"] = "secret-key"
+        try:
+            worker = MeshWorker(config, handler, publisher=FakePublisher())  # type: ignore[arg-type]
+        finally:
+            if prior is None:
+                os.environ.pop("AGAMEMNON_API_KEY", None)
+            else:
+                os.environ["AGAMEMNON_API_KEY"] = prior
+
+        assert worker.agamemnon._base_url == "http://configured:9000"
+        assert worker.agamemnon._api_key == "secret-key"
 
 
 class TestTaskContext:

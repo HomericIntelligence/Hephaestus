@@ -142,3 +142,19 @@ class TestChiefArchitectHandler:
         assert not result.ok
         assert result.error_kind == "PlanFailed"
         assert result.retryable
+
+    def test_missing_planner_result_is_retryable(self) -> None:
+        aga = FakeAgamemnon()
+        handler = ChiefArchitectHandler(
+            planner_factory=lambda issues: FakePlanner({issues[0]: FakePlanResult()})
+        )
+        with mock.patch(
+            "hephaestus.automation.github_api.issues.gh_issue_json",
+            return_value={"title": "Epic", "body": EPIC_BODY},
+        ):
+            result = handler.handle(_ctx({"epic": {"repo": "o/r", "issue": 5}}, aga))
+        assert not result.ok
+        assert result.error_kind == "PlanFailed"
+        assert result.retryable
+        assert "12" in result.error_message
+        assert aga.briefs == []

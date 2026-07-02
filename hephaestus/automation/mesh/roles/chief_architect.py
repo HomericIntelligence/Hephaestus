@@ -97,8 +97,17 @@ class ChiefArchitectHandler:
             def factory(issues: list[int]) -> Any:
                 return Planner(PlannerOptions(issues=issues, issues_explicit=True, parallel=1))
 
-        planner = factory([child.number for child in children])
+        requested_issues = [child.number for child in children]
+        planner = factory(requested_issues)
         plan_results = planner.run()
+        missing = sorted(set(requested_issues) - set(plan_results))
+        if missing:
+            return RoleResult(
+                ok=False,
+                error_kind="PlanFailed",
+                error_message=f"planning missing results for issues: {missing}",
+                retryable=True,
+            )
         failed = [n for n, r in plan_results.items() if not r.success]
         if failed:
             return RoleResult(

@@ -9,12 +9,9 @@ vessels. Advise-before and learn-after run inside the implementer
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from hephaestus.automation.mesh.worker import RoleResult, TaskContext
-
-logger = logging.getLogger(__name__)
 
 
 class TaskAgentHandler:
@@ -24,12 +21,10 @@ class TaskAgentHandler:
         self,
         implementer_factory: Any | None = None,
         ci_driver_factory: Any | None = None,
-        pr_state: Any | None = None,
     ) -> None:
         """Factories override IssueImplementer/CIDriver construction in tests."""
         self._implementer_factory = implementer_factory
         self._ci_driver_factory = ci_driver_factory
-        self._pr_state = pr_state
 
     def handle(self, ctx: TaskContext) -> RoleResult:
         """Implement ``payload['issue']`` and report the PR."""
@@ -95,62 +90,91 @@ class TaskAgentHandler:
         if getattr(result, "pr_number", None):
             pr = {"number": result.pr_number}
 
-        # Drive-green + merge phase: sequential children branch off main, so
-        # the task is only complete once its PR is MERGED (ADR-013 §10 "Done"
-        # row). CIDriver polls checks, fixes failures, and arms auto-merge.
         if pr:
-            ctx.progress(
-                f"Task-agent driving PR #{pr['number']} to green CI and merge "
-                f"(task {ctx.task_id})."
-            )
-            driver_factory = self._ci_driver_factory
-            if driver_factory is None:
-                from hephaestus.automation.ci_driver import CIDriver
-                from hephaestus.automation.models import CIDriverOptions
-
-                def driver_factory(issue_number: int) -> Any:
-                    return CIDriver(
-                        CIDriverOptions(
-                            issues=[issue_number],
-                            max_workers=1,
-                            enable_ui=False,
-                            include_bot_prs=False,
-                        )
-                    )
-
-            driver_factory(issue).run()
-            state = self._merged_state(pr["number"])
-            if state != "MERGED":
-                return RoleResult(
-                    ok=False,
-                    error_kind="PRNotMerged",
-                    error_message=(
-                        f"PR #{pr['number']} for issue #{issue} is {state or 'unknown'} "
-                        "after the drive-green phase"
-                    ),
-                    retryable=True,
-                    pr=pr,
-                )
-            pr["merged"] = True
+            drive_failure = self._drive_pr_to_merge_ready(issue, pr, ctx)
+            if drive_failure is not None:
+                return drive_failure
 
         return RoleResult(
             ok=True,
             summary=f"issue #{issue} implemented"
-            + (f", PR #{pr['number']} merged" if pr else ""),
+            + (f", PR #{pr['number']} merge-ready" if pr else ""),
             pr=pr,
         )
 
-    def _merged_state(self, pr_number: int) -> str:
-        """Live-state check: the PR's actual GitHub state (never trust logs)."""
-        if self._pr_state is not None:
-            return str(self._pr_state(pr_number))
-        import json
+    def _drive_pr_to_merge_ready(
+        self,
+        issue: int,
+        pr: dict[str, Any],
+        ctx: TaskContext,
+    ) -> RoleResult | None:
+        """Run CIDriver and mark the PR as ready for mesh handoff."""
+        # CIDriver owns the distinction between fixable failures and successful
+        # waiting states (armed/pending review/BLOCKED on branch protection).
+        # Do not require GitHub state MERGED here; that turns normal armed
+        # handoffs into retryable mesh redeliveries.
+        ctx.progress(
+            f"Task-agent driving PR #{pr['number']} to green CI and merge-ready "
+            f"(task {ctx.task_id})."
+        )
+        driver_factory = self._ci_driver_factory
+        if driver_factory is None:
+            from hephaestus.automation.ci_driver import CIDriver
+            from hephaestus.automation.models import CIDriverOptions
 
-        from hephaestus.github.client import gh_call
+            def driver_factory(issue_number: int) -> Any:
+                return CIDriver(
+                    CIDriverOptions(
+                        issues=[issue_number],
+                        max_workers=1,
+                        enable_ui=False,
+                        include_bot_prs=False,
+                    )
+                )
 
-        try:
-            result = gh_call(["pr", "view", str(pr_number), "--json", "state"])
-            return str(json.loads(result.stdout).get("state", ""))
-        except Exception as exc:
-            logger.warning("PR state check failed for #%s: %s", pr_number, exc)
-            return ""
+        driver = driver_factory(issue)
+        drive_results = driver.run()
+        drive_result = drive_results.get(issue)
+        if drive_result is None:
+            return RoleResult(
+                ok=False,
+                error_kind="NoCIDriveResult",
+                error_message=(
+                    f"CI driver returned no result for issue #{issue} / PR #{pr['number']}"
+                ),
+                retryable=True,
+                pr=pr,
+            )
+        if not self._ci_drive_succeeded(issue, driver, drive_results):
+            return RoleResult(
+                ok=False,
+                error_kind="CIDriveFailed",
+                error_message=str(
+                    getattr(drive_result, "error", None)
+                    or f"CI driver left PR #{pr['number']} needing action"
+                ),
+                retryable=True,
+                pr=pr,
+            )
+        pr["merge_ready"] = True
+        return None
+
+    def _ci_drive_succeeded(
+        self,
+        issue: int,
+        driver: Any,
+        drive_results: dict[int, Any],
+    ) -> bool:
+        """Return whether CIDriver classified this issue as complete enough to hand off."""
+        from hephaestus.automation.ci_driver import _evaluate_run_result
+
+        open_prs_remaining = getattr(driver, "open_prs_remaining", []) or []
+        return (
+            _evaluate_run_result(
+                drive_results,
+                open_prs_remaining,
+                issues=[issue],
+                as_json=False,
+            )
+            == 0
+        )

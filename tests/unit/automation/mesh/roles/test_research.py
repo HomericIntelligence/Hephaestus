@@ -133,6 +133,31 @@ class TestResearchHandler:
         # Transcript flowed into the brief prompt.
         assert any("small" in p for p in invocations if "TRANSCRIPT" in p)
 
+    def test_payload_intake_id_cannot_escape_mesh_work_dir(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        registered: list[Path] = []
+
+        def register(path: Path, repo: str) -> dict[str, Any]:
+            registered.append(path)
+            return {"epic": 77, "key": "o-r-77"}
+
+        handler = ResearchHandler(
+            invoke=lambda p, c: '{"questions": []}' if "clarifying" in p else BRIEF_WITH_YAML,
+            register_epic=register,
+        )
+        ctx, _ = _ctx({"idea": "build the slice", "intake_id": "../../../../evil", "issue": 5})
+
+        result = handler.handle(ctx)
+
+        assert result.ok
+        workflow_path = registered[0]
+        mesh_dir = (tmp_path / "build/.mesh").resolve()
+        assert workflow_path.resolve().is_relative_to(mesh_dir)
+        assert workflow_path.name == "intake-evil.workflow.yaml"
+        assert not (tmp_path / "evil.workflow.yaml").exists()
+
     def test_brief_without_yaml_is_retryable(self, tmp_path: Path, monkeypatch: Any) -> None:
         monkeypatch.chdir(tmp_path)
         handler = ResearchHandler(

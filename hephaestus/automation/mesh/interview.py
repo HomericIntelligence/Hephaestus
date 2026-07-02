@@ -125,7 +125,13 @@ class Interviewer:
                 )
                 return InterviewAnswer(q_id=q_id, answer=answer, channel="console")
             except asyncio.TimeoutError:
-                pass
+                # Console timed out; continue into phase 2 so GitHub polling can still
+                # capture a late console answer or a comment reply.
+                logger.debug(
+                    "Console answer timed out after %.0fs for %s; entering phase-2 GitHub fallback",
+                    self._console_timeout,
+                    q_id,
+                )
 
             # Phase 2: GitHub fallback (console can still win mid-poll).
             if self._intake_issue is not None:

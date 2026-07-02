@@ -14,9 +14,12 @@ the remainder as sub-tasks.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -131,7 +134,7 @@ class RoleHandler(Protocol):
 
     def handle(self, ctx: TaskContext) -> RoleResult:
         """Run the role's work for *ctx* (called in a worker thread)."""
-        ...  # pragma: no cover
+        raise NotImplementedError  # pragma: no cover
 
 
 class MeshWorker:
@@ -149,7 +152,10 @@ class MeshWorker:
         self.config = config
         self.handler = handler
         self.publisher = publisher or MeshPublisher(config.nats_url)
-        self.agamemnon = agamemnon or AgamemnonClient.from_env()
+        self.agamemnon = agamemnon or AgamemnonClient(
+            config.agamemnon_url,
+            os.environ.get("AGAMEMNON_API_KEY"),
+        )
 
     async def run_forever(self, stop: asyncio.Event | None = None) -> None:
         """Consume the queue until *stop* is set (or forever)."""
@@ -215,9 +221,10 @@ class MeshWorker:
         await self._publish_event(ctx, "started", {})
         heartbeat = asyncio.create_task(self._heartbeat_loop(msg))
         try:
-            result = await asyncio.get_running_loop().run_in_executor(
-                None, self.handler.handle, ctx
-            )
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mesh-role") as executor:
+                result = await asyncio.get_running_loop().run_in_executor(
+                    executor, self.handler.handle, ctx
+                )
         except Exception as exc:
             logger.exception("handler crashed for task %s", task_id)
             result = RoleResult(
@@ -228,6 +235,8 @@ class MeshWorker:
             )
         finally:
             heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
 
         if result.ok:
             extra: dict[str, Any] = {"summary": result.summary}
