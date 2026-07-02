@@ -81,7 +81,9 @@ def _default_invoke(prompt: str, ctx: TaskContext) -> str:
     stdout, _stderr = invoke_claude_with_session(
         repo=owner_repo,
         issue=ctx.payload.get("issue") or ctx.task_id,
-        agent="claude",
+        # session_name() accepts only the known stage tokens; research runs
+        # as a planning-class session.
+        agent="planner",
         prompt=prompt,
         model=os.environ.get("MESH_MODEL", "sonnet"),
         cwd=Path.cwd(),
