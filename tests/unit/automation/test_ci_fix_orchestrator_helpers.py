@@ -74,6 +74,8 @@ class TestForceEngagementPrompt:
         assert "- test-py310" in prompt
         assert "1-fix" in prompt
         assert "BLOCKED:" in prompt
+        assert prompt.count("Every commit MUST be cryptographically signed and DCO-signed") == 1
+        assert "DCO signed off 4." not in prompt
 
     def test_dirty_changes_block_rendered(
         self, orchestrator: CIFixOrchestrator, tmp_path: Path
@@ -203,6 +205,7 @@ class TestPushCiFix:
                 "hephaestus.automation.ci_fix_orchestrator.commit_if_changes",
                 return_value=True,
             ) as commit,
+            patch("hephaestus.automation.ci_fix_orchestrator.ensure_branch_commit_metadata"),
             patch(
                 "hephaestus.automation.ci_fix_orchestrator."
                 "push_current_branch_with_lease_on_divergence"
@@ -250,6 +253,7 @@ class TestPushCiFix:
                 "hephaestus.automation.ci_fix_orchestrator.commit_if_changes",
                 return_value=True,
             ) as commit,
+            patch("hephaestus.automation.ci_fix_orchestrator.ensure_branch_commit_metadata"),
             patch(
                 "hephaestus.automation.ci_fix_orchestrator."
                 "push_current_branch_with_lease_on_divergence"

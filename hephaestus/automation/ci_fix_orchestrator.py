@@ -207,7 +207,6 @@ class CIFixOrchestrator:
             f"`pre-commit run --all-files` locally to verify before committing. "
             f"This MUST include any markdown/lint hooks — every file you add or "
             f"edit has to pass the repo's own linters, with no rule disabled.\n"
-            f"4. **Every commit MUST be cryptographically signed and DCO signed off "
             f"4. **Every commit MUST be cryptographically signed and DCO-signed "
             f"(`git commit -S -s`).** NEVER use `--no-verify`. The repository's "
             f"CI gate rejects unsigned commits, commits without Signed-off-by "
