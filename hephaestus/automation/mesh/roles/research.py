@@ -1,0 +1,209 @@
+"""Research chief-architect role: research an idea, interview the user, hand off.
+
+The full intake segment of the pipeline (ADR-013 §5/§6, Odysseus
+architecture.md steps 2–4): create the intake issue, generate clarifying
+questions with Claude, run them through the interview relay (console live,
+GitHub fallback, assumed on double timeout), research the idea into a brief,
+describe the work as a Telemachy workflow, and register it as a GitHub epic
+via ``telemachy register-epic`` (which publishes the epic trigger).
+
+LLM work runs HERE, in a research-pool myrmidon — never inside Nestor.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import subprocess
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, cast
+
+from hephaestus.automation.mesh.worker import RoleResult, TaskContext
+from hephaestus.io.utils import write_secure
+
+logger = logging.getLogger(__name__)
+
+INTAKE_MARKER = "<!-- hi:intake {intake_id} -->"
+INTAKE_LABEL = "intake"
+
+QUESTIONS_PROMPT = """You are the research intake interviewer for this repository.
+A user submitted this high-level task:
+
+IDEA: {idea}
+CONTEXT: {context}
+
+List the clarifying questions whose answers would most change how this work
+is scoped (target 2-3, fewer if the idea is already specific).
+Return ONLY a JSON object: {{"questions": ["...", "..."]}}"""
+
+BRIEF_PROMPT = """You are a research myrmidon producing a researched brief.
+
+IDEA: {idea}
+CONTEXT: {context}
+INTERVIEW TRANSCRIPT:
+{transcript}
+
+Research this repository (read code/docs as needed) and write:
+1. A researched brief: feasibility, prior art in this repo, proposed scope,
+   and 1-2 ideated extensions worth filing as follow-ups.
+2. A fenced ```yaml block: a Telemachy workflow describing 2-3 concrete
+   implementation tasks. Each task needs: subject, description, assign_to
+   (use "pipeline.task-agent"), and blocked_by (list of subjects, [] if none).
+   Top-level keys: name, description, agents (map each assign_to name to
+   {{"type": "claude"}}), tasks."""
+
+
+def _default_invoke(prompt: str, ctx: TaskContext) -> str:
+    """Run *prompt* through Claude with a per-intake resumable session."""
+    from hephaestus.automation.claude_invoke import invoke_claude_with_session
+    from hephaestus.automation.github_api import get_repo_info
+
+    owner_repo = "/".join(get_repo_info())
+    stdout, _stderr = invoke_claude_with_session(
+        repo=owner_repo,
+        issue=ctx.payload.get("issue") or ctx.task_id,
+        agent="claude",
+        prompt=prompt,
+        model=os.environ.get("MESH_MODEL", "sonnet"),
+        cwd=Path.cwd(),
+        timeout=int(os.environ.get("MESH_AGENT_TIMEOUT", "1800")),
+        allowed_tools="Read,Glob,Grep",
+        output_format="text",
+    )
+    return stdout
+
+
+def _default_register_epic(workflow_path: Path, repo: str) -> dict[str, Any]:
+    """Invoke ``telemachy register-epic`` and parse its JSON stdout."""
+    cmd = [os.environ.get("TELEMACHY_BIN", "telemachy"), "register-epic", str(workflow_path)]
+    if repo:
+        cmd += ["--repo", repo]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
+    return cast(dict[str, Any], json.loads(result.stdout.strip().splitlines()[-1]))
+
+
+def parse_questions(text: str) -> list[str]:
+    """Extract the ``questions`` list from the model's JSON reply (max 3)."""
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match is None:
+        return []
+    try:
+        data = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return []
+    questions = data.get("questions", [])
+    return [str(q) for q in questions if str(q).strip()][:3]
+
+
+def extract_workflow_yaml(text: str) -> str | None:
+    """Extract the first fenced ```yaml block from the brief."""
+    match = re.search(r"```ya?ml\n(.*?)```", text, re.DOTALL)
+    return match.group(1) if match else None
+
+
+class ResearchHandler:
+    """Runs intake → interview → research → epic registration."""
+
+    def __init__(
+        self,
+        invoke: Callable[[str, TaskContext], str] | None = None,
+        register_epic: Callable[[Path, str], dict[str, Any]] | None = None,
+    ) -> None:
+        """LLM invocation and epic registration are injectable for tests."""
+        self._invoke = invoke or _default_invoke
+        self._register_epic = register_epic or _default_register_epic
+
+    def handle(self, ctx: TaskContext) -> RoleResult:
+        """Work one research dispatch to a registered epic."""
+        idea = str(ctx.payload.get("idea") or "").strip()
+        if not idea:
+            return RoleResult(
+                ok=False,
+                error_kind="BadDispatch",
+                error_message="research payload missing 'idea'",
+                retryable=False,
+            )
+        context = str(ctx.payload.get("context") or "")
+        intake_id = str(ctx.payload.get("intake_id") or ctx.task_id)
+        repo = str(ctx.payload.get("repo") or "")
+
+        if ctx.payload.get("issue") is None:
+            ctx.payload["issue"] = self._ensure_intake_issue(ctx, intake_id, idea, context)
+
+        # Interview (each Q&A is mirrored to the intake issue for audit).
+        transcript_lines: list[str] = []
+        for question in parse_questions(
+            self._invoke(QUESTIONS_PROMPT.format(idea=idea, context=context), ctx)
+        ):
+            answer = ctx.ask(question)
+            answered = (
+                answer.answer if not answer.assumed else "(no answer — proceeding on assumptions)"
+            )
+            transcript_lines.append(f"Q: {question}\nA: {answered}")
+            ctx.progress(f"**Q:** {question}\n**A:** {answered} _(via {answer.channel})_")
+        transcript = "\n\n".join(transcript_lines) or "(no interview questions)"
+
+        # Research → brief + workflow YAML.
+        brief_text = self._invoke(
+            BRIEF_PROMPT.format(idea=idea, context=context, transcript=transcript), ctx
+        )
+        ctx.progress(f"## Researched brief\n\n{brief_text}")
+        workflow_yaml = extract_workflow_yaml(brief_text)
+        if workflow_yaml is None:
+            return RoleResult(
+                ok=False,
+                error_kind="NoWorkflow",
+                error_message="brief contained no ```yaml workflow block",
+                retryable=True,
+            )
+
+        # Describe via Telemachy → GitHub epic → hi.pipeline.epic.*.registered.
+        workflow_path = Path("build/.mesh") / f"intake-{intake_id}.workflow.yaml"
+        workflow_path.parent.mkdir(parents=True, exist_ok=True)
+        write_secure(workflow_path, workflow_yaml)
+        registered = self._register_epic(workflow_path, repo)
+        epic_ref = registered.get("epic", "?")
+        ctx.progress(f"Registered epic #{epic_ref} (key `{registered.get('key', '?')}`).")
+        return RoleResult(
+            ok=True,
+            summary=f"intake {intake_id}: epic #{epic_ref} registered",
+        )
+
+    @staticmethod
+    def _ensure_intake_issue(ctx: TaskContext, intake_id: str, idea: str, context: str) -> int:
+        """Create (or on redelivery, find) the intake issue for *intake_id*."""
+        from hephaestus.automation.github_api.issues import gh_issue_create
+        from hephaestus.github.client import gh_call
+
+        marker = INTAKE_MARKER.format(intake_id=intake_id)
+        if ctx.is_redelivery:
+            try:
+                result = gh_call(
+                    [
+                        "issue",
+                        "list",
+                        "--label",
+                        INTAKE_LABEL,
+                        "--state",
+                        "open",
+                        "--search",
+                        f'"{marker}" in:body',
+                        "--json",
+                        "number",
+                        "--limit",
+                        "5",
+                    ]
+                )
+                found = json.loads(result.stdout)
+                if found:
+                    return int(found[0]["number"])
+            except Exception as exc:
+                logger.warning("intake issue search failed: %s", exc)
+        body = (
+            f"{marker}\n## Intake\n\n**Idea:** {idea}\n\n**Context:** {context or '(none)'}\n\n"
+            "Interview transcript and researched brief follow as comments."
+        )
+        return gh_issue_create(f"[intake] {idea[:64]}", body, labels=[INTAKE_LABEL])

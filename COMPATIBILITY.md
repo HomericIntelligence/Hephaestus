@@ -109,6 +109,7 @@ bypass a misfiring hook locally use
 | CLI | Tier | Notes |
 |-----|------|-------|
 | `hephaestus-automation-loop` | Provisional | Dispatches to `hephaestus.automation` (provisional subpackage) |
+| `hephaestus-mesh-worker` | Provisional | HMAS mesh worker serving one role-addressed NATS queue (Odysseus ADR-013) |
 | `hephaestus-plan-issues` | Provisional | Issue-planning stage of the automation pipeline |
 | `hephaestus-implement-issues` | Provisional | Issue-implementation stage |
 | `hephaestus-review-prs` | Provisional | PR-review stage |

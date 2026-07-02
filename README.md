@@ -330,6 +330,7 @@ with `--help` to see full usage.
 | Command | Description |
 |---|---|
 | `hephaestus-automation-loop` | Multi-repo 3-stage automation pipeline using Claude Code or Codex (plan → implement → drive-green; plan-review and PR-review/address-review run in-loop within plan/implement) |
+| `hephaestus-mesh-worker` | HMAS mesh worker: serve one role-addressed (domain, role) NATS work queue (Odysseus ADR-013) |
 | `hephaestus-plan-issues` | Bulk issue planning using Claude Code or Codex |
 | `hephaestus-implement-issues` | Bulk issue implementation using Claude Code or Codex in parallel worktrees |
 | `hephaestus-review-prs` | Read-only PR review automation using Claude Code or Codex in parallel worktrees |
