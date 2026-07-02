@@ -44,7 +44,7 @@ def _detect_cwd_repo() -> tuple[str | None, str | None]:
             capture_output=True,
             text=True,
             check=True,
-            timeout=5,
+            timeout=METADATA_TIMEOUT,
         ).stdout.strip()
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         return (None, None)
@@ -57,7 +57,7 @@ def _detect_cwd_repo() -> tuple[str | None, str | None]:
             capture_output=True,
             text=True,
             check=True,
-            timeout=5,
+            timeout=METADATA_TIMEOUT,
         ).stdout.strip()
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         url = ""
@@ -99,6 +99,7 @@ def _gh_list_repos(org: str) -> list[str]:
                 "--limit",
                 "200",
             ],
+            timeout=NETWORK_TIMEOUT,
         )
     except subprocess.TimeoutExpired as exc:
         raise SystemExit(f"gh repo list {org} timed out after {exc.timeout}s") from exc
@@ -151,6 +152,7 @@ def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
                 "--json",
                 "number,labels,title",
             ],
+            timeout=NETWORK_TIMEOUT,
         )
         entries = json.loads(out.stdout or "[]")
     except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
@@ -214,6 +216,7 @@ def _count_failing_prs(org: str, repo: str) -> int:
                 "--json",
                 "number,isDraft,statusCheckRollup,mergeStateStatus",
             ],
+            timeout=NETWORK_TIMEOUT,
         )
     except (subprocess.SubprocessError, RuntimeError, OSError):
         return 0

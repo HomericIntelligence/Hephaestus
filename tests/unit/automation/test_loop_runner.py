@@ -1587,7 +1587,7 @@ class TestSubprocessTimeouts:
         with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh_call:
             mock_gh_call.return_value = _completed(stdout="[]")
             loop_runner._gh_list_repos("MyOrg")
-        assert mock_gh_call.call_args.kwargs.get("timeout") is None
+        assert mock_gh_call.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
 
     def test_gh_issue_numbers_passes_timeout(self) -> None:
         """``gh issue list`` is routed through gh_call's bounded adapter."""
@@ -1596,7 +1596,7 @@ class TestSubprocessTimeouts:
                 stdout='[{"number": 1, "labels": [], "title": "a"}]'
             )
             loop_runner._list_open_issue_numbers("Org", "Repo")
-        assert mock_gh_call.call_args.kwargs.get("timeout") is None
+        assert mock_gh_call.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
 
     def test_preflight_token_scopes_passes_timeout(self) -> None:
         """The token preflight ``gh api`` call is routed through gh_call."""
