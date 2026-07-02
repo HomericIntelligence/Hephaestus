@@ -789,7 +789,12 @@ def _build_phase_argv(
 
     worker_arg = flags.get("worker_arg")
     if isinstance(worker_arg, str):
-        argv.extend([worker_arg, str(cfg.max_workers)])
+        # _process_one_issue already provides the outer issue-level
+        # concurrency. When a child phase receives exactly one issue, letting it
+        # create its own worker pool only multiplies git/GitHub contention
+        # against the same repo and can race shared .git metadata.
+        child_workers = 1 if len(open_issues) == 1 else cfg.max_workers
+        argv.extend([worker_arg, str(child_workers)])
 
     argv.extend(
         [

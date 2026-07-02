@@ -887,6 +887,47 @@ def test_build_phase_argv_implement_has_single_max_workers() -> None:
     assert argv.count("--max-workers") == 1
 
 
+@pytest.mark.parametrize(
+    ("phase", "worker_arg"),
+    [
+        ("plan", "--parallel"),
+        ("implement", "--max-workers"),
+        ("drive-green", "--max-workers"),
+    ],
+)
+def test_build_phase_argv_issue_scoped_phases_use_single_child_worker(
+    phase: str, worker_arg: str
+) -> None:
+    """Issue-major outer workers should not fan out again inside one-issue phases."""
+    cfg = LoopConfig(max_workers=8)
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/phase", [])):
+        argv = loop_runner._build_phase_argv(phase, cfg, open_issues=[1577])
+
+    assert argv is not None
+    assert argv[argv.index(worker_arg) + 1] == "1"
+
+
+@pytest.mark.parametrize("open_issues", ([1, 2], []))
+@pytest.mark.parametrize(
+    ("phase", "worker_arg"),
+    [
+        ("plan", "--parallel"),
+        ("implement", "--max-workers"),
+        ("drive-green", "--max-workers"),
+    ],
+)
+def test_build_phase_argv_multi_issue_or_unscoped_phases_keep_configured_workers(
+    phase: str, worker_arg: str, open_issues: list[int]
+) -> None:
+    """Only exactly-one-issue child invocations are narrowed to one worker."""
+    cfg = LoopConfig(max_workers=8)
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/phase", [])):
+        argv = loop_runner._build_phase_argv(phase, cfg, open_issues=open_issues)
+
+    assert argv is not None
+    assert argv[argv.index(worker_arg) + 1] == "8"
+
+
 def test_build_phase_argv_plan_omits_no_ui() -> None:
     """Regression: plan does NOT receive --no-ui (per _PHASE_FLAGS)."""
     cfg = LoopConfig()

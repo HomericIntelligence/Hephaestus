@@ -51,3 +51,17 @@ def test_load_all_loads_valid_state_and_skips_corrupt_file(tmp_path: Path) -> No
 
     assert manager.states[123].phase is ImplementationPhase.TESTING
     assert 456 not in manager.states
+
+
+def test_load_only_hydrates_requested_issue_states(tmp_path: Path) -> None:
+    """Issue-scoped runs should not load every stale issue state file."""
+    current = ImplementationState(issue_number=123, phase=ImplementationPhase.TESTING)
+    stale = ImplementationState(issue_number=456, phase=ImplementationPhase.FOLLOW_UP_ISSUES)
+    (tmp_path / "issue-123.json").write_text(current.model_dump_json())
+    (tmp_path / "issue-456.json").write_text(stale.model_dump_json())
+
+    manager = ImplementationStateManager(tmp_path)
+    manager.load_only([123])
+
+    assert set(manager.states) == {123}
+    assert manager.states[123].phase is ImplementationPhase.TESTING
