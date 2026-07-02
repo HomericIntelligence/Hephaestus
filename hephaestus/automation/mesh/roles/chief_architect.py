@@ -58,6 +58,15 @@ class ChiefArchitectHandler:
         epic = ctx.payload.get("epic") or {}
         epic_issue = epic.get("issue")
         if not epic_issue:
+            # An ingested brief's own L0 root is re-dispatched to this queue
+            # (Agamemnon enqueues every delegated node to its layer's role
+            # queue). Without an epic payload there is nothing to decompose —
+            # it is a coordination node: acknowledge it so Agamemnon's
+            # delegate_unblocked_children walk can delegate L1 (ADR-013 §10).
+            if ctx.payload.get("brief_id"):
+                from hephaestus.automation.mesh.roles.coordination import CoordinationHandler
+
+                return CoordinationHandler().handle(ctx)
             return RoleResult(
                 ok=False,
                 error_kind="BadDispatch",
