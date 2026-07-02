@@ -82,6 +82,8 @@ schema = [
     "jsonschema>=4.0,<5",
 ]
 nats = [
+    # hephaestus.nats is stdlib-dataclass based; keep pydantic owned by [automation].
+    # Guarded by tests/unit/validation/test_base_dep_surface.py.
     "nats-py>=2.6,<3",
 ]
 # Product layer (hephaestus.automation). See docs/adr/0001-automation-library-boundary.md.
