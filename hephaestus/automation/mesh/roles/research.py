@@ -49,11 +49,27 @@ INTERVIEW TRANSCRIPT:
 Research this repository (read code/docs as needed) and write:
 1. A researched brief: feasibility, prior art in this repo, proposed scope,
    and 1-2 ideated extensions worth filing as follow-ups.
-2. A fenced ```yaml block: a Telemachy workflow describing 2-3 concrete
-   implementation tasks. Each task needs: subject, description, assign_to
-   (use "pipeline.task-agent"), and blocked_by (list of subjects, [] if none).
-   Top-level keys: name, description, agents (map each assign_to name to
-   {{"type": "claude"}}), tasks."""
+2. A fenced ```yaml block containing a VALID telemachy/v1 workflow that
+   describes 2-3 concrete implementation tasks, exactly this shape:
+
+   apiVersion: telemachy/v1
+   metadata:
+     name: <kebab-case-name>
+     description: <one line>
+   agents:
+     - name: task-agent
+       program: claude-code
+   teams:
+     - name: implementation
+       agents: [task-agent]
+       tasks:
+         - subject: <short imperative title>
+           description: <what to implement and how to verify>
+           assign_to: task-agent
+           blocked_by: []   # list prior task subjects when ordering matters
+
+   Task subjects become GitHub issue titles; blocked_by entries must
+   reference other task subjects in the same team."""
 
 
 def _default_invoke(prompt: str, ctx: TaskContext) -> str:
