@@ -344,8 +344,13 @@ class IssueImplementer:
         if self.options.analyze_only:
             return self._analyze_dependencies()
 
-        # Always load state to detect failed learns
-        self._load_state()
+        # Keep issue-scoped runs from hydrating stale state for unrelated
+        # historical issues. Epic/global runs still load all state so the
+        # failed-learn sweep can see their full dependency context.
+        if self.options.issues:
+            self.state_mgr.load_only(self.options.issues)
+        else:
+            self._load_state()
 
         # Re-run failed learns before normal processing
         if self.options.enable_learn:

@@ -1,6 +1,8 @@
 """Tests for worktree manager."""
 
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, Mock, patch
@@ -61,6 +63,28 @@ class TestWorktreeManager:
         call_args = worktree_mocks.run.call_args[0][0]
         assert call_args[0:2] == ["git", "worktree"]
         assert "123-feature" in call_args
+
+    def test_create_worktree_serializes_git_metadata_mutation(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """Independent subprocesses must not race on shared git worktree metadata."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        worktree_mocks.run.return_value.stdout = "origin/main"
+        manager = WorktreeManager()
+        lock_paths: list[Path] = []
+
+        @contextmanager
+        def fake_file_lock(path: Path) -> Iterator[None]:
+            lock_paths.append(path)
+            yield
+
+        with (
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch("hephaestus.automation.worktree_manager.file_lock", side_effect=fake_file_lock),
+        ):
+            manager.create_worktree(123, "123-feature")
+
+        assert lock_paths == [manager.base_dir / ".git-metadata.lock"]
 
     def test_create_worktree_default_branch_name(self, worktree_mocks: Any, tmp_path: Any) -> None:
         """Test worktree creation with default branch name."""

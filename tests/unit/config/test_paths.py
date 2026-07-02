@@ -88,6 +88,29 @@ def test_prefer_cwd_parent_uses_current_checkout_parent(
     assert caplog.records == []
 
 
+def test_prefer_cwd_parent_unwraps_automation_issue_worktree(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """Loop defaults must not treat build/.worktrees as the projects root."""
+    checkout = tmp_path / "projects" / "ProjectHephaestus"
+    issue_worktree = checkout / "build" / ".worktrees" / "issue-1442"
+    issue_worktree.mkdir(parents=True)
+    monkeypatch.delenv("PROJECTS_ROOT", raising=False)
+    result_mock = MagicMock(stdout=f"{issue_worktree}\n")
+
+    with (
+        patch("hephaestus.config.paths.subprocess.run", return_value=result_mock),
+        caplog.at_level(logging.WARNING, logger="hephaestus.config.paths"),
+    ):
+        result = resolve_projects_dir(prefer_cwd_parent=True)
+
+    assert result == checkout.parent
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.WARNING
+    assert "automation issue worktree" in caplog.records[0].getMessage()
+    assert str(issue_worktree) in caplog.records[0].getMessage()
+
+
 def test_prefer_cwd_parent_falls_back_when_git_root_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

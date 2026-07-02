@@ -29,6 +29,8 @@ import shutil
 import threading
 from pathlib import Path
 
+from hephaestus.utils.file_lock import file_lock
+
 from .git_utils import get_repo_root, is_clean_working_tree, rebase_worktree_onto, run
 
 logger = logging.getLogger(__name__)
@@ -103,6 +105,10 @@ class WorktreeManager:
 
         logger.debug("Initialized WorktreeManager at %s", self.base_dir)
 
+    def _git_metadata_lock_path(self) -> Path:
+        """Return the cross-process lock guarding shared git worktree metadata."""
+        return self.base_dir / ".git-metadata.lock"
+
     @property
     def base_branch(self) -> str:
         """The base branch, auto-detected on first access."""
@@ -133,10 +139,11 @@ class WorktreeManager:
         if self._base_branch_override_source == "loop_trunk":
             self._base_branch_override = None
             self._base_branch_override_source = None
-        with contextlib.suppress(Exception):
-            run(["git", "fetch", "origin"], cwd=self.repo_root, capture_output=True)
-        self._base_branch_resolved = None  # force re-detect on next access
-        return self.base_branch
+        with file_lock(self._git_metadata_lock_path()):
+            with contextlib.suppress(Exception):
+                run(["git", "fetch", "origin"], cwd=self.repo_root, capture_output=True)
+            self._base_branch_resolved = None  # force re-detect on next access
+            return self.base_branch
 
     def _detect_base_branch(self) -> str:
         try:
@@ -254,11 +261,12 @@ class WorktreeManager:
                     logger.debug("git worktree prune failed: %s", e)
 
             try:
-                self._add_worktree_for_branch(
-                    worktree_path,
-                    branch_name,
-                    refresh_base=refresh_base,
-                )
+                with file_lock(self._git_metadata_lock_path()):
+                    self._add_worktree_for_branch(
+                        worktree_path,
+                        branch_name,
+                        refresh_base=refresh_base,
+                    )
                 self.worktrees[issue_number] = worktree_path
                 logger.info("Created worktree for issue #%s at %s", issue_number, worktree_path)
                 return worktree_path
@@ -594,7 +602,8 @@ class WorktreeManager:
                 if force:
                     cmd.append("--force")
 
-                run(cmd, cwd=self.repo_root)
+                with file_lock(self._git_metadata_lock_path()):
+                    run(cmd, cwd=self.repo_root)
 
                 del self.worktrees[issue_number]
                 logger.info("Removed worktree for issue #%s", issue_number)

@@ -102,3 +102,20 @@ class ImplementationStateManager:
             with self._lock:
                 self.states[state.issue_number] = state
             logger.info("Loaded state for issue #%s", state.issue_number)
+
+    def load_only(self, issue_numbers: list[int]) -> None:
+        """Load only state files for the current run's issue scope."""
+        for issue_number in issue_numbers:
+            state = load_state_file(
+                self.state_dir,
+                "issue",
+                issue_number,
+                ImplementationState,
+                state_logger=logger,
+            )
+            if state is None:
+                continue
+
+            with self._lock:
+                self.states[state.issue_number] = state
+            logger.info("Loaded state for issue #%s", state.issue_number)
