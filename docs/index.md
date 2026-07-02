@@ -35,7 +35,7 @@ Auto-generated API documentation is published to GitHub Pages on every release:
 - **Browse online:** <https://homericintelligence.github.io/ProjectHephaestus/>
 
 The published reference covers full function signatures, docstrings, and type
-annotations for all public modules and 51 CLI entry points, regenerated from
+annotations for all public modules and 52 CLI entry points, regenerated from
 the released package via [pdoc](https://pdoc.dev/).
 
 To build the same reference locally (output to the git-ignored `docs/api/`):
@@ -43,6 +43,9 @@ To build the same reference locally (output to the git-ignored `docs/api/`):
 ```bash
 just docs        # outputs to docs/api/
 ```
+
+The generated `docs/api/` directory is git-ignored; run the command locally to browse
+the generated reference.
 
 ## Setup
 

@@ -197,6 +197,17 @@ repos:
         pass_filenames: false
         files: ^(hephaestus/(cli|config|system|utils|version)/.*\.py|COMPATIBILITY\.md)$
 
+  # Tech-debt marker tracking enforcement (#1738)
+  - repo: local
+    hooks:
+      - id: check-no-unlinked-todo
+        name: Every TODO/FIXME/HACK must reference a tracking issue (#N)
+        description: Fails if Python debt markers omit the documented # TODO(#N): form
+        entry: pixi run --environment default hephaestus-check-unlinked-todo
+        language: system
+        pass_filenames: false
+        files: ^(hephaestus|scripts)/.*\.py$|^docs/TECH_DEBT\.md$
+
   # Complexity check
   - repo: local
     hooks:
