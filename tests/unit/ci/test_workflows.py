@@ -301,11 +301,13 @@ class TestReleaseAttestations:
         """The PyPI publish step must opt into PEP 740 / Sigstore provenance.
 
         Parses the workflow and asserts the flag lives under the publish step's
-        ``with:`` block, not merely somewhere in the file text — a comment or
+        ``with:`` block, not merely somewhere in the file text. A comment or
         unrelated step containing the string would otherwise pass a substring
         check while leaving attestations disabled.
         """
-        assert self._publish_step()["with"]["generate_attestations"] is True
+        publish_with = self._publish_step()["with"]
+        assert publish_with["attestations"] is True
+        assert "generate_attestations" not in publish_with
 
     def test_id_token_write_permission_present(self) -> None:
         """Attestation generation requires the ``id-token: write`` permission."""
