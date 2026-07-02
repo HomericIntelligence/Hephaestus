@@ -123,6 +123,17 @@ repos:
         pass_filenames: false
         files: ^(README\.md|pyproject\.toml)$
 
+  # Claude settings permission path check
+  - repo: local
+    hooks:
+      - id: check-settings-permission-paths
+        name: Check Claude settings permission paths
+        description: Ensure .claude/settings.json permission paths are canonical POSIX paths
+        entry: pixi run --environment default python3 -m hephaestus.scripts_lib.check_settings_permission_paths
+        language: system
+        pass_filenames: false
+        files: ^\.claude/settings\.json$
+
   # Skill catalog sync check
   - repo: local
     hooks:
