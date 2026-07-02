@@ -26,7 +26,11 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Unit + integration suites run here; the pixi env is cached and dev-install
+    # already ran, so both finish well under this budget. 20 min (vs the prior
+    # 15) is free insurance so a first-run integration slowdown never aborts a
+    # publish (issue #1499).
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -47,8 +51,16 @@ jobs:
       - name: Editable install (scripts/ smoke tests spawn subprocesses that import hephaestus)
         run: pixi run dev-install
 
-      - name: Run tests
+      - name: Run unit tests
         run: pixi run pytest tests/unit
+
+      - name: Run integration tests
+        # Mirror the required PR gate (_required.yml integration-tests) so a
+        # workflow_dispatch release against an arbitrary commit gets the same
+        # sdist-contents / package-import guarantee a merged PR does (issue #1499).
+        # --override-ini clears the unit coverage addopts; --strict-markers is safe
+        # because the `integration` marker is registered in pyproject.toml.
+        run: pixi run pytest tests/integration --override-ini="addopts=" -v --strict-markers
 
   type-check:
     runs-on: ubuntu-24.04
