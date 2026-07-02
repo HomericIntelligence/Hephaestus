@@ -13,11 +13,11 @@ durable, reviewable fix is therefore a guard over the tracked settings file:
 any future ``//``- or ``\``-prefixed permission path lands where a reviewer
 and CI can catch it.
 
-This invariant is enforced at CI time via the unit test
+This invariant is enforced locally by the
+``check-settings-permission-paths`` pre-commit hook and in CI by
 ``tests/unit/scripts_lib/test_check_settings_permission_paths.py::TestMain::test_passes_on_real_tracked_settings``,
 which asserts that ``main()`` exits with status ``0`` against the tracked
-``.claude/settings.json``. This test-based enforcement is the deliberate protection
-mechanism in lieu of a pre-commit hook.
+``.claude/settings.json``.
 
 Usage:
     python3 -m hephaestus.scripts_lib.check_settings_permission_paths
