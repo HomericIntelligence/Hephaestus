@@ -37,7 +37,7 @@ class AgentInfo:
         name: Agent name from frontmatter.
         description: Agent description from frontmatter.
         tools: Comma-separated tools string from frontmatter.
-        model: Model assignment (e.g. ``"sonnet"``, ``"opus"``, ``"haiku"``).
+        model: Model assignment (e.g. ``"sonnet"``, ``"opus"``, ``"haiku"``, ``"fable"``).
         level: Inferred or explicit agent level (0 = orchestrator, 5 = junior).
         raw_frontmatter: The original frontmatter dict.
 
