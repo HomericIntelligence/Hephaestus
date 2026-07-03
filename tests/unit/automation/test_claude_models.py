@@ -62,6 +62,8 @@ class TestModuleStable:
 
     def test_reimport_idempotent(self) -> None:
         importlib.reload(claude_models)
+        # #1781 made Opus 4.8 the production default; this branch carries the
+        # matching test expectation so full-suite validation stays green.
         assert claude_models.OPUS == "claude-opus-4-8"
         assert claude_models.HAIKU == "claude-haiku-4-5"
         assert claude_models.SONNET == "claude-sonnet-4-6"
