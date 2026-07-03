@@ -135,6 +135,7 @@ class TestWorkflowInventoryLiveTree:
         assert hook is not None
         assert hook["entry"] == "pixi run --environment default hephaestus-check-workflow-inventory"
         assert hook["pass_filenames"] is False
+        assert hook["always_run"] is True
         assert (
             hook["files"]
             == r"^(\.pre-commit-config\.yaml|\.github/workflows/(README\.md|.*\.yml))$"

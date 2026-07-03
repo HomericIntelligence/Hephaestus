@@ -235,6 +235,7 @@ repos:
         entry: pixi run --environment default hephaestus-check-workflow-inventory
         language: system
         pass_filenames: false
+        always_run: true
         files: ^(\.pre-commit-config\.yaml|\.github/workflows/(README\.md|.*\.yml))$
 
   # Version single source of truth check
