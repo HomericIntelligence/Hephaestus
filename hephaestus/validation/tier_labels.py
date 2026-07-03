@@ -8,6 +8,8 @@ console script need no changes.
 import sys
 
 from hephaestus.validation.tiers.tier_labels import (
+    BAD_PATTERNS as BAD_PATTERNS,
+    CANONICAL_TIERS as CANONICAL_TIERS,
     TierLabelFinding as TierLabelFinding,
     check_tier_label_consistency as check_tier_label_consistency,
     find_violations as find_violations,
@@ -18,6 +20,8 @@ from hephaestus.validation.tiers.tier_labels import (
 )
 
 __all__ = [
+    "BAD_PATTERNS",
+    "CANONICAL_TIERS",
     "TierLabelFinding",
     "check_tier_label_consistency",
     "find_violations",

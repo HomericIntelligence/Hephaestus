@@ -8,6 +8,7 @@ console script need no changes.
 import sys
 
 from hephaestus.validation.tiers.cli_tier_docs import (
+    VALID_TIERS as VALID_TIERS,
     TierDocFinding as TierDocFinding,
     find_duplicate_tiers as find_duplicate_tiers,
     find_violations as find_violations,
@@ -19,6 +20,7 @@ from hephaestus.validation.tiers.cli_tier_docs import (
 )
 
 __all__ = [
+    "VALID_TIERS",
     "TierDocFinding",
     "find_duplicate_tiers",
     "find_violations",
