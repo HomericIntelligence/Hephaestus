@@ -101,7 +101,9 @@ class TestMeshConfig:
         cfg = MeshConfig.from_env({"MESH_DOMAIN": "pipeline", "MESH_ROLE": "task-agent"})
         assert cfg.heartbeat_seconds == 300
         assert cfg.ack_wait_seconds == 900
-        assert cfg.max_deliver == 3
+        # 10, not ADR-013's suggested 3: restarts + retryable NOGOs each burn
+        # a delivery; 3 exhausted live and stranded tasks (#1780).
+        assert cfg.max_deliver == 10
         assert cfg.max_ack_pending == 3
         assert cfg.overrun_seconds == 3600
         assert cfg.agent_id.startswith("pipeline-task-agent-")

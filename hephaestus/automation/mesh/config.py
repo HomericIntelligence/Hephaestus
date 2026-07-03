@@ -103,8 +103,14 @@ class MeshConfig:
     """Configuration for one mesh worker process.
 
     Defaults mirror ADR-013 §1/§4: 15-min AckWait, 5-min heartbeats,
-    MaxDeliver 3, MaxAckPending 3 (host heavy-agent budget), ~1 h overrun
+    MaxDeliver 10, MaxAckPending 3 (host heavy-agent budget), ~1 h overrun
     threshold.
+
+    MaxDeliver started at 3 (ADR-013's suggestion) but proved too fragile in
+    the live shakedown: a worker restart mid-claim and each retryable NOGO
+    outcome both consume a delivery, so real tasks exhausted the budget and
+    their dispatch messages vanished — leaving HmasTasks stuck Delegated /
+    InProgress with an empty queue and no operator signal (#1780).
     """
 
     domain: str
@@ -116,7 +122,7 @@ class MeshConfig:
     agamemnon_url: str = "http://localhost:8080"
     heartbeat_seconds: int = 300
     ack_wait_seconds: int = 900
-    max_deliver: int = 3
+    max_deliver: int = 10
     max_ack_pending: int = 3
     overrun_seconds: int = 3600
 
