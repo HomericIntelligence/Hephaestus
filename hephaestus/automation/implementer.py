@@ -29,6 +29,13 @@ top-level comment block for the full list).  These patch paths still target
   ImplementationSummaryPrinter direct import + ``as``   Used by the legacy ``_print_summary``
                                alias (mypy re-export)   dynamic delegate.
 
+All former per-method phase-runner shims (``_finalize_pr``, ``_run_advise``,
+``_collect_diff``, …) now resolve through ``__getattr__`` via
+``_PHASE_RUNNER_DYNAMIC_DELEGATES`` (see #1439); they are no longer class
+methods.  ``patch.object(impl, "_method")`` still intercepts them.  That
+frozenset is the single source of truth for the mechanical phase-runner
+delegates.
+
 Keep-in-sync command (run when adding a new patch surface here):
 
     grep -rn 'patch.*hephaestus\\.automation\\.implementer\\.' tests/ \\
@@ -157,6 +164,7 @@ class IssueImplementer:
 
     _PHASE_RUNNER_DYNAMIC_DELEGATES: ClassVar[frozenset[str]] = frozenset(
         {
+            # pre-existing mechanical delegates (#714)
             "_parse_follow_up_items",
             "_can_resume_state_session",
             "_run_follow_up_issues",
@@ -168,7 +176,7 @@ class IssueImplementer:
             "_run_codex_code",
             "_save_review_log",
             "_load_review_iteration_state",
-            # #1438: absorbed pure-forward phase delegates (were explicit methods)
+            # #1438/#1439: former explicit pure-forward shims, now resolved here
             "_finalize_pr",
             "_run_post_pr_followup",
             "_implement_issue",

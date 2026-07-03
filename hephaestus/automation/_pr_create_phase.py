@@ -68,6 +68,8 @@ class PRCreatePhase(StageMixin):
                     issue_number,
                 )
 
+        # impl._ensure_pr_created resolves via IssueImplementer.__getattr__ (#1439),
+        # whose return type is Any; annotate the result to keep this method's int contract.
         pr_number: int = impl._ensure_pr_created(issue_number, branch_name, worktree_path, slot_id)
         with self.state_lock:
             state.pr_number = pr_number
