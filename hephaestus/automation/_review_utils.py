@@ -102,6 +102,8 @@ def _raw_decode_fenced(text: str, use_last_block: bool) -> dict[str, Any] | None
         if isinstance(value, dict):
             return dict(value)
     return None
+
+
 _REVIEW_PARSE_MISSING = {"comments": [], "summary": "No structured output from analysis"}
 _REVIEW_PARSE_FAILED = {
     "comments": [],

@@ -202,8 +202,10 @@ class TestParseJsonBlock:
         """With multiple fenced objects, raw_decode recovery honors use_last_block."""
         body = "fix:\n```\nmake clean\n```"
         first = {"comments": [], "summary": "first"}
-        last = {"comments": [{"path": "b.py", "line": 2, "side": "RIGHT", "body": body}],
-                "summary": "last"}
+        last = {
+            "comments": [{"path": "b.py", "line": 2, "side": "RIGHT", "body": body}],
+            "summary": "last",
+        }
         text = (
             "```json\n" + json.dumps(first) + "\n```\n"
             "```json\n" + json.dumps(last, indent=2) + "\n```\n"

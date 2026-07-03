@@ -41,6 +41,7 @@ def _error_excerpt(log_text: str, limit: int = 3000) -> str:
     # Later errors are usually the actionable ones — keep the tail on overflow.
     return excerpt[-limit:]
 
+
 # Conclusion values that indicate a PR's check rollup is failing in a way
 # drive-green can act on. SUCCESS / SKIPPED / NEUTRAL / PENDING are
 # explicitly excluded. Shared with loop_runner._count_failing_prs so the
