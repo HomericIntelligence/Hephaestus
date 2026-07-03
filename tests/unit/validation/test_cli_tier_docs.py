@@ -57,7 +57,7 @@ class TestParsing:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Guard from Decision 5: RuntimeError when tomli/tomllib is missing."""
-        from hephaestus.validation import cli_tier_docs
+        from hephaestus.validation.tiers import cli_tier_docs
 
         monkeypatch.setattr(cli_tier_docs, "import_tomllib", lambda: None)
 

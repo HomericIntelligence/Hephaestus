@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.validation.tier_labels import (
+from hephaestus.validation.tiers.tier_labels import (
     BAD_PATTERNS,
     CANONICAL_TIERS,
     TierLabelFinding,

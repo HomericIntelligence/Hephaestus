@@ -116,7 +116,7 @@ class TestComplexitySubprocessTimeout:
 
     def test_ruff_invocation_passes_timeout(self, tmp_path: Path) -> None:
         """The ruff subprocess is bounded so a hung tool cannot stall the check."""
-        with patch("hephaestus.validation.complexity.subprocess.run") as mock_run:
+        with patch("hephaestus.validation.code.complexity.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="", returncode=0)
             run_ruff_complexity_check("hephaestus/", 10, tmp_path)
         assert mock_run.call_args.kwargs["timeout"] == NETWORK_TIMEOUT

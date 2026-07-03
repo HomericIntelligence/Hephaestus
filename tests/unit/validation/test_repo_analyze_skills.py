@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hephaestus.validation.repo_analyze_skills import main
-from hephaestus.validation.skill_catalog import (
+from hephaestus.validation.skills.repo_analyze_skills import main
+from hephaestus.validation.skills.skill_catalog import (
     _discover_skill_names,
     check_skill_frontmatter,
 )
