@@ -225,6 +225,32 @@ class TestLoadDependenciesIterative:
         assert 9 in resolver.completed
         assert 9 not in resolver.graph.issues
 
+    def test_uncached_closed_dependency_is_marked_complete(self) -> None:
+        """A closed dep NOT in the prefetch cache must still count as done.
+
+        ``cached_states`` only covers the run's root issues, so a dependency's
+        closed state is normally absent from the cache. Before this fix the
+        dep was fetched and re-entered the work graph, blocking all dependents
+        as "blocked by failed issue(s)" (live: ProjectOdyssey#5515 blocked by
+        already-merged #5514, #1780 shakedown).
+        """
+        from unittest.mock import patch
+
+        from hephaestus.automation.models import IssueState
+
+        resolver = DependencyResolver(skip_closed=True)
+        root = IssueInfo(number=5515, title="Root", dependencies=[5514])
+        closed_dep = IssueInfo(number=5514, title="Merged dep", state=IssueState.CLOSED)
+
+        with patch(
+            "hephaestus.automation.dependency_resolver.fetch_issue_info",
+            return_value=closed_dep,
+        ):
+            resolver._load_dependencies(root, {})  # cache does NOT contain 5514
+
+        assert 5514 in resolver.completed
+        assert 5514 not in resolver.graph.issues
+
     def test_depth_cap_raises_runtime_error(self) -> None:
         """Exceeding _MAX_DEPENDENCY_DEPTH raises RuntimeError (A5-03)."""
         from unittest.mock import patch
