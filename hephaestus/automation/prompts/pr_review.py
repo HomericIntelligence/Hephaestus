@@ -55,6 +55,15 @@ Classify each inline comment with a `severity`:
 
 {nitpick_directive}
 
+**Inline comments and the verdict must agree (convergence contract):** a GO
+verdict only converges when the PR has ZERO unresolved review threads, so
+every inline comment you emit demands another address/re-review round. Emit
+inline `comments` ONLY for findings that justify `Verdict: NOGO` (severity
+`critical` or `major`). If your verdict is GO, the `comments` array MUST be
+empty — put residual minor/nitpick observations in `summary` prose as
+explicitly non-blocking notes instead. GO + non-empty `comments` is a
+contract violation that livelocks the review loop.
+
 **Output format (verdict contract — MANDATORY):**
 The review prose + inline comments explain *why*; the verdict line is a binary
 gate. Write your analysis in prose, then end your response with exactly one of

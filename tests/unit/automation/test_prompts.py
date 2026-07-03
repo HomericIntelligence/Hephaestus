@@ -106,6 +106,12 @@ class TestPRReviewAnalysisPrompt:
         # Default mode instructs suppression.
         assert "do not emit" in out.lower() or "omit" in out.lower()
 
+    def test_go_verdict_forbids_inline_comments(self) -> None:
+        """GO must not emit inline comments (convergence contract, #1780)."""
+        out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
+        assert "If your verdict is GO, the `comments` array MUST be" in out
+        assert "contract violation that livelocks the review loop" in out
+
     def test_nitpicks_included_when_flag_set(self) -> None:
         """#1083: include_nitpicks=True re-enables nitpick comments."""
         on = prompts.get_pr_review_analysis_prompt(
