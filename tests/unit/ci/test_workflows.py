@@ -262,6 +262,29 @@ class TestEnableAutoMergeOnImplementationGoWorkflow:
         assert "Auto-merge is enabled before implementation review GO." in text
 
 
+class TestRequiredPixiCheckWorkflow:
+    """Regression tests for the required pixi-check workflow job."""
+
+    def _pixi_install_script(self) -> str:
+        with open(REQUIRED_WORKFLOW, encoding="utf-8") as f:
+            workflow = yaml.safe_load(f)
+        steps = workflow["jobs"]["pixi-check"]["steps"]
+        for step in steps:
+            if step.get("name") == "pixi install (locked)":
+                return str(step["run"])
+        raise AssertionError("pixi-check job must define a 'pixi install (locked)' step")
+
+    def test_missing_pixi_lock_fails_without_unlocked_install(self) -> None:
+        """pixi-check must fail fast if the lockfile is missing."""
+        script = self._pixi_install_script()
+        lines = {line.strip() for line in script.splitlines()}
+
+        assert "pixi install --locked" in lines
+        assert "exit 1" in lines
+        assert "pixi install" not in lines
+        assert "running unlocked" not in script
+
+
 class TestPiCliSetup:
     """Regression tests for installing the real Pi CLI in test environments."""
 
