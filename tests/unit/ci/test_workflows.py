@@ -272,7 +272,7 @@ class TestRequiredPixiCheckWorkflow:
         for step in steps:
             if step.get("name") == "pixi install (locked)":
                 return str(step["run"])
-        pytest.fail("pixi-check job must define a 'pixi install (locked)' step")
+        raise AssertionError("pixi-check job must define a 'pixi install (locked)' step")
 
     def test_missing_pixi_lock_fails_without_unlocked_install(self) -> None:
         """pixi-check must fail fast if the lockfile is missing."""
