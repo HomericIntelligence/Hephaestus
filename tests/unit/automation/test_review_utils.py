@@ -9,9 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hephaestus.automation import _review_utils as review_utils
+from hephaestus.automation import _review_utils as review_utils, models
 from hephaestus.automation._review_utils import (
-    DEFAULT_STATE_DIR,
     _discover_prs_simple,
     add_max_workers_arg,
     close_issue_as_covered,
@@ -39,13 +38,13 @@ class TestEnsureStateDir:
 
     def test_default_state_dir_literal(self) -> None:
         """Default state directory path remains the existing on-disk layout."""
-        assert DEFAULT_STATE_DIR == "build/.issue_implementer"
+        assert models.DEFAULT_STATE_DIR == "build/.issue_implementer"
 
     def test_creates_default_state_dir(self, tmp_path: Path) -> None:
         """Default helper creates and returns the repo-local state directory."""
         state_dir = ensure_state_dir(tmp_path)
 
-        assert state_dir == tmp_path / DEFAULT_STATE_DIR
+        assert state_dir == tmp_path / models.DEFAULT_STATE_DIR
         assert state_dir.is_dir()
 
     def test_creates_custom_subdir(self, tmp_path: Path) -> None:
@@ -134,6 +133,7 @@ class TestSetupReviewLogging:
         review_utils.setup_review_logging(verbose=True)
 
         assert captured["level"] == logging.DEBUG
+
 
 # ---------------------------------------------------------------------------
 # parse_json_block
@@ -292,6 +292,7 @@ class TestPrintWorkerSummary:
             )
 
         assert "\nFailed issues:" in caplog.messages
+
 
 # ---------------------------------------------------------------------------
 # _discover_prs_simple
