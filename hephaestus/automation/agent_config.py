@@ -75,21 +75,28 @@ logger = logging.getLogger(__name__)
 
 # ── Model selection ──────────────────────────────────────────────────────────
 
-OPUS = "claude-opus-4-7"
-SONNET = "claude-sonnet-4-6"
-HAIKU = "claude-haiku-4-5"
+OPUS_47 = "claude-opus-4-7"
+SONNET_46 = "claude-sonnet-4-6"
+SONNET_50 = "claude-sonnet-4-6"
+HAIKU_45 = "claude-haiku-4-5"
 CODEX_ADVISE = "gpt-5.4-mini"
 
 # Newer tiers that are valid model IDs but not the per-phase defaults. Listed in
 # the known set so pinning them via HEPH_*_MODEL doesn't emit a spurious
 # "Unknown model" warning. (Fable sits above Opus; 4.8 is the current Opus.)
 OPUS_48 = "claude-opus-4-8"
-FABLE = "claude-fable-5"
+FABLE_5 = "claude-fable-5"
+SONNET = SONNET_46
+OPUS = OPUS_48
+HAIKU = HAIKU_45
+FABLE = FABLE_5
 
 # The set of model IDs the automation suite recognizes. Overrides to values
 # outside this set are still accepted (operators may have preview access) but
 # trigger a one-time warning so misconfigured/typo'd env vars are visible.
-_KNOWN_MODELS: frozenset[str] = frozenset({OPUS, SONNET, HAIKU, OPUS_48, FABLE})
+_KNOWN_MODELS: frozenset[str] = frozenset(
+    {OPUS_47, SONNET_46, SONNET_50, HAIKU_45, OPUS_48, FABLE_5}
+)
 
 
 def _resolve_model(env_var: str, default: str) -> str:
@@ -513,11 +520,16 @@ __all__ = [
     "DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT",
     "DEFAULT_THROUGHPUT_TIMEOUT",
     "FABLE",
+    "FABLE_5",
     "HAIKU",
+    "HAIKU_45",
     "OPUS",
+    "OPUS_47",
     "OPUS_48",
     "PLAN_STAGE_TIMEOUT",
     "SONNET",
+    "SONNET_46",
+    "SONNET_50",
     "address_review_claude_timeout",
     "advise_claude_timeout",
     "advise_model",
