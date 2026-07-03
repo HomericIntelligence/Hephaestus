@@ -110,6 +110,51 @@ def _handler(
     return handler, calls, driven
 
 
+class TestMergeGateState:
+    """Pure merge-gate decisions over gh pr view payloads."""
+
+    def test_merged_always_passes(self) -> None:
+        from hephaestus.automation.mesh.roles.task_agent import _pr_merge_gate_state
+
+        assert _pr_merge_gate_state({"state": "MERGED"})
+
+    def test_armed_with_pending_checks_passes(self) -> None:
+        from hephaestus.automation.mesh.roles.task_agent import _pr_merge_gate_state
+
+        data = {
+            "state": "OPEN",
+            "autoMergeRequest": {"enabledAt": "2026-07-02T00:00:00Z"},
+            "statusCheckRollup": [{"conclusion": ""}, {"conclusion": "SUCCESS"}],
+        }
+        assert _pr_merge_gate_state(data)
+
+    def test_armed_with_failed_check_is_rejected(self) -> None:
+        """Armed + a FAILURE check can never merge on its own (ProjectOdyssey#5523)."""
+        from hephaestus.automation.mesh.roles.task_agent import _pr_merge_gate_state
+
+        data = {
+            "state": "OPEN",
+            "autoMergeRequest": {"enabledAt": "2026-07-02T00:00:00Z"},
+            "statusCheckRollup": [{"conclusion": "SUCCESS"}, {"conclusion": "FAILURE"}],
+        }
+        assert not _pr_merge_gate_state(data)
+
+    def test_unarmed_unlabeled_is_rejected(self) -> None:
+        from hephaestus.automation.mesh.roles.task_agent import _pr_merge_gate_state
+
+        assert not _pr_merge_gate_state({"state": "OPEN", "labels": []})
+
+    def test_go_label_with_green_checks_passes(self) -> None:
+        from hephaestus.automation.mesh.roles.task_agent import _pr_merge_gate_state
+
+        data = {
+            "state": "OPEN",
+            "labels": [{"name": "state:implementation-go"}],
+            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
+        }
+        assert _pr_merge_gate_state(data)
+
+
 class TestTaskAgentHandler:
     """Tests for the task-agent role."""
 

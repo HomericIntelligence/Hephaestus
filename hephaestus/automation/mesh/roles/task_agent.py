@@ -16,6 +16,31 @@ from hephaestus.automation.mesh.worker import RoleResult, TaskContext
 
 logger = logging.getLogger(__name__)
 
+#: Check conclusions that mean auto-merge can never fire without another fix.
+_FAILED_CHECK_CONCLUSIONS = {"FAILURE", "TIMED_OUT"}
+
+
+def _pr_merge_gate_state(data: dict[str, Any]) -> bool:
+    """Pure merge-gate decision over a ``gh pr view --json`` payload.
+
+    MERGED always passes. An open PR passes only when the review gate granted
+    it (auto-merge armed or ``state:implementation-go`` label) AND no check has
+    already concluded FAILURE/TIMED_OUT — an armed PR with a failed required
+    check can never merge on its own, so completing the task would delegate
+    children onto a base that never lands (observed live: ProjectOdyssey#5523
+    armed, then lint/pre-commit failed after the task completed).
+    Pending/queued checks are fine: armed + in-flight CI merges by itself.
+    """
+    if str(data.get("state", "")).upper() == "MERGED":
+        return True
+    for check in data.get("statusCheckRollup") or []:
+        if str(check.get("conclusion", "")).upper() in _FAILED_CHECK_CONCLUSIONS:
+            return False
+    if data.get("autoMergeRequest"):
+        return True
+    labels = [label.get("name", "") for label in data.get("labels", [])]
+    return "state:implementation-go" in labels
+
 
 class TaskAgentHandler:
     """Implements the issue named in the dispatch payload."""
@@ -224,18 +249,19 @@ class TaskAgentHandler:
 
         try:
             result = _gh_call(
-                ["pr", "view", str(pr_number), "--json", "state,labels,autoMergeRequest"]
+                [
+                    "pr",
+                    "view",
+                    str(pr_number),
+                    "--json",
+                    "state,labels,autoMergeRequest,statusCheckRollup",
+                ]
             )
             data = json.loads(result.stdout)
         except Exception as exc:
             logger.warning("PR #%s: merge-gate check failed: %s", pr_number, exc)
             return False
-        if str(data.get("state", "")).upper() == "MERGED":
-            return True
-        if data.get("autoMergeRequest"):
-            return True
-        labels = [label.get("name", "") for label in data.get("labels", [])]
-        return "state:implementation-go" in labels
+        return _pr_merge_gate_state(data)
 
     def _ci_drive_succeeded(
         self,
