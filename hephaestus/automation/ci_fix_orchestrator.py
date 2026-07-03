@@ -902,7 +902,6 @@ def _invoke_claude_agent_session(
             timeout=options.agent_timeout,
             output_format="json",
             allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
-            extra_args=["--dangerously-skip-permissions"],
             input_via_stdin=True,
         )
     except subprocess.CalledProcessError as exc:
