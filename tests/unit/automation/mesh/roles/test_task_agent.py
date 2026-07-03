@@ -180,6 +180,39 @@ class TestTaskAgentHandler:
         handler.handle(_ctx({"issue": 9}, attempt=2))
         assert calls == [(9, True)]
 
+    def test_redelivery_strips_stale_skip_label(self) -> None:
+        removed: list[int] = []
+        handler, _, _ = _handler({9: FakeWorkerResult(success=True)})
+        handler._label_ops = (
+            lambda n: ["state:skip"],
+            removed.append,
+            lambda labels: "state:skip" in labels,
+        )
+        handler.handle(_ctx({"issue": 9}, attempt=2))
+        assert removed == [9]
+
+    def test_redelivery_without_skip_does_not_remove(self) -> None:
+        removed: list[int] = []
+        handler, _, _ = _handler({9: FakeWorkerResult(success=True)})
+        handler._label_ops = (
+            lambda n: ["state:plan-go"],
+            removed.append,
+            lambda labels: "state:skip" in labels,
+        )
+        handler.handle(_ctx({"issue": 9}, attempt=2))
+        assert removed == []
+
+    def test_first_attempt_never_touches_labels(self) -> None:
+        fetched: list[int] = []
+        handler, _, _ = _handler({9: FakeWorkerResult(success=True)})
+        handler._label_ops = (
+            lambda n: fetched.append(n) or [],
+            lambda n: None,
+            lambda labels: False,
+        )
+        handler.handle(_ctx({"issue": 9}, attempt=1))
+        assert fetched == []
+
     def test_plan_not_go_is_retryable_failure(self) -> None:
         handler, _, _ = _handler({9: FakeWorkerResult(success=False, plan_review_not_go=True)})
         result = handler.handle(_ctx({"issue": 9}))

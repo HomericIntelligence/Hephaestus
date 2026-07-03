@@ -443,6 +443,20 @@ class TestUntrustedFencing:
         assert self._fence_present(out, "DIFF_TEXT")
         assert prompts._UNTRUSTED_NOTICE in out
 
+    def test_impl_loop_review_prompt_forbids_threads_on_go(self) -> None:
+        """GO verdicts must not open new inline threads (convergence contract)."""
+        out = prompts.get_impl_loop_review_prompt(
+            issue_number=1,
+            issue_title="t",
+            issue_body="b",
+            diff_text="d",
+            files_changed="a.py",
+            iteration=0,
+            prior_review=None,
+        )
+        assert "PR review threads ONLY for findings that justify" in out
+        assert "GO + new inline threads is a contract violation" in out
+
     def test_pr_review_analysis_prompt_fences_advise_findings(self) -> None:
         """get_pr_review_analysis_prompt fences advise findings before review."""
         out = prompts.get_pr_review_analysis_prompt(

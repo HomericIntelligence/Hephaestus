@@ -9,9 +9,12 @@ vessels. Advise-before and learn-after run inside the implementer
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from hephaestus.automation.mesh.worker import RoleResult, TaskContext
+
+logger = logging.getLogger(__name__)
 
 
 class TaskAgentHandler:
@@ -21,10 +24,12 @@ class TaskAgentHandler:
         self,
         implementer_factory: Any | None = None,
         ci_driver_factory: Any | None = None,
+        label_ops: Any | None = None,
     ) -> None:
         """Factories override IssueImplementer/CIDriver construction in tests."""
         self._implementer_factory = implementer_factory
         self._ci_driver_factory = ci_driver_factory
+        self._label_ops = label_ops
 
     def handle(self, ctx: TaskContext) -> RoleResult:
         """Implement ``payload['issue']`` and report the PR."""
@@ -44,6 +49,14 @@ class TaskAgentHandler:
             f"Task-agent myrmidon `{ctx.config.agent_id}` on `{ctx.config.exec_host}` "
             f"claimed this issue (task {ctx.task_id}, attempt {ctx.attempt})."
         )
+
+        # A prior attempt's NOGO-exhausted review loop applies ``state:skip``,
+        # which makes the implementer skip the issue entirely — every
+        # redelivery would then burn in seconds as ``NoResult`` (#1780). The
+        # mesh owns the retry here: strip the stale skip so this attempt
+        # re-enters the review loop with a fresh budget.
+        if ctx.is_redelivery:
+            self._strip_stale_skip(issue)
 
         factory = self._implementer_factory
         if factory is None:
@@ -101,6 +114,27 @@ class TaskAgentHandler:
             + (f", PR #{pr['number']} merge-ready" if pr else ""),
             pr=pr,
         )
+
+    def _strip_stale_skip(self, issue: int) -> None:
+        """Remove a prior attempt's ``state:skip`` from *issue* (best-effort)."""
+        ops = self._label_ops
+        if ops is None:
+            from hephaestus.automation.github_api.issues import gh_issue_json
+            from hephaestus.automation.github_api.labels import gh_issue_remove_labels
+            from hephaestus.automation.state_labels import STATE_SKIP, is_skipped
+
+            ops = (
+                lambda n: [label.get("name", "") for label in gh_issue_json(n).get("labels", [])],
+                lambda n: gh_issue_remove_labels(n, [STATE_SKIP]),
+                is_skipped,
+            )
+        get_labels, remove_skip, skipped = ops
+        try:
+            if skipped(get_labels(issue)):
+                logger.info("issue #%s: removing stale state:skip before mesh retry", issue)
+                remove_skip(issue)
+        except Exception as exc:
+            logger.warning("issue #%s: could not strip state:skip: %s", issue, exc)
 
     def _drive_pr_to_merge_ready(
         self,
