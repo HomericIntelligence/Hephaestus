@@ -80,3 +80,39 @@ class TestPendingRequiredCheckNames:
         ):
             result = inspector.pending_required_check_names(42)
         assert "slow-ci" in result
+
+
+class TestErrorExcerpt:
+    """Tests for the _error_excerpt failed-log excerpting helper."""
+
+    def test_buried_error_is_surfaced_over_head_banners(self) -> None:
+        """Setup banners must not displace the real error (#1780 shakedown)."""
+        from hephaestus.automation.ci_check_inspector import _error_excerpt
+
+        banner = 'echo "✅ CI build validation succeeded"\n' + ("setup line\n" * 500)
+        log = banner + "train.mojo:149:20: error: value cannot be implicitly copied\nmore\n"
+        excerpt = _error_excerpt(log, limit=3000)
+        assert "error: value cannot be implicitly copied" in excerpt
+
+    def test_no_error_lines_falls_back_to_tail(self) -> None:
+        from hephaestus.automation.ci_check_inspector import _error_excerpt
+
+        log = "\n".join(f"line {i}" for i in range(1000))
+        excerpt = _error_excerpt(log, limit=100)
+        assert excerpt == log[-100:]
+
+    def test_error_context_lines_included(self) -> None:
+        from hephaestus.automation.ci_check_inspector import _error_excerpt
+
+        log = "before2\nbefore1\nBuild FAILED with exit 1\nafter1\nafter2\n"
+        excerpt = _error_excerpt(log)
+        assert "before2" in excerpt
+        assert "after2" in excerpt
+
+    def test_overflow_keeps_the_tail_errors(self) -> None:
+        from hephaestus.automation.ci_check_inspector import _error_excerpt
+
+        log = "\n".join(f"error: number {i}" for i in range(1000))
+        excerpt = _error_excerpt(log, limit=200)
+        assert "error: number 999" in excerpt
+        assert len(excerpt) <= 200
