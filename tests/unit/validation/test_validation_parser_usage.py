@@ -45,6 +45,6 @@ def test_issue_1413_validation_clis_use_shared_repo_root_resolver() -> None:
             continue
         assert "resolve_repo_root(args)" in text, filename
         assert "args.repo_root or get_repo_root()" not in text, filename
-        assert (
-            "args.repo_root if args.repo_root is not None else get_repo_root()" not in text
-        ), filename
+        assert "args.repo_root if args.repo_root is not None else get_repo_root()" not in text, (
+            filename
+        )
