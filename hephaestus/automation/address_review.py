@@ -19,6 +19,7 @@ import json
 import logging
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -296,6 +297,7 @@ def run_address_fix_session(
         try:
             prompt_file.unlink()
         except FileNotFoundError:
+            # Already gone — benign; nothing to clean up.
             pass
         except OSError as exc:
             logger.warning("Could not unlink prompt file %s: %s", prompt_file, exc)
@@ -629,9 +631,7 @@ class AddressReviewer(BaseReviewer):
 
     def _address_issue(self, issue_number: int, pr_number: int) -> WorkerResult:
         """Address unresolved review threads for a single issue."""
-        with self.status_tracker.slot(
-            f"{issue_ref(issue_number)}: Starting", post_sleep=1.0
-        ) as slot_id:
+        with self.status_tracker.slot(f"{issue_ref(issue_number)}: Starting") as slot_id:
             if slot_id is None:
                 return WorkerResult(
                     issue_number=issue_number,
@@ -713,6 +713,9 @@ class AddressReviewer(BaseReviewer):
             except Exception as e:
                 self._log("error", f"Unexpected {type(e).__name__}: {e}", thread_id)
                 return self._fail(issue_number, str(e)[:80], slot_id)
+
+            finally:
+                time.sleep(1)
 
     def _load_impl_session_id(self, issue_number: int) -> str | None:
         """Load the implementer's agent session ID from state file.

@@ -344,13 +344,3 @@ class TestSlotContextManager:
             assert slot_id is None
         # The still-held real slot must not be spuriously released.
         assert tracker.get_active_count() == 1
-
-    def test_slot_post_sleep_delays_release(self) -> None:
-        """post_sleep preserves callers that intentionally delayed release."""
-        tracker = StatusTracker(num_slots=1)
-        start = time.monotonic()
-
-        with tracker.slot(post_sleep=0.2):
-            pass
-
-        assert time.monotonic() - start >= 0.2

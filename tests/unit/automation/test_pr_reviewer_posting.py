@@ -269,6 +269,21 @@ class TestReviewPostsInlineComments:
         # The posted thread IDs propagate onto the saved review state.
         assert result.pr_number == 42
 
+    def test_review_pr_preserves_local_cooldown(self, reviewer: PRReviewer) -> None:
+        """_review_pr keeps its one-second cooldown outside StatusTracker.slot()."""
+        analysis = {"comments": [], "summary": "clean"}
+
+        with (
+            patch.object(reviewer, "_gather_pr_context", return_value={}),
+            patch.object(reviewer, "_run_analysis_session", return_value=analysis),
+            patch("hephaestus.automation.pr_reviewer.gh_pr_review_post", return_value=[]),
+            patch("hephaestus.automation.pr_reviewer.time.sleep") as mock_sleep,
+        ):
+            result = reviewer._review_pr(issue_number=123, pr_number=42)
+
+        assert result.success is True
+        mock_sleep.assert_called_once_with(1)
+
 
 class TestGatherPrContextNoPolicyState:
     """_gather_pr_context no longer collects policy state (Closes/auto-merge/signing).

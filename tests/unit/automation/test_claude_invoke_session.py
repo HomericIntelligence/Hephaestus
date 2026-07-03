@@ -163,6 +163,28 @@ class TestCreateThenResume:
 class TestArgvAssembly:
     """Optional flags appear in argv at the right positions."""
 
+    def test_omitted_timeout_uses_centralized_plan_timeout(
+        self,
+        stub_run: MagicMock,
+        fake_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Omitted timeout resolves through the centralized timeout helper."""
+        monkeypatch.setenv("HEPH_AGENT_PLAN_TIMEOUT", "333")
+        cwd = fake_home / "work"
+        cwd.mkdir()
+
+        invoke_claude_with_session(
+            repo="R",
+            issue=1,
+            agent=AGENT_PLANNER,
+            prompt="hi",
+            model="sonnet",
+            cwd=cwd,
+        )
+
+        assert stub_run.call_args.kwargs["timeout"] == 333
+
     def test_optional_flags(self, stub_run: MagicMock, fake_home: Path) -> None:
         cwd = fake_home / "work"
         cwd.mkdir()

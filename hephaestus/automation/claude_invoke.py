@@ -27,7 +27,11 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from hephaestus.automation.agent_config import session_jsonl_path, session_name
+from hephaestus.automation.agent_config import (
+    planner_claude_timeout,
+    session_jsonl_path,
+    session_name,
+)
 from hephaestus.github.client import ClaudeUsageCapError
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch
 from hephaestus.utils.helpers import strip_null_bytes
@@ -63,7 +67,7 @@ def invoke_claude_with_session(
     prompt: str,
     model: str,
     cwd: Path,
-    timeout: int = 300,
+    timeout: int | None = None,
     system_prompt_file: Path | None = None,
     allowed_tools: str | None = None,
     permission_mode: str | None = None,
@@ -101,7 +105,8 @@ def invoke_claude_with_session(
         model: ``--model`` value; also part of the session key so a session
             never crosses models.
         cwd: Working directory for the subprocess.
-        timeout: Subprocess timeout in seconds.
+        timeout: Subprocess timeout in seconds. When omitted, resolves through
+            the centralized planner-agent timeout helper.
         system_prompt_file: Optional ``--system-prompt`` file.
         allowed_tools: Optional ``--allowedTools`` value (e.g.
             ``"Read,Glob,Grep"``).
@@ -124,6 +129,9 @@ def invoke_claude_with_session(
 
     """
     del recreate_on_resume_failure  # back-compat shim only; no recreate cascade
+    if timeout is None:
+        timeout = planner_claude_timeout()
+
     display_name = session_name(repo, issue, agent, model)
     sid = str(uuid.uuid5(uuid.NAMESPACE_DNS, display_name))
 
