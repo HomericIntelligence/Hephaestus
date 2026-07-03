@@ -24,7 +24,7 @@ def _ctx(payload: dict[str, Any]) -> TaskContext:
         agamemnon=None,  # type: ignore[arg-type]
         deadline=float("inf"),
     )
-    ctx.progress = lambda text: None  # type: ignore[method-assign, assignment]
+    ctx.progress = lambda text: None  # type: ignore[method-assign]
     return ctx
 
 

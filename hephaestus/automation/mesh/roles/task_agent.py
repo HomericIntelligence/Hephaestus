@@ -25,11 +25,13 @@ class TaskAgentHandler:
         implementer_factory: Any | None = None,
         ci_driver_factory: Any | None = None,
         label_ops: Any | None = None,
+        merge_gate: Any | None = None,
     ) -> None:
         """Factories override IssueImplementer/CIDriver construction in tests."""
         self._implementer_factory = implementer_factory
         self._ci_driver_factory = ci_driver_factory
         self._label_ops = label_ops
+        self._merge_gate = merge_gate
 
     def handle(self, ctx: TaskContext) -> RoleResult:
         """Implement ``payload['issue']`` and report the PR."""
@@ -190,8 +192,50 @@ class TaskAgentHandler:
                 retryable=True,
                 pr=pr,
             )
+        if not self._merge_gate_passed(pr["number"]):
+            # _evaluate_run_result deliberately excuses an un-armed PR that
+            # lacks ``state:implementation-go`` ("pending review", #1576) —
+            # right for the loop runner, where a later review labels it. In
+            # the mesh, the review loop that would grant that label has
+            # ALREADY run and ended NOGO, so nothing will ever arm the PR:
+            # completing here would delegate dependent children on top of an
+            # unmerged base. Fail retryably instead; redelivery strips the
+            # stale ``state:skip`` and re-enters review with a fresh budget.
+            return RoleResult(
+                ok=False,
+                error_kind="ReviewNotGo",
+                error_message=(
+                    f"PR #{pr['number']} for issue #{issue} has no implementation-GO "
+                    "label and auto-merge is not armed after the review loop"
+                ),
+                retryable=True,
+                pr=pr,
+            )
         pr["merge_ready"] = True
         return None
+
+    def _merge_gate_passed(self, pr_number: int) -> bool:
+        """Return whether the PR cleared the review gate (merged, armed, or GO-labeled)."""
+        if self._merge_gate is not None:
+            return bool(self._merge_gate(pr_number))
+        import json
+
+        from hephaestus.github.client import _gh_call
+
+        try:
+            result = _gh_call(
+                ["pr", "view", str(pr_number), "--json", "state,labels,autoMergeRequest"]
+            )
+            data = json.loads(result.stdout)
+        except Exception as exc:
+            logger.warning("PR #%s: merge-gate check failed: %s", pr_number, exc)
+            return False
+        if str(data.get("state", "")).upper() == "MERGED":
+            return True
+        if data.get("autoMergeRequest"):
+            return True
+        labels = [label.get("name", "") for label in data.get("labels", [])]
+        return "state:implementation-go" in labels
 
     def _ci_drive_succeeded(
         self,

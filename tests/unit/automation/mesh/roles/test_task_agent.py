@@ -81,6 +81,7 @@ def _handler(
     results: dict[int, FakeWorkerResult],
     ci_results: dict[int, FakeCIDriverResult] | None = None,
     open_prs_remaining: list[dict[str, Any]] | None = None,
+    merge_gate: Any = None,
 ) -> tuple[TaskAgentHandler, list[Any], list[int]]:
     calls: list[Any] = []
     driven: list[int] = []
@@ -104,6 +105,7 @@ def _handler(
             },
             open_prs_remaining or [],
         ),
+        merge_gate=merge_gate if merge_gate is not None else (lambda pr: True),
     )
     return handler, calls, driven
 
@@ -169,6 +171,25 @@ class TestTaskAgentHandler:
         assert "required check failed" in result.error_message
         assert driven == [9]
 
+    def test_unarmed_pr_without_go_label_is_retryable_review_failure(self) -> None:
+        """A clean CI drive must not complete when the review gate never passed.
+
+        ``_evaluate_run_result`` excuses an un-armed PR lacking
+        ``state:implementation-go`` as "pending review" (#1576); in the mesh
+        that means the review loop ended NOGO and nothing will ever arm the
+        PR, so the task must fail retryably instead of delegating children
+        onto an unmerged base (#1780).
+        """
+        handler, _, driven = _handler(
+            {9: FakeWorkerResult(success=True, pr_number=42)},
+            merge_gate=lambda pr: False,
+        )
+        result = handler.handle(_ctx({"issue": 9}))
+        assert not result.ok
+        assert result.error_kind == "ReviewNotGo"
+        assert result.retryable
+        assert driven == [9]
+
     def test_success_without_pr_skips_drive_phase(self) -> None:
         handler, _, driven = _handler({9: FakeWorkerResult(success=True)})
         result = handler.handle(_ctx({"issue": 9}))
@@ -204,9 +225,14 @@ class TestTaskAgentHandler:
 
     def test_first_attempt_never_touches_labels(self) -> None:
         fetched: list[int] = []
+
+        def get_labels(n: int) -> list[str]:
+            fetched.append(n)
+            return []
+
         handler, _, _ = _handler({9: FakeWorkerResult(success=True)})
         handler._label_ops = (
-            lambda n: fetched.append(n) or [],
+            get_labels,
             lambda n: None,
             lambda labels: False,
         )
