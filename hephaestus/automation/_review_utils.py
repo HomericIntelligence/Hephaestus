@@ -63,7 +63,7 @@ from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 from hephaestus.io.utils import write_secure
 
 from .github_api import _gh_call
-from .models import DEFAULT_STATE_DIR, DEFAULT_WORKER_COUNT
+from .models import DEFAULT_STATE_DIR as DEFAULT_STATE_DIR, DEFAULT_WORKER_COUNT
 
 if TYPE_CHECKING:
     from .models import WorkerResult
