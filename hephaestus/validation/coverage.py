@@ -21,7 +21,12 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
-from hephaestus.cli.utils import create_validation_parser, emit_json_status, format_output
+from hephaestus.cli.utils import (
+    create_validation_parser,
+    emit_json_status,
+    format_output,
+    resolve_repo_root,
+)
 from hephaestus.io.toml import import_tomllib
 from hephaestus.utils.helpers import get_repo_root
 
@@ -35,12 +40,16 @@ _PACKAGE_GLOB_SUFFIXES = ("/*.py", "/*")
 _UNIT_TEST_DIR = "tests/unit/automation"
 
 
-def load_coverage_config(config_file: Path | None = None) -> dict[str, Any]:
+def load_coverage_config(
+    config_file: Path | None = None, *, repo_root: Path | None = None
+) -> dict[str, Any]:
     """Load coverage configuration from ``coverage.toml``.
 
     Args:
         config_file: Path to ``coverage.toml``. If None, looks for
             ``coverage.toml`` in the repo root.
+        repo_root: Explicit repository root used to resolve the default
+            ``coverage.toml`` location when ``config_file`` is omitted.
 
     Returns:
         Dictionary with coverage configuration. Returns defaults if
@@ -48,11 +57,12 @@ def load_coverage_config(config_file: Path | None = None) -> dict[str, Any]:
 
     """
     if config_file is None:
-        try:
-            repo_root = get_repo_root()
-            config_file = repo_root / "coverage.toml"
-        except (FileNotFoundError, RuntimeError):
-            return _default_config()
+        if repo_root is None:
+            try:
+                repo_root = get_repo_root()
+            except (FileNotFoundError, RuntimeError):
+                return _default_config()
+        config_file = repo_root / "coverage.toml"
 
     if not config_file.exists():
         return _default_config()
@@ -73,6 +83,13 @@ def load_coverage_config(config_file: Path | None = None) -> dict[str, Any]:
 def _default_config() -> dict[str, Any]:
     """Return the default coverage configuration."""
     return {"coverage": {"target": 90.0, "minimum": 80.0}}
+
+
+def _resolve_repo_relative_path(path: Path | None, repo_root: Path) -> Path | None:
+    """Resolve a CLI path relative to an explicit repo root when needed."""
+    if path is None or path.is_absolute():
+        return path
+    return repo_root / path
 
 
 def _coverage_omit_entries(repo_root: Path) -> list[str]:
@@ -559,10 +576,17 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.check_omit_justification:
-        repo_root = args.repo_root or get_repo_root()
+        repo_root = resolve_repo_root(args)
         return _check_omit_justification_cli(repo_root, json_output=args.json)
 
-    config = load_coverage_config(args.config)
+    explicit_repo_root = args.repo_root
+    if explicit_repo_root is not None:
+        resolved_coverage_file = _resolve_repo_relative_path(args.coverage_file, explicit_repo_root)
+        assert resolved_coverage_file is not None
+        args.coverage_file = resolved_coverage_file
+        args.config = _resolve_repo_relative_path(args.config, explicit_repo_root)
+
+    config = load_coverage_config(args.config, repo_root=explicit_repo_root)
 
     if args.threshold is not None:
         threshold = args.threshold
