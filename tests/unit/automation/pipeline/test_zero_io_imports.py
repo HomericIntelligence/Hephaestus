@@ -61,3 +61,53 @@ def test_pipeline_modules_have_zero_io_imports() -> None:
                 if _forbidden(mod):
                     violations.append(f"{py.name}:{node.lineno}: from {mod} import ...")
     assert not violations, "pipeline modules must do zero I/O imports:\n" + "\n".join(violations)
+
+
+def test_forbidden_detects_synthetic_forbidden_import() -> None:
+    """Negative test: the guard must actually flag forbidden imports.
+
+    Without this test, a broken `_forbidden()` that always returns False
+    would let `test_pipeline_modules_have_zero_io_imports` pass vacuously
+    with an empty `violations` list. Here we parse synthetic source
+    containing known-forbidden imports (stdlib module, forbidden prefix,
+    and a from-import) through the same AST walk and assert each is
+    caught, plus that an allowed import is not.
+    """
+    synthetic_source = (
+        "import subprocess\n"
+        "import hephaestus.automation.git_utils\n"
+        "from os import path\n"
+        "import json\n"  # allowed stdlib module; must NOT be flagged
+    )
+    tree = ast.parse(synthetic_source, filename="<synthetic>")
+
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if _forbidden(alias.name):
+                    violations.append(f"import {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if _forbidden(mod):
+                violations.append(f"from {mod} import ...")
+
+    assert "import subprocess" in violations
+    assert "import hephaestus.automation.git_utils" in violations
+    assert "from os import ..." in violations
+    assert not any("json" in v for v in violations)
+
+
+def test_forbidden_direct_cases() -> None:
+    """Directly exercise `_forbidden()` for both branches of its predicate.
+
+    Covers: a bare forbidden stdlib module, a submodule of a forbidden
+    stdlib module (root-splitting), a forbidden dotted prefix, and an
+    allowed module that must return False.
+    """
+    assert _forbidden("subprocess") is True
+    assert _forbidden("os.path") is True
+    assert _forbidden("hephaestus.automation.claude_invoke") is True
+    assert _forbidden("hephaestus.automation.claude_invoke.helpers") is True
+    assert _forbidden("json") is False
+    assert _forbidden("hephaestus.automation.pipeline") is False
