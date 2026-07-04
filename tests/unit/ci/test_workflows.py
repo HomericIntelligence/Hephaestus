@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib  # type: ignore[no-redef, unused-ignore]
 
 from hephaestus.ci.workflows import (
     Violation,
@@ -315,6 +322,49 @@ class TestRequiredPixiCheckWorkflow:
         assert "exit 1" in lines
         assert "pixi install" not in lines
         assert "running unlocked" not in script
+
+
+class TestGitleaksSecretsScan:
+    """Regression tests for the required gitleaks secrets scan."""
+
+    def _required_workflow(self) -> dict[str, Any]:
+        return yaml.safe_load(REQUIRED_WORKFLOW.read_text(encoding="utf-8"))
+
+    def test_gitleaks_is_declared_in_lint_environment(self) -> None:
+        with (REPO_ROOT / "pixi.toml").open("rb") as fh:
+            pixi = tomllib.load(fh)
+
+        assert pixi["feature"]["lint"]["dependencies"]["gitleaks"] == ">=8.30.0,<9"
+
+    def test_required_workflow_runs_gitleaks_from_pixi_lint_env(self) -> None:
+        workflow = self._required_workflow()
+        steps = workflow["jobs"]["security-secrets-scan"]["steps"]
+
+        setup_index = next(
+            i for i, step in enumerate(steps) if step.get("name") == "Setup pixi env (lint)"
+        )
+        run_index = next(i for i, step in enumerate(steps) if step.get("name") == "Run Gitleaks")
+
+        setup_step = steps[setup_index]
+        run_script = steps[run_index]["run"]
+
+        assert setup_index < run_index
+        assert setup_step["uses"] == "./.github/actions/setup-pixi-env"
+        assert setup_step["with"]["environments"] == "lint"
+        assert "pixi run --environment lint gitleaks" in run_script
+        assert "args=(detect --source=. --verbose --exit-code=1)" in run_script
+        assert "args+=(--config=.gitleaks.toml)" in run_script
+
+    def test_required_workflow_does_not_download_gitleaks_release_tarball(self) -> None:
+        workflow = self._required_workflow()
+        steps = workflow["jobs"]["security-secrets-scan"]["steps"]
+        run_script = next(step["run"] for step in steps if step.get("name") == "Run Gitleaks")
+
+        assert "github.com/gitleaks/gitleaks/releases" not in run_script
+        assert "wget" not in run_script
+        assert "sha256sum --check" not in run_script
+        assert "tar -xzf" not in run_script
+        assert "./gitleaks" not in run_script
 
 
 class TestPiCliSetup:

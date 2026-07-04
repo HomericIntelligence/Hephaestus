@@ -104,6 +104,9 @@ pdoc = ">=14.0,<15"
 # conda-forge; ships from PyPI.
 pytest-watcher = ">=0.4,<1"
 
+[feature.lint.dependencies]
+gitleaks = ">=8.30.0,<9"
+
 [feature.lint.pypi-dependencies]
 bandit = ">=1.9.4,<2"
 
