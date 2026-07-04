@@ -469,7 +469,8 @@ class TestCliMainSuccess:
         monkeypatch.setenv("MESH_ROLE", "component-lead")
 
         class _StubWorker:
-            def __init__(self, config: Any, handler: Any, **kwargs: Any) -> None: ...
+            def __init__(self, config: Any, handler: Any, **kwargs: Any) -> None:
+                pass
 
             async def run_forever(self, stop: Any = None) -> None:
                 raise KeyboardInterrupt
