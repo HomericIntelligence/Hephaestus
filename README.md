@@ -54,7 +54,20 @@ pytest, ruff, and mypy):
   `pydantic`; see [ADR 0001](docs/adr/0001-automation-library-boundary.md).
 - `pip install "HomericIntelligence-Hephaestus[mesh]"` — installs the HMAS
   mesh-worker dependencies (`automation` + `nats`) needed by
-  `hephaestus-mesh-worker`; deliberately not part of `[all]`.
+  `hephaestus-mesh-worker`; deliberately not part of `[all]`. Minimal local
+  run (defaults shown; see `hephaestus/automation/mesh/cli.py` for the full
+  environment contract):
+
+  ```bash
+  MESH_DOMAIN=pipeline MESH_ROLE=task-agent \
+  NATS_URL=nats://localhost:4222 AGAMEMNON_URL=http://localhost:8080 \
+  hephaestus-mesh-worker --verbose
+  ```
+
+  Optional: `AGENT_ID` (defaults to `{domain}-{role}-{hostname}`),
+  `NATS_CLIENT_TOKEN`/`NATS_CA_FILE` (ADR-008/009 auth + TLS),
+  `AGAMEMNON_API_KEY`, and `MESH_HEARTBEAT_SECONDS`/`MESH_ACK_WAIT_SECONDS`/
+  `MESH_MAX_DELIVER`/`MESH_OVERRUN_SECONDS` tuning knobs.
 - `pip install HomericIntelligence-Hephaestus[dev]` — installs development and
   testing dependencies. Use this for contributors and CI.
 - `pip install "HomericIntelligence-Hephaestus[all,dev]"` — both, for a full

@@ -506,3 +506,29 @@ class TestConsumeLoopResilience:
         # message's ack exploded — the loop survived.
         assert good.acked
         assert len(handler.contexts) == 2
+
+
+class TestSchemaGate:
+    """#1764 audit: the hi/v1 schema tag must be enforced when present."""
+
+    def test_foreign_schema_is_termed_without_processing(self) -> None:
+        handler = StubHandler(RoleResult(ok=True))
+        worker, pub, _ = _worker(handler)
+        msg = FakeMsg(payload={"schema": "hi/v2", "issue": 9})
+
+        asyncio.run(worker.handle_message(msg))
+
+        assert msg.termed and not msg.acked
+        assert pub.published == []
+        assert handler.contexts == []
+
+    def test_missing_schema_is_processed_for_agamemnon_compat(self) -> None:
+        """Agamemnon's C++ dispatcher publishes raw task JSON without an envelope."""
+        handler = StubHandler(RoleResult(ok=True, summary="ok"))
+        worker, _, _ = _worker(handler)
+        msg = FakeMsg(payload={"issue": 9})
+
+        asyncio.run(worker.handle_message(msg))
+
+        assert msg.acked
+        assert len(handler.contexts) == 1

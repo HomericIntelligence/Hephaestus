@@ -27,6 +27,7 @@ from typing import Any, Protocol
 from hephaestus.automation.mesh.agamemnon import AgamemnonClient
 from hephaestus.automation.mesh.config import (
     DISPATCH_STREAM,
+    SCHEMA,
     MeshConfig,
     envelope,
     parse_dispatch_subject,
@@ -216,7 +217,18 @@ class MeshWorker:
                     logger.exception("handle_message crashed; continuing consume loop")
 
     async def handle_message(self, msg: Any) -> None:
-        """Work one claimed dispatch message end to end."""
+        """Work one claimed dispatch message end to end.
+
+        Dispatch payload contract (ADR-013 §3): ``task_id`` is required but
+        may be recovered from the subject's final token; ``team_id`` defaults
+        to the worker's configured team; ``schema`` (``hi/v1``) is OPTIONAL on
+        receive — Agamemnon's C++ dispatcher publishes raw task JSON without
+        an envelope — but a PRESENT-and-foreign schema tag is poison (a
+        future ``hi/v2`` producer must not be half-processed by a v1 worker).
+        Everything else (``issue``, ``epic``, ``brief_id``, ``blocked_by`` …)
+        is role-specific and validated by the role handler, which returns a
+        non-retryable ``BadDispatch`` for contract violations.
+        """
         try:
             payload = json.loads(msg.data.decode())
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -231,6 +243,16 @@ class MeshWorker:
                 "non-object dispatch payload (%s) on %s; terminating",
                 type(payload).__name__,
                 msg.subject,
+            )
+            await msg.term()
+            return
+        schema = payload.get("schema")
+        if schema is not None and schema != SCHEMA:
+            logger.error(
+                "unsupported payload schema %r on %s (supported: %s); terminating",
+                schema,
+                msg.subject,
+                SCHEMA,
             )
             await msg.term()
             return
