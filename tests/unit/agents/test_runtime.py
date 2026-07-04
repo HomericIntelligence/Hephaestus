@@ -329,7 +329,7 @@ def test_codex_approval_args_preserves_legacy_flag() -> None:
 @pytest.mark.parametrize(
     ("claude_model", "expected_model", "expected_reasoning"),
     [
-        ("claude-opus-4-7", "gpt-5.5", "xhigh"),
+        ("claude-opus-4-7", "gpt-5.6", "xhigh"),
         ("claude-sonnet-4-6", "gpt-5.5", "medium"),
     ],
 )
@@ -358,21 +358,25 @@ def test_codex_base_cmd_maps_haiku_to_mini_without_reasoning_override(
     assert "model_reasoning_effort" not in cmd
 
 
-def test_codex_base_cmd_keeps_native_codex_model_ids(tmp_path: Path) -> None:
+@pytest.mark.parametrize("native_model", ["gpt-5.4-mini", "gpt-5.5", "gpt-5.6"])
+def test_codex_base_cmd_keeps_native_codex_model_ids(
+    tmp_path: Path,
+    native_model: str,
+) -> None:
     """Explicit native Codex model overrides should still pass through unchanged."""
     with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
-        cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model="gpt-5.4-mini")
+        cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, model=native_model)
 
-    assert cmd[cmd.index("--model") + 1] == "gpt-5.4-mini"
+    assert cmd[cmd.index("--model") + 1] == native_model
     assert "model_reasoning_effort" not in cmd
 
 
-def test_codex_base_cmd_defaults_new_sessions_to_gpt_55_xhigh(tmp_path: Path) -> None:
+def test_codex_base_cmd_defaults_new_sessions_to_gpt_56_xhigh(tmp_path: Path) -> None:
     """A fresh Codex session should not depend on the operator's CLI default."""
     with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
         cmd = agent_runtime._codex_base_cmd(cwd=tmp_path)
 
-    assert cmd[cmd.index("--model") + 1] == "gpt-5.5"
+    assert cmd[cmd.index("--model") + 1] == "gpt-5.6"
     assert cmd[cmd.index("-c") + 1] == 'model_reasoning_effort="xhigh"'
 
 
