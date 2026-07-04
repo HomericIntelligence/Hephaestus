@@ -152,8 +152,6 @@ _NON_TRANSIENT_PATTERNS = [
     for p in (
         r"(?:^|\s)403(?:\s|$)|forbidden|permission denied",
         r"(?:^|\s)404(?:\s|$)|not found",
-        # gh sometimes phrases missing issue/PR targets without 404/not found.
-        r"could not resolve to (?:an? )?(?:issue|pull request)\b",
         r"(?:^|\s)400(?:\s|$)|bad request",
         r"(?:^|\s)401(?:\s|$)|unauthorized",
         r"(?:^|\s)422(?:\s|$)|unprocessable entity",
