@@ -8,12 +8,15 @@ Usage:
     from hephaestus.io.utils import safe_write, ensure_directory
 
     ensure_directory('/path/to/dir')
-    safe_write('/path/to/file.txt', 'content')
+    safe_write('/path/to/file.txt', 'content', backup=False)
+
+    # write_file() remains available for deprecated compatibility.
 """
 
 import json
 import os
 import tempfile
+import warnings
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
@@ -56,21 +59,38 @@ def write_file(
     content: str | bytes,
     mode: str = "w",
 ) -> None:
-    """Write content to a file.
+    """Write content to a file atomically.
+
+    This public compatibility wrapper delegates to :func:`safe_write` without
+    creating a backup file, preserving the simple overwrite behavior while
+    avoiding partial writes on interruption.
 
     Args:
         filepath: Path to file
         content: Content to write
-        mode: File open mode ('w' for text, 'wb' for binary)
+        mode: File open mode; only atomic overwrite modes are supported
+            ('w' for text, 'wb' for binary). Any other mode raises
+            ``ValueError``.
 
     Raises:
+        ValueError: If ``mode`` is not an atomic overwrite mode ('w'/'wb').
+        TypeError: If ``content`` does not match ``mode`` (bytes with 'w',
+            or str with 'wb').
         OSError: If the file cannot be written
 
     """
-    filepath = Path(filepath)
-    filepath.parent.mkdir(parents=True, exist_ok=True)
-    with open(filepath, mode) as f:
-        f.write(content)
+    if mode not in {"w", "wb"}:
+        raise ValueError("write_file only supports atomic overwrite modes: 'w' and 'wb'")
+    warnings.warn(
+        "write_file() is deprecated; use safe_write(..., backup=False) instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    if mode == "w" and isinstance(content, bytes):
+        raise TypeError("write() argument must be str, not bytes")
+    if mode == "wb" and isinstance(content, str):
+        raise TypeError("a bytes-like object is required, not 'str'")
+    safe_write(filepath, content, backup=False)
 
 
 def ensure_directory(path: str | Path) -> None:
