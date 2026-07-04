@@ -23,6 +23,7 @@ What lives here:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -31,6 +32,7 @@ import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from hephaestus.automation.agent_config import fallback_model, session_jsonl_path, session_name
 from hephaestus.github.client import ClaudeUsageCapError
@@ -87,6 +89,37 @@ def _record_model_cap(capped: str, fallback: str) -> None:
         capped,
         fallback,
     )
+
+
+#: Markers of transient/quota failures that must NEVER trigger a recreate —
+#: re-sending the full prompt on a 429 was the old cascade's failure mode.
+_TRANSIENT_FAILURE_MARKERS: tuple[str, ...] = (
+    "429",
+    "rate limit",
+    "overloaded",
+    "quota",
+    "usage cap",
+    "timeout",
+    "timed out",
+)
+
+
+def _resume_target_broken(stderr: str, stdout: str) -> bool:
+    """Return True when a failed ``--resume`` points at a broken local transcript.
+
+    Killed workers leave truncated session JSONLs behind; ``claude --resume``
+    of such a transcript exits 1 with EMPTY stderr, which the expired-phrase
+    probe cannot see (#1780 shakedown — the mesh burned whole delivery budgets
+    re-failing on the same corrupt session). Treat a resume failure as a broken
+    target when the CLI printed a known expired phrase OR printed nothing at
+    all — but never when any transient/quota marker is present.
+    """
+    blob = (stderr + "\n" + stdout).lower()
+    if any(marker in blob for marker in _TRANSIENT_FAILURE_MARKERS):
+        return False
+    if _session_expired(stderr, stdout):
+        return True
+    return not blob.strip()
 
 
 def invoke_claude_with_session(
@@ -297,17 +330,38 @@ def _invoke_claude_once(
         sid,
         "create" if create else "resume",
     )
-    result = subprocess.run(
-        cmd,
-        input=prompt if input_via_stdin else None,
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=timeout,
-        env=env,
-        stdin=subprocess.DEVNULL if not input_via_stdin else None,
-        cwd=str(cwd),
-    )
+    run_kwargs: dict[str, Any] = {
+        "input": prompt if input_via_stdin else None,
+        "capture_output": True,
+        "text": True,
+        "check": True,
+        "timeout": timeout,
+        "env": env,
+        "stdin": subprocess.DEVNULL if not input_via_stdin else None,
+        "cwd": str(cwd),
+    }
+    try:
+        result = subprocess.run(cmd, **run_kwargs)
+    except subprocess.CalledProcessError as exc:
+        # Narrow recreate-once path: ONLY a resume whose target transcript is
+        # broken (truncated by a killed worker) or expired. This is not the old
+        # recreate cascade — transient/quota failures re-raise unchanged, and
+        # the retry happens at most once, same key, same model.
+        if create or not _resume_target_broken(exc.stderr or "", exc.stdout or ""):
+            raise
+        transcript = session_jsonl_path(sid, cwd)
+        with contextlib.suppress(OSError):
+            transcript.rename(transcript.with_suffix(".jsonl.corrupt"))
+        logger.warning(
+            "session %s (%s) resume failed with a broken/missing transcript; "
+            "quarantined it and recreating the session once",
+            sid,
+            display_name,
+        )
+        retry_cmd = list(cmd)
+        i = retry_cmd.index("--resume")
+        retry_cmd[i : i + 2] = ["--session-id", sid, "--name", display_name]
+        result = subprocess.run(retry_cmd, **run_kwargs)
     return result.stdout, sid
 
 
