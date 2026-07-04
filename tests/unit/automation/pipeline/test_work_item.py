@@ -122,7 +122,7 @@ class TestWorkItem:
         assert b.attempts["plan"] == 0
         assert b.session_ids == {}
         assert b.payload == {}
-        assert b.history == []
+        assert len(b.history) == 0
 
     def test_work_item_timestamps_are_utc_aware(self) -> None:
         """created_at/updated_at and history timestamps are tz-aware UTC."""

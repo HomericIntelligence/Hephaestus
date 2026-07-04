@@ -6,6 +6,7 @@ by the coordinator thread. The single cross-thread channel is CompletionQueue.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -87,7 +88,7 @@ class WorkItem:
     stage: StageName = StageName.REPO
     state: str = ""
     attempts: dict[str, int] = field(default_factory=_default_attempts)
-    history: list[HistoryEvent] = field(default_factory=list)
+    history: deque[HistoryEvent] = field(default_factory=lambda: deque(maxlen=HISTORY_CAP))
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
     worktree: str = ""
@@ -101,6 +102,4 @@ class WorkItem:
         """Record a stage transition in the history (capped at HISTORY_CAP events)."""
         event = HistoryEvent(timestamp=_utcnow(), stage=stage, state=state, note=note)
         self.history.append(event)
-        if len(self.history) > HISTORY_CAP:
-            self.history.pop(0)
         self.updated_at = event.timestamp
