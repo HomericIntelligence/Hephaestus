@@ -72,7 +72,7 @@ logger = logging.getLogger(__name__)
 
 ParseJsonErrorCallback = Callable[[str, Path | None, OSError | None], None]
 
-_JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
+_JSON_BLOCK_RE = re.compile(r"```json[^\n]*\n(.*?)\n```", re.DOTALL)
 _REVIEW_PARSE_MISSING = {"comments": [], "summary": "No structured output from analysis"}
 _REVIEW_PARSE_FAILED = {
     "comments": [],
