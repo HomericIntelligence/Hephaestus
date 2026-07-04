@@ -80,25 +80,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "filter_audit_results": ("hephaestus.validation.audit", "filter_audit_results"),
 }
 
-# Lazy symbols that are deprecated shims. Accessing any of these via the
-# top-level package surface emits a DeprecationWarning at access time.
-_DEPRECATED_LAZY: dict[str, str] = {}
-
-_DEPRECATED_LAZY_WITHOUT_LAZY_IMPORT = set(_DEPRECATED_LAZY) - set(_LAZY_IMPORTS)
-if _DEPRECATED_LAZY_WITHOUT_LAZY_IMPORT:
-    raise RuntimeError(
-        "deprecated lazy symbols must also be registered in _LAZY_IMPORTS: "
-        f"{sorted(_DEPRECATED_LAZY_WITHOUT_LAZY_IMPORT)}"
-    )
-
 
 def __getattr__(name: str) -> Any:
     """Lazy-load public symbols on first access (PEP 562)."""
     if name in _LAZY_IMPORTS:
-        if name in _DEPRECATED_LAZY:
-            import warnings
-
-            warnings.warn(_DEPRECATED_LAZY[name], DeprecationWarning, stacklevel=2)
         module_name, attr = _LAZY_IMPORTS[name]
         import importlib
 
@@ -115,8 +100,7 @@ def __dir__() -> list[str]:
 
     Paired with __getattr__ so introspection tools (IPython tab-completion,
     IDEs, documentation generators) can discover the full public API. Returns
-    only names — no attribute access — so no lazy module is imported and no
-    deprecation warning is triggered.
+    only names — no attribute access — so no lazy module is imported.
     """
     return sorted(set(_LAZY_IMPORTS) | set(__all__) | set(globals()))
 
