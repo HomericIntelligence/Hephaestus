@@ -46,3 +46,24 @@ class TestCliMain:
         # Unknown override loses to the registry check → exit 2, proving the
         # flag reached the config.
         assert cli.main(["--domain", "nope", "--role", "nothing"]) == 2
+
+
+class TestMissingMeshExtra:
+    """#1764 packaging audit: missing nats-py must exit cleanly, not traceback."""
+
+    def test_missing_nats_gives_actionable_error(self, monkeypatch: Any) -> None:
+        import builtins
+
+        from hephaestus.automation.mesh import cli
+
+        monkeypatch.setenv("MESH_DOMAIN", "pipeline")
+        monkeypatch.setenv("MESH_ROLE", "component-lead")
+        real_import = builtins.__import__
+
+        def _blocked(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "nats" or name.startswith("nats."):
+                raise ModuleNotFoundError("No module named 'nats'")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _blocked)
+        assert cli.main([]) == 2

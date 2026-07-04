@@ -65,6 +65,22 @@ def main(argv: list[str] | None = None) -> int:
             print(str(exc), file=sys.stderr)
         return 2
 
+    try:
+        # Pre-flight: nats-py is the [mesh] extra's transport; without it the
+        # worker would otherwise die with a raw ModuleNotFoundError traceback
+        # from deep inside asyncio.run, unlike the clean exits above (POLA).
+        import nats  # noqa: F401
+    except ModuleNotFoundError:
+        message = (
+            "nats-py is not installed — install the mesh extra: "
+            'pip install "HomericIntelligence-Hephaestus[mesh]"'
+        )
+        if args.json:
+            emit_json_status(2, message=message)
+        else:
+            print(message, file=sys.stderr)
+        return 2
+
     worker = MeshWorker(config, handler)
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(worker.run_forever())
