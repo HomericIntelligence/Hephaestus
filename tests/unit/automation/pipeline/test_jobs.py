@@ -79,6 +79,45 @@ class TestJobDataclassesFrozen:
             handle.on_done_state = StageName.CI  # type: ignore[misc]
 
 
+class TestBuildTestJobArgv:
+    """Tests that BuildTestJob.argv is always a tuple."""
+
+    def test_argv_tuple_preserved(self) -> None:
+        job = BuildTestJob(repo="test/repo", cwd=Path("/tmp"), argv=("pytest", "-q"), timeout_s=60)
+        assert job.argv == ("pytest", "-q")
+        assert isinstance(job.argv, tuple)
+
+    def test_argv_list_normalized_to_tuple(self) -> None:
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=Path("/tmp"),
+            argv=["pytest", "-q"],  # type: ignore[arg-type]
+            timeout_s=60,
+        )
+        assert job.argv == ("pytest", "-q")
+        assert isinstance(job.argv, tuple)
+
+
+class TestJobHandleIdentity:
+    """Tests for JobHandle's identity-based hashing and equality (eq=False)."""
+
+    def test_identical_specs_produce_distinct_handles(self) -> None:
+        """Two handles over the same job spec are neither equal nor colliding."""
+        job = GitJob(repo="test/repo", op="rebase", timeout_s=60)
+        h1 = JobHandle(job=job, on_done_state=StageName.CI)
+        h2 = JobHandle(job=job, on_done_state=StageName.CI)
+        assert h1 != h2
+        assert h1 == h1
+        assert len({h1: "a", h2: "b"}) == 2
+
+    def test_handle_hashable_with_unhashable_job_fields(self) -> None:
+        """Handles hash by identity even when the job carries dict kwargs."""
+        job = GitJob(repo="test/repo", op="rebase", timeout_s=60, kwargs={"cwd": Path("/tmp")})
+        handle = JobHandle(job=job, on_done_state=StageName.CI)
+        tracked = {handle: "pending"}
+        assert tracked[handle] == "pending"
+
+
 class TestDefaultFactories:
     """Tests that default factory fields are independent per instance."""
 

@@ -40,18 +40,34 @@ class AgentJob:
 
 @dataclass(frozen=True)
 class BuildTestJob:
-    """Job to run build/test commands."""
+    """Job to run build/test commands.
+
+    Security: ``argv`` MUST NOT carry untrusted (issue-body-derived) strings.
+    It is executed directly as a subprocess argument vector, so only the
+    coordinator may construct these jobs, from vetted command templates.
+    """
 
     repo: str
     cwd: Path
-    argv: tuple[str, ...] | list[str]  # e.g. ("pixi","run","pytest","tests/unit","-q")
+    argv: tuple[str, ...]  # e.g. ("pixi","run","pytest","tests/unit","-q")
     timeout_s: int
     descr: str = ""
+
+    def __post_init__(self) -> None:
+        """Normalize argv to a tuple so the job is deeply immutable/hashable."""
+        if not isinstance(self.argv, tuple):
+            # frozen dataclass: bypass the frozen __setattr__ for normalization
+            object.__setattr__(self, "argv", tuple(self.argv))
 
 
 @dataclass(frozen=True)
 class GitJob:
-    """Job to perform a git operation."""
+    """Job to perform a git operation.
+
+    Security: ``kwargs`` values are forwarded to git/worktree helpers that
+    shell out, so they MUST NOT carry untrusted (issue-body-derived) strings.
+    Only the coordinator may construct these jobs, from vetted values.
+    """
 
     repo: str
     op: str
@@ -78,9 +94,17 @@ class JobResult:
     duration_s: float = 0.0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class JobHandle:
-    """Handle to a submitted job paired with its completion result."""
+    """Handle to a submitted job, used to correlate its completion.
+
+    Identity semantics (``eq=False``): each ``submit()`` mints a distinct
+    handle that hashes and compares by object identity, NOT by field value.
+    Two submissions of identical job specs therefore produce two distinct
+    handles, so the coordinator can key dicts/sets by handle without
+    collisions, and unhashable field values (``dict`` kwargs, callables)
+    never break hashing.
+    """
 
     job: AgentJob | BuildTestJob | GitJob
     on_done_state: StageName

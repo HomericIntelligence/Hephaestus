@@ -3,6 +3,14 @@
 Models tests/unit/automation/test_ci_driver_architecture.py. Enforces via AST
 walk that pipeline/* modules never import or call github_api mutator functions,
 with an explicit allowlist for documented interim offenders awaiting refactor.
+Worker-side modules (worker_pool.py, jobs.py) are held to a stricter bar: they
+may not import ``hephaestus.automation.github_api`` or
+``hephaestus.automation.pr_manager`` AT ALL, in any form — this also catches
+non-obvious mutators such as ``skip_epics``, ``gh_call``, and ``run``.
+
+Caveat: this is a static, import/attribute-level guard. Subprocess-level ``gh``
+calls (e.g. building a ``["gh", ...]`` argv and running it directly) are OUT OF
+SCOPE here and must be caught in code review.
 """
 
 from __future__ import annotations
@@ -46,6 +54,12 @@ _MUTATORS = _PUBLIC_MUTATORS | _PRIVATE_MUTATORS
 # only when fuse-pattern is unavoidable. Empty on day one per issue #1812.
 _ALLOWLIST: frozenset[str] = frozenset()
 
+# Worker-side modules: code that executes ON worker threads. These may not
+# import github_api or pr_manager at all (not even non-mutator helpers) so
+# that gh_call/run/skip_epics-style mutators can never sneak in.
+_WORKER_SIDE_MODULES = ("worker_pool.py", "jobs.py")
+_FORBIDDEN_WORKER_MODULES = ("github_api", "pr_manager")
+
 
 def _imported_mutators(path: Path) -> set[str]:
     """Find github_api mutators imported or called in a Python file (AST walk)."""
@@ -63,14 +77,36 @@ def _imported_mutators(path: Path) -> set[str]:
     return found
 
 
+def _forbidden_module_imports(path: Path) -> set[str]:
+    """Find any-form imports of forbidden modules (github_api, pr_manager)."""
+
+    def _is_forbidden(dotted: str) -> bool:
+        return any(part in _FORBIDDEN_WORKER_MODULES for part in dotted.split("."))
+
+    tree = ast.parse(path.read_text())
+    hits: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            hits |= {a.name for a in node.names if _is_forbidden(a.name)}
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if _is_forbidden(module):
+                hits.add(module)
+            else:
+                # e.g. `from hephaestus.automation import github_api`
+                hits |= {f"{module}.{a.name}" for a in node.names if _is_forbidden(a.name)}
+    return hits
+
+
 def test_no_worker_module_imports_github_mutators() -> None:
-    """Ensure pipeline/* modules do not import/call github_api mutators.
+    """Ensure pipeline modules (recursively) do not import/call github_api mutators.
 
     Workers execute on thread pool with no coordinator access; all GitHub
     state changes must go through the coordinator to maintain consistency.
+    Subprocess-level ``gh`` invocations are out of scope for this AST guard.
     """
     violations = []
-    for py in _PIPELINE.glob("*.py"):
+    for py in sorted(_PIPELINE.rglob("*.py")):
         if py.stem == "__init__":
             continue
         offenders = _imported_mutators(py) - _ALLOWLIST
@@ -79,6 +115,26 @@ def test_no_worker_module_imports_github_mutators() -> None:
 
     assert not violations, "worker code must not call github_api mutators:\n" + "\n".join(
         violations
+    )
+
+
+def test_worker_side_modules_never_import_github_api_or_pr_manager() -> None:
+    """Worker-side modules must not import github_api or pr_manager AT ALL.
+
+    The mutator-name scan above cannot enumerate every mutating entry point
+    (``skip_epics``, ``gh_call``, ``run``, ...), so for the modules that run on
+    worker threads we forbid the whole modules in any import form.
+    """
+    violations = []
+    for name in _WORKER_SIDE_MODULES:
+        path = _PIPELINE / name
+        assert path.exists(), f"expected worker-side module missing: {path}"
+        offenders = _forbidden_module_imports(path)
+        if offenders:
+            violations.append(f"{name}: {sorted(offenders)}")
+
+    assert not violations, (
+        "worker-side modules must not import github_api/pr_manager:\n" + "\n".join(violations)
     )
 
 

@@ -17,7 +17,7 @@ from pathlib import Path
 
 from hephaestus.agents.runtime import resolve_agent, run_agent_session
 from hephaestus.automation import claude_invoke, git_utils
-from hephaestus.automation._review_utils import DEFAULT_STATE_DIR, ensure_state_dir
+from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.jobs import (
     AgentJob,
     BuildTestJob,
@@ -32,18 +32,35 @@ from hephaestus.resilience import (
     CircuitBreakerOpenError,
     resilient_call,
 )
+from hephaestus.utils.file_lock import file_lock
+from hephaestus.utils.helpers import get_repo_root
 
 logger = logging.getLogger(__name__)
 
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 
 
-def _repo_lock_path(repo: str) -> Path:
-    """Cross-process advisory lock file for *repo*, under the automation state dir."""
-    state_dir = ensure_state_dir(Path.cwd(), DEFAULT_STATE_DIR)
-    locks_dir = state_dir / "locks"
-    locks_dir.mkdir(parents=True, exist_ok=True)
-    return locks_dir / f"git-{repo.replace('/', '_')}.lock"
+def _repo_lock_path(repo: str, lock_dir: Path | None = None) -> Path:
+    """Cross-process advisory lock file for *repo*.
+
+    Anchored at ``<repo_root>/<DEFAULT_STATE_DIR>/locks`` (the shared
+    automation state dir) rather than the bare CWD, so every process that
+    operates on this checkout resolves the SAME sentinel file regardless of
+    which subdirectory it was launched from. ``file_lock`` creates the parent
+    directory on first acquisition.
+
+    Args:
+        repo: Repository slug (``owner/name``); slashes are flattened.
+        lock_dir: Override directory for the sentinel files (tests inject a
+            temp dir here).
+
+    Returns:
+        Path of the sentinel lock file for *repo*.
+
+    """
+    if lock_dir is None:
+        lock_dir = get_repo_root() / DEFAULT_STATE_DIR / "locks"
+    return lock_dir / f"git-{repo.replace('/', '_')}.lock"
 
 
 class WorkerPool:
@@ -52,9 +69,23 @@ class WorkerPool:
     Jobs are executed via :meth:`submit`; a future callback drains results to
     the completion queue. Workers never look up PR numbers, build prompts, or
     call the GitHub API — those are coordinator responsibilities.
+
+    Completion contract: every non-cancelled :meth:`submit` produces EXACTLY
+    ONE ``(handle, result)`` tuple on the completion queue — normal job
+    failures are converted to error results in :meth:`_run`, and any exception
+    that still escapes the future is converted to a ``worker_crash`` result in
+    :meth:`_on_future_done`. Only futures cancelled before starting (via
+    :meth:`shutdown`'s ``cancel_futures=True``) emit no completion; the
+    coordinator synthesizes those.
     """
 
-    def __init__(self, size: int, shutdown: threading.Event, completion_q: CompletionQueue) -> None:
+    def __init__(
+        self,
+        size: int,
+        shutdown: threading.Event,
+        completion_q: CompletionQueue,
+        lock_dir: Path | None = None,
+    ) -> None:
         """Initialize the pool.
 
         Args:
@@ -63,6 +94,9 @@ class WorkerPool:
                 starting and after completing each job.
             completion_q: Queue to which ``(JobHandle, JobResult)`` tuples are
                 sent when jobs complete.
+            lock_dir: Optional override for the cross-process git lock
+                directory (tests inject a temp dir; defaults to the shared
+                automation state dir — see :func:`_repo_lock_path`).
 
         """
         self._executor = ThreadPoolExecutor(max_workers=size)
@@ -70,6 +104,7 @@ class WorkerPool:
         self._completion_q = completion_q
         self._repo_locks: dict[str, threading.Lock] = {}
         self._repo_locks_guard = threading.Lock()
+        self._lock_dir = lock_dir
 
     def _repo_lock(self, repo: str) -> threading.Lock:
         """Get or create a per-repo lock (held during git operations)."""
@@ -108,18 +143,26 @@ class WorkerPool:
         """Drain result to completion queue when a job future completes.
 
         If the future was cancelled, do not emit a completion (the coordinator
-        synthesizes one later).
+        synthesizes one later). For every OTHER outcome a completion MUST be
+        queued: ``_run`` already converts normal job failures into error
+        results, and anything that still escapes ``future.result()`` — up to
+        and including ``BaseException`` — is converted here to a
+        ``worker_crash`` result so a non-cancelled submit never silently loses
+        its completion. ``KeyboardInterrupt`` is intentionally NOT re-raised
+        after queuing: this callback runs on an executor worker thread where a
+        re-raise would only print a traceback, not stop the process.
         """
         if future.cancelled():
             return  # cancel_futures synthesizes NO completion
         try:
             result = future.result()
-            self._completion_q.put((handle, result))
-        except Exception:
-            # _run catches all job failures and returns them in a JobResult,
-            # so future.result() should rarely raise. This handles only
-            # unexpected runtime errors from the callback machinery.
-            logger.exception("Future result() raised, discarding")
+        except BaseException as exc:
+            logger.exception("Worker future raised; converting to worker_crash result")
+            result = JobResult(
+                ok=False,
+                error=f"worker_crash: {type(exc).__name__}: {exc!s}"[:500],
+            )
+        self._completion_q.put((handle, result))
 
     def _run(self, job: AgentJob | BuildTestJob | GitJob) -> JobResult:
         """Execute a job and return its result.
@@ -169,7 +212,19 @@ class WorkerPool:
         )
 
     def _run_agent(self, job: AgentJob) -> JobResult:
-        """Run an agent job (Claude or other runtime)."""
+        """Run an agent job (Claude or other runtime).
+
+        Retry tradeoff: the whole agent invocation is wrapped in
+        :func:`resilient_call`, so a *transient* failure (network reset, gh
+        flake) re-runs the ENTIRE agent session — expensive, and the retried
+        session may redo work the failed one partially completed. We accept
+        that because agent invocations are idempotent-by-design at the
+        workflow level (plan/review comments upsert; implementation re-runs
+        converge on the same branch), and the alternative — no retry — turns
+        every blip into a failed pipeline stage. Non-transient errors (rc!=0
+        with non-transient stderr, timeouts) are NOT retried; they surface
+        immediately as error results.
+        """
         try:
             agent = resolve_agent(job.agent)
             is_claude = agent == "claude"
@@ -262,14 +317,21 @@ class WorkerPool:
             )
 
     def _run_git(self, job: GitJob) -> JobResult:
-        """Run a git job (serialized per-repo via a shared lock).
+        """Run a git job (serialized per-repo, in-process AND cross-process).
 
-        The per-repo lock is held for the entire operation to ensure
-        worktree-manager calls (which share .git) do not race.
+        Lock layering (documented invariant): the in-process
+        ``threading.Lock`` is OUTER and the cross-process
+        :func:`~hephaestus.utils.file_lock.file_lock` is INNER. The thread
+        lock elects a single thread per process first, so at most one thread
+        per process ever opens/holds the flock descriptor — sidestepping
+        flock's confusing same-process semantics (multiple fds on one file
+        within one process can still exclude each other) and keeping the
+        blocking flock wait to one thread. Both locks are held for the entire
+        operation because worktrees share ``.git``.
         """
         lock = self._repo_lock(job.repo)
         try:
-            with lock:
+            with lock, file_lock(_repo_lock_path(job.repo, self._lock_dir)):
                 return self._dispatch_git_op(job)
         except subprocess.TimeoutExpired as exc:
             return JobResult(
@@ -280,42 +342,91 @@ class WorkerPool:
             )
 
     def _dispatch_git_op(self, job: GitJob) -> JobResult:
-        """Dispatch a git operation to its handler."""
+        """Dispatch a git operation to its handler.
+
+        ``job.timeout_s`` is threaded into every dispatch whose helper accepts
+        a timeout (currently only ``clone`` via ``git_utils.run``). The
+        remaining helpers (``WorktreeManager.create_worktree`` /
+        ``remove_worktree``, ``rebase_worktree_onto``,
+        ``push_current_branch_with_lease_on_divergence``, ``commit_if_changes``,
+        ``push_branch``) expose no timeout parameter today; each call site
+        below documents that gap rather than silently dropping the budget.
+        """
         if job.op == "create_worktree":
             manager = WorktreeManager()
+            # WorktreeManager.create_worktree has no timeout parameter;
+            # job.timeout_s cannot be enforced here.
             manager.create_worktree(**job.kwargs)
             return JobResult(ok=True)
 
         elif job.op == "remove_worktree":
             manager = WorktreeManager()
+            # WorktreeManager.remove_worktree has no timeout parameter;
+            # job.timeout_s cannot be enforced here.
             manager.remove_worktree(**job.kwargs)
             return JobResult(ok=True)
 
         elif job.op == "rebase":
+            # rebase_worktree_onto(cwd, base_branch="main", *, remote) has no
+            # timeout parameter; job.timeout_s cannot be enforced here.
             result = git_utils.rebase_worktree_onto(**job.kwargs)
             return JobResult(ok=result, value=result)
 
         elif job.op == "push":
+            # push_current_branch_with_lease_on_divergence(cwd, *, branch,
+            # remote, push_ref) has no timeout parameter; job.timeout_s
+            # cannot be enforced here.
             git_utils.push_current_branch_with_lease_on_divergence(**job.kwargs)
             return JobResult(ok=True)
 
         elif job.op == "commit_push":
-            # commit_if_changes returns True if changes were committed
-            git_utils.commit_if_changes(**job.kwargs)
-            # extract worktree_path for push
-            worktree_path = job.kwargs.get("worktree_path")
-            branch = job.kwargs.get("branch", "HEAD")
-            if worktree_path:
-                git_utils.push_branch(branch, worktree_path)
-            return JobResult(ok=True)
+            return self._git_commit_push(job)
 
         elif job.op == "clone":
             # gh repo clone <repo> <dest>
-            repo = job.kwargs.get("repo") or ""
-            dest = job.kwargs.get("dest") or ""
-            git_utils.run(["gh", "repo", "clone", repo, dest], cwd=None)
+            repo = str(job.kwargs.get("repo") or "")
+            dest = str(job.kwargs.get("dest") or "")
+            if not repo or not dest:
+                return JobResult(
+                    ok=False,
+                    error="clone requires non-empty 'repo' and 'dest' kwargs",
+                )
+            git_utils.run(["gh", "repo", "clone", repo, dest], cwd=None, timeout=job.timeout_s)
             return JobResult(ok=True)
 
         else:
             # Should be impossible due to GitJob.__post_init__ validation
             return JobResult(ok=False, error=f"unknown op {job.op!r}")
+
+    def _git_commit_push(self, job: GitJob) -> JobResult:
+        """Commit pending changes in a worktree, then push its branch.
+
+        Only the keys ``commit_if_changes`` actually accepts are forwarded —
+        passing ``job.kwargs`` wholesale would crash on routing-only keys such
+        as ``branch``. A missing ``worktree_path`` (or ``issue_number``) is a
+        hard error result, never a silent skip: the coordinator submitted this
+        op expecting a push to happen.
+        """
+        worktree_path = job.kwargs.get("worktree_path")
+        issue_number = job.kwargs.get("issue_number")
+        if not worktree_path or issue_number is None:
+            return JobResult(
+                ok=False,
+                error="commit_push requires non-empty 'worktree_path' and 'issue_number' kwargs",
+            )
+        # NOTE: commit_if_changes returns False BOTH for "worktree clean,
+        # nothing to commit" AND for "commit attempted but failed" (it logs
+        # and swallows the RuntimeError). value=False is therefore ambiguous;
+        # a failed commit still reaches the push below, which pushes whatever
+        # HEAD already holds. commit_if_changes has no timeout parameter;
+        # job.timeout_s cannot be enforced here.
+        changed = git_utils.commit_if_changes(
+            int(issue_number),
+            Path(worktree_path),
+            str(job.kwargs.get("agent", "claude")),
+            allowed_paths=job.kwargs.get("allowed_paths"),
+        )
+        # push_branch has no timeout parameter; job.timeout_s cannot be
+        # enforced here.
+        git_utils.push_branch(str(job.kwargs.get("branch", "HEAD")), Path(worktree_path))
+        return JobResult(ok=True, value=changed)
