@@ -32,7 +32,12 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from hephaestus.automation.agent_config import fallback_model, session_jsonl_path, session_name
+from hephaestus.automation.agent_config import (
+    fallback_model,
+    planner_claude_timeout,
+    session_jsonl_path,
+    session_name,
+)
 from hephaestus.github.client import ClaudeUsageCapError
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch
 from hephaestus.utils.helpers import strip_null_bytes
@@ -174,8 +179,6 @@ def invoke_claude_with_session(
 
     """
     if timeout is None:
-        from hephaestus.automation.agent_config import planner_claude_timeout
-
         timeout = planner_claude_timeout()
     del recreate_on_resume_failure  # back-compat shim only; no recreate cascade
 

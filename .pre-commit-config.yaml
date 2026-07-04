@@ -112,6 +112,17 @@ repos:
         pass_filenames: false
         files: ^pixi\.(toml|lock)$
 
+  # Tech-debt marker linkage enforcement
+  - repo: local
+    hooks:
+      - id: check-no-unlinked-todo
+        name: Check no unlinked tech-debt markers
+        description: Ensure TODO/FIXME/HACK comments reference a tracking issue
+        entry: pixi run --environment default python3 -m hephaestus.validation.unlinked_todo
+        language: system
+        pass_filenames: false
+        files: ^(hephaestus|scripts)/.*\.py$|^docs/TECH_DEBT\.md$
+
   # CLI table sync check
   - repo: local
     hooks:
@@ -123,17 +134,28 @@ repos:
         pass_filenames: false
         files: ^(README\.md|pyproject\.toml)$
 
+  # Claude settings permission path check
+  - repo: local
+    hooks:
+      - id: check-settings-permission-paths
+        name: Check Claude settings permission paths
+        description: Ensure .claude/settings.json permission paths are canonical POSIX paths
+        entry: pixi run --environment default python3 -m hephaestus.scripts_lib.check_settings_permission_paths
+        language: system
+        pass_filenames: false
+        files: ^\.claude/settings\.json$
+
   # Skill catalog sync check
   - repo: local
     hooks:
       - id: hephaestus-check-skill-catalog
         name: hephaestus check skill catalog
-        description: Ensure docs/plugin-installation.md lists every shipped skill and skill frontmatter is valid
+        description: Ensure skill catalog docs list every shipped skill, CLAUDE.md Arguments column stays in sync, and skill frontmatter is valid
         # --environment default is explicit because the pre-commit CI job runs
         # in the lint env; the hephaestus-* console scripts live in default.
         entry: pixi run --environment default hephaestus-check-skill-catalog
         language: system
-        files: '^(docs/plugin-installation\.md|skills/)'
+        files: '^(CLAUDE\.md|docs/plugin-installation\.md|skills/)'
         pass_filenames: false
 
   # repo-analyze* skill generator drift check
@@ -223,6 +245,20 @@ repos:
         language: system
         pass_filenames: false
         files: ^(\.pre-commit-config\.yaml|pixi\.toml)$
+
+  # GitHub workflow inventory documentation enforcement (#1474)
+  - repo: local
+    hooks:
+      - id: hephaestus-check-workflow-inventory
+        name: hephaestus check workflow inventory
+        description: Ensure .github/workflows/README.md documents every .github/workflows/*.yml file
+        # --environment default is explicit because the pre-commit CI job runs
+        # in the lint env; the hephaestus-* console scripts live in default.
+        entry: pixi run --environment default hephaestus-check-workflow-inventory
+        language: system
+        pass_filenames: false
+        always_run: true
+        files: ^(\.pre-commit-config\.yaml|\.github/workflows/(README\.md|.*\.yml))$
 
   # Version single source of truth check
   - repo: local

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hephaestus.ci.workflows import (
     Violation,
@@ -22,6 +23,7 @@ AUTO_MERGE_ON_GO_WORKFLOW = (
     REPO_ROOT / ".github" / "workflows" / "enable-auto-merge-on-implementation-go.yml"
 )
 REQUIRED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "_required.yml"
+RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test.yml"
 SETUP_PI_ACTION = REPO_ROOT / ".github" / "actions" / "setup-pi-cli" / "action.yml"
 
@@ -108,6 +110,38 @@ class TestCheckInventory:
         self._setup(tmp_path, ["ci.yml"], ["ci.yml", "phantom.yml"])
         _, missing = check_inventory(tmp_path)
         assert "phantom.yml" in missing
+
+
+class TestWorkflowInventoryLiveTree:
+    """Live-tree regression tests for workflow inventory enforcement."""
+
+    def test_real_repo_workflow_inventory_is_in_sync(self) -> None:
+        undocumented, missing = check_inventory(REPO_ROOT)
+        assert undocumented == []
+        assert missing == []
+
+    def test_workflow_inventory_hook_is_wired_in_precommit(self) -> None:
+        from hephaestus.ci.precommit import load_precommit_config
+
+        repos = load_precommit_config(REPO_ROOT / ".pre-commit-config.yaml")
+        hook = next(
+            (
+                hook
+                for repo in repos
+                for hook in repo.get("hooks", [])
+                if hook.get("id") == "hephaestus-check-workflow-inventory"
+            ),
+            None,
+        )
+
+        assert hook is not None
+        assert hook["entry"] == "pixi run --environment default hephaestus-check-workflow-inventory"
+        assert hook["pass_filenames"] is False
+        assert hook["always_run"] is True
+        assert (
+            hook["files"]
+            == r"^(\.pre-commit-config\.yaml|\.github/workflows/(README\.md|.*\.yml))$"
+        )
 
 
 class TestIsCheckoutStep:
@@ -260,6 +294,29 @@ class TestEnableAutoMergeOnImplementationGoWorkflow:
         assert "Auto-merge is enabled before implementation review GO." in text
 
 
+class TestRequiredPixiCheckWorkflow:
+    """Regression tests for the required pixi-check workflow job."""
+
+    def _pixi_install_script(self) -> str:
+        with open(REQUIRED_WORKFLOW, encoding="utf-8") as f:
+            workflow = yaml.safe_load(f)
+        steps = workflow["jobs"]["pixi-check"]["steps"]
+        for step in steps:
+            if step.get("name") == "pixi install (locked)":
+                return str(step["run"])
+        raise AssertionError("pixi-check job must define a 'pixi install (locked)' step")
+
+    def test_missing_pixi_lock_fails_without_unlocked_install(self) -> None:
+        """pixi-check must fail fast if the lockfile is missing."""
+        script = self._pixi_install_script()
+        lines = {line.strip() for line in script.splitlines()}
+
+        assert "pixi install --locked" in lines
+        assert "exit 1" in lines
+        assert "pixi install" not in lines
+        assert "running unlocked" not in script
+
+
 class TestPiCliSetup:
     """Regression tests for installing the real Pi CLI in test environments."""
 
@@ -282,6 +339,33 @@ class TestPiCliSetup:
         assert "node-version: 22.19.0" in text
         assert "npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.2" in text
         assert "pi --version" in text
+
+
+class TestReleaseAttestations:
+    """Regression tests for PEP 740 build attestations in the release workflow."""
+
+    def _publish_step(self) -> dict:
+        """Return the parsed ``gh-action-pypi-publish`` step from release.yml."""
+        workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        steps = workflow["jobs"]["build-and-publish"]["steps"]
+        publish = [s for s in steps if "gh-action-pypi-publish" in str(s.get("uses", ""))]
+        assert len(publish) == 1, "expected exactly one PyPI publish step"
+        return publish[0]
+
+    def test_publish_step_generates_attestations(self) -> None:
+        """The PyPI publish step must opt into PEP 740 / Sigstore provenance.
+
+        Parses the workflow and asserts the flag lives under the publish step's
+        ``with:`` block, not merely somewhere in the file text — a comment or
+        unrelated step containing the string would otherwise pass a substring
+        check while leaving attestations disabled.
+        """
+        assert self._publish_step()["with"]["generate_attestations"] is True
+
+    def test_id_token_write_permission_present(self) -> None:
+        """Attestation generation requires the ``id-token: write`` permission."""
+        workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        assert workflow["permissions"]["id-token"] == "write"
 
 
 class TestAutomationExtraInstall:
@@ -356,6 +440,21 @@ class TestCLIEntryPoints:
             "sys.argv", ["hephaestus-check-workflow-inventory", "--repo-root", str(tmp_path)]
         )
         assert check_workflow_inventory_main() == 1
+
+    def test_inventory_default_repo_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hephaestus.ci.workflows import check_workflow_inventory_main
+
+        workflows = tmp_path / ".github" / "workflows"
+        workflows.mkdir(parents=True)
+        (workflows / "ci.yml").write_text("name: CI")
+        (workflows / "README.md").write_text("| ci.yml | CI workflow |\n")
+
+        monkeypatch.setattr("hephaestus.utils.helpers.get_repo_root", lambda: tmp_path)
+        monkeypatch.setattr("sys.argv", ["hephaestus-check-workflow-inventory"])
+
+        assert check_workflow_inventory_main() == 0
 
     def test_checkout_valid(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture

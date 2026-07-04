@@ -887,6 +887,47 @@ def test_build_phase_argv_implement_has_single_max_workers() -> None:
     assert argv.count("--max-workers") == 1
 
 
+@pytest.mark.parametrize(
+    ("phase", "worker_arg"),
+    [
+        ("plan", "--parallel"),
+        ("implement", "--max-workers"),
+        ("drive-green", "--max-workers"),
+    ],
+)
+def test_build_phase_argv_issue_scoped_phases_use_single_child_worker(
+    phase: str, worker_arg: str
+) -> None:
+    """Issue-major outer workers should not fan out again inside one-issue phases."""
+    cfg = LoopConfig(max_workers=8)
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/phase", [])):
+        argv = loop_runner._build_phase_argv(phase, cfg, open_issues=[1577])
+
+    assert argv is not None
+    assert argv[argv.index(worker_arg) + 1] == "1"
+
+
+@pytest.mark.parametrize("open_issues", ([1, 2], []))
+@pytest.mark.parametrize(
+    ("phase", "worker_arg"),
+    [
+        ("plan", "--parallel"),
+        ("implement", "--max-workers"),
+        ("drive-green", "--max-workers"),
+    ],
+)
+def test_build_phase_argv_multi_issue_or_unscoped_phases_keep_configured_workers(
+    phase: str, worker_arg: str, open_issues: list[int]
+) -> None:
+    """Only exactly-one-issue child invocations are narrowed to one worker."""
+    cfg = LoopConfig(max_workers=8)
+    with patch.object(loop_runner, "_resolve_phase_bin", return_value=("/x/phase", [])):
+        argv = loop_runner._build_phase_argv(phase, cfg, open_issues=open_issues)
+
+    assert argv is not None
+    assert argv[argv.index(worker_arg) + 1] == "8"
+
+
 def test_build_phase_argv_plan_omits_no_ui() -> None:
     """Regression: plan does NOT receive --no-ui (per _PHASE_FLAGS)."""
     cfg = LoopConfig()
@@ -1587,7 +1628,7 @@ class TestSubprocessTimeouts:
         with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh_call:
             mock_gh_call.return_value = _completed(stdout="[]")
             loop_runner._gh_list_repos("MyOrg")
-        assert mock_gh_call.call_args.kwargs.get("timeout") is None
+        assert mock_gh_call.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
 
     def test_gh_issue_numbers_passes_timeout(self) -> None:
         """``gh issue list`` is routed through gh_call's bounded adapter."""
@@ -1596,7 +1637,7 @@ class TestSubprocessTimeouts:
                 stdout='[{"number": 1, "labels": [], "title": "a"}]'
             )
             loop_runner._list_open_issue_numbers("Org", "Repo")
-        assert mock_gh_call.call_args.kwargs.get("timeout") is None
+        assert mock_gh_call.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
 
     def test_preflight_token_scopes_passes_timeout(self) -> None:
         """The token preflight ``gh api`` call is routed through gh_call."""

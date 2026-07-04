@@ -26,7 +26,9 @@ Assuming audit remediation is complete:
 
 2. **Cross-Repository Coverage** — Expand hephaestus utility adoption across other HomericIntelligence projects. Standardize configuration loading, logging setup, and subprocess execution patterns.
 
-3. **API Surface Documentation** — Auto-generate API reference documentation for all public modules, including stable subpackage surfaces and complete CLI reference.
+3. **API Surface Documentation** — ✅ Auto-generated API reference is now published to
+   GitHub Pages on each release (pdoc). Remaining: ensure every public function carries a
+   complete docstring, including stable subpackage surfaces and a full CLI reference.
 
 4. **Observability and Health Checks** — Add structured health reporting for long-running components (e.g., NATSSubscriberThread), supporting the broader ProjectArgus (observability) initiative.
 
@@ -50,6 +52,25 @@ We also capture session learnings in ProjectMnemosyne via the `/learn` skill, pr
 
 ## Updating This Roadmap
 
-This roadmap is reviewed and updated at the end of each release cycle (typically monthly). As new Epics are created or project priorities shift, the roadmap is refreshed to reflect current focus areas. To propose changes, open an issue and reference this document.
+**Cadence — release-driven, not date-driven.** A "release cycle" is not a
+calendar interval; it is each `vX.Y.Z` release cut through the **Auto Tag
+Release** workflow (see [RELEASING.md](RELEASING.md)). Because that workflow is
+triggered manually when a batch of features/fixes is ready — not on a fixed
+schedule — releases (and therefore roadmap reviews) are **feature/fix-driven,
+not date-driven**. Cadence in practice tracks release frequency rather than a
+fixed monthly rhythm.
 
-Last updated: 2026-06-12
+**Trigger.** The roadmap is reviewed as part of the pre-release checklist,
+whenever a release is cut. Any Epic being opened or closed, or a shift in
+priorities, is also a valid trigger to refresh it between releases.
+
+**Responsibility.** The maintainer cutting the release owns the roadmap review
+for that cycle: confirming the "Current Focus" section still reflects open
+Epics and updating the "Last updated" date below. In this solo/small-team repo
+that is the release maintainer; there is no separate roadmap committee.
+
+**How to propose changes.** Open an issue that references this document (or a
+PR editing it directly). The roadmap is refreshed to reflect current focus
+areas as Epics are created or priorities shift.
+
+Last updated: 2026-07-01

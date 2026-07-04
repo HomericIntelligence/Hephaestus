@@ -16,6 +16,7 @@ from hephaestus.automation.loop_runner import (
     _build_phase_argv,
     _count_failing_prs,
 )
+from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
 
 def _ok(name: str) -> PhaseResult:
@@ -97,6 +98,14 @@ class TestCountFailingPrs:
             mock_gh.return_value = Mock(stdout="not-json")
             result = _count_failing_prs("MyOrg", "MyRepo")
         assert result == 0
+
+    def test_count_failing_prs_uses_network_timeout(self) -> None:
+        """PR discovery gh call uses the shared network timeout."""
+        with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh:
+            mock_gh.return_value = Mock(stdout="[]")
+            _count_failing_prs("MyOrg", "MyRepo")
+
+        assert mock_gh.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
 
     def test_count_failing_prs_logs_warning_on_limit_hit(self) -> None:
         """A warning is logged when the 1000-PR cap is hit."""

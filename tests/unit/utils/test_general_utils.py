@@ -297,6 +297,51 @@ class TestRunSubprocess:
         assert long_arg not in rendered, "full long arg leaked into log"
         assert "more chars" in rendered, "truncation marker missing"
 
+    def test_failed_command_logs_stdout_tail(self) -> None:
+        """A failing command logs stdout tail where pre-commit reports failures."""
+        stdout = "stdout prefix\n" + ("passed hook\n" * 300) + "failing-hook\nboom\n"
+        error = subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["pre-commit", "run"],
+            output=stdout,
+            stderr="stderr context",
+        )
+
+        with (
+            patch("hephaestus.utils.helpers.subprocess.run", side_effect=error),
+            patch("hephaestus.utils.helpers.logger.error") as mock_error,
+        ):
+            with pytest.raises(subprocess.CalledProcessError):
+                run_subprocess(["pre-commit", "run"])
+
+        rendered = str(mock_error.call_args_list)
+        assert "stdout:" in rendered
+        assert "failing-hook" in rendered
+        assert "boom" in rendered
+        assert "stdout prefix" not in rendered
+
+    def test_failed_command_logs_stderr_tail(self) -> None:
+        """Long stderr keeps the tail instead of the first 200 characters."""
+        stderr = "stderr prefix\n" + ("older stderr\n" * 300) + "useful stderr tail\n"
+        error = subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["tool"],
+            output="stdout context",
+            stderr=stderr,
+        )
+
+        with (
+            patch("hephaestus.utils.helpers.subprocess.run", side_effect=error),
+            patch("hephaestus.utils.helpers.logger.error") as mock_error,
+        ):
+            with pytest.raises(subprocess.CalledProcessError):
+                run_subprocess(["tool"])
+
+        rendered = str(mock_error.call_args_list)
+        assert "stderr:" in rendered
+        assert "useful stderr tail" in rendered
+        assert "stderr prefix" not in rendered
+
 
 class TestFormatCmdForLog:
     """Tests for _format_cmd_for_log (private helper)."""

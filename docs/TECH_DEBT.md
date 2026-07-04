@@ -7,9 +7,10 @@ a tracking issue using the `# TODO(#N): explanation` form (for example,
 `# TODO(#710): replace this dynamic test-seam with constructor injection.`).
 Bare, unlinked markers are not allowed.
 
-> Enforcement note: a `check-no-unlinked-todo` pre-commit hook to gate
-> bare markers automatically is deferred to a follow-up issue. Until it
-> lands, reviewers enforce the `# TODO(#N)` form manually.
+> Enforcement note: the `check-no-unlinked-todo` pre-commit hook
+> (`hephaestus-check-unlinked-todo`, added in #1492) gates bare markers
+> automatically across `hephaestus/` and `scripts/`. Reviewers additionally
+> enforce the `# TODO(#N)` form in review.
 
 ## Filing
 

@@ -8,6 +8,7 @@ from hephaestus.validation.test_structure import (
     _get_subpackages,
     check_no_ghost_packages,
     check_no_loose_test_files,
+    check_no_phantom_test_dirs,
     check_no_stray_tests_root_files,
     check_no_unsanctioned_test_dirs,
     check_scripts_coverage,
@@ -290,6 +291,39 @@ class TestCheckNoGhostPackages:
         assert ok is True, f"ghost dirs present: {ghosts}"
 
 
+class TestCheckNoPhantomTestDirs:
+    """Tests for check_no_phantom_test_dirs()."""
+
+    def test_pycache_only_test_dir_flagged(self, tmp_path: Path) -> None:
+        """Regression for #1468: tests/unit/git/ with only __pycache__ is phantom."""
+        test_root = tmp_path / "tests" / "unit"
+        ghost = test_root / "git"
+        (ghost / "__pycache__").mkdir(parents=True)
+        (ghost / "__pycache__" / "test_git.cpython-314.pyc").write_text("", encoding="utf-8")
+
+        ok, phantoms = check_no_phantom_test_dirs(test_root)
+
+        assert ok is False
+        assert phantoms == {"git"}
+
+    def test_test_module_dir_not_phantom(self, tmp_path: Path) -> None:
+        """A test dir with a real test module is not phantom."""
+        test_root = tmp_path / "tests" / "unit"
+        (test_root / "github").mkdir(parents=True)
+        (test_root / "github" / "test_client.py").write_text("", encoding="utf-8")
+
+        ok, phantoms = check_no_phantom_test_dirs(test_root)
+
+        assert ok is True
+        assert phantoms == set()
+
+    def test_real_repo_has_no_phantom_test_dirs(self) -> None:
+        """The shipped tests/unit tree must not contain pycache-only skeletons."""
+        repo_root = Path(__file__).resolve().parents[3]
+        ok, phantoms = check_no_phantom_test_dirs(repo_root / "tests" / "unit")
+        assert ok is True, f"phantom test dirs present: {phantoms}"
+
+
 class TestGetSubpackages:
     """_get_subpackages must ignore ghost (__pycache__-only) directories."""
 
@@ -355,7 +389,7 @@ class TestCheckTestStructure:
     """Tests for check_test_structure()."""
 
     def test_passing_structure(self, tmp_path: Path) -> None:
-        """Correctly structured project passes both checks."""
+        """Correctly structured project passes all checks."""
         # Create source package
         src = tmp_path / "mypackage"
         _make_package(src, "utils")
@@ -446,10 +480,27 @@ class TestCheckTestStructure:
         assert "tests/unit/git/ (no tests)" in err
         assert "hephaestus/git/ (no modules)" in err
 
+    def test_pycache_only_test_dir_fails(self, tmp_path: Path, capsys) -> None:
+        """check_test_structure fails when tests/unit/git/ is only stale bytecode."""
+        src = tmp_path / "mypackage"
+        _make_package(src, "real")
+        (src / "__init__.py").touch()
+
+        test_root = tmp_path / "tests" / "unit"
+        _make_test_dir(test_root, "real")
+        ghost = test_root / "git"
+        (ghost / "__pycache__").mkdir(parents=True)
+        (ghost / "__pycache__" / "test_git.cpython-314.pyc").write_text("", encoding="utf-8")
+
+        passed = check_test_structure(tmp_path, src_package="mypackage")
+
+        assert passed is False
+        assert "tests/unit/git/ (no Python source)" in capsys.readouterr().err
+
     def test_stray_tests_root_file_fails(self, tmp_path: Path, capsys) -> None:
         """check_test_structure fails and prints when a test_*.py sits at tests/ root.
 
-        Exercises Check 5's failure branch (the stray-file print loop). The
+        Exercises Check 6's failure branch (the stray-file print loop). The
         structure passes every other check; only a stray ``test_*.py`` at
         ``tests/`` root (outside testpaths) triggers the failure — the #1467
         regression.

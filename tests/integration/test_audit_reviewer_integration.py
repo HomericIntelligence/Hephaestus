@@ -6,6 +6,7 @@ from unittest import mock
 
 import pytest
 
+from hephaestus.automation._review_utils import DEFAULT_STATE_DIR
 from hephaestus.automation.audit_reviewer import (
     AuditReviewer,
     _parse_coordinator_results,
@@ -119,13 +120,18 @@ Overall, we have 2 PRs ready to review."""
         assert any("#100" in line and "GO" in line for line in lines)
         assert any("#101" in line and "NOGO" in line for line in lines)
 
-    def test_auditreviewer_construction_default(self) -> None:
+    def test_auditreviewer_construction_default(self, tmp_path: Path) -> None:
         """Verify AuditReviewer initializes with sensible defaults."""
-        reviewer = AuditReviewer()
+        with mock.patch(
+            "hephaestus.automation.audit_reviewer.get_repo_root",
+            return_value=tmp_path,
+        ):
+            reviewer = AuditReviewer()
         assert reviewer.agent == "claude"
         assert reviewer.pr_numbers == []
         assert reviewer.dry_run is False
-        assert reviewer.state_dir is not None
+        assert reviewer.state_dir == tmp_path / DEFAULT_STATE_DIR
+        assert reviewer.state_dir.is_dir()
 
     def test_auditreviewer_construction_codex(self) -> None:
         """Verify AuditReviewer accepts codex agent."""

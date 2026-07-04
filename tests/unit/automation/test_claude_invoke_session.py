@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from collections.abc import Generator
@@ -11,7 +12,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hephaestus.automation.claude_invoke import invoke_claude_with_session
+from hephaestus.automation.agent_config import OPUS_48
+from hephaestus.automation.claude_invoke import (
+    invoke_claude_with_session,
+    is_model_capped,
+    reset_capped_models,
+)
 from hephaestus.automation.session_naming import (
     AGENT_PLAN_REVIEWER,
     AGENT_PLANNER,
@@ -372,6 +378,279 @@ class TestEndToEndSessionResume:
         assert expected_sid in argv
         assert "--session-id" not in argv
         assert "--session-id" not in argv
+
+
+MODEL_CAP_MESSAGE = (
+    "You've reached your Fable 5 limit. "
+    "Run /usage-credits to continue or switch models with /model."
+)
+
+
+def _cap_error(stderr: str = MODEL_CAP_MESSAGE, stdout: str = "") -> subprocess.CalledProcessError:
+    return subprocess.CalledProcessError(returncode=1, cmd=["claude"], output=stdout, stderr=stderr)
+
+
+def _cap_envelope() -> str:
+    return json.dumps({"is_error": True, "api_error_status": 429, "result": MODEL_CAP_MESSAGE})
+
+
+class TestModelCapFallback:
+    """#1793: a model-specific usage cap falls back to the default model.
+
+    The "reached your <model> limit … switch models with /model" 429 carries no
+    reset epoch, so the wait-until-reset handlers can't help — the correct
+    remediation is to retry once on :func:`agent_config.fallback_model` and pin
+    the fallback for the rest of the process (sticky registry).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_registry(self) -> Generator[None, None, None]:
+        reset_capped_models()
+        yield
+        reset_capped_models()
+
+    def test_called_process_error_falls_back_once(
+        self, fake_home: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A cap CalledProcessError retries the SAME request on the fallback."""
+        import logging
+
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        ok = MagicMock(stdout="fallback-ok", stderr="", returncode=0)
+        with patch(
+            "hephaestus.automation.claude_invoke.subprocess.run",
+            side_effect=[_cap_error(), ok],
+        ) as m:
+            with caplog.at_level(logging.WARNING, logger="hephaestus.automation.claude_invoke"):
+                out, _sid = invoke_claude_with_session(
+                    repo="R",
+                    issue=1,
+                    agent=AGENT_PLANNER,
+                    prompt="hi",
+                    model="claude-fable-5",
+                    cwd=cwd,
+                )
+        assert out == "fallback-ok"
+        assert m.call_count == 2
+        first_argv = _argv(m.call_args_list[0])
+        second_argv = _argv(m.call_args_list[1])
+        assert first_argv[first_argv.index("--model") + 1] == "claude-fable-5"
+        assert second_argv[second_argv.index("--model") + 1] == OPUS_48
+        # Same prompt on both attempts — the request is retried, not dropped.
+        assert first_argv[-1] == second_argv[-1] == "hi"
+        assert any(
+            "claude-fable-5" in r.getMessage() and OPUS_48 in r.getMessage() for r in caplog.records
+        )
+
+    def test_error_envelope_falls_back_once(self, fake_home: Path) -> None:
+        """An exit-0 is_error:true cap envelope (json format) also falls back."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        capped = MagicMock(stdout=_cap_envelope(), stderr="", returncode=0)
+        ok = MagicMock(stdout='{"result": "ok"}', stderr="", returncode=0)
+        with patch(
+            "hephaestus.automation.claude_invoke.subprocess.run",
+            side_effect=[capped, ok],
+        ) as m:
+            out, _sid = invoke_claude_with_session(
+                repo="R",
+                issue=1,
+                agent=AGENT_PLANNER,
+                prompt="hi",
+                model="claude-fable-5",
+                cwd=cwd,
+                output_format="json",
+            )
+        assert out == '{"result": "ok"}'
+        assert m.call_count == 2
+        second_argv = _argv(m.call_args_list[1])
+        assert second_argv[second_argv.index("--model") + 1] == OPUS_48
+
+    def test_registry_is_sticky_across_calls(self, fake_home: Path) -> None:
+        """After a cap, later calls go straight to the fallback (1 attempt)."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        ok = MagicMock(stdout="ok", stderr="", returncode=0)
+        with patch(
+            "hephaestus.automation.claude_invoke.subprocess.run",
+            side_effect=[_cap_error(), ok],
+        ):
+            invoke_claude_with_session(
+                repo="R",
+                issue=1,
+                agent=AGENT_PLANNER,
+                prompt="hi",
+                model="claude-fable-5",
+                cwd=cwd,
+            )
+        assert is_model_capped("claude-fable-5") is True
+        with patch("hephaestus.automation.claude_invoke.subprocess.run", return_value=ok) as m2:
+            invoke_claude_with_session(
+                repo="R",
+                issue=2,
+                agent=AGENT_PLANNER,
+                prompt="next",
+                model="claude-fable-5",
+                cwd=cwd,
+            )
+        assert m2.call_count == 1
+        argv = _argv(m2.call_args)
+        assert argv[argv.index("--model") + 1] == OPUS_48
+
+    def test_no_fallback_loop_when_model_is_already_fallback(self, fake_home: Path) -> None:
+        """A cap on the fallback model itself propagates — no retry loop."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        with patch(
+            "hephaestus.automation.claude_invoke.subprocess.run",
+            side_effect=_cap_error(),
+        ) as m:
+            with pytest.raises(subprocess.CalledProcessError):
+                invoke_claude_with_session(
+                    repo="R",
+                    issue=1,
+                    agent=AGENT_PLANNER,
+                    prompt="hi",
+                    model=OPUS_48,
+                    cwd=cwd,
+                )
+        assert m.call_count == 1
+        assert is_model_capped(OPUS_48) is False
+
+    def test_fallback_also_capped_envelope_returned_verbatim(self, fake_home: Path) -> None:
+        """If the fallback retry ALSO returns a cap envelope it is returned as-is.
+
+        Callers' existing ``raise_for_error_envelope`` guards remain the
+        backstop; the fallback model is never added to the registry.
+        """
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        capped = MagicMock(stdout=_cap_envelope(), stderr="", returncode=0)
+        with patch(
+            "hephaestus.automation.claude_invoke.subprocess.run",
+            side_effect=[capped, capped],
+        ) as m:
+            out, _sid = invoke_claude_with_session(
+                repo="R",
+                issue=1,
+                agent=AGENT_PLANNER,
+                prompt="hi",
+                model="claude-fable-5",
+                cwd=cwd,
+                output_format="json",
+            )
+        assert m.call_count == 2
+        assert out == _cap_envelope()
+        assert is_model_capped(OPUS_48) is False
+
+    def test_non_cap_failure_propagates_untouched(self, fake_home: Path) -> None:
+        """A 529 overload (or any non-cap error) is NOT a fallback trigger."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        boom = subprocess.CalledProcessError(
+            returncode=1, cmd=["claude"], output="", stderr="API Error: 529 Overloaded"
+        )
+        with patch("hephaestus.automation.claude_invoke.subprocess.run", side_effect=boom) as m:
+            with pytest.raises(subprocess.CalledProcessError):
+                invoke_claude_with_session(
+                    repo="R",
+                    issue=1,
+                    agent=AGENT_PLANNER,
+                    prompt="hi",
+                    model="claude-fable-5",
+                    cwd=cwd,
+                )
+        assert m.call_count == 1
+
+    def test_non_cap_error_envelope_returned_untouched(self, fake_home: Path) -> None:
+        """A non-cap is_error envelope is returned verbatim (callers handle it)."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        envelope = json.dumps({"is_error": True, "result": "tool execution failed"})
+        with patch(
+            "hephaestus.automation.claude_invoke.subprocess.run",
+            return_value=MagicMock(stdout=envelope, stderr="", returncode=0),
+        ) as m:
+            out, _sid = invoke_claude_with_session(
+                repo="R",
+                issue=1,
+                agent=AGENT_PLANNER,
+                prompt="hi",
+                model="claude-fable-5",
+                cwd=cwd,
+                output_format="json",
+            )
+        assert m.call_count == 1
+        assert out == envelope
+
+    def test_text_format_stdout_not_scanned(self, fake_home: Path) -> None:
+        """Plain-text exit-0 output mentioning /usage-credits is NOT a cap.
+
+        Agent prose can legitimately contain the phrase (e.g. this repo's own
+        code under review); only the json error envelope is trusted on exit 0.
+        """
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        with patch(
+            "hephaestus.automation.claude_invoke.subprocess.run",
+            return_value=MagicMock(
+                stdout="the fix mentions /usage-credits handling", stderr="", returncode=0
+            ),
+        ) as m:
+            out, _sid = invoke_claude_with_session(
+                repo="R",
+                issue=1,
+                agent=AGENT_PLANNER,
+                prompt="hi",
+                model="claude-fable-5",
+                cwd=cwd,
+            )
+        assert m.call_count == 1
+        assert "usage-credits" in out
+        assert is_model_capped("claude-fable-5") is False
+
+    def test_fallback_gets_its_own_session_lineage(self, fake_home: Path) -> None:
+        """The returned sid is the FALLBACK model's uuid (resume is model-locked)."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        ok = MagicMock(stdout="ok", stderr="", returncode=0)
+        with patch(
+            "hephaestus.automation.claude_invoke.subprocess.run",
+            side_effect=[_cap_error(), ok],
+        ):
+            _, sid = invoke_claude_with_session(
+                repo="R",
+                issue=1,
+                agent=AGENT_PLANNER,
+                prompt="hi",
+                model="claude-fable-5",
+                cwd=cwd,
+            )
+        assert sid == session_uuid("R", 1, AGENT_PLANNER, OPUS_48)
+
+    def test_heph_fallback_model_env_override(
+        self, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """HEPH_FALLBACK_MODEL redirects the fallback target."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        monkeypatch.setenv("HEPH_FALLBACK_MODEL", "claude-haiku-4-5")
+        ok = MagicMock(stdout="ok", stderr="", returncode=0)
+        with patch(
+            "hephaestus.automation.claude_invoke.subprocess.run",
+            side_effect=[_cap_error(), ok],
+        ) as m:
+            invoke_claude_with_session(
+                repo="R",
+                issue=1,
+                agent=AGENT_PLANNER,
+                prompt="hi",
+                model="claude-fable-5",
+                cwd=cwd,
+            )
+        second_argv = _argv(m.call_args_list[1])
+        assert second_argv[second_argv.index("--model") + 1] == "claude-haiku-4-5"
 
 
 class TestPromptNullByteSanitization:

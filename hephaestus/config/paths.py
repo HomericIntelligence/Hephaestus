@@ -40,7 +40,24 @@ def _current_checkout_parent() -> Path | None:
     checkout = Path(result.stdout.strip())
     if not checkout.name:
         return None
-    parent = checkout.parent
+    # Automation issue worktrees live under
+    # ``<repo>/build/.worktrees/issue-N``. When the loop is launched from one,
+    # the projects root is still the parent of ``<repo>``, not
+    # ``<repo>/build/.worktrees``; otherwise repo resolution nests clones and
+    # worktrees under the issue worktree area.
+    if (
+        checkout.parent.name == ".worktrees"
+        and checkout.parent.parent.name == "build"
+        and checkout.parent.parent.parent.is_dir()
+    ):
+        parent = checkout.parent.parent.parent.parent
+        logger.warning(
+            "Current checkout %s is an automation issue worktree; using %s as projects root",
+            checkout,
+            parent,
+        )
+    else:
+        parent = checkout.parent
     return parent if parent.is_dir() else None
 
 

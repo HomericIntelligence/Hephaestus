@@ -48,6 +48,26 @@ on each automation command (e.g., `--agent-timeout`, `--poll-max-wait`,
 `--git-message-timeout`, etc.). Legacy `claude_models`, `claude_timeouts`, and
 `session_naming` modules remain compatibility shims over `agent_config`.
 
+## Claude non-interactive permission policy
+
+Claude invocations that pass `permission_mode="dontAsk"` are non-interactive
+automation calls. They do not use `--dangerously-skip-permissions`, and
+`hephaestus.automation.claude_invoke.invoke_claude_with_session` still forwards
+the explicit `--allowedTools` scope. There is no OS-level seccomp, namespace, or chroot sandbox on this Claude path. The compensating controls are per-call tool
+allowlists, cwd/worktree scoping, subprocess timeouts, prompt fencing for
+untrusted GitHub content, secure logs, and GitHub branch protection plus human
+review before merge.
+
+| Call site | Tools | Scope / controls |
+| --- | --- | --- |
+| `audit_reviewer.py:run_audit_coordinator` | `Read,Glob,Grep` | Repo-root audit analysis; no write tools; direct-runner parity uses `sandbox="read-only"`. |
+| `review_validator.py:_run_validation_session` | `Read,Glob,Grep` | Worktree validation of prior review comments; no write tools; GitHub updates stay in orchestrator code. |
+| `comment_difficulty.py:_run_classifier_session` | `Read,Glob,Grep` | Worktree comment classification; no write tools; result is parsed JSON only. |
+| `pr_reviewer.py:run_pr_review_analysis` | `Read,Glob,Grep` | Worktree PR analysis; no write tools; review posting is handled outside the agent call. |
+| `_implement_phase.py:ImplementPhase._run_claude_impl_session` | `Read,Write,Edit,Glob,Grep,Bash` | Initial implementation runs in the isolated issue worktree and remains subject to review, CI, and branch protection. |
+| `_review_phase.py:ReviewPhase._resume_impl_with_feedback` | `Read,Write,Edit,Glob,Grep,Bash` | Review-feedback fixes resume the implementer in the isolated issue worktree and cannot bypass PR review or merge gates. |
+| `address_review.py:run_address_fix_session` | `Read,Write,Edit,Glob,Grep,Bash,Task,Skill` | Review-thread fixes run in the isolated issue worktree; `Task`/`Skill` support per-comment sub-agents and skill-advisor routing. |
+
 ## Prompt safety
 
 `hephaestus.automation.prompts` builds every prompt the agents see. The module's

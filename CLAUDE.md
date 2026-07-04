@@ -316,6 +316,10 @@ gh issue comment <number> --body "Completed implementation of new logging utilit
 
 **IMPORTANT**: The `main` branch is protected. All changes must go through a pull request.
 
+ProjectHephaestus uses trunk-based development: create one short-lived feature
+branch per issue, open a pull request, squash-merge it back to `main`, and cut
+releases from signed `vX.Y.Z` tags; there are no release branches.
+
 **PR policy (enforced by required CI gate `pr-policy` and by the PR reviewer):**
 
 1. The PR body MUST contain the literal line `Closes #<issue-number>` (capital

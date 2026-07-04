@@ -75,21 +75,43 @@ logger = logging.getLogger(__name__)
 
 # ── Model selection ──────────────────────────────────────────────────────────
 
-OPUS = "claude-opus-4-7"
-SONNET = "claude-sonnet-4-6"
-HAIKU = "claude-haiku-4-5"
+OPUS_47 = "claude-opus-4-7"
+SONNET_46 = "claude-sonnet-4-6"
+HAIKU_45 = "claude-haiku-4-5"
 CODEX_ADVISE = "gpt-5.4-mini"
 
 # Newer tiers that are valid model IDs but not the per-phase defaults. Listed in
 # the known set so pinning them via HEPH_*_MODEL doesn't emit a spurious
-# "Unknown model" warning. (Fable sits above Opus; 4.8 is the current Opus.)
+# "Unknown model" warning. (Fable and Mythos sit above Opus; 4.8 is the
+# current Opus.)
 OPUS_48 = "claude-opus-4-8"
-FABLE = "claude-fable-5"
+FABLE_5 = "claude-fable-5"
+SONNET_5 = "claude-sonnet-5"
+SONNET_50 = SONNET_5
+MYTHOS = "claude-mythos-5"
+SONNET = SONNET_46
+OPUS = OPUS_48
+HAIKU = HAIKU_45
+FABLE = FABLE_5
 
 # The set of model IDs the automation suite recognizes. Overrides to values
 # outside this set are still accepted (operators may have preview access) but
 # trigger a one-time warning so misconfigured/typo'd env vars are visible.
-_KNOWN_MODELS: frozenset[str] = frozenset({OPUS, SONNET, HAIKU, OPUS_48, FABLE})
+_KNOWN_MODELS: frozenset[str] = frozenset(
+    {OPUS_47, SONNET_46, SONNET_5, HAIKU_45, OPUS_48, FABLE_5, MYTHOS}
+)
+_MODEL_ALIASES: dict[str, str] = {
+    "fable": FABLE,
+    "mythos": MYTHOS,
+}
+
+
+def normalize_claude_model(model: str) -> str:
+    """Return the Claude CLI model ID for a full model ID or supported shorthand."""
+    value = model.strip()
+    if not value:
+        return ""
+    return _MODEL_ALIASES.get(value.lower(), value)
 
 
 def _resolve_model(env_var: str, default: str) -> str:
@@ -106,15 +128,16 @@ def _resolve_model(env_var: str, default: str) -> str:
     value = os.environ.get(env_var)
     if value is None:
         return default
-    if value not in _KNOWN_MODELS:
+    resolved = normalize_claude_model(value)
+    if resolved not in _KNOWN_MODELS:
         logger.warning(
             "Unknown model %r set in %s (known: %s). "
             "Proceeding, but verify the model ID is correct.",
-            value,
+            resolved,
             env_var,
             ", ".join(sorted(_KNOWN_MODELS)),
         )
-    return value
+    return resolved
 
 
 def planner_model() -> str:
@@ -524,11 +547,18 @@ __all__ = [
     "DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT",
     "DEFAULT_THROUGHPUT_TIMEOUT",
     "FABLE",
+    "FABLE_5",
     "HAIKU",
+    "HAIKU_45",
+    "MYTHOS",
     "OPUS",
+    "OPUS_47",
     "OPUS_48",
     "PLAN_STAGE_TIMEOUT",
     "SONNET",
+    "SONNET_5",
+    "SONNET_46",
+    "SONNET_50",
     "address_review_claude_timeout",
     "advise_claude_timeout",
     "advise_model",
@@ -545,6 +575,7 @@ __all__ = [
     "implementer_model",
     "learn_claude_timeout",
     "learn_model",
+    "normalize_claude_model",
     "plan_reviewer_claude_timeout",
     "plan_stage_timeout",
     "planner_claude_timeout",

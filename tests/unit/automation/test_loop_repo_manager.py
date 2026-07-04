@@ -24,6 +24,7 @@ from hephaestus.automation.loop_repo_manager import (
     _resolve_repo_dir,
     _sort_repos_by_open_count,
 )
+from hephaestus.utils.helpers import METADATA_TIMEOUT
 
 
 class TestDetectCwdRepo:
@@ -50,6 +51,25 @@ class TestDetectCwdRepo:
             org, repo = _detect_cwd_repo()
         assert org == "MyOrg"
         assert repo == "MyRepo"
+
+    def test_git_probes_use_metadata_timeout(self) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
+            m = MagicMock()
+            if "rev-parse" in cmd:
+                m.stdout = "/home/user/repos/MyRepo\n"
+            else:
+                m.stdout = "https://github.com/MyOrg/MyRepo.git\n"
+            return m
+
+        with patch(
+            "hephaestus.automation.loop_repo_manager.subprocess.run",
+            side_effect=fake_run,
+        ) as mock_run:
+            _detect_cwd_repo()
+
+        assert mock_run.call_count == 2
+        for call in mock_run.call_args_list:
+            assert call.kwargs["timeout"] == METADATA_TIMEOUT
 
     def test_parses_repo_name_from_https_remote_not_worktree_dir(self) -> None:
         """GitHub remote path is authoritative when worktree dir is issue-named."""

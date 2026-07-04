@@ -12,12 +12,15 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hephaestus.scripts_lib import check_settings_permission_paths as mod
 from hephaestus.scripts_lib.check_settings_permission_paths import (
     find_violations,
     main,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 class TestFindViolations:
@@ -109,3 +112,30 @@ class TestMain:
         monkeypatch.setattr(mod, "repo_root", lambda: tmp_path)
         assert main() == 1
         assert "not found" in capsys.readouterr().err
+
+
+class TestPreCommitHook:
+    """Tests for the settings permission path pre-commit hook wiring."""
+
+    @staticmethod
+    def _load_hook(hook_id: str) -> dict[str, object]:
+        config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
+        for repo in config["repos"]:
+            if repo.get("repo") != "local":
+                continue
+            for hook in repo.get("hooks", []):
+                if hook.get("id") == hook_id:
+                    return hook
+        raise AssertionError(f"missing pre-commit hook: {hook_id}")
+
+    def test_settings_permission_paths_hook_is_wired(self) -> None:
+        """The checker must run locally when tracked Claude settings change."""
+        hook = self._load_hook("check-settings-permission-paths")
+
+        assert hook["entry"] == (
+            "pixi run --environment default "
+            "python3 -m hephaestus.scripts_lib.check_settings_permission_paths"
+        )
+        assert hook["language"] == "system"
+        assert hook["pass_filenames"] is False
+        assert hook["files"] == r"^\.claude/settings\.json$"

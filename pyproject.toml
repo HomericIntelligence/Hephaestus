@@ -82,6 +82,8 @@ schema = [
     "jsonschema>=4.0,<5",
 ]
 nats = [
+    # hephaestus.nats is stdlib-dataclass based; keep pydantic owned by [automation].
+    # Guarded by tests/unit/validation/test_base_dep_surface.py.
     "nats-py>=2.6,<3",
 ]
 # Product layer (hephaestus.automation). See docs/adr/0001-automation-library-boundary.md.
@@ -149,6 +151,8 @@ hephaestus-agent-stats = "hephaestus.agents.stats:main"
 hephaestus-validate-agents = "hephaestus.agents.frontmatter:validate_agents_main"
 hephaestus-check-cli-tier-docs = "hephaestus.validation.cli_tier_docs:main"
 hephaestus-check-api-table-docs = "hephaestus.validation.api_table_docs:main"
+hephaestus-check-api-reference = "hephaestus.validation.api_reference:main"
+hephaestus-check-unlinked-todo = "hephaestus.validation.unlinked_todo:main"
 
 [project.urls]
 Homepage = "https://github.com/HomericIntelligence/ProjectHephaestus"

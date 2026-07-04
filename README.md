@@ -322,7 +322,7 @@ config = merge_with_env({}, convert_bools=True)
 <!-- CLI table generated from pyproject.toml [project.scripts]. Keep in sync via
      `python3 -m hephaestus.scripts_lib.check_cli_table_sync` (also enforced in pre-commit). -->
 
-51 console scripts are installed when you install the package.  Run any command
+53 console scripts are installed when you install the package.  Run any command
 with `--help` to see full usage.
 
 ### Automation
@@ -407,6 +407,7 @@ sync (#993).
 | Command | Description |
 |---|---|
 | `hephaestus-audit-doc-policy` | Audit documentation command examples for policy violations |
+| `hephaestus-check-api-reference` | Verify generated pdoc API reference output contains subpackage pages |
 | `hephaestus-check-api-table-docs` | Enforce per-symbol `__all__` documentation in COMPATIBILITY.md |
 | `hephaestus-check-cli-tier-docs` | Enforce console-script stability-tier documentation in COMPATIBILITY.md |
 | `hephaestus-check-complexity` | Check cyclomatic complexity against a threshold |
@@ -421,6 +422,7 @@ sync (#993).
 | `hephaestus-check-test-structure` | Validate unit test directory structure |
 | `hephaestus-check-tier-labels` | Enforce tier label consistency across all project Markdown files |
 | `hephaestus-check-type-aliases` | Detect type alias shadowing patterns in Python code |
+| `hephaestus-check-unlinked-todo` | Enforce that every TODO/FIXME/HACK marker references a tracking issue |
 | `hephaestus-filter-audit` | Filter pip-audit JSON output to fail only on HIGH/CRITICAL severity vulnerabilities |
 | `hephaestus-mypy-each-file` | Run mypy on each file individually to avoid duplicate-module-name errors |
 | `hephaestus-validate-agents` | YAML frontmatter extraction and validation for agent markdown files |

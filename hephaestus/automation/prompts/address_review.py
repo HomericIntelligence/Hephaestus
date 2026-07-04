@@ -48,7 +48,8 @@ Every one of these comments MUST be resolved before you finish.
    difficulty:
    - `simple` → `haiku` (claude-haiku-4-5): mechanical/local fix.
    - `medium` → `sonnet` (claude-sonnet-4-6): localized logic / small refactor.
-   - `hard`   → `opus` (claude-opus-4-7): cross-cutting or subtle correctness fix.
+   - `hard`   → `opus` (claude-opus-4-8): cross-cutting or subtle correctness fix.
+   - `hardest`   → `fable` (claude-fable-5): cross-cutting or subtle correctness fix.
 
 3. **Serialize same-file comments.** Two sub-agents must NEVER edit the same file
    at the same time. Group the todo lines by `<file>`: dispatch DIFFERENT files in

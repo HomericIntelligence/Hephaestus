@@ -270,100 +270,17 @@ class CIFixOrchestrator:
     ) -> subprocess.CompletedProcess[str]:
         """Dispatch a prompt to the configured agent (codex or claude).
 
-        Returns a CompletedProcess whose returncode signals success or failure:
-        - returncode == 0: agent ran successfully (stdout has output)
-        - returncode != 0: agent failed (stderr has details)
-
-        For codex, returncode is synthetic — AgentRunResult has no returncode
-        field; success is "no CalledProcessError" (hephaestus/agents/runtime.py).
-        For claude, returncode comes from the subprocess exit code.
-
-        CalledProcessError is absorbed from all codex paths into a non-zero
-        CompletedProcess. TimeoutExpired propagates to the caller so it can
-        log a distinct timeout message.
+        ``CalledProcessError`` is converted to a non-zero result; timeout
+        still propagates so callers can log it distinctly.
         """
-        options = self._options()
-        if uses_direct_agent_runner(options.agent):
-            if session_id:
-                try:
-                    result = resume_agent_session(
-                        agent=options.agent,
-                        session_id=session_id,
-                        prompt=prompt,
-                        cwd=worktree_path,
-                        timeout=options.agent_timeout,
-                        model=direct_agent_model(options.agent, "HEPH_IMPLEMENTER_MODEL"),
-                    )
-                except subprocess.CalledProcessError as exc:
-                    logger.warning(
-                        "Issue #%s: %s resume session %r failed for PR #%s; "
-                        "falling back to fresh session: %s",
-                        issue_number,
-                        options.agent,
-                        session_id,
-                        pr_number,
-                        (exc.stderr or exc.stdout or "")[:300],
-                    )
-                    try:
-                        result = run_agent_session(
-                            agent=options.agent,
-                            prompt=prompt,
-                            cwd=worktree_path,
-                            timeout=options.agent_timeout,
-                            model=direct_agent_model(options.agent, "HEPH_IMPLEMENTER_MODEL"),
-                            sandbox="workspace-write",
-                        )
-                    except subprocess.CalledProcessError as fresh_exc:
-                        return subprocess.CompletedProcess(
-                            args=fresh_exc.cmd,
-                            returncode=fresh_exc.returncode,
-                            stdout=fresh_exc.stdout or "",
-                            stderr=fresh_exc.stderr or "",
-                        )
-            else:
-                try:
-                    result = run_agent_session(
-                        agent=options.agent,
-                        prompt=prompt,
-                        cwd=worktree_path,
-                        timeout=options.agent_timeout,
-                        model=direct_agent_model(options.agent, "HEPH_IMPLEMENTER_MODEL"),
-                        sandbox="workspace-write",
-                    )
-                except subprocess.CalledProcessError as exc:
-                    return subprocess.CompletedProcess(
-                        args=exc.cmd,
-                        returncode=exc.returncode,
-                        stdout=exc.stdout or "",
-                        stderr=exc.stderr or "",
-                    )
-            return subprocess.CompletedProcess(
-                args=[], returncode=0, stdout=result.stdout, stderr=result.stderr or ""
-            )
-
-        repo_slug = get_repo_slug(self._repo_root())
-        try:
-            stdout, _ = invoke_claude_with_session(
-                repo=repo_slug,
-                issue=issue_number,
-                agent=AGENT_CI_DRIVER,
-                prompt=prompt,
-                model=implementer_model(),
-                cwd=worktree_path,
-                timeout=options.agent_timeout,
-                output_format="json",
-                allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
-                extra_args=["--dangerously-skip-permissions"],
-                input_via_stdin=True,
-            )
-            return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
-        except subprocess.CalledProcessError as exc:
-            return subprocess.CompletedProcess(
-                args=exc.cmd,
-                returncode=exc.returncode,
-                stdout=exc.stdout or "",
-                stderr=exc.stderr or "",
-            )
+        return _invoke_agent_session(
+            self,
+            prompt=prompt,
+            session_id=session_id,
+            worktree_path=worktree_path,
+            issue_number=issue_number,
+            pr_number=pr_number,
+        )
 
     def push_ci_fix(
         self,
@@ -519,124 +436,17 @@ class CIFixOrchestrator:
         session_id: str | None,
         max_retries: int = 2,
     ) -> bool:
-        """Re-invoke the agent up to ``max_retries`` times after a no-commit turn (#846).
-
-        A single no-op agent turn used to be terminal: with
-        ``max_fix_iterations=1`` the whole issue failed the instant the first
-        force-engagement retry also returned no commit. That cost real PRs
-        (AchaeanFleet #691/#683, Hermes #643). We now re-engage up to
-        ``max_retries`` times before recording the forensics marker, re-checking
-        between attempts so a PR that goes green (or where a commit lands)
-        short-circuits immediately.
-
-        Only fires when the PR still has failing required checks — a green PR
-        that arrived via concurrent activity should NOT be perturbed. Stays on
-        the same ``(repo, issue, AGENT_CI_DRIVER)`` session so the agent's
-        transcript is continuous; the existing PR and branch are preserved
-        (no new PR, no new branch, no force-push to a new ref).
-
-        Args:
-            issue_number: GitHub issue number for the PR.
-            pr_number: PR number to retry on.
-            worktree_path: Worktree the agent runs in (same as the first turn).
-            pr_head_branch: PR head branch name; the retry must not switch off it.
-            pre_agent_sha: HEAD SHA from before the first turn (used as the
-                no-commit baseline for the retry too — if the retry doesn't
-                advance past this, we treat it as repeated-no-commit).
-            session_id: Codex resume id (Claude resumes by deterministic UUID).
-            max_retries: Maximum number of force-engagement retries.
-
-        Returns:
-            True if the retry produced a new commit (caller should push).
-            False if CI is green now, the retry returned no commit again, or
-            any error path fired. On repeated-no-commit, writes a forensics
-            marker to ``state_dir``.
-
-        """
-        failing: list[str] = []
-        for retry in range(1, max_retries + 1):
-            failing = self._failing_required_check_names(pr_number)
-            dirty_tracked_changes = self._tracked_worktree_changes(worktree_path, issue_number)
-            if not failing and not dirty_tracked_changes:
-                logger.info(
-                    "Issue #%s: no-commit turn but PR #%s has no failing required checks "
-                    "and no tracked worktree changes; skipping force-engagement retry",
-                    issue_number,
-                    pr_number,
-                )
-                return False
-
-            review_threads_block = self._format_review_threads_block(pr_number)
-            retry_prompt = self.force_engagement_prompt(
-                issue_number=issue_number,
-                pr_number=pr_number,
-                worktree_path=worktree_path,
-                pr_head_branch=pr_head_branch,
-                failing_check_names=failing,
-                dirty_tracked_changes=dirty_tracked_changes,
-                review_threads_block=review_threads_block,
-            )
-
-            retry_reason = ", ".join(failing) if failing else "tracked worktree changes"
-            logger.warning(
-                "Issue #%s: no-commit on CI fix turn; re-invoking with "
-                "force-engagement prompt (retry %s/%s, reason: %s)",
-                issue_number,
-                retry,
-                max_retries,
-                retry_reason,
-            )
-
-            try:
-                retry_result = self.invoke_agent_session(
-                    prompt=retry_prompt,
-                    session_id=session_id,
-                    worktree_path=worktree_path,
-                    issue_number=issue_number,
-                    pr_number=pr_number,
-                )
-            except subprocess.TimeoutExpired:
-                logger.error(
-                    "Issue #%s: no-commit retry session timed out for PR #%s",
-                    issue_number,
-                    pr_number,
-                )
-                return False
-
-            if retry_result.returncode != 0:
-                logger.error(
-                    "Issue #%s: no-commit retry session failed for PR #%s: %s",
-                    issue_number,
-                    pr_number,
-                    (retry_result.stderr or "")[:300],
-                )
-                return False
-
-            if self._head_advanced(worktree_path, pre_agent_sha, issue_number):
-                return True
-
-            logger.warning(
-                "Issue #%s: still no commit on PR #%s after force-engagement retry %s/%s",
-                issue_number,
-                pr_number,
-                retry,
-                max_retries,
-            )
-
-        logger.error(
-            "Issue #%s: REPEATED no-commit on PR #%s after %s force-engagement "
-            "retries; marking and moving on",
-            issue_number,
-            pr_number,
-            max_retries,
-        )
-        self.record_repeated_no_commit(
+        """Re-invoke the agent after a no-commit turn, then record repeat failures."""
+        return _retry_no_commit_once(
+            self,
             issue_number=issue_number,
             pr_number=pr_number,
+            worktree_path=worktree_path,
             pr_head_branch=pr_head_branch,
-            failing_check_names=failing,
+            pre_agent_sha=pre_agent_sha,
+            session_id=session_id,
+            max_retries=max_retries,
         )
-        return False
 
     def sync_worktree_and_snapshot_sha(
         self, issue_number: int, worktree_path: Path, pr_head_branch: str
@@ -808,138 +618,8 @@ class CIFixOrchestrator:
         pr_number: int,
         acquired_slot: int,
     ) -> bool:
-        """Rebase a behind/conflicting PR onto its base branch with no agent (#871).
-
-        The cheap, deterministic path: a PR that is merely behind its base (or
-        whose changes don't textually overlap) is rebased and pushed here. Only a
-        PR whose rebase hits real conflicts falls through to the CI-fix agent.
-
-        Flow:
-
-        1. Query ``mergeStateStatus`` / ``mergeable`` / ``baseRefName``. Skip
-           (return ``False``) unless the PR is ``BEHIND`` or ``DIRTY`` /
-           ``CONFLICTING``. ``BLOCKED`` is also eligible only when required
-           checks are failing, because GitHub can report failed-check PRs as
-           branch-protection blocked even when a base rebase can bring in the
-           fix.
-        2. Sync the worktree to the PR head, then ``rebase_worktree_onto`` the
-           base branch.
-        3. Clean rebase → push ``HEAD:<pr-head>`` with ``--force-with-lease`` and
-           return ``True``. The push re-triggers CI; the caller's poll loop
-           evaluates the rebased head.
-        4. Conflicts → the rebase is aborted inside ``rebase_worktree_onto``;
-           return ``False`` so the caller continues to the agent path.
-
-        Any unexpected git/subprocess error is logged and swallowed (returns
-        ``False``) — a mechanical-rebase failure must never crash the worker; the
-        agent path is always the safe fallback.
-
-        Args:
-            issue_number: GitHub issue number for the PR.
-            pr_number: PR number to rebase.
-            acquired_slot: Worker slot ID for status tracking.
-
-        Returns:
-            ``True`` if the PR was mechanically rebased and pushed; ``False`` if
-            no rebase was needed, the rebase conflicted, or an error occurred.
-
-        """
-        try:
-            result = _gh_call(
-                [
-                    "pr",
-                    "view",
-                    str(pr_number),
-                    "--json",
-                    "mergeStateStatus,mergeable,headRefName,baseRefName",
-                ],
-                check=False,
-            )
-            state = dict(json.loads(result.stdout or "{}"))
-        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
-            logger.warning(
-                "Issue #%s: could not fetch PR #%s merge state for rebase; "
-                "skipping mechanical rebase: %s",
-                issue_number,
-                pr_number,
-                exc,
-            )
-            return False
-
-        merge_state = str(state.get("mergeStateStatus") or "").upper()
-        # Only behind-base / conflicting PRs need a rebase. CLEAN / UNSTABLE /
-        # HAS_HOOKS PRs are already on top of their base — let the check-status
-        # path handle them. BLOCKED is usually review-gated, but GitHub also
-        # reports some failed required-check PRs as BLOCKED; those are still
-        # eligible for the cheap rebase path before invoking an agent.
-        rebase_states = ("BEHIND", "DIRTY", "CONFLICTING")
-        if merge_state == "BLOCKED":
-            failing_checks = self._failing_required_check_names(pr_number)
-            if not failing_checks:
-                return False
-            logger.info(
-                "Issue #%s: PR #%s is BLOCKED with failing required checks (%s); "
-                "attempting mechanical rebase before CI-fix agent",
-                issue_number,
-                pr_number,
-                ", ".join(failing_checks),
-            )
-        elif merge_state not in rebase_states:
-            return False
-
-        pr_head_branch = str(state.get("headRefName") or "") or self._get_pr_branch(pr_number)
-        base_branch = str(state.get("baseRefName") or "main") or "main"
-        if not pr_head_branch:
-            logger.warning(
-                "Issue #%s: PR #%s has no resolvable head branch; skipping rebase",
-                issue_number,
-                pr_number,
-            )
-            return False
-
-        self._status().update_slot(
-            acquired_slot,
-            f"{issue_ref(issue_number)}: mechanical rebase onto {base_branch}",
-        )
-
-        try:
-            worktree_path = self._get_worktree_path(issue_number, pr_number)
-            # Land on the PR's actual remote head before rebasing so we replay the
-            # PR's commits (not a stale local ref) onto the base (#832).
-            sync_worktree_to_remote_branch(worktree_path, pr_head_branch)
-
-            if not rebase_worktree_onto(worktree_path, base_branch):
-                logger.info(
-                    "Issue #%s: PR #%s (%s) has rebase conflicts onto %s; deferring to agent",
-                    issue_number,
-                    pr_number,
-                    merge_state,
-                    base_branch,
-                )
-                return False
-
-            # Clean rebase rewrote history — lease-push to the PR head. The helper
-            # no-ops cleanly if the rebase was already up to date (HEAD unchanged).
-            push_current_branch_with_lease_on_divergence(
-                worktree_path,
-                branch=pr_head_branch,
-                push_ref=f"HEAD:{pr_head_branch}",
-            )
-            logger.info(
-                "Issue #%s: mechanically rebased PR #%s onto %s and pushed (no agent)",
-                issue_number,
-                pr_number,
-                base_branch,
-            )
-            return True
-        except subprocess.CalledProcessError as exc:
-            logger.warning(
-                "Issue #%s: mechanical rebase of PR #%s failed (%s); falling through to agent",
-                issue_number,
-                pr_number,
-                (exc.stderr or exc.stdout or "")[:300],
-            )
-            return False
+        """Rebase a behind/conflicting PR onto its base branch with no agent (#871)."""
+        return _attempt_mechanical_rebase(self, issue_number, pr_number, acquired_slot)
 
     def _tracked_worktree_changes(self, worktree_path: Path, issue_number: int) -> list[str]:
         """Return actionable dirty status lines for a post-agent worktree.
@@ -1126,3 +806,336 @@ class CIFixOrchestrator:
             )
             return False
         return True
+
+
+def _completed_process_from_error(
+    exc: subprocess.CalledProcessError,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=exc.cmd,
+        returncode=exc.returncode,
+        stdout=exc.stdout or "",
+        stderr=exc.stderr or "",
+    )
+
+
+def _completed_process_from_agent_result(result: Any) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=result.stdout,
+        stderr=result.stderr or "",
+    )
+
+
+def _run_fresh_direct_agent(
+    options: Any,
+    *,
+    prompt: str,
+    worktree_path: Path,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = run_agent_session(
+            agent=options.agent,
+            prompt=prompt,
+            cwd=worktree_path,
+            timeout=options.agent_timeout,
+            model=direct_agent_model(options.agent, "HEPH_IMPLEMENTER_MODEL"),
+            sandbox="workspace-write",
+        )
+    except subprocess.CalledProcessError as exc:
+        return _completed_process_from_error(exc)
+    return _completed_process_from_agent_result(result)
+
+
+def _invoke_direct_agent_session(
+    orchestrator: CIFixOrchestrator,
+    *,
+    prompt: str,
+    session_id: str | None,
+    worktree_path: Path,
+    issue_number: int,
+    pr_number: int,
+) -> subprocess.CompletedProcess[str]:
+    options = orchestrator._options()
+    if not session_id:
+        return _run_fresh_direct_agent(options, prompt=prompt, worktree_path=worktree_path)
+    try:
+        result = resume_agent_session(
+            agent=options.agent,
+            session_id=session_id,
+            prompt=prompt,
+            cwd=worktree_path,
+            timeout=options.agent_timeout,
+            model=direct_agent_model(options.agent, "HEPH_IMPLEMENTER_MODEL"),
+        )
+    except subprocess.CalledProcessError as exc:
+        logger.warning(
+            "Issue #%s: %s resume session %r failed for PR #%s; falling back to fresh session: %s",
+            issue_number,
+            options.agent,
+            session_id,
+            pr_number,
+            (exc.stderr or exc.stdout or "")[:300],
+        )
+        return _run_fresh_direct_agent(options, prompt=prompt, worktree_path=worktree_path)
+    return _completed_process_from_agent_result(result)
+
+
+def _invoke_claude_agent_session(
+    orchestrator: CIFixOrchestrator,
+    *,
+    prompt: str,
+    worktree_path: Path,
+    issue_number: int,
+) -> subprocess.CompletedProcess[str]:
+    options = orchestrator._options()
+    repo_slug = get_repo_slug(orchestrator._repo_root())
+    try:
+        stdout, _ = invoke_claude_with_session(
+            repo=repo_slug,
+            issue=issue_number,
+            agent=AGENT_CI_DRIVER,
+            prompt=prompt,
+            model=implementer_model(),
+            cwd=worktree_path,
+            timeout=options.agent_timeout,
+            output_format="json",
+            allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
+            input_via_stdin=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        return _completed_process_from_error(exc)
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+
+
+def _invoke_agent_session(
+    orchestrator: CIFixOrchestrator,
+    *,
+    prompt: str,
+    session_id: str | None,
+    worktree_path: Path,
+    issue_number: int,
+    pr_number: int,
+) -> subprocess.CompletedProcess[str]:
+    options = orchestrator._options()
+    if uses_direct_agent_runner(options.agent):
+        return _invoke_direct_agent_session(
+            orchestrator,
+            prompt=prompt,
+            session_id=session_id,
+            worktree_path=worktree_path,
+            issue_number=issue_number,
+            pr_number=pr_number,
+        )
+    return _invoke_claude_agent_session(
+        orchestrator,
+        prompt=prompt,
+        worktree_path=worktree_path,
+        issue_number=issue_number,
+    )
+
+
+def _retry_no_commit_once(
+    orchestrator: CIFixOrchestrator,
+    *,
+    issue_number: int,
+    pr_number: int,
+    worktree_path: Path,
+    pr_head_branch: str,
+    pre_agent_sha: str,
+    session_id: str | None,
+    max_retries: int,
+) -> bool:
+    failing: list[str] = []
+    for retry in range(1, max_retries + 1):
+        failing = orchestrator._failing_required_check_names(pr_number)
+        dirty_changes = orchestrator._tracked_worktree_changes(worktree_path, issue_number)
+        if not failing and not dirty_changes:
+            logger.info(
+                "Issue #%s: no-commit turn but PR #%s has no failing required checks "
+                "and no tracked worktree changes; skipping force-engagement retry",
+                issue_number,
+                pr_number,
+            )
+            return False
+
+        retry_prompt = orchestrator.force_engagement_prompt(
+            issue_number=issue_number,
+            pr_number=pr_number,
+            worktree_path=worktree_path,
+            pr_head_branch=pr_head_branch,
+            failing_check_names=failing,
+            dirty_tracked_changes=dirty_changes,
+            review_threads_block=orchestrator._format_review_threads_block(pr_number),
+        )
+        retry_reason = ", ".join(failing) if failing else "tracked worktree changes"
+        logger.warning(
+            "Issue #%s: no-commit on CI fix turn; re-invoking with "
+            "force-engagement prompt (retry %s/%s, reason: %s)",
+            issue_number,
+            retry,
+            max_retries,
+            retry_reason,
+        )
+
+        try:
+            retry_result = orchestrator.invoke_agent_session(
+                prompt=retry_prompt,
+                session_id=session_id,
+                worktree_path=worktree_path,
+                issue_number=issue_number,
+                pr_number=pr_number,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error(
+                "Issue #%s: no-commit retry session timed out for PR #%s",
+                issue_number,
+                pr_number,
+            )
+            return False
+
+        if retry_result.returncode != 0:
+            logger.error(
+                "Issue #%s: no-commit retry session failed for PR #%s: %s",
+                issue_number,
+                pr_number,
+                (retry_result.stderr or "")[:300],
+            )
+            return False
+        if orchestrator._head_advanced(worktree_path, pre_agent_sha, issue_number):
+            return True
+        logger.warning(
+            "Issue #%s: still no commit on PR #%s after force-engagement retry %s/%s",
+            issue_number,
+            pr_number,
+            retry,
+            max_retries,
+        )
+
+    logger.error(
+        "Issue #%s: REPEATED no-commit on PR #%s after %s force-engagement "
+        "retries; marking and moving on",
+        issue_number,
+        pr_number,
+        max_retries,
+    )
+    orchestrator.record_repeated_no_commit(
+        issue_number=issue_number,
+        pr_number=pr_number,
+        pr_head_branch=pr_head_branch,
+        failing_check_names=failing,
+    )
+    return False
+
+
+def _fetch_rebase_state(issue_number: int, pr_number: int) -> dict[str, Any] | None:
+    try:
+        result = _gh_call(
+            [
+                "pr",
+                "view",
+                str(pr_number),
+                "--json",
+                "mergeStateStatus,mergeable,headRefName,baseRefName",
+            ],
+            check=False,
+        )
+        return dict(json.loads(result.stdout or "{}"))
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Issue #%s: could not fetch PR #%s merge state for rebase; "
+            "skipping mechanical rebase: %s",
+            issue_number,
+            pr_number,
+            exc,
+        )
+        return None
+
+
+def _rebase_state_is_actionable(
+    orchestrator: CIFixOrchestrator,
+    *,
+    issue_number: int,
+    pr_number: int,
+    merge_state: str,
+) -> bool:
+    rebase_states = ("BEHIND", "DIRTY", "CONFLICTING")
+    if merge_state != "BLOCKED":
+        return merge_state in rebase_states
+    failing_checks = orchestrator._failing_required_check_names(pr_number)
+    if not failing_checks:
+        return False
+    logger.info(
+        "Issue #%s: PR #%s is BLOCKED with failing required checks (%s); "
+        "attempting mechanical rebase before CI-fix agent",
+        issue_number,
+        pr_number,
+        ", ".join(failing_checks),
+    )
+    return True
+
+
+def _attempt_mechanical_rebase(
+    orchestrator: CIFixOrchestrator,
+    issue_number: int,
+    pr_number: int,
+    acquired_slot: int,
+) -> bool:
+    state = _fetch_rebase_state(issue_number, pr_number)
+    if state is None:
+        return False
+    merge_state = str(state.get("mergeStateStatus") or "").upper()
+    if not _rebase_state_is_actionable(
+        orchestrator,
+        issue_number=issue_number,
+        pr_number=pr_number,
+        merge_state=merge_state,
+    ):
+        return False
+
+    pr_head_branch = str(state.get("headRefName") or "") or orchestrator._get_pr_branch(pr_number)
+    base_branch = str(state.get("baseRefName") or "main") or "main"
+    if not pr_head_branch:
+        logger.warning(
+            "Issue #%s: PR #%s has no resolvable head branch; skipping rebase",
+            issue_number,
+            pr_number,
+        )
+        return False
+    orchestrator._status().update_slot(
+        acquired_slot,
+        f"{issue_ref(issue_number)}: mechanical rebase onto {base_branch}",
+    )
+    try:
+        worktree_path = orchestrator._get_worktree_path(issue_number, pr_number)
+        sync_worktree_to_remote_branch(worktree_path, pr_head_branch)
+        if not rebase_worktree_onto(worktree_path, base_branch):
+            logger.info(
+                "Issue #%s: PR #%s (%s) has rebase conflicts onto %s; deferring to agent",
+                issue_number,
+                pr_number,
+                merge_state,
+                base_branch,
+            )
+            return False
+        push_current_branch_with_lease_on_divergence(
+            worktree_path,
+            branch=pr_head_branch,
+            push_ref=f"HEAD:{pr_head_branch}",
+        )
+        logger.info(
+            "Issue #%s: mechanically rebased PR #%s onto %s and pushed (no agent)",
+            issue_number,
+            pr_number,
+            base_branch,
+        )
+        return True
+    except subprocess.CalledProcessError as exc:
+        logger.warning(
+            "Issue #%s: mechanical rebase of PR #%s failed (%s); falling through to agent",
+            issue_number,
+            pr_number,
+            (exc.stderr or exc.stdout or "")[:300],
+        )
+        return False

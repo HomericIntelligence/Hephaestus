@@ -128,7 +128,7 @@ def _pr_is_failing(pr: dict[str, Any]) -> bool:
     return any(c.get("conclusion") in FAILING_CHECK_CONCLUSIONS for c in rollup)
 
 
-class CIDriver:
+class _CIDriverCore:
     """Drives open PRs toward green CI by fixing failures and enabling auto-merge.
 
     Features:
@@ -2224,6 +2224,10 @@ class CIDriver:
 
         """
         print_worker_summary("CI Driver Summary", results)
+
+
+class CIDriver(_CIDriverCore):
+    """Public drive-green façade over the compatibility implementation core."""
 
 
 # ---------------------------------------------------------------------------
