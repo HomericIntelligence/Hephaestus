@@ -99,9 +99,20 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Dispatch release workflow
+        # An empty tag output means the compute step took its idempotent-skip
+        # path (tag already existed, nothing was pushed). Skipping here keeps
+        # us from dispatching release.yml with a blank tag, which release.yml
+        # would resolve to "latest tag" and could re-publish an old release.
         if: steps.tag.outputs.tag != ''
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.tag.outputs.tag }}
-        run: gh workflow run release.yml --repo "${GITHUB_REPOSITORY}" -f tag="${TAG}"
+        run: |
+          # The tag is already pushed at this point; a dispatch failure strands
+          # it. Point the operator at the recovery procedure — re-running this
+          # workflow would compute and push a NEW tag, not rescue this one.
+          gh workflow run release.yml --repo "${GITHUB_REPOSITORY}" -f tag="${TAG}" || {
+            echo "::error::Dispatch failed after tag ${TAG} was pushed — the tag is stranded. Do NOT re-run Auto Tag Release (it would compute and push a NEW tag). Recover with: gh workflow run release.yml -f tag=${TAG} — see docs/RELEASING.md, 'Dispatch failed after tag push'."
+            exit 1
+          }

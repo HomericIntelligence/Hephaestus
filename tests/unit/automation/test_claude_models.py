@@ -81,11 +81,16 @@ class TestModuleStable:
     """
 
     def test_reimport_idempotent(self) -> None:
+        expected_opus = claude_models.OPUS
+        expected_haiku = claude_models.HAIKU
+        expected_sonnet = claude_models.SONNET
+        expected_codex_advise = claude_models.CODEX_ADVISE
+
         importlib.reload(claude_models)
-        assert claude_models.OPUS == "claude-opus-4-8"
-        assert claude_models.HAIKU == "claude-haiku-4-5"
-        assert claude_models.SONNET == "claude-sonnet-4-6"
-        assert claude_models.CODEX_ADVISE == "gpt-5.4-mini"
+        assert expected_opus == claude_models.OPUS
+        assert expected_haiku == claude_models.HAIKU
+        assert expected_sonnet == claude_models.SONNET
+        assert expected_codex_advise == claude_models.CODEX_ADVISE
 
 
 class TestEnvVarValidation:

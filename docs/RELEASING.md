@@ -48,6 +48,28 @@ If `auto-tag.yml` is skipped and a tag was pushed manually, the **Release** work
 a `workflow_dispatch` with an optional explicit `tag` input. Leave it blank to use the latest tag,
 or supply a tag name (e.g. `v0.8.0`) to release a specific ref.
 
+### Dispatch failed after tag push
+
+`auto-tag.yml` performs two writes in sequence: it pushes the signed tag, then dispatches the
+Release workflow with that tag. If the dispatch step fails (transient API error, token or
+permission problem), the tag is already on the remote but no release run exists — the tag is
+stranded.
+
+**Never re-run Auto Tag Release to recover.** It computes the next version from the highest
+existing tag, so a re-run sees the stranded tag and computes and pushes a **new** tag (e.g.
+stranded `v0.9.10` → re-run creates `v0.9.11`), leaving the original tag unreleased forever
+(tags are immutable; see #1802 for how stranded tags happen).
+
+Instead, dispatch the Release workflow directly with the stranded tag named explicitly:
+
+```bash
+gh workflow run release.yml -f tag=vX.Y.Z   # the exact tag auto-tag pushed
+```
+
+Never dispatch with a blank `tag` input in this state. Blank means "latest tag", which is only
+correct until another tag lands between the failure and your recovery — always name the
+stranded tag.
+
 ## PyPI Trusted Publishing
 
 Publishing uses OIDC trusted publishing — no `PYPI_API_TOKEN` secret is needed. The workflow runs

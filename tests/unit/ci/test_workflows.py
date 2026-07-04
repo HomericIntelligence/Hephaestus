@@ -378,6 +378,45 @@ class TestAutoTagReleaseDispatch:
         assert 'gh workflow run release.yml --repo "${GITHUB_REPOSITORY}"' in dispatch_step["run"]
         assert '-f tag="${TAG}"' in dispatch_step["run"]
 
+    def _dispatch_step(self) -> dict[str, Any]:
+        steps = self._steps()
+        return next(step for step in steps if step.get("name") == "Dispatch release workflow")
+
+    def test_dispatch_failure_emits_stranded_tag_recovery_error(self) -> None:
+        """A failed dispatch strands the already-pushed tag; the error must say how to recover.
+
+        Re-running Auto Tag Release would compute and push a NEW tag rather than
+        rescue the stranded one, so the ``::error::`` annotation must warn against
+        a re-run, give the exact recovery command with the explicit tag, and point
+        at the recovery section in docs/RELEASING.md.
+        """
+        run = self._dispatch_step()["run"]
+        assert "::error::" in run
+        assert "exit 1" in run
+        assert "Do NOT re-run Auto Tag Release" in run
+        assert "gh workflow run release.yml -f tag=${TAG}" in run
+        assert "docs/RELEASING.md" in run
+        assert "Dispatch failed after tag push" in run
+
+    def test_releasing_doc_has_stranded_tag_recovery_section(self) -> None:
+        """The recovery section the ::error:: annotation points at must exist."""
+        doc = (REPO_ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
+        assert "### Dispatch failed after tag push" in doc
+        assert "gh workflow run release.yml -f tag=vX.Y.Z" in doc
+
+    def test_release_concurrency_keys_on_resolved_tag(self) -> None:
+        """Dispatched and tag-push release runs must serialize per tag, not per branch.
+
+        With ``release-${{ github.ref }}`` every workflow_dispatch run grouped on
+        the branch ref, so two dispatched runs for DIFFERENT tags serialized while
+        a dispatched and a tag-push run of the SAME tag did not share a group.
+        Keying on ``inputs.tag`` first makes dispatched runs group per tag.
+        """
+        workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        concurrency = workflow["concurrency"]
+        assert concurrency["group"] == "release-${{ inputs.tag || github.ref }}"
+        assert concurrency["cancel-in-progress"] is False
+
 
 class TestReleaseAttestations:
     """Regression tests for PEP 740 build attestations in the release workflow."""
