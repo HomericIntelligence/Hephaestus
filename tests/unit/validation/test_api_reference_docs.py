@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 
 from hephaestus.io.toml import import_tomllib
-from hephaestus.validation.docs.api_reference import (
+from hephaestus.validation.api_reference import (
+    DEFAULT_REPO_ROOT,
     ApiReferenceFinding,
     expected_pdoc_targets,
     find_violations,
@@ -27,6 +28,10 @@ def _write_html(path: Path) -> None:
 
 class TestPdocTargets:
     """Tests for the pdoc target list used by the docs task."""
+
+    def test_default_repo_root_points_at_checkout_root(self) -> None:
+        """The flattened module default resolves the repository root."""
+        assert DEFAULT_REPO_ROOT == REPO_ROOT
 
     def test_expected_targets_include_every_direct_subpackage_except_automation(self) -> None:
         direct_subpackages = {

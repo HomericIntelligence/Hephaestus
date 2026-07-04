@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.validation.skills.skill_catalog import (
+from hephaestus.validation.skill_catalog import (
     check_claude_skill_arguments,
     check_skill_catalog,
     extract_claude_skill_arguments,

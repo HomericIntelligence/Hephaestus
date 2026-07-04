@@ -9,11 +9,14 @@ from typing import Any
 
 import pytest
 
-from hephaestus.validation import markdown
-from hephaestus.validation.code import mypy_per_file
-from hephaestus.validation.docs import doc_config, docstrings
-from hephaestus.validation.skills import skill_catalog
-from hephaestus.validation.tiers import cli_tier_docs
+from hephaestus.validation import (
+    cli_tier_docs,
+    doc_config,
+    docstrings,
+    markdown,
+    mypy_per_file,
+    skill_catalog,
+)
 
 
 def test_docstrings_main_accepts_repo_root_and_json(
