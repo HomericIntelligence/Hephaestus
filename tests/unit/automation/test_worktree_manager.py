@@ -925,6 +925,10 @@ class TestCreateWorktreeBranchCollision:
 
         mock_rebase.assert_called_once_with(manager.base_dir / "issue-1577", "main")
 
+    @pytest.mark.parametrize(
+        ("local_branch_exists", "remote_branch_exists"),
+        [(True, False), (False, True)],
+    )
     @patch("hephaestus.automation.worktree_manager.rebase_worktree_onto")
     def test_refresh_base_rebase_conflict_keeps_reused_issue_branch(
         self,
@@ -932,23 +936,45 @@ class TestCreateWorktreeBranchCollision:
         worktree_mocks: Any,
         tmp_path: Any,
         caplog: pytest.LogCaptureFixture,
+        local_branch_exists: bool,
+        remote_branch_exists: bool,
     ) -> None:
-        """Rebase conflicts proceed with the reused branch at its current head."""
+        """Rebase conflicts proceed with reused local and origin-restored branches."""
         worktree_mocks.repo_root.return_value = tmp_path
         worktree_mocks.run.return_value = Mock(returncode=0, stdout="origin/main")
         mock_rebase.return_value = False
         manager = WorktreeManager()
+        worktree_path = manager.base_dir / "issue-1577"
 
         with (
             caplog.at_level("WARNING", logger="hephaestus.automation.worktree_manager"),
             patch.object(manager, "_worktree_holding_branch", return_value=None),
-            patch.object(manager, "_local_branch_exists", return_value=True),
+            patch.object(manager, "_local_branch_exists", return_value=local_branch_exists),
+            patch.object(manager, "_remote_branch_exists", return_value=remote_branch_exists),
         ):
             result = manager.create_worktree(1577, "1577-auto-impl", refresh_base=True)
 
-        assert result == manager.base_dir / "issue-1577"
-        assert manager.worktrees[1577] == manager.base_dir / "issue-1577"
-        mock_rebase.assert_called_once_with(manager.base_dir / "issue-1577", "main")
+        assert result == worktree_path
+        assert manager.worktrees[1577] == worktree_path
+        mock_rebase.assert_called_once_with(worktree_path, "main")
+        add_calls = [
+            call.args[0]
+            for call in worktree_mocks.run.call_args_list
+            if call.args[0][:3] == ["git", "worktree", "add"]
+        ]
+        assert add_calls
+        if local_branch_exists:
+            assert add_calls[-1] == ["git", "worktree", "add", str(worktree_path), "1577-auto-impl"]
+        else:
+            assert add_calls[-1] == [
+                "git",
+                "worktree",
+                "add",
+                str(worktree_path),
+                "-b",
+                "1577-auto-impl",
+                "origin/1577-auto-impl",
+            ]
         assert "proceeding with current branch head" in caplog.text
 
     @patch("hephaestus.automation.worktree_manager.rebase_worktree_onto")
@@ -991,6 +1017,55 @@ class TestCreateWorktreeBranchCollision:
 
         assert 1797 not in manager.worktrees
         assert not worktree_path.exists()
+        argvs = [call.args[0] for call in worktree_mocks.run.call_args_list]
+        assert ["git", "worktree", "remove", "--force", str(worktree_path)] in argvs
+        assert ["git", "worktree", "prune"] in argvs
+
+    def test_create_worktree_prunes_partial_worktree_after_gone_dir_add_failure(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """Failures after git worktree registration prune metadata even if the dir is gone."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        worktree_path = manager.base_dir / "issue-1797"
+
+        with (
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch.object(
+                manager,
+                "_add_worktree_for_branch",
+                side_effect=RuntimeError("registered worktree vanished"),
+            ),
+            pytest.raises(RuntimeError, match="Failed to create worktree"),
+        ):
+            manager.create_worktree(1797, "1797-auto-impl")
+
+        argvs = [call.args[0] for call in worktree_mocks.run.call_args_list]
+        assert ["git", "worktree", "remove", "--force", str(worktree_path)] in argvs
+        assert ["git", "worktree", "prune"] in argvs
+
+    @patch("hephaestus.automation.worktree_manager.shutil.rmtree")
+    def test_create_worktree_preserves_add_failure_when_direct_cleanup_fails(
+        self, mock_rmtree: Any, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """Direct removal failures are logged without masking the setup failure."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        mock_rmtree.side_effect = OSError("busy")
+        manager = WorktreeManager()
+        worktree_path = manager.base_dir / "issue-1797"
+
+        def fail_after_add(path: Path, *_: Any, **__: Any) -> None:
+            path.mkdir(parents=True)
+            raise RuntimeError("rebase failed")
+
+        with (
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch.object(manager, "_add_worktree_for_branch", side_effect=fail_after_add),
+            pytest.raises(RuntimeError, match="Failed to create worktree: rebase failed"),
+        ):
+            manager.create_worktree(1797, "1797-auto-impl")
+
+        assert worktree_path.exists()
         argvs = [call.args[0] for call in worktree_mocks.run.call_args_list]
         assert ["git", "worktree", "remove", "--force", str(worktree_path)] in argvs
         assert ["git", "worktree", "prune"] in argvs

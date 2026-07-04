@@ -252,8 +252,7 @@ class WorktreeManager:
                         )
                     except Exception:
                         self.worktrees.pop(issue_number, None)
-                        if worktree_path.exists():
-                            self._remove_worktree_path_forcefully(worktree_path)
+                        self._remove_worktree_path_forcefully(worktree_path)
                         raise
                 self.worktrees[issue_number] = worktree_path
                 logger.info("Created worktree for issue #%s at %s", issue_number, worktree_path)
@@ -274,14 +273,22 @@ class WorktreeManager:
         except Exception as e:
             logger.debug("git worktree remove failed (expected if not a worktree): %s", e)
 
-        # Fallback to direct directory removal.
-        if worktree_path.exists():
-            shutil.rmtree(worktree_path)
-
         try:
-            run(["git", "worktree", "prune"], cwd=self.repo_root, check=False)
-        except Exception as e:
-            logger.debug("git worktree prune failed: %s", e)
+            # Fallback to direct directory removal.
+            if worktree_path.exists():
+                try:
+                    shutil.rmtree(worktree_path)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to remove worktree directory %s directly: %s",
+                        worktree_path,
+                        e,
+                    )
+        finally:
+            try:
+                run(["git", "worktree", "prune"], cwd=self.repo_root, check=False)
+            except Exception as e:
+                logger.debug("git worktree prune failed: %s", e)
 
     def _add_worktree_for_branch(
         self,
