@@ -101,9 +101,12 @@ def extract_cvss_score(severity_list: list[dict[str, Any]]) -> float | None:
             parsed = _parse_cvss_numeric_score(score)
             if parsed is not None:
                 scores.append(parsed)
-            vector_score = _score_cvss_v3_vector(score)
-            if vector_score is not None:
-                scores.append(vector_score)
+            else:
+                # A string is either a numeric score or a CVSS vector, never
+                # both — only try vector scoring when numeric parse failed.
+                vector_score = _score_cvss_v3_vector(score)
+                if vector_score is not None:
+                    scores.append(vector_score)
         for field in ("base_score", "cvss_score"):
             parsed = _parse_cvss_numeric_score(entry.get(field))
             if parsed is not None:
