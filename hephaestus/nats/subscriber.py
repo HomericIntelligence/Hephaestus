@@ -15,7 +15,7 @@ Usage::
 
     from hephaestus.nats import NATSConfig, NATSSubscriberThread
 
-    config = NATSConfig(enabled=True, url="tls://nats.example.com:4222", subjects=["my.>"])
+    config = NATSConfig(enabled=True, url="nats://nats.example.com:4222", subjects=["my.>"])
     thread = NATSSubscriberThread(config=config, handler=lambda event: print(event))
     thread.start()
     # Check health at any time:

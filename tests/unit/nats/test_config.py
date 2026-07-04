@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import ssl
-
 import pytest
 
 from hephaestus.nats.config import NATSConfig, load_nats_config
@@ -15,14 +13,7 @@ class TestNATSConfig:
     def test_defaults(self) -> None:
         config = NATSConfig()
         assert config.enabled is False
-        assert config.url == "tls://localhost:4222"
-        assert config.tls is True
-        assert config.tls_ca_file is None
-        assert config.tls_cert_file is None
-        assert config.tls_key_file is None
-        assert config.tls_hostname is None
-        assert config.tls_handshake_first is False
-        assert config.allow_plaintext is False
+        assert config.url == "nats://localhost:4222"
         assert config.stream == "TASKS"
         assert config.subjects == []
         assert config.durable_name == "hephaestus-subscriber"
@@ -67,52 +58,8 @@ class TestNATSConfig:
         with pytest.raises(ValueError):
             NATSConfig(initial_backoff_seconds=10.0, max_backoff_seconds=5.0)
 
-    def test_nonlocal_plaintext_rejected_when_enabled(self) -> None:
-        with pytest.raises(ValueError, match="plaintext nats://"):
-            NATSConfig(enabled=True, url="nats://broker.example.com:4222", tls=False)
-
-    def test_nonlocal_plaintext_ws_rejected_when_enabled(self) -> None:
-        with pytest.raises(ValueError, match="plaintext ws://"):
-            NATSConfig(enabled=True, url="ws://broker.example.com:4222", tls=False)
-
-    def test_loopback_plaintext_allowed_for_local_development(self) -> None:
-        config = NATSConfig(enabled=True, url="nats://127.0.0.1:4222", tls=False)
-        assert config.tls_enabled is False
-
-    def test_explicit_allow_plaintext_permits_nonlocal_nats_url(self) -> None:
-        config = NATSConfig(
-            enabled=True,
-            url="nats://broker.example.com:4222",
-            tls=False,
-            allow_plaintext=True,
-        )
-        assert config.allow_plaintext is True
-        assert config.tls_enabled is False
-
-    def test_tls_key_requires_tls_cert(self) -> None:
-        with pytest.raises(ValueError, match="tls_key_file requires tls_cert_file"):
-            NATSConfig(tls_key_file="/run/secrets/nats.key")
-
-    def test_tls_scheme_enables_tls_options_even_when_flag_is_false(self) -> None:
-        config = NATSConfig(url="tls://broker.example.com:4222", tls=False)
-        assert config.tls_enabled is True
-
-    def test_connect_options_include_ssl_context_and_tls_kwargs(self) -> None:
-        config = NATSConfig(
-            url="tls://broker.example.com:4222",
-            tls=True,
-            tls_hostname="broker.example.com",
-            tls_handshake_first=True,
-        )
-
-        options = config.connect_options()
-
-        assert isinstance(options["tls"], ssl.SSLContext)
-        assert options["tls_hostname"] == "broker.example.com"
-        assert options["tls_handshake_first"] is True
-
-    def test_connect_options_empty_for_local_plaintext(self) -> None:
-        config = NATSConfig(enabled=True, url="nats://localhost:4222", tls=False)
+    def test_connect_options_empty(self) -> None:
+        config = NATSConfig(enabled=True, url="nats://localhost:4222")
         assert config.connect_options() == {}
 
 
@@ -189,78 +136,12 @@ class TestLoadNATSConfig:
         config = load_nats_config({"initial_backoff_seconds": "0.5"})
         assert config.initial_backoff_seconds == 0.5
 
-    def test_yaml_string_false_does_not_permit_nonlocal_plaintext(self) -> None:
-        with pytest.raises(ValueError, match="plaintext nats://"):
-            load_nats_config(
-                {
-                    "enabled": True,
-                    "url": "nats://broker.example.com:4222",
-                    "tls": "false",
-                    "allow_plaintext": "false",
-                },
-                env_override=False,
-            )
-
-    def test_yaml_string_bools_are_coerced_before_validation(self) -> None:
-        config = load_nats_config(
-            {
-                "enabled": True,
-                "url": "tls://broker.example.com:4222",
-                "tls": "false",
-                "tls_handshake_first": "true",
-                "allow_plaintext": "false",
-            },
-            env_override=False,
-        )
-
-        assert config.tls is False
-        assert config.tls_handshake_first is True
-        assert config.allow_plaintext is False
-
-    def test_yaml_invalid_bool_names_field(self) -> None:
-        with pytest.raises(ValueError, match="allow_plaintext"):
-            load_nats_config({"allow_plaintext": "sometimes"}, env_override=False)
-
-    def test_env_reads_tls_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("NATS_URL", "tls://broker.example.com:4222")
-        monkeypatch.setenv("NATS_TLS", "true")
-        monkeypatch.setenv("NATS_TLS_CA_FILE", "/run/secrets/nats-ca.pem")
-        monkeypatch.setenv("NATS_TLS_CERT_FILE", "/run/secrets/nats-client.pem")
-        monkeypatch.setenv("NATS_TLS_KEY_FILE", "/run/secrets/nats-client.key")
-        monkeypatch.setenv("NATS_TLS_HOSTNAME", "broker.example.com")
-        monkeypatch.setenv("NATS_TLS_HANDSHAKE_FIRST", "yes")
-
-        config = load_nats_config({"enabled": True})
-
-        assert config.url == "tls://broker.example.com:4222"
-        assert config.tls is True
-        assert config.tls_ca_file == "/run/secrets/nats-ca.pem"
-        assert config.tls_cert_file == "/run/secrets/nats-client.pem"
-        assert config.tls_key_file == "/run/secrets/nats-client.key"
-        assert config.tls_hostname == "broker.example.com"
-        assert config.tls_handshake_first is True
-
-    def test_env_false_bool_permits_local_plaintext(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("NATS_URL", "nats://127.0.0.1:4222")
-        monkeypatch.setenv("NATS_TLS", "false")
-
-        config = load_nats_config({"enabled": True})
-
-        assert config.tls is False
-        assert config.tls_enabled is False
-
-    def test_invalid_bool_env_names_variable(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("NATS_TLS", "sometimes")
-        with pytest.raises(ValueError, match="NATS_TLS"):
-            load_nats_config({})
-
-
 class TestFromEnv:
     """Tests for NATSConfig.from_env()."""
 
     def test_no_env_uses_defaults(self) -> None:
         config = NATSConfig.from_env()
-        assert config.url == "tls://localhost:4222"
+        assert config.url == "nats://localhost:4222"
         assert config.stream == "TASKS"
         assert config.initial_backoff_seconds == 1.0
 
@@ -302,4 +183,4 @@ class TestFromEnv:
     def test_empty_string_var_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("NATS_URL", "")
         config = NATSConfig.from_env()
-        assert config.url == "tls://localhost:4222"
+        assert config.url == "nats://localhost:4222"

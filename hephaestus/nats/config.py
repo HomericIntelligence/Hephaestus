@@ -7,7 +7,7 @@ Usage::
 
     from hephaestus.nats.config import NATSConfig, load_nats_config
 
-    config = NATSConfig(enabled=True, url="tls://nats.example.com:4222")
+    config = NATSConfig(enabled=True, url="nats://nats.example.com:4222")
     # or load from YAML:
     config = load_nats_config(yaml_dict["nats"])
 """
