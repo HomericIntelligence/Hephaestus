@@ -13,8 +13,8 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -23,6 +23,30 @@ from hephaestus.cli.utils import create_validation_parser, emit_json_status, for
 from hephaestus.utils.helpers import get_repo_root
 
 HIGH_THRESHOLD: float = 7.0
+_CVSS_V3_METRICS: frozenset[str] = frozenset({"AV", "AC", "PR", "UI", "S", "C", "I", "A"})
+_CVSS_V3_IMPACT_WEIGHT: dict[str, float] = {"H": 0.56, "L": 0.22, "N": 0.0}
+_CVSS_V3_BASE_WEIGHTS: dict[str, dict[str, float]] = {
+    "AV": {"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.2},
+    "AC": {"L": 0.77, "H": 0.44},
+    "UI": {"N": 0.85, "R": 0.62},
+}
+_CVSS_V3_PR_WEIGHTS: dict[str, dict[str, float]] = {
+    "U": {"N": 0.85, "L": 0.62, "H": 0.27},
+    "C": {"N": 0.85, "L": 0.68, "H": 0.5},
+}
+
+
+def _parse_cvss_numeric_score(value: object) -> float | None:
+    """Return a finite CVSS score within the inclusive 0.0-10.0 range."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed) or not 0.0 <= parsed <= 10.0:
+        return None
+    return parsed
 
 
 def load_ignore_list(path: Path | None = None) -> frozenset[str]:
@@ -68,14 +92,85 @@ def extract_cvss_score(severity_list: list[dict[str, Any]]) -> float | None:
     """
     scores: list[float] = []
     for entry in severity_list:
-        score_str = entry.get("score", "")
-        if isinstance(score_str, (int, float)):
-            scores.append(float(score_str))
-        numeric = entry.get("base_score") or entry.get("cvss_score")
-        if numeric is not None:
-            with contextlib.suppress(TypeError, ValueError):
-                scores.append(float(numeric))
+        score = entry.get("score", "")
+        if isinstance(score, (int, float)):
+            parsed = _parse_cvss_numeric_score(score)
+            if parsed is not None:
+                scores.append(parsed)
+        elif isinstance(score, str):
+            parsed = _parse_cvss_numeric_score(score)
+            if parsed is not None:
+                scores.append(parsed)
+            else:
+                # A string is either a numeric score or a CVSS vector, never
+                # both — only try vector scoring when numeric parse failed.
+                vector_score = _score_cvss_v3_vector(score)
+                if vector_score is not None:
+                    scores.append(vector_score)
+        for field in ("base_score", "cvss_score"):
+            parsed = _parse_cvss_numeric_score(entry.get(field))
+            if parsed is not None:
+                scores.append(parsed)
     return max(scores) if scores else None
+
+
+def _score_cvss_v3_vector(vector: str) -> float | None:
+    stripped = vector.strip().upper()
+    if not stripped.startswith(("CVSS:3.0/", "CVSS:3.1/")):
+        return None
+
+    _, *metric_parts = stripped.split("/")
+    metrics: dict[str, str] = {}
+    for part in metric_parts:
+        key, separator, value = part.partition(":")
+        if not separator or not key or not value:
+            return None
+        metrics[key] = value
+
+    if not _CVSS_V3_METRICS.issubset(metrics):
+        return None
+
+    scope = metrics["S"]
+    if scope not in _CVSS_V3_PR_WEIGHTS:
+        return None
+
+    try:
+        impact_subscore = 1 - (
+            (1 - _CVSS_V3_IMPACT_WEIGHT[metrics["C"]])
+            * (1 - _CVSS_V3_IMPACT_WEIGHT[metrics["I"]])
+            * (1 - _CVSS_V3_IMPACT_WEIGHT[metrics["A"]])
+        )
+        impact = _cvss_v3_impact(scope, impact_subscore)
+        exploitability = (
+            8.22
+            * _CVSS_V3_BASE_WEIGHTS["AV"][metrics["AV"]]
+            * _CVSS_V3_BASE_WEIGHTS["AC"][metrics["AC"]]
+            * _CVSS_V3_PR_WEIGHTS[scope][metrics["PR"]]
+            * _CVSS_V3_BASE_WEIGHTS["UI"][metrics["UI"]]
+        )
+    except KeyError:
+        return None
+
+    if impact <= 0:
+        return 0.0
+
+    raw_score = impact + exploitability
+    if scope == "C":
+        raw_score *= 1.08
+    return _cvss_v3_round_up(min(raw_score, 10.0))
+
+
+def _cvss_v3_impact(scope: str, impact_subscore: float) -> float:
+    # The changed-scope Impact formula is identical in CVSS 3.0 and 3.1
+    # (the 0.9731/^13 form belongs to the v3.1 Environmental ModifiedImpact,
+    # not the base score).
+    if scope == "U":
+        return 6.42 * impact_subscore
+    return 7.52 * (impact_subscore - 0.029) - 3.25 * (impact_subscore - 0.02) ** 15
+
+
+def _cvss_v3_round_up(value: float) -> float:
+    return math.ceil(value * 10 - 1e-7) / 10
 
 
 def severity_label(score: float | None) -> str:

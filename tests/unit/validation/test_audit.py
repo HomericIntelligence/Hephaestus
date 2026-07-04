@@ -56,9 +56,69 @@ class TestExtractCvssScore:
         result = extract_cvss_score([{"base_score": "9.1"}])
         assert result == 9.1
 
-    def test_no_score_returns_none(self) -> None:
-        """Returns None when no numeric score is available."""
+    def test_string_score_does_not_skip_base_score(self) -> None:
+        """Considers base_score even when score is a numeric string."""
+        result = extract_cvss_score([{"score": "5.0", "base_score": "9.1"}])
+        assert result == 9.1
+
+    def test_non_finite_score_does_not_skip_base_score(self) -> None:
+        """Ignores non-finite score text while preserving a finite base_score."""
+        result = extract_cvss_score([{"score": "nan", "base_score": "9.8"}])
+        assert result == 9.8
+
+    def test_cvss_vector_score(self) -> None:
+        """Computes the base score from a CVSS v3 vector-only entry."""
         result = extract_cvss_score([{"score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}])
+        assert result == 9.8
+
+    def test_cvss_changed_scope_vector_score(self) -> None:
+        """Computes the base score for a changed-scope CVSS v3 vector-only entry."""
+        result = extract_cvss_score([{"score": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H"}])
+        assert result == 9.9
+
+    def test_cvss_30_changed_scope_vector_score(self) -> None:
+        """CVSS 3.0 changed-scope vectors use the same Impact formula as 3.1.
+
+        Official base score per the CVSS v3.0 spec is 9.9 — identical to the
+        v3.1 score for the same vector.
+        """
+        result = extract_cvss_score([{"score": "CVSS:3.0/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H"}])
+        assert result == 9.9
+
+    def test_cvss_30_changed_scope_high_boundary(self) -> None:
+        """A mid-ISS CVSS 3.0 changed-scope vector scores correctly at the HIGH boundary.
+
+        Per the v3.0 base spec: ISS = 1 - (1-0.56)(1-0.22)(1-0.22) = 0.732304,
+        Impact = 7.52*(ISS-0.029) - 3.25*(ISS-0.02)^15 = 5.268808,
+        Exploitability = 8.22*0.62*0.77*0.5*0.62 = 1.216511,
+        Roundup(1.08*(Impact+Expl)) = Roundup(7.004144) = 7.1.
+        The former ModifiedImpact-style branch (ISS*0.9731, ^13) yielded 7.0.
+        """
+        result = extract_cvss_score([{"score": "CVSS:3.0/AV:A/AC:L/PR:H/UI:R/S:C/C:H/I:L/A:L"}])
+        assert result == 7.1
+
+    def test_cvss_vector_lowercase_metrics(self) -> None:
+        """Lowercase vector text is normalized before scoring."""
+        result = extract_cvss_score([{"score": "cvss:3.0/av:n/ac:l/pr:l/ui:n/s:c/c:h/i:h/a:h"}])
+        assert result == 9.9
+
+    def test_malformed_vector_returns_none(self) -> None:
+        """A truncated CVSS vector yields no score."""
+        result = extract_cvss_score([{"score": "CVSS:3.1/AV:N/AC:L"}])
+        assert result is None
+
+    def test_out_of_range_numeric_score_ignored(self) -> None:
+        """Scores outside the 0.0-10.0 CVSS range are rejected."""
+        assert extract_cvss_score([{"score": 10.1}]) is None
+        assert extract_cvss_score([{"base_score": "-0.1"}]) is None
+
+    def test_bool_score_ignored(self) -> None:
+        """Boolean values are not treated as numeric CVSS scores."""
+        assert extract_cvss_score([{"score": True}]) is None
+
+    def test_non_numeric_score_returns_none(self) -> None:
+        """Returns None when score text is neither numeric nor a supported CVSS vector."""
+        result = extract_cvss_score([{"score": "unknown"}])
         assert result is None
 
     def test_empty_list(self) -> None:
@@ -146,6 +206,20 @@ class TestFilterAuditResults:
         blocking, suppressed = filter_audit_results(data)
         assert len(blocking) == 0
         assert len(suppressed) == 1
+
+    def test_cvss_vector_only_high_severity_blocks(self) -> None:
+        """Vector-only HIGH/CRITICAL vulnerabilities are blocking."""
+        data = self._make_data(
+            [
+                {
+                    "id": "CVE-5",
+                    "severity": [{"score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}],
+                }
+            ]
+        )
+        blocking, suppressed = filter_audit_results(data)
+        assert blocking == [("pkg", "1.0", "CVE-5", "CRITICAL")]
+        assert suppressed == []
 
 
 class TestMain:
