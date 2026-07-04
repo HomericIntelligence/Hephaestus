@@ -95,12 +95,18 @@ nats = [
 automation = [
     "pydantic>=2.12.5,<3",
 ]
+# HMAS mesh worker (hephaestus.automation.mesh): product layer + nats-py for
+# the role-addressed dispatch queues (Odysseus ADR-013).
+mesh = [
+    "HomericIntelligence-Hephaestus[automation,nats]",
+]
 all = [
     "HomericIntelligence-Hephaestus[automation,github,nats,toml,xml,schema]",
 ]
 
 [project.scripts]
 hephaestus-automation-loop = "hephaestus.automation.loop_runner:main"
+hephaestus-mesh-worker = "hephaestus.automation.mesh.cli:main"
 hephaestus-plan-issues = "hephaestus.automation.planner:main"
 hephaestus-implement-issues = "hephaestus.automation.implementer:main"
 hephaestus-review-prs = "hephaestus.automation.pr_reviewer:main"

@@ -705,3 +705,72 @@ class TestPromptNullByteSanitization:
             cwd=cwd,
         )
         assert out == ""
+
+
+class TestBrokenResumeRecreatesOnce:
+    """#1780: a broken/truncated transcript recreates ONCE; 429s never do.
+
+    Killed workers leave truncated session JSONLs; ``claude --resume`` of one
+    exits 1 with EMPTY stderr. The mesh burned whole redelivery budgets
+    re-failing on the same corrupt session. Quarantine + recreate-once is
+    scoped so transient/quota failures still propagate unchanged.
+    """
+
+    def _invoke(self, cwd: Path) -> tuple[str, str]:
+        return invoke_claude_with_session(
+            repo="R",
+            issue=1,
+            agent=AGENT_PLANNER,
+            prompt="hi",
+            model="sonnet",
+            cwd=cwd,
+        )
+
+    def test_empty_output_resume_failure_quarantines_and_recreates(self, fake_home: Path) -> None:
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        sid = session_uuid("R", 1, AGENT_PLANNER, "sonnet")
+        _make_existing_jsonl(fake_home, cwd, sid)
+        err = subprocess.CalledProcessError(returncode=1, cmd=["claude"], output="", stderr="")
+        ok = MagicMock(stdout="recovered", stderr="", returncode=0)
+        with patch(
+            "hephaestus.automation.claude_invoke.subprocess.run", side_effect=[err, ok]
+        ) as m:
+            stdout, _ = self._invoke(cwd)
+        assert stdout == "recovered"
+        assert m.call_count == 2
+        retry_argv = _argv(m.call_args_list[1])
+        assert "--session-id" in retry_argv
+        assert "--resume" not in retry_argv
+        # The corrupt transcript was quarantined out of the resume probe's path.
+        assert not session_jsonl_path(sid, cwd).exists()
+
+    def test_quota_failure_on_resume_still_propagates(self, fake_home: Path) -> None:
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        sid = session_uuid("R", 1, AGENT_PLANNER, "sonnet")
+        _make_existing_jsonl(fake_home, cwd, sid)
+        err = subprocess.CalledProcessError(
+            returncode=1, cmd=["claude"], output="", stderr="429 rate limit exceeded"
+        )
+        with patch("hephaestus.automation.claude_invoke.subprocess.run", side_effect=err) as m:
+            with pytest.raises(subprocess.CalledProcessError):
+                self._invoke(cwd)
+        assert m.call_count == 1
+        assert session_jsonl_path(sid, cwd).exists()
+
+    def test_expired_phrase_on_resume_recreates(self, fake_home: Path) -> None:
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        sid = session_uuid("R", 1, AGENT_PLANNER, "sonnet")
+        _make_existing_jsonl(fake_home, cwd, sid)
+        err = subprocess.CalledProcessError(
+            returncode=1, cmd=["claude"], output="", stderr="No conversation found: cannot resume"
+        )
+        ok = MagicMock(stdout="fresh", stderr="", returncode=0)
+        with patch(
+            "hephaestus.automation.claude_invoke.subprocess.run", side_effect=[err, ok]
+        ) as m:
+            stdout, _ = self._invoke(cwd)
+        assert stdout == "fresh"
+        assert m.call_count == 2
