@@ -338,7 +338,7 @@ config = merge_with_env({}, convert_bools=True)
 <!-- CLI table generated from pyproject.toml [project.scripts]. Keep in sync via
      `python3 -m hephaestus.scripts_lib.check_cli_table_sync` (also enforced in pre-commit). -->
 
-53 console scripts are installed when you install the package.  Run any command
+54 console scripts are installed when you install the package.  Run any command
 with `--help` to see full usage.
 
 ### Automation

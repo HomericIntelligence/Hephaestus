@@ -654,6 +654,13 @@ def parse_json_block(
             record_error(_format_parse_error(exc), block)
             return _copy_default(failed_default)
 
+    # The anchored regex requires the closing fence at line start, so a
+    # ```json opener with a truncated or mid-line-closed block produces no
+    # match at all — recover the same way as the matched-but-unparseable path.
+    recovered = _raw_decode_fenced(text, use_last_block)
+    if recovered is not None:
+        return recovered
+
     if raw_json_fallback:
         try:
             return dict(json.loads(text))
