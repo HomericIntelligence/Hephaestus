@@ -151,15 +151,6 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Generated API reference directory (default: <repo-root>/docs/api)",
     )
-    parser.add_argument(
-        "--min-subpackage-pages",
-        type=int,
-        default=None,
-        help=(
-            "Deprecated compatibility flag. The validator now checks for every "
-            "expected direct hephaestus subpackage page."
-        ),
-    )
     args = parser.parse_args(argv)
     repo_root = resolve_repo_root(args)
     docs_dir = args.docs_dir if args.docs_dir is not None else repo_root / "docs" / "api"

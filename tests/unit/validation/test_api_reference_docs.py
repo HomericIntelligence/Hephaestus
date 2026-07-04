@@ -156,3 +156,13 @@ class TestMain:
         assert main(["--docs-dir", str(docs_dir), "--json"]) == 1
         payload = json.loads(capsys.readouterr().out)
         assert payload["violations"][0]["kind"] == "missing-subpackage-page"
+
+    def test_main_rejects_removed_min_subpackage_pages_flag(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--min-subpackage-pages", "999"])
+
+        assert exc_info.value.code == 2
+        assert "unrecognized arguments: --min-subpackage-pages 999" in capsys.readouterr().err
