@@ -429,6 +429,14 @@ def _async_return(value: Any) -> Any:
     return _coro()
 
 
+def _stub_nats_module(monkeypatch: Any) -> None:
+    """Satisfy cli.main's [mesh]-extra pre-flight in the extra-less test env."""
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "nats", types.ModuleType("nats"))
+
+
 class TestCliMainSuccess:
     """cli.main happy path: builds worker from env and runs the loop."""
 
@@ -437,6 +445,7 @@ class TestCliMainSuccess:
 
         from hephaestus.automation.mesh import cli
 
+        _stub_nats_module(monkeypatch)
         monkeypatch.setenv("MESH_DOMAIN", "pipeline")
         monkeypatch.setenv("MESH_ROLE", "component-lead")
         ran: list[bool] = []
@@ -455,6 +464,7 @@ class TestCliMainSuccess:
     def test_main_keyboard_interrupt_is_clean_exit(self, monkeypatch: Any) -> None:
         from hephaestus.automation.mesh import cli
 
+        _stub_nats_module(monkeypatch)
         monkeypatch.setenv("MESH_DOMAIN", "pipeline")
         monkeypatch.setenv("MESH_ROLE", "component-lead")
 
