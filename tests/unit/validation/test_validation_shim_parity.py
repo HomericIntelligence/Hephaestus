@@ -1,10 +1,8 @@
-"""Full-surface parity tests for the validation backward-compat shims.
+"""Public surface tests for flat validation modules.
 
-Issue #1446 merged ten flat validation modules into the ``docs/``, ``code/``,
-``tiers/``, and ``skills/`` subpackages, leaving each original
-``hephaestus.validation.<module>`` path as a thin re-export shim. A missing or
-drifted re-export only surfaces as an ``AttributeError`` at a future call site,
-so these tests assert object identity for every public name on each shim.
+Issue #1736 removes the nested ``validation/docs``, ``validation/code``,
+``validation/tiers``, and ``validation/skills`` packages. The retained flat
+modules must keep their public names importable for console scripts and tests.
 """
 
 from __future__ import annotations
@@ -12,23 +10,6 @@ from __future__ import annotations
 import importlib
 
 import pytest
-
-# shim module path -> canonical subpackage module path
-SHIMS = {
-    "hephaestus.validation.docstrings": "hephaestus.validation.docs.docstrings",
-    "hephaestus.validation.doc_config": "hephaestus.validation.docs.doc_config",
-    "hephaestus.validation.doc_policy": "hephaestus.validation.docs.doc_policy",
-    "hephaestus.validation.type_aliases": "hephaestus.validation.code.type_aliases",
-    "hephaestus.validation.complexity": "hephaestus.validation.code.complexity",
-    "hephaestus.validation.mypy_per_file": "hephaestus.validation.code.mypy_per_file",
-    "hephaestus.validation.tier_labels": "hephaestus.validation.tiers.tier_labels",
-    "hephaestus.validation.cli_tier_docs": "hephaestus.validation.tiers.cli_tier_docs",
-    "hephaestus.validation.skill_catalog": "hephaestus.validation.skills.skill_catalog",
-    "hephaestus.validation.repo_analyze_skills": (
-        "hephaestus.validation.skills.repo_analyze_skills"
-    ),
-    "hephaestus.validation.skill_merge_method": ("hephaestus.validation.skills.skill_merge_method"),
-}
 
 EXPECTED_PUBLIC_NAMES = {
     "hephaestus.validation.docstrings": (
@@ -128,27 +109,10 @@ EXPECTED_PUBLIC_NAMES = {
 }
 
 
-def _public_names(module: object) -> list[str]:
-    names = []
-    for name in dir(module):
-        if name.startswith("_"):
-            continue
-        obj = getattr(module, name)
-        if getattr(getattr(obj, "__class__", None), "__name__", "") == "module":
-            continue
-        names.append(name)
-    return names
-
-
-@pytest.mark.parametrize("shim_path,canonical_path", list(SHIMS.items()))
-def test_shim_reexports_match_canonical(shim_path: str, canonical_path: str) -> None:
-    """Every legacy public name on a shim exists and matches its canonical module."""
-    shim = importlib.import_module(shim_path)
-    canonical = importlib.import_module(canonical_path)
-    expected_names = EXPECTED_PUBLIC_NAMES[shim_path]
-    assert _public_names(shim) == list(expected_names), (
-        f"{shim_path} public surface drifted from the expected legacy exports"
-    )
-    for name in expected_names:
-        obj = getattr(shim, name)
-        assert getattr(canonical, name) is obj, f"{shim_path}.{name} drifted from {canonical_path}"
+@pytest.mark.parametrize("module_path", list(EXPECTED_PUBLIC_NAMES))
+def test_flat_validation_module_public_surface(module_path: str) -> None:
+    """Every retained flat validation module exposes its expected public names."""
+    module = importlib.import_module(module_path)
+    expected_names = EXPECTED_PUBLIC_NAMES[module_path]
+    missing = [name for name in expected_names if not hasattr(module, name)]
+    assert missing == [], f"{module_path} is missing expected exports: {missing}"

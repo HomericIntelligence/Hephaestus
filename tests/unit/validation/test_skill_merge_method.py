@@ -1,6 +1,7 @@
 import textwrap
 from pathlib import Path
 
+from hephaestus.validation import skill_merge_method
 from hephaestus.validation.skill_merge_method import scan
 
 
@@ -75,3 +76,9 @@ def test_real_repo_skills_pass() -> None:
     """The real skills/ tree must be clean after this PR lands."""
     repo_root = Path(__file__).resolve().parents[3]
     assert scan(repo_root) == []
+
+
+def test_default_repo_root_points_at_checkout_root() -> None:
+    """The flattened module default resolves the repository root."""
+    repo_root = Path(__file__).resolve().parents[3]
+    assert repo_root == skill_merge_method._DEFAULT_REPO_ROOT

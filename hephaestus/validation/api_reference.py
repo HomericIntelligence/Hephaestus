@@ -24,7 +24,8 @@ from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 
 PACKAGE_NAME = "hephaestus"
 EXCLUDED_SUBPACKAGES = frozenset({"automation"})
-DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[3]
+# This module lives at hephaestus/validation/, so the repo root is two parents up.
+DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True)

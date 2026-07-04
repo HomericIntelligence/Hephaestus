@@ -6,22 +6,22 @@ from pathlib import Path
 
 VALIDATION_MODULES = {
     "audit.py": 1,
-    "tiers/cli_tier_docs.py": 1,
-    "code/complexity.py": 1,
+    "cli_tier_docs.py": 1,
+    "complexity.py": 1,
     "coverage.py": 1,
-    "docs/doc_config.py": 1,
-    "docs/doc_policy.py": 1,
-    "docs/docstrings.py": 1,
+    "doc_config.py": 1,
+    "doc_policy.py": 1,
+    "docstrings.py": 1,
     "markdown.py": 2,
-    "code/mypy_per_file.py": 1,
+    "mypy_per_file.py": 1,
     "python_version.py": 1,
-    "skills/repo_analyze_skills.py": 1,
+    "repo_analyze_skills.py": 1,
     "schema.py": 1,
-    "skills/skill_catalog.py": 1,
+    "skill_catalog.py": 1,
     "stale_scripts.py": 1,
     "test_structure.py": 1,
-    "tiers/tier_labels.py": 1,
-    "code/type_aliases.py": 1,
+    "tier_labels.py": 1,
+    "type_aliases.py": 1,
 }
 
 
