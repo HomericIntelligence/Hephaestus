@@ -81,47 +81,87 @@ def test_every_stage_has_default_fail_target(stage: StageName) -> None:
     assert "*" in ROUTES[stage].fail_routes
 
 
+# Reasons that consume a budget on every occurrence (used for the
+# unconditional termination property below).
+_BUDGETED_REASONS = sorted(k for k, v in _REASON_BUDGET.items() if v is not None)
+
+# Upper bound on budget-consuming steps before SOME counter must exceed its
+# declared budget (duplicate keys across stages overcount, which only makes
+# the bound looser and the property stronger).
+_TOTAL_BUDGET_SUM = sum(budget for route in ROUTES.values() for budget in route.budgets.values())
+
+
+def _drive(item: WorkItem, reasons: list[str]) -> int:
+    """Drive ``item`` through ``reasons`` via ROUTES with budgets enforced.
+
+    Returns the number of budget-consuming steps taken. FINISHED is
+    absorbing: the walk stops there.
+    """
+    budgeted_steps = 0
+    for reason in reasons:
+        if item.stage == StageName.FINISHED:
+            break
+        budget_key = _REASON_BUDGET[reason]
+        if budget_key is not None:
+            budgeted_steps += 1
+            item.attempts[budget_key] += 1
+            if item.attempts[budget_key] > _declared_budget(budget_key):
+                item.stage = StageName.FINISHED
+                continue
+        item.stage = _fail_target(item.stage, reason)
+    return budgeted_steps
+
+
+@given(
+    start=st.sampled_from(NON_TERMINAL),
+    reasons=st.lists(
+        st.sampled_from(_BUDGETED_REASONS),
+        min_size=_TOTAL_BUDGET_SUM + 1,
+        max_size=_TOTAL_BUDGET_SUM + 10,
+    ),
+)
+@settings(max_examples=150)
+def test_budgeted_failure_sequences_always_reach_finished(
+    start: StageName, reasons: list[str]
+) -> None:
+    """(b) UNCONDITIONAL termination: budgets force FINISHED.
+
+    Any sequence of budget-consuming failures longer than the total budget
+    sum must exhaust some counter and land the item in FINISHED — asserted
+    for every generated example, never vacuously.
+    """
+    item = WorkItem(repo="r", kind=ItemKind.ISSUE, issue=1, stage=start)
+    budgeted_steps = _drive(item, reasons)
+    assert item.stage == StageName.FINISHED
+    assert budgeted_steps <= _TOTAL_BUDGET_SUM + 1
+
+
 @given(
     start=st.sampled_from(NON_TERMINAL),
     reasons=st.lists(st.sampled_from(_REASONS), min_size=1, max_size=60),
 )
 @settings(max_examples=300)
-def test_driven_failure_sequences_always_terminate(start: StageName, reasons: list[str]) -> None:
-    """(b) Any failure sequence terminates once per-item budgets are enforced.
+def test_mixed_failure_sequences_hold_walk_invariants(start: StageName, reasons: list[str]) -> None:
+    """(b') Mixed sequences (incl. unbudgeted exits/self-loops) hold invariants.
 
-    Drives a WorkItem from ``start`` through the generated failure reasons:
-    each budgeted failure increments the item's counter (per-item-lifetime,
-    never reset); once a counter exceeds its ROUTES budget the drive routes
-    to FINISHED (exhaustion), mirroring the coordinator contract. The walk
-    must never exceed a global step bound derived from the budget sum.
+    Unbudgeted reasons resolve purely through the routing table, so their
+    recurrence is bounded by the driven sequence itself (the coordinator's
+    step semantics, not this table, bound them in production). Asserted for
+    EVERY example: the walk stays inside the stage set, never takes more
+    budget-consuming steps than the global budget bound, and FINISHED is
+    absorbing once a budget is exhausted.
     """
     item = WorkItem(repo="r", kind=ItemKind.ISSUE, issue=1, stage=start)
-    max_total_steps = sum(
-        budget for route in ROUTES.values() for budget in route.budgets.values()
-    ) + len(_REASONS)
-    budgeted_steps = 0
-    exhausted_a_budget = False
-
-    for reason in reasons:
-        if item.stage == StageName.FINISHED:
-            break
-
-        budget_key = _REASON_BUDGET[reason]
-        if budget_key is not None:
-            budgeted_steps += 1
-            assert budgeted_steps <= max_total_steps, (
-                "failure walk exceeded the global budget bound"
-            )
-            item.attempts[budget_key] += 1
-            if item.attempts[budget_key] > _declared_budget(budget_key):
-                item.stage = StageName.FINISHED
-                exhausted_a_budget = True
-                continue
-        item.stage = _fail_target(item.stage, reason)
-
-    # Termination is only guaranteed once a budget is actually exhausted;
-    # FINISHED is absorbing so the walk must have landed there and stayed.
-    if exhausted_a_budget:
+    exhausted_before = dict(item.attempts)
+    budgeted_steps = _drive(item, reasons)
+    assert item.stage in set(StageName)
+    assert budgeted_steps <= _TOTAL_BUDGET_SUM + 1
+    exhausted = any(
+        item.attempts[k] > _declared_budget(k)
+        for k in item.attempts
+        if item.attempts[k] != exhausted_before[k]
+    )
+    if exhausted:
         assert item.stage == StageName.FINISHED
 
 
