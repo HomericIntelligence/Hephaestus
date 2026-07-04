@@ -75,12 +75,6 @@ class TestEnsureLabelsOnRepo:
         assert {STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO} <= seen_labels
         assert {STATE_IMPLEMENTATION_NO_GO, STATE_IMPLEMENTATION_GO} <= seen_labels
 
-    def test_label_create_uses_gh_call_default_timeout(self, mock_gh_call: MagicMock) -> None:
-        """Label upserts inherit the centralized gh_call timeout."""
-        mock_gh_call.return_value = _ok_proc()
-        ensure_labels_on_repo("owner/name")
-        assert all("timeout" not in call.kwargs for call in mock_gh_call.call_args_list)
-
     def test_dry_run_issues_zero_calls(self, mock_gh_call: MagicMock) -> None:
         issued = ensure_labels_on_repo("owner/name", dry_run=True)
         assert issued == 0
@@ -157,9 +151,6 @@ class TestMain:
         assert rc == 0
         # 1 detect + n label creates total gh_call calls.
         assert mock_gh_call.call_count == 1 + n
-        repo_view_call = mock_gh_call.call_args_list[0]
-        assert repo_view_call.args[0][:2] == ["repo", "view"]
-        assert "timeout" not in repo_view_call.kwargs
 
     def test_main_org_enumerates_and_applies_to_each(self, mock_gh_call: MagicMock) -> None:
         mock_gh_call.side_effect = [

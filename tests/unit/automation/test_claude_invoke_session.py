@@ -163,13 +163,13 @@ class TestCreateThenResume:
 class TestArgvAssembly:
     """Optional flags appear in argv at the right positions."""
 
-    def test_omitted_timeout_uses_centralized_plan_timeout(
+    def test_omitted_timeout_passes_env_override_to_subprocess_run(
         self,
         stub_run: MagicMock,
         fake_home: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Omitted timeout resolves through the centralized timeout helper."""
+        """Omitted timeout passes the centralized env override to subprocess.run."""
         monkeypatch.setenv("HEPH_AGENT_PLAN_TIMEOUT", "333")
         cwd = fake_home / "work"
         cwd.mkdir()
@@ -183,7 +183,9 @@ class TestArgvAssembly:
             cwd=cwd,
         )
 
-        assert stub_run.call_args.kwargs["timeout"] == 333
+        stub_run.assert_called_once()
+        run_kwargs = stub_run.call_args.kwargs
+        assert run_kwargs["timeout"] == 333
 
     def test_optional_flags(self, stub_run: MagicMock, fake_home: Path) -> None:
         cwd = fake_home / "work"
