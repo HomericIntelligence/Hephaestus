@@ -30,9 +30,13 @@ GIT_COMMON_DIR_PROBE_SECONDS = 5
 CODEX_TERMINATION_GRACE_SECONDS = 5
 CODEX_FINAL_MESSAGE_GRACE_ENV = "HEPH_CODEX_FINAL_MESSAGE_GRACE"
 CODEX_FINAL_MESSAGE_GRACE_SECONDS = 5.0
-CODEX_OPUS_MODEL = "gpt-5.5"
+CODEX_GPT_56_MODEL = "gpt-5.6"
+CODEX_GPT_55_MODEL = "gpt-5.5"
+CODEX_FABLE_MODEL = CODEX_GPT_55_MODEL
+CODEX_FABLE_REASONING_EFFORT = "xhigh"
+CODEX_OPUS_MODEL = CODEX_GPT_56_MODEL
 CODEX_OPUS_REASONING_EFFORT = "xhigh"
-CODEX_SONNET_MODEL = "gpt-5.5"
+CODEX_SONNET_MODEL = CODEX_GPT_55_MODEL
 CODEX_SONNET_REASONING_EFFORT = "medium"
 CODEX_HAIKU_MODEL = "gpt-5.4-mini"
 CODEX_DEFAULT_MODEL = CODEX_OPUS_MODEL
@@ -378,6 +382,8 @@ def _codex_model_config(model: str, *, use_default: bool = False) -> CodexModelC
             return CodexModelConfig(CODEX_DEFAULT_MODEL, CODEX_DEFAULT_REASONING_EFFORT)
         return CodexModelConfig("")
     lower_model = normalized.lower()
+    if lower_model == "fable" or lower_model.startswith("claude-fable-"):
+        return CodexModelConfig(CODEX_FABLE_MODEL, CODEX_FABLE_REASONING_EFFORT)
     if lower_model == "opus" or lower_model.startswith("claude-opus-"):
         return CodexModelConfig(CODEX_OPUS_MODEL, CODEX_OPUS_REASONING_EFFORT)
     if lower_model == "sonnet" or lower_model.startswith("claude-sonnet-"):

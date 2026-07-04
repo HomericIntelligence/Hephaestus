@@ -127,6 +127,13 @@ def test_skill_catalog_defaults_derive_from_repo_root_json(
         "---\nname: alpha\ndescription: Test skill\n---\n\n# Alpha\n",
         encoding="utf-8",
     )
+    (tmp_path / "CLAUDE.md").write_text(
+        "# Agent Guide\n\n"
+        "| Skill | Arguments | When to Use |\n"
+        "|-------|-----------|-------------|\n"
+        "| `alpha` | — | Test skill |\n",
+        encoding="utf-8",
+    )
 
     assert skill_catalog.main(["--repo-root", str(tmp_path), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)

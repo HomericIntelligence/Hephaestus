@@ -421,7 +421,6 @@ def compact_session(
                 sid,
                 "--output-format",
                 "text",
-                "--dangerously-skip-permissions",
                 "--print",
                 "/compact",
             ],

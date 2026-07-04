@@ -10,6 +10,7 @@ from unittest import mock
 import pytest
 from hypothesis import given, strategies as st
 
+from hephaestus.automation._review_utils import DEFAULT_STATE_DIR
 from hephaestus.automation.audit_reviewer import (
     AuditReviewer,
     _build_coordinator_prompt,
@@ -429,8 +430,14 @@ class TestAuditReviewerRun:
         assert mock_post.call_args[1]["dry_run"] is True
 
     def test_state_dir_default_under_build(self, tmp_path: Path) -> None:
-        reviewer = AuditReviewer()
-        assert "build" in str(reviewer.state_dir)
+        with mock.patch(
+            "hephaestus.automation.audit_reviewer.get_repo_root",
+            return_value=tmp_path,
+        ):
+            reviewer = AuditReviewer()
+
+        assert reviewer.state_dir == tmp_path / DEFAULT_STATE_DIR
+        assert reviewer.state_dir.is_dir()
 
 
 class TestParser:
