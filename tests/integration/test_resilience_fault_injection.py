@@ -143,7 +143,7 @@ def test_nats_subscriber_reconnects_after_connect_partition(
     nc = _make_connection(AsyncMock(side_effect=next_msg))
     attempts = {"n": 0}
 
-    async def connect(_url: str) -> MagicMock:
+    async def connect(_url: str, **_kwargs: object) -> MagicMock:
         attempts["n"] += 1
         if attempts["n"] == 1:
             raise ConnectionError("network is unreachable")

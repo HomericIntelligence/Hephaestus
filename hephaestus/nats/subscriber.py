@@ -15,7 +15,7 @@ Usage::
 
     from hephaestus.nats import NATSConfig, NATSSubscriberThread
 
-    config = NATSConfig(enabled=True, url="nats://localhost:4222", subjects=["my.>"])
+    config = NATSConfig(enabled=True, url="tls://nats.example.com:4222", subjects=["my.>"])
     thread = NATSSubscriberThread(config=config, handler=lambda event: print(event))
     thread.start()
     # Check health at any time:
@@ -348,7 +348,7 @@ class NATSSubscriberThread(threading.Thread):
             self._stop_event.set()
             return
 
-        nc = await nats_client.connect(self._config.url)
+        nc = await nats_client.connect(self._config.url, **self._config.connect_options())
         self._set_state(SubscriberState.CONNECTED)
         try:
             js = nc.jetstream()
