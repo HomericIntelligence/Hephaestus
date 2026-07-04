@@ -17,7 +17,7 @@ process group, so a child can look "complete"), and hides the pipeline shape:
 phases are processes, not inspectable functions. There is no architecture
 design doc; the closest anchors are
 [ADR-0001](0001-automation-library-boundary.md) and the ASCII state diagram
-in `hephaestus/automation/state_labels.py:9-30`.
+in `hephaestus/automation/state_labels.py:9-37`.
 
 ## Decision
 
