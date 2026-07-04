@@ -126,7 +126,7 @@ class TestRunMypyPerFile:
         """Each per-file mypy run is bounded by NETWORK_TIMEOUT (#684)."""
         files = [str(tmp_path / "f.py")]
         Path(files[0]).write_text("x = 1\n")
-        with patch("hephaestus.validation.code.mypy_per_file.subprocess.run") as mock_run:
+        with patch("hephaestus.validation.mypy_per_file.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             run_mypy_per_file(files, flags=[])
         assert mock_run.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
@@ -136,7 +136,7 @@ class TestRunMypyPerFile:
         files = [str(tmp_path / "f.py")]
         Path(files[0]).write_text("x = 1\n")
         with patch(
-            "hephaestus.validation.code.mypy_per_file.subprocess.run",
+            "hephaestus.validation.mypy_per_file.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd="mypy", timeout=120),
         ):
             rc = run_mypy_per_file(files, flags=[])

@@ -76,6 +76,46 @@ class TestExtractCvssScore:
         result = extract_cvss_score([{"score": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H"}])
         assert result == 9.9
 
+    def test_cvss_30_changed_scope_vector_score(self) -> None:
+        """CVSS 3.0 changed-scope vectors use the same Impact formula as 3.1.
+
+        Official base score per the CVSS v3.0 spec is 9.9 — identical to the
+        v3.1 score for the same vector.
+        """
+        result = extract_cvss_score([{"score": "CVSS:3.0/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H"}])
+        assert result == 9.9
+
+    def test_cvss_30_changed_scope_high_boundary(self) -> None:
+        """A mid-ISS CVSS 3.0 changed-scope vector scores correctly at the HIGH boundary.
+
+        Per the v3.0 base spec: ISS = 1 - (1-0.56)(1-0.22)(1-0.22) = 0.732304,
+        Impact = 7.52*(ISS-0.029) - 3.25*(ISS-0.02)^15 = 5.268808,
+        Exploitability = 8.22*0.62*0.77*0.5*0.62 = 1.216511,
+        Roundup(1.08*(Impact+Expl)) = Roundup(7.004144) = 7.1.
+        The former ModifiedImpact-style branch (ISS*0.9731, ^13) yielded 7.0.
+        """
+        result = extract_cvss_score([{"score": "CVSS:3.0/AV:A/AC:L/PR:H/UI:R/S:C/C:H/I:L/A:L"}])
+        assert result == 7.1
+
+    def test_cvss_vector_lowercase_metrics(self) -> None:
+        """Lowercase vector text is normalized before scoring."""
+        result = extract_cvss_score([{"score": "cvss:3.0/av:n/ac:l/pr:l/ui:n/s:c/c:h/i:h/a:h"}])
+        assert result == 9.9
+
+    def test_malformed_vector_returns_none(self) -> None:
+        """A truncated CVSS vector yields no score."""
+        result = extract_cvss_score([{"score": "CVSS:3.1/AV:N/AC:L"}])
+        assert result is None
+
+    def test_out_of_range_numeric_score_ignored(self) -> None:
+        """Scores outside the 0.0-10.0 CVSS range are rejected."""
+        assert extract_cvss_score([{"score": 10.1}]) is None
+        assert extract_cvss_score([{"base_score": "-0.1"}]) is None
+
+    def test_bool_score_ignored(self) -> None:
+        """Boolean values are not treated as numeric CVSS scores."""
+        assert extract_cvss_score([{"score": True}]) is None
+
     def test_non_numeric_score_returns_none(self) -> None:
         """Returns None when score text is neither numeric nor a supported CVSS vector."""
         result = extract_cvss_score([{"score": "unknown"}])

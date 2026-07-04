@@ -112,8 +112,13 @@ class TestHealthObservability:
             "last_message_at",
             "url",
             "stream",
+            "circuit_breaker_state",
             "uptime_seconds",
         }
+
+    def test_health_dict_circuit_breaker_state_is_string(self) -> None:
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        assert thread.health_dict()["circuit_breaker_state"] == "closed"
 
     def test_health_dict_initial_values(self) -> None:
         config = _config(url="nats://localhost:4222")
@@ -379,7 +384,7 @@ t = NATSSubscriberThread(config=cfg, handler=lambda e: None)
 fake_nats = types.ModuleType("nats")
 fake_api = types.ModuleType("nats.js.api")
 
-async def connect(url):
+async def connect(url, **kwargs):
     raise RuntimeError("connect stopped before network")
 
 class DeliverPolicy(str):

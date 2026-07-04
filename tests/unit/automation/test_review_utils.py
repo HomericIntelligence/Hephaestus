@@ -15,6 +15,7 @@ from hephaestus.automation._review_utils import (
     add_max_workers_arg,
     close_issue_as_covered,
     drain_completed_futures,
+    ensure_state_dir,
     find_merged_closing_pr,
     find_pr_for_issue,
     get_pr_head_branch,
@@ -26,6 +27,58 @@ from hephaestus.automation._review_utils import (
     save_state_file,
 )
 from hephaestus.automation.models import DEFAULT_WORKER_COUNT, ImplementationState, WorkerResult
+
+# ---------------------------------------------------------------------------
+# ensure_state_dir
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureStateDir:
+    """Tests for the shared automation state directory helper."""
+
+    def test_default_state_dir_literal(self) -> None:
+        """Default state directory path remains the existing on-disk layout."""
+        assert models.DEFAULT_STATE_DIR == "build/.issue_implementer"
+
+    def test_creates_default_state_dir(self, tmp_path: Path) -> None:
+        """Default helper creates and returns the repo-local state directory."""
+        state_dir = ensure_state_dir(tmp_path)
+
+        assert state_dir == tmp_path / models.DEFAULT_STATE_DIR
+        assert state_dir.is_dir()
+
+    def test_creates_custom_subdir(self, tmp_path: Path) -> None:
+        """A custom subdir keeps the helper reusable for alternate state roots."""
+        state_dir = ensure_state_dir(tmp_path, "custom/state")
+
+        assert state_dir == tmp_path / "custom/state"
+        assert state_dir.is_dir()
+
+
+def test_issue_implementer_state_dir_literal_is_centralized() -> None:
+    """Only the canonical helper and literal-pin test may spell issue_implementer."""
+    import ast
+
+    expected_paths = {
+        Path("hephaestus/automation/models.py"),
+        Path("tests/unit/automation/test_review_utils.py"),
+    }
+    hits: list[tuple[Path, int, str]] = []
+    for base in (Path("hephaestus/automation"), Path("tests/unit/automation")):
+        for path in base.rglob("*.py"):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and "issue_implementer" in node.value
+                ):
+                    hits.append((path, node.lineno, node.value))
+
+    bad = [hit for hit in hits if hit[0] not in expected_paths]
+    assert not bad
+    assert {path for path, _, _ in hits} == expected_paths
+
 
 # ---------------------------------------------------------------------------
 # log_file_path
@@ -119,6 +172,13 @@ class TestParseJsonBlock:
         result = parse_json_block(text)
         assert result["summary"] == "ok"
         assert len(result["comments"]) == 1
+
+    def test_json_string_containing_fence_marker_does_not_close_block(self) -> None:
+        """Fence markers inside JSON strings are content, not closing fences."""
+        payload = {"comments": [], "summary": "contains ``` marker"}
+        text = "```json\n" + json.dumps(payload) + "\n```"
+        result = parse_json_block(text)
+        assert result["summary"] == payload["summary"]
 
     def test_invalid_json_with_custom_default_writes_trace(self, tmp_path: Path) -> None:
         """Malformed JSON with trace_dir writes the diagnostic payload."""
@@ -239,27 +299,6 @@ class TestPrintWorkerSummary:
             )
 
         assert "\nFailed issues:" in caplog.messages
-
-
-class TestEnsureStateDir:
-    """Tests for the canonical automation state-dir helper."""
-
-    def test_ensure_state_dir_creates_default_state_dir_under_repo_root(
-        self, tmp_path: Path
-    ) -> None:
-        """Default state dir is created under the provided repo root."""
-        state_dir = review_utils.ensure_state_dir(tmp_path)
-
-        assert models.DEFAULT_STATE_DIR == "build/.issue_implementer"
-        assert state_dir == tmp_path / Path(models.DEFAULT_STATE_DIR)
-        assert state_dir.is_dir()
-
-    def test_ensure_state_dir_accepts_custom_subdir(self, tmp_path: Path) -> None:
-        """Callers can override the subdir while reusing mkdir behavior."""
-        state_dir = review_utils.ensure_state_dir(tmp_path, subdir="custom/state")
-
-        assert state_dir == tmp_path / "custom" / "state"
-        assert state_dir.is_dir()
 
 
 # ---------------------------------------------------------------------------

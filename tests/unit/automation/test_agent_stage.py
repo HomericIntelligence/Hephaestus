@@ -64,6 +64,27 @@ def test_run_agent_dispatches_claude_and_writes_outputs(
     assert Path(args.log_file).read_text(encoding="utf-8") == "claude output"
 
 
+def test_run_agent_normalizes_claude_model_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude one-off stages should accept the same model aliases as env vars."""
+    seen: dict[str, object] = {}
+
+    def fake_run_claude_text(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(["claude"], 0, stdout="claude output", stderr="")
+
+    monkeypatch.setattr(agent_stage, "run_claude_text", fake_run_claude_text)
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "claude")
+
+    args = _args(tmp_path, agent="claude")
+    args.model = "mythos"
+
+    assert agent_stage.run_agent(args) == 0
+    assert seen["model"] == "claude-mythos-5"
+
+
 def test_run_agent_dispatches_codex_and_logs_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

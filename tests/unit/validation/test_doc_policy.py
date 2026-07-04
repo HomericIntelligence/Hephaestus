@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.validation.docs.doc_policy import (
+from hephaestus.validation.doc_policy import (
     Finding,
     Severity,
     _extract_code_blocks,

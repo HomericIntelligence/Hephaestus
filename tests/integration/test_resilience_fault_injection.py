@@ -8,6 +8,7 @@ import json
 import signal
 import subprocess
 import sys
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -74,7 +75,10 @@ def test_network_partition_retries_opens_breaker_then_recovers(
         "hephaestus.resilience.circuit_breaker.time.monotonic",
         lambda: clock["now"],
     )
-    monkeypatch.setattr("hephaestus.utils.retry.time.sleep", lambda _delay: None)
+    monkeypatch.setattr(
+        "hephaestus.utils.retry.time",
+        SimpleNamespace(sleep=lambda _delay: None),
+    )
 
     name = "fault-injection-network"
     breaker = get_circuit_breaker(name, failure_threshold=2, recovery_timeout=10.0)
@@ -143,7 +147,7 @@ def test_nats_subscriber_reconnects_after_connect_partition(
     nc = _make_connection(AsyncMock(side_effect=next_msg))
     attempts = {"n": 0}
 
-    async def connect(_url: str) -> MagicMock:
+    async def connect(_url: str, **_kwargs: object) -> MagicMock:
         attempts["n"] += 1
         if attempts["n"] == 1:
             raise ConnectionError("network is unreachable")
@@ -203,8 +207,10 @@ def test_nats_subscriber_acks_and_surfaces_disk_full_handler_failure() -> None:
 def test_process_kill_is_contained_and_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     """A killed child is contained in the parent and is not retried as transient."""
     monkeypatch.setattr(
-        "hephaestus.utils.retry.time.sleep",
-        lambda _delay: pytest.fail("non-transient process kill must not sleep/retry"),
+        "hephaestus.utils.retry.time",
+        SimpleNamespace(
+            sleep=lambda _delay: pytest.fail("non-transient process kill must not sleep/retry")
+        ),
     )
 
     name = "fault-injection-process-kill"

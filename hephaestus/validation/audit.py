@@ -38,7 +38,7 @@ _CVSS_V3_PR_WEIGHTS: dict[str, dict[str, float]] = {
 
 def _parse_cvss_numeric_score(value: object) -> float | None:
     """Return a finite CVSS score within the inclusive 0.0-10.0 range."""
-    if not isinstance(value, (int, float, str)):
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return None
     try:
         parsed = float(value)
@@ -116,7 +116,7 @@ def _score_cvss_v3_vector(vector: str) -> float | None:
     if not stripped.startswith(("CVSS:3.0/", "CVSS:3.1/")):
         return None
 
-    version, *metric_parts = stripped.split("/")
+    _, *metric_parts = stripped.split("/")
     metrics: dict[str, str] = {}
     for part in metric_parts:
         key, separator, value = part.partition(":")
@@ -137,7 +137,7 @@ def _score_cvss_v3_vector(vector: str) -> float | None:
             * (1 - _CVSS_V3_IMPACT_WEIGHT[metrics["I"]])
             * (1 - _CVSS_V3_IMPACT_WEIGHT[metrics["A"]])
         )
-        impact = _cvss_v3_impact(version, scope, impact_subscore)
+        impact = _cvss_v3_impact(scope, impact_subscore)
         exploitability = (
             8.22
             * _CVSS_V3_BASE_WEIGHTS["AV"][metrics["AV"]]
@@ -157,11 +157,12 @@ def _score_cvss_v3_vector(vector: str) -> float | None:
     return _cvss_v3_round_up(min(raw_score, 10.0))
 
 
-def _cvss_v3_impact(version: str, scope: str, impact_subscore: float) -> float:
+def _cvss_v3_impact(scope: str, impact_subscore: float) -> float:
+    # The changed-scope Impact formula is identical in CVSS 3.0 and 3.1
+    # (the 0.9731/^13 form belongs to the v3.1 Environmental ModifiedImpact,
+    # not the base score).
     if scope == "U":
         return 6.42 * impact_subscore
-    if version == "CVSS:3.0":
-        return 7.52 * (impact_subscore - 0.029) - 3.25 * (impact_subscore * 0.9731 - 0.02) ** 13
     return 7.52 * (impact_subscore - 0.029) - 3.25 * (impact_subscore - 0.02) ** 15
 
 
