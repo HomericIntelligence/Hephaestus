@@ -56,9 +56,19 @@ class TestExtractCvssScore:
         result = extract_cvss_score([{"base_score": "9.1"}])
         assert result == 9.1
 
-    def test_no_score_returns_none(self) -> None:
-        """Returns None when no numeric score is available."""
+    def test_string_score_does_not_skip_base_score(self) -> None:
+        """Considers base_score even when score is a numeric string."""
+        result = extract_cvss_score([{"score": "5.0", "base_score": "9.1"}])
+        assert result == 9.1
+
+    def test_cvss_vector_score(self) -> None:
+        """Computes the base score from a CVSS v3 vector-only entry."""
         result = extract_cvss_score([{"score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}])
+        assert result == 9.8
+
+    def test_non_numeric_score_returns_none(self) -> None:
+        """Returns None when score text is neither numeric nor a supported CVSS vector."""
+        result = extract_cvss_score([{"score": "unknown"}])
         assert result is None
 
     def test_empty_list(self) -> None:
@@ -146,6 +156,20 @@ class TestFilterAuditResults:
         blocking, suppressed = filter_audit_results(data)
         assert len(blocking) == 0
         assert len(suppressed) == 1
+
+    def test_cvss_vector_only_high_severity_blocks(self) -> None:
+        """Vector-only HIGH/CRITICAL vulnerabilities are blocking."""
+        data = self._make_data(
+            [
+                {
+                    "id": "CVE-5",
+                    "severity": [{"score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}],
+                }
+            ]
+        )
+        blocking, suppressed = filter_audit_results(data)
+        assert blocking == [("pkg", "1.0", "CVE-5", "CRITICAL")]
+        assert suppressed == []
 
 
 class TestMain:
