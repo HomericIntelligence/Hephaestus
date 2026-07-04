@@ -8,12 +8,39 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Callable
 from typing import Any
 
 from .github_api import _gh_call, gh_pr_checks
 
 logger = logging.getLogger(__name__)
+
+_ERROR_LINE_RE = re.compile(r"error|failed|fatal|traceback|❌|✗", re.IGNORECASE)
+
+
+def _error_excerpt(log_text: str, limit: int = 3000) -> str:
+    """Excerpt the error-bearing portion of a failed job's log.
+
+    Truncating to the HEAD buries the real failure under setup banners: a Mojo
+    build's first 3000 chars are environment echoes — the live CI-fix agent
+    read a literal ``✅ CI build validation succeeded`` echo near the top,
+    concluded the build passed, and no-committed twice while compile errors
+    sat thousands of lines deeper (#1780 shakedown, ProjectOdyssey#5529).
+    Prefer lines matching error signatures (with 2 lines of context); fall
+    back to the log TAIL, where build failures normally conclude.
+    """
+    lines = log_text.splitlines()
+    hits = [i for i, line in enumerate(lines) if _ERROR_LINE_RE.search(line)]
+    if not hits:
+        return log_text[-limit:]
+    keep: set[int] = set()
+    for i in hits:
+        keep.update(range(max(0, i - 2), min(len(lines), i + 3)))
+    excerpt = "\n".join(lines[i] for i in sorted(keep))
+    # Later errors are usually the actionable ones — keep the tail on overflow.
+    return excerpt[-limit:]
+
 
 # Conclusion values that indicate a PR's check rollup is failing in a way
 # drive-green can act on. SUCCESS / SKIPPED / NEUTRAL / PENDING are
@@ -156,7 +183,7 @@ class CICheckInspector:
                         ["run", "view", str(run_id), "--log-failed"],
                         check=False,
                     )
-                    logs.append(f"=== {run_name} ===\n{log_result.stdout[:3000]}")
+                    logs.append(f"=== {run_name} ===\n{_error_excerpt(log_result.stdout)}")
                 except Exception as log_err:
                     logger.debug("Could not fetch log for run %s: %s", run_id, log_err)
 

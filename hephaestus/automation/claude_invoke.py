@@ -15,14 +15,16 @@ What lives here:
 - :func:`invoke_claude_with_session` — the single entry point every
   automation phase must use. Picks ``--session-id`` (first call) vs
   ``--resume`` (subsequent calls) based on whether the model-keyed JSONL
-  transcript already exists. No recreate-on-failure cascade — a create/resume
-  error propagates (#1168). On a model-specific usage cap it retries the same
-  request once on :func:`agent_config.fallback_model` and pins the fallback
-  for the rest of the process (#1793).
+  transcript already exists. Broken local resume targets are quarantined and
+  recreated once; transient/quota failures still propagate. On a
+  model-specific usage cap it retries the same request once on
+  :func:`agent_config.fallback_model` and pins the fallback for the rest of the
+  process (#1793).
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -31,6 +33,7 @@ import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from hephaestus.automation.agent_config import fallback_model, session_jsonl_path, session_name
 from hephaestus.github.client import ClaudeUsageCapError
@@ -89,6 +92,37 @@ def _record_model_cap(capped: str, fallback: str) -> None:
     )
 
 
+#: Markers of transient/quota failures that must NEVER trigger a recreate —
+#: re-sending the full prompt on a 429 was the old cascade's failure mode.
+_TRANSIENT_FAILURE_MARKERS: tuple[str, ...] = (
+    "429",
+    "rate limit",
+    "overloaded",
+    "quota",
+    "usage cap",
+    "timeout",
+    "timed out",
+)
+
+
+def _resume_target_broken(stderr: str, stdout: str) -> bool:
+    """Return True when a failed ``--resume`` points at a broken local transcript.
+
+    Killed workers leave truncated session JSONLs behind; ``claude --resume``
+    of such a transcript exits 1 with EMPTY stderr, which the expired-phrase
+    probe cannot see (#1780 shakedown — the mesh burned whole delivery budgets
+    re-failing on the same corrupt session). Treat a resume failure as a broken
+    target when the CLI printed a known expired phrase OR printed nothing at
+    all — but never when any transient/quota marker is present.
+    """
+    blob = (stderr + "\n" + stdout).lower()
+    if any(marker in blob for marker in _TRANSIENT_FAILURE_MARKERS):
+        return False
+    if _session_expired(stderr, stdout):
+        return True
+    return not blob.strip()
+
+
 def invoke_claude_with_session(
     *,
     repo: str,
@@ -113,10 +147,13 @@ def invoke_claude_with_session(
     call ``--resume``s it so cached context is reused instead of re-sent (#1166,
     #1168). ``claude --resume`` does NOT auto-create — it errors "No conversation
     found" for an unknown id — so create-on-first-use is required; the probe is
-    the model-keyed transcript file's existence. There is no expired/contention
-    recreate cascade (the old one mis-fired on 429s, re-sending full prompts 3×
-    and crossing models); a ``--session-id``/``--resume`` failure simply
-    propagates. Because ``--resume`` is locked to the creating model, the model
+    the model-keyed transcript file's existence. There is no blanket
+    recreate-on-failure cascade (the old one mis-fired on 429s, re-sending full
+    prompts 3× and crossing models — #1168); the ONE exception is a broken or
+    expired resume target (truncated transcript from a killed worker), which is
+    quarantined and recreated once on the same key — transient/quota failures
+    and any failure of that single retry still propagate. Because ``--resume``
+    is locked to the creating model, the model
     is part of the key: switching a per-agent model starts that model's own
     create-once-then-resume lineage rather than colliding with another model's
     transcript.
@@ -172,7 +209,7 @@ def invoke_claude_with_session(
         subprocess.TimeoutExpired: If the call exceeds ``timeout``.
 
     """
-    del recreate_on_resume_failure  # back-compat shim only; no recreate cascade
+    del recreate_on_resume_failure  # back-compat shim; see broken-resume note above
 
     def _attempt(effective_model: str) -> tuple[str, str]:
         return _invoke_claude_once(
@@ -241,8 +278,9 @@ def _invoke_claude_once(
     # to create the transcript; every later call ``--resume``s it to reuse cached
     # context. The probe is the transcript file's existence, which is model-keyed
     # because ``sid`` is. This is NOT the old recreate-on-failure cascade (that
-    # mis-fired on 429s, re-sending full prompts 3x and crossing models); a
-    # ``--resume``/``--session-id`` failure now simply propagates.
+    # mis-fired on 429s, re-sending full prompts 3x and crossing models): the
+    # only recreate is the broken-resume quarantine below, which retries once on
+    # the same key and re-raises everything else.
     create = not session_jsonl_path(sid, cwd).exists()
     mode_args = ["--session-id", sid, "--name", display_name] if create else ["--resume", sid]
     cmd: list[str] = [
@@ -297,17 +335,54 @@ def _invoke_claude_once(
         sid,
         "create" if create else "resume",
     )
-    result = subprocess.run(
-        cmd,
-        input=prompt if input_via_stdin else None,
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=timeout,
-        env=env,
-        stdin=subprocess.DEVNULL if not input_via_stdin else None,
-        cwd=str(cwd),
-    )
+    run_kwargs: dict[str, Any] = {
+        "input": prompt if input_via_stdin else None,
+        "capture_output": True,
+        "text": True,
+        "check": True,
+        "timeout": timeout,
+        "env": env,
+        "stdin": subprocess.DEVNULL if not input_via_stdin else None,
+        "cwd": str(cwd),
+    }
+    try:
+        result = subprocess.run(cmd, **run_kwargs)
+    except subprocess.CalledProcessError as exc:
+        # Narrow recreate-once path: ONLY a resume whose target transcript is
+        # broken (truncated by a killed worker) or expired. This is not the old
+        # recreate cascade — transient/quota failures re-raise unchanged, and
+        # the retry happens at most once, same key, same model.
+        if create or not _resume_target_broken(exc.stderr or "", exc.stdout or ""):
+            raise
+        transcript = session_jsonl_path(sid, cwd)
+        with contextlib.suppress(OSError):
+            transcript.rename(transcript.with_suffix(".jsonl.corrupt"))
+        logger.warning(
+            "session %s (%s) resume failed with a broken/missing transcript; "
+            "quarantined it and recreating the session once",
+            sid,
+            display_name,
+        )
+        retry_cmd = list(cmd)
+        i = retry_cmd.index("--resume")
+        retry_cmd[i : i + 2] = ["--session-id", sid, "--name", display_name]
+        try:
+            result = subprocess.run(retry_cmd, **run_kwargs)
+        except subprocess.CalledProcessError as retry_exc:
+            # The recreate itself can fail — notably "already in use" when a
+            # concurrent sibling holds the same deterministic session (#909's
+            # collision case). One retry is the budget: log which failure this
+            # is and propagate; no uuid4 fallback (that crossed sessions and
+            # broke the per-key transcript lineage the key exists to protect).
+            logger.warning(
+                "session %s (%s) recreate after quarantine also failed "
+                "(exit %s, stderr %.200s); propagating",
+                sid,
+                display_name,
+                retry_exc.returncode,
+                retry_exc.stderr or "",
+            )
+            raise
     return result.stdout, sid
 
 

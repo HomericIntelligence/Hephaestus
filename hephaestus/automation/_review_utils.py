@@ -76,6 +76,34 @@ _JSON_BLOCK_RE = re.compile(
     r"^[ \t]*```json[ \t]*\r?\n(.*?)\r?\n^[ \t]*```[ \t]*\r?$",
     re.DOTALL | re.MULTILINE,
 )
+_JSON_FENCE_OPEN_RE = re.compile(r"```json\s*")
+
+
+def _raw_decode_fenced(text: str, use_last_block: bool) -> dict[str, Any] | None:
+    """Decode one complete JSON value after a ```json fence (balance-aware).
+
+    The anchored fence regex requires the closing ``` at line start — a fenced
+    code block nested inside a JSON string (e.g. a review comment body carrying
+    a ```-fenced fix recipe) can still make the extracted block unparseable or
+    prevent a match entirely, observed live on ProjectOdyssey#5530 (#1780
+    shakedown). ``raw_decode`` consumes exactly one JSON value and is immune to
+    embedded backticks.
+    """
+    starts = [m.end() for m in _JSON_FENCE_OPEN_RE.finditer(text)]
+    if not starts:
+        return None
+    # Only the fence the caller's block-selection mode points at — falling
+    # through to OTHER blocks would change first/last-block semantics (the
+    # CI-repair path relies on an invalid first block NOT being replaced by a
+    # later valid one).
+    start = starts[-1] if use_last_block else starts[0]
+    with contextlib.suppress(json.JSONDecodeError, TypeError, ValueError):
+        value, _ = json.JSONDecoder().raw_decode(text, start)
+        if isinstance(value, dict):
+            return dict(value)
+    return None
+
+
 _REVIEW_PARSE_MISSING = {"comments": [], "summary": "No structured output from analysis"}
 _REVIEW_PARSE_FAILED = {
     "comments": [],
@@ -559,6 +587,32 @@ def _write_json_parse_trace(
         return trace_path, exc
 
 
+def _parse_matched_fenced_block(
+    block: str,
+    text: str,
+    *,
+    use_last_block: bool,
+    raw_json_fallback: bool,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Parse a regex-matched fenced block, recovering via fallbacks.
+
+    Returns:
+        ``(result, None)`` on success, or ``(None, reason)`` when the block
+        and every fallback failed to yield a JSON object.
+
+    """
+    try:
+        return dict(json.loads(block)), None
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        recovered = _raw_decode_fenced(text, use_last_block)
+        if recovered is not None:
+            return recovered, None
+        if raw_json_fallback:
+            with contextlib.suppress(json.JSONDecodeError, TypeError, ValueError):
+                return dict(json.loads(text)), None
+        return None, _format_parse_error(exc)
+
+
 def parse_json_block(
     text: str,
     *,
@@ -614,14 +668,23 @@ def parse_json_block(
     matches = _JSON_BLOCK_RE.findall(text)
     if matches:
         block = matches[-1 if use_last_block else 0]
-        try:
-            return dict(json.loads(block))
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
-            if raw_json_fallback:
-                with contextlib.suppress(json.JSONDecodeError, TypeError, ValueError):
-                    return dict(json.loads(text))
-            record_error(_format_parse_error(exc), block)
-            return _copy_default(failed_default)
+        result, reason = _parse_matched_fenced_block(
+            block,
+            text,
+            use_last_block=use_last_block,
+            raw_json_fallback=raw_json_fallback,
+        )
+        if result is not None:
+            return result
+        record_error(reason or "unparseable fenced ```json block", block)
+        return _copy_default(failed_default)
+
+    # The anchored regex requires the closing fence at line start, so a
+    # ```json opener with a truncated or mid-line-closed block produces no
+    # match at all — recover the same way as the matched-but-unparseable path.
+    recovered = _raw_decode_fenced(text, use_last_block)
+    if recovered is not None:
+        return recovered
 
     if raw_json_fallback:
         try:

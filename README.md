@@ -52,6 +52,22 @@ pytest, ruff, and mypy):
   extras: `automation`, `github`, `nats`, `toml`, `xml`, `schema`. Note that
   `automation` is the product layer (`hephaestus.automation`) and pulls in
   `pydantic`; see [ADR 0001](docs/adr/0001-automation-library-boundary.md).
+- `pip install "HomericIntelligence-Hephaestus[mesh]"` — installs the HMAS
+  mesh-worker dependencies (`automation` + `nats`) needed by
+  `hephaestus-mesh-worker`; deliberately not part of `[all]`. Minimal local
+  run (defaults shown; see `hephaestus/automation/mesh/cli.py` for the full
+  environment contract):
+
+  ```bash
+  MESH_DOMAIN=pipeline MESH_ROLE=task-agent \
+  NATS_URL=nats://localhost:4222 AGAMEMNON_URL=http://localhost:8080 \
+  hephaestus-mesh-worker --verbose
+  ```
+
+  Optional: `AGENT_ID` (defaults to `{domain}-{role}-{hostname}`),
+  `NATS_CLIENT_TOKEN`/`NATS_CA_FILE` (ADR-008/009 auth + TLS),
+  `AGAMEMNON_API_KEY`, and `MESH_HEARTBEAT_SECONDS`/`MESH_ACK_WAIT_SECONDS`/
+  `MESH_MAX_DELIVER`/`MESH_OVERRUN_SECONDS` tuning knobs.
 - `pip install HomericIntelligence-Hephaestus[dev]` — installs development and
   testing dependencies. Use this for contributors and CI.
 - `pip install "HomericIntelligence-Hephaestus[all,dev]"` — both, for a full
@@ -322,7 +338,7 @@ config = merge_with_env({}, convert_bools=True)
 <!-- CLI table generated from pyproject.toml [project.scripts]. Keep in sync via
      `python3 -m hephaestus.scripts_lib.check_cli_table_sync` (also enforced in pre-commit). -->
 
-53 console scripts are installed when you install the package.  Run any command
+54 console scripts are installed when you install the package.  Run any command
 with `--help` to see full usage.
 
 ### Automation
@@ -330,6 +346,7 @@ with `--help` to see full usage.
 | Command | Description |
 |---|---|
 | `hephaestus-automation-loop` | Multi-repo 3-stage automation pipeline using Claude Code or Codex (plan → implement → drive-green; plan-review and PR-review/address-review run in-loop within plan/implement) |
+| `hephaestus-mesh-worker` | HMAS mesh worker: serve one role-addressed (domain, role) NATS work queue (Odysseus ADR-013) |
 | `hephaestus-plan-issues` | Bulk issue planning using Claude Code or Codex |
 | `hephaestus-implement-issues` | Bulk issue implementation using Claude Code or Codex in parallel worktrees |
 | `hephaestus-review-prs` | Read-only PR review automation using Claude Code or Codex in parallel worktrees |

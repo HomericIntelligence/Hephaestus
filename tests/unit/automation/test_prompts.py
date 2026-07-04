@@ -106,6 +106,12 @@ class TestPRReviewAnalysisPrompt:
         # Default mode instructs suppression.
         assert "do not emit" in out.lower() or "omit" in out.lower()
 
+    def test_go_verdict_forbids_inline_comments(self) -> None:
+        """GO must not emit inline comments (convergence contract, #1780)."""
+        out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
+        assert "If your verdict is GO, the `comments` array MUST be" in out
+        assert "livelocks the review loop" in out
+
     def test_nitpicks_included_when_flag_set(self) -> None:
         """#1083: include_nitpicks=True re-enables nitpick comments."""
         on = prompts.get_pr_review_analysis_prompt(
@@ -442,6 +448,20 @@ class TestUntrustedFencing:
         assert self._fence_present(out, "ISSUE_BODY")
         assert self._fence_present(out, "DIFF_TEXT")
         assert prompts._UNTRUSTED_NOTICE in out
+
+    def test_impl_loop_review_prompt_forbids_threads_on_go(self) -> None:
+        """GO verdicts must not open new inline threads (convergence contract)."""
+        out = prompts.get_impl_loop_review_prompt(
+            issue_number=1,
+            issue_title="t",
+            issue_body="b",
+            diff_text="d",
+            files_changed="a.py",
+            iteration=0,
+            prior_review=None,
+        )
+        assert "PR review threads ONLY for findings that justify" in out
+        assert "GO + new inline threads is a contract violation" in out
 
     def test_pr_review_analysis_prompt_fences_advise_findings(self) -> None:
         """get_pr_review_analysis_prompt fences advise findings before review."""

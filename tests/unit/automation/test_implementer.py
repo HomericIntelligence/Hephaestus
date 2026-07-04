@@ -1040,6 +1040,10 @@ class TestNoChangesProducedAppliesStateSkip:
                 "hephaestus.automation.implementer_phase_runner.find_pr_for_issue",
                 return_value=None,
             ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.find_merged_closing_pr",
+                return_value=700,
+            ),
             patch.object(impl.worktree_manager, "create_worktree", return_value=worktree_path),
             patch.object(impl, "_save_state"),
             patch.object(impl, "_has_plan", return_value=True),
@@ -1060,6 +1064,52 @@ class TestNoChangesProducedAppliesStateSkip:
         assert result.success is True
         assert result.issue_number == 736
         mock_label.assert_called_once_with(736, ["state:skip"])
+
+    def test_empty_branch_without_merged_pr_is_failure(
+        self, impl: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """A 0-commit branch with NO merged closing PR is a stale artifact.
+
+        A killed/aborted run leaves an empty ``{issue}-auto-impl`` branch;
+        declaring the work "already merged" silently skips real work
+        (observed live: ProjectOdyssey#5520). It must fail — without the
+        ``state:skip`` label — so a retry re-implements from scratch.
+        """
+        worktree_path = tmp_path / "wt"
+        worktree_path.mkdir()
+        no_changes_error = RuntimeError(
+            "No changes produced for issue HomericIntelligence/ProjectHephaestus#736: "
+            "branch '736-auto-impl' has no commits vs 'main'."
+        )
+        with (
+            patch(
+                "hephaestus.automation.implementer_phase_runner.find_pr_for_issue",
+                return_value=None,
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.find_merged_closing_pr",
+                return_value=None,
+            ),
+            patch.object(impl.worktree_manager, "create_worktree", return_value=worktree_path),
+            patch.object(impl, "_save_state"),
+            patch.object(impl, "_has_plan", return_value=True),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.is_plan_review_go",
+                return_value=True,
+            ),
+            patch("hephaestus.automation.implementer_phase_runner.fetch_issue_info"),
+            patch.object(impl, "_run_advise"),
+            patch.object(impl, "_run_claude_code", return_value="session-id"),
+            patch.object(impl, "_finalize_pr", side_effect=no_changes_error),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.gh_issue_add_labels"
+            ) as mock_label,
+        ):
+            result = impl.phase_runner._implement_issue(736)
+
+        assert result.success is False
+        assert "stale empty branch" in str(result.error)
+        mock_label.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

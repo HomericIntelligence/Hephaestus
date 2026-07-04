@@ -180,6 +180,39 @@ class TestParseJsonBlock:
         result = parse_json_block(text)
         assert result["summary"] == payload["summary"]
 
+    def test_nested_fence_inside_comment_body_still_parses(self) -> None:
+        """A ```-fenced snippet inside a JSON string must not truncate the block.
+
+        The non-greedy fence regex stops at the FIRST closing ``` — a review
+        comment body carrying a fenced fix recipe made the whole analysis
+        unparseable (observed live on ProjectOdyssey#5530, #1780 shakedown).
+        The raw_decode fallback must recover the full object.
+        """
+        body = "Remove the files:\n```\ngit ls-files '*.pyc' | xargs git rm --cached\n```\nDone."
+        payload = {
+            "comments": [{"path": "a.py", "line": 1, "side": "RIGHT", "body": body}],
+            "summary": "NOGO: binaries committed",
+        }
+        text = "prose before\n```json\n" + json.dumps(payload, indent=2) + "\n```\n"
+        result = parse_json_block(text)
+        assert result["summary"] == "NOGO: binaries committed"
+        assert result["comments"][0]["body"] == body
+
+    def test_nested_fence_last_block_mode_recovers_last_object(self) -> None:
+        """With multiple fenced objects, raw_decode recovery honors use_last_block."""
+        body = "fix:\n```\nmake clean\n```"
+        first = {"comments": [], "summary": "first"}
+        last = {
+            "comments": [{"path": "b.py", "line": 2, "side": "RIGHT", "body": body}],
+            "summary": "last",
+        }
+        text = (
+            "```json\n" + json.dumps(first) + "\n```\n"
+            "```json\n" + json.dumps(last, indent=2) + "\n```\n"
+        )
+        result = parse_json_block(text)
+        assert result["summary"] == "last"
+
     def test_invalid_json_with_custom_default_writes_trace(self, tmp_path: Path) -> None:
         """Malformed JSON with trace_dir writes the diagnostic payload."""
         default: dict[str, Any] = {"addressed": [], "replies": {}}
