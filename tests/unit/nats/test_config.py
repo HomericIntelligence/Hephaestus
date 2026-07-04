@@ -33,7 +33,7 @@ class TestNATSConfig:
         assert config.subjects == ["my.subject.>"]
 
     def test_invalid_extra_field_ignored(self) -> None:
-        config = NATSConfig(enabled=True)
+        config = load_nats_config({"enabled": True, "unknown_key": "ignored"})
         assert config.enabled is True
 
     def test_backoff_defaults_preserve_historical_constants(self) -> None:
@@ -127,6 +127,10 @@ class TestLoadNATSConfig:
         # unknown kwargs). load_nats_config must keep dropping unknown keys.
         config = load_nats_config({"url": "nats://x:4222", "unknown_key": "ignored"})
         assert config.url == "nats://x:4222"
+
+    def test_yaml_string_backoff_coerced_to_float(self) -> None:
+        config = load_nats_config({"initial_backoff_seconds": "0.5"})
+        assert config.initial_backoff_seconds == 0.5
 
 
 class TestFromEnv:
