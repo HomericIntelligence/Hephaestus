@@ -19,6 +19,7 @@ automation loop.
 from __future__ import annotations
 
 import importlib
+import os
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,13 @@ except ModuleNotFoundError:  # pragma: no cover — only on Python 3.10
     import tomli as tomllib  # type: ignore[no-redef, unused-ignore]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _console_script_env() -> dict[str, str]:
+    """Return an env that lets console scripts import the editable worktree."""
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    return env
 
 
 def _load_entry_points() -> list[tuple[str, str, str]]:
@@ -85,7 +93,13 @@ class TestCLIHelpFlag:
             pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
         assert binary is not None  # narrow for mypy; pytest.skip already returned
 
-        result = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            [binary, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=_console_script_env(),
+        )
         assert result.returncode == 0, (
             f"{command} --help exited {result.returncode}\n"
             f"stdout: {result.stdout[:500]}\n"
@@ -115,7 +129,13 @@ class TestCLIJsonFlag:
             pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
         assert binary is not None
 
-        result = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            [binary, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=_console_script_env(),
+        )
         assert result.returncode == 0, (
             f"{command} --help exited {result.returncode}\n"
             f"stdout: {result.stdout[:500]}\n"
@@ -143,7 +163,13 @@ class TestCLIVersionFlag:
             pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
         assert binary is not None
 
-        result = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=_console_script_env(),
+        )
         assert result.returncode == 0, (
             f"{command} --version exited {result.returncode}\n"
             f"stdout: {result.stdout[:500]}\n"
@@ -165,7 +191,13 @@ class TestCLIVersionFlag:
             pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
         assert binary is not None
 
-        result = subprocess.run([binary, "-V"], capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            [binary, "-V"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=_console_script_env(),
+        )
         assert result.returncode == 0, (
             f"{command} -V exited {result.returncode}\n"
             f"stdout: {result.stdout[:500]}\n"
@@ -189,22 +221,18 @@ class TestMaxWorkersValidation:
 
     def test_automation_loop_rejects_zero_max_workers(self) -> None:
         """hephaestus-automation-loop --max-workers=0 exits non-zero with clear error."""
-        import os
-
         binary = shutil.which("hephaestus-automation-loop")
         if binary is None:
             pytest.skip("hephaestus-automation-loop not on PATH")
         assert binary is not None  # narrow Optional[str] for mypy
 
-        env = os.environ.copy()
-        env.pop("PYTHONPATH", None)
         result = subprocess.run(
             [binary, "--max-workers", "0"],
             capture_output=True,
             text=True,
             timeout=10,
             check=False,
-            env=env,
+            env=_console_script_env(),
         )
         assert result.returncode != 0, "Expected non-zero exit for --max-workers=0"
         assert "--max-workers" in result.stderr, "Error must mention --max-workers argument"
