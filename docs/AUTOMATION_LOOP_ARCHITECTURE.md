@@ -173,7 +173,7 @@ causes a queue push.
 **Prompt functions**:
 
 - `prompts/planning.py:261 get_plan_loop_review_prompt`
-- `learn.build_learn_prompt`
+- `learn.py:111 build_learn_prompt`
 
 ### 4. implementation
 
