@@ -215,6 +215,18 @@ def _read_int_env(name: str, default: int) -> int:
     return read_timeout_env(name, default)
 
 
+def agent_default_timeout() -> int:
+    """Return the generic agent-invocation timeout in seconds (default 7200s).
+
+    This is the phase-agnostic fallback for
+    :func:`hephaestus.automation.claude_invoke.invoke_claude_with_session`
+    when a caller omits ``timeout``. It must stay generic — no phase's own
+    budget (planner/reviewer/implementer/...) may leak in here, since every
+    agent type funnels through that single entry point (#1415).
+    """
+    return _read_int_env("HEPH_AGENT_DEFAULT_TIMEOUT", DEFAULT_AGENT_TIMEOUT)
+
+
 def planner_claude_timeout() -> int:
     """Timeout for planner agent calls (default 1200s)."""
     return read_timeout_env(
@@ -562,6 +574,7 @@ __all__ = [
     "address_review_claude_timeout",
     "advise_claude_timeout",
     "advise_model",
+    "agent_default_timeout",
     "ci_driver_claude_timeout",
     "ci_poll_max_wait",
     "codex_advise_model",

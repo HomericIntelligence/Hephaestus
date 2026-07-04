@@ -12,6 +12,7 @@ from hephaestus.automation.agent_config import (
     PLAN_STAGE_TIMEOUT as PLAN_STAGE_TIMEOUT,
     address_review_claude_timeout as address_review_claude_timeout,
     advise_claude_timeout as advise_claude_timeout,
+    agent_default_timeout as agent_default_timeout,
     ci_driver_claude_timeout as ci_driver_claude_timeout,
     ci_poll_max_wait as ci_poll_max_wait,
     follow_up_claude_timeout as follow_up_claude_timeout,

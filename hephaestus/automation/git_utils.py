@@ -12,6 +12,8 @@ import subprocess
 from collections.abc import Collection
 from pathlib import Path
 
+from hephaestus.constants import agent_git_timeout
+
 # ``get_repo_root`` is re-exported (not redefined) so that the single canonical
 # implementation in ``hephaestus.utils.helpers`` is used everywhere, while
 # ``hephaestus.automation.git_utils.get_repo_root`` remains a stable, patchable
@@ -259,7 +261,7 @@ def safe_git_fetch(repo_root: Path, retries: int = 3) -> bool:
         run(
             ["git", "fetch", "origin"],
             cwd=repo_root,
-            timeout=30,
+            timeout=agent_git_timeout(),
         )
         logger.debug("Git fetch succeeded")
         return True
