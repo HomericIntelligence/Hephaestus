@@ -46,7 +46,7 @@ _REASON_BUDGET: dict[str, str | None] = {
     "exhaustion": "pr_review_iter",
     "fix_exhausted": "ci_fix",
     "not_implementation_go": "pr_review_iter",
-    "no_pr": "ci_fix",
+    "no_pr": None,
     "ci_red": "merge",
     "blocked_exhausted": "blocked_address",
     "closed": "merge",

@@ -33,7 +33,7 @@ class TestHistoryEvent:
 
     def test_history_event_creation(self) -> None:
         """Create a HistoryEvent with required and optional fields."""
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         event = HistoryEvent(
             timestamp=now, stage=StageName.PLANNING, state="in_progress", note="test"
         )
@@ -44,12 +44,16 @@ class TestHistoryEvent:
 
     def test_history_event_default_note(self) -> None:
         """HistoryEvent.note defaults to empty string."""
-        event = HistoryEvent(timestamp=datetime.now(), stage=StageName.REPO, state="queued")
+        event = HistoryEvent(
+            timestamp=datetime.now(timezone.utc), stage=StageName.REPO, state="queued"
+        )
         assert event.note == ""
 
     def test_history_event_frozen(self) -> None:
         """HistoryEvent is frozen (immutable)."""
-        event = HistoryEvent(timestamp=datetime.now(), stage=StageName.REPO, state="queued")
+        event = HistoryEvent(
+            timestamp=datetime.now(timezone.utc), stage=StageName.REPO, state="queued"
+        )
         with pytest.raises(AttributeError):
             event.state = "modified"  # type: ignore
 
