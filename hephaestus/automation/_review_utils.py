@@ -587,6 +587,32 @@ def _write_json_parse_trace(
         return trace_path, exc
 
 
+def _parse_matched_fenced_block(
+    block: str,
+    text: str,
+    *,
+    use_last_block: bool,
+    raw_json_fallback: bool,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Parse a regex-matched fenced block, recovering via fallbacks.
+
+    Returns:
+        ``(result, None)`` on success, or ``(None, reason)`` when the block
+        and every fallback failed to yield a JSON object.
+
+    """
+    try:
+        return dict(json.loads(block)), None
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        recovered = _raw_decode_fenced(text, use_last_block)
+        if recovered is not None:
+            return recovered, None
+        if raw_json_fallback:
+            with contextlib.suppress(json.JSONDecodeError, TypeError, ValueError):
+                return dict(json.loads(text)), None
+        return None, _format_parse_error(exc)
+
+
 def parse_json_block(
     text: str,
     *,
@@ -642,17 +668,16 @@ def parse_json_block(
     matches = _JSON_BLOCK_RE.findall(text)
     if matches:
         block = matches[-1 if use_last_block else 0]
-        try:
-            return dict(json.loads(block))
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
-            recovered = _raw_decode_fenced(text, use_last_block)
-            if recovered is not None:
-                return recovered
-            if raw_json_fallback:
-                with contextlib.suppress(json.JSONDecodeError, TypeError, ValueError):
-                    return dict(json.loads(text))
-            record_error(_format_parse_error(exc), block)
-            return _copy_default(failed_default)
+        result, reason = _parse_matched_fenced_block(
+            block,
+            text,
+            use_last_block=use_last_block,
+            raw_json_fallback=raw_json_fallback,
+        )
+        if result is not None:
+            return result
+        record_error(reason or "unparseable fenced ```json block", block)
+        return _copy_default(failed_default)
 
     # The anchored regex requires the closing fence at line start, so a
     # ```json opener with a truncated or mid-line-closed block produces no
