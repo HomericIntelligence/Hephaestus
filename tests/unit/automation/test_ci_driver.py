@@ -3495,6 +3495,9 @@ class TestInvokeAgentSession:
         assert result.returncode == 0
         assert result.stdout == "output text"
         mock_invoke.assert_called_once()
+        kwargs = mock_invoke.call_args.kwargs
+        assert kwargs["allowed_tools"] == "Read,Write,Edit,Glob,Grep,Bash"
+        assert "extra_args" not in kwargs
 
     def test_claude_error_returns_nonzero_rc(self, driver: CIDriver, tmp_path: Path) -> None:
         with patch(
