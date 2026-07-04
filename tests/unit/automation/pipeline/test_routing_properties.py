@@ -48,7 +48,7 @@ _REASON_BUDGET: dict[str, str | None] = {
     "agent_error": None,
     "human_blocked": None,
     "exhaustion": None,
-    "fix_exhausted": "ci_fix",
+    "fix_exhausted": None,
     "not_implementation_go": None,
     "no_pr": None,
     # ci_red cycles merge_wait -> ci for another merge attempt later, so it
