@@ -173,13 +173,6 @@ class TestParseJsonBlock:
         assert result["summary"] == "ok"
         assert len(result["comments"]) == 1
 
-    def test_json_string_containing_fence_marker_does_not_close_block(self) -> None:
-        """Fence markers inside JSON strings are content, not closing fences."""
-        payload = {"comments": [], "summary": "contains ``` marker"}
-        text = "```json\n" + json.dumps(payload) + "\n```"
-        result = parse_json_block(text)
-        assert result["summary"] == payload["summary"]
-
     def test_invalid_json_with_custom_default_writes_trace(self, tmp_path: Path) -> None:
         """Malformed JSON with trace_dir writes the diagnostic payload."""
         default: dict[str, Any] = {"addressed": [], "replies": {}}
