@@ -240,39 +240,55 @@ class WorktreeManager:
             # unknown contents fail closed there instead of being removed.
             if worktree_path.exists():
                 logger.warning("Removing existing worktree directory: %s", worktree_path)
-                # Try git worktree remove first to clean up git metadata
-                try:
-                    run(
-                        ["git", "worktree", "remove", "--force", str(worktree_path)],
-                        cwd=self.repo_root,
-                        check=False,
-                    )
-                except Exception as e:
-                    logger.debug("git worktree remove failed (expected if not a worktree): %s", e)
-
-                # Fallback to direct directory removal
-                if worktree_path.exists():
-                    shutil.rmtree(worktree_path)
-
-                # Prune stale worktree metadata
-                try:
-                    run(["git", "worktree", "prune"], cwd=self.repo_root, check=False)
-                except Exception as e:
-                    logger.debug("git worktree prune failed: %s", e)
+                self._remove_worktree_path_forcefully(worktree_path)
 
             try:
                 with file_lock(self._git_metadata_lock_path()):
-                    self._add_worktree_for_branch(
-                        worktree_path,
-                        branch_name,
-                        refresh_base=refresh_base,
-                    )
+                    try:
+                        self._add_worktree_for_branch(
+                            worktree_path,
+                            branch_name,
+                            refresh_base=refresh_base,
+                        )
+                    except Exception:
+                        self.worktrees.pop(issue_number, None)
+                        self._remove_worktree_path_forcefully(worktree_path)
+                        raise
                 self.worktrees[issue_number] = worktree_path
                 logger.info("Created worktree for issue #%s at %s", issue_number, worktree_path)
                 return worktree_path
 
             except Exception as e:
                 raise RuntimeError(f"Failed to create worktree: {e}") from e
+
+    def _remove_worktree_path_forcefully(self, worktree_path: Path) -> None:
+        """Remove a worktree path and prune stale git metadata."""
+        # Try git worktree remove first to clean up git metadata.
+        try:
+            run(
+                ["git", "worktree", "remove", "--force", str(worktree_path)],
+                cwd=self.repo_root,
+                check=False,
+            )
+        except Exception as e:
+            logger.debug("git worktree remove failed (expected if not a worktree): %s", e)
+
+        try:
+            # Fallback to direct directory removal.
+            if worktree_path.exists():
+                try:
+                    shutil.rmtree(worktree_path)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to remove worktree directory %s directly: %s",
+                        worktree_path,
+                        e,
+                    )
+        finally:
+            try:
+                run(["git", "worktree", "prune"], cwd=self.repo_root, check=False)
+            except Exception as e:
+                logger.debug("git worktree prune failed: %s", e)
 
     def _add_worktree_for_branch(
         self,
@@ -374,8 +390,11 @@ class WorktreeManager:
             self.base_branch,
         )
         if not rebase_worktree_onto(worktree_path, base_branch_name):
-            raise RuntimeError(
-                f"Could not rebase reused issue branch {branch_name} onto {self.base_branch}"
+            logger.warning(
+                "Could not rebase reused issue branch %s onto %s before implementation; "
+                "proceeding with current branch head",
+                branch_name,
+                self.base_branch,
             )
 
     def _origin_base_branch_name(self) -> str | None:
