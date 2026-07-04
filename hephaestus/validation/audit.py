@@ -13,7 +13,6 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import math
 import sys
@@ -35,6 +34,19 @@ _CVSS_V3_PR_WEIGHTS: dict[str, dict[str, float]] = {
     "U": {"N": 0.85, "L": 0.62, "H": 0.27},
     "C": {"N": 0.85, "L": 0.68, "H": 0.5},
 }
+
+
+def _parse_cvss_numeric_score(value: object) -> float | None:
+    """Return a finite CVSS score within the inclusive 0.0-10.0 range."""
+    if not isinstance(value, (int, float, str)):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed) or not 0.0 <= parsed <= 10.0:
+        return None
+    return parsed
 
 
 def load_ignore_list(path: Path | None = None) -> frozenset[str]:
@@ -82,17 +94,20 @@ def extract_cvss_score(severity_list: list[dict[str, Any]]) -> float | None:
     for entry in severity_list:
         score = entry.get("score", "")
         if isinstance(score, (int, float)):
-            scores.append(float(score))
+            parsed = _parse_cvss_numeric_score(score)
+            if parsed is not None:
+                scores.append(parsed)
         elif isinstance(score, str):
-            with contextlib.suppress(ValueError):
-                scores.append(float(score))
+            parsed = _parse_cvss_numeric_score(score)
+            if parsed is not None:
+                scores.append(parsed)
             vector_score = _score_cvss_v3_vector(score)
             if vector_score is not None:
                 scores.append(vector_score)
-        numeric = entry.get("base_score") or entry.get("cvss_score")
-        if numeric is not None:
-            with contextlib.suppress(TypeError, ValueError):
-                scores.append(float(numeric))
+        for field in ("base_score", "cvss_score"):
+            parsed = _parse_cvss_numeric_score(entry.get(field))
+            if parsed is not None:
+                scores.append(parsed)
     return max(scores) if scores else None
 
 

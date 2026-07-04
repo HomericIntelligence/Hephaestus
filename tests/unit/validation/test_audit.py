@@ -61,10 +61,20 @@ class TestExtractCvssScore:
         result = extract_cvss_score([{"score": "5.0", "base_score": "9.1"}])
         assert result == 9.1
 
+    def test_non_finite_score_does_not_skip_base_score(self) -> None:
+        """Ignores non-finite score text while preserving a finite base_score."""
+        result = extract_cvss_score([{"score": "nan", "base_score": "9.8"}])
+        assert result == 9.8
+
     def test_cvss_vector_score(self) -> None:
         """Computes the base score from a CVSS v3 vector-only entry."""
         result = extract_cvss_score([{"score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}])
         assert result == 9.8
+
+    def test_cvss_changed_scope_vector_score(self) -> None:
+        """Computes the base score for a changed-scope CVSS v3 vector-only entry."""
+        result = extract_cvss_score([{"score": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H"}])
+        assert result == 9.9
 
     def test_non_numeric_score_returns_none(self) -> None:
         """Returns None when score text is neither numeric nor a supported CVSS vector."""
