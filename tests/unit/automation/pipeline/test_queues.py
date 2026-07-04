@@ -30,8 +30,10 @@ class TestStageQueue:
         q.push(item2)
 
         assert len(q) == 2
-        assert q.pop() == item1
-        assert q.pop() == item2
+        first = q.pop()
+        assert first == item1
+        second = q.pop()
+        assert second == item2
         assert len(q) == 0
 
     def test_stage_queue_pop_empty_raises(self) -> None:
