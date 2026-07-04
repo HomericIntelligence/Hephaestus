@@ -18,6 +18,7 @@ import contextlib
 import json
 import logging
 import os
+import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -158,8 +159,23 @@ class MeshWorker:
         )
 
     async def run_forever(self, stop: asyncio.Event | None = None) -> None:
-        """Consume the queue until *stop* is set (or forever)."""
+        """Consume the queue until *stop* is set (or SIGTERM/SIGINT).
+
+        Signal handlers set the stop event so the in-flight handler finishes
+        and the loop exits at the next fetch boundary — a drain, not a kill
+        (an abandoned claim would otherwise redeliver only after the full
+        AckWait). Callers may still pass their own *stop* event.
+        """
         from nats.js.api import AckPolicy, ConsumerConfig
+
+        if stop is None:
+            stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig_name in ("SIGTERM", "SIGINT"):
+            signum = getattr(signal, sig_name, None)
+            if signum is not None:
+                with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+                    loop.add_signal_handler(signum, stop.set)
 
         nc = await self.publisher.connect()
         js = nc.jetstream()
@@ -182,7 +198,7 @@ class MeshWorker:
             self.config.filter_subject,
             self.config.durable_name,
         )
-        while stop is None or not stop.is_set():
+        while not stop.is_set():
             try:
                 msgs = await psub.fetch(1, timeout=FETCH_TIMEOUT)
             except TimeoutError:
@@ -190,7 +206,14 @@ class MeshWorker:
             except asyncio.TimeoutError:
                 continue
             for msg in msgs:
-                await self.handle_message(msg)
+                try:
+                    await self.handle_message(msg)
+                except Exception:
+                    # handle_message resolves every normal path itself; only a
+                    # failed ack/nak/term (or a bug) reaches here. The claim
+                    # redelivers after AckWait — losing one message's ack must
+                    # never take the whole long-running consumer down.
+                    logger.exception("handle_message crashed; continuing consume loop")
 
     async def handle_message(self, msg: Any) -> None:
         """Work one claimed dispatch message end to end."""

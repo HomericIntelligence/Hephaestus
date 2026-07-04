@@ -432,9 +432,7 @@ def _async_return(value: Any) -> Any:
 class TestCliMainSuccess:
     """cli.main happy path: builds worker from env and runs the loop."""
 
-    def test_main_runs_worker_and_returns_zero(
-        self, monkeypatch: Any
-    ) -> None:
+    def test_main_runs_worker_and_returns_zero(self, monkeypatch: Any) -> None:
         import pytest  # noqa: F401  # monkeypatch fixture provided by pytest
 
         from hephaestus.automation.mesh import cli
@@ -468,3 +466,43 @@ class TestCliMainSuccess:
 
         monkeypatch.setattr(cli, "MeshWorker", _StubWorker)
         assert cli.main([]) == 0
+
+
+class TestConsumeLoopResilience:
+    """#1764 audit: an ack failure must not take the whole consumer down."""
+
+    def test_ack_failure_is_logged_and_loop_continues(self, monkeypatch: Any) -> None:
+        import sys
+        import types
+
+        fake_api = types.ModuleType("nats.js.api")
+        fake_api.AckPolicy = types.SimpleNamespace(EXPLICIT="explicit")  # type: ignore[attr-defined]
+
+        class _ConsumerConfig:
+            def __init__(self, **kwargs: Any) -> None:
+                self.__dict__.update(kwargs)
+
+        fake_api.ConsumerConfig = _ConsumerConfig  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "nats", types.ModuleType("nats"))
+        monkeypatch.setitem(sys.modules, "nats.js", types.ModuleType("nats.js"))
+        monkeypatch.setitem(sys.modules, "nats.js.api", fake_api)
+
+        class _AckExplodesMsg(FakeMsg):
+            async def ack(self) -> None:
+                raise RuntimeError("nats gone")
+
+        handler = StubHandler(RoleResult(ok=True, summary="done"))
+        pub = FakePublisher()
+        worker = MeshWorker(CFG, handler, publisher=pub, agamemnon=FakeAgamemnon())  # type: ignore[arg-type]
+        stop = asyncio.Event()
+        boom = _AckExplodesMsg(payload={"issue": 1})
+        good = FakeMsg(payload={"issue": 2})
+        js = _FakeJetStream(_FakePullSub([boom, good], stop))
+        pub.connect = lambda: _async_return(_FakeNC(js))  # type: ignore[attr-defined]
+
+        asyncio.run(worker.run_forever(stop=stop))
+
+        # The second message was still consumed and acked after the first
+        # message's ack exploded — the loop survived.
+        assert good.acked
+        assert len(handler.contexts) == 2
