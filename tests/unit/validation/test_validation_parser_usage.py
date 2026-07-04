@@ -22,8 +22,9 @@ VALIDATION_MODULES = {
     "test_structure.py": 1,
     "tier_labels.py": 1,
     "type_aliases.py": 1,
-    "unlinked_todo.py": 1,
 }
+
+VALIDATION_MODULES["unlinked_todo.py"] = 1
 
 
 def test_issue_1409_validation_clis_use_shared_parser() -> None:
