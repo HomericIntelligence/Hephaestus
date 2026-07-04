@@ -45,7 +45,7 @@ _REASON_BUDGET: dict[str, str | None] = {
     "plan_cycles_exhausted": "plan_cycles",
     "plan_not_go": None,
     "already_implementation_go_pr": None,
-    "agent_error": "pr_review_iter",
+    "agent_error": None,
     "human_blocked": None,
     "exhaustion": None,
     "fix_exhausted": "ci_fix",
