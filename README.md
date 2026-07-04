@@ -322,7 +322,7 @@ config = merge_with_env({}, convert_bools=True)
 <!-- CLI table generated from pyproject.toml [project.scripts]. Keep in sync via
      `python3 -m hephaestus.scripts_lib.check_cli_table_sync` (also enforced in pre-commit). -->
 
-51 console scripts are installed when you install the package.  Run any command
+52 console scripts are installed when you install the package.  Run any command
 with `--help` to see full usage.
 
 ### Automation
@@ -330,6 +330,7 @@ with `--help` to see full usage.
 | Command | Description |
 |---|---|
 | `hephaestus-automation-loop` | Multi-repo 3-stage automation pipeline using Claude Code or Codex (plan → implement → drive-green; plan-review and PR-review/address-review run in-loop within plan/implement) |
+| `hephaestus-mesh-worker` | HMAS mesh worker: serve one role-addressed (domain, role) NATS work queue (Odysseus ADR-013) |
 | `hephaestus-plan-issues` | Bulk issue planning using Claude Code or Codex |
 | `hephaestus-implement-issues` | Bulk issue implementation using Claude Code or Codex in parallel worktrees |
 | `hephaestus-review-prs` | Read-only PR review automation using Claude Code or Codex in parallel worktrees |

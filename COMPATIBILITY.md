@@ -81,7 +81,7 @@ may change incompatibly in a minor release.
 
 ## Console-Script Stability Tiers
 
-ProjectHephaestus installs 51 console scripts via `[project.scripts]` in
+ProjectHephaestus installs 52 console scripts via `[project.scripts]` in
 `pyproject.toml`. Each is classified into one of three tiers:
 
 - **Stable** — covered by the [deprecation policy](#deprecation-policy). CLI
@@ -109,6 +109,7 @@ bypass a misfiring hook locally use
 | CLI | Tier | Notes |
 |-----|------|-------|
 | `hephaestus-automation-loop` | Provisional | Dispatches to `hephaestus.automation` (provisional subpackage) |
+| `hephaestus-mesh-worker` | Provisional | HMAS mesh worker serving one role-addressed NATS queue (Odysseus ADR-013) |
 | `hephaestus-plan-issues` | Provisional | Issue-planning stage of the automation pipeline |
 | `hephaestus-implement-issues` | Provisional | Issue-implementation stage |
 | `hephaestus-review-prs` | Provisional | PR-review stage |
