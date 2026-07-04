@@ -214,10 +214,10 @@ class TestPipelineScope:
         scope = PipelineScope(all_stages)
         trimmed = scope.trimmed_routes()
 
+        assert StageName.FINISHED in trimmed
         for stage in StageName:
-            assert stage in trimmed or stage == StageName.FINISHED
-            if stage in trimmed:
-                assert trimmed[stage].next == ROUTES[stage].next
+            assert stage in trimmed
+            assert trimmed[stage].next == ROUTES[stage].next
 
     def test_pipeline_scope_partial_subset(self) -> None:
         """PipelineScope trims PLANNING..PR_REVIEW subset."""
