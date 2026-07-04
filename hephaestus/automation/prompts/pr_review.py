@@ -61,8 +61,10 @@ every inline comment you emit demands another address/re-review round. Emit
 inline `comments` ONLY for findings that justify `Verdict: NOGO` (severity
 `critical` or `major`). If your verdict is GO, the `comments` array MUST be
 empty — put residual minor/nitpick observations in `summary` prose as
-explicitly non-blocking notes instead. GO + non-empty `comments` is a
-contract violation that livelocks the review loop.
+explicitly non-blocking notes instead. This rule overrides the nitpick
+directive above: even when nitpick emission is enabled, nitpick comments may
+only accompany a NOGO verdict. GO + non-empty `comments` is a contract
+violation that livelocks the review loop.
 
 **Output format (verdict contract — MANDATORY):**
 The review prose + inline comments explain *why*; the verdict line is a binary

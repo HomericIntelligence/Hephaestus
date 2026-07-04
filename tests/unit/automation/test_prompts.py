@@ -110,7 +110,7 @@ class TestPRReviewAnalysisPrompt:
         """GO must not emit inline comments (convergence contract, #1780)."""
         out = prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1)
         assert "If your verdict is GO, the `comments` array MUST be" in out
-        assert "contract violation that livelocks the review loop" in out
+        assert "livelocks the review loop" in out
 
     def test_nitpicks_included_when_flag_set(self) -> None:
         """#1083: include_nitpicks=True re-enables nitpick comments."""

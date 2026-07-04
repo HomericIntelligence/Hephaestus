@@ -344,3 +344,127 @@ class TestHeartbeatOverrunCheckpoint:
         updated = [(s, p) for s, p in pub.published if s.endswith(".updated")]
         assert len(updated) == 1
         assert updated[0][1]["overrun"] is True
+
+
+class _FakePullSub:
+    """Yields one queued message, then TimeoutError until stop is set."""
+
+    def __init__(self, msgs: list[FakeMsg], stop: asyncio.Event) -> None:
+        self._msgs = list(msgs)
+        self._stop = stop
+
+    async def fetch(self, batch: int, timeout: float = 0) -> list[FakeMsg]:
+        if self._msgs:
+            return [self._msgs.pop(0)]
+        self._stop.set()
+        raise TimeoutError
+
+
+class _FakeJetStream:
+    def __init__(self, psub: _FakePullSub) -> None:
+        self._psub = psub
+        self.pull_subscribe_calls: list[dict[str, Any]] = []
+
+    async def pull_subscribe(self, subject: str, **kwargs: Any) -> _FakePullSub:
+        self.pull_subscribe_calls.append({"subject": subject, **kwargs})
+        return self._psub
+
+
+class _FakeNC:
+    def __init__(self, js: _FakeJetStream) -> None:
+        self._js = js
+
+    def jetstream(self) -> _FakeJetStream:
+        return self._js
+
+
+class TestRunForever:
+    """The claim loop: subscribe, fetch, dispatch, tolerate fetch timeouts."""
+
+    def test_consumes_one_message_then_stops_on_timeout(self, monkeypatch: Any) -> None:
+        # The test env installs the base package without the [nats] extra, so
+        # stub the two nats.js.api names run_forever imports at call time.
+        import sys
+        import types
+
+        fake_api = types.ModuleType("nats.js.api")
+        fake_api.AckPolicy = types.SimpleNamespace(EXPLICIT="explicit")  # type: ignore[attr-defined]
+
+        class _ConsumerConfig:
+            def __init__(self, **kwargs: Any) -> None:
+                self.__dict__.update(kwargs)
+
+        fake_api.ConsumerConfig = _ConsumerConfig  # type: ignore[attr-defined]
+        fake_nats = types.ModuleType("nats")
+        fake_js = types.ModuleType("nats.js")
+        monkeypatch.setitem(sys.modules, "nats", fake_nats)
+        monkeypatch.setitem(sys.modules, "nats.js", fake_js)
+        monkeypatch.setitem(sys.modules, "nats.js.api", fake_api)
+
+        handler = StubHandler(RoleResult(ok=True, summary="done"))
+        pub = FakePublisher()
+        aga = FakeAgamemnon()
+        worker = MeshWorker(CFG, handler, publisher=pub, agamemnon=aga)  # type: ignore[arg-type]
+        stop = asyncio.Event()
+        msg = FakeMsg(payload={"issue": 9})
+        js = _FakeJetStream(_FakePullSub([msg], stop))
+        pub.connect = lambda: _async_return(_FakeNC(js))  # type: ignore[attr-defined]
+
+        asyncio.run(worker.run_forever(stop=stop))
+
+        assert msg.acked
+        assert len(handler.contexts) == 1
+        sub = js.pull_subscribe_calls[0]
+        assert sub["subject"] == CFG.filter_subject
+        assert sub["durable"] == CFG.durable_name
+        cfg = sub["config"]
+        assert cfg.max_deliver == CFG.max_deliver
+        assert cfg.ack_wait == CFG.ack_wait_seconds
+
+
+def _async_return(value: Any) -> Any:
+    async def _coro() -> Any:
+        return value
+
+    return _coro()
+
+
+class TestCliMainSuccess:
+    """cli.main happy path: builds worker from env and runs the loop."""
+
+    def test_main_runs_worker_and_returns_zero(
+        self, monkeypatch: Any
+    ) -> None:
+        import pytest  # noqa: F401  # monkeypatch fixture provided by pytest
+
+        from hephaestus.automation.mesh import cli
+
+        monkeypatch.setenv("MESH_DOMAIN", "pipeline")
+        monkeypatch.setenv("MESH_ROLE", "component-lead")
+        ran: list[bool] = []
+
+        class _StubWorker:
+            def __init__(self, config: Any, handler: Any, **kwargs: Any) -> None:
+                self.config = config
+
+            async def run_forever(self, stop: Any = None) -> None:
+                ran.append(True)
+
+        monkeypatch.setattr(cli, "MeshWorker", _StubWorker)
+        assert cli.main([]) == 0
+        assert ran == [True]
+
+    def test_main_keyboard_interrupt_is_clean_exit(self, monkeypatch: Any) -> None:
+        from hephaestus.automation.mesh import cli
+
+        monkeypatch.setenv("MESH_DOMAIN", "pipeline")
+        monkeypatch.setenv("MESH_ROLE", "component-lead")
+
+        class _StubWorker:
+            def __init__(self, config: Any, handler: Any, **kwargs: Any) -> None: ...
+
+            async def run_forever(self, stop: Any = None) -> None:
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(cli, "MeshWorker", _StubWorker)
+        assert cli.main([]) == 0

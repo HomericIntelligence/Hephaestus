@@ -52,6 +52,9 @@ pytest, ruff, and mypy):
   extras: `automation`, `github`, `nats`, `toml`, `xml`, `schema`. Note that
   `automation` is the product layer (`hephaestus.automation`) and pulls in
   `pydantic`; see [ADR 0001](docs/adr/0001-automation-library-boundary.md).
+- `pip install "HomericIntelligence-Hephaestus[mesh]"` — installs the HMAS
+  mesh-worker dependencies (`automation` + `nats`) needed by
+  `hephaestus-mesh-worker`; deliberately not part of `[all]`.
 - `pip install HomericIntelligence-Hephaestus[dev]` — installs development and
   testing dependencies. Use this for contributors and CI.
 - `pip install "HomericIntelligence-Hephaestus[all,dev]"` — both, for a full

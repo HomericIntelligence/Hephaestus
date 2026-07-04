@@ -27,7 +27,7 @@ def _pr_merge_gate_state(data: dict[str, Any]) -> bool:
 
     MERGED always passes. An open PR passes only when the review gate granted
     it (auto-merge armed or ``state:implementation-go`` label) AND no check has
-    already concluded FAILURE/TIMED_OUT — an armed PR with a failed required
+    already concluded FAILURE/TIMED_OUT/CANCELLED — an armed PR with a failed required
     check can never merge on its own, so completing the task would delegate
     children onto a base that never lands (observed live: ProjectOdyssey#5523
     armed, then lint/pre-commit failed after the task completed).

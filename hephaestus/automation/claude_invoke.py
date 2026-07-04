@@ -147,10 +147,13 @@ def invoke_claude_with_session(
     call ``--resume``s it so cached context is reused instead of re-sent (#1166,
     #1168). ``claude --resume`` does NOT auto-create — it errors "No conversation
     found" for an unknown id — so create-on-first-use is required; the probe is
-    the model-keyed transcript file's existence. There is no expired/contention
-    recreate cascade (the old one mis-fired on 429s, re-sending full prompts 3×
-    and crossing models); a ``--session-id``/``--resume`` failure simply
-    propagates. Because ``--resume`` is locked to the creating model, the model
+    the model-keyed transcript file's existence. There is no blanket
+    recreate-on-failure cascade (the old one mis-fired on 429s, re-sending full
+    prompts 3× and crossing models — #1168); the ONE exception is a broken or
+    expired resume target (truncated transcript from a killed worker), which is
+    quarantined and recreated once on the same key — transient/quota failures
+    and any failure of that single retry still propagate. Because ``--resume``
+    is locked to the creating model, the model
     is part of the key: switching a per-agent model starts that model's own
     create-once-then-resume lineage rather than colliding with another model's
     transcript.
@@ -206,7 +209,7 @@ def invoke_claude_with_session(
         subprocess.TimeoutExpired: If the call exceeds ``timeout``.
 
     """
-    del recreate_on_resume_failure  # back-compat shim only; no recreate cascade
+    del recreate_on_resume_failure  # back-compat shim; see broken-resume note above
 
     def _attempt(effective_model: str) -> tuple[str, str]:
         return _invoke_claude_once(
@@ -275,8 +278,9 @@ def _invoke_claude_once(
     # to create the transcript; every later call ``--resume``s it to reuse cached
     # context. The probe is the transcript file's existence, which is model-keyed
     # because ``sid`` is. This is NOT the old recreate-on-failure cascade (that
-    # mis-fired on 429s, re-sending full prompts 3x and crossing models); a
-    # ``--resume``/``--session-id`` failure now simply propagates.
+    # mis-fired on 429s, re-sending full prompts 3x and crossing models): the
+    # only recreate is the broken-resume quarantine below, which retries once on
+    # the same key and re-raises everything else.
     create = not session_jsonl_path(sid, cwd).exists()
     mode_args = ["--session-id", sid, "--name", display_name] if create else ["--resume", sid]
     cmd: list[str] = [
@@ -362,7 +366,23 @@ def _invoke_claude_once(
         retry_cmd = list(cmd)
         i = retry_cmd.index("--resume")
         retry_cmd[i : i + 2] = ["--session-id", sid, "--name", display_name]
-        result = subprocess.run(retry_cmd, **run_kwargs)
+        try:
+            result = subprocess.run(retry_cmd, **run_kwargs)
+        except subprocess.CalledProcessError as retry_exc:
+            # The recreate itself can fail — notably "already in use" when a
+            # concurrent sibling holds the same deterministic session (#909's
+            # collision case). One retry is the budget: log which failure this
+            # is and propagate; no uuid4 fallback (that crossed sessions and
+            # broke the per-key transcript lineage the key exists to protect).
+            logger.warning(
+                "session %s (%s) recreate after quarantine also failed "
+                "(exit %s, stderr %.200s); propagating",
+                sid,
+                display_name,
+                retry_exc.returncode,
+                retry_exc.stderr or "",
+            )
+            raise
     return result.stdout, sid
 
 

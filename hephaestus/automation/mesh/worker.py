@@ -229,7 +229,11 @@ class MeshWorker:
             loop=asyncio.get_running_loop(),
         )
 
-        await self._publish_event(ctx, "started", {})
+        # State-fact publishes are best-effort observability: a NATS hiccup
+        # here must never crash the consume loop or decide the message's fate
+        # — only ack/nak/term may do that (the ADR-013 assignment record is
+        # redundant with JetStream's own delivery state).
+        await self._publish_event_safe(ctx, "started", {})
         heartbeat = asyncio.create_task(self._heartbeat_loop(msg, ctx))
         try:
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mesh-role") as executor:
@@ -253,10 +257,10 @@ class MeshWorker:
             extra: dict[str, Any] = {"summary": result.summary}
             if result.pr:
                 extra["pr"] = result.pr
-            await self._publish_event(ctx, "completed", extra)
+            await self._publish_event_safe(ctx, "completed", extra)
             await msg.ack()
         else:
-            await self._publish_event(
+            await self._publish_event_safe(
                 ctx,
                 "failed",
                 {
@@ -271,6 +275,21 @@ class MeshWorker:
                 await msg.nak()
             else:
                 await msg.term()
+
+    async def _publish_event_safe(self, ctx: TaskContext, verb: str, extra: dict[str, Any]) -> None:
+        """Publish a state fact without letting a NATS failure decide the message's fate.
+
+        A publish failure before the handler ran would otherwise crash the
+        consume loop with the message unacked; one after a successful handler
+        would skip the ack and re-run completed work. The fact is logged and
+        dropped — JetStream's own delivery state remains authoritative.
+        """
+        try:
+            await self._publish_event(ctx, verb, extra)
+        except Exception as exc:
+            logger.warning(
+                "state-fact publish failed for task %s verb=%s: %s", ctx.task_id, verb, exc
+            )
 
     async def _publish_event(self, ctx: TaskContext, verb: str, extra: dict[str, Any]) -> None:
         """Publish one ADR-013 §2 state fact (claim/assignment lives here)."""
