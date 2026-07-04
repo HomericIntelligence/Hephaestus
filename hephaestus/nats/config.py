@@ -78,16 +78,13 @@ class NATSConfig:
     - ``NATS_BACKOFF_MULTIPLIER`` → ``backoff_multiplier`` (float > 1)
 
     ``enabled``, ``subjects``, and ``deliver_policy`` are not env-configurable
-    and must be set via the constructor or YAML. Defaults preserve the
-    historical localhost plaintext development behavior; production callers
-    should switch to a TLS URL or set ``tls=True`` with the appropriate cert
-    inputs.
+    and must be set via the constructor or YAML.
 
     """
 
     enabled: bool = False
-    url: str = "nats://localhost:4222"
-    tls: bool = False
+    url: str = "tls://localhost:4222"
+    tls: bool = True
     tls_ca_file: str | None = None
     tls_cert_file: str | None = None
     tls_key_file: str | None = None

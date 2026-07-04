@@ -19,6 +19,7 @@ automation loop.
 from __future__ import annotations
 
 import importlib
+import os
 import shutil
 import subprocess
 import sys
@@ -53,6 +54,13 @@ ENTRY_POINTS = _load_entry_points()
 ENTRY_POINT_IDS = [ep[0] for ep in ENTRY_POINTS]
 
 
+def _console_script_env() -> dict[str, str]:
+    """Return an environment that exercises installed console-script wrappers."""
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    return env
+
+
 class TestCLITargetImportable:
     """Every entry point's target ``module:attr`` must be an importable callable."""
 
@@ -85,7 +93,13 @@ class TestCLIHelpFlag:
             pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
         assert binary is not None  # narrow for mypy; pytest.skip already returned
 
-        result = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            [binary, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=_console_script_env(),
+        )
         assert result.returncode == 0, (
             f"{command} --help exited {result.returncode}\n"
             f"stdout: {result.stdout[:500]}\n"
@@ -115,7 +129,13 @@ class TestCLIJsonFlag:
             pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
         assert binary is not None
 
-        result = subprocess.run([binary, "--help"], capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            [binary, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=_console_script_env(),
+        )
         assert result.returncode == 0, (
             f"{command} --help exited {result.returncode}\n"
             f"stdout: {result.stdout[:500]}\n"
@@ -143,7 +163,13 @@ class TestCLIVersionFlag:
             pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
         assert binary is not None
 
-        result = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=_console_script_env(),
+        )
         assert result.returncode == 0, (
             f"{command} --version exited {result.returncode}\n"
             f"stdout: {result.stdout[:500]}\n"
@@ -165,7 +191,13 @@ class TestCLIVersionFlag:
             pytest.skip(f"{command} not on PATH — install with `pip install -e .` or run via pixi")
         assert binary is not None
 
-        result = subprocess.run([binary, "-V"], capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            [binary, "-V"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=_console_script_env(),
+        )
         assert result.returncode == 0, (
             f"{command} -V exited {result.returncode}\n"
             f"stdout: {result.stdout[:500]}\n"
@@ -189,22 +221,18 @@ class TestMaxWorkersValidation:
 
     def test_automation_loop_rejects_zero_max_workers(self) -> None:
         """hephaestus-automation-loop --max-workers=0 exits non-zero with clear error."""
-        import os
-
         binary = shutil.which("hephaestus-automation-loop")
         if binary is None:
             pytest.skip("hephaestus-automation-loop not on PATH")
         assert binary is not None  # narrow Optional[str] for mypy
 
-        env = os.environ.copy()
-        env.pop("PYTHONPATH", None)
         result = subprocess.run(
             [binary, "--max-workers", "0"],
             capture_output=True,
             text=True,
             timeout=10,
             check=False,
-            env=env,
+            env=_console_script_env(),
         )
         assert result.returncode != 0, "Expected non-zero exit for --max-workers=0"
         assert "--max-workers" in result.stderr, "Error must mention --max-workers argument"
