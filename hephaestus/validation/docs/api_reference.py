@@ -22,15 +22,16 @@ from pathlib import Path
 
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 
-DEFAULT_MIN_SUBPACKAGE_PAGES = 2
 PACKAGE_NAME = "hephaestus"
+EXCLUDED_SUBPACKAGES = frozenset({"automation"})
+DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 @dataclass(frozen=True)
 class ApiReferenceFinding:
     """A single generated API-reference violation."""
 
-    # kind values: "missing-docs-dir" | "too-few-subpackage-pages"
+    # kind values: "missing-docs-dir" | "missing-subpackage-page"
     kind: str
     detail: str
 
@@ -57,8 +58,19 @@ def expected_pdoc_targets(repo_root: Path, package_name: str = PACKAGE_NAME) -> 
         if path.is_dir()
         and not path.name.startswith((".", "_"))
         and (path / "__init__.py").is_file()
+        and path.name not in EXCLUDED_SUBPACKAGES
     )
     return (f"./{package_name}", *(f"./{package_name}/{name}" for name in subpackages))
+
+
+def expected_direct_subpackage_pages(
+    repo_root: Path = DEFAULT_REPO_ROOT,
+    package_name: str = PACKAGE_NAME,
+) -> tuple[str, ...]:
+    """Return expected direct-subpackage page filenames for generated pdoc output."""
+    return tuple(
+        f"{Path(target).name}.html" for target in expected_pdoc_targets(repo_root, package_name)[1:]
+    )
 
 
 def list_subpackage_pages(docs_dir: Path, package_name: str = PACKAGE_NAME) -> list[Path]:
@@ -78,17 +90,17 @@ def list_subpackage_pages(docs_dir: Path, package_name: str = PACKAGE_NAME) -> l
 def find_violations(
     docs_dir: Path,
     *,
-    min_subpackage_pages: int = DEFAULT_MIN_SUBPACKAGE_PAGES,
+    repo_root: Path = DEFAULT_REPO_ROOT,
 ) -> list[ApiReferenceFinding]:
     """Return generated API-reference violations for *docs_dir*.
 
     Args:
         docs_dir: Generated pdoc output directory, usually ``docs/api``.
-        min_subpackage_pages: Minimum direct subpackage page count required.
+        repo_root: Repository root used to discover the expected pdoc targets.
 
     Returns:
         List of findings. An empty list means the generated API reference is
-        not the near-empty top-level-only artifact.
+        complete for every expected direct subpackage page.
 
     """
     if not docs_dir.is_dir():
@@ -99,16 +111,19 @@ def find_violations(
             )
         ]
 
-    subpackage_pages = list_subpackage_pages(docs_dir)
-    if len(subpackage_pages) < min_subpackage_pages:
+    generated_pages = {path.name for path in list_subpackage_pages(docs_dir)}
+    missing_pages = sorted(
+        page_name
+        for page_name in expected_direct_subpackage_pages(repo_root)
+        if page_name not in generated_pages
+    )
+    if missing_pages:
         return [
             ApiReferenceFinding(
-                kind="too-few-subpackage-pages",
-                detail=(
-                    f"{docs_dir} has {len(subpackage_pages)} hephaestus subpackage page(s); "
-                    f"expected at least {min_subpackage_pages}"
-                ),
+                kind="missing-subpackage-page",
+                detail=f"missing generated page docs/api/{PACKAGE_NAME}/{page_name}",
             )
+            for page_name in missing_pages
         ]
     return []
 
@@ -139,16 +154,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--min-subpackage-pages",
         type=int,
-        default=DEFAULT_MIN_SUBPACKAGE_PAGES,
+        default=None,
         help=(
-            "Minimum direct hephaestus subpackage pages required "
-            f"(default: {DEFAULT_MIN_SUBPACKAGE_PAGES})"
+            "Deprecated compatibility flag. The validator now checks for every "
+            "expected direct hephaestus subpackage page."
         ),
     )
     args = parser.parse_args(argv)
     repo_root = resolve_repo_root(args)
     docs_dir = args.docs_dir if args.docs_dir is not None else repo_root / "docs" / "api"
-    findings = find_violations(docs_dir, min_subpackage_pages=args.min_subpackage_pages)
+    findings = find_violations(docs_dir, repo_root=repo_root)
     print(format_json(findings) if args.json else format_report(findings))
     return 0 if not findings else 1
 

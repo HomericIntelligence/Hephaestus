@@ -10,7 +10,6 @@ import pytest
 
 from hephaestus.io.toml import import_tomllib
 from hephaestus.validation.docs.api_reference import (
-    DEFAULT_MIN_SUBPACKAGE_PAGES,
     ApiReferenceFinding,
     expected_pdoc_targets,
     find_violations,
@@ -29,19 +28,21 @@ def _write_html(path: Path) -> None:
 class TestPdocTargets:
     """Tests for the pdoc target list used by the docs task."""
 
-    def test_expected_targets_include_every_direct_subpackage(self) -> None:
+    def test_expected_targets_include_every_direct_subpackage_except_automation(self) -> None:
         direct_subpackages = {
             f"./hephaestus/{path.name}"
             for path in (REPO_ROOT / "hephaestus").iterdir()
             if path.is_dir()
             and not path.name.startswith((".", "_"))
             and (path / "__init__.py").is_file()
+            and path.name != "automation"
         }
 
         targets = expected_pdoc_targets(REPO_ROOT)
 
         assert targets[0] == "./hephaestus"
         assert set(targets[1:]) == direct_subpackages
+        assert "./hephaestus/automation" not in targets
 
     def test_pixi_docs_task_matches_expected_targets(self) -> None:
         tomllib = import_tomllib()
@@ -75,25 +76,45 @@ class TestFindViolations:
         _write_html(docs_dir / "hephaestus.html")
         (docs_dir / "search.js").write_text("window.search = [];\n", encoding="utf-8")
 
-        findings = find_violations(docs_dir)
+        findings = find_violations(docs_dir, repo_root=REPO_ROOT)
+
+        assert findings
+        assert all(finding.kind == "missing-subpackage-page" for finding in findings)
+        assert all("automation.html" not in finding.detail for finding in findings)
+
+    def test_missing_expected_subpackage_pages_are_reported_individually(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        docs_dir = tmp_path / "docs" / "api"
+        expected_pages = {
+            f"{Path(target).name}.html" for target in expected_pdoc_targets(REPO_ROOT)[1:]
+        }
+        missing_pages = {"io.html", "utils.html"} & expected_pages
+        assert missing_pages == {"io.html", "utils.html"}
+
+        _write_html(docs_dir / "hephaestus.html")
+        for page_name in sorted(expected_pages - missing_pages):
+            _write_html(docs_dir / "hephaestus" / page_name)
+        _write_html(docs_dir / "hephaestus" / "automation.html")
+
+        findings = find_violations(docs_dir, repo_root=REPO_ROOT)
 
         assert findings == [
             ApiReferenceFinding(
-                kind="too-few-subpackage-pages",
-                detail=(
-                    f"{docs_dir} has 0 hephaestus subpackage page(s); "
-                    f"expected at least {DEFAULT_MIN_SUBPACKAGE_PAGES}"
-                ),
+                kind="missing-subpackage-page",
+                detail=f"missing generated page docs/api/hephaestus/{page_name}",
             )
+            for page_name in sorted(missing_pages)
         ]
 
-    def test_subpackage_pages_pass(self, tmp_path: Path) -> None:
+    def test_complete_expected_subpackage_pages_pass(self, tmp_path: Path) -> None:
         docs_dir = tmp_path / "docs" / "api"
         _write_html(docs_dir / "hephaestus.html")
-        _write_html(docs_dir / "hephaestus" / "utils.html")
-        _write_html(docs_dir / "hephaestus" / "io.html")
+        for target in expected_pdoc_targets(REPO_ROOT)[1:]:
+            _write_html(docs_dir / "hephaestus" / f"{Path(target).name}.html")
 
-        assert find_violations(docs_dir) == []
+        assert find_violations(docs_dir, repo_root=REPO_ROOT) == []
 
     def test_lists_only_direct_subpackage_pages(self, tmp_path: Path) -> None:
         docs_dir = tmp_path / "docs" / "api"
@@ -108,8 +129,8 @@ class TestMain:
 
     def test_main_returns_zero_for_complete_docs(self, tmp_path: Path) -> None:
         docs_dir = tmp_path / "docs" / "api"
-        _write_html(docs_dir / "hephaestus" / "utils.html")
-        _write_html(docs_dir / "hephaestus" / "io.html")
+        for target in expected_pdoc_targets(REPO_ROOT)[1:]:
+            _write_html(docs_dir / "hephaestus" / f"{Path(target).name}.html")
 
         assert main(["--docs-dir", str(docs_dir)]) == 0
 
@@ -122,7 +143,7 @@ class TestMain:
         _write_html(docs_dir / "hephaestus.html")
 
         assert main(["--docs-dir", str(docs_dir)]) == 1
-        assert "too-few-subpackage-pages" in capsys.readouterr().out
+        assert "missing-subpackage-page" in capsys.readouterr().out
 
     def test_main_json_output_is_valid_json(
         self,
@@ -134,4 +155,4 @@ class TestMain:
 
         assert main(["--docs-dir", str(docs_dir), "--json"]) == 1
         payload = json.loads(capsys.readouterr().out)
-        assert payload["violations"][0]["kind"] == "too-few-subpackage-pages"
+        assert payload["violations"][0]["kind"] == "missing-subpackage-page"
