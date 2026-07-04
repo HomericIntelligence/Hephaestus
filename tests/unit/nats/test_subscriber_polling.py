@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -183,6 +184,36 @@ def test_next_msg_called_with_bounded_timeout() -> None:
 
     assert seen_timeout["value"] is not None, "next_msg must receive a timeout"
     assert 0 < seen_timeout["value"] < 5, "the poll timeout must be bounded"
+
+
+def test_subscribe_loop_passes_tls_options_to_nats_connect() -> None:
+    """TLS config is forwarded to nats-py's native connection options."""
+    thread = NATSSubscriberThread(
+        config=NATSConfig(
+            enabled=True,
+            url="tls://broker.example.com:4222",
+            subjects=["hi.tasks.>"],
+            tls=True,
+            tls_hostname="broker.example.com",
+            tls_handshake_first=True,
+        ),
+        handler=MagicMock(),
+    )
+
+    async def next_msg(timeout: float = 0.0) -> MagicMock:
+        thread._stop_event.set()
+        raise _FakeNatsTimeoutError
+
+    nats_module, nc = _install_fake_nats(AsyncMock(side_effect=next_msg))
+    _run_loop(thread, nats_module)
+
+    nats_module.connect.assert_awaited_once()
+    args, kwargs = nats_module.connect.await_args
+    assert args == ("tls://broker.example.com:4222",)
+    assert isinstance(kwargs["tls"], ssl.SSLContext)
+    assert kwargs["tls_hostname"] == "broker.example.com"
+    assert kwargs["tls_handshake_first"] is True
+    nc.drain.assert_awaited_once()
 
 
 @pytest.mark.parametrize("exc_type", [asyncio.TimeoutError, TimeoutError])
