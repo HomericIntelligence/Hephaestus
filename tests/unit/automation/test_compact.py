@@ -70,17 +70,17 @@ class TestCompactSession:
             assert "cwd" in call_kwargs
             assert call_kwargs["cwd"] == str(test_cwd)
 
-    def test_compact_session_passes_dangerously_skip_permissions_and_text_output(
+    def test_compact_session_omits_dangerously_skip_permissions_and_uses_text_output(
         self, tmp_path: Path
     ) -> None:
-        """Verify all required CLI flags are present."""
+        """Verify compact keeps text output without bypassing permissions."""
         with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=0, stderr="")
 
             compact_session("test-repo", 42, AGENT_CI_DRIVER, tmp_path)
 
             cmd = mock_run.call_args[0][0]
-            assert "--dangerously-skip-permissions" in cmd
+            assert "--dangerously-skip-permissions" not in cmd
             assert "--output-format" in cmd
             output_fmt_idx = cmd.index("--output-format")
             assert cmd[output_fmt_idx + 1] == "text"

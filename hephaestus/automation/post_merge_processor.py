@@ -178,7 +178,6 @@ class PostMergeProcessor:
                 timeout=options.learn_timeout,
                 output_format="text",
                 allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
-                extra_args=["--dangerously-skip-permissions"],
                 input_via_stdin=True,
             )
             self._last_learn_evidence = mnemosyne_update_evidence(stdout or "")
