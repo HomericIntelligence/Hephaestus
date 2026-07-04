@@ -322,7 +322,7 @@ config = merge_with_env({}, convert_bools=True)
 <!-- CLI table generated from pyproject.toml [project.scripts]. Keep in sync via
      `python3 -m hephaestus.scripts_lib.check_cli_table_sync` (also enforced in pre-commit). -->
 
-51 console scripts are installed when you install the package.  Run any command
+52 console scripts are installed when you install the package.  Run any command
 with `--help` to see full usage.
 
 ### Automation
@@ -407,6 +407,7 @@ sync (#993).
 | Command | Description |
 |---|---|
 | `hephaestus-audit-doc-policy` | Audit documentation command examples for policy violations |
+| `hephaestus-check-api-reference` | Verify generated pdoc API reference output contains subpackage pages |
 | `hephaestus-check-api-table-docs` | Enforce per-symbol `__all__` documentation in COMPATIBILITY.md |
 | `hephaestus-check-cli-tier-docs` | Enforce console-script stability-tier documentation in COMPATIBILITY.md |
 | `hephaestus-check-complexity` | Check cyclomatic complexity against a threshold |
