@@ -18,3 +18,4 @@ numbered, and listed here.
 | [0003](0003-dependabot-renovate-split.md) | Dependabot owns pip+actions; Renovate owns pixi/conda | Accepted |
 | [0004](0004-single-aggregator-required-checks.md) | Single aggregated required-checks gate | Accepted |
 | [0005](0005-multi-agent-runtime-abstraction.md) | Multi-agent (Claude/Codex/Pi) runtime abstraction | Accepted |
+| [0006](0006-queue-based-in-process-automation-pipeline.md) | Queue-based in-process automation pipeline | Accepted |
