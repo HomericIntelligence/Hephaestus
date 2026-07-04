@@ -171,6 +171,20 @@ repos:
         pass_filenames: false
         files: ^(hephaestus|tests/unit)/
 
+  # Coverage omit-list justification enforcement (#1422)
+  - repo: local
+    hooks:
+      - id: hephaestus-check-coverage-omit-justification
+        name: Coverage-omitted automation modules have backing unit tests
+        description: Fails if a hephaestus/automation module is added to coverage omit without a backing tests/unit/automation suite
+        # --environment default is explicit because the pre-commit CI job runs
+        # in the lint env; the hephaestus-* console scripts live in default.
+        # PYTHONPATH=. keeps nested worktrees from importing a parent checkout.
+        entry: env PYTHONPATH=. pixi run --environment default hephaestus-check-coverage --check-omit-justification
+        language: system
+        pass_filenames: false
+        files: ^(pyproject\.toml|tests/unit/automation/.*\.py|hephaestus/automation/.*\.py|hephaestus/validation/coverage\.py)$
+
   # CLI stability-tier documentation enforcement (#766)
   - repo: local
     hooks:

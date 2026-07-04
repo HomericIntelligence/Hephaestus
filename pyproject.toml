@@ -271,10 +271,11 @@ omit = [
     # Full orchestration loops require a live claude/gh CLI — integration test territory.
     # Pure-function helpers in these modules are tested in tests/unit/automation/ instead.
     # The membership of this list is frozen in tests/unit/validation/test_omit_allowlist.py
-    # to prevent silent growth; tests/unit/validation/test_omit_justification.py enforces
-    # (via ast import-parsing) that each omitted module has a backing unit-test suite
-    # (issue #1422); and their importability is guarded by
-    # tests/integration/test_orchestration_smoke.py.
+    # to prevent silent growth; hephaestus-check-coverage --check-omit-justification
+    # enforces that entries still point at real automation modules and that each
+    # omitted module has a backing unit-test suite (issue #1422), and the command
+    # is wired into pre-commit for pyproject/test changes; importability is guarded
+    # by tests/integration/test_orchestration_smoke.py.
     "hephaestus/automation/implementer.py",
     # implementer_cli.py holds main()/CLI parsing extracted from implementer.py (#468);
     # main() drives the live claude/gh orchestration loop, so it is integration-only.
@@ -297,8 +298,6 @@ omit = [
     "hephaestus/automation/loop_repo_manager.py",
     # curses_ui.py uses a live terminal; cannot be unit-tested without a real TTY
     "hephaestus/automation/curses_ui.py",
-    # github_api.py shells out to gh CLI for every call; fully integration-only
-    "hephaestus/automation/github_api.py",
     # pr_reviewer.py drives a full Claude session against a live PR; integration-only
     "hephaestus/automation/pr_reviewer.py",
     # audit_reviewer.py drives a live agent coordinator session; integration-only

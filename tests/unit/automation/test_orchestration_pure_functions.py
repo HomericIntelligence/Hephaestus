@@ -1,8 +1,9 @@
-"""Behavioral tests for pure-function helpers in coverage-omitted orchestration modules.
+"""Behavioral tests for pure-function helpers around orchestration modules.
 
-These source files are in pyproject.toml [tool.coverage.run].omit (live claude/gh CLI
-boundary), so they do not count toward the coverage denominator. These tests prove
-behavioral correctness of the pure helpers inside them.
+Most source files covered here are in pyproject.toml [tool.coverage.run].omit
+(live claude/gh CLI boundary), so they do not count toward the coverage
+denominator. The github_api helpers remain here as the compatibility package
+that replaced the former flat github_api.py module.
 """
 
 from __future__ import annotations
@@ -99,19 +100,19 @@ class TestCIDriverPureFunctions:
 
 
 # ---------------------------------------------------------------------------
-# github_api — confirmed from github_api.py:417-422 and :533-544
+# github_api compatibility package — confirmed from github_api/issues.py
 # ---------------------------------------------------------------------------
 class TestGithubApiPureFunctions:
-    """Test pure helpers in github_api (omitted from coverage measurement)."""
+    """Test pure helpers in the github_api compatibility package."""
 
     def test_parse_issue_number_from_url(self) -> None:
-        # Regex: r"/issues/(\d+)" — github_api.py:419
+        # Regex: r"/issues/(\d+)" — github_api/issues.py:_parse_issue_number
         from hephaestus.automation.github_api import _parse_issue_number
 
         assert _parse_issue_number("https://github.com/org/repo/issues/42") == 42
 
     def test_parse_issue_number_bare_numeric_string(self) -> None:
-        # Fallback: int(output.split("/")[-1]) — github_api.py:422
+        # Fallback: int(output.split("/")[-1]) — github_api/issues.py:_parse_issue_number
         from hephaestus.automation.github_api import _parse_issue_number
 
         assert _parse_issue_number("99") == 99
@@ -123,7 +124,7 @@ class TestGithubApiPureFunctions:
         _assert_body_has_closes("Summary\n\nCloses #42\n")
 
     def test_assert_body_has_closes_missing_raises_value_error(self) -> None:
-        # Raises ValueError — confirmed github_api.py:541
+        # Raises ValueError — confirmed in github_api/issues.py
         from hephaestus.automation.github_api import _assert_body_has_closes
 
         with pytest.raises(ValueError):

@@ -9,11 +9,13 @@ Usage::
     hephaestus-check-coverage --path src/ --coverage-file coverage.xml
     hephaestus-check-coverage --threshold 80 --path mypackage/
     hephaestus-check-coverage --config coverage.toml --verbose
+    hephaestus-check-coverage --check-omit-justification
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import logging
 import sys
 from pathlib import Path
@@ -26,6 +28,11 @@ from hephaestus.utils.helpers import get_repo_root
 logger = logging.getLogger(__name__)
 
 tomllib = import_tomllib()
+
+_AUTOMATION_PKG = "hephaestus.automation"
+_MODULE_PREFIX = "hephaestus/automation/"
+_PACKAGE_GLOB_SUFFIXES = ("/*.py", "/*")
+_UNIT_TEST_DIR = "tests/unit/automation"
 
 
 def load_coverage_config(config_file: Path | None = None) -> dict[str, Any]:
@@ -66,6 +73,143 @@ def load_coverage_config(config_file: Path | None = None) -> dict[str, Any]:
 def _default_config() -> dict[str, Any]:
     """Return the default coverage configuration."""
     return {"coverage": {"target": 90.0, "minimum": 80.0}}
+
+
+def _coverage_omit_entries(repo_root: Path) -> list[str]:
+    """Return string coverage omit entries from ``pyproject.toml``."""
+    if tomllib is None:
+        raise RuntimeError("tomllib/tomli not available; cannot parse pyproject.toml")
+
+    with open(repo_root / "pyproject.toml", "rb") as f:
+        pyproject = tomllib.load(f)
+    omit = pyproject.get("tool", {}).get("coverage", {}).get("run", {}).get("omit", [])
+    return sorted(entry for entry in omit if isinstance(entry, str))
+
+
+def _automation_module_from_omit_entry(entry: str) -> str | None:
+    """Return the short automation module name represented by an omit entry."""
+    if not entry.startswith(_MODULE_PREFIX):
+        return None
+    relative_entry = entry[len(_MODULE_PREFIX) :]
+    if relative_entry.endswith(".py") and "/" not in relative_entry:
+        return relative_entry[: -len(".py")]
+    for suffix in _PACKAGE_GLOB_SUFFIXES:
+        if relative_entry.endswith(suffix):
+            return relative_entry[: -len(suffix)].split("/", 1)[0]
+    return None
+
+
+def _automation_omit_entries(repo_root: Path) -> list[tuple[str, str]]:
+    """Return ``(module, entry)`` pairs for automation coverage omits."""
+    return sorted(
+        (module, entry)
+        for entry in _coverage_omit_entries(repo_root)
+        if (module := _automation_module_from_omit_entry(entry)) is not None
+    )
+
+
+def _omitted_automation_modules(repo_root: Path) -> list[str]:
+    """Return short automation module names from ``pyproject.toml`` coverage omits."""
+    modules: set[str] = set()
+    for module, _entry in _automation_omit_entries(repo_root):
+        modules.add(module)
+    return sorted(modules)
+
+
+def _imported_automation_modules(source: str) -> set[str]:
+    """Return short names of ``hephaestus.automation`` modules imported by ``source``."""
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module == _AUTOMATION_PKG:
+                found.update(alias.name for alias in node.names)
+            elif module.startswith(_AUTOMATION_PKG + "."):
+                found.add(module[len(_AUTOMATION_PKG) + 1 :].split(".")[0])
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith(_AUTOMATION_PKG + "."):
+                    found.add(alias.name[len(_AUTOMATION_PKG) + 1 :].split(".")[0])
+    return found
+
+
+def _defines_a_test(source: str) -> bool:
+    """Return True when ``source`` defines at least one pytest-style test function."""
+    tree = ast.parse(source)
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(
+            "test_"
+        ):
+            return True
+        if (
+            isinstance(node, ast.ClassDef)
+            and node.name.startswith("Test")
+            and any(
+                isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and child.name.startswith("test_")
+                for child in node.body
+            )
+        ):
+            return True
+    return False
+
+
+def _backing_test_sources(repo_root: Path) -> dict[Path, str]:
+    """Return source text for automation unit tests that can justify coverage omits."""
+    test_root = repo_root / _UNIT_TEST_DIR
+    return {
+        path: path.read_text(encoding="utf-8")
+        for path in sorted(test_root.rglob("test_*.py"))
+        if path.is_file()
+    }
+
+
+def find_unjustified_coverage_omits(repo_root: Path) -> list[str]:
+    """Return coverage-omitted automation modules without backing unit tests.
+
+    The guard enforces the issue #1422 proxy invariant: every automation module
+    represented in ``[tool.coverage.run].omit`` must be imported by at least one
+    ``tests/unit/automation/test_*.py`` file that defines a ``test_*`` function.
+    It does not claim every pure helper is asserted; it blocks silent omit-list
+    growth without a test suite anchor.
+
+    Args:
+        repo_root: Repository root containing ``pyproject.toml``.
+
+    Returns:
+        Sorted short module names that lack a backing unit-test suite.
+
+    """
+    omitted_modules = _omitted_automation_modules(repo_root)
+    sources = _backing_test_sources(repo_root)
+    return sorted(
+        module
+        for module in omitted_modules
+        if not any(
+            module in _imported_automation_modules(source) and _defines_a_test(source)
+            for source in sources.values()
+        )
+    )
+
+
+def find_stale_coverage_omits(repo_root: Path) -> list[str]:
+    """Return coverage-omitted automation modules missing from the source tree.
+
+    Args:
+        repo_root: Repository root containing ``pyproject.toml`` and
+            ``hephaestus/automation``.
+
+    Returns:
+        Sorted short module names whose omit-list entry no longer matches
+        source files under ``hephaestus/automation``.
+
+    """
+    automation_root = repo_root / _MODULE_PREFIX
+    return sorted(
+        module
+        for module, entry in _automation_omit_entries(repo_root)
+        if not any(automation_root.glob(entry[len(_MODULE_PREFIX) :]))
+    )
 
 
 def get_module_threshold(path: str, config: dict[str, Any]) -> float:
@@ -307,6 +451,61 @@ def _emit_json_report(args: argparse.Namespace, threshold: float) -> int:
     return 0 if passed else 1
 
 
+def _check_omit_justification_cli(repo_root: Path, *, json_output: bool) -> int:
+    """Run the coverage omit-list justification guard for the CLI."""
+    missing = find_stale_coverage_omits(repo_root)
+    unjustified = find_unjustified_coverage_omits(repo_root)
+    if missing or unjustified:
+        messages = []
+        if missing:
+            messages.append(
+                "coverage omit entries point at missing automation modules: " + ", ".join(missing)
+            )
+        if unjustified:
+            messages.append(
+                "coverage-omitted automation modules lack backing unit tests: "
+                + ", ".join(unjustified)
+            )
+        message = "; ".join(messages)
+        if json_output:
+            emit_json_status(
+                1,
+                message=message,
+                missing_modules=missing,
+                unjustified_modules=unjustified,
+            )
+        else:
+            print("ERROR: Coverage omit-list justification failed.", file=sys.stderr)
+            if missing:
+                print(
+                    "The following omit entries no longer match source files "
+                    "under hephaestus/automation:",
+                    file=sys.stderr,
+                )
+                for module in missing:
+                    print(f"  - {module}", file=sys.stderr)
+            if unjustified:
+                print(
+                    "The following hephaestus/automation modules are omitted from "
+                    "coverage but have no backing tests/unit/automation/test_*.py suite:",
+                    file=sys.stderr,
+                )
+                for module in unjustified:
+                    print(f"  - {module}", file=sys.stderr)
+            print(
+                "Add focused unit tests for each module's pure helpers, restore the "
+                "missing module, or remove the module from [tool.coverage.run].omit.",
+                file=sys.stderr,
+            )
+        return 1
+
+    if json_output:
+        emit_json_status(0, message="coverage omit-list justifications are present")
+    else:
+        print("Coverage omit-list justification OK.")
+    return 0
+
+
 def main() -> int:
     """CLI entry point for coverage checking.
 
@@ -316,8 +515,16 @@ def main() -> int:
     """
     parser = create_validation_parser(
         "Check test coverage against threshold",
-        include_repo_root=False,
+        include_repo_root=True,
         epilog="Example: %(prog)s --threshold 80 --path mypackage/",
+    )
+    parser.add_argument(
+        "--check-omit-justification",
+        action="store_true",
+        help=(
+            "Verify every coverage-omitted hephaestus/automation module has a "
+            "backing tests/unit/automation unit-test suite"
+        ),
     )
     parser.add_argument(
         "--threshold",
@@ -350,6 +557,10 @@ def main() -> int:
     )
 
     args = parser.parse_args()
+
+    if args.check_omit_justification:
+        repo_root = args.repo_root or get_repo_root()
+        return _check_omit_justification_cli(repo_root, json_output=args.json)
 
     config = load_coverage_config(args.config)
 

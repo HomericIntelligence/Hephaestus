@@ -82,11 +82,13 @@ shell out to live `claude`/`gh` CLIs are excluded from coverage via
 `[tool.coverage.run].omit`. The contract: an omitted module's pure-function
 helpers MUST still be unit-tested in `tests/unit/automation/`. This is enforced
 executably — `tests/unit/validation/test_omit_allowlist.py` freezes the list's
-membership, and `tests/unit/validation/test_omit_justification.py` (using `ast`
-import-parsing) fails CI if any omitted module lacks a backing unit-test suite.
-That guard checks a *proxy* (a test file imports the module and defines a test),
-not that every helper is asserted. Reducing the omit list (target: −50% over two
-releases, issue #1422) means promoting a module's orchestration logic to
+membership, and `hephaestus-check-coverage --check-omit-justification` fails if
+any omitted module no longer exists in `hephaestus/automation/` or lacks a
+backing unit-test suite. The command is wired into pre-commit for `pyproject.toml`
+and automation unit-test changes. Its backing-test check uses `ast`
+import-parsing and verifies a *proxy* (a test file imports the module and defines
+a test), not that every helper is asserted. Reducing the omit list (target: −50%
+over two releases, issue #1422) means promoting a module's orchestration logic to
 mocked-subprocess unit coverage and removing its `omit` entry.
 
 ## Python Development Guidelines
