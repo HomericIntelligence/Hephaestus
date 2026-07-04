@@ -14,7 +14,7 @@ Usage::
 
     config = NATSConfig(
         enabled=True,
-        url="nats://nats.example.com:4222",
+        url="tls://nats.example.com:4222",
         subjects=["my.subject.>"],
     )
     router = EventRouter()
