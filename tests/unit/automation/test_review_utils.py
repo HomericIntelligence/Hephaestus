@@ -100,6 +100,11 @@ class TestLogFilePath:
             == tmp_path / "pr-review-analysis-42.log"
         )
 
+    def test_suffix_can_include_dots(self, tmp_path: Path) -> None:
+        assert log_file_path(tmp_path, "address", 42, iteration=2, suffix="parse-error.log") == (
+            tmp_path / "address-42-r2.parse-error.log"
+        )
+
 
 class TestSetupReviewLogging:
     """setup_review_logging routes through the canonical constants (#1427)."""
