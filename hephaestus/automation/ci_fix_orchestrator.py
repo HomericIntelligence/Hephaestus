@@ -292,6 +292,7 @@ class CIFixOrchestrator:
         pr_number: int,
         pr_head_branch: str,
         session_id: str | None,
+        pr_base_branch: str = "main",
     ) -> bool:
         """Check head advancement, retry if needed, then push CI fixes.
 
@@ -308,10 +309,12 @@ class CIFixOrchestrator:
                 session_id=session_id,
             ):
                 return False
-        if not self._ci_fix_head_is_pushable(worktree_path, issue_number):
+        base_ref = f"origin/{pr_base_branch}"
+        if not self._ci_fix_head_is_pushable(worktree_path, issue_number, base_ref=base_ref):
             if not self._ci_fix_residual_commit_is_safe(
                 worktree_path=worktree_path,
                 issue_number=issue_number,
+                base_ref=base_ref,
             ):
                 return False
             if not self._commit_residual_ci_fix_changes(
@@ -319,16 +322,18 @@ class CIFixOrchestrator:
                 issue_number=issue_number,
             ):
                 return False
-            if not self._ci_fix_head_is_pushable(worktree_path, issue_number):
+            if not self._ci_fix_head_is_pushable(worktree_path, issue_number, base_ref=base_ref):
                 return False
         try:
-            ensure_branch_commit_metadata(worktree_path)
+            ensure_branch_commit_metadata(worktree_path, base_branch=pr_base_branch)
         except Exception as metadata_err:
             logger.error(
                 "Issue #%s: failed to enforce signed+DCO commit metadata before push: %s",
                 issue_number,
                 metadata_err,
             )
+            return False
+        if not self._ci_fix_head_is_pushable(worktree_path, issue_number, base_ref=base_ref):
             return False
         try:
             push_current_branch_with_lease_on_divergence(
@@ -551,6 +556,7 @@ class CIFixOrchestrator:
         advise_findings: str = "",
         *,
         pr_head_branch: str,
+        pr_base_branch: str = "main",
     ) -> bool:
         """Invoke the selected coding agent to fix CI failures, then push the result.
 
@@ -619,6 +625,7 @@ class CIFixOrchestrator:
             issue_number=issue_number,
             pr_number=pr_number,
             pr_head_branch=pr_head_branch,
+            pr_base_branch=pr_base_branch,
             session_id=session_id,
         )
 

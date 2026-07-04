@@ -193,7 +193,7 @@ class TestPushCiFix:
             patch.object(
                 orchestrator,
                 "_ci_fix_head_is_pushable",
-                side_effect=[False, True],
+                side_effect=[False, True, True],
             ),
             patch.object(orchestrator, "_ci_fix_residual_commit_is_safe", return_value=True),
             patch.object(
@@ -238,7 +238,7 @@ class TestPushCiFix:
             patch.object(
                 orchestrator,
                 "_ci_fix_head_is_pushable",
-                side_effect=[False, True],
+                side_effect=[False, True, True],
             ),
             patch.object(orchestrator, "_ci_fix_residual_commit_is_safe", return_value=True),
             patch.object(
@@ -313,6 +313,67 @@ class TestPushCiFix:
             )
 
         assert pushed is False
+        push.assert_not_called()
+
+    def test_enforces_metadata_against_pr_base_branch(
+        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    ) -> None:
+        with (
+            patch.object(orchestrator, "_head_advanced", return_value=True),
+            patch.object(
+                orchestrator,
+                "_ci_fix_head_is_pushable",
+                side_effect=[True, True],
+            ),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator.ensure_branch_commit_metadata"
+            ) as metadata,
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator."
+                "push_current_branch_with_lease_on_divergence"
+            ),
+        ):
+            pushed = orchestrator.push_ci_fix(
+                worktree_path=tmp_path,
+                pre_agent_sha="abc123",
+                issue_number=1405,
+                pr_number=1633,
+                pr_head_branch="1405-auto-impl",
+                pr_base_branch="release/2.x",
+                session_id=None,
+            )
+
+        assert pushed is True
+        metadata.assert_called_once_with(tmp_path, base_branch="release/2.x")
+
+    def test_rechecks_pushability_after_metadata_rewrite_before_push(
+        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    ) -> None:
+        with (
+            patch.object(orchestrator, "_head_advanced", return_value=True),
+            patch.object(
+                orchestrator,
+                "_ci_fix_head_is_pushable",
+                side_effect=[True, False],
+            ) as pushable,
+            patch("hephaestus.automation.ci_fix_orchestrator.ensure_branch_commit_metadata"),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator."
+                "push_current_branch_with_lease_on_divergence"
+            ) as push,
+        ):
+            pushed = orchestrator.push_ci_fix(
+                worktree_path=tmp_path,
+                pre_agent_sha="abc123",
+                issue_number=1405,
+                pr_number=1633,
+                pr_head_branch="1405-auto-impl",
+                pr_base_branch="release/2.x",
+                session_id=None,
+            )
+
+        assert pushed is False
+        assert pushable.call_count == 2
         push.assert_not_called()
 
     def test_returns_false_when_residual_commit_does_not_restore_pushability(

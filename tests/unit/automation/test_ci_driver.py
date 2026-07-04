@@ -95,6 +95,7 @@ def _mock_default_pr_state(monkeypatch: pytest.MonkeyPatch) -> None:
             "state": "OPEN",
             "headRefOid": f"test-head-{pr_number}",
             "mergeStateStatus": "CLEAN",
+            "baseRefName": "main",
         },
     )
     monkeypatch.setattr(
@@ -890,6 +891,37 @@ class TestCiDriverAdvise:
         mock_advise.assert_called_once_with(123)
         # Findings are forwarded as the 6th positional arg to the fix session.
         assert mock_fix.call_args.args[5] == "## Findings\n- mind X"
+
+    def test_attempt_ci_fixes_passes_pr_base_ref_to_fix_session(
+        self, driver: CIDriver, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-main PR base is threaded into the CI-fix push path."""
+        monkeypatch.setattr(
+            CIDriver,
+            "_gh_pr_state",
+            lambda self, pr_number: {
+                "state": "OPEN",
+                "headRefOid": f"test-head-{pr_number}",
+                "mergeStateStatus": "CLEAN",
+                "baseRefName": "release/2.x",
+            },
+        )
+        with (
+            patch.object(driver, "_get_failing_ci_logs", return_value="error log"),
+            patch.object(driver, "_load_impl_session_id", return_value=None),
+            patch.object(driver, "_get_worktree_path", return_value=Path("/tmp/wt")),
+            patch.object(driver, "_run_ci_fix_session", return_value=True) as mock_fix,
+            patch.object(driver, "_record_ci_fix_head"),
+            patch.object(driver, "_reply_and_resolve_bot_threads"),
+        ):
+            driver._attempt_ci_fixes(123, 456, 0)
+
+        assert mock_fix.call_args.kwargs["pr_base_branch"] == "release/2.x"
+
+    def test_get_pr_base_branch_defaults_to_main_on_lookup_error(self, driver: CIDriver) -> None:
+        """Base-branch lookup failures must not abort CI/address fix push paths."""
+        with patch.object(driver, "_gh_pr_state", side_effect=RuntimeError("gh unavailable")):
+            assert driver._get_pr_base_branch(456) == "main"
 
     def test_advise_skipped_when_disabled(self, driver: CIDriver) -> None:
         """enable_advise=False → _run_advise is never called and findings are empty."""
@@ -3691,7 +3723,15 @@ class TestPushCiFix:
         with (
             patch(
                 "hephaestus.automation.ci_fix_orchestrator.run",
-                side_effect=[post_sha, clean_status, no_untracked, ahead_count],
+                side_effect=[
+                    post_sha,
+                    clean_status,
+                    no_untracked,
+                    ahead_count,
+                    clean_status,
+                    no_untracked,
+                    ahead_count,
+                ],
             ),
             patch("hephaestus.automation.ci_fix_orchestrator.ensure_branch_commit_metadata"),
             patch(
@@ -3720,7 +3760,15 @@ class TestPushCiFix:
         with (
             patch(
                 "hephaestus.automation.ci_fix_orchestrator.run",
-                side_effect=[post_sha, clean_status, no_untracked, ahead_count],
+                side_effect=[
+                    post_sha,
+                    clean_status,
+                    no_untracked,
+                    ahead_count,
+                    clean_status,
+                    no_untracked,
+                    ahead_count,
+                ],
             ),
             patch(
                 "hephaestus.automation.ci_fix_orchestrator.ensure_branch_commit_metadata",
@@ -3742,7 +3790,7 @@ class TestPushCiFix:
             )
 
         assert result is True
-        mock_policy.assert_called_once_with(tmp_path)
+        mock_policy.assert_called_once_with(tmp_path, base_branch="main")
         assert events == ["policy", "push"]
 
     def test_returns_false_when_head_not_advanced_and_retry_fails(

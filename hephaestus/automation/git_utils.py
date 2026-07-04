@@ -539,7 +539,14 @@ def _remove_untracked_files_tracked_by_ref(cwd: Path, ref: str) -> list[Path]:
 
 def _commit_policy_rebase_command(base_ref: str) -> list[str]:
     """Return a rebase command that repairs signature and DCO metadata per commit."""
-    return ["git", "rebase", base_ref, "--exec", COMMIT_POLICY_REWRITE_EXEC]
+    return [
+        "git",
+        "rebase",
+        "--force-rebase",
+        base_ref,
+        "--exec",
+        COMMIT_POLICY_REWRITE_EXEC,
+    ]
 
 
 def ensure_branch_commit_metadata(
@@ -551,7 +558,13 @@ def ensure_branch_commit_metadata(
     """Rewrite branch commits so each carries a verified signature and DCO trailer."""
     base_ref = f"{remote}/{base_branch}"
     run(["git", "fetch", remote, base_branch], cwd=cwd)
-    run(_commit_policy_rebase_command(base_ref), cwd=cwd)
+    try:
+        run(_commit_policy_rebase_command(base_ref), cwd=cwd)
+    except subprocess.CalledProcessError:
+        # Leave the worktree ready for the caller's next automation attempt.
+        # ``check=False`` preserves the original rebase failure signal.
+        run(["git", "rebase", "--abort"], cwd=cwd, check=False)
+        raise
 
 
 def rebase_worktree_onto(
@@ -564,7 +577,7 @@ def rebase_worktree_onto(
 
     This is the cheap, deterministic path for PRs that are merely *behind* the
     base branch (or have textually non-overlapping changes): a policy-aware
-    ``git rebase --exec`` resolves them with no agent involvement while
+    ``git rebase --force-rebase --exec`` resolves them with no agent involvement while
     re-signing each replayed commit and adding a DCO sign-off. Only when the
     rebase hits a real conflict do we hand off to the CI-fix agent.
 
@@ -572,10 +585,11 @@ def rebase_worktree_onto(
 
     1. ``git fetch <remote> <base_branch>`` — refresh the remote-tracking ref so
        the rebase target is current.
-    2. ``git rebase <remote>/<base_branch> --exec ...`` — replay the PR's commits
-       on top of the latest base and run ``git commit --amend --no-edit -S -s``
-       after each replayed commit. On conflict, ``git rebase --abort`` restores
-       the pre-rebase HEAD so the worktree is left clean for the agent path.
+    2. ``git rebase --force-rebase <remote>/<base_branch> --exec ...`` —
+       replay the PR's commits on top of the latest base and run
+       ``git commit --amend --no-edit -S -s`` after each replayed commit. On
+       conflict, ``git rebase --abort`` restores the pre-rebase HEAD so the
+       worktree is left clean for the agent path.
 
     The caller is expected to push the rebased HEAD with
     :func:`push_current_branch_with_lease_on_divergence` (the rebase rewrites
@@ -587,10 +601,9 @@ def rebase_worktree_onto(
         remote: Remote name (default ``origin``).
 
     Returns:
-        ``True`` if the rebase applied cleanly (HEAD may or may not have moved —
-        an already-up-to-date PR rebases cleanly to a no-op). ``False`` if the
-        rebase hit conflicts and was aborted, signalling the caller to fall back
-        to the agent.
+        ``True`` if the rebase applied cleanly. ``False`` if the rebase hit
+        conflicts and was aborted, signalling the caller to fall back to the
+        agent.
 
     Raises:
         subprocess.CalledProcessError: If the ``git fetch`` fails. A fetch
