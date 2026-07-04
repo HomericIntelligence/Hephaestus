@@ -15,10 +15,11 @@ What lives here:
 - :func:`invoke_claude_with_session` — the single entry point every
   automation phase must use. Picks ``--session-id`` (first call) vs
   ``--resume`` (subsequent calls) based on whether the model-keyed JSONL
-  transcript already exists. No recreate-on-failure cascade — a create/resume
-  error propagates (#1168). On a model-specific usage cap it retries the same
-  request once on :func:`agent_config.fallback_model` and pins the fallback
-  for the rest of the process (#1793).
+  transcript already exists. Broken local resume targets are quarantined and
+  recreated once; transient/quota failures still propagate. On a
+  model-specific usage cap it retries the same request once on
+  :func:`agent_config.fallback_model` and pins the fallback for the rest of the
+  process (#1793).
 """
 
 from __future__ import annotations

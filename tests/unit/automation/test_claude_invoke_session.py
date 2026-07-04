@@ -726,9 +726,7 @@ class TestBrokenResumeRecreatesOnce:
             cwd=cwd,
         )
 
-    def test_empty_output_resume_failure_quarantines_and_recreates(
-        self, fake_home: Path
-    ) -> None:
+    def test_empty_output_resume_failure_quarantines_and_recreates(self, fake_home: Path) -> None:
         cwd = fake_home / "work"
         cwd.mkdir()
         sid = session_uuid("R", 1, AGENT_PLANNER, "sonnet")
@@ -755,9 +753,7 @@ class TestBrokenResumeRecreatesOnce:
         err = subprocess.CalledProcessError(
             returncode=1, cmd=["claude"], output="", stderr="429 rate limit exceeded"
         )
-        with patch(
-            "hephaestus.automation.claude_invoke.subprocess.run", side_effect=err
-        ) as m:
+        with patch("hephaestus.automation.claude_invoke.subprocess.run", side_effect=err) as m:
             with pytest.raises(subprocess.CalledProcessError):
                 self._invoke(cwd)
         assert m.call_count == 1
