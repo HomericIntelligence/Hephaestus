@@ -118,7 +118,7 @@ repos:
       - id: check-no-unlinked-todo
         name: Check no unlinked tech-debt markers
         description: Ensure TODO/FIXME/HACK comments reference a tracking issue
-        entry: pixi run --environment default hephaestus-check-unlinked-todo
+        entry: pixi run --environment default python3 -m hephaestus.validation.unlinked_todo
         language: system
         pass_filenames: false
         files: ^(hephaestus|scripts)/.*\.py$|^docs/TECH_DEBT\.md$

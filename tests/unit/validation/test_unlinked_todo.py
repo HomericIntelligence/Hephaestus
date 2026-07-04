@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
+import hephaestus.validation.unlinked_todo as unlinked_todo
 from hephaestus.utils.helpers import get_repo_root
 from hephaestus.validation.unlinked_todo import (
     SCANNED_ROOTS,
     find_violations,
     main,
-    resolve_repo_root,
     scan_file,
 )
 
@@ -47,6 +47,11 @@ class TestScanFile:
         f.write_text('label = "# TODO"\n')
         assert scan_file(f, "m.py") == []
 
+    def test_marker_later_in_comment_text_not_flagged(self, tmp_path: Path) -> None:
+        f = tmp_path / "m.py"
+        f.write_text("# linked form uses `# TODO: explanation` syntax\n")
+        assert scan_file(f, "m.py") == []
+
     def test_linked_fixme_and_hack_allowed(self, tmp_path: Path) -> None:
         f = tmp_path / "m.py"
         f.write_text("# FIXME(#5): x\n# HACK(#6): y\n")
@@ -67,12 +72,14 @@ class TestFindViolations:
         # No hephaestus/ or scripts/ dir present -> no findings, no error.
         assert find_violations(tmp_path) == []
 
-    def test_excludes_self_and_test_module(self, tmp_path: Path) -> None:
+    def test_scans_self_module_like_any_other_file(self, tmp_path: Path) -> None:
         val = tmp_path / "hephaestus" / "validation"
         val.mkdir(parents=True)
         (val / "unlinked_todo.py").write_text("# TODO bare in own module\n")
         v = find_violations(tmp_path)
-        assert v == []
+        assert len(v) == 1
+        assert v[0].path == "hephaestus/validation/unlinked_todo.py"
+        assert v[0].marker == "TODO"
 
     def test_real_repo_has_no_unlinked_markers(self) -> None:
         """The shipped tree must pass — the gate is green on main."""
@@ -113,11 +120,11 @@ class TestMain:
         assert '"violations"' in capsys.readouterr().out
 
     def test_main_repo_root_default(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Cover the ``resolve_repo_root`` default branch (flag absent)."""
-        monkeypatch.setattr(
-            f"{resolve_repo_root.__module__}.resolve_repo_root",
-            lambda args: get_repo_root(),
-        )
+        monkeypatch.setattr(unlinked_todo, "resolve_repo_root", lambda args: tmp_path)
         assert main([]) == 0

@@ -29,15 +29,6 @@ from hephaestus.cli.utils import create_validation_parser, resolve_repo_root as 
 # Dirs (relative to repo root) whose .py files the policy governs.
 SCANNED_ROOTS: tuple[str, ...] = ("hephaestus", "scripts")
 
-# The validator module itself legitimately contains the literal marker
-# words in its docstring/strings; excluding it keeps the gate green on the
-# shipped tree (self-reference exemption).
-_EXCLUDED_RELPATHS: frozenset[str] = frozenset(
-    {
-        "hephaestus/validation/unlinked_todo.py",
-    }
-)
-
 # A marker in a tokenize COMMENT token: ``#``, optional space, keyword, word
 # boundary. Strings containing marker text are ignored before this regex runs.
 _MARKER_RE = re.compile(r"#\s*(TODO|FIXME|HACK)\b(.*)$")
@@ -72,11 +63,11 @@ def scan_file(path: Path, relpath: str) -> list[UnlinkedMarkerFinding]:
     for token in tokenize.generate_tokens(io.StringIO(source).readline):
         if token.type != tokenize.COMMENT:
             continue
-        m = _MARKER_RE.search(token.string)
+        m = _MARKER_RE.match(token.string)
         if not m:
             continue
         if _LINK_RE.match(m.group(2)):
-            continue  # linked form `# TODO(#N): ...` — allowed
+            continue  # linked marker form is allowed
         findings.append(
             UnlinkedMarkerFinding(
                 path=relpath,
@@ -110,8 +101,6 @@ def find_violations(repo_root: Path) -> list[UnlinkedMarkerFinding]:
             continue
         for py in sorted(base.rglob("*.py")):
             relpath = py.relative_to(repo_root).as_posix()
-            if relpath in _EXCLUDED_RELPATHS:
-                continue
             findings.extend(scan_file(py, relpath))
     return findings
 

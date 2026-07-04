@@ -45,9 +45,6 @@ To build the same reference locally (output to the git-ignored `docs/api/`):
 just docs        # outputs to docs/api/
 ```
 
-The generated `docs/api/` directory is git-ignored; run the command locally to browse
-the generated reference.
-
 ## Setup
 
 See the [README](../README.md) for installation and development setup instructions.
