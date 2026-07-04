@@ -304,3 +304,25 @@ class TestTaskAgentHandler:
         assert not result.ok
         assert result.error_kind == "NoResult"
         assert result.retryable
+
+
+class TestReviewFindings1764:
+    """Regression tests for the PR #1764 strict-review findings."""
+
+    def test_non_numeric_issue_is_non_retryable_bad_dispatch(self) -> None:
+        handler, calls, _ = _handler({})
+        result = handler.handle(_ctx({"issue": "abc"}))
+        assert not result.ok
+        assert result.error_kind == "BadDispatch"
+        assert not result.retryable
+        assert calls == []
+
+    def test_cancelled_check_conclusion_rejects_gate(self) -> None:
+        from hephaestus.automation.mesh.roles.task_agent import _pr_merge_gate_state
+
+        data = {
+            "state": "OPEN",
+            "autoMergeRequest": {"enabledAt": "2026-07-02T00:00:00Z"},
+            "statusCheckRollup": [{"conclusion": "CANCELLED"}],
+        }
+        assert not _pr_merge_gate_state(data)

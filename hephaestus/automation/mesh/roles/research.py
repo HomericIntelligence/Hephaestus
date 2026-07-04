@@ -33,8 +33,11 @@ MESH_WORK_DIR = Path("build/.mesh")
 QUESTIONS_PROMPT = """You are the research intake interviewer for this repository.
 A user submitted this high-level task:
 
-IDEA: {idea}
-CONTEXT: {context}
+{untrusted_notice}
+
+{idea_block}
+
+{context_block}
 
 List the clarifying questions whose answers would most change how this work
 is scoped (target 2-3, fewer if the idea is already specific).
@@ -42,10 +45,13 @@ Return ONLY a JSON object: {{"questions": ["...", "..."]}}"""
 
 BRIEF_PROMPT = """You are a research myrmidon producing a researched brief.
 
-IDEA: {idea}
-CONTEXT: {context}
-INTERVIEW TRANSCRIPT:
-{transcript}
+{untrusted_notice}
+
+{idea_block}
+
+{context_block}
+
+{transcript_block}
 
 Research this repository (read code/docs as needed) and write:
 1. A researched brief: feasibility, prior art in this repo, proposed scope,
@@ -163,9 +169,24 @@ class ResearchHandler:
             ctx.payload["issue"] = self._ensure_intake_issue(ctx, intake_id, idea, context)
 
         # Interview (each Q&A is mirrored to the intake issue for audit).
+        # idea/context/transcript originate from external intake and GitHub
+        # data — fence them like every other untrusted prompt field so
+        # embedded instructions cannot escape into the agent prompt.
+        from hephaestus.automation.prompts._shared import fence_content
+
+        fenced = fence_content()
+        idea_block = fenced.fence("IDEA", idea)
+        context_block = fenced.fence("CONTEXT", context or "(none)")
         transcript_lines: list[str] = []
         for question in parse_questions(
-            self._invoke(QUESTIONS_PROMPT.format(idea=idea, context=context), ctx)
+            self._invoke(
+                QUESTIONS_PROMPT.format(
+                    untrusted_notice=fenced.untrusted_notice,
+                    idea_block=idea_block,
+                    context_block=context_block,
+                ),
+                ctx,
+            )
         ):
             answer = ctx.ask(question)
             answered = (
@@ -177,7 +198,13 @@ class ResearchHandler:
 
         # Research → brief + workflow YAML.
         brief_text = self._invoke(
-            BRIEF_PROMPT.format(idea=idea, context=context, transcript=transcript), ctx
+            BRIEF_PROMPT.format(
+                untrusted_notice=fenced.untrusted_notice,
+                idea_block=idea_block,
+                context_block=context_block,
+                transcript_block=fenced.fence("INTERVIEW_TRANSCRIPT", transcript),
+            ),
+            ctx,
         )
         ctx.progress(f"## Researched brief\n\n{brief_text}")
         workflow_yaml = extract_workflow_yaml(brief_text)

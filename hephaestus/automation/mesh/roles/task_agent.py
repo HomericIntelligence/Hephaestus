@@ -17,7 +17,9 @@ from hephaestus.automation.mesh.worker import RoleResult, TaskContext
 logger = logging.getLogger(__name__)
 
 #: Check conclusions that mean auto-merge can never fire without another fix.
-_FAILED_CHECK_CONCLUSIONS = {"FAILURE", "TIMED_OUT"}
+#: Mirrors ci_check_inspector.FAILING_CHECK_CONCLUSIONS — a CANCELLED required
+#: check blocks merge exactly like a failed one.
+_FAILED_CHECK_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "CANCELLED"}
 
 
 def _pr_merge_gate_state(data: dict[str, Any]) -> bool:
@@ -68,7 +70,17 @@ class TaskAgentHandler:
                 error_message="task-agent payload missing 'issue'",
                 retryable=False,
             )
-        issue = int(issue)
+        try:
+            issue = int(issue)
+        except (TypeError, ValueError):
+            # A malformed issue ref must not burn redeliveries as a handler
+            # crash — the payload will be identical on every attempt.
+            return RoleResult(
+                ok=False,
+                error_kind="BadDispatch",
+                error_message=f"task-agent payload has non-numeric 'issue': {issue!r}",
+                retryable=False,
+            )
 
         # Progress comment = resume anchor (ADR-013 §4). The implementer's own
         # state manager plus the existing branch/PR make redelivery a resume.

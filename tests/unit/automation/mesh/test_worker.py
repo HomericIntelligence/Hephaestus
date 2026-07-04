@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 from dataclasses import dataclass, field
@@ -177,6 +178,18 @@ class TestHandleMessage:
         assert pub.published == []
         assert handler.contexts == []
 
+    def test_non_object_json_payload_terms_without_events(self) -> None:
+        """Valid non-object JSON (`[]`) is poison — term, never crash (#1764 review)."""
+        handler = StubHandler(RoleResult(ok=True))
+        worker, pub, _ = _worker(handler)
+        msg = FakeMsg(raw=b"[1, 2, 3]")
+
+        asyncio.run(worker.handle_message(msg))
+
+        assert msg.termed and not msg.naked and not msg.acked
+        assert pub.published == []
+        assert handler.contexts == []
+
     def test_task_id_from_subject_and_attempt_from_metadata(self) -> None:
         handler = StubHandler(RoleResult(ok=True))
         worker, _pub, _ = _worker(handler)
@@ -288,3 +301,46 @@ class TestDeliveryAttempt:
             metadata = None
 
         assert MeshWorker._delivery_attempt(BareMsg()) == 1
+
+
+class TestHeartbeatOverrunCheckpoint:
+    """#1764 review: the worker must observe the ADR-013 overrun deadline."""
+
+    def test_heartbeat_reports_overrun_exactly_once(self) -> None:
+        cfg = MeshConfig(
+            domain="pipeline",
+            role="task-agent",
+            agent_id="a-1",
+            exec_host="h",
+            heartbeat_seconds=0,
+            overrun_seconds=0,
+        )
+        pub = FakePublisher()
+        aga = FakeAgamemnon()
+        worker = MeshWorker(cfg, StubHandler(RoleResult(ok=True)), publisher=pub, agamemnon=aga)  # type: ignore[arg-type]
+        msg = FakeMsg(payload={})
+        ctx = TaskContext(
+            config=cfg,
+            payload={},
+            task_id="t-1",
+            team_id="mesh",
+            attempt=1,
+            publisher=pub,  # type: ignore[arg-type]
+            agamemnon=aga,  # type: ignore[arg-type]
+            deadline=0.0,  # already past: overrun() is immediately true
+        )
+
+        async def run() -> None:
+            hb = asyncio.create_task(worker._heartbeat_loop(msg, ctx))
+            for _ in range(50):
+                await asyncio.sleep(0)
+                if pub.published:
+                    break
+            hb.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await hb
+
+        asyncio.run(run())
+        updated = [(s, p) for s, p in pub.published if s.endswith(".updated")]
+        assert len(updated) == 1
+        assert updated[0][1]["overrun"] is True

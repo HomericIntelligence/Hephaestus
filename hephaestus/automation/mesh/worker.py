@@ -200,6 +200,17 @@ class MeshWorker:
             logger.error("malformed dispatch payload on %s; terminating", msg.subject)
             await msg.term()
             return
+        if not isinstance(payload, dict):
+            # Valid-but-non-object JSON (`[]`, `"x"`, `3`) would raise on the
+            # first .get() below — outside any handler try — leaving the poison
+            # message neither acked, naked, nor termed.
+            logger.error(
+                "non-object dispatch payload (%s) on %s; terminating",
+                type(payload).__name__,
+                msg.subject,
+            )
+            await msg.term()
+            return
 
         parsed = parse_dispatch_subject(msg.subject)
         task_id = str(payload.get("task_id") or (parsed[2] if parsed else "")) or "unknown"
@@ -219,7 +230,7 @@ class MeshWorker:
         )
 
         await self._publish_event(ctx, "started", {})
-        heartbeat = asyncio.create_task(self._heartbeat_loop(msg))
+        heartbeat = asyncio.create_task(self._heartbeat_loop(msg, ctx))
         try:
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mesh-role") as executor:
                 result = await asyncio.get_running_loop().run_in_executor(
@@ -277,14 +288,44 @@ class MeshWorker:
             ),
         )
 
-    async def _heartbeat_loop(self, msg: Any) -> None:
-        """Extend the lease every heartbeat interval while the handler runs."""
+    async def _heartbeat_loop(self, msg: Any, ctx: TaskContext) -> None:
+        """Extend the lease every heartbeat interval while the handler runs.
+
+        Also observes the ADR-013 overrun checkpoint: role handlers run as
+        monolithic operations, so the worker — not the handler — is the one
+        place the ~1 h soft deadline is reliably seen. On the first heartbeat
+        past the deadline it publishes an ``updated`` state fact flagged
+        ``overrun`` so Agamemnon/operators can checkpoint or split
+        (``POST /v1/tasks/:id/split``); the lease itself keeps extending —
+        overrun is a soft signal, never a kill (ADR-013 §4).
+        """
+        overrun_reported = False
         while True:
             await asyncio.sleep(self.config.heartbeat_seconds)
             try:
                 await msg.in_progress()
             except Exception as exc:
                 logger.warning("heartbeat failed: %s", exc)
+            if not overrun_reported and ctx.overrun():
+                overrun_reported = True
+                logger.warning(
+                    "task %s exceeded the %ss overrun threshold; publishing checkpoint",
+                    ctx.task_id,
+                    self.config.overrun_seconds,
+                )
+                with contextlib.suppress(Exception):
+                    await self._publish_event(
+                        ctx,
+                        "updated",
+                        {
+                            "overrun": True,
+                            "overrun_seconds": self.config.overrun_seconds,
+                            "note": (
+                                "soft deadline exceeded; operator/Agamemnon may "
+                                "checkpoint or split via POST /v1/tasks/:id/split"
+                            ),
+                        },
+                    )
 
     @staticmethod
     def _delivery_attempt(msg: Any) -> int:
