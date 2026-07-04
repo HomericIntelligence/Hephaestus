@@ -455,7 +455,10 @@ class TestOrchestrationSubprocessBoundaries:
 
         repo_dir = tmp_path / "ProjectHephaestus"
         repo_dir.mkdir()
-        completed = subprocess.CompletedProcess(args=["hephaestus-plan-issues"], returncode=0)
+        completed: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
+            args=["hephaestus-plan-issues"],
+            returncode=0,
+        )
 
         def fake_subprocess_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
             env = kwargs["env"]
@@ -480,8 +483,9 @@ class TestOrchestrationSubprocessBoundaries:
                 "_resolve_phase_bin",
                 return_value=("hephaestus-plan-issues", []),
             ),
-            patch.object(
-                loop_runner.subprocess, "run", side_effect=fake_subprocess_run
+            patch(
+                "hephaestus.automation.loop_runner.subprocess.run",
+                side_effect=fake_subprocess_run,
             ) as mock_run,
         ):
             result = loop_runner.run_phase(
