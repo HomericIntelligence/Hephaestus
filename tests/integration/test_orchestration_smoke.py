@@ -1,14 +1,15 @@
-"""Smoke tests for omitted orchestration modules.
+"""Guard-only smoke tests for omitted orchestration modules.
 
 These tests validate that the orchestration modules omitted from coverage
 (derived from ``pyproject.toml[tool.coverage.run].omit``) remain importable and
 that their console entry points still work correctly.
 
-This suite is intentionally a guard-only integration layer: it proves the
-omitted modules still import, their ``--help`` paths stay wired up, and the
-main-only entry points can be executed under mocks without touching live
-``gh``/agent subprocesses. It is not a substitute for the mocked-subprocess
-unit coverage required to shrink the coverage omit list for issue #1422.
+This suite proves the omitted modules still import, their ``--help`` paths stay
+wired up, and a representative set of orchestration entry points can reach
+their mocked hand-off seams without touching live ``gh``/agent subprocesses.
+It does not claim full orchestration coverage and is not a substitute for the
+per-entry-point mocked-subprocess coverage required before issue #1422 can
+shrink the coverage omit list.
 """
 
 import contextlib
@@ -116,6 +117,163 @@ class TestConsoleScriptsWork:
 
 
 @pytest.mark.integration
+class TestConsoleEntryPointsUnderMocks:
+    """Representative console entry points should hand off under mocks."""
+
+    def test_planner_main_executes_under_mocks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``planner.main()`` should parse args and invoke ``Planner.run()``."""
+        from hephaestus.automation import planner
+        from hephaestus.automation.models import PlanResult
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "hephaestus-plan-issues",
+                "--issues",
+                "1422",
+                "--dry-run",
+                "--no-advise",
+                "--agent",
+                "claude",
+            ],
+        )
+
+        with (
+            patch.object(planner, "configure_github_throttle_from_args"),
+            patch.object(planner, "resolve_agent", return_value="claude"),
+            patch.object(planner, "Planner") as mock_planner_class,
+        ):
+            mock_planner = mock_planner_class.return_value
+            mock_planner.run.return_value = {
+                1422: PlanResult(issue_number=1422, success=True),
+            }
+
+            rc = planner.main()
+
+        assert rc == 0
+        options = mock_planner_class.call_args.args[0]
+        assert options.issues == [1422]
+        assert options.dry_run is True
+        assert options.enable_advise is False
+        assert options.agent == "claude"
+
+    def test_implementer_main_executes_under_mocks(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """``implementer.main()`` should parse args and invoke ``IssueImplementer.run()``."""
+        from hephaestus.automation import implementer
+        from hephaestus.automation.models import WorkerResult
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "hephaestus-implement-issues",
+                "--issues",
+                "1422",
+                "--dry-run",
+                "--no-ui",
+                "--no-advise",
+                "--no-learn",
+                "--agent",
+                "claude",
+            ],
+        )
+
+        with (
+            patch("hephaestus.cli.utils.configure_github_throttle_from_args"),
+            patch("hephaestus.agents.runtime.resolve_agent", return_value="claude"),
+            patch(
+                "hephaestus.utils.terminal.terminal_guard",
+                return_value=contextlib.nullcontext(),
+            ),
+            patch.object(implementer, "get_repo_root", return_value=tmp_path),
+            patch.object(implementer, "ensure_state_dir", return_value=tmp_path),
+            patch.object(implementer, "IssueImplementer") as mock_implementer_class,
+        ):
+            mock_implementer = mock_implementer_class.return_value
+            mock_implementer.run.return_value = {
+                1422: WorkerResult(issue_number=1422, success=True, pr_number=1827),
+            }
+
+            rc = implementer.main()
+
+        assert rc == 0
+        options = mock_implementer_class.call_args.args[0]
+        assert options.issues == [1422]
+        assert options.dry_run is True
+        assert options.enable_ui is False
+        assert options.enable_advise is False
+        assert options.enable_learn is False
+        assert options.agent == "claude"
+
+    def test_pr_reviewer_main_executes_under_mocks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``pr_reviewer.main()`` should parse args and invoke ``PRReviewer.run()``."""
+        from hephaestus.automation import pr_reviewer
+        from hephaestus.automation.models import WorkerResult
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "hephaestus-review-prs",
+                "--issues",
+                "1422",
+                "--dry-run",
+                "--no-ui",
+                "--agent",
+                "claude",
+            ],
+        )
+
+        with (
+            patch.object(pr_reviewer, "configure_github_throttle_from_args"),
+            patch.object(pr_reviewer, "resolve_agent", return_value="claude"),
+            patch(
+                "hephaestus.utils.terminal.terminal_guard",
+                return_value=contextlib.nullcontext(),
+            ),
+            patch.object(pr_reviewer, "PRReviewer") as mock_reviewer_class,
+        ):
+            mock_reviewer = mock_reviewer_class.return_value
+            mock_reviewer.run.return_value = {
+                1422: WorkerResult(issue_number=1422, success=True, pr_number=1827),
+            }
+
+            rc = pr_reviewer.main()
+
+        assert rc == 0
+        options = mock_reviewer_class.call_args.args[0]
+        assert options.issues == [1422]
+        assert options.dry_run is True
+        assert options.enable_ui is False
+        assert options.agent == "claude"
+
+    def test_audit_reviewer_main_executes_under_mocks(self) -> None:
+        """``audit_reviewer.main()`` should parse args and invoke ``AuditReviewer.run()``."""
+        from hephaestus.automation import audit_reviewer
+
+        with (
+            patch.object(audit_reviewer, "configure_github_throttle_from_args"),
+            patch.object(audit_reviewer, "AuditReviewer") as mock_reviewer_class,
+        ):
+            mock_reviewer = mock_reviewer_class.return_value
+            mock_reviewer.run.return_value = (0, [])
+
+            rc = audit_reviewer.main(["--pr-numbers", "1827", "--dry-run", "--agent", "claude"])
+
+        assert rc == 0
+        assert mock_reviewer_class.call_args.kwargs == {
+            "agent": "claude",
+            "pr_numbers": [1827],
+            "dry_run": True,
+        }
+
+
+@pytest.mark.integration
 class TestMainCallable:
     """Modules with main() must have a callable main function."""
 
@@ -129,7 +287,7 @@ class TestMainCallable:
 
 @pytest.mark.integration
 class TestMainEntryPointsUnderMocks:
-    """Main-only orchestration entry points should execute under dry-run mocks."""
+    """Main-only entry points should keep their mocked dry-run seams wired."""
 
     def test_address_review_main_executes_under_mocks(
         self,
@@ -226,7 +384,7 @@ class TestMainEntryPointsUnderMocks:
 
 @pytest.mark.integration
 class TestOrchestrationSubprocessBoundaries:
-    """Orchestration entry points should exercise subprocess seams under mocks."""
+    """Selected subprocess seams should stay reachable under mocks."""
 
     def test_agent_stage_main_invokes_direct_agent_under_mocks(
         self,
@@ -322,8 +480,9 @@ class TestOrchestrationSubprocessBoundaries:
                 "_resolve_phase_bin",
                 return_value=("hephaestus-plan-issues", []),
             ),
-            patch.object(loop_runner.subprocess, "run", side_effect=fake_subprocess_run)
-            as mock_run,
+            patch.object(
+                loop_runner.subprocess, "run", side_effect=fake_subprocess_run
+            ) as mock_run,
         ):
             result = loop_runner.run_phase(
                 repo="ProjectHephaestus",
