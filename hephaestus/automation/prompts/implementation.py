@@ -138,15 +138,6 @@ Review the diff against the issue requirements and the rubric. Cite specific
 file:line locations when justifying findings. Watch for: missing tests,
 incomplete error handling, unaddressed acceptance criteria, scope creep,
 and risky changes that the issue did not request.
-
-**Inline threads and the verdict must agree (convergence contract):** a GO
-verdict only stands when the PR has ZERO unresolved review threads, so every
-inline thread you open is a demand for another address/re-review round. Open
-inline PR review threads ONLY for findings that justify `Verdict: NOGO`. If
-your verdict is GO, do NOT open any new inline threads — state residual
-nitpick-level observations (style preferences, optional hardening, future
-refactors) in your summary prose as explicitly non-blocking notes instead.
-GO + new inline threads is a contract violation that livelocks the loop.
 {full_sweep_suffix}
 
 {output_format}

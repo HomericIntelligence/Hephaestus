@@ -823,16 +823,13 @@ class AddressReviewer(BaseReviewer):
 
         """
         log_file = log_file_path(self.state_dir, "address-review", issue_number)
-        trace_path = log_file_path(
-            self.state_dir, "address", issue_number, suffix="parse-error.log"
-        )
 
         def parse_with_trace(text: str) -> dict[str, Any]:
             return _review_utils.parse_json_block(
                 text,
                 default=_ADDRESS_PARSE_DEFAULT,
-                trace_dir=trace_path.parent,
-                trace_name=trace_path.name,
+                trace_dir=self.state_dir,
+                trace_name=f"address-{issue_number}.parse-error.log",
                 on_error=lambda reason, path, error: _log_address_parse_error(
                     issue_number,
                     reason,

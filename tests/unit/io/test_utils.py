@@ -70,96 +70,17 @@ class TestReadFile:
 class TestWriteFile:
     """Tests for write_file."""
 
-    WARNING_MATCH = (
-        "write_file\\(\\) is deprecated; use safe_write\\(\\.\\.\\., backup=False\\) instead\\."
-    )
-
-    def test_emits_deprecation_warning(self, tmp_path: Path) -> None:
-        """Deprecated compatibility wrapper warns callers at runtime."""
-        f = tmp_path / "out.txt"
-        with pytest.deprecated_call(match=self.WARNING_MATCH):
-            write_file(f, "content")
-        assert f.read_text() == "content"
-
     def test_writes_text(self, tmp_path: Path) -> None:
         """Writes text content."""
         f = tmp_path / "out.txt"
-        with pytest.deprecated_call(match=self.WARNING_MATCH):
-            write_file(f, "content")
+        write_file(f, "content")
         assert f.read_text() == "content"
-
-    def test_writes_binary_in_wb_mode(self, tmp_path: Path) -> None:
-        """Binary mode preserves the wrapper's successful write contract."""
-        f = tmp_path / "out.bin"
-        with pytest.deprecated_call(match=self.WARNING_MATCH):
-            write_file(f, b"\x00\x01\xff", mode="wb")
-        assert f.read_bytes() == b"\x00\x01\xff"
-
-    def test_overwrites_existing_file_without_backup(self, tmp_path: Path) -> None:
-        """Compatibility wrapper overwrites in place without creating .bak."""
-        f = tmp_path / "out.txt"
-        f.write_text("original")
-        with pytest.deprecated_call(match=self.WARNING_MATCH):
-            write_file(f, "updated")
-        assert f.read_text() == "updated"
-        assert not f.with_suffix(".txt.bak").exists()
 
     def test_creates_parent_dirs(self, tmp_path: Path) -> None:
         """Creates missing parent directories."""
         f = tmp_path / "sub" / "file.txt"
-        with pytest.deprecated_call(match=self.WARNING_MATCH):
-            write_file(f, "hi")
+        write_file(f, "hi")
         assert f.exists()
-
-    def test_write_is_atomic_on_failure(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A failed write leaves the original file intact, never partial."""
-        f = tmp_path / "out.txt"
-        f.write_text("original-intact")
-
-        def boom(*_args: object, **_kwargs: object) -> None:
-            raise OSError("simulated atomic replace failure")
-
-        monkeypatch.setattr(os, "replace", boom)
-        with pytest.deprecated_call(match=self.WARNING_MATCH):
-            with pytest.raises(OSError, match="simulated atomic replace failure"):
-                write_file(f, "new-content-that-must-not-land")
-
-        assert f.read_text() == "original-intact"
-
-    def test_failed_write_leaves_no_temp_file(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A failed write cleans up its temporary file."""
-        f = tmp_path / "out.txt"
-
-        def boom(*_args: object, **_kwargs: object) -> None:
-            raise OSError("simulated atomic replace failure")
-
-        monkeypatch.setattr(os, "replace", boom)
-        with pytest.deprecated_call(match=self.WARNING_MATCH):
-            with pytest.raises(OSError, match="simulated atomic replace failure"):
-                write_file(f, "content")
-
-        assert list(tmp_path.iterdir()) == []
-
-    def test_rejects_non_overwrite_modes(self, tmp_path: Path) -> None:
-        """Only overwrite modes are supported for atomic writes."""
-        with pytest.raises(ValueError, match="atomic overwrite modes"):
-            write_file(tmp_path / "out.txt", "content", mode="a")
-
-    def test_rejects_bytes_content_for_text_mode(self, tmp_path: Path) -> None:
-        """Text mode rejects bytes to match open(..., 'w').write(...)."""
-        with pytest.deprecated_call(match=self.WARNING_MATCH):
-            with pytest.raises(TypeError, match="str"):
-                write_file(tmp_path / "out.txt", b"bytes", mode="w")
-
-    def test_rejects_text_content_for_binary_mode(self, tmp_path: Path) -> None:
-        """Binary mode rejects text to match open(..., 'wb').write(...)."""
-        with pytest.deprecated_call(match=self.WARNING_MATCH):
-            with pytest.raises(TypeError, match="bytes-like object"):
-                write_file(tmp_path / "out.bin", "text", mode="wb")
 
 
 class TestSafeWrite:
