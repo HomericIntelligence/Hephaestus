@@ -80,6 +80,28 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "filter_audit_results": ("hephaestus.validation.audit", "filter_audit_results"),
 }
 
+_REMOVED_TOP_LEVEL_SYMBOL_REPLACEMENTS: dict[str, str] = {
+    "get_config_value": (
+        "use load_config(), merge_configs(), and get_setting() from hephaestus.config"
+    ),
+    "retry_with_jitter": (
+        "use retry_with_backoff(..., jitter=True, max_delay=...) from hephaestus.utils"
+    ),
+}
+
+
+def _assert_removed_top_level_symbols_not_in_lazy_imports() -> None:
+    """Fail fast if a removed top-level symbol is accidentally reintroduced lazily."""
+    reintroduced = set(_REMOVED_TOP_LEVEL_SYMBOL_REPLACEMENTS) & set(_LAZY_IMPORTS)
+    if reintroduced:
+        names = ", ".join(sorted(reintroduced))
+        raise RuntimeError(
+            f"Removed top-level deprecated symbols must not be present in _LAZY_IMPORTS: {names}"
+        )
+
+
+_assert_removed_top_level_symbols_not_in_lazy_imports()
+
 
 def __getattr__(name: str) -> Any:
     """Lazy-load public symbols on first access (PEP 562)."""
@@ -92,6 +114,11 @@ def __getattr__(name: str) -> Any:
         # Cache in module globals to avoid repeated lookups
         globals()[name] = value
         return value
+    if name in _REMOVED_TOP_LEVEL_SYMBOL_REPLACEMENTS:
+        replacement = _REMOVED_TOP_LEVEL_SYMBOL_REPLACEMENTS[name]
+        raise AttributeError(
+            f"module 'hephaestus' has no attribute {name!r}; {name!r} was removed, {replacement}"
+        )
     raise AttributeError(f"module 'hephaestus' has no attribute {name!r}")
 
 
@@ -102,7 +129,10 @@ def __dir__() -> list[str]:
     IDEs, documentation generators) can discover the full public API. Returns
     only names — no attribute access — so no lazy module is imported.
     """
-    return sorted(set(_LAZY_IMPORTS) | set(__all__) | set(globals()))
+    return sorted(
+        (set(_LAZY_IMPORTS) | set(__all__) | set(globals()))
+        - set(_REMOVED_TOP_LEVEL_SYMBOL_REPLACEMENTS)
+    )
 
 
 # Static declarations for the lazily-loaded names in __all__. These are
