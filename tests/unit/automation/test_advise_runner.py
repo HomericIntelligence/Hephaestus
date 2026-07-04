@@ -7,6 +7,7 @@ suite; here we exercise the shared logic with a stub invoker.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -472,3 +473,90 @@ class TestExtractJsonObject:
     def test_non_object_json_raises(self) -> None:
         with pytest.raises(ValueError, match="must be an object"):
             advise_runner._extract_json_object("[1, 2, 3]")
+
+
+class TestMarketplacePromptPayload:
+    """The compact marketplace payload builder (#1839)."""
+
+    def _write_marketplace(self, tmp_path: Path, plugins: list[object]) -> Path:
+        path = tmp_path / "marketplace.json"
+        path.write_text(json.dumps({"plugins": plugins}), encoding="utf-8")
+        return path
+
+    def test_missing_file_returns_empty_plugins(self, tmp_path: Path) -> None:
+        payload = advise_runner.marketplace_prompt_payload(tmp_path / "absent.json")
+        assert json.loads(payload) == {"plugins": []}
+
+    def test_non_list_plugins_returns_empty(self, tmp_path: Path) -> None:
+        path = tmp_path / "marketplace.json"
+        path.write_text(json.dumps({"plugins": "nope"}), encoding="utf-8")
+        assert json.loads(advise_runner.marketplace_prompt_payload(path)) == {"plugins": []}
+
+    def test_keeps_only_whitelisted_string_and_list_fields(self, tmp_path: Path) -> None:
+        path = self._write_marketplace(
+            tmp_path,
+            [
+                {
+                    "name": "a",
+                    "description": "d",
+                    "category": "c",
+                    "tags": ["t1", "t2"],
+                    "source": "./a",
+                    "version": "1.2.3",  # not whitelisted -> dropped
+                    "extra": {"nested": True},  # wrong type -> dropped
+                }
+            ],
+        )
+        result = json.loads(advise_runner.marketplace_prompt_payload(path))
+        assert result["plugins"] == [
+            {
+                "name": "a",
+                "description": "d",
+                "category": "c",
+                "tags": ["t1", "t2"],
+                "source": "./a",
+            }
+        ]
+
+    def test_non_dict_and_empty_compact_entries_are_skipped(self, tmp_path: Path) -> None:
+        # A non-dict entry and a dict with no whitelisted fields both yield nothing;
+        # the one valid plugin around them must survive.
+        path = self._write_marketplace(
+            tmp_path,
+            ["not-a-dict", {"version": "9.9.9"}, {"name": "keep"}, {"unknown": 1}],
+        )
+        result = json.loads(advise_runner.marketplace_prompt_payload(path))
+        assert result["plugins"] == [{"name": "keep"}]
+
+    def test_size_boundary_trims_only_last_added_entry(self, tmp_path: Path) -> None:
+        # Two valid plugins fit; the third pushes past the limit and must be the
+        # only one dropped -- the earlier valid entries stay.
+        big = "x" * 30_000
+        path = self._write_marketplace(
+            tmp_path,
+            [
+                {"name": "first", "description": big},
+                {"name": "second", "description": big},
+                {"name": "third", "description": big},
+            ],
+        )
+        assert advise_runner._MAX_MARKETPLACE_PROMPT_CHARS == 80_000
+        result = json.loads(advise_runner.marketplace_prompt_payload(path))
+        names = [p["name"] for p in result["plugins"]]
+        assert names == ["first", "second"]
+
+    def test_empty_compact_after_large_valid_keeps_prior(self, tmp_path: Path) -> None:
+        # A large valid plugin that stays just under the limit, followed by an
+        # empty-compact entry. The empty entry must be skipped without disturbing
+        # the already-collected plugin. (After #1839 the size check only runs on a
+        # real append, so the empty iteration does no serialization work at all.)
+        big = "y" * 79_000
+        path = self._write_marketplace(
+            tmp_path,
+            [
+                {"name": "valid", "description": big},
+                {"version": "1.0.0"},  # empty compact -> skipped
+            ],
+        )
+        result = json.loads(advise_runner.marketplace_prompt_payload(path))
+        assert [p["name"] for p in result["plugins"]] == ["valid"]
