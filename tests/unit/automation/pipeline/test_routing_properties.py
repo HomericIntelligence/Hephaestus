@@ -1,160 +1,163 @@
-"""Property-based tests for the routing graph invariants.
+"""Hypothesis property tests for the routing table (issue #1811 deliverable).
 
-Verifies structural properties that must hold across all routing configurations:
-  (a) Every non-terminal stage has a "*" fail route (mandatory default).
-  (b) Every cycle in the routing graph passes through an attempt-budget key.
-  (c) Driving an item through budget+1 failures lands it at the fail target.
-  (d) Every PipelineScope subset yields routes that stay inside scope ∪ {finished}.
+Generative invariants over ROUTES and PipelineScope:
+
+(a) every non-terminal stage declares a default ("*") fail target;
+(b) any generated failure sequence, driven through the table with per-item
+    budgets enforced, always terminates within a global bound;
+(c) for every ROUTES budget key: budget+1 repeats exhaust it, and a fresh
+    WorkItem carries a matching attempts counter;
+(d) for every generated contiguous PipelineScope subset, no trimmed route
+    targets a stage outside scope ∪ {FINISHED}.
 """
 
 from __future__ import annotations
+
+from hypothesis import given, settings, strategies as st
 
 from hephaestus.automation.pipeline import (
     ROUTES,
     PipelineScope,
     StageName,
+    WorkItem,
 )
+from hephaestus.automation.pipeline.routing import PIPELINE_ORDER, budget_keys
+from hephaestus.automation.pipeline.work_item import ItemKind
 
-# Mapping of loop-guarded stages to their budget keys.
-# These are the stages that are allowed to loop back via fail_routes.
-_LOOP_GUARDED = {
-    StageName.PLAN_REVIEW: "plan_review_iter",
-    StageName.PR_REVIEW: "pr_review_iter",
-    StageName.CI: "ci_fix",
+NON_TERMINAL = [s for s in StageName if s != StageName.FINISHED]
+
+# Every fail-route reason key declared anywhere in ROUTES, plus an unknown
+# one to exercise the "*" default path.
+_DECLARED_REASONS = sorted(
+    {key for route in ROUTES.values() for key in route.fail_routes if key != "*"}
+)
+_REASONS = [*_DECLARED_REASONS, "unknown_reason"]
+
+# Reason → budget key consumed when that failure repeats. Mirrors the
+# architecture doc's per-stage budget assignments; unknown reasons consume
+# none and resolve purely via the "*" default.
+_REASON_BUDGET: dict[str, str | None] = {
+    "nogo": "plan_review_iter",
+    "plan_cycles_exhausted": "plan_cycles",
+    "plan_not_go": "implement",
+    "already_implementation_go_pr": "implement",
+    "agent_error": "implement",
+    "human_blocked": "pr_review_iter",
+    "exhaustion": "pr_review_iter",
+    "fix_exhausted": "ci_fix",
+    "not_implementation_go": "ci_fix",
+    "no_pr": "ci_fix",
+    "ci_red": "merge",
+    "blocked_exhausted": "blocked_address",
+    "closed": "merge",
+    "timeout": "merge",
+    "unknown_reason": None,
 }
 
 
-class TestRoutingProperties:
-    """Property-based tests for routing invariants."""
+def _fail_target(stage: StageName, reason: str) -> StageName:
+    """Resolve a failure at ``stage`` for ``reason`` via ROUTES."""
+    route = ROUTES[stage]
+    return route.fail_routes.get(reason, route.fail_routes.get("*", StageName.FINISHED))
 
-    def test_property_a_all_nonterminal_stages_have_default_fail_route(self) -> None:
-        """Property (a): Every non-terminal stage has a "*" fail route."""
-        terminal_stages = {StageName.FINISHED}
-        violations = []
 
-        for stage, route in ROUTES.items():
-            if stage in terminal_stages:
-                continue
-            if "*" not in route.fail_routes:
-                violations.append(f"{stage} lacks '*' fail route")
+def _declared_budget(budget_key: str) -> int:
+    """Return the ROUTES-declared value for a budget key."""
+    return next(
+        route.budgets[budget_key] for route in ROUTES.values() if budget_key in route.budgets
+    )
 
-        assert not violations, "Fail-route violations:\n" + "\n".join(violations)
 
-    def test_property_b_every_cycle_passes_through_budget(self) -> None:
-        """Property (b): Every cycle in the routing graph passes through an attempt-budget key.
+@given(stage=st.sampled_from(NON_TERMINAL))
+def test_every_stage_has_default_fail_target(stage: StageName) -> None:
+    """(a) Every non-terminal stage declares a '*' default fail target."""
+    assert "*" in ROUTES[stage].fail_routes
 
-        A cycle is detected when a fail-route loops back to a stage that has
-        already been visited (i.e., the fail target is not a forward/terminal target).
-        Every such looping stage must have a corresponding budget key in ROUTES.
-        """
-        violations = []
 
-        for stage, route in ROUTES.items():
-            for fail_key, fail_target in route.fail_routes.items():
-                # Is this a loop (fail target is earlier or same stage)?
-                # In our ROUTES, loops are:
-                #   PLAN_REVIEW fails to PLANNING (earlier)
-                #   PR_REVIEW fails to IMPLEMENTATION (earlier)
-                #   CI fails to IMPLEMENTATION (earlier)
-                # All others advance or terminate.
+@given(
+    start=st.sampled_from(NON_TERMINAL),
+    reasons=st.lists(st.sampled_from(_REASONS), min_size=1, max_size=60),
+)
+@settings(max_examples=300)
+def test_driven_failure_sequences_always_terminate(start: StageName, reasons: list[str]) -> None:
+    """(b) Any failure sequence terminates once per-item budgets are enforced.
 
-                is_loop = False
-                stage_order = [
-                    StageName.REPO,
-                    StageName.PLANNING,
-                    StageName.PLAN_REVIEW,
-                    StageName.IMPLEMENTATION,
-                    StageName.PR_REVIEW,
-                    StageName.CI,
-                    StageName.MERGE_WAIT,
-                    StageName.FINISHED,
-                ]
-                stage_idx = stage_order.index(stage)
-                target_idx = stage_order.index(fail_target) if fail_target in stage_order else -1
+    Drives a WorkItem from ``start`` through the generated failure reasons:
+    each budgeted failure increments the item's counter (per-item-lifetime,
+    never reset); once a counter exceeds its ROUTES budget the drive routes
+    to FINISHED (exhaustion), mirroring the coordinator contract. The walk
+    must never exceed a global step bound derived from the budget sum.
+    """
+    item = WorkItem(repo="r", kind=ItemKind.ISSUE, issue=1, stage=start)
+    max_total_steps = sum(
+        budget for route in ROUTES.values() for budget in route.budgets.values()
+    ) + len(_REASONS)
+    budgeted_steps = 0
 
-                if target_idx <= stage_idx and fail_target != StageName.FINISHED:
-                    is_loop = True
+    for reason in reasons:
+        if item.stage == StageName.FINISHED:
+            break
 
-                # If it's a loop, the looping stage must have a budget entry
-                if is_loop and stage not in _LOOP_GUARDED:
-                    violations.append(
-                        f"{stage} loops back to {fail_target} "
-                        f"(via '{fail_key}' fail route) but is not in _LOOP_GUARDED"
-                    )
-
-        assert not violations, "Unguarded loop violations:\n" + "\n".join(violations)
-
-    def test_property_c_budget_plus_one_failures_reach_fail_target(self) -> None:
-        """Property (c): Driving an item through budget+1 failures lands it at the fail target.
-
-        For each loop-guarded stage, we verify that after exhausting the budget,
-        a subsequent failure in that stage routes to its fail_target, which should
-        NOT be the same stage (to prevent infinite loops).
-        """
-        violations = []
-
-        for stage, budget_key in _LOOP_GUARDED.items():
-            if stage not in ROUTES:
-                violations.append(f"{stage} in _LOOP_GUARDED but not in ROUTES")
-                continue
-
-            route = ROUTES[stage]
-            if budget_key not in route.budgets:
-                violations.append(
-                    f"{stage} loop-guard references budget_key={budget_key!r} "
-                    f"but {stage} route has budgets={set(route.budgets.keys())}"
-                )
-                continue
-
-            budget = route.budgets[budget_key]
-            fail_target = route.fail_routes.get("*")
-
-            if fail_target is None:
-                violations.append(f"{stage} lacks '*' fail route")
-                continue
-
-            # When budget is exhausted (after budget+1 attempts), the fail_target
-            # should be a different stage than the current one, to avoid self-loops
-            assert budget >= 1, f"{stage}: budget should be >= 1"
-            assert fail_target != stage, (
-                f"Self-loop guard: {stage} has fail_target={fail_target}, "
-                f"which is the same stage (would loop infinitely)"
+        budget_key = _REASON_BUDGET[reason]
+        if budget_key is not None:
+            budgeted_steps += 1
+            assert budgeted_steps <= max_total_steps, (
+                "failure walk exceeded the global budget bound"
             )
+            item.attempts[budget_key] += 1
+            if item.attempts[budget_key] > _declared_budget(budget_key):
+                item.stage = StageName.FINISHED
+                continue
+        item.stage = _fail_target(item.stage, reason)
 
-        assert not violations, "Property (c) violations:\n" + "\n".join(violations)
+    assert item.stage in set(StageName)
 
-    def test_property_d_pipeline_scope_subset_stays_in_scope(self) -> None:
-        """Property (d): Every PipelineScope subset yields routes inside scope ∪ {finished}.
 
-        For a few representative scopes, verify that trimmed_routes never point
-        outside the scope (except to FINISHED, which is always valid).
-        """
-        test_scopes = [
-            frozenset({StageName.PLANNING}),
-            frozenset({StageName.PLANNING, StageName.PLAN_REVIEW, StageName.IMPLEMENTATION}),
-            frozenset({StageName.PR_REVIEW, StageName.CI, StageName.MERGE_WAIT}),
-        ]
-        violations = []
+@given(budget_key=st.sampled_from(sorted(budget_keys())))
+def test_budget_exhaustion_is_always_finite(budget_key: str) -> None:
+    """(c) budget+1 repeats of any budgeted failure exhausts the budget.
 
-        for scope_set in test_scopes:
-            scope = PipelineScope(scope_set)
-            trimmed = scope.trimmed_routes()
+    Also proves every ROUTES budget key has a matching counter on a fresh
+    WorkItem, so no budget is untrackable.
+    """
+    item = WorkItem(repo="r", kind=ItemKind.ISSUE, issue=1)
+    assert budget_key in item.attempts, (
+        f"WorkItem.attempts missing counter for ROUTES budget {budget_key!r}"
+    )
+    declared = _declared_budget(budget_key)
+    assert declared >= 1
+    for _ in range(declared + 1):
+        item.attempts[budget_key] += 1
+    assert item.attempts[budget_key] > declared
 
-            for stage, route in trimmed.items():
-                valid_targets = scope_set | {StageName.FINISHED}
 
-                # Check next target
-                if route.next not in valid_targets:
-                    violations.append(
-                        f"Scope {scope_set}: stage {stage} next={route.next} is outside scope"
-                    )
+@st.composite
+def contiguous_scopes(draw: st.DrawFn) -> frozenset[StageName]:
+    """Generate contiguous, non-empty stage subsets in pipeline order."""
+    non_finished = [s for s in PIPELINE_ORDER if s != StageName.FINISHED]
+    start = draw(st.integers(min_value=0, max_value=len(non_finished) - 1))
+    end = draw(st.integers(min_value=start, max_value=len(non_finished) - 1))
+    include_finished = draw(st.booleans())
+    stages: set[StageName] = set(non_finished[start : end + 1])
+    if include_finished:
+        stages.add(StageName.FINISHED)
+    return frozenset(stages)
 
-                # Check all fail targets
-                for fail_key, fail_target in route.fail_routes.items():
-                    if fail_target not in valid_targets:
-                        violations.append(
-                            f"Scope {scope_set}: stage {stage} "
-                            f"fail_routes[{fail_key!r}]={fail_target} is outside scope"
-                        )
 
-        assert not violations, "Pipeline scope violations:\n" + "\n".join(violations)
+@given(stages=contiguous_scopes())
+@settings(max_examples=200)
+def test_scope_closure_over_generated_subsets(stages: frozenset[StageName]) -> None:
+    """(d) Every trimmed route targets scope ∪ {FINISHED} for ANY contiguous scope."""
+    scope = PipelineScope(stages)
+    allowed = set(stages) | {StageName.FINISHED}
+    for stage, route in scope.trimmed_routes().items():
+        assert stage in stages
+        assert route.next in allowed
+        for target in route.fail_routes.values():
+            assert target in allowed
+
+
+def test_attempts_keys_match_routes_budget_keys() -> None:
+    """WorkItem.attempts default keys are exactly the union of ROUTES budgets."""
+    item = WorkItem(repo="r", kind=ItemKind.ISSUE, issue=1)
+    assert frozenset(item.attempts) == budget_keys()

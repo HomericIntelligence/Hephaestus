@@ -13,7 +13,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .work_item import WorkItem
 
-CompletionQueue = Queue[tuple[Any, str]]
+# Payload is (JobHandle, JobResult) per docs/AUTOMATION_LOOP_ARCHITECTURE.md;
+# both types land with the worker pool (epic #1809 worker-pool slice), so the
+# alias stays shape-only until then.
+CompletionQueue = Queue[tuple[Any, Any]]
 
 
 class StageQueue:

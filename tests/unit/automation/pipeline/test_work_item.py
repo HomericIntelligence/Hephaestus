@@ -1,6 +1,6 @@
 """Tests for WorkItem, ItemKind, ItemResult, and HistoryEvent."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -94,9 +94,11 @@ class TestWorkItem:
         """WorkItem initializes all attempt counters to 0."""
         item = WorkItem(repo="repo", kind=ItemKind.REPO)
         expected_keys = {
+            "clone",
             "plan",
             "plan_review_iter",
             "plan_cycles",
+            "implement",
             "pr_review_iter",
             "pr_review_hard",
             "test_fix",
@@ -107,6 +109,29 @@ class TestWorkItem:
         }
         assert set(item.attempts.keys()) == expected_keys
         assert all(v == 0 for v in item.attempts.values())
+
+    def test_work_item_mutable_defaults_do_not_alias(self) -> None:
+        """Two WorkItems never share attempts/history/session_ids/payload."""
+        a = WorkItem(repo="repo", kind=ItemKind.REPO)
+        b = WorkItem(repo="repo", kind=ItemKind.REPO)
+        a.attempts["plan"] = 5
+        a.session_ids["implementer"] = "sid-1"
+        a.payload["k"] = "v"
+        a.add_history_event(StageName.PLANNING, "running")
+
+        assert b.attempts["plan"] == 0
+        assert b.session_ids == {}
+        assert b.payload == {}
+        assert b.history == []
+
+    def test_work_item_timestamps_are_utc_aware(self) -> None:
+        """created_at/updated_at and history timestamps are tz-aware UTC."""
+        item = WorkItem(repo="repo", kind=ItemKind.REPO)
+        assert item.created_at.tzinfo is not None
+        assert item.updated_at.tzinfo is not None
+        item.add_history_event(StageName.PLANNING, "running")
+        assert item.history[0].timestamp.tzinfo is not None
+        assert item.updated_at == item.history[0].timestamp
 
     def test_work_item_history_cap_at_200(self) -> None:
         """History is capped at 200 events; oldest events are dropped."""
@@ -122,9 +147,9 @@ class TestWorkItem:
     def test_work_item_add_history_event(self) -> None:
         """add_history_event records stage transitions."""
         item = WorkItem(repo="repo", kind=ItemKind.REPO)
-        before = datetime.now()
+        before = datetime.now(timezone.utc)
         item.add_history_event(StageName.PLANNING, "running", note="started")
-        after = datetime.now()
+        after = datetime.now(timezone.utc)
 
         assert len(item.history) == 1
         event = item.history[0]

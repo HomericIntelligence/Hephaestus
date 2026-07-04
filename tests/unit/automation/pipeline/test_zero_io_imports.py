@@ -17,12 +17,20 @@ _FORBIDDEN_MODULES = {
     "http",
     "requests",
     "httpx",
+    "asyncio",
+    "pty",
+    "fcntl",
+    "tempfile",
 }
 _FORBIDDEN_PREFIXES = (
     "hephaestus.automation.github_api",
     "hephaestus.automation.claude_invoke",
     "hephaestus.github",
     "hephaestus.automation.git_utils",
+    # Both wrap subprocess execution; importing them from the pure-data layer
+    # would smuggle shell-out capability past the stdlib forbid list.
+    "hephaestus.utils",
+    "hephaestus.resilience",
 )
 
 
@@ -40,9 +48,8 @@ def test_pipeline_modules_have_zero_io_imports() -> None:
     conditional and lazy imports that a text-scan would miss.
     """
     violations: list[str] = []
-    for py in sorted(_PIPELINE_DIR.glob("*.py")):
-        if py.name == "__pycache__":
-            continue
+    # rglob so future pipeline/ subpackages (e.g. stages/) stay guarded.
+    for py in sorted(_PIPELINE_DIR.rglob("*.py")):
         tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

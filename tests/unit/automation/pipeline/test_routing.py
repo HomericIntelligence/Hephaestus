@@ -118,33 +118,91 @@ class TestROUTES:
             assert isinstance(route, Route)
             assert isinstance(route.next, StageName)
 
-    def test_repo_stage_routes_to_planning(self) -> None:
-        """REPO stage routes to PLANNING."""
-        assert ROUTES[StageName.REPO].next == StageName.PLANNING
+    def test_repo_item_is_terminal(self) -> None:
+        """The repo item advances to FINISHED; seeded issues enter their own queues."""
+        assert ROUTES[StageName.REPO].next == StageName.FINISHED
         assert ROUTES[StageName.REPO].fail_routes["*"] == StageName.FINISHED
-
-    def test_planning_stage_has_budgets(self) -> None:
-        """PLANNING stage has plan and plan_cycles budgets."""
-        route = ROUTES[StageName.PLANNING]
-        assert route.budgets["plan"] == 1
-        assert route.budgets["plan_cycles"] == 2
+        assert ROUTES[StageName.REPO].budgets == {"clone": 2}
 
     def test_plan_review_stage_loops_back(self) -> None:
         """PLAN_REVIEW default fail target is PLANNING (loop back)."""
         route = ROUTES[StageName.PLAN_REVIEW]
         assert route.fail_routes["*"] == StageName.PLANNING
 
-    def test_pr_review_stage_budgets(self) -> None:
-        """PR_REVIEW has pr_review_iter, pr_review_hard, blocked_address budgets."""
-        route = ROUTES[StageName.PR_REVIEW]
-        assert route.budgets["pr_review_iter"] == 3
-        assert route.budgets["pr_review_hard"] == 6
-        assert route.budgets["blocked_address"] == 2
-
     def test_finished_stage_terminal(self) -> None:
         """FINISHED stage is terminal (routes to itself)."""
         route = ROUTES[StageName.FINISHED]
         assert route.next == StageName.FINISHED
+
+    def test_routes_match_architecture_doc_table(self) -> None:
+        """Pin the FULL table to docs/AUTOMATION_LOOP_ARCHITECTURE.md "ROUTES table".
+
+        The doc is the epic #1809 contract; any divergence between this
+        literal transcription and routing.ROUTES is a bug in one of the two.
+        """
+        expected: dict[StageName, Route] = {
+            StageName.REPO: Route(
+                next=StageName.FINISHED,
+                fail_routes={"*": StageName.FINISHED},
+                budgets={"clone": 2},
+            ),
+            StageName.PLANNING: Route(
+                next=StageName.PLAN_REVIEW,
+                fail_routes={"*": StageName.FINISHED},
+                budgets={"plan": 2},
+            ),
+            StageName.PLAN_REVIEW: Route(
+                next=StageName.IMPLEMENTATION,
+                fail_routes={
+                    "nogo": StageName.PLANNING,
+                    "plan_cycles_exhausted": StageName.FINISHED,
+                    "*": StageName.PLANNING,
+                },
+                budgets={"plan_review_iter": 3, "plan_cycles": 2},
+            ),
+            StageName.IMPLEMENTATION: Route(
+                next=StageName.PR_REVIEW,
+                fail_routes={
+                    "plan_not_go": StageName.PLAN_REVIEW,
+                    "already_implementation_go_pr": StageName.CI,
+                    "*": StageName.FINISHED,
+                },
+                budgets={"implement": 2, "test_fix": 1},
+            ),
+            StageName.PR_REVIEW: Route(
+                next=StageName.CI,
+                fail_routes={
+                    "agent_error": StageName.IMPLEMENTATION,
+                    "human_blocked": StageName.FINISHED,
+                    "exhaustion": StageName.FINISHED,
+                    "*": StageName.PR_REVIEW,
+                },
+                budgets={"pr_review_iter": 3, "pr_review_hard": 6},
+            ),
+            StageName.CI: Route(
+                next=StageName.MERGE_WAIT,
+                fail_routes={
+                    "fix_exhausted": StageName.IMPLEMENTATION,
+                    "not_implementation_go": StageName.PR_REVIEW,
+                    "no_pr": StageName.FINISHED,
+                    "*": StageName.CI,
+                },
+                budgets={"ci_fix": 1, "rebase": 2},
+            ),
+            StageName.MERGE_WAIT: Route(
+                next=StageName.FINISHED,
+                fail_routes={
+                    "ci_red": StageName.CI,
+                    "blocked_exhausted": StageName.PR_REVIEW,
+                    "closed": StageName.FINISHED,
+                    "timeout": StageName.FINISHED,
+                    "*": StageName.FINISHED,
+                },
+                budgets={"blocked_address": 2, "rebase": 2, "merge": 1},
+            ),
+            StageName.FINISHED: Route(next=StageName.FINISHED),
+        }
+        assert expected == ROUTES
 
 
 class TestPipelineScope:
@@ -204,9 +262,11 @@ class TestPipelineScope:
         scope = PipelineScope(stages)
         trimmed = scope.trimmed_routes()
 
-        # PR_REVIEW.fail_routes["*"] is IMPLEMENTATION, which is out of scope
+        # PR_REVIEW.fail_routes["agent_error"] is IMPLEMENTATION (out of
+        # scope) → rewritten; "*" self-targets PR_REVIEW (in scope) → kept.
         route = trimmed[StageName.PR_REVIEW]
-        assert route.fail_routes["*"] == StageName.FINISHED
+        assert route.fail_routes["agent_error"] == StageName.FINISHED
+        assert route.fail_routes["*"] == StageName.PR_REVIEW
 
     def test_pipeline_scope_finished_always_in_scope(self) -> None:
         """FINISHED is always a valid target (never out of scope)."""
@@ -218,12 +278,30 @@ class TestPipelineScope:
         route = trimmed[StageName.PLANNING]
         assert route.fail_routes["*"] == StageName.FINISHED
 
-    def test_pipeline_scope_caches_result(self) -> None:
-        """trimmed_routes() caches its result."""
+    def test_pipeline_scope_returns_defensive_copies(self) -> None:
+        """Mutating a trimmed result never corrupts ROUTES or later calls."""
         stages = frozenset({StageName.PLANNING})
         scope = PipelineScope(stages)
         result1 = scope.trimmed_routes()
-        result2 = scope.trimmed_routes()
+        result1[StageName.PLANNING].budgets["plan"] = 99
+        result1[StageName.PLANNING].fail_routes["*"] = StageName.REPO
 
-        # Should return the same object (cached)
-        assert result1 is result2
+        assert ROUTES[StageName.PLANNING].budgets["plan"] == 2
+        result2 = scope.trimmed_routes()
+        assert result2[StageName.PLANNING].budgets["plan"] == 2
+        assert result2[StageName.PLANNING].fail_routes["*"] == StageName.FINISHED
+
+    def test_pipeline_scope_rejects_empty(self) -> None:
+        """An empty scope is a caller bug and raises."""
+        with pytest.raises(ValueError, match="at least one stage"):
+            PipelineScope(frozenset())
+
+    def test_pipeline_scope_rejects_non_contiguous(self) -> None:
+        """A gapped scope (e.g. planning + ci) silently drops stages — reject it."""
+        with pytest.raises(ValueError, match="contiguous"):
+            PipelineScope(frozenset({StageName.PLANNING, StageName.CI}))
+
+    def test_pipeline_scope_finished_never_breaks_contiguity(self) -> None:
+        """FINISHED (universal sink) is allowed in any scope."""
+        scope = PipelineScope(frozenset({StageName.MERGE_WAIT, StageName.FINISHED}))
+        assert StageName.MERGE_WAIT in scope.trimmed_routes()
