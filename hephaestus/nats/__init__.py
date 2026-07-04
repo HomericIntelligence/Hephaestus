@@ -12,7 +12,11 @@ Usage::
 
     from hephaestus.nats import NATSConfig, NATSEvent, EventRouter, NATSSubscriberThread
 
-    config = NATSConfig(enabled=True, url="nats://localhost:4222", subjects=["my.subject.>"])
+    config = NATSConfig(
+        enabled=True,
+        url="tls://nats.example.com:4222",
+        subjects=["my.subject.>"],
+    )
     router = EventRouter()
     router.register("created", lambda event: print(event.subject))
 

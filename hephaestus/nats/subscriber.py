@@ -15,7 +15,7 @@ Usage::
 
     from hephaestus.nats import NATSConfig, NATSSubscriberThread
 
-    config = NATSConfig(enabled=True, url="nats://localhost:4222", subjects=["my.>"])
+    config = NATSConfig(enabled=True, url="tls://nats.example.com:4222", subjects=["my.>"])
     thread = NATSSubscriberThread(config=config, handler=lambda event: print(event))
     thread.start()
     # Check health at any time:
@@ -37,11 +37,27 @@ from typing import Any
 
 from hephaestus.nats.config import NATSConfig
 from hephaestus.nats.events import NATSEvent
+from hephaestus.resilience import (
+    CircuitBreaker,
+    CircuitBreakerOpenError,
+    CircuitBreakerState,
+)
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_JOIN_TIMEOUT: float = 5.0
 """Default join timeout (seconds) for :meth:`NATSSubscriberThread.stop`."""
+
+NATS_CIRCUIT_BREAKER_NAME = "nats-subscriber"
+"""Circuit breaker name used by :class:`NATSSubscriberThread`."""
+
+NATS_CIRCUIT_BREAKER_FAILURE_THRESHOLD = 5
+"""Consecutive connection failures before the subscriber enters ``ERROR``.
+
+The value matches :class:`hephaestus.resilience.CircuitBreaker`'s default so
+the NATS subscriber adopts the shared resilience behavior without adding a
+NATS-specific tuning surface.
+"""
 
 
 class SubscriberState(enum.Enum):
@@ -55,7 +71,7 @@ class SubscriberState(enum.Enum):
         CONNECTED    → STOPPING     (stop() called while connected)
         DISCONNECTED → STOPPING     (stop() called while in backoff)
         STOPPING     → STOPPED      (thread join completes)
-        any          → ERROR        (unhandled exception propagates out of run())
+        any          → ERROR        (unhandled exception or open circuit breaker)
 
     """
 
@@ -72,6 +88,8 @@ class NATSSubscriberThread(threading.Thread):
 
     The thread creates an isolated asyncio event loop internally.  The NATS
     connection and JetStream subscription live entirely within that loop.
+    Reconnection attempts are guarded by a circuit breaker; sustained
+    connection failures transition the subscriber to :attr:`SubscriberState.ERROR`.
 
     Health observability
     --------------------
@@ -83,7 +101,7 @@ class NATSSubscriberThread(threading.Thread):
     - :attr:`last_message_at` — Unix timestamp of the most recent successfully
       dispatched message, or ``None`` if no message has been processed yet.
     - :meth:`health_dict()` — JSON-serialisable snapshot of the above plus the
-      configured URL, stream, and uptime approximation.
+      configured URL, stream, circuit-breaker state, and uptime approximation.
 
     Delivery semantics
     ------------------
@@ -138,6 +156,11 @@ class NATSSubscriberThread(threading.Thread):
         self._handler = handler
         self._join_timeout = join_timeout
         self._stop_event = threading.Event()
+        self._circuit_breaker = CircuitBreaker(
+            NATS_CIRCUIT_BREAKER_NAME,
+            failure_threshold=NATS_CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+            recovery_timeout=self._config.max_backoff_seconds,
+        )
 
         # --- health / observability state (guarded by _state_lock) ---
         self._state_lock = threading.Lock()
@@ -189,6 +212,8 @@ class NATSSubscriberThread(threading.Thread):
               timestamp of last dispatched message, or ``None``.
             - ``"url"`` (:class:`str`): configured NATS URL.
             - ``"stream"`` (:class:`str`): configured stream name.
+            - ``"circuit_breaker_state"`` (:class:`str`): current circuit
+              breaker state, e.g. ``"closed"`` or ``"open"``.
             - ``"uptime_seconds"`` (:class:`float`): seconds since thread was
               constructed.
 
@@ -203,6 +228,7 @@ class NATSSubscriberThread(threading.Thread):
             "last_message_at": last_msg,
             "url": self._config.url,
             "stream": self._config.stream,
+            "circuit_breaker_state": self._circuit_breaker.state.value,
             "uptime_seconds": time.monotonic() - self._started_at,
         }
 
@@ -220,6 +246,12 @@ class NATSSubscriberThread(threading.Thread):
         with self._state_lock:
             self._last_error = exc
             self._state = SubscriberState.DISCONNECTED
+
+    def _record_terminal_error(self, exc: BaseException) -> None:
+        """Record *exc* as the latest error and transition to ERROR."""
+        with self._state_lock:
+            self._last_error = exc
+            self._state = SubscriberState.ERROR
 
     def _record_message(self) -> None:
         """Update ``last_message_at`` to the current time."""
@@ -246,7 +278,19 @@ class NATSSubscriberThread(threading.Thread):
                 try:
                     loop = asyncio.new_event_loop()
                     try:
-                        loop.run_until_complete(self._subscribe_loop())
+
+                        def _run_subscribe_once(
+                            event_loop: asyncio.AbstractEventLoop = loop,
+                        ) -> None:
+                            event_loop.run_until_complete(self._subscribe_loop())
+
+                        self._circuit_breaker.call(_run_subscribe_once)
+                    except CircuitBreakerOpenError as exc:
+                        self._record_terminal_error(exc)
+                        logger.error(
+                            "NATS circuit breaker is open; subscriber entering ERROR state"
+                        )
+                        return
                     finally:
                         loop.close()
                     backoff = self._config.initial_backoff_seconds
@@ -254,6 +298,13 @@ class NATSSubscriberThread(threading.Thread):
                     if self._stop_event.is_set():
                         break
                     self._record_error(exc)
+                    if self._circuit_breaker.state is CircuitBreakerState.OPEN:
+                        self._record_terminal_error(exc)
+                        logger.error(
+                            "NATS circuit breaker opened after sustained connection "
+                            "failures; subscriber entering ERROR state"
+                        )
+                        return
                     logger.exception(
                         "NATS connection error, retrying in %.1fs",
                         backoff,
@@ -297,7 +348,7 @@ class NATSSubscriberThread(threading.Thread):
             self._stop_event.set()
             return
 
-        nc = await nats_client.connect(self._config.url)
+        nc = await nats_client.connect(self._config.url, **self._config.connect_options())
         self._set_state(SubscriberState.CONNECTED)
         try:
             js = nc.jetstream()

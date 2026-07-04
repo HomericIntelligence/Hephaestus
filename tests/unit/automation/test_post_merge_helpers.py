@@ -96,6 +96,9 @@ class TestRunDriveGreenLearnings:
             result = processor.run_drive_green_learnings(1, 2)
         assert result is True
         assert inv.called
+        kwargs = inv.call_args.kwargs
+        assert kwargs["allowed_tools"] == "Read,Write,Edit,Glob,Grep,Bash"
+        assert "extra_args" not in kwargs
         assert processor._last_learn_evidence == sentinel
 
     def test_codex_path_uses_run_agent_session(self, tmp_path: Path) -> None:

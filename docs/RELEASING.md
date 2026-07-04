@@ -32,8 +32,13 @@ Before triggering the workflow, ensure:
 - [ ] All changes merged to `main` and CI is green.
 - [ ] `pixi.lock` is up to date (`pixi install` produces no changes).
 - [ ] No open issues in the milestone you are releasing.
+- [ ] `docs/MIGRATION.md`'s "latest released version is **X.Y.Z**" line already names
+  the version you are about to tag. The Release workflow's test job runs
+  `test_migration_md_version_does_not_trail_latest_git_tag`, and tags are immutable —
+  tagging before the doc bump strands the tag unreleased (this broke the first
+  v0.9.7 attempt and all of v0.9.8; see #1802). Bump the doc, merge, then tag.
 
-The version itself does **not** need to be edited in any file: this project uses
+The package version itself does **not** need to be edited in any file: this project uses
 hatch-vcs dynamic versioning, so the package version is derived from the git tag the
 `auto-tag` workflow pushes. There is no `[project].version` field to bump.
 

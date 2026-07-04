@@ -1,6 +1,6 @@
 """Validate unit test directory structure.
 
-Provides six complementary checks:
+Provides seven complementary checks:
 
 1. **Mirror check**: Every subpackage in the source directory has a corresponding
    directory under ``tests/unit/``.
@@ -14,11 +14,13 @@ Provides six complementary checks:
    ``hephaestus/<name>/`` subpackage where both are content-free (source has
    no module beyond ``__init__.py`` AND the test dir has no ``test_*.py``) —
    the name-only mirror check would otherwise treat the pair as valid.
-5. **No-stray-tests-root-files check**: No ``test_*.py`` files exist directly
+5. **No-phantom-test-dirs check**: No direct ``tests/unit/<name>/`` dir is
+   content-free, such as a stale directory containing only ``__pycache__``.
+6. **No-stray-tests-root-files check**: No ``test_*.py`` files exist directly
    under ``tests/`` root. Such files fall outside
    ``testpaths = ["tests/unit", "tests/integration"]`` and are silently never
    collected by pytest (issue #1467).
-6. **Scripts-coverage check**: When top-level ``scripts/`` exists, the
+7. **Scripts-coverage check**: When top-level ``scripts/`` exists, the
    ``tests/unit/scripts/`` smoke harness must exist and keep auto-discovering
    every ``scripts/*.py`` file.
 
@@ -128,6 +130,26 @@ def check_no_ghost_packages(
         if not _has_source_modules(src_root / name) and not _has_test_files(test_root / name)
     }
     return len(ghosts) == 0, ghosts
+
+
+def check_no_phantom_test_dirs(test_root: Path) -> tuple[bool, set[str]]:
+    """Flag direct ``tests/unit`` dirs with no Python source at all.
+
+    This catches stale skeletons such as ``tests/unit/git/`` containing only
+    ``__pycache__`` after the corresponding tests were removed.
+    """
+    if not test_root.is_dir():
+        return True, set()
+
+    phantoms = {
+        d.name
+        for d in test_root.iterdir()
+        if d.is_dir()
+        and not d.name.startswith("_")
+        and not d.name.startswith(".")
+        and not _has_python_source(d)
+    }
+    return len(phantoms) == 0, phantoms
 
 
 def check_test_directory_mirrors(
@@ -367,6 +389,23 @@ def _report_ghost_packages_check(
     return False
 
 
+def _report_phantom_test_dirs_check(test_root: Path, verbose: bool) -> bool:
+    ok, phantoms = check_no_phantom_test_dirs(test_root)
+    if ok:
+        if verbose:
+            print("OK: No phantom test directories under tests/unit/.")
+        return True
+
+    print(
+        "ERROR: tests/unit/ has content-free directories. Remove stale dirs, "
+        "or add real test files if the directory is intentional.\nPhantom(s):",
+        file=sys.stderr,
+    )
+    for name in sorted(phantoms):
+        print(f"  tests/unit/{name}/ (no Python source)", file=sys.stderr)
+    return False
+
+
 def _report_stray_tests_root_files_check(tests_root: Path, verbose: bool) -> bool:
     no_stray, violations = check_no_stray_tests_root_files(tests_root)
     if no_stray:
@@ -440,6 +479,7 @@ def check_test_structure(
         _report_loose_files_check(test_root, verbose),
         _report_unsanctioned_dirs_check(src_root, test_root, verbose),
         _report_ghost_packages_check(src_root, test_root, verbose),
+        _report_phantom_test_dirs_check(test_root, verbose),
         _report_stray_tests_root_files_check(tests_root, verbose),
     ]
     if scripts_root.is_dir():

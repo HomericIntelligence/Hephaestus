@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Coroutine
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from hephaestus.nats.config import NATSConfig
@@ -22,7 +24,8 @@ class TestSubscriberReadsBackoffFromConfig:
         # Force one iteration of the reconnect loop, then bail.
         call_count = {"n": 0}
 
-        def _fake_run_until_complete(_coro: object) -> None:
+        def _fake_run_until_complete(coro: Coroutine[Any, Any, Any]) -> None:
+            coro.close()
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise RuntimeError("boom")
@@ -54,7 +57,8 @@ class TestSubscriberReadsBackoffFromConfig:
         thread = NATSSubscriberThread(config=config, handler=MagicMock())
         iters = {"n": 0}
 
-        def _fake_run_until_complete(_coro: object) -> None:
+        def _fake_run_until_complete(coro: Coroutine[Any, Any, Any]) -> None:
+            coro.close()
             iters["n"] += 1
             if iters["n"] >= 3:
                 thread._stop_event.set()

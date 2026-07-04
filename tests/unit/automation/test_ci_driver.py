@@ -11,6 +11,7 @@ import pytest
 
 from hephaestus.agents.runtime import AgentRunResult
 from hephaestus.automation import ci_driver
+from hephaestus.automation._review_utils import DEFAULT_STATE_DIR
 from hephaestus.automation.ci_driver import CIDriver, _evaluate_run_result
 from hephaestus.automation.models import CIDriverOptions, WorkerResult
 
@@ -101,6 +102,21 @@ def _mock_default_pr_state(monkeypatch: pytest.MonkeyPatch) -> None:
         "_get_pr_branch",
         lambda self, pr_number: f"test-branch-{pr_number}",
     )
+
+
+def test_default_state_dir_uses_canonical_path(
+    mock_options: CIDriverOptions, tmp_path: Path
+) -> None:
+    """CIDriver creates the shared default automation state directory."""
+    with (
+        patch("hephaestus.automation.ci_driver.get_repo_root", return_value=tmp_path),
+        patch("hephaestus.automation.ci_driver.WorktreeManager"),
+        patch("hephaestus.automation.ci_driver.StatusTracker"),
+    ):
+        d = CIDriver(mock_options)
+
+    assert d.state_dir == tmp_path / DEFAULT_STATE_DIR
+    assert d.state_dir.is_dir()
 
 
 # ---------------------------------------------------------------------------
@@ -3495,6 +3511,9 @@ class TestInvokeAgentSession:
         assert result.returncode == 0
         assert result.stdout == "output text"
         mock_invoke.assert_called_once()
+        kwargs = mock_invoke.call_args.kwargs
+        assert kwargs["allowed_tools"] == "Read,Write,Edit,Glob,Grep,Bash"
+        assert "extra_args" not in kwargs
 
     def test_claude_error_returns_nonzero_rc(self, driver: CIDriver, tmp_path: Path) -> None:
         with patch(
