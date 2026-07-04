@@ -150,6 +150,7 @@ def get_repo_root(start_path: str | Path | None = None) -> Path:
 
 
 _LOG_ARG_MAX = 200
+_LOG_STREAM_TAIL_MAX = 2000
 
 
 def _format_cmd_for_log(cmd: list[str]) -> str:
@@ -167,6 +168,14 @@ def _format_cmd_for_log(cmd: list[str]) -> str:
         else:
             parts.append(arg)
     return " ".join(parts)
+
+
+def _tail_for_log(value: str, limit: int = _LOG_STREAM_TAIL_MAX) -> str:
+    """Return a bounded tail for command output included in error logs."""
+    if len(value) <= limit:
+        return value
+    omitted = len(value) - limit
+    return f"...({omitted} earlier chars){value[-limit:]}"
 
 
 def run_subprocess(
@@ -233,8 +242,11 @@ def run_subprocess(
     except subprocess.CalledProcessError as e:
         if log_on_error:
             logger.error("Command failed: %s", _format_cmd_for_log(cmd))
+            stdout = e.stdout or ""
+            if stdout:
+                logger.error("stdout: %s", _tail_for_log(stdout))
             stderr = e.stderr or ""
-            logger.error("stderr: %s", stderr[:_LOG_ARG_MAX])
+            logger.error("stderr: %s", _tail_for_log(stderr))
         raise
 
 
