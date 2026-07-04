@@ -31,6 +31,11 @@ class TestDefaults:
         monkeypatch.delenv("HEPH_GIT_MESSAGE_MODEL", raising=False)
         assert claude_models.git_message_model() == claude_models.HAIKU
 
+    def test_fallback_defaults_to_current_opus(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The usage-cap fallback model is the current Opus (#1793)."""
+        monkeypatch.delenv("HEPH_FALLBACK_MODEL", raising=False)
+        assert claude_models.fallback_model() == claude_models.OPUS_48
+
 
 class TestEnvOverride:
     """An operator can flip a phase's model without code changes.
@@ -52,6 +57,21 @@ class TestEnvOverride:
         monkeypatch.setenv("HEPH_GIT_MESSAGE_MODEL", "claude-fable-5")
         assert claude_models.git_message_model() == "claude-fable-5"
 
+    def test_fallback_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HEPH_FALLBACK_MODEL", "claude-sonnet-4-6")
+        assert claude_models.fallback_model() == "claude-sonnet-4-6"
+
+    def test_fallback_unknown_override_warns_but_returns_value(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        monkeypatch.setenv("HEPH_FALLBACK_MODEL", "claude-preview-99-99")
+        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
+            result = claude_models.fallback_model()
+        assert result == "claude-preview-99-99"
+        assert any("Unknown model" in r.message for r in caplog.records)
+
 
 class TestModuleStable:
     """Module reimport stability guard.
@@ -62,7 +82,7 @@ class TestModuleStable:
 
     def test_reimport_idempotent(self) -> None:
         importlib.reload(claude_models)
-        assert claude_models.OPUS == "claude-opus-4-7"
+        assert claude_models.OPUS == "claude-opus-4-8"
         assert claude_models.HAIKU == "claude-haiku-4-5"
         assert claude_models.SONNET == "claude-sonnet-4-6"
         assert claude_models.CODEX_ADVISE == "gpt-5.4-mini"
