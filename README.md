@@ -314,7 +314,8 @@ config = merge_with_env({}, convert_bools=True)
 
 ### I/O Utilities (`hephaestus.io`)
 
-- `read_file(path)` / `write_file(path, content)`: Simple file I/O
+- `read_file(path)`: Simple file reading
+- `write_file(path, content)`: Deprecated — use `safe_write(path, content, backup=False)` instead (atomic write; emits `DeprecationWarning`)
 - `load_data(path)` / `save_data(path, data)`: Structured data (JSON/YAML)
 
 ## CLI Commands
