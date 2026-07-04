@@ -380,7 +380,7 @@ pr_review → ci) remain globally bounded.
 | plan_review | implementation | planning (nogo, default), finished(fail) on plan_cycles_exhausted | plan_review_iter=3, plan_cycles=2 |
 | implementation | pr_review | plan_review (plan_not_go), ci (already_implementation_go_pr), finished(fail) on exhaustion | implement=2, test_fix=1 |
 | pr_review | ci | implementation (agent_error), finished(fail) on human_blocked, finished(skip) on exhaustion | pr_review_iter=3, pr_review_hard=6 |
-| ci | merge_wait | implementation (fix_exhausted), pr_review (not_impl_go), finished(fail) on no_pr | ci_fix=1, rebase=2 |
+| ci | merge_wait | implementation (fix_exhausted), pr_review (not_implementation_go), finished(fail) on no_pr | ci_fix=1, rebase=2 |
 | merge_wait | finished(pass) | ci (ci_red), pr_review (blocked_exhausted), finished(fail) on closed/timeout | blocked_address=2, rebase=2, merge=--max-merge-attempts |
 | finished | — | — | — |
 
