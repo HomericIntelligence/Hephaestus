@@ -31,6 +31,7 @@ DeliverPolicyStr = Literal[
 _DELIVER_POLICIES = frozenset(
     {"all", "last", "new", "by_start_sequence", "by_start_time", "last_per_subject"}
 )
+_FLOAT_FIELDS = frozenset({"initial_backoff_seconds", "max_backoff_seconds", "backoff_multiplier"})
 
 
 @dataclass
@@ -125,12 +126,12 @@ class NATSConfig:
         return cls(**data)
 
 
-def _coerce_float(name: str, raw: str) -> float:
+def _coerce_float(name: str, raw: Any) -> float:
     """Coerce an env var string to ``float`` with a variable-named error.
 
     Args:
         name: Environment variable name (used in the error message).
-        raw: Raw string value to coerce.
+        raw: Raw value to coerce.
 
     Returns:
         The parsed float value.
@@ -141,7 +142,7 @@ def _coerce_float(name: str, raw: str) -> float:
     """
     try:
         return float(raw)
-    except ValueError:
+    except (TypeError, ValueError):
         raise ValueError(f"{name} must be a number, got {raw!r}") from None
 
 
@@ -220,4 +221,7 @@ def load_nats_config(
     # remain strict, which is the desired behavior for code callers.
     known = {f.name for f in dataclass_fields(NATSConfig)}
     filtered = {k: v for k, v in data.items() if k in known}
+    for field_name in _FLOAT_FIELDS:
+        if field_name in filtered:
+            filtered[field_name] = _coerce_float(field_name, filtered[field_name])
     return NATSConfig(**filtered)
