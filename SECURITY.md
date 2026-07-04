@@ -48,11 +48,6 @@ network-facing service. Its security posture reflects that scope:
 - **Pickle safety**: `load_data` and `save_data` block pickle by default (`allow_unsafe_deserialization=False`)
 - **Subprocess safety**: Avoid passing untrusted input to `run_subprocess`; always use list-form commands (never `shell=True`)
 - **HTTPS downloads**: All dataset downloads use HTTPS
-- **NATS TLS by default**: Enabled `hephaestus.nats` subscribers default to
-  TLS, pass an `SSLContext` to nats-py, and reject non-local plaintext
-  `nats://` URLs unless `allow_plaintext=True` is set for an explicit
-  non-production exception. Certificate and key material must be provided as
-  runtime file paths, never committed to the repository.
 
 ### Abuse & Rate Limiting
 
