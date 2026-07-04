@@ -35,17 +35,21 @@ _REASONS = [*_DECLARED_REASONS, "unknown_reason"]
 
 # Reason → budget key consumed when that failure repeats. Mirrors the
 # architecture doc's per-stage budget assignments; unknown reasons consume
-# none and resolve purely via the "*" default.
+# none and resolve purely via the "*" default. Fail-back EXITS that leave
+# their stage rather than retry it consume no retry budget: plan_not_go
+# (implementation -> plan_review), already_implementation_go_pr (-> ci),
+# not_implementation_go (ci -> pr_review), and no_pr (-> finished) all map
+# to None.
 _REASON_BUDGET: dict[str, str | None] = {
     "nogo": "plan_review_iter",
     "plan_cycles_exhausted": "plan_cycles",
-    "plan_not_go": "implement",
+    "plan_not_go": None,
     "already_implementation_go_pr": None,
     "agent_error": "pr_review_iter",
     "human_blocked": "pr_review_iter",
     "exhaustion": "pr_review_iter",
     "fix_exhausted": "ci_fix",
-    "not_implementation_go": "pr_review_iter",
+    "not_implementation_go": None,
     "no_pr": None,
     "ci_red": "merge",
     "blocked_exhausted": "blocked_address",
