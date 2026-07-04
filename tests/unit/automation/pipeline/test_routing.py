@@ -305,3 +305,9 @@ class TestPipelineScope:
         """FINISHED (universal sink) is allowed in any scope."""
         scope = PipelineScope(frozenset({StageName.MERGE_WAIT, StageName.FINISHED}))
         assert StageName.MERGE_WAIT in scope.trimmed_routes()
+
+    def test_pipeline_scope_finished_only(self) -> None:
+        """A FINISHED-only scope is valid (empty ordered prefix) and terminal."""
+        scope = PipelineScope(frozenset({StageName.FINISHED}))
+        trimmed = scope.trimmed_routes()
+        assert trimmed == {StageName.FINISHED: ROUTES[StageName.FINISHED]}

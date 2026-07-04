@@ -144,6 +144,16 @@ class TestWorkItem:
         assert item.history[0].note == "event_50"
         assert item.history[-1].note == "event_249"
 
+    def test_work_item_history_exactly_at_cap_drops_nothing(self) -> None:
+        """Exactly HISTORY_CAP events: nothing dropped, event_0 still first."""
+        item = WorkItem(repo="repo", kind=ItemKind.REPO)
+        for i in range(200):
+            item.add_history_event(StageName.PLANNING, "in_progress", note=f"event_{i}")
+
+        assert len(item.history) == 200
+        assert item.history[0].note == "event_0"
+        assert item.history[-1].note == "event_199"
+
     def test_work_item_add_history_event(self) -> None:
         """add_history_event records stage transitions."""
         item = WorkItem(repo="repo", kind=ItemKind.REPO)
