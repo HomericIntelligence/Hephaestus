@@ -558,6 +558,7 @@ def ensure_branch_commit_metadata(
     """Rewrite branch commits so each carries a verified signature and DCO trailer."""
     base_ref = f"{remote}/{base_branch}"
     run(["git", "fetch", remote, base_branch], cwd=cwd)
+    _remove_untracked_files_tracked_by_ref(cwd, base_ref)
     try:
         run(_commit_policy_rebase_command(base_ref), cwd=cwd)
     except subprocess.CalledProcessError:

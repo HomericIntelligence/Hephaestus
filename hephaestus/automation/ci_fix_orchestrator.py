@@ -566,12 +566,8 @@ class CIFixOrchestrator:
             worktree_path: Path to the checked-out worktree.
             ci_logs: Combined CI failure log text.
             session_id: Optional agent session ID to resume.
-            advise_findings: Prior learnings from the advise step, prepended to
-                the prompt as context. Empty or a skip marker contributes nothing.
-            pr_head_branch: The PR's head-branch name on the remote. The push
-                uses this as the destination refspec so the fix lands on the
-                actual PR branch even if the agent switched branches locally
-                during the session (#832).
+            advise_findings: Prior learnings prepended to the prompt.
+            pr_head_branch: Remote PR head branch used as the push destination.
 
         Returns:
             True if the fix session succeeded and the branch was pushed.
