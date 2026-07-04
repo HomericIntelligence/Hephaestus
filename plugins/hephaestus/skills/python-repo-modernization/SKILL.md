@@ -138,14 +138,17 @@ testpaths = ["tests/unit"]
 pythonpath = [".", "scripts"]
 ```
 
-### 7. Add Structure Enforcement Script
+### 7. Add Structure Enforcement
 
-Create `scripts/check_unit_test_structure.py` that verifies every `hephaestus/<subpackage>` has a matching `tests/unit/<subpackage>/` directory. Wire it as a pre-commit hook:
+Use the canonical `hephaestus/validation/test_structure.py` validator, exposed as
+the `hephaestus-check-test-structure` console script, to verify every
+`hephaestus/<subpackage>` has a matching `tests/unit/<subpackage>/` directory.
+Wire it as a pre-commit hook:
 
 ```yaml
 - id: check-unit-test-structure
   name: Check unit test structure
-  entry: python scripts/check_unit_test_structure.py
+  entry: pixi run --environment default hephaestus-check-test-structure
   language: system
   pass_filenames: false
   files: ^(hephaestus|tests/unit)/
@@ -272,7 +275,7 @@ Common stale patterns to find and fix:
 Coverage: 61.04% (≥50% threshold met)
 hephaestus.__version__ = "0.3.0"
 from hephaestus import slugify, retry_with_backoff  # ✅
-python scripts/check_unit_test_structure.py         # ✅ 13/13 subpackages
+hephaestus-check-test-structure                     # ✅ 13/13 subpackages
 ```
 
 ### Key pyproject.toml Settings
@@ -313,7 +316,7 @@ packages = ["hephaestus"]  # picks up py.typed automatically
 - [ ] `touch <package>/py.typed`
 - [ ] Create `tests/unit/<subpackage>/` structure with `__init__.py` files
 - [ ] Update `pyproject.toml` testpaths and pythonpath
-- [ ] Write `scripts/check_unit_test_structure.py`
+- [ ] Enable `hephaestus-check-test-structure`
 - [ ] Add pip-audit, check-pixi-lock, structure check, complexity hooks
 - [ ] Create `.github/workflows/release.yml` for tag-triggered PyPI publish
 - [ ] Fix stale README/docs references (function names, module paths, removed tasks)
