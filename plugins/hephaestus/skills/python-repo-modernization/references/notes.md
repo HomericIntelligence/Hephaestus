@@ -21,7 +21,7 @@
 **Phase 3 — Pre-commit:**
 
 - `.pre-commit-config.yaml` — 4 new hooks: pip-audit, check-pixi-lock, check-unit-test-structure, ruff-check-complexity
-- `scripts/check_unit_test_structure.py` — new enforcement script
+- `hephaestus-check-test-structure` — unit-test structure enforcement
 
 **Phase 4 — CI:**
 
@@ -47,7 +47,7 @@ pixi run pip install -e .
 pixi run pytest tests/unit -v --no-header -q
 pixi run python -c "import hephaestus; print(hephaestus.__version__)"
 pixi run python -c "from hephaestus import slugify, retry_with_backoff"
-pixi run python scripts/check_unit_test_structure.py
+pixi run hephaestus-check-test-structure
 ```
 
 ### Key Bug: Float Coercion in merge_with_env
