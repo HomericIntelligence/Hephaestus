@@ -33,8 +33,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hephaestus.automation.agent_config import (
+    agent_default_timeout,
     fallback_model,
-    planner_claude_timeout,
     session_jsonl_path,
     session_name,
 )
@@ -153,8 +153,10 @@ def invoke_claude_with_session(
         model: ``--model`` value; also part of the session key so a session
             never crosses models.
         cwd: Working directory for the subprocess.
-        timeout: Subprocess timeout in seconds. When omitted, resolves through
-            the centralized planner-agent timeout helper.
+        timeout: Subprocess timeout in seconds. When omitted, resolves to the
+            generic :func:`agent_config.agent_default_timeout` (7200s) — this
+            entry point is shared by every agent type, so no phase-specific
+            budget is assumed (#1415).
         system_prompt_file: Optional ``--system-prompt`` file.
         allowed_tools: Optional ``--allowedTools`` value (e.g.
             ``"Read,Glob,Grep"``).
@@ -179,7 +181,7 @@ def invoke_claude_with_session(
 
     """
     if timeout is None:
-        timeout = planner_claude_timeout()
+        timeout = agent_default_timeout()
     del recreate_on_resume_failure  # back-compat shim only; no recreate cascade
 
     def _attempt(effective_model: str) -> tuple[str, str]:

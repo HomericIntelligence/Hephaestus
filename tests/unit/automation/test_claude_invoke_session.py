@@ -169,14 +169,21 @@ class TestCreateThenResume:
 class TestArgvAssembly:
     """Optional flags appear in argv at the right positions."""
 
-    def test_omitted_timeout_passes_env_override_to_subprocess_run(
+    def test_omitted_timeout_uses_generic_default_not_planner(
         self,
         stub_run: MagicMock,
         fake_home: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Omitted timeout passes the centralized env override to subprocess.run."""
+        """Omitted timeout resolves to the generic default, not planner's (#1415).
+
+        This shared entry point is used by every agent type, so a planner-only
+        budget must not leak into a non-planner caller that omits ``timeout``.
+        """
+        # Planner-specific override must NOT influence the generic fallback.
         monkeypatch.setenv("HEPH_AGENT_PLAN_TIMEOUT", "333")
+        # The generic override is what applies.
+        monkeypatch.setenv("HEPH_AGENT_DEFAULT_TIMEOUT", "4321")
         cwd = fake_home / "work"
         cwd.mkdir()
 
@@ -191,7 +198,7 @@ class TestArgvAssembly:
 
         stub_run.assert_called_once()
         run_kwargs = stub_run.call_args.kwargs
-        assert run_kwargs["timeout"] == 333
+        assert run_kwargs["timeout"] == 4321
 
     def test_optional_flags(self, stub_run: MagicMock, fake_home: Path) -> None:
         cwd = fake_home / "work"
