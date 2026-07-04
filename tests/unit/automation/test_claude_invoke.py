@@ -8,9 +8,70 @@ from hypothesis import given, strategies as st
 from hephaestus.automation.claude_invoke import (
     INFRA_ERROR_REVIEW_TEXT,
     ReviewVerdict,
+    detect_model_usage_cap,
     detect_server_overload,
     parse_review_verdict,
 )
+
+# The exact model-cap phrasing observed in output2.log (2026-07-03). Unlike a
+# session-limit 429 it carries NO reset time — the remediation is a model
+# switch, not a wait (#1793).
+MODEL_CAP_MESSAGE = (
+    "You've reached your Fable 5 limit. "
+    "Run /usage-credits to continue or switch models with /model."
+)
+
+
+class TestDetectModelUsageCap:
+    """Tests for the model-specific usage-cap classifier (#1793)."""
+
+    def test_production_phrasing(self) -> None:
+        """The exact envelope text from the 2026-07-03 loop run is detected."""
+        assert detect_model_usage_cap(MODEL_CAP_MESSAGE) is True
+
+    def test_other_model_name(self) -> None:
+        """The regex generalizes to any model tier name, not just Fable."""
+        assert detect_model_usage_cap("You've reached your Opus 4.8 limit.") is True
+
+    def test_phrase_signals_alone(self) -> None:
+        """Each remediation-hint phrase is an independent signal."""
+        assert detect_model_usage_cap("Run /usage-credits to continue") is True
+        assert detect_model_usage_cap("switch models with /model") is True
+
+    def test_session_limit_not_matched(self) -> None:
+        """Session-limit phrasings stay owned by detect_session_limit (wait path)."""
+        assert (
+            detect_model_usage_cap(
+                "You've hit your session limit · resets 12:30pm (America/Los_Angeles)"
+            )
+            is False
+        )
+        assert detect_model_usage_cap("You've reached your session limit") is False
+
+    def test_usage_cap_not_matched(self) -> None:
+        """Generic usage-cap phrasings stay owned by detect_claude_usage_cap."""
+        assert (
+            detect_model_usage_cap(
+                "You're out of extra usage · resets May 8, 5pm (America/Los_Angeles)"
+            )
+            is False
+        )
+        assert detect_model_usage_cap("You've reached your usage limit") is False
+
+    def test_scans_multiple_streams(self) -> None:
+        """Detection spans both stderr and stdout streams."""
+        assert detect_model_usage_cap("clean stderr", MODEL_CAP_MESSAGE) is True
+
+    def test_empty_and_no_streams(self) -> None:
+        """Empty or absent streams are skipped without error."""
+        assert detect_model_usage_cap("", "") is False
+        assert detect_model_usage_cap() is False
+
+    def test_model_cap_has_no_reset_epoch(self) -> None:
+        """Documents WHY fallback (not wait): the message yields no reset epoch."""
+        from hephaestus.github.rate_limit import resolve_quota_reset_epoch
+
+        assert resolve_quota_reset_epoch(MODEL_CAP_MESSAGE) is None
 
 
 class TestDetectServerOverload:
