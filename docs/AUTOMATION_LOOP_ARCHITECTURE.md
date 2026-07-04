@@ -157,7 +157,7 @@ causes a queue push.
    leave labels untouched, RETRY next tick.
 3. [W:A] **Amend step** — resume planner session with feedback block;
    iteration counter increments.
-4. [W:A] **Learn step** (on GO only) — `learn.build_learn_prompt`.
+4. [W:A] **Learn step** (on GO only) — `learn.py:111 build_learn_prompt`.
 
 **Verdicts**: ADVANCE, RETRY, FAIL_BACK(nogo, plan_cycles_exhausted).
 
@@ -347,7 +347,7 @@ FAIL_BACK(reason).
 **Prompt functions**:
 
 - `prompts/address_review.py:181 get_address_review_prompt`
-- `learn.build_learn_prompt` (post-merge deduped)
+- `learn.py:111 build_learn_prompt` (post-merge deduped)
 
 ### 8. finished
 
