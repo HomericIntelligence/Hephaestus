@@ -11,10 +11,14 @@ keeps a round with pending deferrals from early-exiting.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from unittest.mock import patch
 
+import pytest
+
 from hephaestus.automation import loop_runner
-from hephaestus.automation.loop_runner import LoopConfig, RepoResult
+from hephaestus.automation.loop_runner import LoopConfig, PhaseResult, RepoResult
 
 # ---------------------------------------------------------------------------
 # _parse_planned_files — heading-anchored plan-body parsing
@@ -230,6 +234,210 @@ def test_serialize_disabled_dispatches_all(tmp_path: object) -> None:
 
     assert sorted(submitted) == [1, 2]
     assert out.deferred_issues == []
+
+
+# ---------------------------------------------------------------------------
+# Terminal deferred-issue catch-up (#1762, option (b))
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_process_repo(
+    calls: list[tuple[str, int, list[int], int, bool]],
+    deferred: list[int],
+) -> Callable[[str, int, LoopConfig], RepoResult]:
+    """Fake ``process_repo`` recording calls; the unpinned call defers *deferred*."""
+
+    def fake_process_repo(repo: str, loop_idx: int, cfg: LoopConfig) -> RepoResult:
+        calls.append(
+            (repo, loop_idx, list(cfg.issues), cfg.max_workers, cfg.serialize_file_overlap)
+        )
+        result = RepoResult(
+            repo=repo,
+            loop_idx=loop_idx,
+            phases=[PhaseResult(name="plan", rc=0, work_units=1)],
+        )
+        if not cfg.issues:
+            result.deferred_issues = list(deferred)
+        return result
+
+    return fake_process_repo
+
+
+def test_terminal_catchup_runs_after_post_loop_with_guard_on() -> None:
+    """Final-round deferrals replay AFTER post-loop stages, guard kept ON.
+
+    The catch-up must run only once the post-loop drive-green sweep has had
+    its chance to merge the overlapping peers' PRs, must keep
+    ``serialize_file_overlap=True``, must tag results ``is_catchup=True``,
+    and must consult the rate budget between serial dispatches.
+    """
+    cfg = LoopConfig(
+        loops=1,
+        max_workers=3,
+        phases=loop_runner.ALL_SELECTABLE,
+        serialize_file_overlap=True,
+    )
+    calls: list[tuple[str, int, list[int], int, bool]] = []
+    order: list[str] = []
+    sleeps: list[tuple[int, int]] = []
+
+    fake_process_repo = _make_fake_process_repo(calls, deferred=[2, 3])
+
+    def tracking_process_repo(repo: str, loop_idx: int, cfg: LoopConfig) -> RepoResult:
+        order.append(f"process_repo:{list(cfg.issues)}")
+        return fake_process_repo(repo, loop_idx, cfg)
+
+    def fake_post_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
+        order.append("post_loop")
+        return []
+
+    plans = {2: {"a.py"}, 3: {"b.py"}}
+    with (
+        patch.object(loop_runner, "process_repo", side_effect=tracking_process_repo),
+        patch.object(loop_runner, "_run_post_loop_stages", side_effect=fake_post_loop),
+        # Both deferred issues are the only open ones → no claiming peers.
+        patch.object(loop_runner, "_list_open_issue_numbers", return_value=[2, 3]),
+        patch.object(loop_runner, "_fetch_planned_files", side_effect=lambda i: plans.get(i)),
+        patch.object(loop_runner, "find_pr_for_issue", return_value=None),
+        patch.object(
+            loop_runner,
+            "_maybe_sleep_for_rate_budget",
+            side_effect=lambda idx, total: sleeps.append((idx, total)),
+        ),
+    ):
+        results = loop_runner.run_loop(cfg, repos=["Repo"])
+
+    # Catch-up dispatches strictly AFTER the post-loop drive-green sweep.
+    assert order == ["process_repo:[]", "post_loop", "process_repo:[2]", "process_repo:[3]"]
+    # Serial, single-worker, overlap guard STILL ON (never forced off).
+    assert calls == [
+        ("Repo", 1, [], 3, True),
+        ("Repo", 1, [2], 1, True),
+        ("Repo", 1, [3], 1, True),
+    ]
+    # Rate budget consulted between the two serial catch-up dispatches.
+    assert (0, 1) in sleeps
+    # Catch-up records are tagged so per-loop accounting excludes them.
+    assert [r.is_catchup for r in results] == [False, True, True]
+    assert [r.deferred_issues for r in results] == [[2, 3], [], []]
+
+
+def test_terminal_catchup_withholds_issue_while_peer_pr_open(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The reviewer's NOGO scenario: peer PR still open → NOT redispatched.
+
+    Redispatching a deferred issue while its overlapping peer's PR is still
+    open would recreate the #1623 same-file conflict race. The issue must
+    stay deferred with a prominent WARN naming the blocking peer.
+    """
+    cfg = LoopConfig(
+        loops=1,
+        max_workers=3,
+        phases=loop_runner.ALL_SELECTABLE,
+        serialize_file_overlap=True,
+    )
+    calls: list[tuple[str, int, list[int], int, bool]] = []
+    fake_process_repo = _make_fake_process_repo(calls, deferred=[3])
+
+    plans = {2: {"hephaestus/automation/shared.py"}, 3: {"hephaestus/automation/shared.py"}}
+    with (
+        caplog.at_level(logging.WARNING),
+        patch.object(loop_runner, "process_repo", side_effect=fake_process_repo),
+        patch.object(loop_runner, "_run_post_loop_stages", return_value=[]),
+        # Peer #2 is still open alongside deferred #3 ...
+        patch.object(loop_runner, "_list_open_issue_numbers", return_value=[2, 3]),
+        patch.object(loop_runner, "_fetch_planned_files", side_effect=lambda i: plans.get(i)),
+        # ... and still owns an OPEN PR → its planned files stay claimed.
+        patch.object(loop_runner, "find_pr_for_issue", return_value=77),
+        patch.object(loop_runner, "_maybe_sleep_for_rate_budget"),
+    ):
+        results = loop_runner.run_loop(cfg, repos=["Repo"])
+
+    # Only the initial unpinned round ran — issue #3 was NOT redispatched.
+    assert calls == [("Repo", 1, [], 3, True)]
+    assert [r.is_catchup for r in results] == [False]
+    log_text = caplog.text
+    assert "withheld" in log_text
+    assert "peer #2 PR still open" in log_text
+    assert "remain blocked" in log_text
+
+
+def test_terminal_catchup_peer_without_open_pr_does_not_block() -> None:
+    """A peer whose PR already merged (no open PR) releases its file claim."""
+    cfg = LoopConfig(
+        loops=1,
+        max_workers=2,
+        phases=loop_runner.ALL_SELECTABLE,
+        serialize_file_overlap=True,
+    )
+    calls: list[tuple[str, int, list[int], int, bool]] = []
+    fake_process_repo = _make_fake_process_repo(calls, deferred=[3])
+
+    plans = {2: {"same.py"}, 3: {"same.py"}}
+    with (
+        patch.object(loop_runner, "process_repo", side_effect=fake_process_repo),
+        patch.object(loop_runner, "_run_post_loop_stages", return_value=[]),
+        patch.object(loop_runner, "_list_open_issue_numbers", return_value=[2, 3]),
+        patch.object(loop_runner, "_fetch_planned_files", side_effect=lambda i: plans.get(i)),
+        patch.object(loop_runner, "find_pr_for_issue", return_value=None),
+        patch.object(loop_runner, "_maybe_sleep_for_rate_budget"),
+    ):
+        results = loop_runner.run_loop(cfg, repos=["Repo"])
+
+    assert calls == [("Repo", 1, [], 2, True), ("Repo", 1, [3], 1, True)]
+    assert results[-1].is_catchup is True
+
+
+def test_terminal_catchup_shutdown_stops_cleanly() -> None:
+    """A shutdown request mid-catch-up stops before the next dispatch."""
+    cfg = LoopConfig(
+        loops=1,
+        max_workers=3,
+        phases=loop_runner.ALL_SELECTABLE,
+        serialize_file_overlap=True,
+    )
+    calls: list[tuple[str, int, list[int], int, bool]] = []
+    fake_process_repo = _make_fake_process_repo(calls, deferred=[2, 3])
+
+    # Call sites: run_loop's loop-start check, then one check per catch-up
+    # issue. False → loop runs; False → issue #2 dispatches; True → stop.
+    with (
+        patch.object(loop_runner, "process_repo", side_effect=fake_process_repo),
+        patch.object(loop_runner, "_run_post_loop_stages", return_value=[]),
+        patch.object(loop_runner, "_list_open_issue_numbers", return_value=[2, 3]),
+        patch.object(loop_runner, "_fetch_planned_files", return_value=None),
+        patch.object(loop_runner, "find_pr_for_issue", return_value=None),
+        patch.object(loop_runner, "_maybe_sleep_for_rate_budget"),
+        patch.object(loop_runner, "_shutdown_requested", side_effect=[False, False, True]),
+    ):
+        results = loop_runner.run_loop(cfg, repos=["Repo"])
+
+    assert calls == [("Repo", 1, [], 3, True), ("Repo", 1, [2], 1, True)]
+    assert len(results) == 2
+
+
+def test_open_peer_pr_claims_only_open_pr_peers_claim() -> None:
+    """Peers claim files only with an open PR AND a plan; deferred are excluded."""
+    plans = {2: {"a.py"}, 4: {"b.py"}, 5: None}
+    open_prs = {2: 77}  # #4 and #5 have no open PR
+
+    with (
+        patch.object(loop_runner, "_list_open_issue_numbers", return_value=[2, 3, 4, 5]),
+        patch.object(loop_runner, "_fetch_planned_files", side_effect=lambda i: plans.get(i)),
+        patch.object(loop_runner, "find_pr_for_issue", side_effect=lambda i: open_prs.get(i)),
+    ):
+        claims = loop_runner._open_peer_pr_claims(LoopConfig(), "Repo", deferred={3})
+
+    assert claims == {2: {"a.py"}}
+
+
+def test_open_peer_pr_claims_listing_failure_fails_open() -> None:
+    """An issue-listing failure yields no claims (catch-up proceeds)."""
+    with patch.object(
+        loop_runner, "_list_open_issue_numbers", side_effect=RuntimeError("api down")
+    ):
+        assert loop_runner._open_peer_pr_claims(LoopConfig(), "Repo", deferred={3}) == {}
 
 
 # ---------------------------------------------------------------------------
