@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from pytest import MonkeyPatch
+
 from hephaestus.automation.mesh.config import MeshConfig
 from hephaestus.automation.mesh.roles.task_agent import TaskAgentHandler
 from hephaestus.automation.mesh.worker import TaskContext
@@ -83,6 +85,7 @@ def _handler(
     open_prs_remaining: list[dict[str, Any]] | None = None,
     merge_gate: Any = None,
     label_ops: Any = None,
+    use_default_merge_gate: bool = False,
 ) -> tuple[TaskAgentHandler, list[Any], list[int]]:
     calls: list[Any] = []
     driven: list[int] = []
@@ -107,7 +110,13 @@ def _handler(
             open_prs_remaining or [],
         ),
         label_ops=label_ops,
-        merge_gate=merge_gate if merge_gate is not None else (lambda pr: True),
+        merge_gate=(
+            None
+            if use_default_merge_gate
+            else merge_gate
+            if merge_gate is not None
+            else (lambda pr: True)
+        ),
     )
     return handler, calls, driven
 
@@ -237,6 +246,24 @@ class TestTaskAgentHandler:
         assert not result.retryable
         assert driven == [9]
 
+    def test_merge_gate_read_failure_is_retryable(self, monkeypatch: MonkeyPatch) -> None:
+        def fail_gh_call(_argv: list[str]) -> Any:
+            raise RuntimeError("gh pr view failed")
+
+        monkeypatch.setattr("hephaestus.github.client._gh_call", fail_gh_call)
+        handler, _, driven = _handler(
+            {9: FakeWorkerResult(success=True, pr_number=42)},
+            use_default_merge_gate=True,
+        )
+
+        result = handler.handle(_ctx({"issue": 9}))
+
+        assert not result.ok
+        assert result.error_kind == "MergeGateReadFailed"
+        assert result.retryable
+        assert result.pr == {"number": 42}
+        assert driven == [9]
+
     def test_success_without_pr_skips_drive_phase(self) -> None:
         handler, _, driven = _handler({9: FakeWorkerResult(success=True)})
         result = handler.handle(_ctx({"issue": 9}))
@@ -275,9 +302,14 @@ class TestTaskAgentHandler:
 
     def test_redelivery_does_not_read_or_remove_skip_before_successful_resume(self) -> None:
         reads: list[int] = []
+
+        def read_labels(issue: int) -> list[str]:
+            reads.append(issue)
+            return ["state:skip"]
+
         handler, calls, _ = _handler(
             {9: FakeWorkerResult(success=True)},
-            label_ops=(lambda n: reads.append(n) or ["state:skip"], lambda labels: True),
+            label_ops=(read_labels, lambda labels: True),
         )
 
         result = handler.handle(_ctx({"issue": 9}, attempt=2))

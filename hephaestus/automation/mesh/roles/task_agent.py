@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 _FAILED_CHECK_CONCLUSIONS = {"FAILURE", "TIMED_OUT"}
 
 
+class MergeGateReadError(RuntimeError):
+    """Raised when the PR merge-gate state could not be read."""
+
+
 def _pr_merge_gate_state(data: dict[str, Any]) -> bool:
     """Pure merge-gate decision over a ``gh pr view --json`` payload.
 
@@ -234,7 +238,17 @@ class TaskAgentHandler:
                 retryable=True,
                 pr=pr,
             )
-        if not self._merge_gate_passed(pr["number"]):
+        try:
+            merge_gate_passed = self._merge_gate_passed(pr["number"])
+        except MergeGateReadError as exc:
+            return RoleResult(
+                ok=False,
+                error_kind="MergeGateReadFailed",
+                error_message=str(exc),
+                retryable=True,
+                pr=pr,
+            )
+        if not merge_gate_passed:
             return self._review_not_go_result(
                 issue,
                 pr=pr,
@@ -250,7 +264,12 @@ class TaskAgentHandler:
     def _merge_gate_passed(self, pr_number: int) -> bool:
         """Return whether the PR cleared the review gate (merged, armed, or GO-labeled)."""
         if self._merge_gate is not None:
-            return bool(self._merge_gate(pr_number))
+            try:
+                return bool(self._merge_gate(pr_number))
+            except Exception as exc:
+                raise MergeGateReadError(
+                    f"could not read merge-gate state for PR #{pr_number}: {exc}"
+                ) from exc
         import json
 
         from hephaestus.github.client import _gh_call
@@ -268,7 +287,9 @@ class TaskAgentHandler:
             data = json.loads(result.stdout)
         except Exception as exc:
             logger.warning("PR #%s: merge-gate check failed: %s", pr_number, exc)
-            return False
+            raise MergeGateReadError(
+                f"could not read merge-gate state for PR #{pr_number}: {exc}"
+            ) from exc
         return _pr_merge_gate_state(data)
 
     def _ci_drive_succeeded(

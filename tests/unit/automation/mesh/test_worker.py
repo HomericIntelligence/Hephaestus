@@ -272,13 +272,6 @@ class TestTaskContext:
         # No issue in payload → logging path; must not raise.
         ctx.progress("step done")
 
-    def test_ask_requires_loop(self) -> None:
-        ctx, _ = self._ctx()
-        import pytest
-
-        with pytest.raises(RuntimeError):
-            ctx.ask("q?")
-
 
 class TestDeliveryAttempt:
     """Tests for metadata fallback."""

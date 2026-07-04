@@ -14,7 +14,6 @@ the remainder as sub-tasks.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import os
@@ -73,25 +72,6 @@ class TaskContext:
     def is_redelivery(self) -> bool:
         """Return True when JetStream has delivered this task before (attempt > 1)."""
         return self.attempt > 1
-
-    def ask(self, question: str, q_id: str | None = None) -> Any:
-        """Ask the user *question* over the interview relay (ADR-013 §5).
-
-        Handlers run in a worker thread while the relay is async on the
-        worker loop, so this bridges with ``run_coroutine_threadsafe`` and
-        blocks until an answer (console, GitHub fallback, or assumed).
-        """
-        from hephaestus.automation.mesh.interview import Interviewer
-
-        if self.loop is None:
-            raise RuntimeError("TaskContext.ask requires a running worker loop")
-        interviewer = Interviewer(
-            self.publisher,
-            intake_id=str(self.payload.get("intake_id") or self.task_id),
-            intake_issue=self.payload.get("issue"),
-        )
-        future = asyncio.run_coroutine_threadsafe(interviewer.ask(question, q_id), self.loop)
-        return future.result()
 
     def overrun(self) -> bool:
         """Return True once ~1 h of active work has elapsed (ADR-013 §4)."""
@@ -235,8 +215,10 @@ class MeshWorker:
             )
         finally:
             heartbeat.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await heartbeat
+            heartbeat_result = await asyncio.gather(heartbeat, return_exceptions=True)
+            for item in heartbeat_result:
+                if isinstance(item, BaseException) and not isinstance(item, asyncio.CancelledError):
+                    raise item
 
         if result.ok:
             extra: dict[str, Any] = {"summary": result.summary}
