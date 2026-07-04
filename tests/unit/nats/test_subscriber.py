@@ -112,8 +112,13 @@ class TestHealthObservability:
             "last_message_at",
             "url",
             "stream",
+            "circuit_breaker_state",
             "uptime_seconds",
         }
+
+    def test_health_dict_circuit_breaker_state_is_string(self) -> None:
+        thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
+        assert thread.health_dict()["circuit_breaker_state"] == "closed"
 
     def test_health_dict_initial_values(self) -> None:
         config = _config(url="nats://localhost:4222")
