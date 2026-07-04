@@ -406,6 +406,39 @@ class TestCoverageOmitJustifications:
 class TestMain:
     """Tests for main() CLI entry point."""
 
+    def test_repo_root_resolves_default_config_and_coverage_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """--repo-root anchors default config/report discovery outside the repo cwd."""
+        import json
+
+        pytest.importorskip("defusedxml")
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "coverage.toml").write_text("[coverage]\nminimum = 85\n", encoding="utf-8")
+        (repo_root / "coverage.xml").write_text(
+            '<?xml version="1.0" ?>\n<coverage version="7.4" line-rate="0.90"></coverage>\n',
+            encoding="utf-8",
+        )
+        outside_cwd = tmp_path / "outside"
+        outside_cwd.mkdir()
+        monkeypatch.chdir(outside_cwd)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "check-coverage",
+                "--repo-root",
+                str(repo_root),
+                "--json",
+            ],
+        )
+
+        assert main() == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["threshold"] == 85
+        assert payload["coverage"] == 90.0
+        assert payload["passed"] is True
+
     def test_missing_coverage_file_returns_one(self, tmp_path: Path, monkeypatch) -> None:
         """Missing coverage file exits 1."""
         monkeypatch.setattr(
