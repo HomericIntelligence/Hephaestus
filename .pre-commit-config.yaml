@@ -235,6 +235,20 @@ repos:
         pass_filenames: false
         files: ^(\.pre-commit-config\.yaml|pixi\.toml)$
 
+  # GitHub workflow inventory documentation enforcement (#1474)
+  - repo: local
+    hooks:
+      - id: hephaestus-check-workflow-inventory
+        name: hephaestus check workflow inventory
+        description: Ensure .github/workflows/README.md documents every .github/workflows/*.yml file
+        # --environment default is explicit because the pre-commit CI job runs
+        # in the lint env; the hephaestus-* console scripts live in default.
+        entry: pixi run --environment default hephaestus-check-workflow-inventory
+        language: system
+        pass_filenames: false
+        always_run: true
+        files: ^(\.pre-commit-config\.yaml|\.github/workflows/(README\.md|.*\.yml))$
+
   # Version single source of truth check
   - repo: local
     hooks:
