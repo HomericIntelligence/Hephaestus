@@ -14,6 +14,7 @@ from hephaestus.agents.runtime import (
     run_claude_text,
     uses_direct_agent_runner,
 )
+from hephaestus.automation.agent_config import normalize_claude_model
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.io.utils import write_secure
 
@@ -89,7 +90,7 @@ def run_claude(
             prompt,
             cwd=repo_root,
             timeout=args.timeout,
-            model=args.model,
+            model=normalize_claude_model(args.model),
             sandbox=args.sandbox,
         )
     except subprocess.TimeoutExpired as exc:
