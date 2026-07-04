@@ -7,6 +7,7 @@ reaches green CI and auto-merge is enabled.
 from __future__ import annotations
 
 import logging
+import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -18,7 +19,7 @@ from hephaestus.agents.runtime import (
     uses_direct_agent_runner,
 )
 
-from .claude_invoke import invoke_claude_with_session
+from .claude_invoke import format_called_process_error, invoke_claude_with_session
 from .claude_models import implementer_model
 from .git_utils import get_repo_slug, issue_ref, pr_ref
 from .learn import build_learn_prompt, compact_session, mnemosyne_update_evidence
@@ -184,10 +185,17 @@ class PostMergeProcessor:
             logger.info("Issue #%s: drive-green learnings captured", issue_number)
             return True
         except Exception as e:  # broad: external claude process; non-blocking
+            detail = (
+                format_called_process_error(e)
+                if isinstance(e, subprocess.CalledProcessError)
+                else str(e)
+            )
             logger.warning(
                 "Issue #%s: drive-green learnings failed (non-fatal): %s",
                 issue_number,
-                e,
+                detail,
+                extra={"exception_type": type(e).__name__},
+                exc_info=True,
             )
             return False
 

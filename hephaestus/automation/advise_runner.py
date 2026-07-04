@@ -44,6 +44,7 @@ except ModuleNotFoundError:  # pragma: no cover - Windows fallback
     # name to None on the Windows fallback path needs [assignment].
     fcntl = None  # type: ignore[assignment]
 
+from .claude_invoke import format_called_process_error
 from .git_utils import get_repo_root
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,13 @@ class SelectedSkill:
     source: str
     reason: str
     path: Path
+
+
+def _advise_failure_detail(exc: Exception) -> str:
+    """Return the diagnostic string for a failed advise run."""
+    if isinstance(exc, subprocess.CalledProcessError):
+        return format_called_process_error(exc)
+    return str(exc)
 
 
 def advise_skipped(reason: str) -> str:
@@ -515,5 +523,12 @@ def run_advise(
             selected = parse_selected_skills(selector_output, mnemosyne_root)
         return format_selected_skill_context(selected)
     except Exception as e:
-        logger.warning("Advise step failed for issue #%s: %s", issue_number, e)
+        detail = _advise_failure_detail(e)
+        logger.warning(
+            "Advise step failed for issue #%s: %s",
+            issue_number,
+            detail,
+            extra={"exception_type": type(e).__name__},
+            exc_info=True,
+        )
         return advise_skipped(f"unexpected error: {e}")

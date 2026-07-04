@@ -2700,6 +2700,44 @@ class TestResolveDirtyReusedWorktree:
         assert any(a[:3] == ["git", "rev-parse", "HEAD"] for a in argvs)
         assert not any(a[:2] == ["git", "stash"] for a in argvs)
 
+    def test_decision_agent_called_process_error_log_includes_stderr(
+        self, implementer: IssueImplementer, tmp_path: Path
+    ) -> None:
+        """A failed decision-agent call logs subprocess stderr before stashing."""
+        wt = tmp_path / "worktree"
+        wt.mkdir(exist_ok=True)
+        implementer.options.agent = "claude"
+        err = subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["claude", "--resume", "abc"],
+            stderr="No conversation found with session ID abc",
+        )
+
+        with (
+            patch(
+                "hephaestus.automation.implementer_phase_runner.invoke_claude_with_session",
+                side_effect=err,
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.get_repo_slug",
+                return_value="o/r",
+            ),
+            patch(
+                "hephaestus.automation.implementer_phase_runner.run",
+                return_value=MagicMock(stdout="", returncode=0),
+            ),
+            patch.object(implementer, "_log") as log,
+        ):
+            implementer.phase_runner._resolve_dirty_reused_worktree(
+                issue_number=1,
+                worktree_path=wt,
+                branch_name="708-auto-impl",
+                thread_id=None,
+            )
+
+        messages = [call.args[1] for call in log.call_args_list]
+        assert any("No conversation found with session ID abc" in msg for msg in messages)
+
     def test_stash_failure_raises_instead_of_best_effort(
         self, implementer: IssueImplementer, tmp_path: Path
     ) -> None:

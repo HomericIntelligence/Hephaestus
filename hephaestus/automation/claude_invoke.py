@@ -44,10 +44,45 @@ from hephaestus.utils.helpers import strip_null_bytes
 
 logger = logging.getLogger(__name__)
 
+_MAX_SUBPROCESS_FAILURE_DETAIL_CHARS = 500
+
+
+def _subprocess_stream_text(value: object) -> str:
+    """Return subprocess stream content as text for diagnostic logging."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return str(value)
+
+
+def _truncate_subprocess_detail(text: str, max_chars: int) -> str:
+    """Bound subprocess diagnostics before writing them to shared logs."""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "... [truncated]"
+
+
+def format_called_process_error(
+    exc: subprocess.CalledProcessError,
+    *,
+    max_chars: int = _MAX_SUBPROCESS_FAILURE_DETAIL_CHARS,
+) -> str:
+    """Format a ``CalledProcessError`` with bounded stdout/stderr diagnostics."""
+    parts = [str(exc)]
+    stderr = _subprocess_stream_text(exc.stderr).strip()
+    if stderr:
+        parts.append(f"stderr={_truncate_subprocess_detail(stderr, max_chars)!r}")
+    stdout = _subprocess_stream_text(exc.stdout).strip()
+    if stdout:
+        parts.append(f"stdout={_truncate_subprocess_detail(stdout, max_chars)!r}")
+    return "; ".join(parts)
+
 
 # Substrings the Claude CLI returns when ``--resume`` targets a session that
 # no longer exists in local persistence.
 SESSION_EXPIRED_PHRASES: tuple[str, ...] = (
+    "no conversation found",
     "session not found",
     "invalid session",
     "session expired",
