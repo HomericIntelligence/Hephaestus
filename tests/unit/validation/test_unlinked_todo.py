@@ -7,11 +7,11 @@ from pathlib import Path
 import pytest
 
 from hephaestus.utils.helpers import get_repo_root
-from hephaestus.validation import unlinked_todo
 from hephaestus.validation.unlinked_todo import (
     SCANNED_ROOTS,
     find_violations,
     main,
+    resolve_repo_root,
     scan_file,
 )
 
@@ -40,6 +40,11 @@ class TestScanFile:
     def test_word_in_string_not_flagged(self, tmp_path: Path) -> None:
         f = tmp_path / "m.py"
         f.write_text('label = "TODO list"\n')  # no `#` comment lead-in
+        assert scan_file(f, "m.py") == []
+
+    def test_comment_marker_inside_string_not_flagged(self, tmp_path: Path) -> None:
+        f = tmp_path / "m.py"
+        f.write_text('label = "# TODO"\n')
         assert scan_file(f, "m.py") == []
 
     def test_linked_fixme_and_hack_allowed(self, tmp_path: Path) -> None:
@@ -111,5 +116,8 @@ class TestMain:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Cover the ``resolve_repo_root`` default branch (flag absent)."""
-        monkeypatch.setattr(unlinked_todo, "resolve_repo_root", lambda args: get_repo_root())
+        monkeypatch.setattr(
+            f"{resolve_repo_root.__module__}.resolve_repo_root",
+            lambda args: get_repo_root(),
+        )
         assert main([]) == 0

@@ -16,13 +16,15 @@ Usage::
 
 from __future__ import annotations
 
+import io
 import json
 import re
 import sys
+import tokenize
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
+from hephaestus.cli.utils import create_validation_parser, resolve_repo_root as resolve_repo_root
 
 # Dirs (relative to repo root) whose .py files the policy governs.
 SCANNED_ROOTS: tuple[str, ...] = ("hephaestus", "scripts")
@@ -36,9 +38,8 @@ _EXCLUDED_RELPATHS: frozenset[str] = frozenset(
     }
 )
 
-# A marker in a comment: ``#``, optional space, keyword, word boundary. The
-# ``#`` lead-in anchors on comment context so a string literal like ``"TODO"``
-# is not falsely flagged (skill: anchor on the prefix, not a free substring).
+# A marker in a tokenize COMMENT token: ``#``, optional space, keyword, word
+# boundary. Strings containing marker text are ignored before this regex runs.
 _MARKER_RE = re.compile(r"#\s*(TODO|FIXME|HACK)\b(.*)$")
 # A linked marker: keyword immediately followed by ``(#<digits>)``.
 _LINK_RE = re.compile(r"^\s*\(#\d+\)")
@@ -67,8 +68,11 @@ def scan_file(path: Path, relpath: str) -> list[UnlinkedMarkerFinding]:
 
     """
     findings: list[UnlinkedMarkerFinding] = []
-    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        m = _MARKER_RE.search(line)
+    source = path.read_text(encoding="utf-8")
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type != tokenize.COMMENT:
+            continue
+        m = _MARKER_RE.search(token.string)
         if not m:
             continue
         if _LINK_RE.match(m.group(2)):
@@ -76,10 +80,10 @@ def scan_file(path: Path, relpath: str) -> list[UnlinkedMarkerFinding]:
         findings.append(
             UnlinkedMarkerFinding(
                 path=relpath,
-                line=lineno,
+                line=token.start[0],
                 marker=m.group(1),
                 detail=(
-                    f"{relpath}:{lineno} has a bare `# {m.group(1)}` marker; "
+                    f"{relpath}:{token.start[0]} has a bare `# {m.group(1)}` marker; "
                     f"use the `# {m.group(1)}(#N): explanation` form "
                     f"(see docs/TECH_DEBT.md)"
                 ),
