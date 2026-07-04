@@ -21,7 +21,7 @@ resumable, never failed.
 ```mermaid
 flowchart LR
   repo --> planning --> plan_review --> implementation --> pr_review --> ci --> merge_wait --> finished
-  plan_review -- "NOGO x3 (plan_cycles)" --> planning
+  plan_review -- "NOGO (plan_review_iter 3 / plan_cycles 2)" --> planning
   implementation -- "agent err" --> implementation
   pr_review -- "agent_error" --> implementation
   ci -- "fix (in-stage)" --> ci
@@ -36,9 +36,14 @@ flowchart LR
 ```
 repo ─> planning ─> plan_review ─> implementation ─> pr_review ─> ci ─> merge_wait ─> finished
              ^             │              ^   ^           │  ^      │  ^       │
-             └─ NOGO x3 ───┘              │   └ agent err ┘  └ fix ─┘  └ DIRTY→rebase (in-stage),
-                (plan_cycles)             └── fix_exhausted             FAILING→ci, BLOCKED→pr_review
+             └─── NOGO ────┘              │   └ agent err ┘  └ fix ─┘  └ DIRTY→rebase (in-stage),
+                (iter 3, cycles 2)        └── fix_exhausted             FAILING→ci, BLOCKED→pr_review
 ```
+
+The diagrams show the primary flow and the most common regressions only. The
+complete edge set — including implementation → plan_review (`plan_not_go`),
+implementation → ci (`already_implementation_go_pr`), and ci → pr_review
+(`not_implementation_go`) — is normative in the ROUTES table below.
 
 ## Coordinator / worker contract
 
@@ -99,7 +104,10 @@ causes a queue push.
 5. [M] Push repo's discovered issues to their classified entry queues; advance
    repo item → finished (pass, seeded: N issues).
 
-**Verdicts**: terminal (no fail routes; always → finished).
+**Verdicts**: terminal — the repo item itself always advances to finished
+(pass, seeded: N) once seeding completes; clone exhaustion → finished(fail).
+
+**Budgets**: `clone` = 2 (max clone attempts per repo).
 
 **Owned labels**: none (epics receive `state:skip` before exclusion).
 
@@ -142,9 +150,11 @@ causes a queue push.
    verdict parsed in-worker by `claude_invoke.parse_review_verdict` (GO,
    NOGO, AMBIGUOUS, ERROR).
 2. [M] **EVAL**: if GO → apply `state:plan-go` label [durable] → ADVANCE; if
-   NOGO and iteration < 3 → proceed to step 3; if NOGO/AMBIGUOUS at iteration
-   cap or exhausted plan_cycles → apply `state:plan-no-go` label [durable] →
-   FAIL_BACK(nogo); if ERROR → leave labels untouched, RETRY next tick.
+   NOGO and iteration < 3 → proceed to step 3; if NOGO/AMBIGUOUS at the
+   iteration cap → apply `state:plan-no-go` label [durable], then
+   FAIL_BACK(nogo) while plan_cycles remain or
+   FAIL_BACK(plan_cycles_exhausted) once plan_cycles is exhausted; if ERROR →
+   leave labels untouched, RETRY next tick.
 3. [W:A] **Amend step** — resume planner session with feedback block;
    iteration counter increments.
 4. [W:A] **Learn step** (on GO only) — `learn.build_learn_prompt`.
@@ -197,10 +207,10 @@ per-repo in-flight cap.
 
 **Fail routes**: `plan_not_go` → plan_review; `already_implementation_go_pr`
 (existing PR detected) → ci (declared route, skips pr_review); `agent_error`
-→ RETRY; exhaustion → finished(fail).
+→ RETRY (consumes the `implement` budget); exhaustion → finished(fail).
 
-**Budgets**: `implement` = 2 (not used today; reserved), `test_fix` = 1 (retry
-on test failure).
+**Budgets**: `implement` = 2 (bounds implement-step attempts, including
+`agent_error` retries), `test_fix` = 1 (retry on test failure).
 
 **Owned labels**: PR creation is the journal entry (no labels needed).
 
@@ -252,6 +262,7 @@ decrease), `pr_review_hard` = 6 (hard cap; iterations 4-6 only if
 unresolved-thread count decreases).
 
 **Owned labels**: `state:implementation-go` (GO verdict) [durable],
+`state:implementation-no-go` (NOGO verdict, before retry/regress) [durable],
 `state:skip` (exhaustion) [durable].
 
 **Prompt functions**:
@@ -274,9 +285,12 @@ unresolved-thread count decreases).
    `is_implementation_go` (fast-forward if not).
 2. [W:G] **Mechanical rebase** (optional, if base changed): attempt rebase via
    git; on success, push.
-3. [M] **POLL** (non-blocking): call `classify_ci_state(pr)` — returns
-   PENDING, GREEN, FAILING, or terminal states. If PENDING → RETRY with timer
-   backoff; if GREEN → ADVANCE; if FAILING → step 4.
+3. [M] **POLL** (non-blocking): call `classify_ci_state(pr)` — a NEW pure
+   function this epic extracts from `ci_run_coordinator.
+   poll_ci_until_concluded`'s conclusion classifier (dropping its sleep
+   loop); it does not exist yet. Returns the new vocabulary PENDING, GREEN,
+   FAILING, or terminal states. If PENDING → RETRY with timer backoff; if
+   GREEN → ADVANCE; if FAILING → step 4.
 4. [W:A] **CI fix step** (budget ci_fix = 1) — `ci_fix_orchestrator.py:483
    build_ci_fix_prompt`; escalation via `ci_fix_orchestrator.py:147
    force_engagement_prompt`.
@@ -354,17 +368,20 @@ FAIL_BACK(reason).
 ## ROUTES table
 
 Failure routing (single declarative location; per-stage fail-target and
-budgets):
+budgets). All budgets are per-item-lifetime counters stored in
+`WorkItem.attempts`; they are NEVER reset when an item re-enters a stage, so
+cross-stage regression cycles (e.g. merge_wait → ci → implementation →
+pr_review → ci) remain globally bounded.
 
 | Stage | Next (success) | Fail targets | Budgets |
 |-------|---|---|---|
-| repo | planning | finished(fail) | — |
+| repo | finished(pass) — repo item is terminal; discovered issues/PRs go to their classified entry queues | finished(fail) on clone exhaustion | clone=2 |
 | planning | plan_review | finished(fail) | plan=2 |
-| plan_review | implementation | planning (default), finished(fail) on plan_cycles exhausted | plan_review_iter=3, plan_cycles=2 |
+| plan_review | implementation | planning (nogo, default), finished(fail) on plan_cycles_exhausted | plan_review_iter=3, plan_cycles=2 |
 | implementation | pr_review | plan_review (plan_not_go), ci (already_go_pr), finished(fail) on exhaustion | implement=2, test_fix=1 |
-| pr_review | ci | implementation (agent_error), finished(skip) on exhaustion | pr_review_iter=3, pr_review_hard=6 |
+| pr_review | ci | implementation (agent_error), finished(fail) on human_blocked, finished(skip) on exhaustion | pr_review_iter=3, pr_review_hard=6 |
 | ci | merge_wait | implementation (fix_exhausted), pr_review (not_impl_go), finished(fail) on no_pr | ci_fix=1, rebase=2 |
-| merge_wait | finished(pass) | ci (ci_red), pr_review (blocked_exhausted), finished(fail) on closed/timeout | blocked_address=2, rebase=2 |
+| merge_wait | finished(pass) | ci (ci_red), pr_review (blocked_exhausted), finished(fail) on closed/timeout | blocked_address=2, rebase=2, merge=--max-merge-attempts |
 | finished | — | — | — |
 
 ## Seeding and reconstruction
@@ -373,12 +390,15 @@ One classifier serves both initial seeding (`--repos`, `--issues`, `--prs`
 args) and restart reconstruction (at startup, scan GitHub for labels/PR state).
 Uses ordered label rank at-or-past comparisons (never equality):
 
-- `state:skip` — rank 0 (lowest).
-- `state:needs-plan` — rank 1.
-- `state:plan-no-go` — rank 2.
-- `state:plan-go` — rank 3.
-- `state:implementation-no-go` — rank 4.
-- `state:implementation-go` — rank 5 (highest).
+- `state:needs-plan` — rank 0 (lowest).
+- `state:plan-no-go` — rank 1.
+- `state:plan-go` — rank 2.
+- `state:implementation-no-go` — rank 3.
+- `state:implementation-go` — rank 4 (highest).
+
+`state:skip` carries no rank: it is handled by exclusion (a skipped item
+never enters the rank comparison at all), matching its operator-only,
+absolute semantics.
 
 | GitHub state | Entry queue | Notes |
 |---|---|---|
