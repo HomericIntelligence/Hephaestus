@@ -49,7 +49,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from hephaestus.agents.runtime import resolve_agent
@@ -257,6 +257,11 @@ class RepoResult:
     # even when a crashed/uncloned repo leaves BOTH phase lists empty —
     # emptiness alone cannot distinguish a post-loop record from a per-loop one.
     is_post_loop: bool = False
+    # True only for records produced by the terminal deferred-issue catch-up
+    # (``_run_terminal_deferred_issues``, #1762). Like ``is_post_loop``, the
+    # tag excludes these terminal replays from per-loop convergence and
+    # loops-run accounting — they are not an additional loop iteration.
+    is_catchup: bool = False
     # Populated when the WORKER itself crashed (not a phase failure).
     runner_error: str | None = None
     # Issues withheld from this round because their planned file set overlaps
@@ -1461,6 +1466,141 @@ def _run_post_loop_stages(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]
     return results
 
 
+def _open_peer_pr_claims(cfg: LoopConfig, repo: str, deferred: set[int]) -> dict[int, set[str]]:
+    """Map open peer issues that still own an OPEN PR to their planned file sets.
+
+    A "peer" is any open issue in *repo* outside the deferred set. Only peers
+    that still own an open PR (per :func:`find_pr_for_issue`, which searches
+    open PRs only) AND have a parseable plan claim files: a merged PR releases
+    its claim (the same-file conflict risk is gone once the peer's edits are on
+    trunk), and an unknown plan claims nothing — fail-open, matching
+    :func:`_select_non_overlapping`. Any per-peer lookup failure likewise drops
+    that peer's claim rather than blocking catch-up on a transient API blip.
+
+    Args:
+        cfg: Loop configuration (supplies the GitHub org).
+        repo: Repository name.
+        deferred: Issue numbers deferred this round (excluded from peers).
+
+    Returns:
+        ``{peer_issue: planned_file_set}`` for every claiming peer.
+
+    """
+    try:
+        open_issues = _list_open_issue_numbers(cfg.org, repo)
+    except Exception as exc:  # fail-open: no claims → catch-up proceeds
+        LOG.warning("[%s] could not list open issues for catch-up peer check: %s", repo, exc)
+        return {}
+    claims: dict[int, set[str]] = {}
+    for peer in open_issues:
+        if peer in deferred:
+            continue
+        try:
+            pr_number = find_pr_for_issue(peer)
+        except Exception as exc:  # fail-open per peer
+            LOG.warning("[%s] could not resolve PR for peer issue #%s: %s", repo, peer, exc)
+            continue
+        if pr_number is None:
+            continue
+        files = _fetch_planned_files(peer)
+        if files:
+            claims[peer] = files
+    return claims
+
+
+def _run_terminal_deferred_issues(
+    cfg: LoopConfig,
+    terminal_results: list[RepoResult],
+) -> tuple[list[RepoResult], list[str]]:
+    """Replay final-round file-overlap deferrals after the post-loop sweep.
+
+    File-overlap serialization (#1623) normally relies on the next ``--loops``
+    round to pick up deferred siblings; on the terminal round there is no next
+    iteration. This catch-up therefore runs AFTER ``_run_post_loop_stages`` —
+    the drive-green sweep in which the overlapping peers' PRs actually merge —
+    and replays each deferred issue serially through :func:`process_repo` with
+    the overlap guard left ON (issue #1762, option (b)).
+
+    An issue whose planned files still overlap a peer that owns an OPEN PR is
+    NOT redispatched — doing so would recreate the exact same-file conflict
+    race #1623 exists to prevent. It stays deferred and is reported in the
+    returned ``blocked`` lines, which ``run_loop`` surfaces as a WARNING in
+    the loop summary (never silently dropped).
+
+    Args:
+        cfg: Loop configuration.
+        terminal_results: Per-repo results of the last executed loop round.
+
+    Returns:
+        ``(catchup_results, blocked)``: catch-up ``RepoResult`` records —
+        tagged ``is_catchup=True`` so per-loop convergence and loops-run
+        accounting exclude them — plus human-readable descriptions of the
+        issues still blocked and why.
+
+    """
+    deferred_by_repo: dict[str, list[int]] = {}
+    for result in terminal_results:
+        if result.deferred_issues:
+            deferred_by_repo.setdefault(result.repo, []).extend(result.deferred_issues)
+
+    if not deferred_by_repo:
+        return [], []
+
+    total_deferred = sum(len(issues) for issues in deferred_by_repo.values())
+    LOG.warning(
+        "Terminal loop left %d file-overlap deferred issue(s); running post-merge serial catch-up.",
+        total_deferred,
+    )
+
+    catchup_results: list[RepoResult] = []
+    blocked: list[str] = []
+    for repo, issues in deferred_by_repo.items():
+        pending = list(dict.fromkeys(issues))
+        claims = _open_peer_pr_claims(cfg, repo, set(pending))
+        for issue in pending:
+            if _shutdown_requested():
+                LOG.warning(
+                    "[%s] terminal deferred catch-up stopped before issue #%s (shutdown requested)",
+                    repo,
+                    issue,
+                )
+                return catchup_results, blocked
+
+            planned = _fetch_planned_files(issue)
+            blocker = next(
+                (peer for peer, files in claims.items() if planned and planned & files),
+                None,
+            )
+            if blocker is not None:
+                LOG.warning(
+                    "[%s] catch-up for issue #%s withheld: planned files overlap "
+                    "issue #%s, whose PR is still open — re-run the loop after it merges",
+                    repo,
+                    issue,
+                    blocker,
+                )
+                blocked.append(f"{repo}#{issue} (peer #{blocker} PR still open)")
+                continue
+
+            if catchup_results:
+                # (0, 1) keeps the rate guard active between serial dispatches:
+                # its ``loop_idx >= total_loops`` short-circuit is meant for the
+                # terminal loop boundary, and more work still follows here.
+                _maybe_sleep_for_rate_budget(0, 1)
+
+            # Overlap serialization stays at the configured default (ON); only
+            # the scope (one issue) and worker count are narrowed.
+            catchup_cfg = replace(cfg, issues=[issue], max_workers=1)
+            LOG.warning("[%s] redispatching terminal deferred issue #%s", repo, issue)
+            result = process_repo(repo, cfg.loops, catchup_cfg)
+            result.is_catchup = True
+            catchup_results.append(result)
+            if result.deferred_issues:
+                blocked.append(f"{repo}#{issue} (re-deferred: {result.deferred_issues})")
+
+    return catchup_results, blocked
+
+
 def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
     """Drive ``cfg.loops`` iterations across ``repos``. Returns flat result list.
 
@@ -1471,6 +1611,7 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
     safety net for the rare case where the work submission itself dies.
     """
     all_results: list[RepoResult] = []
+    terminal_loop_results: list[RepoResult] = []
 
     for loop_idx in range(1, cfg.loops + 1):
         if _shutdown_requested():
@@ -1511,6 +1652,7 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
                     )
 
         elapsed_s = time.monotonic() - loop_t0
+        terminal_loop_results = loop_results
         LOG.info("%s", _summarize_loop(loop_results, loop_idx, elapsed_s))
         LOG.info("Loop %d complete.", loop_idx)
 
@@ -1541,13 +1683,22 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
     post_loop_results = _run_post_loop_stages(cfg, repos)
     all_results.extend(post_loop_results)
 
+    # Final-round overlap deferrals are replayed only AFTER the post-loop
+    # drive-green sweep above has had its chance to merge the overlapping
+    # peers' PRs, with the overlap guard kept ON (#1762, option (b)) —
+    # replaying earlier or with the guard off would reintroduce the same-file
+    # conflict race the deferral exists to prevent (#1623).
+    catchup_results, blocked_catchups = _run_terminal_deferred_issues(cfg, terminal_loop_results)
+    all_results.extend(catchup_results)
+
     # Report actual loops run (may be less than cfg.loops due to early
     # exit). Post-loop RepoResults are tagged ``is_post_loop=True`` by
-    # ``_run_post_loop_stages``, so filtering on that flag reliably excludes
-    # them even when a crashed/uncloned repo leaves both phase lists empty.
-    # This prevents the post-loop record's loop_idx=cfg.loops from spuriously
+    # ``_run_post_loop_stages`` and catch-up ones ``is_catchup=True`` by
+    # ``_run_terminal_deferred_issues``, so filtering on those flags reliably
+    # excludes them even when a crashed/uncloned repo leaves both phase lists
+    # empty. This prevents such a record's loop_idx=cfg.loops from spuriously
     # inflating the count when early-exit cut the loop body short.
-    per_loop_results = [r for r in all_results if not r.is_post_loop]
+    per_loop_results = [r for r in all_results if not (r.is_post_loop or r.is_catchup)]
     actual_loops = max((r.loop_idx for r in per_loop_results), default=0)
     LOG.info(
         "✓ Completed %d of %d loop(s) across %d repo(s).",
@@ -1557,6 +1708,13 @@ def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
     )
     if post_loop_results:
         LOG.info("%s", _summarize_post_loop(post_loop_results))
+    if blocked_catchups:
+        LOG.warning(
+            "⚠ %d file-overlap deferred issue(s) remain blocked after terminal "
+            "catch-up: %s. Re-run the loop once the peer PR(s) merge.",
+            len(blocked_catchups),
+            "; ".join(blocked_catchups),
+        )
     return all_results
 
 
@@ -1721,8 +1879,13 @@ def main(argv: list[str] | None = None) -> int:
 
     results = run_loop(cfg, repos)
 
-    # Compute actual loops run (may be less than cfg.loops due to early exit)
-    loops_run = max((r.loop_idx for r in results if not r.is_post_loop), default=0)
+    # Compute actual loops run (may be less than cfg.loops due to early exit).
+    # Post-loop and terminal-catch-up records carry loop_idx=cfg.loops but are
+    # not loop iterations — exclude both (see run_loop's per_loop_results).
+    loops_run = max(
+        (r.loop_idx for r in results if not (r.is_post_loop or r.is_catchup)),
+        default=0,
+    )
 
     failures = [r for r in results if r.any_failure]
     if failures:
