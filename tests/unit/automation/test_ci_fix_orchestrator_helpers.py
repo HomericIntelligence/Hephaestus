@@ -140,6 +140,27 @@ class TestBuildCiFixPrompt:
         assert "- required-checks-gate" in prompt
         assert "aggregate" in prompt
 
+    def test_hard_scope_limits_forbid_doc_rewrites(
+        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    ) -> None:
+        """The prompt must forbid README/doc rewrites and delete-to-silence.
+
+        Live CI-fix sessions repeatedly replaced the entire ProjectOdyssey
+        README with a placeholder ('Description here.') when they could not
+        fix a compile error (#1780 shakedown, three occurrences).
+        """
+        prompt = orchestrator.build_ci_fix_prompt(
+            issue_number=1,
+            pr_number=2,
+            worktree_path=tmp_path,
+            ci_logs="error: whatever",
+            pr_head_branch="1-fix",
+            advise_findings="",
+        )
+        assert "HARD SCOPE LIMITS" in prompt
+        assert "never replace the" in prompt
+        assert "say so and stop" in prompt
+
     def test_skip_marker_advise_contributes_nothing(
         self, orchestrator: CIFixOrchestrator, tmp_path: Path
     ) -> None:
