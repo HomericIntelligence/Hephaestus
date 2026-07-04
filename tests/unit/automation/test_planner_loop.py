@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.automation._review_utils import DEFAULT_STATE_DIR
 from hephaestus.automation.models import PLAN_COMMENT_MARKER, PlannerOptions
 from hephaestus.automation.planner import MAX_REVIEW_ITERATIONS, Planner
 from hephaestus.automation.review_state import PLAN_REVIEW_PREFIX, is_plan_review_go
@@ -679,7 +680,7 @@ class TestCapturePlannerLearnings:
         ):
             out = planner._capture_planner_learnings(123, "plan text")
 
-        state_dir = tmp_path / "build" / ".issue_implementer"
+        state_dir = tmp_path / DEFAULT_STATE_DIR
         record = json.loads((state_dir / "planner-learn-123.json").read_text())
         assert out == "- learning A\n"
         assert record["issue_number"] == 123
@@ -704,7 +705,7 @@ class TestCapturePlannerLearnings:
         ):
             out = planner._capture_planner_learnings(123, "plan text")
 
-        state_dir = tmp_path / "build" / ".issue_implementer"
+        state_dir = tmp_path / DEFAULT_STATE_DIR
         record = json.loads((state_dir / "planner-learn-123.json").read_text())
         assert out == ""
         assert record["issue_number"] == 123

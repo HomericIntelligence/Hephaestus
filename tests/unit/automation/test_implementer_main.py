@@ -24,6 +24,8 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.automation._review_utils import DEFAULT_STATE_DIR
+
 
 def test_main_returns_zero_when_no_open_issues(
     monkeypatch: pytest.MonkeyPatch,
@@ -91,3 +93,24 @@ def test_no_ui_flag_skips_curses(
 
     assert rc == 0
     mock_curses.assert_not_called()
+
+
+def test_main_configures_logging_under_default_state_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``main`` passes the canonical state directory to logging setup."""
+    from hephaestus.automation import implementer
+
+    monkeypatch.setattr(sys, "argv", ["impl", "--dry-run", "--no-ui", "--agent", "claude"])
+
+    with (
+        patch.object(implementer, "gh_list_open_issues", return_value=[]),
+        patch.object(implementer, "get_repo_root", return_value=tmp_path),
+        patch.object(implementer, "_setup_logging") as mock_setup_logging,
+    ):
+        rc = implementer.main()
+
+    assert rc == 0
+    mock_setup_logging.assert_called_once()
+    assert mock_setup_logging.call_args.kwargs["log_dir"] == tmp_path / DEFAULT_STATE_DIR

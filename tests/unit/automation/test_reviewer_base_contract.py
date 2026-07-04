@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from hephaestus.automation import _reviewer_base
+from hephaestus.automation._review_utils import DEFAULT_STATE_DIR
 from hephaestus.automation.models import ReviewState
 from hephaestus.io import utils as io_utils
 
@@ -39,6 +40,14 @@ def test_injection_wires_repo_root(tmp_path: Path) -> None:
     deps = _make_deps(tmp_path)
     r = ConcreteReviewer(_make_options(), **deps)
     assert r.repo_root == tmp_path
+
+
+def test_injection_wires_default_state_dir(tmp_path: Path) -> None:
+    """Constructor injection must create the canonical default state directory."""
+    deps = _make_deps(tmp_path)
+    r = ConcreteReviewer(_make_options(), **deps)
+    assert r.state_dir == tmp_path / DEFAULT_STATE_DIR
+    assert r.state_dir.is_dir()
 
 
 def test_injection_calls_factories(tmp_path: Path) -> None:
@@ -83,7 +92,7 @@ def test_save_state_persists_review_state_with_secure_permissions(tmp_path: Path
 
     reviewer._save_state(state)
 
-    state_file = tmp_path / "build" / ".issue_implementer" / "review-1402.json"
+    state_file = tmp_path / DEFAULT_STATE_DIR / "review-1402.json"
     restored = ReviewState.model_validate_json(state_file.read_text())
     assert restored.issue_number == 1402
     assert restored.pr_number == 2402
