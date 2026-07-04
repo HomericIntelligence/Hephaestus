@@ -112,6 +112,38 @@ class TestCheckInventory:
         assert "phantom.yml" in missing
 
 
+class TestWorkflowInventoryLiveTree:
+    """Live-tree regression tests for workflow inventory enforcement."""
+
+    def test_real_repo_workflow_inventory_is_in_sync(self) -> None:
+        undocumented, missing = check_inventory(REPO_ROOT)
+        assert undocumented == []
+        assert missing == []
+
+    def test_workflow_inventory_hook_is_wired_in_precommit(self) -> None:
+        from hephaestus.ci.precommit import load_precommit_config
+
+        repos = load_precommit_config(REPO_ROOT / ".pre-commit-config.yaml")
+        hook = next(
+            (
+                hook
+                for repo in repos
+                for hook in repo.get("hooks", [])
+                if hook.get("id") == "hephaestus-check-workflow-inventory"
+            ),
+            None,
+        )
+
+        assert hook is not None
+        assert hook["entry"] == "pixi run --environment default hephaestus-check-workflow-inventory"
+        assert hook["pass_filenames"] is False
+        assert hook["always_run"] is True
+        assert (
+            hook["files"]
+            == r"^(\.pre-commit-config\.yaml|\.github/workflows/(README\.md|.*\.yml))$"
+        )
+
+
 class TestIsCheckoutStep:
     """Tests for _is_checkout_step()."""
 
@@ -408,6 +440,21 @@ class TestCLIEntryPoints:
             "sys.argv", ["hephaestus-check-workflow-inventory", "--repo-root", str(tmp_path)]
         )
         assert check_workflow_inventory_main() == 1
+
+    def test_inventory_default_repo_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hephaestus.ci.workflows import check_workflow_inventory_main
+
+        workflows = tmp_path / ".github" / "workflows"
+        workflows.mkdir(parents=True)
+        (workflows / "ci.yml").write_text("name: CI")
+        (workflows / "README.md").write_text("| ci.yml | CI workflow |\n")
+
+        monkeypatch.setattr("hephaestus.utils.helpers.get_repo_root", lambda: tmp_path)
+        monkeypatch.setattr("sys.argv", ["hephaestus-check-workflow-inventory"])
+
+        assert check_workflow_inventory_main() == 0
 
     def test_checkout_valid(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
