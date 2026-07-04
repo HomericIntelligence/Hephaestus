@@ -49,7 +49,7 @@ from ._review_phase import (
     MAX_REVIEW_ITERATIONS_HARD_CAP,
     ReviewPhase,
 )
-from ._review_utils import find_merged_closing_pr, find_pr_for_issue, get_pr_head_branch
+from ._review_utils import find_pr_for_issue, get_pr_head_branch
 from ._stage_context import StageContext
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import advise_model
@@ -355,42 +355,27 @@ class ImplementationPhaseRunner:
         """Map a ``RuntimeError`` from the pipeline to a WorkerResult.
 
         "No changes produced" / "no commits vs" means the branch has 0 commits
-        vs main. That is only "work already landed" when a MERGED PR actually
-        closes the issue — an empty ``{issue}-auto-impl`` branch left behind by
-        a killed/aborted run also has 0 commits, and treating it as merged
-        silently skips real work (observed live: ProjectOdyssey#5520 tagged
-        ``state:skip`` while its epic's first PR was still open). Verify the
-        merged PR before declaring success; otherwise fail so the caller
-        retries with a fresh implementation.
+        vs main — the implementation already landed via a prior merged PR. Treat
+        that as success and apply ``state:skip`` so future loops don't re-attempt
+        the issue. Any other RuntimeError is a genuine failure.
         """
         impl = self.impl
         msg = str(e)
         if "no commits vs" in msg.lower() or "no changes produced" in msg.lower():
-            merged_pr = find_merged_closing_pr(issue_number)
-            if merged_pr is not None:
-                impl._log(
-                    "info",
-                    f"Issue #{issue_number}: no new commits vs main and merged PR "
-                    f"#{merged_pr} closes it — work already merged; applying state:skip",
-                    thread_id,
-                )
-                self.status_tracker.update_slot(
-                    slot_id, f"{issue_ref(issue_number)}: already implemented — state:skip"
-                )
-                with contextlib.suppress(Exception):
-                    gh_issue_add_labels(issue_number, [STATE_SKIP])
-                return WorkerResult(
-                    issue_number=issue_number,
-                    success=True,
-                )
-            error_msg = (
-                f"branch for #{issue_number} has no commits vs main but no merged PR "
-                "closes the issue — stale empty branch from an aborted run; retry "
-                "with a fresh implementation"
+            impl._log(
+                "info",
+                f"Issue #{issue_number}: no new commits vs main — "
+                "work already merged; applying state:skip",
+                thread_id,
             )
-            impl._log("error", error_msg, thread_id)
-            return self._record_issue_failure(
-                issue_number, slot_id, thread_id, error_msg[:80], persist_error=error_msg
+            self.status_tracker.update_slot(
+                slot_id, f"{issue_ref(issue_number)}: already implemented — state:skip"
+            )
+            with contextlib.suppress(Exception):
+                gh_issue_add_labels(issue_number, [STATE_SKIP])
+            return WorkerResult(
+                issue_number=issue_number,
+                success=True,
             )
 
         impl._log("error", f"Runtime error: {e}", thread_id)

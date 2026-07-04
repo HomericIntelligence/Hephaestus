@@ -206,17 +206,6 @@ class DependencyResolver:
 
             try:
                 dep_issue = fetch_issue_info(dep_num)
-                # ``cached_states`` only covers the run's ROOT issues, so a
-                # dep's closed state is normally NOT in the cache. Without this
-                # live-state check a merged/closed dependency re-enters the
-                # work graph, its stale local branch conflicts with the merged
-                # main, and every dependent issue is skipped as "blocked by
-                # failed issue(s)" (observed live: ProjectOdyssey#5515 blocked
-                # by already-merged #5514, #1780 shakedown).
-                if self.skip_closed and dep_issue.state.is_done:
-                    logger.info("Dependency #%s is closed, marking complete", dep_num)
-                    self.completed.add(dep_num)
-                    continue
                 self.add_issue(dep_issue)
                 # Enqueue this issue's own dependencies for the next BFS level
                 for child_dep in dep_issue.dependencies:
