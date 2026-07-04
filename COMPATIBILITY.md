@@ -81,7 +81,7 @@ may change incompatibly in a minor release.
 
 ## Console-Script Stability Tiers
 
-ProjectHephaestus installs 51 console scripts via `[project.scripts]` in
+ProjectHephaestus installs 52 console scripts via `[project.scripts]` in
 `pyproject.toml`. Each is classified into one of three tiers:
 
 - **Stable** — covered by the [deprecation policy](#deprecation-policy). CLI
@@ -159,6 +159,7 @@ bypass a misfiring hook locally use
 | `hephaestus-check-repo-analyze-skills` | Internal | Repo CI repo-analyze skill generator validator |
 | `hephaestus-check-cli-tier-docs` | Internal | Enforces this very table; added in #766 |
 | `hephaestus-check-api-table-docs` | Internal | Enforces per-symbol `__all__` documentation in COMPATIBILITY.md |
+| `hephaestus-check-api-reference` | Internal | Verifies generated pdoc API reference output before Pages upload |
 
 ## Public API
 
