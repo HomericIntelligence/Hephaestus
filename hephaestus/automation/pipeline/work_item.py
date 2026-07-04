@@ -79,6 +79,9 @@ class WorkItem:
 
     A WorkItem represents a repo, issue, or PR being processed through the
     pipeline. All access is single-threaded (coordinator thread only).
+
+    Note: `history` is a `deque` (not a list), supporting iteration, indexing
+    (`[0]`, `[-1]`), and `append`, but not `sort()`.
     """
 
     repo: str
