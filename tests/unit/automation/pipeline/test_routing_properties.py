@@ -46,8 +46,8 @@ _REASON_BUDGET: dict[str, str | None] = {
     "plan_not_go": None,
     "already_implementation_go_pr": None,
     "agent_error": "pr_review_iter",
-    "human_blocked": "pr_review_iter",
-    "exhaustion": "pr_review_iter",
+    "human_blocked": None,
+    "exhaustion": None,
     "fix_exhausted": "ci_fix",
     "not_implementation_go": None,
     "no_pr": None,
@@ -97,6 +97,7 @@ def test_driven_failure_sequences_always_terminate(start: StageName, reasons: li
         budget for route in ROUTES.values() for budget in route.budgets.values()
     ) + len(_REASONS)
     budgeted_steps = 0
+    exhausted_a_budget = False
 
     for reason in reasons:
         if item.stage == StageName.FINISHED:
@@ -111,10 +112,14 @@ def test_driven_failure_sequences_always_terminate(start: StageName, reasons: li
             item.attempts[budget_key] += 1
             if item.attempts[budget_key] > _declared_budget(budget_key):
                 item.stage = StageName.FINISHED
+                exhausted_a_budget = True
                 continue
         item.stage = _fail_target(item.stage, reason)
 
-    assert item.stage in set(StageName)
+    # Termination is only guaranteed once a budget is actually exhausted;
+    # FINISHED is absorbing so the walk must have landed there and stayed.
+    if exhausted_a_budget:
+        assert item.stage == StageName.FINISHED
 
 
 @given(budget_key=st.sampled_from(sorted(budget_keys())))
