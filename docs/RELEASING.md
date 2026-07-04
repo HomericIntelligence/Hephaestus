@@ -14,8 +14,8 @@ That is the only manual step. The pipeline then runs automatically:
 ```
 workflow_dispatch (Auto Tag Release)
   └─ computes next vX.Y.Z
-  └─ git tag + push → triggers:
-       Release workflow (on: push: tags: v*)
+  └─ git tag + push (signed annotated tag)
+  └─ workflow_dispatch (Release workflow, tag=vX.Y.Z)
          ├─ test job (pytest)
          ├─ type-check job (mypy)
          └─ build-and-publish job

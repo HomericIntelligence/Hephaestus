@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -19,6 +20,7 @@ from hephaestus.ci.workflows import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+AUTO_TAG_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "auto-tag.yml"
 AUTO_MERGE_ON_GO_WORKFLOW = (
     REPO_ROOT / ".github" / "workflows" / "enable-auto-merge-on-implementation-go.yml"
 )
@@ -339,6 +341,42 @@ class TestPiCliSetup:
         assert "node-version: 22.19.0" in text
         assert "npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.2" in text
         assert "pi --version" in text
+
+
+class TestAutoTagReleaseDispatch:
+    """Regression tests for the one-click release workflow chain."""
+
+    def _workflow(self) -> dict[str, Any]:
+        return yaml.safe_load(AUTO_TAG_WORKFLOW.read_text(encoding="utf-8"))
+
+    def _steps(self) -> list[dict[str, Any]]:
+        return self._workflow()["jobs"]["auto-tag"]["steps"]
+
+    def test_auto_tag_can_dispatch_workflows(self) -> None:
+        """The release dispatch API requires the workflow actions permission."""
+        workflow = self._workflow()
+        assert workflow["permissions"]["contents"] == "write"
+        assert workflow["permissions"]["actions"] == "write"
+
+    def test_auto_tag_dispatches_release_workflow_with_computed_tag(self) -> None:
+        """GITHUB_TOKEN tag pushes do not trigger release.yml; dispatch it explicitly."""
+        steps = self._steps()
+        names = [step.get("name") for step in steps]
+
+        compute_index = names.index("Compute next version and push tag")
+        dispatch_index = names.index("Dispatch release workflow")
+        assert compute_index < dispatch_index
+
+        compute_step = steps[compute_index]
+        assert compute_step["id"] == "tag"
+        assert 'echo "tag=${TAG}" >> "$GITHUB_OUTPUT"' in compute_step["run"]
+
+        dispatch_step = steps[dispatch_index]
+        assert dispatch_step["if"] == "steps.tag.outputs.tag != ''"
+        assert dispatch_step["env"]["GH_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"  # noqa: S105
+        assert dispatch_step["env"]["TAG"] == "${{ steps.tag.outputs.tag }}"
+        assert 'gh workflow run release.yml --repo "${GITHUB_REPOSITORY}"' in dispatch_step["run"]
+        assert '-f tag="${TAG}"' in dispatch_step["run"]
 
 
 class TestReleaseAttestations:

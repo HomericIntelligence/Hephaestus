@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*"  # fires automatically when auto-tag.yml pushes a vX.Y.Z tag
+      - "v*"  # fires for human/PAT tag pushes; auto-tag.yml dispatches explicitly
   workflow_dispatch:
     inputs:
       tag:
