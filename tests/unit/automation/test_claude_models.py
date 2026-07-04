@@ -62,7 +62,7 @@ class TestModuleStable:
 
     def test_reimport_idempotent(self) -> None:
         importlib.reload(claude_models)
-        assert claude_models.OPUS == claude_models.OPUS_48
+        assert claude_models.OPUS == "claude-opus-4-8"
         assert claude_models.HAIKU == "claude-haiku-4-5"
         assert claude_models.SONNET == "claude-sonnet-4-6"
         assert claude_models.CODEX_ADVISE == "gpt-5.4-mini"
