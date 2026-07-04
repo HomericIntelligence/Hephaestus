@@ -314,8 +314,9 @@ def marketplace_prompt_payload(marketplace_path: Path) -> str:
             value = plugin.get(key)
             if isinstance(value, (str, list)):
                 compact[key] = value
-        if compact:
-            compact_plugins.append(compact)
+        if not compact:
+            continue
+        compact_plugins.append(compact)
         payload = json.dumps(
             {"plugins": compact_plugins},
             ensure_ascii=False,
