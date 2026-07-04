@@ -157,6 +157,17 @@ def git_message_model() -> str:
     return _resolve_model("HEPH_GIT_MESSAGE_MODEL", HAIKU)
 
 
+def fallback_model() -> str:
+    """Model substituted when a model-specific usage cap is detected (#1793).
+
+    A "reached your <model> limit … switch models with /model" 429 carries no
+    reset epoch, so waiting cannot help — the invoke chokepoint retries on
+    this model instead. Honors ``HEPH_FALLBACK_MODEL``; defaults to
+    :data:`OPUS` (the current Opus).
+    """
+    return _resolve_model("HEPH_FALLBACK_MODEL", OPUS)
+
+
 # ── Subprocess timeouts ──────────────────────────────────────────────────────
 
 PLAN_STAGE_TIMEOUT = 7200
@@ -525,6 +536,7 @@ __all__ = [
     "ci_poll_max_wait",
     "codex_advise_model",
     "current_trunk_githash",
+    "fallback_model",
     "follow_up_claude_timeout",
     "gh_cli_timeout",
     "git_message_agent_timeout",

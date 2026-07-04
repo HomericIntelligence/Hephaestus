@@ -7,13 +7,18 @@ What lives here:
 - :func:`parse_review_verdict` — verdict parser used by the strict review loops
 - :func:`scan_quota_reset` — shared cross-stream rate-limit scanner so all
   phases get identical 429 handling.
+- :func:`detect_model_usage_cap` — classifier for the model-specific
+  "reached your <model> limit … switch models with /model" 429, which carries
+  no reset epoch and is remediated by a model switch, not a wait (#1793).
 - :data:`SESSION_EXPIRED_PHRASES` — substrings the Claude CLI returns when
   ``--resume`` targets a session that no longer exists locally.
 - :func:`invoke_claude_with_session` — the single entry point every
   automation phase must use. Picks ``--session-id`` (first call) vs
   ``--resume`` (subsequent calls) based on whether the model-keyed JSONL
   transcript already exists. No recreate-on-failure cascade — a create/resume
-  error propagates (#1168).
+  error propagates (#1168). On a model-specific usage cap it retries the same
+  request once on :func:`agent_config.fallback_model` and pins the fallback
+  for the rest of the process (#1793).
 """
 
 from __future__ import annotations
@@ -27,11 +32,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from hephaestus.automation.agent_config import (
-    planner_claude_timeout,
-    session_jsonl_path,
-    session_name,
-)
+from hephaestus.automation.agent_config import fallback_model, session_jsonl_path, session_name
 from hephaestus.github.client import ClaudeUsageCapError
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch
 from hephaestus.utils.helpers import strip_null_bytes
@@ -57,6 +58,35 @@ def _session_expired(stderr: str, stdout: str) -> bool:
     """Return True if either stream indicates the resume target is gone."""
     blob = (stderr + "\n" + stdout).lower()
     return any(phrase in blob for phrase in SESSION_EXPIRED_PHRASES)
+
+
+# Models observed to be usage-capped in THIS process. Consulted by
+# :func:`invoke_claude_with_session` so later calls skip the doomed attempt and
+# go straight to the fallback (a capped model stays capped for hours; without
+# stickiness an exhausted quota once fired ~39 doomed sessions in an hour).
+# Deliberately per-process: phase subprocesses spawned by the loop each
+# re-detect once, which costs one ~0.5s failed call per phase (#1793).
+_capped_models: set[str] = set()
+
+
+def is_model_capped(model: str) -> bool:
+    """Return True if *model* hit a model-specific usage cap in this process."""
+    return model in _capped_models
+
+
+def reset_capped_models() -> None:
+    """Clear the capped-model registry (test hook)."""
+    _capped_models.clear()
+
+
+def _record_model_cap(capped: str, fallback: str) -> None:
+    """Mark *capped* as unusable for this process and log the switch."""
+    _capped_models.add(capped)
+    logger.warning(
+        "model %s usage cap hit; falling back to %s for the rest of this run",
+        capped,
+        fallback,
+    )
 
 
 def invoke_claude_with_session(
@@ -94,6 +124,19 @@ def invoke_claude_with_session(
     The session is scoped to the artifact (issue/PR), not a commit SHA, so the
     transcript persists across main-bumps for the issue's lifetime (#841).
 
+    Model-specific usage caps (#1793): a 429 whose message says "reached your
+    <model> limit … switch models with /model" carries no reset epoch, so the
+    wait-until-reset handlers cannot help. When such a cap is detected — via a
+    non-zero exit OR an exit-0 ``is_error: true`` JSON envelope (json format
+    only; plain-text output is never scanned, since agent prose can
+    legitimately contain the phrases) — the same request is retried once on
+    :func:`agent_config.fallback_model`, and the capped model is pinned to the
+    fallback for the rest of this process. The fallback runs under its own
+    session lineage (the model is part of the session key), so the capped
+    model's cached context is re-sent once. No retry happens when the
+    effective model already IS the fallback; the error propagates so callers'
+    existing quota/overload handling takes over.
+
     Args:
         repo: Repository slug (e.g. ``"ProjectScylla"``).
         issue: Issue number — leading ``#`` is stripped by
@@ -121,17 +164,79 @@ def invoke_claude_with_session(
 
     Returns:
         ``(stdout, session_uuid)`` — the deterministic id derived from
-        ``(repo, issue, agent, model)``.
+        ``(repo, issue, agent, model)`` — for the model actually used (the
+        fallback's id when a cap forced a switch).
 
     Raises:
-        subprocess.CalledProcessError: If the create/resume call exits non-zero.
+        subprocess.CalledProcessError: If the create/resume call exits non-zero
+            (after the one fallback retry, when applicable).
         subprocess.TimeoutExpired: If the call exceeds ``timeout``.
 
     """
-    del recreate_on_resume_failure  # back-compat shim only; no recreate cascade
     if timeout is None:
-        timeout = planner_claude_timeout()
+        from hephaestus.automation.agent_config import planner_claude_timeout
 
+        timeout = planner_claude_timeout()
+    del recreate_on_resume_failure  # back-compat shim only; no recreate cascade
+
+    def _attempt(effective_model: str) -> tuple[str, str]:
+        return _invoke_claude_once(
+            repo=repo,
+            issue=issue,
+            agent=agent,
+            prompt=prompt,
+            model=effective_model,
+            cwd=cwd,
+            timeout=timeout,
+            system_prompt_file=system_prompt_file,
+            allowed_tools=allowed_tools,
+            permission_mode=permission_mode,
+            extra_args=extra_args,
+            output_format=output_format,
+            input_via_stdin=input_via_stdin,
+        )
+
+    fallback = fallback_model()
+    effective = model
+    if model != fallback and is_model_capped(model):
+        logger.info("model %s previously capped; using fallback %s", model, fallback)
+        effective = fallback
+    try:
+        stdout, sid = _attempt(effective)
+    except subprocess.CalledProcessError as e:
+        if effective == fallback or not detect_model_usage_cap(e.stderr or "", e.stdout or ""):
+            raise
+        _record_model_cap(effective, fallback)
+        return _attempt(fallback)
+    if output_format == "json" and effective != fallback:
+        err_text = _envelope_error_text(stdout)
+        if err_text is not None and detect_model_usage_cap(err_text):
+            _record_model_cap(effective, fallback)
+            return _attempt(fallback)
+    return stdout, sid
+
+
+def _invoke_claude_once(
+    *,
+    repo: str,
+    issue: int | str,
+    agent: str,
+    prompt: str,
+    model: str,
+    cwd: Path,
+    timeout: int,
+    system_prompt_file: Path | None,
+    allowed_tools: str | None,
+    permission_mode: str | None,
+    extra_args: list[str] | None,
+    output_format: str,
+    input_via_stdin: bool,
+) -> tuple[str, str]:
+    """Run one ``claude`` create/resume call for the given model (no fallback).
+
+    The single-attempt body of :func:`invoke_claude_with_session`; see its
+    docstring for the session-key semantics.
+    """
     display_name = session_name(repo, issue, agent, model)
     sid = str(uuid.uuid5(uuid.NAMESPACE_DNS, display_name))
 
@@ -211,6 +316,25 @@ def invoke_claude_with_session(
     return result.stdout, sid
 
 
+def _envelope_error_text(stdout: str) -> str | None:
+    """Extract the error text from an ``is_error: true`` Claude JSON envelope.
+
+    Returns ``None`` when ``stdout`` is empty, not JSON, or not an error
+    envelope; otherwise the (possibly empty) ``result`` field as a string.
+    Shared by :func:`raise_for_error_envelope` and the model-cap fallback in
+    :func:`invoke_claude_with_session` so the envelope decode exists once.
+    """
+    if not stdout:
+        return None
+    try:
+        data = json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not (isinstance(data, dict) and data.get("is_error")):
+        return None
+    return str(data.get("result") or "")
+
+
 def raise_for_error_envelope(stdout: str) -> None:
     """Raise if ``stdout`` is an ``is_error: true`` Claude JSON envelope.
 
@@ -234,15 +358,9 @@ def raise_for_error_envelope(stdout: str) -> None:
         RuntimeError: If the envelope is ``is_error`` for any other reason.
 
     """
-    if not stdout:
+    err_text = _envelope_error_text(stdout)
+    if err_text is None:
         return
-    try:
-        data = json.loads(stdout)
-    except (json.JSONDecodeError, ValueError):
-        return
-    if not (isinstance(data, dict) and data.get("is_error")):
-        return
-    err_text = str(data.get("result") or "")
     reset_epoch = resolve_quota_reset_epoch(err_text)
     if reset_epoch is not None:
         raise ClaudeUsageCapError(
@@ -317,6 +435,56 @@ def detect_server_overload(*texts: str) -> bool:
         if any(phrase in lowered for phrase in _SERVER_OVERLOAD_PHRASES):
             return True
         if _SERVER_OVERLOAD_STATUS_RE.search(text):
+            return True
+    return False
+
+
+# Signals for the MODEL-SPECIFIC usage cap, e.g.:
+#   "You've reached your Fable 5 limit. Run /usage-credits to continue or
+#    switch models with /model."
+# Unlike the session-limit / usage-cap 429s (rate_limit.py), this carries NO
+# reset epoch — waiting cannot help; the remediation is a model switch. The
+# negative lookahead keeps "session limit" / "usage limit" owned by the
+# wait-until-reset detectors so the two families never overlap (#1793).
+_MODEL_USAGE_CAP_RE = re.compile(
+    r"reached\s+your\s+(?!session\b|usage\b)[\w .-]{1,40}?\s+limit",
+    re.IGNORECASE,
+)
+_MODEL_USAGE_CAP_PHRASES: tuple[str, ...] = (
+    "/usage-credits",
+    "switch models with /model",
+)
+
+
+def detect_model_usage_cap(*texts: str) -> bool:
+    """Return True if any stream carries a model-specific usage-cap message.
+
+    Recognizes the "You've reached your <model> limit … switch models with
+    /model" 429 the Claude CLI emits when one model tier's quota is exhausted
+    while others remain available. Three independent signals are ORed (the
+    "reached your <model> limit" regex plus each remediation-hint phrase) so a
+    partial rewording still matches. Session-limit and generic usage-cap
+    phrasings are deliberately NOT matched — those carry a reset epoch and stay
+    with :func:`scan_quota_reset`'s wait-until-reset handling.
+
+    Only failure streams (stderr of a non-zero exit, or the ``result`` field of
+    an ``is_error: true`` JSON envelope) should be passed here — never plain
+    successful output, which can legitimately mention these phrases (#1793).
+
+    Args:
+        *texts: One or more output streams to inspect (stderr and/or stdout).
+
+    Returns:
+        True if a model-specific usage-cap signal is present in any stream.
+
+    """
+    for text in texts:
+        if not text:
+            continue
+        lowered = text.lower()
+        if any(phrase in lowered for phrase in _MODEL_USAGE_CAP_PHRASES):
+            return True
+        if _MODEL_USAGE_CAP_RE.search(text):
             return True
     return False
 
