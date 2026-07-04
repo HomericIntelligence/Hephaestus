@@ -312,6 +312,17 @@ class TestSafeGitFetch:
         assert result is True
         git_utils_mocks.run.assert_called_once()
 
+    def test_fetch_timeout_uses_agent_git_timeout_env(
+        self, monkeypatch: pytest.MonkeyPatch, git_utils_mocks: Any
+    ) -> None:
+        """Fetch inherits the shared agent git timeout instead of a local literal."""
+        monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", "77")
+        repo_root = Path("/home/user/repo")
+
+        assert safe_git_fetch(repo_root, retries=1) is True
+
+        assert git_utils_mocks.run.call_args.kwargs["timeout"] == 77
+
     @patch("hephaestus.utils.retry.time.sleep")
     def test_retry_on_failure(self, mock_sleep: Any, git_utils_mocks: Any) -> None:
         """Test retry on fetch failure."""

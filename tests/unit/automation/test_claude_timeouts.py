@@ -32,6 +32,24 @@ def test_planner_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
     assert claude_timeouts.planner_claude_timeout() == DEFAULT_THROUGHPUT_TIMEOUT_S
 
 
+def test_agent_default_timeout_is_generic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shared invoke fallback is generic (7200s), not the planner budget (#1415)."""
+    monkeypatch.delenv("HEPH_AGENT_DEFAULT_TIMEOUT", raising=False)
+
+    result = claude_timeouts.agent_default_timeout()
+
+    assert result == TWO_HOURS_S
+    # Must NOT collapse onto any phase-specific budget.
+    assert result != DEFAULT_THROUGHPUT_TIMEOUT_S
+
+
+def test_agent_default_timeout_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HEPH_AGENT_DEFAULT_TIMEOUT tunes the shared invoke fallback."""
+    monkeypatch.setenv("HEPH_AGENT_DEFAULT_TIMEOUT", "4321")
+
+    assert claude_timeouts.agent_default_timeout() == 4321
+
+
 def test_plan_stage_timeout_default_stays_long(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

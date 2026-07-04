@@ -117,7 +117,7 @@ def ensure_labels_on_repo(repo: str, *, dry_run: bool = False) -> int:
             "--force",  # upsert: create-or-update
         ]
         try:
-            gh_call(cmd, timeout=30)
+            gh_call(cmd)
         except subprocess.CalledProcessError as exc:
             logger.warning(
                 "%s: failed to ensure label %r (rc=%s): %s",
@@ -135,10 +135,7 @@ def ensure_labels_on_repo(repo: str, *, dry_run: bool = False) -> int:
 def _detect_current_repo_slug() -> str:
     """Derive ``owner/name`` from the current git checkout's ``origin`` remote."""
     try:
-        proc = gh_call(
-            ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-            timeout=30,
-        )
+        proc = gh_call(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
     except subprocess.CalledProcessError as exc:
         raise SystemExit(
             "Could not detect current repo via 'gh repo view'. "

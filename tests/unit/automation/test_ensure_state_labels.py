@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation.ensure_state_labels import (
+    _detect_current_repo_slug,
     _gh_list_org_repos,
     ensure_labels_on_repo,
     main,
@@ -91,6 +92,29 @@ class TestEnsureLabelsOnRepo:
         issued = ensure_labels_on_repo("owner/name")
         assert issued == n - 1
         assert mock_gh_call.call_count == n
+
+    def test_label_create_uses_default_gh_timeout(self, mock_gh_call: MagicMock) -> None:
+        """No per-call timeout override — HEPH_GH_CLI_TIMEOUT governs via gh_call.
+
+        The local ``timeout=30`` literal was removed so the centralized
+        ``gh_cli_timeout()`` default inside ``gh_call`` applies (#1415).
+        """
+        mock_gh_call.return_value = _ok_proc()
+        ensure_labels_on_repo("owner/name")
+        assert mock_gh_call.call_count == len(STATE_LABEL_SPECS)
+        for call in mock_gh_call.call_args_list:
+            assert "timeout" not in call.kwargs
+
+
+class TestDetectCurrentRepoSlug:
+    """``_detect_current_repo_slug`` defers timeout policy to ``gh_call``."""
+
+    def test_detect_uses_default_gh_timeout(self, mock_gh_call: MagicMock) -> None:
+        """No per-call timeout override — HEPH_GH_CLI_TIMEOUT governs via gh_call."""
+        mock_gh_call.return_value = _ok_proc(stdout="owner/name\n")
+        assert _detect_current_repo_slug() == "owner/name"
+        mock_gh_call.assert_called_once()
+        assert "timeout" not in mock_gh_call.call_args.kwargs
 
 
 class TestGhListOrgRepos:

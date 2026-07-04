@@ -410,6 +410,28 @@ class TestAddressIssue:
 
         assert results == {}
 
+    def test_address_issue_preserves_local_cooldown(self, reviewer: AddressReviewer) -> None:
+        """_address_issue keeps its one-second cooldown outside StatusTracker.slot()."""
+        threads = [{"id": "thread-1", "path": "foo.py", "line": 5, "body": "Fix this"}]
+
+        with (
+            patch.object(reviewer, "_check_threads_for_address", return_value=threads),
+            patch.object(
+                reviewer,
+                "_setup_address_state",
+                return_value=("session-1", MagicMock(), "branch-1", Path("/tmp/worktree")),
+            ),
+            patch.object(
+                reviewer, "_run_fix_session", return_value={"addressed": [], "replies": {}}
+            ),
+            patch.object(reviewer, "_commit_push_and_resolve"),
+            patch("hephaestus.automation.address_review.time.sleep") as mock_sleep,
+        ):
+            result = reviewer._address_issue(123, 456)
+
+        assert result.success is True
+        mock_sleep.assert_called_once_with(1)
+
 
 # ---------------------------------------------------------------------------
 # #382/A4-06: AddressReviewer.run() must report preserved worktrees after cleanup_all
