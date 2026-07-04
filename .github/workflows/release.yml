@@ -256,6 +256,9 @@ jobs:
       - name: Generate API reference (pdoc -> docs/api/)
         run: pixi run docs
 
+      - name: Verify API reference coverage
+        run: pixi run --environment default hephaestus-check-api-reference --docs-dir docs/api
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa  # v3.0.1
         with:

@@ -24,6 +24,14 @@ VALIDATION_MODULES = {
     "type_aliases.py": 1,
 }
 
+# Modules skipped by the resolver guard are those without a
+# "create_validation_parser(" call or with "include_repo_root=False"
+# (no --repo-root flag means no resolver duplication is possible).
+# 11 of the 17 modules above currently qualify; the floor guards against
+# API drift (e.g. a rename of create_validation_parser) silently turning
+# the resolver check into a no-op that passes vacuously.
+MIN_RESOLVER_CHECKED_MODULES = 10
+
 
 def test_issue_1409_validation_clis_use_shared_parser() -> None:
     """Issue #1409 validation entry points use the canonical parser helper."""
@@ -39,12 +47,18 @@ def test_issue_1409_validation_clis_use_shared_parser() -> None:
 def test_issue_1413_validation_clis_use_shared_repo_root_resolver() -> None:
     """Validation entry points should not duplicate repo-root fallback logic."""
     root = Path(__file__).resolve().parents[3]
+    checked = 0
     for filename in VALIDATION_MODULES:
         text = (root / "hephaestus" / "validation" / filename).read_text()
         if "create_validation_parser(" not in text or "include_repo_root=False" in text:
             continue
+        checked += 1
         assert "resolve_repo_root(args)" in text, filename
         assert "args.repo_root or get_repo_root()" not in text, filename
         assert "args.repo_root if args.repo_root is not None else get_repo_root()" not in text, (
             filename
         )
+    assert checked >= MIN_RESOLVER_CHECKED_MODULES, (
+        f"only {checked} modules were checked; the skip conditions above may have "
+        "drifted out of sync with the create_validation_parser API"
+    )

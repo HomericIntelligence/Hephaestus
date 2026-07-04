@@ -4,6 +4,8 @@ Extracts utilities that were previously duplicated across
 ``pr_reviewer.py`` and ``address_review.py``.
 
 Provides:
+- ``DEFAULT_STATE_DIR`` / ``ensure_state_dir``: Canonical automation state
+  directory path and creation helper.
 - ``parse_json_block``: Extract the last ```json``` block from Claude output.
 - ``_discover_prs_simple``: Shared issue-to-PR discovery loop for reviewer
   callers that supply their own single-issue lookup function.
@@ -61,7 +63,7 @@ from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 from hephaestus.io.utils import write_secure
 
 from .github_api import _gh_call
-from .models import DEFAULT_STATE_DIR, DEFAULT_WORKER_COUNT
+from .models import DEFAULT_STATE_DIR as DEFAULT_STATE_DIR, DEFAULT_WORKER_COUNT
 
 if TYPE_CHECKING:
     from .models import WorkerResult
@@ -70,7 +72,10 @@ logger = logging.getLogger(__name__)
 
 ParseJsonErrorCallback = Callable[[str, Path | None, OSError | None], None]
 
-_JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
+_JSON_BLOCK_RE = re.compile(
+    r"^[ \t]*```json[ \t]*\r?\n(.*?)\r?\n^[ \t]*```[ \t]*\r?$",
+    re.DOTALL | re.MULTILINE,
+)
 _REVIEW_PARSE_MISSING = {"comments": [], "summary": "No structured output from analysis"}
 _REVIEW_PARSE_FAILED = {
     "comments": [],
