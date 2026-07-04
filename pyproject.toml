@@ -28,16 +28,17 @@ keywords = ["utilities", "helpers", "tooling", "homericintelligence"]
 dependencies = [
     "packaging>=21.0,<27",
     "pyyaml>=6.0,<7",
-    "pydantic>=2.12.5,<3",
     # IANA timezone data is bundled with Python on POSIX but not on Windows;
     # rate_limit.py uses ZoneInfo which needs it on Windows.
     "tzdata; platform_system == 'Windows'",
 ]
 
 # Optional-dependency groups. The `all` aggregator below intentionally lists
-# only runtime extras (github, nats, toml, xml, schema) — `dev` is kept separate
-# so production installs of `[all]` do not pull pytest/ruff/mypy. If you change
-# this convention, update the "Optional dependencies" section in README.md.
+# all runtime extras (automation, github, nats, toml, xml, schema) — `dev` is
+# kept separate so production installs of `[all]` do not pull pytest/ruff/mypy.
+# `automation` is the product layer (hephaestus.automation) and pulls pydantic;
+# see docs/adr/0001-automation-library-boundary.md. If you change this
+# convention, update the "Optional dependencies" section in README.md.
 [project.optional-dependencies]
 dev = [
     # pytest 9.x and pytest-cov 7.x are the latest majors; tight floors are
@@ -81,19 +82,21 @@ schema = [
     "jsonschema>=4.0,<5",
 ]
 nats = [
+    # hephaestus.nats is stdlib-dataclass based; keep pydantic owned by [automation].
+    # Guarded by tests/unit/validation/test_base_dep_surface.py.
     "nats-py>=2.6,<3",
 ]
 # Product layer (hephaestus.automation). See docs/adr/0001-automation-library-boundary.md.
-# Explicitly declares the deps automation needs at runtime even though some are
-# also currently base deps (pydantic is pulled in transitionally via hephaestus.nats).
-# Listing them here means the extra is honest and forward-compatible: when the
-# base dep list shrinks, this extra remains load-bearing. CI verifies the
-# library-side import surface stays clean via tests/unit/test_import_surface.py.
+# pydantic is the runtime dependency of hephaestus/automation/models.py. As of
+# issue #1458 it is NO LONGER a base dependency (hephaestus.nats moved to stdlib
+# dataclasses), so this extra is now load-bearing: a base install does not get
+# pydantic. CI verifies the library-side import surface stays clean via
+# tests/unit/validation/test_import_surface.py.
 automation = [
     "pydantic>=2.12.5,<3",
 ]
 all = [
-    "HomericIntelligence-Hephaestus[github,nats,toml,xml,schema]",
+    "HomericIntelligence-Hephaestus[automation,github,nats,toml,xml,schema]",
 ]
 
 [project.scripts]

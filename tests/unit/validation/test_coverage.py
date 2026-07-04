@@ -338,6 +338,26 @@ class TestCoverageOmitJustifications:
         assert payload["missing_modules"] == ["removed"]
         assert payload["unjustified_modules"] == []
 
+    def test_cli_omit_guard_text_reports_missing_modules(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The text CLI mode names stale omit entries for operators."""
+        repo_root = write_stale_omit_fixture(tmp_path)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "check-coverage",
+                "--check-omit-justification",
+                "--repo-root",
+                str(repo_root),
+            ],
+        )
+
+        assert main() == 1
+        captured = capsys.readouterr()
+        assert "no longer match source files" in captured.err
+        assert "removed" in captured.err
+
     def test_cli_omit_guard_uses_default_repo_root(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:

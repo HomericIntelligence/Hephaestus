@@ -384,7 +384,7 @@ t = NATSSubscriberThread(config=cfg, handler=lambda e: None)
 fake_nats = types.ModuleType("nats")
 fake_api = types.ModuleType("nats.js.api")
 
-async def connect(url, **kwargs):
+async def connect(url):
     raise RuntimeError("connect stopped before network")
 
 class DeliverPolicy(str):
