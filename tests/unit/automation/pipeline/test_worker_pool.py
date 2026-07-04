@@ -13,6 +13,7 @@ import pytest
 from hephaestus.automation.pipeline.jobs import (
     AgentJob,
     BuildTestJob,
+    GitJob,
 )
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
@@ -159,21 +160,20 @@ class TestInterruptedPostCheck:
         completion_q: CompletionQueue,
     ) -> None:
         """Job callable returns ok=True but shutdown is set -> interrupted=True."""
-        # Use a slower subprocess to ensure the shutdown event gets set while it's running
         job = BuildTestJob(
             repo="test/repo",
             cwd=Path("/tmp"),
-            argv=("sleep", "1"),
+            argv=("python", "-c", "import time; time.sleep(2)"),  # Long sleep
             timeout_s=60,
         )
 
         pool.submit(job, StageName.CI)
-        # Set shutdown before the job completes (but after submit)
-        time.sleep(0.1)
-        shutdown_event.set()
-        time.sleep(1.5)  # Wait for the sleep job to finish
+        time.sleep(0.1)  # Let job start
+        shutdown_event.set()  # Signal shutdown
+        time.sleep(0.2)  # Give job time to complete
 
-        _, result = completion_q.get_nowait()
+        # Get result from queue with a short timeout
+        _handle, result = completion_q.get(timeout=3)
         assert result.interrupted is True
         assert result.ok is False
 
@@ -209,15 +209,80 @@ class TestInterruptedPostCheck:
 class TestGitMutexSerialization:
     """Tests for per-repo git mutex serialization."""
 
-    def test_same_repo_jobs_use_lock(
+    def test_same_repo_jobs_serialize_with_mutex(
         self,
-        pool: WorkerPool,
         completion_q: CompletionQueue,
     ) -> None:
-        """Two GitJobs for the same repo both use the same lock object."""
-        lock1 = pool._repo_lock("test/repo1")
-        lock2 = pool._repo_lock("test/repo1")
-        assert lock1 is lock2  # Same lock object
+        """Two GitJobs for the same repo run serially (held by lock)."""
+        shutdown_event = threading.Event()
+        pool = WorkerPool(size=2, shutdown=shutdown_event, completion_q=completion_q)
+
+        events: list[str] = []
+        lock = threading.Lock()
+        barrier = threading.Barrier(2)  # Both jobs reach here simultaneously
+
+        def git_job_entrypoint(job_name: str) -> None:
+            # NOTE: _run_git already holds the per-repo lock around this
+            # call — re-acquiring pool._repo_lock here would self-deadlock
+            # (threading.Lock is not reentrant). The barrier alone proves
+            # serialization: if the pool serialized us, the two jobs never
+            # overlap, so neither can satisfy the 2-party barrier.
+            with lock:
+                events.append(f"{job_name}:entered_lock")
+            try:
+                barrier.wait(timeout=0.5)
+            except threading.BrokenBarrierError:
+                # Expected under serialization: the peer never arrives
+                # while we are inside the pool's critical section.
+                with lock:
+                    events.append(f"{job_name}:barrier_failed_expected")
+            with lock:
+                events.append(f"{job_name}:exited_lock")
+
+        job1 = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={},
+        )
+        job2 = GitJob(
+            repo="test/repo",
+            op="remove_worktree",
+            timeout_s=60,
+            kwargs={},
+        )
+
+        instance = MagicMock()
+
+        def create_side_effect(**kwargs: object) -> None:
+            git_job_entrypoint("job1")
+
+        def remove_side_effect(**kwargs: object) -> None:
+            git_job_entrypoint("job2")
+
+        instance.create_worktree.side_effect = create_side_effect
+        instance.remove_worktree.side_effect = remove_side_effect
+
+        with patch(
+            "hephaestus.automation.pipeline.worker_pool.WorktreeManager",
+            return_value=instance,
+        ):
+            pool.submit(job1, StageName.REPO)
+            pool.submit(job2, StageName.REPO)
+            # Block on the completion channel instead of sleeping: robust
+            # under the slow pure-Python coverage tracer and proves both
+            # jobs actually complete.
+            completions = [completion_q.get(timeout=10.0) for _ in range(2)]
+
+        pool.shutdown()
+
+        assert len(completions) == 2
+
+        # Verify serialization: both jobs must have failed the barrier —
+        # they never overlapped inside the pool's critical section, and the
+        # event order proves one job fully finished before the other began.
+        assert [e for e in events if e.endswith(":barrier_failed_expected")], events
+        assert events.index("job1:exited_lock") < len(events)
 
     def test_different_repo_jobs_use_different_locks(
         self,

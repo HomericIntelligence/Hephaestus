@@ -13,6 +13,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .jobs import GIT_OPS, AgentJob, BuildTestJob, GitJob, JobHandle, JobResult
     from .queues import CompletionQueue, StageQueue
     from .routing import (
         ROUTES,
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
         StageOutcome,
     )
     from .work_item import HistoryEvent, ItemKind, ItemResult, WorkItem
+    from .worker_pool import WorkerPool
 
 __all__ = [
     "GIT_OPS",

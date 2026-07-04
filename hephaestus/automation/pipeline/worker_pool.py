@@ -30,6 +30,7 @@ from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.resilience import (
     CircuitBreakerOpenError,
+    resilient_call,
 )
 
 logger = logging.getLogger(__name__)
@@ -114,9 +115,10 @@ class WorkerPool:
         try:
             result = future.result()
             self._completion_q.put((handle, result))
-        except BaseException:
-            # future.result() can raise BaseException (e.g. a bug in _run),
-            # but the _run wrapper catches everything so this should be rare.
+        except Exception:
+            # _run catches all job failures and returns them in a JobResult,
+            # so future.result() should rarely raise. This handles only
+            # unexpected runtime errors from the callback machinery.
             logger.exception("Future result() raised, discarding")
 
     def _run(self, job: AgentJob | BuildTestJob | GitJob) -> JobResult:
@@ -143,14 +145,14 @@ class WorkerPool:
                 result = self._run_git(job)
             else:
                 raise TypeError(f"unknown job type {type(job)}")
-        except BaseException as exc:
-            # Worker isolates ALL failures (including KeyboardInterrupt) into
-            # a result so the callback never re-raises into its thread.
+        except Exception as exc:
+            # Convert job execution failures into a JobResult so the callback
+            # never re-raises into its thread. This catches normal runtime errors
+            # but allows process-control exceptions to propagate normally.
             logger.exception("Job %s raised, returning error result", job)
             result = JobResult(
                 ok=False,
                 error=f"{type(exc).__name__}: {exc!s}"[:500],
-                duration_s=time.monotonic() - start,
             )
 
         # Mandatory post-check: SIGINT to the process group makes subprocess
@@ -171,33 +173,37 @@ class WorkerPool:
         try:
             agent = resolve_agent(job.agent)
             is_claude = agent == "claude"
+            prompt = job.prompt_builder(**job.prompt_kwargs)
 
-            if is_claude:
-                # Claude: invoke via claude_invoke.invoke_claude_with_session
-                prompt = job.prompt_builder(**job.prompt_kwargs)
-                stdout, _ = claude_invoke.invoke_claude_with_session(
-                    repo=job.repo,
-                    issue=job.issue,
-                    agent=job.agent,
-                    prompt=prompt,
-                    model=job.model,
-                    cwd=job.cwd,
-                    timeout=job.timeout_s,
-                    output_format=job.output_format,
-                )
-            else:
-                # Non-Claude: invoke via run_agent_session (e.g. codex, pi)
-                prompt = job.prompt_builder(**job.prompt_kwargs)
-                agent_result = run_agent_session(
-                    agent=agent,
-                    prompt=prompt,
-                    cwd=job.cwd,
-                    timeout=job.timeout_s,
-                    model=job.model,
-                    sandbox="workspace-write",
-                    approval="never",
-                )
-                stdout = agent_result.stdout or ""
+            def _invoke() -> str:
+                if is_claude:
+                    stdout, _ = claude_invoke.invoke_claude_with_session(
+                        repo=job.repo,
+                        issue=job.issue,
+                        agent=job.agent,
+                        prompt=prompt,
+                        model=job.model,
+                        cwd=job.cwd,
+                        timeout=job.timeout_s,
+                        output_format=job.output_format,
+                    )
+                    return stdout
+                else:
+                    agent_result = run_agent_session(
+                        agent=agent,
+                        prompt=prompt,
+                        cwd=job.cwd,
+                        timeout=job.timeout_s,
+                        model=job.model,
+                        sandbox="workspace-write",
+                        approval="never",
+                    )
+                    return agent_result.stdout or ""
+
+            stdout = resilient_call(
+                _invoke,
+                circuit_breaker_name=f"agent:{agent}:{job.model}",
+            )
 
             value = None
             if job.parse is not None:

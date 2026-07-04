@@ -182,10 +182,6 @@ class FakeWorkerPool:
         else:
             return JobResult(ok=False, error="unknown job type")
 
-    def set_job_result(self, handle: JobHandle, result: JobResult) -> None:
-        """Override the result for a handle (for mocking specific job outcomes)."""
-        self._results[handle] = result
-
     def shutdown(self) -> None:
         """Shutdown (no-op for fake pool)."""
         pass
@@ -198,8 +194,8 @@ def fake_github() -> FakeGitHub:
 
 
 @pytest.fixture
-def fake_pool(completion_q: CompletionQueue | None = None) -> FakeWorkerPool:
-    """Fresh FakeWorkerPool instance for each test."""
+def fake_pool(completion_q: CompletionQueue) -> FakeWorkerPool:
+    """Fresh FakeWorkerPool instance for each test, wired to the provided completion queue."""
     return FakeWorkerPool(completion_q=completion_q)
 
 
