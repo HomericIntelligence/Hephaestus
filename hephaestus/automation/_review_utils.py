@@ -539,12 +539,26 @@ def log_file_path(
     issue_number: int,
     *,
     iteration: int | None = None,
+    suffix: str = "log",
 ) -> Path:
-    """Return the standard per-issue automation log path."""
+    """Return the standard per-issue automation log path.
+
+    Args:
+        state_dir: Directory that holds per-issue automation logs.
+        prefix: Log-name prefix identifying the phase (e.g. ``"address"``).
+        issue_number: GitHub issue number the log belongs to.
+        iteration: Optional review-round number appended as ``-r{iteration}``.
+        suffix: File extension without the leading dot (a leading dot is
+            stripped); may itself contain dots (e.g. ``"parse-error.log"``).
+
+    Returns:
+        ``{state_dir}/{prefix}-{issue_number}[-r{iteration}].{suffix}``.
+
+    """
     stem = f"{prefix}-{issue_number}"
     if iteration is not None:
         stem = f"{stem}-r{iteration}"
-    return state_dir / f"{stem}.log"
+    return state_dir / f"{stem}.{suffix.removeprefix('.')}"
 
 
 def _copy_default(default: Mapping[str, Any]) -> dict[str, Any]:
