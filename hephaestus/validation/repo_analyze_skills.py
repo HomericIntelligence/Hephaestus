@@ -17,6 +17,7 @@ import yaml
 
 from hephaestus.cli.utils import create_validation_parser, emit_json_status
 
+# This module lives at hephaestus/validation/, so the repo root is two parents up.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMMON_DIR = REPO_ROOT / "skills" / "_repo_analyze_common"
 SKILLS_DIR = REPO_ROOT / "skills"

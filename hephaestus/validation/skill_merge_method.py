@@ -17,6 +17,8 @@ from pathlib import Path
 HARDCODED = re.compile(r"gh\s+pr\s+merge\b[^\n]*--auto\b[^\n]*--(rebase|squash|merge)\b")
 MARKER = "<!-- merge-method-allowed: example -->"
 FENCE = re.compile(r"^\s*```")
+# This module lives at hephaestus/validation/, so the repo root is two parents up.
+_DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _block_is_marked(lines: list[str], idx: int) -> bool:
@@ -64,7 +66,7 @@ def main() -> int:
         0 if no violations found, 1 otherwise
 
     """
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = _DEFAULT_REPO_ROOT
     findings = scan(repo_root)
     if not findings:
         return 0
