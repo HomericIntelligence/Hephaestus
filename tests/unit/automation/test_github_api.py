@@ -501,15 +501,20 @@ class TestGhCall:
 
         assert mock_run.call_count == 1
 
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "gh: Could not resolve to an Issue with the number of 119.",
+            "GraphQL: Could not resolve to an issue or pull request with the number of 5528.",
+        ],
+    )
     @patch("hephaestus.github.client.run_subprocess")
     @patch("hephaestus.github.client.time.sleep")
-    def test_fail_fast_on_could_not_resolve_issue(self, _mock_sleep: Any, mock_run: Any) -> None:
+    def test_fail_fast_on_could_not_resolve_issue(
+        self, _mock_sleep: Any, mock_run: Any, stderr: str
+    ) -> None:
         """A permanent GitHub issue-resolution failure must not retry."""
-        mock_run.side_effect = subprocess.CalledProcessError(
-            1,
-            "gh",
-            stderr="gh: Could not resolve to an Issue with the number of 119.",
-        )
+        mock_run.side_effect = subprocess.CalledProcessError(1, "gh", stderr=stderr)
 
         with pytest.raises(subprocess.CalledProcessError):
             _gh_call(["issue", "view", "119"], max_retries=6)
