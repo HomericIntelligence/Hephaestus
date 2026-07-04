@@ -50,3 +50,29 @@ def test_base_import_does_not_load_automation_or_heavy_deps() -> None:
     assert leaked == [], (
         f"forbidden modules loaded by `import hephaestus` (ADR-0001 / issue #711 AC#3): {leaked}"
     )
+
+
+def test_validation_package_and_console_script_targets_import() -> None:
+    """Validation package exports and declared validation CLIs stay importable."""
+    code = (
+        "import importlib\n"
+        "from pathlib import Path\n"
+        "from hephaestus.io.toml import import_tomllib\n"
+        "import hephaestus.validation\n"
+        "tomllib = import_tomllib()\n"
+        "assert tomllib is not None\n"
+        "pyproject = tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))\n"
+        "targets = pyproject['project']['scripts'].values()\n"
+        "for target in targets:\n"
+        "    module_name, _, attr = target.partition(':')\n"
+        "    if not module_name.startswith('hephaestus.validation.'):\n"
+        "        continue\n"
+        "    module = importlib.import_module(module_name)\n"
+        "    getattr(module, attr)\n"
+    )
+    subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
