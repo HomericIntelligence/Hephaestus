@@ -35,6 +35,7 @@ _DELIVER_POLICIES = frozenset(
     {"all", "last", "new", "by_start_sequence", "by_start_time", "last_per_subject"}
 )
 _FLOAT_FIELDS = frozenset({"initial_backoff_seconds", "max_backoff_seconds", "backoff_multiplier"})
+_BOOL_FIELDS = frozenset({"tls", "tls_handshake_first", "allow_plaintext"})
 
 
 @dataclass
@@ -107,6 +108,13 @@ class NATSConfig:
                 ``initial_backoff_seconds``.
 
         """
+        self.tls = _coerce_config_bool("tls", self.tls)
+        self.tls_handshake_first = _coerce_config_bool(
+            "tls_handshake_first",
+            self.tls_handshake_first,
+        )
+        self.allow_plaintext = _coerce_config_bool("allow_plaintext", self.allow_plaintext)
+
         if self.deliver_policy not in _DELIVER_POLICIES:
             raise ValueError(
                 f"deliver_policy must be one of {sorted(_DELIVER_POLICIES)}, "
@@ -133,8 +141,9 @@ class NATSConfig:
             and _is_nonlocal_plaintext_url(self.url)
             and not self.allow_plaintext
         ):
+            scheme = urlparse(self.url).scheme or "nats"
             raise ValueError(
-                "enabled NATS plaintext nats:// URLs are allowed only for localhost; "
+                f"enabled NATS plaintext {scheme}:// URLs are allowed only for localhost; "
                 "use tls:// or tls=True for production, or set allow_plaintext=True "
                 "for an explicit non-production exception"
             )
@@ -224,10 +233,19 @@ def _coerce_bool(name: str, raw: str) -> bool:
     raise ValueError(f"{name} must be a boolean, got {raw!r}")
 
 
+def _coerce_config_bool(field_name: str, raw: Any) -> bool:
+    """Coerce a config bool field from bool/string input or reject it."""
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return _coerce_bool(field_name, raw)
+    raise ValueError(f"{field_name} must be a boolean, got {raw!r}")
+
+
 def _is_nonlocal_plaintext_url(url: str) -> bool:
-    """Return whether *url* is a plaintext NATS URL for a non-loopback host."""
+    """Return whether *url* is a plaintext NATS/WebSocket URL for a non-loopback host."""
     parsed = urlparse(url)
-    if parsed.scheme != "nats":
+    if parsed.scheme not in {"nats", "ws"}:
         return False
     host = parsed.hostname
     if host is None or host in {"", "localhost"}:
@@ -337,4 +355,7 @@ def load_nats_config(
     for field_name in _FLOAT_FIELDS:
         if field_name in filtered:
             filtered[field_name] = _coerce_float(field_name, filtered[field_name])
+    for field_name in _BOOL_FIELDS:
+        if field_name in filtered:
+            filtered[field_name] = _coerce_config_bool(field_name, filtered[field_name])
     return NATSConfig(**filtered)

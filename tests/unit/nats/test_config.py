@@ -71,6 +71,10 @@ class TestNATSConfig:
         with pytest.raises(ValueError, match="plaintext nats://"):
             NATSConfig(enabled=True, url="nats://broker.example.com:4222", tls=False)
 
+    def test_nonlocal_plaintext_ws_rejected_when_enabled(self) -> None:
+        with pytest.raises(ValueError, match="plaintext ws://"):
+            NATSConfig(enabled=True, url="ws://broker.example.com:4222", tls=False)
+
     def test_loopback_plaintext_allowed_for_local_development(self) -> None:
         config = NATSConfig(enabled=True, url="nats://127.0.0.1:4222", tls=False)
         assert config.tls_enabled is False
@@ -184,6 +188,38 @@ class TestLoadNATSConfig:
     def test_yaml_string_backoff_coerced_to_float(self) -> None:
         config = load_nats_config({"initial_backoff_seconds": "0.5"})
         assert config.initial_backoff_seconds == 0.5
+
+    def test_yaml_string_false_does_not_permit_nonlocal_plaintext(self) -> None:
+        with pytest.raises(ValueError, match="plaintext nats://"):
+            load_nats_config(
+                {
+                    "enabled": True,
+                    "url": "nats://broker.example.com:4222",
+                    "tls": "false",
+                    "allow_plaintext": "false",
+                },
+                env_override=False,
+            )
+
+    def test_yaml_string_bools_are_coerced_before_validation(self) -> None:
+        config = load_nats_config(
+            {
+                "enabled": True,
+                "url": "tls://broker.example.com:4222",
+                "tls": "false",
+                "tls_handshake_first": "true",
+                "allow_plaintext": "false",
+            },
+            env_override=False,
+        )
+
+        assert config.tls is False
+        assert config.tls_handshake_first is True
+        assert config.allow_plaintext is False
+
+    def test_yaml_invalid_bool_names_field(self) -> None:
+        with pytest.raises(ValueError, match="allow_plaintext"):
+            load_nats_config({"allow_plaintext": "sometimes"}, env_override=False)
 
     def test_env_reads_tls_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("NATS_URL", "tls://broker.example.com:4222")
