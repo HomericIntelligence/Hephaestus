@@ -43,6 +43,12 @@ def test_import_fails_if_removed_symbol_is_reintroduced_to_lazy_imports(
         '    "filter_audit_results": ("hephaestus.validation.audit", "filter_audit_results"),\n}',
         injected,
     )
+    # Anchor-freshness guard: if _LAZY_IMPORTS gains a new trailing entry the
+    # replace() above silently no-ops and this test would pass vacuously.
+    assert mutated != init_src, (
+        "mutation anchor is stale — update the injected tail to match the "
+        "current last entry of _LAZY_IMPORTS in hephaestus/__init__.py"
+    )
     module_path = tmp_path / "hephaestus_init_guard_probe.py"
     module_path.write_text(mutated, encoding="utf-8")
 
