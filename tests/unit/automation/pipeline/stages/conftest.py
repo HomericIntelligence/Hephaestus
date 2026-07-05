@@ -46,6 +46,8 @@ class FakeStageGitHub(FakeGitHub):
         failing_checks: list[str] | None = None,
         pending_checks: list[str] | None = None,
         checks: list[dict[str, Any]] | None = None,
+        pr_stuck: bool = False,
+        learn_terminal: bool = False,
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -66,6 +68,10 @@ class FakeStageGitHub(FakeGitHub):
             failing_checks: Canned answer for failing_required_check_names.
             pending_checks: Canned answer for pending_required_check_names.
             checks: Canned answer for pr_checks (all checks for CI polling).
+            pr_stuck: Canned answer for pr_is_genuinely_stuck.
+            learn_terminal: Seed answer for drive_green_learn_terminal —
+                True mirrors an issue whose post-merge /learn already ran
+                terminally (the #848 dedupe record).
 
         """
         super().__init__()
@@ -80,7 +86,10 @@ class FakeStageGitHub(FakeGitHub):
         self._failing_checks = list(failing_checks or [])
         self._pending_checks = list(pending_checks or [])
         self._checks = list(checks or [])
+        self._pr_stuck = pr_stuck
+        self._learn_terminal = learn_terminal
         self.arming_records: dict[int, tuple[int, str]] = {}
+        self.learn_results: dict[int, bool] = {}
 
     def _issue_labels(self, issue_number: int) -> set[str]:
         """Return the issue's label set, seeding it on first access."""
@@ -211,6 +220,25 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror ci_driver.CIDriver._arm_drive_green (records the arming record)."""
         self.arming_records[issue_number] = (pr_number, head_sha)
         self._log("arm_drive_green", issue_number, pr_number, head_sha)
+
+    def pr_is_genuinely_stuck(self, pr_number: int) -> bool:
+        """Mirror pr_manager.pr_is_genuinely_stuck (canned answer)."""
+        del pr_number  # single canned answer; not per-PR keyed
+        return self._pr_stuck
+
+    def drive_green_learn_terminal(self, issue_number: int) -> bool:
+        """Mirror ci_driver._learn_record_terminal over the arming record.
+
+        Terminal when seeded so (``learn_terminal=True``) or once
+        :meth:`mark_drive_green_learn_result` recorded an outcome — the
+        exactly-once /learn read-back (#848).
+        """
+        return self._learn_terminal or issue_number in self.learn_results
+
+    def mark_drive_green_learn_result(self, issue_number: int, *, succeeded: bool) -> None:
+        """Mirror post_merge_processor.mark_drive_green_learn_result [durable]."""
+        self.learn_results[issue_number] = succeeded
+        self._log("mark_drive_green_learn_result", issue_number, succeeded)
 
 
 if TYPE_CHECKING:

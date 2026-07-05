@@ -80,6 +80,34 @@ class TestClassifyCiState:
         # Falls back to all checks
         assert classify_ci_state(checks) is CiConclusion.GREEN
 
+    def test_cancelled_is_failing_not_green(self) -> None:
+        """GREEN mirrors legacy all_green EXACTLY: cancelled must never arm.
+
+        Legacy ``_drive_issue`` computed ``all_green = conclusion in
+        (success, skipped, neutral)``; a cancelled check therefore never
+        took the arm path. The classifier's GREEN must match that set, so
+        the residual (cancelled/timed_out/action_required) is FAILING.
+        """
+        checks = [
+            {"status": "completed", "conclusion": "cancelled", "required": True},
+        ]
+        assert classify_ci_state(checks) is CiConclusion.FAILING
+
+    def test_timed_out_is_failing_not_green(self) -> None:
+        """timed_out is outside the legacy all_green set → FAILING."""
+        checks = [
+            {"status": "completed", "conclusion": "timed_out", "required": True},
+        ]
+        assert classify_ci_state(checks) is CiConclusion.FAILING
+
+    def test_mixed_success_and_cancelled_is_failing(self) -> None:
+        """One non-green conclusion breaks all_green even beside successes."""
+        checks = [
+            {"status": "completed", "conclusion": "success", "required": True},
+            {"status": "completed", "conclusion": "cancelled", "required": True},
+        ]
+        assert classify_ci_state(checks) is CiConclusion.FAILING
+
 
 class TestClassifyPrMergeState:
     """Test classify_pr_merge_state pure classifier."""
@@ -145,3 +173,25 @@ class TestClassifyPrMergeState:
         """gh_state without state field → defaults to empty string → PENDING."""
         gh_state: dict[str, object] = {"mergeStateStatus": "BEHIND"}
         assert classify_pr_merge_state(gh_state, [], [], []) is PrMergeState.PENDING
+
+    def test_fixable_failing_takes_priority_over_dirty(self) -> None:
+        """Legacy ordering: a red required check wins over the DIRTY status.
+
+        Migrated from the ``_wait_for_pr_terminal`` scenario table: the
+        legacy loop checked failing checks BEFORE mergeStateStatus, so a
+        red-and-conflicting PR returns FAILING (drive a fix first).
+        """
+        gh_state = {"state": "OPEN", "mergeStateStatus": "DIRTY"}
+        assert classify_pr_merge_state(gh_state, ["lint"], ["lint"], []) is PrMergeState.FAILING
+
+    def test_policy_only_failure_with_blocked_waits(self) -> None:
+        """Migrated legacy scenario: BLOCKED + auto-merge-policy-only waits.
+
+        A stale auto-merge-policy failure right after arming is not
+        code-fixable and not a branch-protection block: PENDING (the legacy
+        loop kept waiting for the policy check to refresh).
+        """
+        gh_state = {"state": "OPEN", "mergeStateStatus": "BLOCKED"}
+        assert (
+            classify_pr_merge_state(gh_state, ["auto-merge-policy"], [], []) is PrMergeState.PENDING
+        )

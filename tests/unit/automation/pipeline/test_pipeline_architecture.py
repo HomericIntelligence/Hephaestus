@@ -160,21 +160,82 @@ def test_public_mutators_from_all() -> None:
     assert expected <= _PUBLIC_MUTATORS, f"expected mutators missing: {expected - _PUBLIC_MUTATORS}"
 
 
-def test_no_time_sleep_in_pipeline_stages() -> None:
-    """AC1: zero time.sleep in any pipeline stage module (issue #1816)."""
-    import re
+def _sleep_violations(tree: ast.AST, filename: str, *, allow_time_import: bool) -> list[str]:
+    """AST-collect time.sleep usage/imports (issue #1816, AC1).
 
-    violations = []
+    Flags, anywhere in the module (function bodies included):
+
+    - ``time.sleep(...)`` attribute access (any ``<Name time>.sleep``);
+    - ``from time import sleep`` (aliased or not);
+    - any other ``import time`` / ``from time import ...`` form, unless
+      ``allow_time_import`` (base.py legitimately uses ``time.time`` for its
+      injectable-clock default — it still may never sleep).
+    """
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "sleep"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "time"
+        ):
+            violations.append(f"{filename}:{node.lineno}: time.sleep reference")
+        elif isinstance(node, ast.ImportFrom) and node.module == "time":
+            names = {a.name for a in node.names}
+            if "sleep" in names:
+                violations.append(f"{filename}:{node.lineno}: from time import sleep")
+            elif not allow_time_import:
+                violations.append(f"{filename}:{node.lineno}: from time import ...")
+        elif isinstance(node, ast.Import) and not allow_time_import:
+            violations.extend(
+                f"{filename}:{node.lineno}: import time"
+                for a in node.names
+                if a.name == "time" or a.name.startswith("time.")
+            )
+    return violations
+
+
+def test_no_time_sleep_in_pipeline_stages() -> None:
+    """AC1: zero time.sleep in any pipeline stage module (issue #1816).
+
+    AST-based (matching this file's own guards), so conditional/lazy
+    imports and aliased ``from time import sleep`` are caught too — not
+    just top-level text matches. base.py is NOT exempt: it may keep its
+    ``import time`` (the injectable clock's ``time.time`` default) but is
+    asserted to contain no ``time.sleep`` in any form.
+    """
+    violations: list[str] = []
     for py in sorted(_PIPELINE.glob("stages/*.py")):
-        if py.stem == "__init__" or py.stem == "base":
-            continue
-        src = py.read_text()
-        # Check for actual code, not comments: match "time.sleep(" or "time\.sleep\("
-        if re.search(r"time\.sleep\s*\(", src):
-            violations.append(f"{py.name}: contains time.sleep()")
-        # Check for import statements: "import time" or "from time import"
-        if re.search(r"^(?:import|from)\s+time\b", src, re.MULTILINE):
-            violations.append(f"{py.name}: imports time module")
+        tree = ast.parse(py.read_text(), filename=str(py))
+        violations.extend(_sleep_violations(tree, py.name, allow_time_import=py.stem == "base"))
     assert not violations, "stages must not sleep — timer heap owns waits:\n" + "\n".join(
         violations
     )
+
+
+def test_sleep_guard_detects_synthetic_violations() -> None:
+    """Negative test: the AST sleep guard actually flags every forbidden form.
+
+    Without this, a broken ``_sleep_violations`` returning [] would let the
+    guard above pass vacuously.
+    """
+    synthetic = (
+        "import time\n"
+        "from time import sleep\n"
+        "from time import sleep as zzz\n"
+        "def f():\n"
+        "    import time\n"
+        "    time.sleep(1)\n"
+    )
+    tree = ast.parse(synthetic, filename="<synthetic>")
+
+    strict = _sleep_violations(tree, "stage.py", allow_time_import=False)
+    assert any("time.sleep reference" in v for v in strict)
+    assert sum("from time import sleep" in v for v in strict) == 2  # plain + aliased
+    assert sum(": import time" in v for v in strict) == 2  # top-level + in-function
+
+    # base.py mode: the bare imports are allowed, sleep never is.
+    relaxed = _sleep_violations(tree, "base.py", allow_time_import=True)
+    assert any("time.sleep reference" in v for v in relaxed)
+    assert not any(": import time" in v for v in relaxed)
+    assert sum("from time import sleep" in v for v in relaxed) == 2

@@ -19,7 +19,9 @@ import pytest
 
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import (
+    ci,
     implementation,
+    merge_wait,
     plan_review,
     planning,
     pr_review,
@@ -30,6 +32,8 @@ _STAGE_MODULES: dict[StageName, ModuleType] = {
     StageName.PLAN_REVIEW: plan_review,
     StageName.IMPLEMENTATION: implementation,
     StageName.PR_REVIEW: pr_review,
+    StageName.CI: ci,
+    StageName.MERGE_WAIT: merge_wait,
 }
 
 #: Reasons each stage is EXPECTED to emit (lock: additions must edit this).
@@ -40,6 +44,11 @@ _EXPECTED_REASONS: dict[StageName, set[str]] = {
     # human_blocked is emitted as FINISH_FAIL (terminal), not FAIL_BACK —
     # its ROUTES row entry (-> FINISHED) documents the same destination.
     StageName.PR_REVIEW: {"agent_error"},
+    # no_pr/timeout are emitted as FINISH_FAIL (terminal), not FAIL_BACK.
+    StageName.CI: {"fix_exhausted", "not_implementation_go"},
+    # closed/timeout/rebase_exhausted/arm_* are FINISH_FAIL; blocked_stuck
+    # is SKIP — only the cross-stage regressions are FAIL_BACK.
+    StageName.MERGE_WAIT: {"ci_red", "blocked_exhausted"},
 }
 
 
@@ -92,6 +101,8 @@ def test_scan_is_not_vacuous() -> None:
     """The AST scan finds real emissions (guards against a silent no-op scan)."""
     assert "agent_error" in _fail_back_reason_literals(pr_review)
     assert "plan_not_go" in _fail_back_reason_literals(implementation)
+    assert "fix_exhausted" in _fail_back_reason_literals(ci)
+    assert "ci_red" in _fail_back_reason_literals(merge_wait)
 
 
 def test_named_reasons_route_where_the_doc_says() -> None:
@@ -102,3 +113,10 @@ def test_named_reasons_route_where_the_doc_says() -> None:
     assert (
         ROUTES[StageName.IMPLEMENTATION].fail_routes["already_implementation_go_pr"] == StageName.CI
     )
+    assert ROUTES[StageName.CI].fail_routes["fix_exhausted"] == StageName.IMPLEMENTATION
+    assert ROUTES[StageName.CI].fail_routes["not_implementation_go"] == StageName.PR_REVIEW
+    assert ROUTES[StageName.CI].fail_routes["no_pr"] == StageName.FINISHED
+    assert ROUTES[StageName.MERGE_WAIT].fail_routes["ci_red"] == StageName.CI
+    assert ROUTES[StageName.MERGE_WAIT].fail_routes["blocked_exhausted"] == StageName.PR_REVIEW
+    assert ROUTES[StageName.MERGE_WAIT].fail_routes["closed"] == StageName.FINISHED
+    assert ROUTES[StageName.MERGE_WAIT].fail_routes["timeout"] == StageName.FINISHED

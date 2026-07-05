@@ -27,6 +27,14 @@ Coordinator convention (binding for #1817, the coordinator slice):
   the job), then sets ``item.state = on_done_state`` and steps again.
   ``on_job_done`` is never called for interrupted results — interrupts
   leave items resumable, never failed.
+- Timer-park (RETRY delay) contract: ``StageOutcome`` has NO delay field,
+  so a stage that returns ``StageOutcome(Disposition.RETRY, ...)`` for a
+  non-blocking poll records the backoff delay in
+  ``item.payload["retry_delay_s"]`` immediately before returning. The
+  coordinator (#1817) consumes ``payload["retry_delay_s"]`` to park the
+  item on its timer heap and re-steps it after that many seconds (a
+  missing key means "retry on the next drain tick"). Stages NEVER sleep —
+  the heap owns every wait.
 - All durable GitHub mutations go through ``ctx.github`` and happen
   immediately BEFORE the outcome that causes a queue push ("durable write
   precedes the queue push").
@@ -287,6 +295,39 @@ class StageGitHub(Protocol):
         Used by CI stage's ``_poll`` to classify via ``classify_ci_state``.
         The coordinator handles the I/O and dry-run logic; the stage simply
         calls this accessor.
+        """
+        ...
+
+    def pr_is_genuinely_stuck(self, pr_number: int) -> bool:
+        """Return True iff the PR cannot merge without manual/agent action.
+
+        Mirrors ``pr_manager.pr_is_genuinely_stuck`` (#1576): a merge
+        CONFLICT or a red required check is stuck; a BLOCKED-awaiting-review
+        PR is NOT. Gates any ``state:skip`` tagging on the merge_wait
+        BLOCKED-exhaustion path — exactly the legacy skip-ownership guard.
+        """
+        ...
+
+    def drive_green_learn_terminal(self, issue_number: int) -> bool:
+        """Return True when the post-merge ``/learn`` is already terminal.
+
+        Mirrors ``ci_driver.CIDriver._learn_record_terminal`` over the
+        issue's ``ArmingStateStore`` record: a record whose
+        ``learn_captured_at``/``learn_succeeded_at`` is set, or whose
+        ``learn_status`` is ``succeeded``/``failed``, must never fire
+        ``/learn`` again — the merge_wait MERGED path dedupes on this read
+        (doc section 7: "Post-merge learn (deduped via arming_state)").
+        """
+        ...
+
+    def mark_drive_green_learn_result(self, issue_number: int, *, succeeded: bool) -> None:
+        """Durably record the post-merge ``/learn`` outcome on the arming record.
+
+        Mirrors ``post_merge_processor.mark_drive_green_learn_result``:
+        written as soon as the learn job completes (success or failure
+        alike) and BEFORE the FINISH_PASS outcome, so a restart can never
+        replay ``/learn`` for the same merged PR —
+        :meth:`drive_green_learn_terminal` reads this record back.
         """
         ...
 

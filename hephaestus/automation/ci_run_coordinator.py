@@ -29,24 +29,40 @@ class CiConclusion(enum.Enum):
     NO_CHECKS = "no_checks"
 
 
+#: The legacy ``all_green`` conclusion set (``ci_driver._drive_issue`` /
+#: ``CIDriveRunCoordinator.drive_issue``): a PR is GREEN — and may be armed —
+#: only when every required check concluded in one of these.
+GREEN_CONCLUSIONS: frozenset[str] = frozenset({"success", "skipped", "neutral"})
+
+
 def classify_ci_state(checks: list[dict[str, Any]]) -> CiConclusion:
     """Classify already-fetched CI checks WITHOUT any sleep/backoff.
 
     Extracted from poll_ci_until_concluded (issue #1816) so a pipeline stage
-    can classify in one sub-second call and timer-park on PENDING. Returns:
+    can classify in one sub-second call and timer-park on PENDING. GREEN
+    mirrors the legacy ``all_green`` semantics EXACTLY (conclusions all in
+    :data:`GREEN_CONCLUSIONS`) — the pipeline must never arm a PR the legacy
+    driver would not have armed. Returns:
         NO_CHECKS: empty list — no CI configured; caller treats as success.
         PENDING:   at least one required check has status != "completed".
-        FAILING:   all required completed and >=1 conclusion == "failure".
-        GREEN:     all required completed, conclusions in {success,skipped,neutral}.
+        GREEN:     all required completed, conclusions all in
+                   {success, skipped, neutral} (legacy ``all_green``).
+        FAILING:   all required completed but not all green — an explicit
+                   "failure" or a residual conclusion (cancelled, timed_out,
+                   action_required, ...). The residual class is routed to the
+                   fix leg; the legacy driver no-op'd it
+                   (``_handle_failing_pr``: "non-failure conclusions are
+                   treated as no-op"), which stranded such PRs — sending them
+                   to the fix agent is the pipeline's deliberate repair.
     """
     if not checks:
         return CiConclusion.NO_CHECKS
     required = [c for c in checks if c.get("required", False)] or checks
     if not all(c.get("status") == "completed" for c in required):
         return CiConclusion.PENDING
-    if any(c.get("conclusion") == "failure" for c in required):
-        return CiConclusion.FAILING
-    return CiConclusion.GREEN
+    if all(c.get("conclusion") in GREEN_CONCLUSIONS for c in required):
+        return CiConclusion.GREEN
+    return CiConclusion.FAILING
 
 
 class PrMergeState(enum.Enum):
