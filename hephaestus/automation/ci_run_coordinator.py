@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 import logging
 import threading
 import time
@@ -17,6 +18,74 @@ from .git_utils import issue_ref, pr_ref
 from .models import WorkerResult
 
 logger = logging.getLogger(__name__)
+
+
+class CiConclusion(enum.Enum):
+    """Pure classification of a PR's required-check rollup (issue #1816)."""
+
+    GREEN = "green"
+    FAILING = "failing"
+    PENDING = "pending"
+    NO_CHECKS = "no_checks"
+
+
+def classify_ci_state(checks: list[dict[str, Any]]) -> CiConclusion:
+    """Classify already-fetched CI checks WITHOUT any sleep/backoff.
+
+    Extracted from poll_ci_until_concluded (issue #1816) so a pipeline stage
+    can classify in one sub-second call and timer-park on PENDING. Returns:
+        NO_CHECKS: empty list — no CI configured; caller treats as success.
+        PENDING:   at least one required check has status != "completed".
+        FAILING:   all required completed and >=1 conclusion == "failure".
+        GREEN:     all required completed, conclusions in {success,skipped,neutral}.
+    """
+    if not checks:
+        return CiConclusion.NO_CHECKS
+    required = [c for c in checks if c.get("required", False)] or checks
+    if not all(c.get("status") == "completed" for c in required):
+        return CiConclusion.PENDING
+    if any(c.get("conclusion") == "failure" for c in required):
+        return CiConclusion.FAILING
+    return CiConclusion.GREEN
+
+
+class PrMergeState(enum.Enum):
+    """Pure classification of an armed PR's merge state (issue #1816)."""
+
+    MERGED = "merged"
+    CLOSED = "closed"
+    FAILING = "failing"
+    DIRTY = "dirty"
+    BLOCKED = "blocked"
+    PENDING = "pending"
+
+
+def classify_pr_merge_state(
+    gh_state: dict[str, Any] | None,
+    failing: list[str],
+    fixable_failing: list[str],
+    pending: list[str],
+) -> PrMergeState:
+    """Branch logic of _wait_for_pr_terminal (issue #1816), no sleep/no I/O.
+
+    Mirrors ci_driver.py:1515-1582 exactly. The policy-only-failure logging
+    branch (:1575-1582) is intentionally omitted: it only logs and does NOT
+    change the returned state (falls through to PENDING either way), so
+    dropping it preserves behavior — verified against ci_driver.py:1575-1582.
+    """
+    state = ((gh_state or {}).get("state") or "").upper()
+    if state == "MERGED":
+        return PrMergeState.MERGED
+    if state == "CLOSED":
+        return PrMergeState.CLOSED
+    if fixable_failing:
+        return PrMergeState.FAILING
+    merge_status = ((gh_state or {}).get("mergeStateStatus") or "").upper()
+    if merge_status in ("DIRTY", "CONFLICTING"):
+        return PrMergeState.DIRTY
+    if merge_status == "BLOCKED" and not failing and not pending:
+        return PrMergeState.BLOCKED
+    return PrMergeState.PENDING
 
 
 class CIDriveRunCoordinator:
@@ -209,11 +278,12 @@ class CIDriveRunCoordinator:
         poll_attempt = 0
         while True:
             checks = self._check_inspector.gh_pr_checks(pr_number, self._options().dry_run)
-            if not checks:
+            conclusion = classify_ci_state(checks)
+            if conclusion is CiConclusion.NO_CHECKS:
                 logger.info("Issue #%s: no CI checks found for PR #%s", issue_number, pr_number)
                 return None
-            required_checks = [c for c in checks if c.get("required", False)] or checks
-            if all(c["status"] == "completed" for c in required_checks):
+            if conclusion is not CiConclusion.PENDING:  # GREEN or FAILING → concluded
+                required_checks = [c for c in checks if c.get("required", False)] or checks
                 return checks, required_checks
             sleep_secs = min(2**poll_attempt, 60)
             if poll_elapsed + sleep_secs > max_wait:

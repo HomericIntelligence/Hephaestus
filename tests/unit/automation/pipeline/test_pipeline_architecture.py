@@ -158,3 +158,23 @@ def test_public_mutators_from_all() -> None:
         "gh_create_label",
     }
     assert expected <= _PUBLIC_MUTATORS, f"expected mutators missing: {expected - _PUBLIC_MUTATORS}"
+
+
+def test_no_time_sleep_in_pipeline_stages() -> None:
+    """AC1: zero time.sleep in any pipeline stage module (issue #1816)."""
+    import re
+
+    violations = []
+    for py in sorted(_PIPELINE.glob("stages/*.py")):
+        if py.stem == "__init__" or py.stem == "base":
+            continue
+        src = py.read_text()
+        # Check for actual code, not comments: match "time.sleep(" or "time\.sleep\("
+        if re.search(r"time\.sleep\s*\(", src):
+            violations.append(f"{py.name}: contains time.sleep()")
+        # Check for import statements: "import time" or "from time import"
+        if re.search(r"^(?:import|from)\s+time\b", src, re.MULTILINE):
+            violations.append(f"{py.name}: imports time module")
+    assert not violations, "stages must not sleep — timer heap owns waits:\n" + "\n".join(
+        violations
+    )
