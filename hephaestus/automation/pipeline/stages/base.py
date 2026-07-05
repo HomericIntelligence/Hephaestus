@@ -46,14 +46,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeAlias, runtime_checkable
 
-from ..jobs import AgentJob, JobHandle, JobResult
+from ..jobs import AgentJob, BuildTestJob, GitJob, JobHandle, JobResult
 from ..routing import Disposition, StageName, StageOutcome
 from ..work_item import ItemKind, WorkItem
 
 __all__ = [
     "AgentJob",
+    "BuildTestJob",
     "Continue",
     "Disposition",
+    "GitJob",
     "ItemKind",
     "JobHandle",
     "JobRequest",
@@ -132,6 +134,76 @@ class StageGitHub(Protocol):
         """
         ...
 
+    # -- implementation / pr_review surface (#1815) ------------------------
+
+    def get_pr_head_branch(self, pr_number: int) -> str | None:
+        """Return the PR's head branch name (``_review_utils.get_pr_head_branch``)."""
+        ...
+
+    def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
+        """Return ``(has_go, has_no_go)`` for the PR's implementation state labels.
+
+        Mirrors ``pr_manager.pr_has_implementation_state_label`` — the
+        existing-PR fast-path read the implementation GATE uses.
+        """
+        ...
+
+    def count_unresolved_threads(self, pr_number: int) -> tuple[int, int]:
+        """Return ``(automation_unresolved, human_unresolved)`` thread counts.
+
+        Mirrors ``_review_phase._count_unresolved_threads_blocking_go``
+        (#1152): the pr_review EVAL gate — a GO only stands with zero of
+        both; open human threads yield HUMAN_BLOCKED, open automation
+        threads downgrade GO to NOGO. This read resolves nothing.
+        """
+        ...
+
+    def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
+        """Durably ensure the PR exists and return its number (idempotent).
+
+        The coordinator maps this onto the ``pr_manager.ensure_pr_created``
+        chain (→ ``gh_pr_create``), which is idempotent for an existing PR.
+        PR creation is the implementation stage's journal entry (doc
+        section 4: "Owned labels: PR creation is the journal entry").
+        """
+        ...
+
+    def defer_auto_merge(self, pr_number: int) -> None:
+        """Durably ensure auto-merge stays DISABLED until implementation GO.
+
+        Mirrors ``pr_manager.ensure_pr_auto_merge_deferred`` — called
+        immediately after PR creation (legacy runner order,
+        ``implementer_phase_runner.py:623``): auto-merge must never be armed
+        before ``state:implementation-go``.
+        """
+        ...
+
+    def post_review_threads(
+        self, pr_number: int, threads: list[dict[str, Any]], summary: str
+    ) -> list[str]:
+        """Durably post surviving review threads to the PR; return thread ids.
+
+        The pr_review POST step's durable write (doc section 5 step 3). The
+        coordinator maps this onto ``gh_pr_review_post``.
+        """
+        ...
+
+    def mark_pr_implementation_go(self, pr_number: int) -> None:
+        """Durably apply ``state:implementation-go`` to the PR.
+
+        Mirrors ``pr_manager.mark_pr_implementation_go``; written BEFORE
+        :meth:`arm_auto_merge` (the label authorizes the arming).
+        """
+        ...
+
+    def arm_auto_merge(self, pr_number: int) -> None:
+        """Durably arm squash auto-merge after implementation GO.
+
+        Mirrors ``pr_manager.enable_auto_merge_after_implementation_go``;
+        only ever called after :meth:`mark_pr_implementation_go` succeeded.
+        """
+        ...
+
 
 @dataclass(frozen=True)
 class Continue:
@@ -145,13 +217,14 @@ class JobRequest:
     """Request a job be submitted to the worker pool.
 
     Attributes:
-        job: The frozen job spec to submit.
+        job: The frozen job spec to submit (agent, build/test, or git — the
+            same union :class:`~..jobs.JobHandle` carries).
         on_done_state: The state the coordinator moves the item to after the
             job completes and ``on_job_done`` has run.
 
     """
 
-    job: AgentJob
+    job: AgentJob | BuildTestJob | GitJob
     on_done_state: str
 
 
