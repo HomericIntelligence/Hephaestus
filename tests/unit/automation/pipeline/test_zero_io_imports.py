@@ -54,6 +54,13 @@ _THIN_FETCH_PREFIXES = (
 _CAPABILITY_EXEMPT: dict[str, tuple[str, ...]] = {
     "seeding.py": _THIN_FETCH_PREFIXES,
     "admission.py": _THIN_FETCH_PREFIXES,
+    # stages/plan_review.py imports ONLY the pure verdict parser
+    # (claude_invoke.parse_review_verdict / ReviewVerdict) to attach as
+    # AgentJob.parse — the architecture doc's plan_review contract says the
+    # "verdict [is] parsed in-worker by claude_invoke.parse_review_verdict"
+    # (#1814). The exemption is prefix-scoped: any other I/O-flavored import
+    # in the module still trips the guard via the remaining prefixes.
+    "plan_review.py": ("hephaestus.automation.claude_invoke",),
 }
 
 
