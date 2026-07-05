@@ -33,10 +33,3 @@ def test_shim_reexports_match_canonical(symbol_name: str) -> None:
 
     # They should be the same object (re-export via `as name` binding)
     assert shim_obj is canonical_obj, f"{symbol_name} drifted: shim is not the canonical object"
-
-
-def test_shimmed_functions_callable() -> None:
-    """All shimmed functions are callable."""
-    for symbol_name in SHIMMED_SYMBOLS:
-        obj = getattr(loop_runner, symbol_name)
-        assert callable(obj), f"{symbol_name} is not callable"

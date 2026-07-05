@@ -1,18 +1,29 @@
 """File-overlap serialization and admission control for the implementation queue.
 
 Tests the within-round file-overlap guard that defers issues whose planned file
-sets intersect an in-flight peer's, and the filtered-open-issues helper.
+sets intersect an in-flight peer's, the topological-order gating for the
+implementation queue, and the filtered-open-issues helper.
 """
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import patch
 
+import pytest
+
+from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline.admission import (
     _filter_open_issues,
     _parse_planned_files,
     _select_non_overlapping,
+    order_for_implementation,
 )
+
+
+def _info(number: int, dependencies: list[int] | None = None) -> IssueInfo:
+    """Build a minimal IssueInfo for dependency-ordering tests."""
+    return IssueInfo(number=number, title=f"Issue {number}", dependencies=dependencies or [])
 
 
 class TestParsePlannedFiles:
@@ -187,6 +198,40 @@ class TestSelectNonOverlapping:
         # #1 claims file1.py; #2 overlaps file1.py → defer; #3 claims file2.py → dispatch.
         assert dispatch == [1, 3]
         assert defer == [2]
+
+
+class TestOrderForImplementation:
+    """Topological-order gating: dependencies dispatch before dependents."""
+
+    def test_dependency_ordered_before_dependent(self) -> None:
+        """#A depends on #B → B precedes A regardless of input order."""
+        order = order_for_implementation([_info(10, dependencies=[20]), _info(20)])
+        assert order.index(20) < order.index(10)
+
+    def test_no_dependencies_preserves_input_order(self) -> None:
+        """Independent issues keep their dispatch-priority (input) order."""
+        assert order_for_implementation([_info(3), _info(1), _info(2)]) == [3, 1, 2]
+
+    def test_out_of_set_dependency_ignored(self) -> None:
+        """A dependency outside the implementation queue is dropped (fail-open)."""
+        # #5 depends on #999 which is not admitted — #5 must still be ordered.
+        order = order_for_implementation([_info(5, dependencies=[999]), _info(6)])
+        assert sorted(order) == [5, 6]
+
+    def test_chain_fully_ordered(self) -> None:
+        """A → B → C chain sorts leaf-dependency first."""
+        order = order_for_implementation(
+            [_info(1, dependencies=[2]), _info(2, dependencies=[3]), _info(3)]
+        )
+        assert order == [3, 2, 1]
+
+    def test_cycle_falls_open_to_input_order(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A dependency cycle keeps input order and warns (never wedges the queue)."""
+        infos = [_info(1, dependencies=[2]), _info(2, dependencies=[1]), _info(3)]
+        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.pipeline.admission"):
+            order = order_for_implementation(infos)
+        assert order == [1, 2, 3]
+        assert any("dependency cycle" in record.message for record in caplog.records)
 
 
 class TestFilterOpenIssues:

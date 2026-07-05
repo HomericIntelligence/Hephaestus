@@ -1,25 +1,43 @@
-"""Admission control for implementation queue: file-overlap serialization and dependency ordering.
+"""Admission control for the implementation queue.
 
 Part of epic #1809. Provides:
-- File-overlap detection via greedy first-fit partitioning
-- Dependency-based execution ordering via topological sort
-- Per-repo in-flight work-item cap helpers
+
+- File-overlap serialization via greedy first-fit partitioning
+  (:func:`_select_non_overlapping`, re-housed from ``loop_runner.py``, #1623)
+- Dependency-based execution ordering via
+  ``DependencyResolver.topological_sort`` (:func:`order_for_implementation`)
+- Closed-issue filtering for explicit ``--issues`` lists
+  (:func:`_filter_open_issues`, #1576)
 
 The file-overlap guard (#1623) prevents concurrent plan execution on the same
 source files, which would lead to merge conflicts when the first PR lands.
+
+Dropped deliverable (documented): the per-repo in-flight cap helper
+(``within_repo_cap``) is intentionally NOT implemented. The issue #1813
+"# Implementation Plan" comment sanctions the drop: "justify or drop
+``within_repo_cap`` (YAGNI — no named consumer)" — no consumer exists until
+the coordinator slice (#1817), which owns worker-slot accounting and can add
+a cap where it dispatches.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from typing import TYPE_CHECKING
 
+from hephaestus.automation.dependency_resolver import CyclicDependencyError, DependencyResolver
 from hephaestus.automation.github_api import (
     _fetch_issue_comment_ids,
     is_issue_closed,
     prefetch_issue_states,
 )
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from hephaestus.automation.models import IssueInfo
 
 LOG = logging.getLogger(__name__)
 
@@ -44,10 +62,10 @@ def _parse_planned_files(plan_body: str) -> set[str]:
     heading. Empty set when neither section exists.
 
     Args:
-            plan_body: The full body of the plan comment.
+        plan_body: The full body of the plan comment.
 
     Returns:
-            The set of backticked repo-relative paths found in the Files sections.
+        The set of backticked repo-relative paths found in the Files sections.
 
     """
     files: set[str] = set()
@@ -74,10 +92,10 @@ def _fetch_planned_files(issue: int) -> set[str] | None:
     "no plan" signal is simply an empty/no-match list.
 
     Args:
-            issue: GitHub issue number.
+        issue: GitHub issue number.
 
     Returns:
-            The parsed plan file set, or None when no plan comment is present.
+        The parsed plan file set, or None when no plan comment is present.
 
     """
     for comment in _fetch_issue_comment_ids(issue):
@@ -99,10 +117,10 @@ def _select_non_overlapping(issues: list[int]) -> tuple[list[int], list[int]]:
     is bounded by the issue count already being processed that round.
 
     Args:
-            issues: The issue numbers to partition, in dispatch-priority order.
+        issues: The issue numbers to partition, in dispatch-priority order.
 
     Returns:
-            A ``(dispatch, defer)`` tuple of issue-number lists (order preserved).
+        A ``(dispatch, defer)`` tuple of issue-number lists (order preserved).
 
     """
     claimed: set[str] = set()
@@ -124,6 +142,47 @@ def _select_non_overlapping(issues: list[int]) -> tuple[list[int], list[int]]:
     return dispatch, defer
 
 
+def order_for_implementation(issue_infos: Sequence[IssueInfo]) -> list[int]:
+    """Order implementation-queue issues so dependencies come first.
+
+    Topological-order gating via ``DependencyResolver.topological_sort``:
+    builds a graph over exactly the given issues, keeping only dependency
+    edges whose target is ALSO in the set — an edge to an issue outside the
+    implementation queue cannot be ordered here and is dropped (fail-open;
+    that dependency's own classification decides when it runs). Kahn's
+    algorithm preserves the input order among issues at equal depth, so the
+    result is deterministic.
+
+    On a dependency cycle the original order is returned unchanged with a
+    warning (fail-open: never wedge the queue over bad metadata).
+
+    Args:
+        issue_infos: Issue metadata (``number`` + ``dependencies``) for every
+            issue currently admitted to the implementation queue.
+
+    Returns:
+        The issue numbers reordered so every in-set dependency precedes its
+        dependents.
+
+    """
+    in_set = {info.number for info in issue_infos}
+    resolver = DependencyResolver(skip_closed=False)
+    for info in issue_infos:
+        resolver.graph.add_issue(info)
+    for info in issue_infos:
+        for dep in info.dependencies:
+            if dep in in_set:
+                resolver.graph.add_dependency(info.number, dep)
+    try:
+        return resolver.topological_sort()
+    except CyclicDependencyError:
+        LOG.warning(
+            "dependency cycle among implementation-queue issues %s — keeping input order",
+            sorted(in_set),
+        )
+        return [info.number for info in issue_infos]
+
+
 def _filter_open_issues(repo: str, issue_numbers: list[int]) -> list[int]:
     """Drop CLOSED issues from an explicit ``--issues`` list (#1576).
 
@@ -135,11 +194,11 @@ def _filter_open_issues(repo: str, issue_numbers: list[int]) -> list[int]:
     never silently drop work over a transient API blip).
 
     Args:
-            repo: Repository name (for logging).
-            issue_numbers: The explicit issue list.
+        repo: Repository name (for logging).
+        issue_numbers: The explicit issue list.
 
     Returns:
-            The subset that is not closed (order preserved).
+        The subset that is not closed (order preserved).
 
     """
     try:
@@ -157,7 +216,9 @@ def _filter_open_issues(repo: str, issue_numbers: list[int]) -> list[int]:
 
 
 __all__ = [
+    "_fetch_planned_files",
     "_filter_open_issues",
     "_parse_planned_files",
     "_select_non_overlapping",
+    "order_for_implementation",
 ]

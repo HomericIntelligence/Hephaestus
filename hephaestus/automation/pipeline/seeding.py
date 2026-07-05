@@ -3,28 +3,43 @@
 Part of epic #1809. Reconstructs in-memory queues from GitHub labels and PR state,
 the single source of truth for "GitHub is the journal" architecture.
 
-Pure classifier: (labels, PR existence/state) → entry queue, using **ordered label rank**:
+Pure classifier: (labels, PR existence/state) → entry stage, using **ordered label rank**:
 - needs-plan(0) < plan-no-go(1) < plan-go(2) < implementation-no-go(3) < implementation-go(4)
 - At-or-past comparisons, NEVER equality (verified lesson: `==` strands items already past target)
 
-Entry queue routing:
-- `state:skip` or epic label → excluded (logged)
+Entry routing (the binding contract is the classification table in
+``docs/AUTOMATION_LOOP_ARCHITECTURE.md`` "Seeding and reconstruction"):
+
+- ``state:skip`` or epic → excluded (stage ``None``, logged)
 - PR merged → finished (pass, idempotent)
-- Open PR + `state:implementation-go` → ci
+- Open PR + at-or-past ``state:implementation-go`` → ci
 - Open PR, no impl-GO → pr_review (existing-PR path)
-- No PR, at-or-past `state:plan-go` → implementation
-- No PR, `state:plan-no-go` → planning (amend path)
-- `state:needs-plan` / no state label → planning
+- No PR, at-or-past ``state:plan-go`` → implementation
+- No PR, ``state:plan-no-go`` → planning (amend path)
+- ``state:needs-plan`` / no state label → planning
+
+Write-path boundary (epic tagging)
+----------------------------------
+Per the doc row "Epic tagging is the one seeding write; done BEFORE excluding",
+an untagged epic must receive ``state:skip``. The pipeline mutator guard
+(``tests/unit/automation/pipeline/test_pipeline_architecture.py``) forbids
+GitHub mutations in this module, so seeding only SURFACES the tag need: an
+epic without ``state:skip`` is excluded with reason prefix
+:data:`EPIC_NEEDS_SKIP_TAG`, and the caller — the coordinator slice (#1817) —
+executes the actual label write via the existing ``github_api.skip_epics``
+chokepoint before honoring the exclusion.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from hephaestus.automation._review_utils import find_pr_for_issue
-from hephaestus.automation.github_api import fetch_issue_info
+from hephaestus.automation._review_utils import find_merged_pr_for_issue, find_pr_for_issue
+from hephaestus.automation.github_api import fetch_issue_info, gh_pr_label_names
+from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
@@ -32,6 +47,8 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
     STATE_SKIP,
+    is_epic,
+    is_implementation_go,
 )
 
 LOG = logging.getLogger(__name__)
@@ -46,7 +63,16 @@ _LABEL_RANK = {
     STATE_IMPLEMENTATION_GO: 4,
 }
 
-QueueName = Literal["planning", "pr_review", "ci", "implementation", "finished"]
+#: Exclusion-reason prefix surfacing the one sanctioned seeding write to the
+#: caller: an epic that still lacks ``state:skip`` must be tagged (via the
+#: existing ``github_api.skip_epics`` chokepoint, executed by the coordinator,
+#: #1817) BEFORE the exclusion is final. See module docstring.
+EPIC_NEEDS_SKIP_TAG = "epic_needs_skip_tag"
+
+#: Classification result: ``(stage, reason)``. ``stage is None`` means the
+#: issue is EXCLUDED from the pipeline (state:skip / epic) — exclusion is NOT
+#: completion, so it is deliberately distinct from ``StageName.FINISHED``.
+Classification = tuple[StageName | None, str]
 
 
 @dataclass(frozen=True)
@@ -54,21 +80,27 @@ class IssueFacts:
     """GitHub state snapshot for a single issue.
 
     Attributes:
-            number: GitHub issue number.
-            is_epic: Whether this issue is an epic (excluded from queuing).
-            labels: Set of state labels currently on this issue.
-            pr_number: GitHub PR number if one exists and is live (open or merged), None otherwise.
-            pr_is_open: True iff PR exists and is open.
-            pr_is_merged: True iff PR exists and is merged.
+        number: GitHub issue number.
+        title: Issue title (feeds the epic title-marker signal, #1669).
+        is_epic: Whether this issue is an epic/roadmap (excluded from queuing).
+        labels: Set of labels currently on this issue.
+        pr_number: GitHub PR number if one exists and is live (open or
+            merged), None otherwise.
+        pr_is_open: True iff PR exists and is open.
+        pr_is_merged: True iff PR exists and is merged.
 
-    Invariants:
-            - At most one `state:*` label is present.
-            - If `pr_number is None`, then `pr_is_open` and `pr_is_merged` are both False.
-            - If PR is neither open nor merged, `pr_number` is None (normalized at fetch layer).
+    Invariants (established by :func:`seed_issue`'s tri-state fetch):
+        - Exactly one of {no live PR, open PR, merged PR} holds:
+          ``pr_number is None`` ⇔ ``not pr_is_open and not pr_is_merged``,
+          and ``pr_is_open``/``pr_is_merged`` are mutually exclusive.
+        - A PR that is neither open nor merged (closed/abandoned) is
+          normalized to ``pr_number = None`` at the fetch layer, so the
+          classifier can never fall through on a dead PR.
 
     """
 
     number: int
+    title: str
     is_epic: bool
     labels: set[str]
     pr_number: int | None
@@ -76,14 +108,37 @@ class IssueFacts:
     pr_is_merged: bool
 
 
+@dataclass(frozen=True)
+class SeedEntry:
+    """One planned queue push produced by :func:`seed_from_cli`.
+
+    Attributes:
+        kind: Source CLI scope of the entry (``repo`` / ``issue`` / ``pr``).
+        identifier: Repo name, issue number, or PR number.
+        stage: Entry stage, or ``None`` when the item is excluded.
+        reason: Human-readable classification reason (logged by the caller).
+
+    """
+
+    kind: Literal["repo", "issue", "pr"]
+    identifier: int | str
+    stage: StageName | None
+    reason: str
+
+
 def _get_state_label(labels: set[str]) -> str | None:
-    """Extract the single active `state:*` label, or None.
+    """Extract the single active ``state:*`` label, or None when absent.
+
+    Contradictory combinations (multiple ``state:*`` labels) resolve
+    deterministically to the HIGHEST-rank (latest-stage) label and emit a
+    warning — they never return None.
 
     Args:
-            labels: Set of label names on an issue.
+        labels: Set of label names on an issue.
 
     Returns:
-            The state label, or None if absent or contradictory (multiple state labels).
+        The state label; the highest-rank one when contradictory; None only
+        when no ``state:*`` label is present.
 
     """
     state_labels = [lbl for lbl in labels if lbl.startswith("state:")]
@@ -102,16 +157,19 @@ def _label_at_or_past(label: str | None, target: str) -> bool:
     """Check whether a label is at or past a target rank.
 
     At-or-past semantics prevent re-queueing issues already past the target:
-    - An issue with `state:plan-go` (rank 2) is at-or-past `state:plan-go` ✓
-    - An issue with `state:implementation-go` (rank 4) is at-or-past `state:plan-go` ✓
-    - An issue with `state:needs-plan` (rank 0) is NOT at-or-past `state:plan-go` ✗
+    - An issue with ``state:plan-go`` (rank 2) is at-or-past ``state:plan-go``
+    - An issue with ``state:implementation-go`` (rank 4) is at-or-past
+      ``state:plan-go``
+    - An issue with ``state:needs-plan`` (rank 0) is NOT at-or-past
+      ``state:plan-go``
 
     Args:
-            label: The label to check (or None for absence).
-            target: The target state label name.
+        label: The label to check (or None for absence).
+        target: The target state label name.
 
     Returns:
-            True iff the label's rank >= target's rank (or is absent, treated as rank 0).
+        True iff the label's rank >= target's rank (absence == needs-plan,
+        rank 0).
 
     """
     if label is None:
@@ -121,28 +179,38 @@ def _label_at_or_past(label: str | None, target: str) -> bool:
     return label_rank >= target_rank
 
 
-def classify_issue(facts: IssueFacts) -> tuple[QueueName, str]:
-    """Classify an issue into a single entry queue based on GitHub state.
+def classify_issue(facts: IssueFacts) -> Classification:
+    """Classify an issue into a single entry stage based on GitHub state.
+
+    Exclusion (``state:skip`` / epic) is distinct from completion: excluded
+    issues return ``stage=None`` (and are logged), while genuinely finished
+    work (merged PR) returns :attr:`StageName.FINISHED`.
 
     Args:
-            facts: GitHub state snapshot for the issue.
+        facts: GitHub state snapshot for the issue.
 
     Returns:
-            A (queue_name, reason) tuple describing where the issue should be queued.
-
-    Raises:
-            No exceptions; contradictory or unknown states default to safe routing.
+        A ``(stage, reason)`` :data:`Classification`; ``stage is None`` means
+        excluded.
 
     """
-    # Exclusions: skip and epics
+    # Exclusions: skip wins over everything (operator-only, absolute — it
+    # carries no rank and never enters the rank comparison).
     if STATE_SKIP in facts.labels:
-        return "finished", f"#{facts.number} tagged {STATE_SKIP}"
+        reason = f"#{facts.number} tagged {STATE_SKIP}"
+        LOG.info("issue excluded: %s", reason)
+        return None, reason
     if facts.is_epic:
-        return "finished", f"#{facts.number} is an epic (excluded from routing)"
+        # Untagged epic: surface the sanctioned write to the caller (see
+        # module docstring — the state:skip write executes at the coordinator
+        # via the existing skip_epics chokepoint, #1817).
+        reason = f"{EPIC_NEEDS_SKIP_TAG}: #{facts.number} is an epic without {STATE_SKIP}"
+        LOG.info("issue excluded: %s", reason)
+        return None, reason
 
     # Terminal state: merged PR
     if facts.pr_is_merged:
-        return "finished", f"#{facts.number} PR merged (idempotent)"
+        return StageName.FINISHED, f"#{facts.number} PR merged (idempotent)"
 
     # Extract the active state label
     state_label = _get_state_label(facts.labels)
@@ -151,68 +219,70 @@ def classify_issue(facts: IssueFacts) -> tuple[QueueName, str]:
     if facts.pr_is_open:
         # Open PR + implementation-go → ready for CI
         if _label_at_or_past(state_label, STATE_IMPLEMENTATION_GO):
-            return "ci", f"#{facts.number} open PR with {STATE_IMPLEMENTATION_GO}"
+            return StageName.CI, f"#{facts.number} open PR with {STATE_IMPLEMENTATION_GO}"
         # Open PR, no implementation-go → awaiting PR review
-        return "pr_review", f"#{facts.number} open PR awaiting review"
+        return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"
 
     # No PR path: check implementation readiness
     if _label_at_or_past(state_label, STATE_PLAN_GO):
-        return "implementation", f"#{facts.number} at-or-past {STATE_PLAN_GO}, no PR yet"
+        return StageName.IMPLEMENTATION, f"#{facts.number} at-or-past {STATE_PLAN_GO}, no PR yet"
 
     # No PR, plan rejected or needs plan → planning phase
     if state_label == STATE_PLAN_NO_GO:
-        return "planning", f"#{facts.number} {STATE_PLAN_NO_GO} (amend path)"
+        return StageName.PLANNING, f"#{facts.number} {STATE_PLAN_NO_GO} (amend path)"
 
     # Default: no label or needs-plan → planning
-    return "planning", f"#{facts.number} {state_label or STATE_NEEDS_PLAN}"
+    return StageName.PLANNING, f"#{facts.number} {state_label or STATE_NEEDS_PLAN}"
 
 
 def seed_issue(issue_number: int) -> IssueFacts:
-    """Fetch and normalize GitHub state for a single issue.
+    """Fetch and normalize GitHub state for a single issue (tri-state PR).
 
-    Normalizes PR facts: if a PR exists but is neither open nor merged, sets
-    `pr_number = None` so `classify_issue` only ever sees a clean tri-state.
-    This prevents misclassification of closed/draft PRs.
+    PR facts are a real tri-state fetch: the open-PR lookup
+    (:func:`find_pr_for_issue`) runs first; on a miss, the merged-PR lookup
+    (:func:`find_merged_pr_for_issue`) runs so merged work classifies as
+    finished instead of being re-queued after a restart. A PR that is neither
+    open nor merged (closed/abandoned) is invisible to both lookups and is
+    normalized to ``pr_number = None``, so :func:`classify_issue` only ever
+    sees a clean {no live PR | open PR | merged PR} tri-state.
+
+    Fail-closed: any GitHub error — from the issue fetch or either PR lookup —
+    propagates. Swallowing a PR-probe failure would misclassify toward
+    IMPLEMENTATION and cause duplicate-PR churn.
 
     Args:
-            issue_number: GitHub issue number.
+        issue_number: GitHub issue number.
 
     Returns:
-            Normalized GitHub state snapshot.
+        Normalized GitHub state snapshot.
 
     Raises:
-            Exception: Any GitHub API error is re-raised (caller's responsibility to handle).
+        Exception: Any GitHub API error from the issue fetch or the PR
+            lookups is re-raised (caller's responsibility to handle).
 
     """
     issue_info = fetch_issue_info(issue_number)
     labels = set(issue_info.labels)
 
-    # Determine if this is an epic by checking for "epic" label.
-    is_epic = any(lbl.lower() == "epic" for lbl in labels)
+    # Epic detection: label (epic/roadmap) OR title marker, per #1669.
+    epic = is_epic(issue_info.labels, issue_info.title)
 
-    # Fetch PR if exists; normalize to None if closed/draft.
-    pr_number: int | None = None
+    # Tri-state PR fetch: open first, then merged; closed PRs surface in
+    # neither lookup (normalized to "no live PR"). No try/except: fail-closed.
     pr_is_open = False
     pr_is_merged = False
-
-    try:
-        found_pr = find_pr_for_issue(issue_number)
-        if found_pr is not None:
-            # We have a PR. find_pr_for_issue finds open/merged PRs for the issue.
-            # Per the plan: "resolve it at the FETCH layer — `seed_issue` yields
-            # `pr_number=None` for any PR that is neither open nor merged."
-            # find_pr_for_issue is a best-effort search; it may find closed PRs too.
-            # For now, we trust it returns live PRs (open or merged via merge strategies).
-            pr_number = found_pr
-            # Assume returned PR is open for now; merge state would be determined
-            # by fetching the full PR object, which is outside the scope of this MVP.
-            pr_is_open = True
-    except Exception as exc:
-        LOG.warning("Could not resolve PR for issue #%s: %s", issue_number, exc)
+    pr_number: int | None = find_pr_for_issue(issue_number)
+    if pr_number is not None:
+        pr_is_open = True
+    else:
+        pr_number = find_merged_pr_for_issue(issue_number)
+        if pr_number is not None:
+            pr_is_merged = True
 
     return IssueFacts(
         number=issue_number,
-        is_epic=is_epic,
+        title=issue_info.title,
+        is_epic=epic,
         labels=labels,
         pr_number=pr_number,
         pr_is_open=pr_is_open,
@@ -220,9 +290,70 @@ def seed_issue(issue_number: int) -> IssueFacts:
     )
 
 
+def seed_from_cli(
+    repos: Sequence[str],
+    issues: Sequence[int],
+    prs: Sequence[int],
+) -> list[SeedEntry]:
+    """Map CLI scope args (``--repos`` / ``--issues`` / ``--prs``) to queue pushes.
+
+    Pure planning plus thin fetch — no mutations:
+
+    - ``repos`` → one :attr:`StageName.REPO` entry each (discovery seeds).
+    - ``issues`` → :func:`seed_issue` + :func:`classify_issue` per issue.
+    - ``prs`` → :attr:`StageName.CI` when the PR carries
+      ``state:implementation-go``, else :attr:`StageName.PR_REVIEW` —
+      mirroring ``_review_existing_pr`` semantics
+      (``implementer_phase_runner.py:750``): GO short-circuits review, and a
+      failed label fetch reads as "not yet reviewed" (→ pr_review).
+
+    Args:
+        repos: Repository names to seed for discovery.
+        issues: Issue numbers to classify directly.
+        prs: PR numbers to route by implementation-review label.
+
+    Returns:
+        Planned queue pushes, in the given order (repos, issues, prs).
+
+    """
+    entries: list[SeedEntry] = [
+        SeedEntry(
+            kind="repo", identifier=repo, stage=StageName.REPO, reason=f"{repo} CLI repo seed"
+        )
+        for repo in repos
+    ]
+    for issue in issues:
+        stage, reason = classify_issue(seed_issue(issue))
+        entries.append(SeedEntry(kind="issue", identifier=issue, stage=stage, reason=reason))
+    for pr in prs:
+        labels = gh_pr_label_names(pr)
+        if is_implementation_go(labels):
+            entries.append(
+                SeedEntry(
+                    kind="pr",
+                    identifier=pr,
+                    stage=StageName.CI,
+                    reason=f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
+                )
+            )
+        else:
+            entries.append(
+                SeedEntry(
+                    kind="pr",
+                    identifier=pr,
+                    stage=StageName.PR_REVIEW,
+                    reason=f"PR #{pr} without {STATE_IMPLEMENTATION_GO} — awaiting review",
+                )
+            )
+    return entries
+
+
 __all__ = [
+    "EPIC_NEEDS_SKIP_TAG",
+    "Classification",
     "IssueFacts",
-    "QueueName",
+    "SeedEntry",
     "classify_issue",
+    "seed_from_cli",
     "seed_issue",
 ]

@@ -220,11 +220,8 @@ def test_process_repo_inner_defers_overlapping_issue(tmp_path: object) -> None:
         patch.object(loop_runner, "_resolve_repo_dir", return_value=repo_dir),
         patch.object(loop_runner, "_rebase_main", return_value=("abc123", True)),
         patch.object(loop_runner, "_list_open_issue_numbers", return_value=[1, 2]),
-        # Patch both: admission (where _select_non_overlapping uses it) and loop_runner (the shim)
-        patch(
-            "hephaestus.automation.pipeline.admission._fetch_planned_files",
-            side_effect=lambda i: plans[i],
-        ),
+        # Patch the one canonical seam: admission, where _select_non_overlapping
+        # resolves _fetch_planned_files (loop_runner routes through _admission).
         patch(
             "hephaestus.automation.pipeline.admission._fetch_planned_files",
             side_effect=lambda i: plans[i],

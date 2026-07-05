@@ -70,6 +70,18 @@ from hephaestus.automation.loop_repo_manager import (
     _resolve_repo_dir as _resolve_repo_dir,
     _sort_repos_by_open_count as _sort_repos_by_open_count,
 )
+
+# Admission-control seams live in pipeline.admission (#1813, epic #1809);
+# internal call sites go through the `_admission` module attribute so tests
+# patch one canonical seam, and the `as name` imports re-export the moved
+# symbols for external callers (ruff's explicit re-export idiom).
+from hephaestus.automation.pipeline import admission as _admission
+from hephaestus.automation.pipeline.admission import (
+    _fetch_planned_files as _fetch_planned_files,
+    _filter_open_issues as _filter_open_issues,
+    _parse_planned_files as _parse_planned_files,
+    _select_non_overlapping as _select_non_overlapping,
+)
 from hephaestus.automation.pr_manager import pr_is_genuinely_stuck
 from hephaestus.automation.state_labels import STATE_SKIP
 from hephaestus.cli.utils import (
@@ -980,7 +992,7 @@ def _process_repo_inner(
     # otherwise be driven (and wrongly tagged ``state:skip``) every loop.
     open_issues = cfg.issues or _list_open_issue_numbers(cfg.org, repo)
     if cfg.issues:
-        open_issues = _filter_open_issues(repo, open_issues)
+        open_issues = _admission._filter_open_issues(repo, open_issues)
 
     # ISSUE-MAJOR control flow (#1560): iterate issues outermost and run the
     # FULL selected-phase sequence (plan → implement → drive-green) for each
@@ -1001,7 +1013,7 @@ def _process_repo_inner(
     # alive by RepoResult.produced_work), by which point the conflicting peer
     # has merged and the deferred branch rebases cleanly.
     if cfg.serialize_file_overlap and workers > 1 and len(open_issues) > 1:
-        open_issues, deferred = _select_non_overlapping(open_issues)
+        open_issues, deferred = _admission._select_non_overlapping(open_issues)
         if deferred:
             LOG.info(
                 "[%s] deferring %d file-overlapping issue(s) to next round: %s",
@@ -1033,17 +1045,6 @@ def _process_repo_inner(
                 result.phases.append(PhaseResult(name="implement", rc=1, elapsed_s=0.0))
 
     return result
-
-
-# Backward-compatibility shims for admission control functions (moved to pipeline/admission.py).
-# See #1813, epic #1809.
-from hephaestus.automation.pipeline import admission as _admission  # noqa: E402
-from hephaestus.automation.pipeline.admission import (  # noqa: E402
-    _fetch_planned_files as _fetch_planned_files,
-    _filter_open_issues as _filter_open_issues,
-    _parse_planned_files as _parse_planned_files,
-    _select_non_overlapping as _select_non_overlapping,
-)
 
 
 def _issue_owns_genuinely_failing_pr(issue: int) -> bool:
@@ -1298,7 +1299,7 @@ def _run_post_loop_stages(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]
             trunk_sha, _fetch_ok = _rebase_main(repo, repo_dir)
             open_issues = cfg.issues or _list_open_issue_numbers(cfg.org, repo)
             if cfg.issues:
-                open_issues = _filter_open_issues(repo, open_issues)
+                open_issues = _admission._filter_open_issues(repo, open_issues)
             for stage in selected_post:
                 skip_reason = _post_loop_stage_skip_reason(cfg, repo, stage, open_issues)
                 if skip_reason is not None:
