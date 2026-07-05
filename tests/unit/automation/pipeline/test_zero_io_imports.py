@@ -59,7 +59,7 @@ _CAPABILITY_EXEMPT: dict[str, dict[str, frozenset[str] | None]] = {
     "seeding.py": dict.fromkeys(_THIN_FETCH_PREFIXES),
     "admission.py": dict.fromkeys(_THIN_FETCH_PREFIXES),
     # stages/plan_review.py may import ONLY the pure verdict parser pieces
-    # (claude_invoke.parse_review_verdict / ReviewVerdict) to attach as
+    # (claude_invoke.parse_review_verdict — the ONLY allowed symbol) to attach as
     # AgentJob.parse — the architecture doc's plan_review contract says the
     # "verdict [is] parsed in-worker by claude_invoke.parse_review_verdict"
     # (#1814). The exemption is SYMBOL-scoped: importing any other

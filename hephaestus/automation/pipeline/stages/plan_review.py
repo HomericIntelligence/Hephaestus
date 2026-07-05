@@ -434,3 +434,6 @@ class PlanReviewStage(Stage):
                 item.payload["prior_review"] = getattr(result.value, "raw", str(result.value))
             elif item.state == "AMEND_WAIT":
                 item.payload["plan_text"] = result.value
+            # LEARN_WAIT intentionally has no branch: the learn job's output
+            # is a side effect for the Mnemosyne skill store, not a payload
+            # value any later state consumes.
