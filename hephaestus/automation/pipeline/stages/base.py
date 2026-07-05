@@ -41,19 +41,26 @@ Coordinator convention (binding for #1817, the coordinator slice):
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol, TypeAlias, runtime_checkable
 
-from ..jobs import AgentJob, JobHandle, JobResult
+from hephaestus.automation.state_labels import STATE_SKIP
+
+from ..jobs import AgentJob, BuildTestJob, GitJob, JobHandle, JobResult
 from ..routing import Disposition, StageName, StageOutcome
 from ..work_item import ItemKind, WorkItem
 
 __all__ = [
+    "GIT_JOB_TIMEOUT_S",
     "AgentJob",
+    "BuildTestJob",
     "Continue",
     "Disposition",
+    "GitJob",
     "ItemKind",
     "JobHandle",
     "JobRequest",
@@ -65,7 +72,15 @@ __all__ = [
     "StageOutcome",
     "StepResult",
     "WorkItem",
+    "write_skip_label",
 ]
+
+logger = logging.getLogger(__name__)
+
+#: Timeout for git worktree/commit/push jobs (mechanical, no agent). Shared
+#: by every stage that submits :class:`GitJob`s (single home — stages must
+#: not import it from each other).
+GIT_JOB_TIMEOUT_S = 600
 
 
 @runtime_checkable
@@ -132,6 +147,98 @@ class StageGitHub(Protocol):
         """
         ...
 
+    # -- implementation / pr_review surface (#1815) ------------------------
+
+    def get_pr_head_branch(self, pr_number: int) -> str | None:
+        """Return the PR's head branch name (``_review_utils.get_pr_head_branch``)."""
+        ...
+
+    def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
+        """Return ``(has_go, has_no_go)`` for the PR's implementation state labels.
+
+        Mirrors ``pr_manager.pr_has_implementation_state_label`` — the
+        existing-PR fast-path read the implementation GATE uses.
+        """
+        ...
+
+    def count_unresolved_threads(self, pr_number: int) -> tuple[int, int]:
+        """Return ``(automation_unresolved, human_unresolved)`` thread counts.
+
+        Mirrors ``_review_phase._count_unresolved_threads_blocking_go``
+        (#1152): the pr_review EVAL gate — a GO only stands with zero of
+        both; open human threads yield HUMAN_BLOCKED, open automation
+        threads downgrade GO to NOGO. This read resolves nothing.
+        """
+        ...
+
+    def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
+        """Durably ensure the PR exists and return its number (idempotent).
+
+        Backing (#1817): ``_review_utils.find_pr_for_issue`` first (reuse an
+        existing open PR — the idempotence), then ``github_api.gh_pr_create``
+        with the *given* ``title``/``body``. NOT ``pr_manager
+        .ensure_pr_created``, which generates its own PR body and would
+        discard the ``get_pr_description`` body the stage composed. PR
+        creation is the implementation stage's journal entry (doc section 4:
+        "Owned labels: PR creation is the journal entry").
+        """
+        raise NotImplementedError
+
+    def post_pr_comment(self, pr_number: int, body: str) -> None:
+        """Durably post an explanatory comment on the PR conversation.
+
+        The coordinator maps this onto ``gh_issue_comment`` (PRs share the
+        issue comment channel). Used by pr_review's HUMAN_BLOCKED terminal
+        path to record WHY automation stood down before finishing failed.
+        """
+        pass
+
+    def mark_pr_implementation_no_go(self, pr_number: int) -> None:
+        """Durably apply ``state:implementation-no-go`` to the PR.
+
+        Mirrors ``pr_manager.mark_pr_implementation_no_go`` (adds the no-go
+        label, removes any stale go label). Doc section 5 owned label:
+        written on every NOGO round, before retry/regress [durable]
+        (legacy ``_review_phase._apply_impl_review_verdict`` :248).
+        """
+        ...
+
+    def defer_auto_merge(self, pr_number: int) -> None:
+        """Durably ensure auto-merge stays DISABLED until implementation GO.
+
+        Mirrors ``pr_manager.ensure_pr_auto_merge_deferred`` — called
+        immediately after PR creation (legacy runner order,
+        ``implementer_phase_runner.py:623``): auto-merge must never be armed
+        before ``state:implementation-go``.
+        """
+        ...
+
+    def post_review_threads(
+        self, pr_number: int, threads: list[dict[str, Any]], summary: str
+    ) -> list[str]:
+        """Durably post surviving review threads to the PR; return thread ids.
+
+        The pr_review POST step's durable write (doc section 5 step 3). The
+        coordinator maps this onto ``gh_pr_review_post``.
+        """
+        ...
+
+    def mark_pr_implementation_go(self, pr_number: int) -> None:
+        """Durably apply ``state:implementation-go`` to the PR.
+
+        Mirrors ``pr_manager.mark_pr_implementation_go``; written BEFORE
+        :meth:`arm_auto_merge` (the label authorizes the arming).
+        """
+        ...
+
+    def arm_auto_merge(self, pr_number: int) -> None:
+        """Durably arm squash auto-merge after implementation GO.
+
+        Mirrors ``pr_manager.enable_auto_merge_after_implementation_go``;
+        only ever called after :meth:`mark_pr_implementation_go` succeeded.
+        """
+        ...
+
 
 @dataclass(frozen=True)
 class Continue:
@@ -145,13 +252,14 @@ class JobRequest:
     """Request a job be submitted to the worker pool.
 
     Attributes:
-        job: The frozen job spec to submit.
+        job: The frozen job spec to submit (agent, build/test, or git — the
+            same union :class:`~..jobs.JobHandle` carries).
         on_done_state: The state the coordinator moves the item to after the
             job completes and ``on_job_done`` has run.
 
     """
 
-    job: AgentJob
+    job: AgentJob | BuildTestJob | GitJob
     on_done_state: str
 
 
@@ -194,6 +302,63 @@ class StageContext:
         if self.budget_fn is not None:
             return self.budget_fn(name)
         return 1  # conservative default
+
+
+def _issue_labels(item: WorkItem, ctx: StageContext) -> list[str]:
+    """Refresh the item's labels from GitHub and update ``labels_cache``.
+
+    Reads through ``ctx.github.gh_issue_json`` (mirrors
+    ``github_api.issues.gh_issue_json``); on any read failure the cached
+    labels are used so a transient API blip cannot mis-route the item.
+    Shared by every stage that gates on labels (single home — stages must
+    not import it from each other).
+    """
+    if item.issue is None:
+        return []
+    try:
+        data = ctx.github.gh_issue_json(item.issue)
+    except Exception as e:  # transient gh failure: fall back to cache
+        logger.warning("pipeline:%d: label refresh failed (using cache): %s", item.issue, e)
+        return list(item.labels_cache)
+    raw = data.get("labels", []) if isinstance(data, dict) else []
+    labels = [entry["name"] if isinstance(entry, dict) else str(entry) for entry in raw]
+    item.labels_cache = dict.fromkeys(labels, True)
+    return labels
+
+
+def _worktree_path(item: WorkItem, ctx: StageContext) -> Path:
+    """Return the item's worktree as a Path, falling back to the shared one.
+
+    The shared-checkout fallback is only safe for READ-mostly agent jobs
+    (advise, review) that run before a worktree exists; stages that edit or
+    push code MUST guard against dispatching into the shared checkout on the
+    wrong branch (see ``PrReviewStage._address``).
+    """
+    if item.worktree:
+        return Path(item.worktree)
+    return Path(str(ctx.paths.worktree))
+
+
+def write_skip_label(issue_number: int, ctx: StageContext) -> None:
+    """Durably apply ``state:skip``, non-fatally (legacy warn pattern).
+
+    Single home for the exhaustion/no-commits skip write (previously
+    duplicated across the implementation and pr_review stages).
+
+    Args:
+        issue_number: GitHub issue number.
+        ctx: Stage context carrying the GitHub accessor.
+
+    """
+    try:
+        ctx.github.add_labels(issue_number, [STATE_SKIP])
+    except Exception as e:
+        logger.warning(
+            "pipeline:%d: failed to add label %r (non-fatal): %s",
+            issue_number,
+            STATE_SKIP,
+            e,
+        )
 
 
 @runtime_checkable

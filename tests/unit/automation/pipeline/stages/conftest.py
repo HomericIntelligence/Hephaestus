@@ -39,6 +39,9 @@ class FakeStageGitHub(FakeGitHub):
         merged_pr: int | None = None,
         open_pr: int | None = None,
         has_plan: bool = False,
+        pr_head_branch: str | None = None,
+        pr_impl_state: tuple[bool, bool] = (False, False),
+        unresolved: list[tuple[int, int]] | None = None,
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -47,6 +50,13 @@ class FakeStageGitHub(FakeGitHub):
             merged_pr: Canned answer for find_merged_closing_pr.
             open_pr: Canned answer for find_pr_for_issue.
             has_plan: Canned answer for has_existing_plan.
+            pr_head_branch: Canned answer for get_pr_head_branch.
+            pr_impl_state: Canned (has_go, has_no_go) answer for
+                pr_has_implementation_state_label.
+            unresolved: FIFO of (automation, human) answers for
+                count_unresolved_threads — consumed one per call, last
+                entry repeating (lets tests script a decreasing /
+                plateauing thread count for the #1554 progress rule).
 
         """
         super().__init__()
@@ -54,6 +64,9 @@ class FakeStageGitHub(FakeGitHub):
         self._merged_pr = merged_pr
         self._open_pr = open_pr
         self._has_plan = has_plan
+        self._pr_head_branch = pr_head_branch
+        self._pr_impl_state = pr_impl_state
+        self._unresolved: list[tuple[int, int]] = list(unresolved or [(0, 0)])
 
     def _issue_labels(self, issue_number: int) -> set[str]:
         """Return the issue's label set, seeding it on first access."""
@@ -77,6 +90,24 @@ class FakeStageGitHub(FakeGitHub):
     def has_existing_plan(self, issue_number: int) -> bool:
         """Mirror PlannerStateManager.has_existing_plan (plan comment check)."""
         return self._has_plan
+
+    def get_pr_head_branch(self, pr_number: int) -> str | None:
+        """Mirror _review_utils.get_pr_head_branch (canned answer)."""
+        return self._pr_head_branch
+
+    def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
+        """Mirror pr_manager.pr_has_implementation_state_label (canned answer)."""
+        return self._pr_impl_state
+
+    def count_unresolved_threads(self, pr_number: int) -> tuple[int, int]:
+        """Mirror _review_phase._count_unresolved_threads_blocking_go (FIFO).
+
+        Consumes one scripted (automation, human) answer per call; the last
+        entry repeats once the FIFO drains.
+        """
+        if len(self._unresolved) > 1:
+            return self._unresolved.pop(0)
+        return self._unresolved[0]
 
     # -- mutator surface used by the stages ----------------------------------
     # Coordinator-neutral names (the pipeline architecture guard forbids
@@ -107,6 +138,41 @@ class FakeStageGitHub(FakeGitHub):
         self._has_plan = True
         self.gh_issue_upsert_comment(issue_number, PLAN_COMMENT_MARKER, body)
 
+    def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
+        """Mirror the coordinator PR-ensure (delegates to gh_pr_create)."""
+        return self.gh_pr_create(branch, title, body)
+
+    def defer_auto_merge(self, pr_number: int) -> None:
+        """Mirror pr_manager.ensure_pr_auto_merge_deferred (records mutation)."""
+        self._log("defer_auto_merge", pr_number)
+
+    def post_review_threads(
+        self, pr_number: int, threads: list[dict[str, Any]], summary: str
+    ) -> list[str]:
+        """Mirror the coordinator thread post (delegates to gh_pr_review_post)."""
+        return self.gh_pr_review_post(pr_number, threads, summary)
+
+    def mark_pr_implementation_go(self, pr_number: int) -> None:
+        """Mirror pr_manager.mark_pr_implementation_go (records mutation)."""
+        self._log("mark_pr_implementation_go", pr_number)
+
+    def mark_pr_implementation_no_go(self, pr_number: int) -> None:
+        """Mirror pr_manager.mark_pr_implementation_no_go (records mutation)."""
+        self._log("mark_pr_implementation_no_go", pr_number)
+
+    def post_pr_comment(self, pr_number: int, body: str) -> None:
+        """Mirror the coordinator PR-comment post (delegates to gh_issue_comment).
+
+        PRs share the issue comment channel, so the canonical
+        ``gh_issue_comment`` recorder keeps the mutation_log format and
+        stores the body for content assertions.
+        """
+        self.gh_issue_comment(pr_number, body)
+
+    def arm_auto_merge(self, pr_number: int) -> None:
+        """Mirror pr_manager.enable_auto_merge_after_implementation_go."""
+        self._log("arm_auto_merge", pr_number)
+
 
 if TYPE_CHECKING:
     # mypy-enforced declaration that FakeStageGitHub satisfies the
@@ -128,6 +194,8 @@ class _Config:
     def __init__(self, *, dry_run: bool = False) -> None:
         self.enable_advise = True
         self.enable_learn = True
+        self.enable_follow_up = True
+        self.run_pre_pr_tests = False
         self.force = False
         self.agent = "claude"
         self.dry_run = dry_run

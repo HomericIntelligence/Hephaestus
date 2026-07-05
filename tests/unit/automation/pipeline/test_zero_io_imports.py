@@ -66,6 +66,11 @@ _CAPABILITY_EXEMPT: dict[str, dict[str, frozenset[str] | None]] = {
     # claude_invoke symbol (e.g. invoke_claude_with_session) or the module
     # itself still trips the guard, as does any other I/O-flavored import.
     "plan_review.py": {"hephaestus.automation.claude_invoke": frozenset({"parse_review_verdict"})},
+    # stages/pr_review.py gets the SAME symbol-scoped exemption for the same
+    # reason: the architecture doc's pr_review contract parses the reviewer
+    # verdict in-worker (#1815), so the stage attaches parse_review_verdict
+    # as AgentJob.parse. No other claude_invoke symbol is permitted.
+    "pr_review.py": {"hephaestus.automation.claude_invoke": frozenset({"parse_review_verdict"})},
 }
 
 
