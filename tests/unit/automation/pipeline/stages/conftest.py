@@ -1,0 +1,196 @@
+"""Fixtures and fakes for pipeline stage tests.
+
+``FakeStageGitHub`` extends the canonical pipeline ``FakeGitHub`` (see
+``tests/unit/automation/pipeline/conftest.py``) with the read surface the
+planning/plan_review stages use (``gh_issue_json``, PR-coverage lookups,
+plan-comment presence), so mutator call sites and the ``mutation_log``
+format stay identical to what coordinator tests (#1817) will assert.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
+import pytest
+
+from hephaestus.automation.pipeline.routing import ROUTES, StageName
+from hephaestus.automation.pipeline.stages import StageContext, StageGitHub
+from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
+from tests.unit.automation.pipeline.conftest import FakeGitHub
+
+
+class FakeStageGitHub(FakeGitHub):
+    """Canonical FakeGitHub plus the stage read queries.
+
+    Implements the :class:`StageGitHub` protocol (mypy-checked below).
+    Reads mirror the real helper names the stages call through
+    ``ctx.github``: ``gh_issue_json`` (github_api.issues),
+    ``find_merged_closing_pr`` / ``find_pr_for_issue`` /
+    ``close_issue_as_covered`` (_review_utils), and ``has_existing_plan``
+    (PlannerStateManager).
+    """
+
+    def __init__(
+        self,
+        *,
+        labels: list[str] | None = None,
+        merged_pr: int | None = None,
+        open_pr: int | None = None,
+        has_plan: bool = False,
+    ) -> None:
+        """Initialize the fake with canned read answers.
+
+        Args:
+            labels: Seed labels applied to any issue on first read/mutation.
+            merged_pr: Canned answer for find_merged_closing_pr.
+            open_pr: Canned answer for find_pr_for_issue.
+            has_plan: Canned answer for has_existing_plan.
+
+        """
+        super().__init__()
+        self._seed_labels = list(labels or [])
+        self._merged_pr = merged_pr
+        self._open_pr = open_pr
+        self._has_plan = has_plan
+
+    def _issue_labels(self, issue_number: int) -> set[str]:
+        """Return the issue's label set, seeding it on first access."""
+        if issue_number not in self.labels:
+            self.labels[issue_number] = set(self._seed_labels)
+        return self.labels[issue_number]
+
+    # -- read surface used by the stages -----------------------------------
+    def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+        """Mirror github_api.issues.gh_issue_json (labels subset only)."""
+        return {"labels": [{"name": name} for name in sorted(self._issue_labels(issue_number))]}
+
+    def find_merged_closing_pr(self, issue_number: int) -> int | None:
+        """Mirror _review_utils.find_merged_closing_pr."""
+        return self._merged_pr
+
+    def find_pr_for_issue(self, issue_number: int) -> int | None:
+        """Mirror _review_utils.find_pr_for_issue (open PR lookup)."""
+        return self._open_pr
+
+    def has_existing_plan(self, issue_number: int) -> bool:
+        """Mirror PlannerStateManager.has_existing_plan (plan comment check)."""
+        return self._has_plan
+
+    # -- mutator surface used by the stages ----------------------------------
+    # Coordinator-neutral names (the pipeline architecture guard forbids
+    # github_api mutator names inside pipeline modules); each delegates to
+    # the canonical gh_* recorder so mutation_log keeps the canonical format.
+    def close_issue_as_covered(self, issue_number: int, pr_number: int) -> None:
+        """Mirror _review_utils.close_issue_as_covered (records mutation)."""
+        self._log("close_issue_as_covered", issue_number, pr_number)
+
+    def add_labels(self, issue_number: int, labels: list[str]) -> None:
+        """Coordinator-neutral label add (delegates to gh_issue_add_labels)."""
+        self._issue_labels(issue_number)
+        self.gh_issue_add_labels(issue_number, labels)
+
+    def remove_labels(self, issue_number: int, labels: list[str]) -> None:
+        """Coordinator-neutral label remove (delegates to gh_issue_remove_labels)."""
+        self._issue_labels(issue_number)
+        self.gh_issue_remove_labels(issue_number, labels)
+
+    def upsert_plan_comment(self, issue_number: int, body: str) -> None:
+        """Mirror the coordinator plan-comment upsert (PLAN_COMMENT_MARKER-keyed).
+
+        Delegates to the canonical ``gh_issue_upsert_comment`` recorder so
+        the mutation_log keeps the canonical format, and flips the
+        ``has_existing_plan`` answer to True — the posted comment IS the
+        durable plan artifact the verify step reads back.
+        """
+        self._has_plan = True
+        self.gh_issue_upsert_comment(issue_number, PLAN_COMMENT_MARKER, body)
+
+
+if TYPE_CHECKING:
+    # mypy-enforced declaration that FakeStageGitHub satisfies the
+    # StageGitHub protocol (m5): a drifted signature fails type checking.
+    _stage_github_protocol_check: StageGitHub = FakeStageGitHub()
+
+
+def _budget_fn(name: str) -> int:
+    """Look up a budget across all ROUTES rows (conservative default 1)."""
+    for route in ROUTES.values():
+        if name in route.budgets:
+            return route.budgets[name]
+    return 1
+
+
+class _Config:
+    """PlannerOptions-like config stub for stage tests."""
+
+    def __init__(self, *, dry_run: bool = False) -> None:
+        self.enable_advise = True
+        self.enable_learn = True
+        self.force = False
+        self.agent = "claude"
+        self.dry_run = dry_run
+
+
+class _Paths:
+    """Path accessor stub for stage tests."""
+
+    repo_root = "/tmp/repo"
+    worktree = "/tmp/repo/worktree"
+
+
+@pytest.fixture
+def make_ctx() -> Callable[..., StageContext]:
+    """Build StageContext instances with a fake clock and ROUTES budgets."""
+
+    def _make_ctx(
+        *,
+        config: Any = None,
+        org: str = "test-org",
+        dry_run: bool = False,
+        github: FakeStageGitHub | None = None,
+        paths: Any = None,
+    ) -> StageContext:
+        ticks = [0]
+
+        def now_fn() -> float:
+            ticks[0] += 1
+            return 1000.0 + ticks[0]
+
+        return StageContext(
+            config=config if config is not None else _Config(dry_run=dry_run),
+            org=org,
+            dry_run=dry_run,
+            github=github if github is not None else FakeStageGitHub(),
+            paths=paths if paths is not None else _Paths(),
+            now_fn=now_fn,
+            budget_fn=_budget_fn,
+        )
+
+    return _make_ctx
+
+
+@pytest.fixture
+def make_work_item() -> Callable[..., WorkItem]:
+    """Build WorkItem instances parked in a plan-side stage."""
+
+    def _make_item(
+        *,
+        repo: str = "test-repo",
+        kind: ItemKind = ItemKind.ISSUE,
+        issue: int | None = 1,
+        pr: int | None = None,
+        stage: StageName = StageName.PLANNING,
+        state: str = "ENTER",
+        labels: list[str] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> WorkItem:
+        item = WorkItem(repo=repo, kind=kind, issue=issue, pr=pr, stage=stage, state=state)
+        if labels:
+            item.labels_cache = dict.fromkeys(labels, True)
+        if payload:
+            item.payload = payload
+        return item
+
+    return _make_item

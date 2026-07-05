@@ -20,6 +20,7 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
     STATE_SKIP,
+    apply_plan_verdict,
     has_label,
     is_epic,
     is_implementation_go,
@@ -208,6 +209,25 @@ class TestIsEpic:
 
     def test_epic_labels_constant_contents(self) -> None:
         assert set(EPIC_LABELS) == {"epic", "roadmap"}
+
+
+class TestApplyPlanVerdict:
+    """``apply_plan_verdict`` returns the (add, remove) labels for a reviewer verdict.
+
+    Pure function: no I/O, no logging, no GitHub calls. Both the legacy
+    planner_review_loop and the new plan_review stage call it to ensure
+    identical transitions (#1814).
+    """
+
+    def test_go_verdict_adds_go_removes_others(self) -> None:
+        add, remove = apply_plan_verdict(is_go=True)
+        assert add == STATE_PLAN_GO
+        assert set(remove) == {STATE_PLAN_NO_GO, STATE_NEEDS_PLAN}
+
+    def test_nogo_verdict_adds_nogo_removes_others(self) -> None:
+        add, remove = apply_plan_verdict(is_go=False)
+        assert add == STATE_PLAN_NO_GO
+        assert set(remove) == {STATE_PLAN_GO, STATE_NEEDS_PLAN}
 
 
 class TestPartitionEpics:
