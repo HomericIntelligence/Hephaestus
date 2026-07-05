@@ -795,7 +795,8 @@ class TestPrReviewOnJobDone:
         item = make_work_item(issue=1, pr=1001, state="ADDRESS_WAIT")
 
         stage.on_job_done(item, JobResult(ok=False, error="agent crashed"), ctx)
-        assert item.payload.pop("address_error") is True
+        address_error = item.payload.pop("address_error")
+        assert address_error is True
 
         item.state = "PUSH_WAIT"
         stage.on_job_done(item, JobResult(ok=False, error="push rejected"), ctx)
