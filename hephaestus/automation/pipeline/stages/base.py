@@ -41,16 +41,21 @@ Coordinator convention (binding for #1817, the coordinator slice):
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol, TypeAlias, runtime_checkable
+
+from hephaestus.automation.state_labels import STATE_SKIP
 
 from ..jobs import AgentJob, BuildTestJob, GitJob, JobHandle, JobResult
 from ..routing import Disposition, StageName, StageOutcome
 from ..work_item import ItemKind, WorkItem
 
 __all__ = [
+    "GIT_JOB_TIMEOUT_S",
     "AgentJob",
     "BuildTestJob",
     "Continue",
@@ -67,7 +72,15 @@ __all__ = [
     "StageOutcome",
     "StepResult",
     "WorkItem",
+    "write_skip_label",
 ]
+
+logger = logging.getLogger(__name__)
+
+#: Timeout for git worktree/commit/push jobs (mechanical, no agent). Shared
+#: by every stage that submits :class:`GitJob`s (single home — stages must
+#: not import it from each other).
+GIT_JOB_TIMEOUT_S = 600
 
 
 @runtime_checkable
@@ -161,10 +174,32 @@ class StageGitHub(Protocol):
     def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
         """Durably ensure the PR exists and return its number (idempotent).
 
-        The coordinator maps this onto the ``pr_manager.ensure_pr_created``
-        chain (→ ``gh_pr_create``), which is idempotent for an existing PR.
-        PR creation is the implementation stage's journal entry (doc
-        section 4: "Owned labels: PR creation is the journal entry").
+        Backing (#1817): ``_review_utils.find_pr_for_issue`` first (reuse an
+        existing open PR — the idempotence), then ``github_api.gh_pr_create``
+        with the *given* ``title``/``body``. NOT ``pr_manager
+        .ensure_pr_created``, which generates its own PR body and would
+        discard the ``get_pr_description`` body the stage composed. PR
+        creation is the implementation stage's journal entry (doc section 4:
+        "Owned labels: PR creation is the journal entry").
+        """
+        ...
+
+    def post_pr_comment(self, pr_number: int, body: str) -> None:
+        """Durably post an explanatory comment on the PR conversation.
+
+        The coordinator maps this onto ``gh_issue_comment`` (PRs share the
+        issue comment channel). Used by pr_review's HUMAN_BLOCKED terminal
+        path to record WHY automation stood down before finishing failed.
+        """
+        ...
+
+    def mark_pr_implementation_no_go(self, pr_number: int) -> None:
+        """Durably apply ``state:implementation-no-go`` to the PR.
+
+        Mirrors ``pr_manager.mark_pr_implementation_no_go`` (adds the no-go
+        label, removes any stale go label). Doc section 5 owned label:
+        written on every NOGO round, before retry/regress [durable]
+        (legacy ``_review_phase._apply_impl_review_verdict`` :248).
         """
         ...
 
@@ -267,6 +302,63 @@ class StageContext:
         if self.budget_fn is not None:
             return self.budget_fn(name)
         return 1  # conservative default
+
+
+def _issue_labels(item: WorkItem, ctx: StageContext) -> list[str]:
+    """Refresh the item's labels from GitHub and update ``labels_cache``.
+
+    Reads through ``ctx.github.gh_issue_json`` (mirrors
+    ``github_api.issues.gh_issue_json``); on any read failure the cached
+    labels are used so a transient API blip cannot mis-route the item.
+    Shared by every stage that gates on labels (single home — stages must
+    not import it from each other).
+    """
+    if item.issue is None:
+        return []
+    try:
+        data = ctx.github.gh_issue_json(item.issue)
+    except Exception as e:  # transient gh failure: fall back to cache
+        logger.warning("pipeline:%d: label refresh failed (using cache): %s", item.issue, e)
+        return list(item.labels_cache)
+    raw = data.get("labels", []) if isinstance(data, dict) else []
+    labels = [entry["name"] if isinstance(entry, dict) else str(entry) for entry in raw]
+    item.labels_cache = dict.fromkeys(labels, True)
+    return labels
+
+
+def _worktree_path(item: WorkItem, ctx: StageContext) -> Path:
+    """Return the item's worktree as a Path, falling back to the shared one.
+
+    The shared-checkout fallback is only safe for READ-mostly agent jobs
+    (advise, review) that run before a worktree exists; stages that edit or
+    push code MUST guard against dispatching into the shared checkout on the
+    wrong branch (see ``PrReviewStage._address``).
+    """
+    if item.worktree:
+        return Path(item.worktree)
+    return Path(str(ctx.paths.worktree))
+
+
+def write_skip_label(issue_number: int, ctx: StageContext) -> None:
+    """Durably apply ``state:skip``, non-fatally (legacy warn pattern).
+
+    Single home for the exhaustion/no-commits skip write (previously
+    duplicated across the implementation and pr_review stages).
+
+    Args:
+        issue_number: GitHub issue number.
+        ctx: Stage context carrying the GitHub accessor.
+
+    """
+    try:
+        ctx.github.add_labels(issue_number, [STATE_SKIP])
+    except Exception as e:
+        logger.warning(
+            "pipeline:%d: failed to add label %r (non-fatal): %s",
+            issue_number,
+            STATE_SKIP,
+            e,
+        )
 
 
 @runtime_checkable

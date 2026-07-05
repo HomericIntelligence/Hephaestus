@@ -35,13 +35,47 @@ contract):
   budget, is the doc's designated agent-error recovery).
 - EVAL verdict semantics (re-housed ``_evaluate_go_verdict``): a GO stands
   only with ZERO unresolved threads (#1152). GO + open HUMAN thread ->
-  HUMAN_BLOCKED: finish failed with the PR left UNLABELED (a human must
+  HUMAN_BLOCKED: an explanatory PR comment is posted [durable, before the
+  outcome] naming the blocking human thread count and that automation
+  stands down, then finish failed with the PR left UNLABELED (a human must
   act; automation may not resolve their thread). GO + open automation
   thread -> downgraded to NOGO (address + re-review). Clean GO -> durably
   ``mark_pr_implementation_go`` then ``arm_auto_merge`` [durable, in that
   order — the label authorizes the arming; arming is skipped if the mark
-  write fails] -> follow-up step -> ADVANCE. Exhaustion -> durably apply
-  ``state:skip`` [durable] -> SKIP.
+  write fails] -> follow-up step -> ADVANCE. Every real non-GO round
+  durably writes ``state:implementation-no-go`` (doc section 5 owned
+  label, "NOGO verdict, before retry/regress"; legacy
+  ``_apply_impl_review_verdict`` -> ``mark_pr_implementation_no_go``
+  :248) before looping/regressing, non-fatally. Exhaustion -> durably
+  apply ``state:skip`` [durable] -> SKIP.
+- Downgraded-GO cost (DELIBERATE 2-round divergence from legacy): legacy
+  downgraded a GO with open automation threads and ran the address step in
+  the SAME iteration; this stage records the downgrade in EVAL and lets
+  the NEXT round's POST re-count the live threads before dispatching the
+  address leg, so a downgraded GO costs one extra review round. Chosen
+  because POST live-checks the unresolved counts (a thread resolved
+  out-of-band between rounds skips the address leg entirely) and the
+  budget/extension gate stays a single chokepoint in EVAL.
+- Progress metric (#1554 parity): the extension gate compares AUTOMATION
+  unresolved counts only — a human resolving their own thread is not
+  automation progress and must not earn extension rounds.
+- POST posts only SURVIVING threads: the round's reviewer threads are
+  filtered through the validation job's verdict
+  (:func:`_surviving_threads`, re-housed ``review_validator`` semantics —
+  ``wont_fix`` findings are accepted and dropped, ``unaddressed`` prior
+  findings are re-opened as new postable threads; an unparseable
+  validator output filters nothing, the legacy fail-open).
+- Real-commit gating (#1575): PUSH_WAIT's commit_push result is inspected
+  in EVAL. A push that produced NO commit (the fix agent punted or
+  self-reported a phantom fix) is NOT treated as addressed: the address
+  step is retried ONCE with the ``build_unaddressed_directive`` block
+  (via ``get_address_review_prompt``'s ``unaddressed_findings``), and a
+  second consecutive no-commit turn is evaluated as an unaddressed round.
+- agent_error fail-backs (address failure, reviewer-error cap, missing
+  PR/worktree) set ``payload["agent_error_failback"]`` so the
+  implementation GATE consumes the ``implement`` budget on re-adoption —
+  the cross-stage ping-pong bound (M1). ``review_error_retries`` is reset
+  by ``on_enter`` on each fresh implementation cycle.
 - Prompt functions (imported, never re-authored):
   ``prompts/pr_review.py get_pr_review_analysis_prompt`` /
   ``get_review_validation_prompt`` / ``get_comment_difficulty_prompt``,
@@ -62,6 +96,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from typing import Any
 
 from hephaestus.automation.agent_config import (
     address_review_claude_timeout,
@@ -89,6 +125,7 @@ from hephaestus.automation.session_naming import (
 from hephaestus.automation.state_labels import STATE_SKIP
 
 from .base import (
+    GIT_JOB_TIMEOUT_S,
     AgentJob,
     Continue,
     Disposition,
@@ -100,8 +137,9 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
+    _worktree_path,
+    write_skip_label,
 )
-from .implementation import GIT_JOB_TIMEOUT_S, _worktree_path
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +175,115 @@ _ROUND_PAYLOAD_KEYS = (
     "difficulty_tiers",
     "address_error",
     "address_output",
+    "push_no_commit",
+    "no_commit_retry_done",
+    "unaddressed_findings",
 )
+
+
+def _parse_validation_result(raw: Any) -> dict[str, Any] | None:
+    """Parse the validator job's output into its verdict dict, tolerantly.
+
+    The validation prompt asks for a single fenced JSON block at the END of
+    the response (``{"unaddressed": [...], "wont_fix": [...]}``); the parser
+    takes the LAST parseable block (legacy last-block-wins convention), then
+    falls back to treating the whole output as JSON. Returns None when
+    nothing parses — callers fail open.
+
+    Args:
+        raw: The validation job's stored output (str, dict, or anything).
+
+    Returns:
+        The parsed verdict dict, or None when unparseable/absent.
+
+    """
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    blocks = re.findall(r"```(?:json)?\s*(.*?)```", raw, flags=re.DOTALL)
+    for candidate in (*reversed(blocks), raw):
+        try:
+            parsed = json.loads(candidate.strip())
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _thread_ids(entries: Any) -> set[str]:
+    """Collect the ``thread_id``/``id`` strings from a validator bucket."""
+    ids: set[str] = set()
+    if not isinstance(entries, list):
+        return ids
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        thread_id = entry.get("thread_id") or entry.get("id")
+        if thread_id:
+            ids.add(str(thread_id))
+    return ids
+
+
+def _surviving_threads(
+    threads: list[dict[str, Any]], validation_result: Any
+) -> list[dict[str, Any]]:
+    """Filter the round's reviewer threads through the validator's verdict.
+
+    Re-housed ``review_validator`` consumption semantics (m1):
+
+    - ``wont_fix`` entries are documented-by-design decisions — accepted,
+      so any reviewer thread re-raising one of those thread ids is DROPPED
+      (never re-posted; the legacy recurrence-acceptance path, #1329).
+    - ``unaddressed`` entries are prior findings the current diff does NOT
+      resolve — RE-OPENED as new postable threads (the legacy
+      ``_classify_unaddressed_findings`` -> post path), unless the reviewer
+      already re-raised the same thread id this round.
+
+    Fail-open: a missing/unparseable validator output filters nothing — a
+    validator blip must never suppress the reviewer's own findings (the
+    legacy fail-open pattern).
+
+    Args:
+        threads: The round's reviewer-produced thread dicts.
+        validation_result: The validation job's stored output.
+
+    Returns:
+        The surviving thread list to durably post.
+
+    """
+    surviving = [dict(t) for t in threads]
+    parsed = _parse_validation_result(validation_result)
+    if parsed is None:
+        return surviving
+    wont_fix_ids = _thread_ids(parsed.get("wont_fix"))
+    if wont_fix_ids:
+        surviving = [
+            t for t in surviving if str(t.get("thread_id") or t.get("id") or "") not in wont_fix_ids
+        ]
+    present_ids = {str(t.get("thread_id") or t.get("id") or "") for t in surviving}
+    unaddressed = parsed.get("unaddressed")
+    if isinstance(unaddressed, list):
+        for entry in unaddressed:
+            if not isinstance(entry, dict):
+                continue
+            thread_id = str(entry.get("thread_id") or entry.get("id") or "")
+            if thread_id and thread_id in present_ids:
+                continue  # reviewer already re-raised it this round
+            detail = (
+                str(entry.get("detail") or "").strip()
+                or str(entry.get("original_body") or "").strip()
+                or "prior review comment not addressed"
+            )
+            surviving.append(
+                {
+                    "path": entry.get("path") or "",
+                    "line": entry.get("line"),
+                    "body": f"Reopened (prior round, still unaddressed): {detail}",
+                }
+            )
+    return surviving
 
 
 class PrReviewStage(Stage):
@@ -188,6 +334,11 @@ class PrReviewStage(Stage):
             item.payload["pr_review_cycle"] = cycle
             item.payload["pr_review_round"] = 0
             item.payload.pop("prev_unresolved", None)
+            # Fresh implementation cycle: the consecutive reviewer-failure
+            # streak restarts too (M1 — a re-entry after an agent_error
+            # fail-back gets a fresh error budget; the implement budget,
+            # consumed at the GATE, bounds the total number of cycles).
+            item.payload.pop("review_error_retries", None)
         return None
 
     def step(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
@@ -207,7 +358,7 @@ class PrReviewStage(Stage):
             # Nothing to review: fail back to implementation, whose
             # PR_CREATE step is the designated (re)creation path.
             logger.warning("pr_review:%d: no PR on item; failing back", item.issue)
-            return StageOutcome(Disposition.FAIL_BACK, "agent_error")
+            return self._fail_back_agent_error(item)
 
         if item.state == ENTER:
             return Continue(next_state=REVIEW_WAIT)
@@ -354,6 +505,14 @@ class PrReviewStage(Stage):
                 item.payload["address_error"] = True
             return
 
+        if item.state == PUSH_WAIT:
+            # Real-commit gate (#1575): commit_push reports whether a commit
+            # was actually produced (value/changed True). A no-commit push
+            # means the address turn was a phantom fix — EVAL must NOT treat
+            # the round as addressed.
+            item.payload["push_no_commit"] = not bool(result.value)
+            return
+
         if item.state == REVIEW_WAIT and result.value is not None:
             item.payload["review_verdict"] = result.value
             item.payload["review_text"] = getattr(result.value, "raw", str(result.value))
@@ -368,17 +527,24 @@ class PrReviewStage(Stage):
         # value any later state consumes.
 
     def _post(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """POST [M]: durably post surviving threads, refresh unresolved counts.
+        """POST [M]: durably post SURVIVING threads, refresh unresolved counts.
 
         The thread post is the round's durable write (doc step 3). The
-        surviving-thread list is parsed from the review/validation outputs
-        by the worker/coordinator (#1817) into ``payload["review_threads"]``.
+        reviewer's threads (parsed by the worker/coordinator (#1817) into
+        ``payload["review_threads"]``) are first filtered through the
+        validation job's verdict (:func:`_surviving_threads`, m1): wont_fix
+        findings are dropped, unaddressed prior findings are re-opened.
         Zero open automation threads skip the address leg straight to EVAL
         (the legacy zero-thread guard — nothing to classify or address).
         """
         if item.pr is None:  # guarded by step(); kept for type narrowing
-            return StageOutcome(Disposition.FAIL_BACK, "agent_error")
-        threads = item.payload.get("review_threads") or []
+            return self._fail_back_agent_error(item)
+        threads = _surviving_threads(
+            list(item.payload.get("review_threads") or []),
+            item.payload.get("validation_result"),
+        )
+        # The surviving set is what gets posted, classified, and addressed.
+        item.payload["review_threads"] = threads
         if threads:
             posted = ctx.github.post_review_threads(
                 item.pr, list(threads), item.payload.get("review_text", "")
@@ -398,10 +564,26 @@ class PrReviewStage(Stage):
         session with the review feedback (doc step 5,
         ``get_impl_resume_feedback_prompt``). Existing-PR path (adopted by
         the implementation GATE fast path): run the address-review session
-        against the PR's unresolved threads (``get_address_review_prompt``).
+        against the PR's unresolved threads (``get_address_review_prompt``,
+        with any carried ``unaddressed_findings`` rendering the
+        ``build_unaddressed_directive`` retry block, #1575).
+
+        Fail-closed worktree guard: address jobs EDIT code, so they must
+        never run in the shared checkout (wrong branch — it would commit
+        fixes onto whatever the shared tree has checked out). Without a
+        worktree the item fails back to implementation, whose GATE/worktree
+        leg is the designated recovery (bounded by the M1 agent_error
+        budget consumption).
         """
         if item.pr is None:  # guarded by step(); kept for type narrowing
-            return StageOutcome(Disposition.FAIL_BACK, "agent_error")
+            return self._fail_back_agent_error(item)
+        if not item.worktree:
+            logger.warning(
+                "pr_review:%s: no worktree for the address step; failing back "
+                "(never edit in the shared checkout)",
+                item.issue,
+            )
+            return self._fail_back_agent_error(item)
         verdict = item.payload.get("review_verdict")
         if item.payload.get("existing_pr"):
             job = AgentJob(
@@ -418,6 +600,11 @@ class PrReviewStage(Stage):
                     "worktree_path": item.worktree,
                     "threads_json": json.dumps(item.payload.get("review_threads", [])),
                     "todo_block": item.payload.get("difficulty_tiers", ""),
+                    # No-commit retry directive (#1575): non-empty ONLY on
+                    # the one retry after a no-commit address turn;
+                    # get_address_review_prompt renders it via
+                    # build_unaddressed_directive.
+                    "unaddressed_findings": list(item.payload.get("unaddressed_findings") or []),
                 },
                 descr="address",
             )
@@ -449,7 +636,7 @@ class PrReviewStage(Stage):
         verdicts — never for ERROR or missing verdicts (#911/#1554/#1794).
         """
         if item.pr is None or item.issue is None:  # guarded by step(); narrowing
-            return StageOutcome(Disposition.FAIL_BACK, "agent_error")
+            return self._fail_back_agent_error(item)
         payload = item.payload
 
         if payload.pop("address_error", None):
@@ -457,34 +644,18 @@ class PrReviewStage(Stage):
             # back to implementation for a fresh implement pass (bounded by
             # the implement budget). No labels, no round burned.
             logger.warning("pr_review:%d: address step failed; failing back", item.issue)
-            return StageOutcome(Disposition.FAIL_BACK, "agent_error")
+            return self._fail_back_agent_error(item)
+
+        # Real-commit gate (#1575, M4): a no-commit push retries the address
+        # once with the directive; the second no-commit turn falls through
+        # and is evaluated as an unaddressed round.
+        no_commit_retry = self._gate_no_commit(item)
+        if no_commit_retry is not None:
+            return no_commit_retry
 
         verdict = payload.get("review_verdict")
         if verdict is None or verdict.is_error:
-            # Reviewer-infrastructure failure: labels untouched, no round
-            # burned, RETRY — bounded by the consecutive-failure cap
-            # (plan_review pattern), then fail back agent_error.
-            reason = "no verdict found" if verdict is None else "reviewer error"
-            retries = payload.get("review_error_retries", 0) + 1
-            payload["review_error_retries"] = retries
-            if retries > REVIEW_ERROR_RETRY_CAP:
-                logger.error(
-                    "pr_review:%d: %s; %d consecutive reviewer failures (cap %d)"
-                    " — failing back to implementation",
-                    item.issue,
-                    reason,
-                    retries,
-                    REVIEW_ERROR_RETRY_CAP,
-                )
-                return StageOutcome(Disposition.FAIL_BACK, "agent_error")
-            logger.warning(
-                "pr_review:%d: %s; retry %d/%d (no round burned)",
-                item.issue,
-                reason,
-                retries,
-                REVIEW_ERROR_RETRY_CAP,
-            )
-            return StageOutcome(Disposition.RETRY, reason)
+            return self._handle_error_verdict(item, verdict)
 
         # Real verdict: this round counts. Reset the consecutive-failure
         # cap; advance the cycle-relative gate and the lifetime audit trail.
@@ -505,13 +676,15 @@ class PrReviewStage(Stage):
 
         if verdict.is_go and human_unresolved:
             # A GO cannot stand while a HUMAN review thread is open —
-            # automation must not resolve it and cannot fix it. Terminal,
-            # with the PR left UNLABELED (no go, no no-go, no skip).
+            # automation must not resolve it and cannot fix it. Post the
+            # explanatory stand-down comment [durable, before the outcome],
+            # then finish with the PR left UNLABELED (no go/no-go/skip).
             logger.info(
                 "pr_review:%d: GO blocked by %d human thread(s); finishing (unlabeled)",
                 item.issue,
                 human_unresolved,
             )
+            self._post_human_blocked_comment(item.pr, human_unresolved, ctx)
             return StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
 
         if verdict.is_go and unresolved == 0:
@@ -522,9 +695,18 @@ class PrReviewStage(Stage):
             return StageOutcome(Disposition.ADVANCE, "GO with zero unresolved threads")
 
         # NOGO/AMBIGUOUS — or a GO downgraded by open automation threads
-        # (re-housed downgrade: address + re-review before GO can stand).
+        # (re-housed downgrade: address + re-review before GO can stand;
+        # the address leg runs NEXT round after POST live-checks the
+        # threads — the module docstring's deliberate 2-round divergence).
+        # Doc section 5 owned label: every real non-GO round durably records
+        # state:implementation-no-go BEFORE the retry/regress outcome
+        # (legacy mark_pr_implementation_no_go, _review_phase.py:248).
+        self._write_no_go(item.pr, ctx)
+        # #1554 parity (m2): the progress trail counts AUTOMATION threads
+        # only — a human resolving their own thread is not automation
+        # progress and must not earn extension rounds.
         prev_unresolved = payload.get("prev_unresolved")
-        payload["prev_unresolved"] = unresolved
+        payload["prev_unresolved"] = automation_unresolved
         if round_done < soft_cap:
             logger.info(
                 "pr_review:%d: %s (round %d/%d, %d unresolved); re-reviewing",
@@ -535,30 +717,189 @@ class PrReviewStage(Stage):
                 unresolved,
             )
             return Continue(next_state=REVIEW_WAIT)
-        made_progress = prev_unresolved is not None and unresolved < prev_unresolved
+        made_progress = prev_unresolved is not None and automation_unresolved < prev_unresolved
         if round_done < hard_cap and made_progress:
             # #1554 progress-aware extension: rounds soft_cap+1..hard_cap are
-            # admitted only while the unresolved count strictly decreases.
+            # admitted only while the AUTOMATION unresolved count strictly
+            # decreases.
             logger.info(
-                "pr_review:%d: extension round %d/%d earned (%s -> %d unresolved)",
+                "pr_review:%d: extension round %d/%d earned (%s -> %d automation unresolved)",
                 item.issue,
                 round_done + 1,
                 hard_cap,
                 prev_unresolved,
-                unresolved,
+                automation_unresolved,
             )
             return Continue(next_state=REVIEW_WAIT)
 
         logger.warning(
-            "pr_review:%d: exhausted at round %d (unresolved %s -> %d); applying %s",
+            "pr_review:%d: exhausted at round %d (automation unresolved %s -> %d); applying %s",
             item.issue,
             round_done,
             prev_unresolved,
-            unresolved,
+            automation_unresolved,
             STATE_SKIP,
         )
-        self._write_skip_label(item.issue, ctx)
+        write_skip_label(item.issue, ctx)
         return StageOutcome(Disposition.SKIP, "exhaustion")
+
+    @staticmethod
+    def _gate_no_commit(item: WorkItem) -> Continue | None:
+        """Apply the real-commit gate (#1575): a no-commit push is never "addressed".
+
+        A push that produced NO commit means the address turn self-reported
+        a phantom fix. The FIRST such turn retries the address once, carrying
+        the still-open threads as ``unaddressed_findings`` (rendered by
+        ``build_unaddressed_directive`` inside ``get_address_review_prompt``)
+        to re-ground the resumed session. A SECOND consecutive no-commit turn
+        returns None so EVAL treats it as an unaddressed round. A real commit
+        spends/clears the retry directive (legacy: "a progress round clears
+        the retry directive").
+
+        Args:
+            item: The work item under evaluation.
+
+        Returns:
+            ``Continue(ADDRESS_WAIT)`` for the one retry, else None.
+
+        """
+        payload = item.payload
+        no_commit = payload.pop("push_no_commit", None)
+        if no_commit:
+            if not payload.get("no_commit_retry_done"):
+                payload["no_commit_retry_done"] = True
+                payload["unaddressed_findings"] = list(payload.get("review_threads") or [])
+                logger.warning(
+                    "pr_review:%s: address turn produced NO commit; retrying the "
+                    "address once with the unaddressed-findings directive (#1575)",
+                    item.issue,
+                )
+                return Continue(next_state=ADDRESS_WAIT)
+            logger.warning(
+                "pr_review:%s: address retry still produced no commit; "
+                "treating this as an unaddressed round",
+                item.issue,
+            )
+        elif no_commit is False:
+            payload.pop("no_commit_retry_done", None)
+            payload.pop("unaddressed_findings", None)
+        return None
+
+    def _handle_error_verdict(self, item: WorkItem, verdict: Any) -> StageOutcome:
+        """Handle a missing/ERROR verdict: bounded RETRY, then fail back.
+
+        Reviewer-infrastructure failure: labels untouched, no round burned,
+        RETRY — bounded by the consecutive-failure cap (plan_review
+        pattern), then fail back ``agent_error`` (#911/#1554/#1794).
+
+        Args:
+            item: The work item under evaluation.
+            verdict: The stored verdict (None or an ERROR verdict).
+
+        Returns:
+            RETRY below the cap; the flagged agent_error fail-back at it.
+
+        """
+        payload = item.payload
+        reason = "no verdict found" if verdict is None else "reviewer error"
+        retries = payload.get("review_error_retries", 0) + 1
+        payload["review_error_retries"] = retries
+        if retries > REVIEW_ERROR_RETRY_CAP:
+            logger.error(
+                "pr_review:%s: %s; %d consecutive reviewer failures (cap %d)"
+                " — failing back to implementation",
+                item.issue,
+                reason,
+                retries,
+                REVIEW_ERROR_RETRY_CAP,
+            )
+            return self._fail_back_agent_error(item)
+        logger.warning(
+            "pr_review:%s: %s; retry %d/%d (no round burned)",
+            item.issue,
+            reason,
+            retries,
+            REVIEW_ERROR_RETRY_CAP,
+        )
+        return StageOutcome(Disposition.RETRY, reason)
+
+    @staticmethod
+    def _fail_back_agent_error(item: WorkItem) -> StageOutcome:
+        """FAIL_BACK ``agent_error``, flagging the re-entry for the M1 bound.
+
+        Every agent_error fail-back marks
+        ``payload["agent_error_failback"]`` so the implementation GATE's
+        existing-PR adoption consumes the ``implement`` budget — without a
+        moving counter the fail-back -> adopt -> ADVANCE cycle would
+        ping-pong forever.
+
+        Args:
+            item: The work item failing back.
+
+        Returns:
+            The FAIL_BACK(``agent_error``) outcome.
+
+        """
+        item.payload["agent_error_failback"] = True
+        return StageOutcome(Disposition.FAIL_BACK, "agent_error")
+
+    @staticmethod
+    def _write_no_go(pr_number: int, ctx: StageContext) -> None:
+        """Durably mark implementation NO-GO, non-fatally (legacy warn pattern).
+
+        Doc section 5 owned label ("NOGO verdict, before retry/regress"):
+        written on EVERY real non-GO round so the PR durably reflects the
+        latest converged verdict even across restarts (legacy
+        ``mark_pr_implementation_no_go``, ``_review_phase.py:248``).
+
+        Args:
+            pr_number: GitHub PR number that earned the non-GO round.
+            ctx: Stage context carrying the GitHub accessor.
+
+        """
+        try:
+            ctx.github.mark_pr_implementation_no_go(pr_number)
+        except Exception as e:
+            logger.warning(
+                "pr_review: failed to mark PR #%d implementation-no-go (non-fatal): %s",
+                pr_number,
+                e,
+            )
+
+    @staticmethod
+    def _post_human_blocked_comment(
+        pr_number: int, human_unresolved: int, ctx: StageContext
+    ) -> None:
+        """Post the HUMAN_BLOCKED stand-down comment, non-fatally [durable].
+
+        Written BEFORE the FINISH_FAIL outcome so the reason automation
+        stood down is durably visible on the PR (M3): without it, an
+        unlabeled PR that automation stops touching looks abandoned.
+
+        Args:
+            pr_number: GitHub PR number blocked by human threads.
+            human_unresolved: Count of unresolved human-owned review threads.
+            ctx: Stage context carrying the GitHub accessor.
+
+        """
+        body = (
+            "**Automation stand-down: human review thread(s) block GO.**\n\n"
+            f"The implementation review reached GO, but {human_unresolved} "
+            "unresolved review thread(s) opened by a human remain on this PR. "
+            "Automation will not resolve human threads and cannot act on them, "
+            "so it is standing down: the PR is left unlabeled (no "
+            "`state:implementation-go` / `state:implementation-no-go`) and "
+            "auto-merge stays unarmed. Once the human thread(s) are resolved, "
+            "the next automation pass will re-review this PR."
+        )
+        try:
+            ctx.github.post_pr_comment(pr_number, body)
+        except Exception as e:
+            logger.warning(
+                "pr_review: failed to post HUMAN_BLOCKED comment on PR #%d (non-fatal): %s",
+                pr_number,
+                e,
+            )
 
     @staticmethod
     def _write_go_and_arm(pr_number: int, ctx: StageContext) -> None:
@@ -589,23 +930,4 @@ class PrReviewStage(Stage):
         except Exception as e:
             logger.warning(
                 "pr_review: failed to arm auto-merge on PR #%d (non-fatal): %s", pr_number, e
-            )
-
-    @staticmethod
-    def _write_skip_label(issue_number: int, ctx: StageContext) -> None:
-        """Durably apply ``state:skip``, non-fatally (legacy warn pattern).
-
-        Args:
-            issue_number: GitHub issue number.
-            ctx: Stage context carrying the GitHub accessor.
-
-        """
-        try:
-            ctx.github.add_labels(issue_number, [STATE_SKIP])
-        except Exception as e:
-            logger.warning(
-                "pr_review:%d: failed to add label %r (non-fatal): %s",
-                issue_number,
-                STATE_SKIP,
-                e,
             )

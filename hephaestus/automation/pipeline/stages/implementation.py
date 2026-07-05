@@ -10,18 +10,38 @@ binding contract):
 
 - States: ENTER -> GATE -> WORKTREE_WAIT -> DIRTY_DECISION_WAIT ->
   ADVISE_WAIT -> IMPLEMENT_WAIT -> TEST_WAIT -> TESTFIX_WAIT ->
-  COMMIT_PUSH_WAIT -> PR_CREATE.
+  COMMIT_PUSH_WAIT -> PR_CREATE. The existing-PR fast path short-circuits
+  WORKTREE_WAIT -> DIRTY_DECISION_WAIT -> ADOPTED (ADVANCE to pr_review).
 - Budgets: ``implement`` = 2 (bounds implement attempts INCLUDING
   agent_error retries — the doc's "agent_error -> RETRY (consumes the
   implement budget)"), ``test_fix`` = 1 (one fix attempt on red pre-PR
   tests). Both read from ROUTES via ``ctx.budget``, never hardcoded here.
 - GATE [M]: existing-PR fast path first (``_review_existing_pr``
   semantics): a PR already carrying ``state:implementation-go`` fails back
-  ``already_implementation_go_pr`` (routes to ci); a PR without it adopts
-  the PR's REAL head branch and ADVANCEs straight to pr_review. Otherwise
-  the plan-review verdict gate: at-or-past ``state:plan-go`` (or already
-  ``state:implementation-go``) proceeds; anything else fails back
-  ``plan_not_go`` (routes to plan_review).
+  ``already_implementation_go_pr`` (routes to ci) with ``item.pr`` /
+  ``item.branch`` set for the ci stage; a PR without it adopts the PR's
+  REAL head branch, re-ensures the auto-merge deferral [durable], cuts a
+  worktree on the ADOPTED branch (``refresh_base=False`` +
+  ``sync_to_remote`` — the anti-clobber reset of
+  ``_prepare_worktree_for_existing_pr`` :649, so pushed commits are never
+  discarded), runs the dirty-salvage decision if needed, and only then
+  ADVANCEs to pr_review (ADOPTED). Otherwise the plan-review verdict gate:
+  at-or-past ``state:plan-go`` (or already ``state:implementation-go``)
+  proceeds; anything else fails back ``plan_not_go`` (routes to
+  plan_review).
+- agent_error ping-pong bound: when pr_review fails back ``agent_error``
+  (flagged in ``payload["agent_error_failback"]``), the GATE's existing-PR
+  adoption CONSUMES the ``implement`` budget — otherwise the
+  fail-back -> adopt -> ADVANCE cycle would never move a counter and could
+  loop forever. Exhaustion -> FINISH_FAIL(``agent_error_exhausted``): the
+  reviewer/address infrastructure failed repeatedly and re-adopting the
+  same PR again cannot fix it; a human should look at the PR.
+- Transient git failures (worktree creation, commit+push) RETRY without
+  burning the implement budget, but are bounded by
+  :data:`GIT_ERROR_RETRY_CAP` consecutive failures (mirrors
+  pr_review.REVIEW_ERROR_RETRY_CAP); at the cap the item finishes failed
+  (``git_error``) instead of retrying a broken remote forever. The counter
+  resets on any successful git job.
 - Owned labels: none — PR creation is the journal entry (doc section 4).
   The only label this stage ever writes is ``state:skip`` on the legacy
   "no commits vs base" runtime error (re-housed
@@ -42,7 +62,6 @@ binding contract):
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from hephaestus.automation.agent_config import (
     advise_claude_timeout,
@@ -65,6 +84,7 @@ from hephaestus.automation.state_labels import (
 )
 
 from .base import (
+    GIT_JOB_TIMEOUT_S,
     AgentJob,
     BuildTestJob,
     Continue,
@@ -77,8 +97,10 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
+    _issue_labels,
+    _worktree_path,
+    write_skip_label,
 )
-from .planning import _issue_labels
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +109,7 @@ ENTER = "ENTER"
 GATE = "GATE"
 WORKTREE_WAIT = "WORKTREE_WAIT"
 DIRTY_DECISION_WAIT = "DIRTY_DECISION_WAIT"
+ADOPTED = "ADOPTED"
 ADVISE_WAIT = "ADVISE_WAIT"
 IMPLEMENT_WAIT = "IMPLEMENT_WAIT"
 TEST_WAIT = "TEST_WAIT"
@@ -94,8 +117,12 @@ TESTFIX_WAIT = "TESTFIX_WAIT"
 COMMIT_PUSH_WAIT = "COMMIT_PUSH_WAIT"
 PR_CREATE = "PR_CREATE"
 
-#: Timeout for git worktree/commit/push jobs (mechanical, no agent).
-GIT_JOB_TIMEOUT_S = 600
+#: Max CONSECUTIVE transient git failures (worktree creation / commit+push)
+#: tolerated before the stage finishes failed (``git_error``) instead of
+#: RETRYing forever. Mirrors pr_review.REVIEW_ERROR_RETRY_CAP: transient
+#: failures never burn the implement budget, but a persistently broken
+#: remote must still terminate. Reset on any successful git job.
+GIT_ERROR_RETRY_CAP = 2
 
 #: Timeout for the optional pre-PR unit-test run (mirrors the legacy
 #: ``_pr_create_phase`` bound; the budget that matters — ``test_fix`` —
@@ -186,13 +213,6 @@ def build_test_fix_prompt(issue_number: int, prev_iteration: int, test_output: s
     )
 
 
-def _worktree_path(item: WorkItem, ctx: StageContext) -> Path:
-    """Return the item's worktree as a Path, falling back to the shared one."""
-    if item.worktree:
-        return Path(item.worktree)
-    return Path(str(ctx.paths.worktree))
-
-
 class ImplementationStage(Stage):
     """Stage: gate plan GO, worktree, advise, implement, test, commit, PR."""
 
@@ -239,14 +259,25 @@ class ImplementationStage(Stage):
 
         if item.state == WORKTREE_WAIT:
             logger.info("implementation:%d: requesting worktree job", item.issue)
+            adopted = bool(item.payload.get("existing_pr"))
+            kwargs: dict[str, object] = {
+                "issue": item.issue,
+                "branch": item.branch,
+                # Fresh branch: cut from a freshly refreshed trunk (doc step
+                # 2: worktree_manager.create_worktree(refresh_base=True)).
+                # ADOPTED branch: never reset to trunk — sync to the PR's
+                # remote head instead (the anti-clobber reset of
+                # _prepare_worktree_for_existing_pr :649/:693, so re-running
+                # never discards pushed commits). Values coordinator-vetted.
+                "refresh_base": not adopted,
+            }
+            if adopted:
+                kwargs["sync_to_remote"] = True
             worktree_job = GitJob(
                 repo=item.repo,
                 op="create_worktree",
                 timeout_s=GIT_JOB_TIMEOUT_S,
-                # refresh_base=True: the worktree is cut from a freshly
-                # refreshed trunk (doc step 2: worktree_manager.create_worktree
-                # (refresh_base=True)); values are coordinator-vetted.
-                kwargs={"issue": item.issue, "branch": item.branch, "refresh_base": True},
+                kwargs=kwargs,
                 descr="create_worktree",
             )
             return JobRequest(worktree_job, on_done_state=DIRTY_DECISION_WAIT)
@@ -254,10 +285,15 @@ class ImplementationStage(Stage):
         if item.state == DIRTY_DECISION_WAIT:
             if item.payload.pop("git_error", None):
                 # Worktree creation failed: transient infrastructure, not an
-                # implement outcome — RETRY without burning the budget.
-                return StageOutcome(Disposition.RETRY, "worktree creation failed")
+                # implement outcome — RETRY without burning the implement
+                # budget, bounded by GIT_ERROR_RETRY_CAP (M5).
+                return self._git_retry(item, "worktree creation failed")
+            # Adopted-PR path: after the (clean or salvaged) worktree is
+            # ready, skip the implement leg — the PR's code already exists;
+            # pr_review's address leg drives it from here.
+            adopted_next = ADOPTED if item.payload.get("existing_pr") else ADVISE_WAIT
             if not item.payload.get("worktree_dirty"):
-                return Continue(next_state=ADVISE_WAIT)
+                return Continue(next_state=adopted_next)
             logger.info("implementation:%d: requesting dirty-worktree decision", item.issue)
             job = AgentJob(
                 repo=item.repo,
@@ -274,7 +310,19 @@ class ImplementationStage(Stage):
                 },
                 descr="dirty_decision",
             )
-            return JobRequest(job, on_done_state=ADVISE_WAIT)
+            return JobRequest(job, on_done_state=adopted_next)
+
+        if item.state == ADOPTED:
+            # Existing-PR fast path complete: worktree ready on the PR's real
+            # head branch — hand the PR to pr_review (doc step 1 "skip to
+            # step 8": nothing to implement, commit, or create).
+            logger.info(
+                "implementation:%d: adopted PR #%s (branch %r); advancing to pr_review",
+                item.issue,
+                item.pr,
+                item.branch,
+            )
+            return StageOutcome(Disposition.ADVANCE, f"existing PR #{item.pr}")
 
         if item.state == ADVISE_WAIT:
             if not ctx.config.enable_advise:
@@ -441,7 +489,11 @@ class ImplementationStage(Stage):
             item.attempts["test_fix"] = item.attempts.get("test_fix", 0) + 1
             return
 
-        if item.state == COMMIT_PUSH_WAIT and not result.ok:
+        if item.state == COMMIT_PUSH_WAIT:
+            if result.ok:
+                # A successful push ends the consecutive-git-failure streak.
+                item.payload.pop("git_error_retries", None)
+                return
             error_text = (result.error or "").lower()
             if "no commits" in error_text:
                 # Legacy _handle_runtime_error (:348): "no commits between
@@ -490,6 +542,8 @@ class ImplementationStage(Stage):
             logger.warning("implementation:%s: worktree job failed: %s", item.issue, result.error)
             item.payload["git_error"] = True
             return
+        # A successful worktree job ends the consecutive-git-failure streak.
+        item.payload.pop("git_error_retries", None)
         value = result.value
         if isinstance(value, dict):
             item.worktree = str(value.get("path", item.worktree))
@@ -521,35 +575,72 @@ class ImplementationStage(Stage):
         """GATE [M]: existing-PR fast path, then the plan-review verdict gate.
 
         Re-houses ``_review_existing_pr`` (:750) and ``_ensure_plan_ready``
-        (:429). All checks are at-or-past reads; nothing is written.
+        (:429). All checks are at-or-past reads; the only write is the
+        auto-merge deferral re-ensure on PR adoption [durable].
+
+        agent_error bound (M1): a re-entry from a pr_review ``agent_error``
+        fail-back (``payload["agent_error_failback"]``) that adopts an
+        existing PR CONSUMES the ``implement`` budget — the adoption produces
+        no implement job whose completion would otherwise count it, and
+        without a moving counter the fail-back -> adopt -> ADVANCE cycle
+        would ping-pong forever. Exhaustion terminates with
+        ``agent_error_exhausted``.
         """
         if item.issue is None:  # guarded by step(); kept for type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
 
+        # Pop the fail-back marker unconditionally: on the fresh-implement
+        # path below the budget is consumed by the implement job itself, so
+        # the marker must never survive into a later GATE pass.
+        agent_error_reentry = bool(item.payload.pop("agent_error_failback", None))
+
         existing_pr = item.pr or ctx.github.find_pr_for_issue(item.issue)
         if existing_pr:
+            item.pr = existing_pr
+            head_branch = ctx.github.get_pr_head_branch(existing_pr)
+            if head_branch:
+                item.branch = head_branch
             has_go, _has_no_go = ctx.github.pr_has_implementation_state_label(existing_pr)
             if has_go:
+                # item.pr/item.branch are set above so the ci stage receives
+                # a fully-identified PR (m7).
                 logger.info(
                     "implementation:%d: PR #%d already implementation-go; routing to ci",
                     item.issue,
                     existing_pr,
                 )
                 return StageOutcome(Disposition.FAIL_BACK, "already_implementation_go_pr")
+            if agent_error_reentry:
+                # M1: consume the implement budget at GATE-adoption so the
+                # pr_review agent_error -> re-adopt cycle is bounded.
+                attempts = item.attempts.get("implement", 0) + 1
+                item.attempts["implement"] = attempts
+                budget = ctx.budget("implement")
+                if attempts >= budget:
+                    logger.error(
+                        "implementation:%d: agent_error fail-backs exhausted the "
+                        "implement budget (%d/%d) re-adopting PR #%d — stopping; "
+                        "the review/address infrastructure failed repeatedly and "
+                        "re-adopting the same PR cannot fix it (manual look needed)",
+                        item.issue,
+                        attempts,
+                        budget,
+                        existing_pr,
+                    )
+                    return StageOutcome(Disposition.FINISH_FAIL, "agent_error_exhausted")
             # Adopt the PR's REAL head branch — never assume {issue}-auto-impl
-            # (the _review_existing_pr branch-assumption bug).
-            item.pr = existing_pr
-            head_branch = ctx.github.get_pr_head_branch(existing_pr)
-            if head_branch:
-                item.branch = head_branch
+            # (the _review_existing_pr branch-assumption bug) — and re-ensure
+            # auto-merge stays deferred on the adopted PR [durable]: it must
+            # never be armed before state:implementation-go.
             item.payload["existing_pr"] = True
+            ctx.github.defer_auto_merge(existing_pr)
             logger.info(
-                "implementation:%d: existing PR #%d (branch %r); advancing to pr_review",
+                "implementation:%d: existing PR #%d (branch %r); preparing adopted worktree",
                 item.issue,
                 existing_pr,
                 item.branch,
             )
-            return StageOutcome(Disposition.ADVANCE, f"existing PR #{existing_pr}")
+            return Continue(next_state=WORKTREE_WAIT)
 
         labels = _issue_labels(item, ctx)
         # At-or-past (never equality): plan-go OR already implementation-go
@@ -577,12 +668,13 @@ class ImplementationStage(Stage):
             logger.warning(
                 "implementation:%d: no commits vs base; applying %s", item.issue, STATE_SKIP
             )
-            self._write_skip_label(item.issue, ctx)
+            write_skip_label(item.issue, ctx)
             return StageOutcome(Disposition.SKIP, "no commits vs base")
         if item.payload.pop("git_error", None):
             # Push failed: transient git/network trouble — RETRY the stage
-            # without burning the implement budget.
-            return StageOutcome(Disposition.RETRY, "commit_push failed")
+            # without burning the implement budget, bounded by
+            # GIT_ERROR_RETRY_CAP (M5).
+            return self._git_retry(item, "commit_push failed")
 
         if item.pr is None:
             title = item.payload.get("issue_title") or f"[Auto] Implement issue #{item.issue}"
@@ -602,20 +694,41 @@ class ImplementationStage(Stage):
         return StageOutcome(Disposition.ADVANCE, f"PR #{item.pr} ready for review")
 
     @staticmethod
-    def _write_skip_label(issue_number: int, ctx: StageContext) -> None:
-        """Durably apply ``state:skip``, non-fatally (legacy warn pattern).
+    def _git_retry(item: WorkItem, note: str) -> StageOutcome:
+        """RETRY a transient git failure, bounded by GIT_ERROR_RETRY_CAP (M5).
+
+        Transient worktree/push failures never burn the implement budget,
+        but a persistently failing remote must still terminate: at the cap
+        the item finishes failed (``git_error``). The consecutive-failure
+        counter lives in ``payload["git_error_retries"]`` and is reset by
+        any successful git job (see ``on_job_done``).
 
         Args:
-            issue_number: GitHub issue number.
-            ctx: Stage context carrying the GitHub accessor.
+            item: The work item whose git job failed.
+            note: Human-readable failure note for the RETRY outcome.
+
+        Returns:
+            RETRY below the cap; FINISH_FAIL(``git_error``) at the cap.
 
         """
-        try:
-            ctx.github.add_labels(issue_number, [STATE_SKIP])
-        except Exception as e:
-            logger.warning(
-                "implementation:%d: failed to add label %r (non-fatal): %s",
-                issue_number,
-                STATE_SKIP,
-                e,
+        retries = item.payload.get("git_error_retries", 0) + 1
+        item.payload["git_error_retries"] = retries
+        if retries > GIT_ERROR_RETRY_CAP:
+            logger.error(
+                "implementation:%s: %s; %d consecutive git failures (cap %d) — "
+                "finishing failed (git_error): the remote/worktree is persistently "
+                "broken and needs a manual look",
+                item.issue,
+                note,
+                retries,
+                GIT_ERROR_RETRY_CAP,
             )
+            return StageOutcome(Disposition.FINISH_FAIL, "git_error")
+        logger.warning(
+            "implementation:%s: %s; git retry %d/%d (implement budget untouched)",
+            item.issue,
+            note,
+            retries,
+            GIT_ERROR_RETRY_CAP,
+        )
+        return StageOutcome(Disposition.RETRY, note)

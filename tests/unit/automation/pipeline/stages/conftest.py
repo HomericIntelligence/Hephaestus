@@ -156,6 +156,19 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror pr_manager.mark_pr_implementation_go (records mutation)."""
         self._log("mark_pr_implementation_go", pr_number)
 
+    def mark_pr_implementation_no_go(self, pr_number: int) -> None:
+        """Mirror pr_manager.mark_pr_implementation_no_go (records mutation)."""
+        self._log("mark_pr_implementation_no_go", pr_number)
+
+    def post_pr_comment(self, pr_number: int, body: str) -> None:
+        """Mirror the coordinator PR-comment post (delegates to gh_issue_comment).
+
+        PRs share the issue comment channel, so the canonical
+        ``gh_issue_comment`` recorder keeps the mutation_log format and
+        stores the body for content assertions.
+        """
+        self.gh_issue_comment(pr_number, body)
+
     def arm_auto_merge(self, pr_number: int) -> None:
         """Mirror pr_manager.enable_auto_merge_after_implementation_go."""
         self._log("arm_auto_merge", pr_number)

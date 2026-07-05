@@ -8,6 +8,7 @@ from hephaestus.automation.pipeline.jobs import AgentJob, BuildTestJob, GitJob, 
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.implementation import (
+    GIT_ERROR_RETRY_CAP,
     PRE_PR_TEST_ARGV,
     ImplementationStage,
     build_implementation_prompt,
@@ -165,9 +166,15 @@ class TestGate:
     def test_gate_existing_pr_with_impl_go_routes_to_ci(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An existing implementation-go PR fails back already_implementation_go_pr."""
+        """An existing implementation-go PR fails back already_implementation_go_pr.
+
+        The ci stage must receive a fully-identified PR: item.pr and the
+        PR's REAL head branch are set BEFORE the fail-back (m7).
+        """
         stage = ImplementationStage()
-        github = FakeStageGitHub(open_pr=1001, pr_impl_state=(True, False))
+        github = FakeStageGitHub(
+            open_pr=1001, pr_impl_state=(True, False), pr_head_branch="1-real-branch"
+        )
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, state="GATE")
 
@@ -176,11 +183,18 @@ class TestGate:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.FAIL_BACK
         assert result.note == "already_implementation_go_pr"
+        assert item.pr == 1001  # set before the fail-back (m7)
+        assert item.branch == "1-real-branch"
 
-    def test_gate_existing_pr_without_impl_go_advances_to_pr_review(
+    def test_gate_existing_pr_without_impl_go_adopts_via_worktree(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An existing non-GO PR is adopted (REAL head branch) and ADVANCEs."""
+        """An existing non-GO PR is adopted: real head branch, deferral, worktree.
+
+        Adoption re-ensures the auto-merge deferral [durable] and routes
+        through WORKTREE_WAIT so pr_review's address leg gets an isolated
+        worktree on the ADOPTED branch (never the shared checkout).
+        """
         stage = ImplementationStage()
         github = FakeStageGitHub(open_pr=1001, pr_head_branch="1-some-real-branch")
         ctx = make_ctx(github=github)
@@ -188,11 +202,196 @@ class TestGate:
 
         result = stage.step(item, ctx)
 
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.ADVANCE
+        assert isinstance(result, Continue)
+        assert result.next_state == "WORKTREE_WAIT"
         assert item.pr == 1001
         assert item.branch == "1-some-real-branch"  # never assumed {issue}-auto-impl
         assert item.payload["existing_pr"] is True
+        assert github.mutation_log == [("defer_auto_merge", (1001,))]
+
+    def test_adopted_worktree_job_syncs_without_trunk_reset(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The adopted branch's worktree is synced, never reset to trunk.
+
+        Anti-clobber (_prepare_worktree_for_existing_pr): refresh_base must
+        be False and sync_to_remote True so pushed commits are never
+        discarded.
+        """
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="WORKTREE_WAIT")
+        item.branch = "1-some-real-branch"
+        item.payload["existing_pr"] = True
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs == {
+            "issue": 1,
+            "branch": "1-some-real-branch",
+            "refresh_base": False,
+            "sync_to_remote": True,
+        }
+
+    def test_adopted_clean_worktree_advances_to_pr_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A clean adopted worktree skips the implement leg and ADVANCEs."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
+        item.payload["existing_pr"] = True
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == "ADOPTED"
+
+        item.state = "ADOPTED"
+        outcome = stage.step(item, ctx)
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.ADVANCE
+
+    def test_adopted_dirty_worktree_salvages_then_advances(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A dirty adopted worktree runs the salvage decision, then ADVANCEs."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
+        item.payload["existing_pr"] = True
+        item.payload["worktree_dirty"] = True
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert result.job.descr == "dirty_decision"
+        assert result.on_done_state == "ADOPTED"
+
+
+class TestAgentErrorPingPongBound:
+    """M1: pr_review agent_error fail-backs consume the implement budget."""
+
+    def test_reentry_flag_consumes_budget_at_adoption(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A flagged re-entry that adopts a PR consumes attempts["implement"]."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(open_pr=1001, pr_head_branch="1-real")
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, state="GATE")
+        item.payload["agent_error_failback"] = True
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue)  # 1 < budget 2: still adopted
+        assert result.next_state == "WORKTREE_WAIT"
+        assert item.attempts["implement"] == 1  # the bound moved
+        assert "agent_error_failback" not in item.payload  # flag consumed
+
+    def test_reentry_exhaustion_finishes_failed_without_labels(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """At the implement budget the re-adoption terminates, labels untouched."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(open_pr=1001, pr_head_branch="1-real")
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, state="GATE")
+        item.attempts["implement"] = 1  # one fail-back round trip already
+        item.payload["agent_error_failback"] = True
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.FINISH_FAIL
+        assert result.note == "agent_error_exhausted"
+        assert github.mutation_log == []  # no labels, no deferral on the dead path
+
+    def test_flag_never_survives_the_fresh_implement_path(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Without an existing PR the flag is dropped (implement job counts)."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(labels=["state:plan-go"])  # no PR
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=7, state="GATE")
+        item.payload["agent_error_failback"] = True
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == "WORKTREE_WAIT"
+        assert item.attempts["implement"] == 0  # the implement job itself counts
+        assert "agent_error_failback" not in item.payload
+
+
+class TestGitErrorRetryCap:
+    """M5: transient git RETRYs are bounded by GIT_ERROR_RETRY_CAP."""
+
+    def test_worktree_failures_retry_to_the_cap_then_fail(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Consecutive worktree failures RETRY twice, then finish failed."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+
+        for expected_retry in range(1, GIT_ERROR_RETRY_CAP + 1):
+            stage.on_job_done(item, JobResult(ok=False, error="disk full"), ctx)
+            item.state = "DIRTY_DECISION_WAIT"
+            outcome = stage.step(item, ctx)
+            assert isinstance(outcome, StageOutcome)
+            assert outcome.disposition == Disposition.RETRY
+            assert item.payload["git_error_retries"] == expected_retry
+            item.state = "WORKTREE_WAIT"  # coordinator RETRY re-enters
+
+        stage.on_job_done(item, JobResult(ok=False, error="disk full"), ctx)
+        item.state = "DIRTY_DECISION_WAIT"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.FINISH_FAIL
+        assert outcome.note == "git_error"
+        assert item.attempts["implement"] == 0  # git failures never burn implement
+
+    def test_push_failures_share_the_same_cap(self, make_ctx: Any, make_work_item: Any) -> None:
+        """Consecutive push failures hit the same bounded-RETRY path."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        item.payload["git_error_retries"] = GIT_ERROR_RETRY_CAP  # at the cap
+
+        stage.on_job_done(item, JobResult(ok=False, error="remote hung up"), ctx)
+        item.state = "PR_CREATE"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.FINISH_FAIL
+        assert outcome.note == "git_error"
+
+    def test_worktree_success_resets_the_counter(self, make_ctx: Any, make_work_item: Any) -> None:
+        """A successful worktree job ends the consecutive-failure streak."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.payload["git_error_retries"] = GIT_ERROR_RETRY_CAP
+
+        stage.on_job_done(item, JobResult(ok=True, value="/tmp/wt"), ctx)
+
+        assert "git_error_retries" not in item.payload
+
+    def test_push_success_resets_the_counter(self, make_ctx: Any, make_work_item: Any) -> None:
+        """A successful commit+push ends the consecutive-failure streak."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        item.payload["git_error_retries"] = 1
+
+        stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+
+        assert "git_error_retries" not in item.payload
 
 
 class TestWorktreeAndAdvise:
