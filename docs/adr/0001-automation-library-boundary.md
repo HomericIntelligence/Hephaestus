@@ -27,7 +27,7 @@ Adopt a **dual-layer package** with four guarantees:
    imports (`hephaestus/__init__.py`). `import hephaestus` MUST NOT
    transitively import `curses`, `fcntl`, `pydantic`, or any
    `hephaestus.automation.*` module. Verified empirically and locked in
-   by `tests/unit/test_import_surface.py`.
+   by `tests/unit/validation/test_import_surface.py`.
 
 2. **Product layer** — `hephaestus.automation`. Opt-in via the
    `HomericIntelligence-Hephaestus[automation]` extra. The extra declares
@@ -46,7 +46,7 @@ Adopt a **dual-layer package** with four guarantees:
 4. **Boundary contract** — `hephaestus.automation` may import from any
    library subpackage; library subpackages MUST NOT import from
    `hephaestus.automation`. Enforced by
-   `tests/unit/test_automation_boundary.py`.
+   `tests/unit/validation/test_automation_boundary.py`.
 
 ## Alternatives considered
 
@@ -67,10 +67,10 @@ Adopt a **dual-layer package** with four guarantees:
   `[project.optional-dependencies] automation = [...]`.
 - README and CLAUDE.md gain a "Library vs product layer" section pointing
   here.
-- `tests/unit/test_import_surface.py` fails CI if `import hephaestus` ever
+- `tests/unit/validation/test_import_surface.py` fails CI if `import hephaestus` ever
   pulls `curses`, `pydantic`, or any `hephaestus.automation.*` module into
   `sys.modules`.
-- `tests/unit/test_automation_boundary.py` fails CI if any library
+- `tests/unit/validation/test_automation_boundary.py` fails CI if any library
   subpackage gains a `from hephaestus.automation` import.
 - `hephaestus.nats` was migrated off pydantic to stdlib dataclasses
   (issue #1458; `load_nats_config` filters unknown keys to preserve the
