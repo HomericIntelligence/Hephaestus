@@ -17,6 +17,7 @@ from hephaestus.automation._review_utils import (
     drain_completed_futures,
     ensure_state_dir,
     find_merged_closing_pr,
+    find_merged_pr_for_issue,
     find_pr_for_issue,
     get_pr_head_branch,
     load_impl_session_id,
@@ -799,6 +800,79 @@ class TestFindMergedClosingPr:
             result = find_merged_closing_pr(1357)
 
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# find_merged_pr_for_issue
+# ---------------------------------------------------------------------------
+
+
+class TestFindMergedPrForIssue:
+    """Tests for find_merged_pr_for_issue — the tri-state fetch's merged lookup."""
+
+    def test_finds_via_merged_branch_name(self) -> None:
+        """Strategy 1: ``{issue}-auto-impl`` head lookup with ``--state merged``."""
+        captured: dict[str, list[str]] = {}
+
+        def _side_effect(args: list[str], **kw: Any) -> MagicMock:
+            captured["args"] = args
+            return _make_gh_result([{"number": 43}])
+
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            side_effect=_side_effect,
+        ):
+            result = find_merged_pr_for_issue(7)
+
+        assert result == 43
+        assert "--head" in captured["args"]
+        assert "7-auto-impl" in captured["args"]
+        assert "merged" in captured["args"]
+
+    def test_falls_back_to_merged_body_search(self) -> None:
+        """Branch miss → falls through to find_merged_closing_pr's body search."""
+
+        def _side_effect(args: list[str], **kw: Any) -> MagicMock:
+            if "--head" in args:
+                return _make_gh_result([])
+            return _make_gh_result([{"number": 44, "body": "Fix.\n\nCloses #7\n"}])
+
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            side_effect=_side_effect,
+        ):
+            result = find_merged_pr_for_issue(7)
+
+        assert result == 44
+
+    def test_returns_none_when_no_merged_pr(self) -> None:
+        """Neither strategy finds a merged PR → None (closed PRs stay invisible)."""
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            return_value=_make_gh_result([]),
+        ):
+            result = find_merged_pr_for_issue(7)
+
+        assert result is None
+
+    def test_branch_lookup_failure_still_tries_body_search(self) -> None:
+        """A branch-strategy gh failure is swallowed; body search still runs."""
+        calls: list[list[str]] = []
+
+        def _side_effect(args: list[str], **kw: Any) -> MagicMock:
+            calls.append(args)
+            if "--head" in args:
+                raise RuntimeError("gh boom")
+            return _make_gh_result([{"number": 45, "body": "Closes #7\n"}])
+
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            side_effect=_side_effect,
+        ):
+            result = find_merged_pr_for_issue(7)
+
+        assert result == 45
+        assert len(calls) == 2
 
 
 # ---------------------------------------------------------------------------
