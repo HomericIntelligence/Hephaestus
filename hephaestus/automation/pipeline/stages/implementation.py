@@ -99,6 +99,8 @@ from .base import (
     WorkItem,
     _issue_labels,
     _worktree_path,
+    agent_provider,
+    stage_model,
     write_skip_label,
 )
 
@@ -298,11 +300,12 @@ class ImplementationStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=AGENT_IMPLEMENTER,
-                model=implementer_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "implementer", implementer_model),
                 prompt_builder=get_dirty_reused_worktree_decision_prompt,
                 cwd=_worktree_path(item, ctx),
                 timeout_s=implementer_claude_timeout(),
+                session_agent=AGENT_IMPLEMENTER,
                 prompt_kwargs={
                     "branch_name": item.branch,
                     "status_text": item.payload.get("worktree_status", ""),
@@ -332,11 +335,12 @@ class ImplementationStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=AGENT_ADVISE,
-                model=advise_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "advise", advise_model),
                 prompt_builder=get_advise_prompt_builder(ctx.config.agent),
                 cwd=_worktree_path(item, ctx),
                 timeout_s=advise_claude_timeout(),
+                session_agent=AGENT_ADVISE,
                 prompt_kwargs={
                     "issue_number": item.issue,
                     "issue_title": item.payload.get("issue_title", ""),
@@ -365,11 +369,12 @@ class ImplementationStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=AGENT_IMPLEMENTER,
-                model=implementer_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "implementer", implementer_model),
                 prompt_builder=build_implementation_prompt,
                 cwd=_worktree_path(item, ctx),
                 timeout_s=implementer_claude_timeout(),
+                session_agent=AGENT_IMPLEMENTER,
                 prompt_kwargs={
                     "issue_number": item.issue,
                     "issue_title": item.payload.get("issue_title", ""),
@@ -415,11 +420,12 @@ class ImplementationStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=AGENT_IMPLEMENTER,
-                model=implementer_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "implementer", implementer_model),
                 prompt_builder=build_test_fix_prompt,
                 cwd=_worktree_path(item, ctx),
                 timeout_s=implementer_claude_timeout(),
+                session_agent=AGENT_IMPLEMENTER,
                 prompt_kwargs={
                     "issue_number": item.issue,
                     "prev_iteration": item.attempts.get("test_fix", 0),

@@ -189,7 +189,7 @@ class RepoStage(Stage):
         ]
         covered_prs: set[int] = set()
         for num in kept:
-            facts = _seeding.seed_issue(num)
+            facts = _seeding.seed_issue_from_github(num, ctx.github)
             stage, reason = _seeding.classify_issue(facts)
             if facts.pr_number is not None:
                 covered_prs.add(facts.pr_number)

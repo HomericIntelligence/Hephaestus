@@ -176,6 +176,7 @@ class TestDiscover:
             loop_repo_manager_mod, "_list_open_pr_numbers", lambda org, repo: open_prs or []
         )
         monkeypatch.setattr(seeding_mod, "seed_issue", lambda num: facts[num])
+        monkeypatch.setattr(seeding_mod, "seed_issue_from_github", lambda num, github: facts[num])
 
         def fake_classify(f: IssueFacts) -> tuple[StageName | None, str]:
             classified.append(f.number)
@@ -183,6 +184,55 @@ class TestDiscover:
 
         monkeypatch.setattr(seeding_mod, "classify_issue", fake_classify)
         return classified
+
+    def test_discover_classifies_through_repo_scoped_github(
+        self,
+        repo_item: WorkItem,
+        tmp_path: Path,
+        make_ctx: Callable[..., Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Repo discovery must not fall back to current-repo seeding helpers."""
+
+        class RepoScopedGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(open_pr=44)
+                self.issue_reads: list[int] = []
+
+            def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+                self.issue_reads.append(issue_number)
+                return {
+                    "number": issue_number,
+                    "title": "repo-specific task",
+                    "state": "OPEN",
+                    "body": "",
+                    "labels": [{"name": "state:implementation-go"}],
+                }
+
+            def find_merged_pr_for_issue(self, issue_number: int) -> int | None:
+                return None
+
+        github = RepoScopedGitHub()
+        ctx = make_ctx(github=github, paths=_RepoPaths(tmp_path))
+        monkeypatch.setattr(
+            loop_repo_manager_mod,
+            "_list_open_issue_meta",
+            lambda org, repo: [{"number": 8, "labels": ["state:implementation-go"], "title": "x"}],
+        )
+        monkeypatch.setattr(loop_repo_manager_mod, "_list_open_pr_numbers", lambda org, repo: [])
+        monkeypatch.setattr(
+            seeding_mod,
+            "seed_issue",
+            lambda num: (_ for _ in ()).throw(AssertionError("used current-repo seed_issue")),
+        )
+        repo_item.state = "DISCOVER"
+
+        result = RepoStage().step(repo_item, ctx)
+
+        assert isinstance(result, Continue)
+        assert github.issue_reads == [8]
+        assert repo_item.payload["products"][0]["stage"] is StageName.CI
+        assert repo_item.payload["products"][0]["pr"] == 44
 
     def test_discover_classifies_dedups_and_stages_products(
         self,

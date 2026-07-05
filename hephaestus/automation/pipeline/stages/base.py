@@ -80,6 +80,8 @@ __all__ = [
     "StageOutcome",
     "StepResult",
     "WorkItem",
+    "agent_provider",
+    "stage_model",
     "write_skip_label",
 ]
 
@@ -113,6 +115,10 @@ class StageGitHub(Protocol):
 
     def find_merged_closing_pr(self, issue_number: int) -> int | None:
         """Return the merged PR closing this issue, if any (``_review_utils``)."""
+        ...
+
+    def find_merged_pr_for_issue(self, issue_number: int) -> int | None:
+        """Return the merged PR for this issue, if any (tri-state seeding lookup)."""
         ...
 
     def find_pr_for_issue(self, issue_number: int) -> int | None:
@@ -415,6 +421,18 @@ class StageContext:
         if self.budget_fn is not None:
             return self.budget_fn(name)
         return 1  # conservative default
+
+
+def agent_provider(ctx: StageContext) -> str:
+    """Return the selected agent backend provider for an agent job."""
+    return str(getattr(ctx.config, "agent", "") or "claude")
+
+
+def stage_model(ctx: StageContext, phase: str, fallback: Callable[[], str]) -> str:
+    """Return a phase model override, the catch-all model, or the legacy fallback."""
+    phase_value = getattr(ctx.config, f"{phase}_model", "")
+    catch_all = getattr(ctx.config, "model", "")
+    return str(phase_value or catch_all or fallback())
 
 
 def _issue_labels(item: WorkItem, ctx: StageContext) -> list[str]:

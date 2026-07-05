@@ -78,6 +78,7 @@ import signal
 import threading
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, cast
@@ -168,6 +169,7 @@ class PipelineConfig:
     dry_run: bool = False
     grace_s: float = _DEFAULT_GRACE_S
     phase_timeout_s: float | None = None
+    agent: str = "claude"
     model: str = ""
     planner_model: str = ""
     reviewer_model: str = ""
@@ -189,6 +191,10 @@ class _StageRunConfig:
     run_pre_pr_tests: bool = False
     force: bool = False
     agent: str = "claude"
+    model: str = ""
+    planner_model: str = ""
+    reviewer_model: str = ""
+    implementer_model: str = ""
     dry_run: bool = False
     nitpick: bool = False
     drive_green_all: bool = False
@@ -218,6 +224,7 @@ class Coordinator:
         github: StageGitHub,
         pool: Any | None = None,
         stages: dict[StageName, Stage] | None = None,
+        github_factory: Callable[[str, Path], StageGitHub] | None = None,
         install_signals: bool = True,
     ) -> None:
         """Initialize coordinator state.
@@ -228,12 +235,15 @@ class Coordinator:
             pool: Worker pool (a real ``WorkerPool`` is built when omitted;
                 tests inject ``FakeWorkerPool``).
             stages: Stage-instance map override (tests inject stubs).
+            github_factory: Optional per-repo accessor factory. Production uses
+                this so each repo context targets GitHub with an explicit repo.
             install_signals: Install SIGINT/SIGTERM/SIGHUP handlers in
                 ``run()`` (disabled in unit tests).
 
         """
         self.config = config
         self.github = github
+        self._github_factory = github_factory
         self.shutdown = threading.Event()
         self.completion_q: CompletionQueue = queue_mod.Queue()
         if pool is None:
@@ -277,6 +287,11 @@ class Coordinator:
         self._seen_item_ids: set[int] = set()
         self._stage_config = _StageRunConfig(
             enable_advise=not config.no_advise,
+            agent=config.agent,
+            model=config.model,
+            planner_model=config.planner_model,
+            reviewer_model=config.reviewer_model,
+            implementer_model=config.implementer_model,
             dry_run=config.dry_run,
             nitpick=config.nitpick,
             drive_green_all=config.drive_green_all,
@@ -307,7 +322,11 @@ class Coordinator:
                 config=self._stage_config,
                 org=self.config.org,
                 dry_run=self.config.dry_run,
-                github=self.github,
+                github=(
+                    self._github_factory(item.repo, root)
+                    if self._github_factory is not None
+                    else self.github
+                ),
                 paths=_Paths(
                     repo_root=root,
                     worktree=root,
@@ -994,6 +1013,18 @@ def run_pipeline(config: PipelineConfig) -> int:
     # helpers and must stay out of the pure pipeline import surface.
     from hephaestus.automation.pipeline_github import PipelineGitHub
 
-    github = PipelineGitHub(config.org, dry_run=config.dry_run)
-    coordinator = Coordinator(config, github=github)
+    def _github_for(repo_name: str, repo_root: Path) -> PipelineGitHub:
+        return PipelineGitHub(
+            config.org,
+            repo=repo_name,
+            dry_run=config.dry_run,
+            repo_root=repo_root,
+        )
+
+    repo = config.repos[0] if config.repos else ""
+    repo_root = Path(config.projects_dir) / repo if repo else Path(config.projects_dir)
+    github = (
+        _github_for(repo, repo_root) if repo else PipelineGitHub(config.org, dry_run=config.dry_run)
+    )
+    coordinator = Coordinator(config, github=github, github_factory=_github_for)
     return coordinator.run()

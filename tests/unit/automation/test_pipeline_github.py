@@ -19,7 +19,8 @@ import hephaestus.automation.github_api as github_api_mod
 import hephaestus.automation.pipeline_github as pg
 import hephaestus.automation.pr_manager as pr_manager_mod
 from hephaestus.automation.pipeline.stages.base import StageGitHub
-from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
+from hephaestus.automation.protocol import PLAN_COMMENT_MARKER, PLAN_REVIEW_PREFIX
+from hephaestus.automation.state_labels import STATE_PLAN_GO
 
 
 @pytest.fixture
@@ -118,6 +119,113 @@ class TestMutatorMapping:
         adapter.upsert_plan_comment(5, "# Implementation Plan\n\nbody")
 
         mock.assert_called_once_with(5, PLAN_COMMENT_MARKER, "# Implementation Plan\n\nbody")
+
+
+class TestRepoScoping:
+    """PipelineGitHub must target its configured repository explicitly."""
+
+    def test_issue_reads_include_repo_arg(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            payload = {
+                "number": 5,
+                "title": "t",
+                "state": "OPEN",
+                "labels": [],
+                "body": "",
+            }
+            return SimpleNamespace(stdout=json.dumps(payload))
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        assert (
+            pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).gh_issue_json(5)["number"]
+            == 5
+        )
+
+        assert calls == [
+            [
+                "issue",
+                "view",
+                "5",
+                "--json",
+                "number,title,state,labels,body",
+                "--repo",
+                "org/repo-a",
+            ]
+        ]
+
+    def test_label_mutators_include_repo_arg(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv[:2] == ["label", "list"]:
+                return SimpleNamespace(stdout="[]")
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).add_labels(5, ["state:x"])
+
+        assert calls[-1] == [
+            "issue",
+            "edit",
+            "5",
+            "--add-label",
+            "state:x",
+            "--repo",
+            "org/repo-a",
+        ]
+
+    def test_plan_gate_backfills_repo_scoped_go_comment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv[:2] == ["issue", "view"]:
+                payload = {
+                    "labels": [],
+                    "comments": [{"body": f"{PLAN_REVIEW_PREFIX}\n\nVerdict: GO"}],
+                }
+                return SimpleNamespace(stdout=json.dumps(payload))
+            if argv[:2] == ["label", "list"]:
+                return SimpleNamespace(stdout=json.dumps([{"name": STATE_PLAN_GO}]))
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        assert pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).has_existing_plan(5)
+
+        assert calls == [
+            [
+                "issue",
+                "view",
+                "5",
+                "--json",
+                "labels,comments",
+                "--repo",
+                "org/repo-a",
+            ],
+            ["label", "list", "--json", "name", "--limit", "200", "--repo", "org/repo-a"],
+            [
+                "issue",
+                "edit",
+                "5",
+                "--add-label",
+                STATE_PLAN_GO,
+                "--repo",
+                "org/repo-a",
+            ],
+        ]
 
 
 class TestCreatePr:

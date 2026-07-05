@@ -1697,6 +1697,7 @@ def _build_pipeline_config(
         dry_run=cfg.dry_run,
         grace_s=30.0,  # Default grace period
         phase_timeout_s=cfg.phase_timeout_s,
+        agent=cfg.agent,
         model=cfg.model,
         planner_model=cfg.planner_model,
         reviewer_model=cfg.reviewer_model,

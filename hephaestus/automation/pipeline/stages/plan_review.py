@@ -75,6 +75,8 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
+    agent_provider,
+    stage_model,
 )
 
 logger = logging.getLogger(__name__)
@@ -208,11 +210,12 @@ class PlanReviewStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=AGENT_PLAN_REVIEWER,
-                model=reviewer_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "reviewer", reviewer_model),
                 prompt_builder=get_plan_loop_review_prompt,
                 cwd=ctx.paths.worktree,
                 timeout_s=plan_reviewer_claude_timeout(),
+                session_agent=AGENT_PLAN_REVIEWER,
                 # get_plan_loop_review_prompt takes a 0-based iteration index
                 # (full-sweep suffix on the final iteration). Issue title/body
                 # are seeded into item.payload by the coordinator (#1817).
@@ -242,11 +245,12 @@ class PlanReviewStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=AGENT_PLANNER,
-                model=planner_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "planner", planner_model),
                 prompt_builder=build_amend_prompt,
                 cwd=ctx.paths.worktree,
                 timeout_s=planner_claude_timeout(),
+                session_agent=AGENT_PLANNER,
                 # build_amend_prompt composes get_plan_prompt with the
                 # reviewer feedback block in-worker (doc: "resume planner
                 # session with feedback block"; mirrors
@@ -266,11 +270,12 @@ class PlanReviewStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=AGENT_PLANNER,  # resume the planner's own session (legacy parity)
-                model=planner_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "planner", planner_model),
                 prompt_builder=build_learn_prompt,
                 cwd=ctx.paths.worktree,
                 timeout_s=learn_claude_timeout(),
+                session_agent=AGENT_PLANNER,  # resume planner session (legacy parity)
                 prompt_kwargs={"context": item.payload.get("plan_text", "")},
                 descr="learn",
             )

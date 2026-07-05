@@ -123,6 +123,36 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
     assert config.prs == []
 
 
+def test_build_pipeline_config_maps_agent_and_models(
+    dispatch: dict[str, MagicMock], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pipeline path preserves provider and model selections."""
+    monkeypatch.setattr(loop_runner, "resolve_agent", lambda agent: "codex")
+
+    loop_runner.main(
+        [
+            "--pipeline",
+            "--agent",
+            "codex",
+            "--model",
+            "gpt-default",
+            "--planner-model",
+            "gpt-plan",
+            "--reviewer-model",
+            "gpt-review",
+            "--implementer-model",
+            "gpt-impl",
+        ]
+    )
+
+    (config,) = dispatch["run_pipeline"].call_args.args
+    assert config.agent == "codex"
+    assert config.model == "gpt-default"
+    assert config.planner_model == "gpt-plan"
+    assert config.reviewer_model == "gpt-review"
+    assert config.implementer_model == "gpt-impl"
+
+
 def test_phase_timeout_help_documents_pipeline_shift() -> None:
     """M4: the --phase-timeout help names the agent-job semantic shift."""
     parser = loop_runner._build_parser()

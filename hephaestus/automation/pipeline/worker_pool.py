@@ -230,6 +230,7 @@ class WorkerPool:
         try:
             agent = resolve_agent(job.agent)
             is_claude = agent == "claude"
+            session_agent = job.session_agent or job.agent
             prompt = job.prompt_builder(**job.prompt_kwargs)
 
             def _invoke() -> str:
@@ -237,7 +238,7 @@ class WorkerPool:
                     stdout, _ = claude_invoke.invoke_claude_with_session(
                         repo=job.repo,
                         issue=job.issue,
-                        agent=job.agent,
+                        agent=session_agent,
                         prompt=prompt,
                         model=job.model,
                         cwd=job.cwd,

@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -34,17 +35,30 @@ from hephaestus.automation._review_utils import (
     close_issue_as_covered,
     ensure_state_dir,
     find_merged_closing_pr,
+    find_merged_pr_for_issue,
     find_pr_for_issue,
     get_pr_head_branch,
 )
 from hephaestus.automation.arming_state import ArmingStateStore
 from hephaestus.automation.ci_check_inspector import CICheckInspector
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
-from hephaestus.automation.review_state import is_plan_review_go
+from hephaestus.automation.review_state import (
+    PLAN_REVIEW_PREFIX,
+    is_plan_review_go,
+    latest_verdict,
+)
 from hephaestus.automation.state_labels import (
     ALL_IMPLEMENTATION_STATE_LABELS,
     ALL_STATE_LABELS,
+    STATE_IMPLEMENTATION_GO,
+    STATE_IMPLEMENTATION_NO_GO,
+    STATE_LABEL_SPECS,
+    STATE_PLAN_GO,
+    STATE_PLAN_NO_GO,
     STATE_SKIP,
+    has_label,
+    is_implementation_go,
+    is_plan_go,
 )
 from hephaestus.constants import read_timeout_env
 from hephaestus.github.client import gh_call
@@ -108,19 +122,27 @@ class PipelineGitHub:
     mutator (log-and-skip) per the ``StageGitHub`` protocol docstring.
     """
 
-    def __init__(self, org: str, *, dry_run: bool = False, repo_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        org: str,
+        *,
+        repo: str | None = None,
+        dry_run: bool = False,
+        repo_root: Path | None = None,
+    ) -> None:
         """Initialize the accessor.
 
         Args:
-            org: GitHub organization (used for logging context only; the
-                underlying helpers resolve the repo from their cwd exactly as
-                the legacy phases do).
+            org: GitHub organization.
+            repo: Optional repository name. When set, every supported gh CLI
+                read/write is explicitly scoped with ``--repo org/repo``.
             dry_run: When True, every mutator logs-and-skips.
             repo_root: Repo checkout root anchoring the drive-green arming
                 state dir (defaults to the current working directory).
 
         """
         self.org = org
+        self.repo = repo
         self.dry_run = dry_run
         self._repo_root = repo_root or Path.cwd()
         self._arming = ArmingStateStore(lambda: ensure_state_dir(self._repo_root))
@@ -130,6 +152,149 @@ class PipelineGitHub:
             # is truthful; only mutators log-and-skip.
             options_provider=lambda: SimpleNamespace(dry_run=False),
         )
+
+    @property
+    def _repo_slug(self) -> str | None:
+        if not self.repo:
+            return None
+        return f"{self.org}/{self.repo}"
+
+    def _with_repo(self, argv: list[str]) -> list[str]:
+        """Append an explicit repo selector when this accessor is repo-scoped."""
+        if self._repo_slug is None:
+            return argv
+        return [*argv, "--repo", self._repo_slug]
+
+    def _gh(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return gh_call(self._with_repo(argv), **kwargs)
+
+    def _label_names(self) -> set[str]:
+        if self._repo_slug is None:
+            return github_api.gh_list_labels()
+        result = self._gh(["label", "list", "--json", "name", "--limit", "200"])
+        data = json.loads(result.stdout or "[]")
+        return {str(item["name"]) for item in data if isinstance(item, dict) and item.get("name")}
+
+    def _create_label(self, name: str) -> None:
+        spec = STATE_LABEL_SPECS.get(name, {})
+        cmd = ["label", "create", name, "--color", spec.get("color", "ededed"), "--force"]
+        if desc := spec.get("description", ""):
+            cmd.extend(["--description", desc])
+        self._gh(cmd)
+
+    def _add_labels(self, issue_number: int, labels: list[str]) -> None:
+        if not labels:
+            return
+        existing = self._label_names()
+        for label in labels:
+            if label not in existing:
+                self._create_label(label)
+                existing.add(label)
+        cmd = ["issue", "edit", str(issue_number)]
+        for label in labels:
+            cmd.extend(["--add-label", label])
+        self._gh(cmd)
+
+    def _remove_labels(self, issue_number: int, labels: list[str]) -> None:
+        if not labels:
+            return
+        existing = self._label_names()
+        labels_to_remove = [label for label in labels if label in existing]
+        if not labels_to_remove:
+            return
+        cmd = ["issue", "edit", str(issue_number)]
+        for label in labels_to_remove:
+            cmd.extend(["--remove-label", label])
+        self._gh(cmd)
+
+    @staticmethod
+    def _label_names_from_payload(payload: dict[str, Any]) -> list[str]:
+        labels = payload.get("labels")
+        if not isinstance(labels, list):
+            return []
+        names: list[str] = []
+        for label in labels:
+            if isinstance(label, str):
+                names.append(label)
+            elif isinstance(label, dict) and isinstance(label.get("name"), str):
+                names.append(str(label["name"]))
+        return names
+
+    @staticmethod
+    def _latest_plan_review_body(comments: Any) -> str | None:
+        if not isinstance(comments, list):
+            return None
+        latest_review_body: str | None = None
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            body = comment.get("body")
+            if isinstance(body, str) and body.startswith(PLAN_REVIEW_PREFIX):
+                latest_review_body = body
+        return latest_review_body
+
+    def _backfill_plan_go(self, issue_number: int) -> None:
+        if self.dry_run:
+            logger.info("[dry-run] would backfill %s on #%d", STATE_PLAN_GO, issue_number)
+            return
+        try:
+            self._add_labels(issue_number, [STATE_PLAN_GO])
+        except Exception as exc:
+            logger.warning(
+                "Issue #%d: failed to backfill %s in %s: %s",
+                issue_number,
+                STATE_PLAN_GO,
+                self._repo_slug,
+                exc,
+            )
+
+    def _find_pr_for_issue(self, issue_number: int, *, state: str) -> int | None:
+        branch_name = f"{issue_number}-auto-impl"
+        try:
+            result = self._gh(
+                [
+                    "pr",
+                    "list",
+                    "--head",
+                    branch_name,
+                    "--state",
+                    state,
+                    "--json",
+                    "number",
+                    "--limit",
+                    "1",
+                ],
+                check=False,
+            )
+            pr_data = json.loads(result.stdout or "[]")
+            if pr_data:
+                return int(pr_data[0]["number"])
+        except Exception as exc:
+            logger.debug("%s PR branch lookup failed for issue #%d: %s", state, issue_number, exc)
+
+        try:
+            result = self._gh(
+                [
+                    "pr",
+                    "list",
+                    "--state",
+                    state,
+                    "--search",
+                    f"Closes #{issue_number} in:body",
+                    "--json",
+                    "number,body",
+                    "--limit",
+                    "10",
+                ],
+                check=False,
+            )
+            closes_pattern = re.compile(rf"^Closes #{issue_number}\b", re.MULTILINE)
+            for candidate in json.loads(result.stdout or "[]"):
+                if closes_pattern.search(candidate.get("body") or ""):
+                    return int(candidate["number"])
+        except Exception as exc:
+            logger.debug("%s PR body lookup failed for issue #%d: %s", state, issue_number, exc)
+        return None
 
     def _skip(self, what: str) -> bool:
         """Return True (and log) when dry-run should skip a mutation."""
@@ -142,26 +307,91 @@ class PipelineGitHub:
 
     def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
         """Fetch issue JSON (``github_api.issues.gh_issue_json``)."""
+        if self._repo_slug is not None:
+            result = self._gh(
+                ["issue", "view", str(issue_number), "--json", "number,title,state,labels,body"]
+            )
+            data = json.loads(result.stdout or "{}")
+            if not isinstance(data, dict):
+                raise RuntimeError(f"Failed to fetch issue #{issue_number}: non-object response")
+            for field in ("title", "body"):
+                value = data.get(field)
+                if isinstance(value, str):
+                    data[field] = github_api.strip_null_bytes(value)
+            return data
         return github_api.gh_issue_json(issue_number)
 
     def find_merged_closing_pr(self, issue_number: int) -> int | None:
         """Return the merged PR closing this issue (``_review_utils``)."""
+        if self._repo_slug is not None:
+            return self._find_pr_for_issue(issue_number, state="merged")
         return find_merged_closing_pr(issue_number)
+
+    def find_merged_pr_for_issue(self, issue_number: int) -> int | None:
+        """Return the merged PR for this issue (tri-state seeding lookup)."""
+        if self._repo_slug is not None:
+            return self._find_pr_for_issue(issue_number, state="merged")
+        return find_merged_pr_for_issue(issue_number)
 
     def find_pr_for_issue(self, issue_number: int) -> int | None:
         """Return an open PR covering this issue (``_review_utils``)."""
+        if self._repo_slug is not None:
+            return self._find_pr_for_issue(issue_number, state="open")
         return find_pr_for_issue(issue_number)
 
     def has_existing_plan(self, issue_number: int) -> bool:
         """Labels-first plan gate incl. comment-scan backfill (``is_plan_review_go``)."""
+        if self._repo_slug is not None:
+            try:
+                result = self._gh(
+                    ["issue", "view", str(issue_number), "--json", "labels,comments"],
+                    check=False,
+                )
+                data = json.loads(result.stdout or "{}")
+            except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
+                return False
+            if not isinstance(data, dict):
+                return False
+
+            labels = self._label_names_from_payload(data)
+            if is_plan_go(labels):
+                return True
+            if has_label(labels, STATE_PLAN_NO_GO):
+                return False
+
+            latest_review_body = self._latest_plan_review_body(data.get("comments"))
+            if latest_review_body is None or latest_verdict(latest_review_body) != "GO":
+                return False
+
+            self._backfill_plan_go(issue_number)
+            return True
         return bool(is_plan_review_go(issue_number))
 
     def get_pr_head_branch(self, pr_number: int) -> str | None:
         """Return the PR's head branch (``_review_utils.get_pr_head_branch``)."""
+        if self._repo_slug is not None:
+            try:
+                result = self._gh(
+                    ["pr", "view", str(pr_number), "--json", "headRefName"],
+                    check=False,
+                )
+                data = json.loads(result.stdout or "{}")
+                value = data.get("headRefName") if isinstance(data, dict) else None
+                return str(value) if value else None
+            except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
+                return None
         return get_pr_head_branch(pr_number)
 
     def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
         """Return ``(has_go, has_no_go)`` (``pr_manager``)."""
+        if self._repo_slug is not None:
+            try:
+                result = self._gh(["pr", "view", str(pr_number), "--json", "labels"], check=False)
+                data = json.loads(result.stdout or "{}")
+                labels = self._label_names_from_payload(data if isinstance(data, dict) else {})
+            except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
+                return (False, False)
+            return is_implementation_go(labels), has_label(labels, STATE_IMPLEMENTATION_NO_GO)
         return pr_manager.pr_has_implementation_state_label(pr_number)
 
     def count_unresolved_threads(self, pr_number: int) -> tuple[int, int]:
@@ -171,6 +401,11 @@ class PipelineGitHub:
         (#1152): resolves nothing; fails open to ``(0, 0)`` on a fetch error
         so a transient API blip cannot strand a GO.
         """
+        if self._repo_slug is not None:
+            # TODO(#1823): move the full GraphQL thread ownership query behind a
+            # repo-scoped helper. Until then, fail open like the legacy adapter
+            # on fetch errors rather than resolving or mutating anything.
+            return (0, 0)
         try:
             threads = github_api.gh_pr_list_unresolved_threads(pr_number, dry_run=False)
         except Exception as exc:
@@ -190,7 +425,7 @@ class PipelineGitHub:
         baseRefName}``.
         """
         try:
-            result = gh_call(
+            result = self._gh(
                 [
                     "pr",
                     "view",
@@ -207,18 +442,67 @@ class PipelineGitHub:
 
     def failing_required_check_names(self, pr_number: int) -> list[str]:
         """Names of required checks currently failing (``CICheckInspector``)."""
+        if self._repo_slug is not None:
+            checks = self.pr_checks(pr_number)
+            required = [c for c in checks if c.get("required")] or checks
+            return [
+                c.get("name", "")
+                for c in required
+                if c.get("status") == "completed" and c.get("conclusion") == "failure"
+            ]
         return self._inspector.failing_required_check_names(pr_number)
 
     def pending_required_check_names(self, pr_number: int) -> list[str]:
         """Names of required checks still in flight (``CICheckInspector``)."""
+        if self._repo_slug is not None:
+            checks = self.pr_checks(pr_number)
+            required = [c for c in checks if c.get("required")] or checks
+            return [c.get("name", "") for c in required if c.get("status") != "completed"]
         return self._inspector.pending_required_check_names(pr_number)
 
     def pr_checks(self, pr_number: int) -> list[dict[str, Any]]:
         """All checks for the PR (``gh_pr_checks``)."""
+        if self._repo_slug is not None:
+            try:
+                result = self._gh(
+                    ["pr", "checks", str(pr_number), "--json", "name,state,bucket,workflow"],
+                    log_on_error=False,
+                )
+            except subprocess.CalledProcessError as exc:
+                if github_api._is_gh_pr_checks_no_checks_error(exc):
+                    return []
+                raise
+            raw = json.loads(result.stdout or "[]")
+            return [github_api._map_pr_check(item) for item in raw]
         return github_api.gh_pr_checks(pr_number, dry_run=False)
 
     def pr_is_genuinely_stuck(self, pr_number: int) -> bool:
         """Return True iff the PR cannot merge without manual action (``pr_manager``)."""
+        if self._repo_slug is not None:
+            try:
+                result = self._gh(
+                    [
+                        "pr",
+                        "view",
+                        str(pr_number),
+                        "--json",
+                        "mergeStateStatus,mergeable,statusCheckRollup",
+                    ],
+                    check=False,
+                )
+                pr = json.loads(result.stdout or "{}")
+            except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
+                return False
+            merge_state = str(pr.get("mergeStateStatus") or "").upper()
+            mergeable = str(pr.get("mergeable") or "").upper()
+            if merge_state in {"DIRTY", "CONFLICTING"} or mergeable == "CONFLICTING":
+                return True
+            rollup = pr.get("statusCheckRollup")
+            return isinstance(rollup, list) and any(
+                isinstance(check, dict)
+                and check.get("conclusion") in {"FAILURE", "CANCELLED", "TIMED_OUT"}
+                for check in rollup
+            )
         return pr_manager.pr_is_genuinely_stuck(pr_number)
 
     def drive_green_learn_terminal(self, issue_number: int) -> bool:
@@ -239,11 +523,17 @@ class PipelineGitHub:
         """Durably add labels (``gh_issue_add_labels``)."""
         if self._skip(f"add labels {labels} to #{issue_number}"):
             return
+        if self._repo_slug is not None:
+            self._add_labels(issue_number, labels)
+            return
         github_api.gh_issue_add_labels(issue_number, labels)
 
     def remove_labels(self, issue_number: int, labels: list[str]) -> None:
         """Durably remove labels (``gh_issue_remove_labels``)."""
         if self._skip(f"remove labels {labels} from #{issue_number}"):
+            return
+        if self._repo_slug is not None:
+            self._remove_labels(issue_number, labels)
             return
         github_api.gh_issue_remove_labels(issue_number, labels)
 
@@ -251,11 +541,30 @@ class PipelineGitHub:
         """Close the issue as covered by a merged PR (``_review_utils``)."""
         if self._skip(f"close #{issue_number} as covered by PR #{pr_number}"):
             return
+        if self._repo_slug is not None:
+            self._gh(
+                [
+                    "issue",
+                    "close",
+                    str(issue_number),
+                    "--comment",
+                    f"Closed by merged PR #{pr_number} (Closes #{issue_number}).",
+                ],
+                check=False,
+            )
+            return
         close_issue_as_covered(issue_number, pr_number)
 
     def upsert_plan_comment(self, issue_number: int, body: str) -> None:
         """Upsert the single plan comment keyed on ``PLAN_COMMENT_MARKER``."""
         if self._skip(f"upsert plan comment on #{issue_number}"):
+            return
+        # TODO(#1823): exact repo-scoped upsert needs the GraphQL comment-id
+        # helper to accept owner/repo. Until then, repo-scoped runs post a new
+        # durable comment rather than silently targeting the current repo.
+        if self._repo_slug is not None:
+            with github_api._body_file(body) as path:
+                self._gh(["issue", "comment", str(issue_number), "--body-file", path])
             return
         github_api.gh_issue_upsert_comment(issue_number, PLAN_COMMENT_MARKER, body)
 
@@ -267,16 +576,43 @@ class PipelineGitHub:
         ``pr_manager.ensure_pr_created``, which would discard the stage's
         composed body (protocol docstring). Dry-run returns 0 (no PR).
         """
-        existing = find_pr_for_issue(issue_number)
+        existing = self.find_pr_for_issue(issue_number)
         if existing:
             return existing
         if self._skip(f"create PR for #{issue_number} from {branch!r}"):
             return 0
+        if self._repo_slug is not None:
+            github_api._assert_body_has_closes(body)
+            github_api._assert_branch_commits_signed(branch, base="main")
+            with github_api._body_file(body) as body_path:
+                result = self._gh(
+                    [
+                        "pr",
+                        "create",
+                        "--head",
+                        branch,
+                        "--base",
+                        "main",
+                        "--title",
+                        github_api.strip_null_bytes(title),
+                        "--body-file",
+                        body_path,
+                    ]
+                )
+            output = result.stdout.strip()
+            match = re.search(r"/pull/(\d+)", output)
+            if match:
+                return int(match.group(1))
+            return int(output.split("/")[-1])
         return github_api.gh_pr_create(branch, title, body)
 
     def post_pr_comment(self, pr_number: int, body: str) -> None:
         """Post an explanatory PR comment (``gh_issue_comment`` channel)."""
         if self._skip(f"post comment on PR #{pr_number}"):
+            return
+        if self._repo_slug is not None:
+            with github_api._body_file(body) as path:
+                self._gh(["issue", "comment", str(pr_number), "--body-file", path])
             return
         github_api.gh_issue_comment(pr_number, body)
 
@@ -284,11 +620,19 @@ class PipelineGitHub:
         """Apply ``state:implementation-no-go`` (``pr_manager``)."""
         if self._skip(f"mark PR #{pr_number} implementation-no-go"):
             return
+        if self._repo_slug is not None:
+            self._add_labels(pr_number, [STATE_IMPLEMENTATION_NO_GO])
+            self._remove_labels(pr_number, [STATE_IMPLEMENTATION_GO])
+            return
         pr_manager.mark_pr_implementation_no_go(pr_number)
 
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Apply ``state:implementation-go`` (``pr_manager``)."""
         if self._skip(f"mark PR #{pr_number} implementation-go"):
+            return
+        if self._repo_slug is not None:
+            self._add_labels(pr_number, [STATE_IMPLEMENTATION_GO])
+            self._remove_labels(pr_number, [STATE_IMPLEMENTATION_NO_GO])
             return
         pr_manager.mark_pr_implementation_go(pr_number)
 
@@ -296,11 +640,23 @@ class PipelineGitHub:
         """Keep auto-merge disabled until implementation GO (``pr_manager``)."""
         if self._skip(f"defer auto-merge on PR #{pr_number}"):
             return
+        if self._repo_slug is not None:
+            result = self._gh(
+                ["pr", "view", str(pr_number), "--json", "autoMergeRequest"],
+                check=False,
+            )
+            data = json.loads(result.stdout or "{}")
+            if data.get("autoMergeRequest") is not None:
+                self._gh(["pr", "merge", str(pr_number), "--disable-auto"])
+            return
         pr_manager.ensure_pr_auto_merge_deferred(pr_number)
 
     def arm_auto_merge(self, pr_number: int) -> None:
         """Arm squash auto-merge after implementation GO (``pr_manager``)."""
         if self._skip(f"arm auto-merge on PR #{pr_number}"):
+            return
+        if self._repo_slug is not None:
+            self._gh(["pr", "merge", str(pr_number), "--auto", "--squash"])
             return
         pr_manager.enable_auto_merge_after_implementation_go(pr_number)
 
@@ -310,6 +666,9 @@ class PipelineGitHub:
         """Post surviving review threads (``gh_pr_review_post``)."""
         if self._skip(f"post {len(threads)} review thread(s) on PR #{pr_number}"):
             return []
+        # TODO(#1823): repo-scope the GraphQL review-post helper. This remains
+        # delegated for now because it needs diff-position validation and GraphQL
+        # review creation, not a simple gh CLI command.
         return github_api.gh_pr_review_post(pr_number, threads, summary)
 
     def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:
@@ -327,7 +686,7 @@ class PipelineGitHub:
             issue_number,
             {
                 "pr_number": pr_number,
-                "pr_head_branch": get_pr_head_branch(pr_number) or "",
+                "pr_head_branch": self.get_pr_head_branch(pr_number) or "",
                 "head_sha_at_arming": head_sha,
                 "armed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "learn_attempted_at": None,
@@ -371,6 +730,11 @@ class PipelineGitHub:
         """
         if self._skip(f"tag epics {sorted(epics_labels)} {STATE_SKIP}"):
             return
+        if self._repo_slug is not None:
+            for number, labels in epics_labels.items():
+                if STATE_SKIP not in labels:
+                    self._add_labels(number, [STATE_SKIP])
+            return
         github_api.skip_epics(epics_labels)
 
     def ensure_state_labels(self) -> None:
@@ -381,5 +745,11 @@ class PipelineGitHub:
         """
         wanted = [*ALL_STATE_LABELS, *ALL_IMPLEMENTATION_STATE_LABELS, STATE_SKIP]
         if self._skip(f"ensure state labels exist: {wanted}"):
+            return
+        if self._repo_slug is not None:
+            existing = self._label_names()
+            for label in wanted:
+                if label not in existing:
+                    self._create_label(label)
             return
         github_api._ensure_labels_exist(wanted)

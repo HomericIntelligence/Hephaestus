@@ -106,6 +106,10 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror _review_utils.find_merged_closing_pr."""
         return self._merged_pr
 
+    def find_merged_pr_for_issue(self, issue_number: int) -> int | None:
+        """Mirror _review_utils.find_merged_pr_for_issue."""
+        return self._merged_pr
+
     def find_pr_for_issue(self, issue_number: int) -> int | None:
         """Mirror _review_utils.find_pr_for_issue (open PR lookup)."""
         return self._open_pr
