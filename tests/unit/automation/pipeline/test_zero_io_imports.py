@@ -65,9 +65,7 @@ _CAPABILITY_EXEMPT: dict[str, dict[str, frozenset[str] | None]] = {
     # (#1814). The exemption is SYMBOL-scoped: importing any other
     # claude_invoke symbol (e.g. invoke_claude_with_session) or the module
     # itself still trips the guard, as does any other I/O-flavored import.
-    "plan_review.py": {
-        "hephaestus.automation.claude_invoke": frozenset({"parse_review_verdict", "ReviewVerdict"})
-    },
+    "plan_review.py": {"hephaestus.automation.claude_invoke": frozenset({"parse_review_verdict"})},
 }
 
 
@@ -197,12 +195,11 @@ def test_capability_scope_still_blocks_io_in_seeding() -> None:
 
 
 def test_plan_review_exemption_is_symbol_scoped() -> None:
-    """The plan_review.py claude_invoke exemption permits ONLY the parser symbols.
+    """The plan_review.py claude_invoke exemption permits ONLY parse_review_verdict.
 
-    A synthetic plan_review.py importing an execution symbol
-    (invoke_claude_with_session) or the whole claude_invoke module must
-    still be flagged; the sanctioned parse_review_verdict / ReviewVerdict
-    from-imports must pass.
+    A synthetic plan_review.py importing ReviewVerdict, an execution symbol
+    (invoke_claude_with_session), or the whole claude_invoke module must
+    all be flagged. Only the sanctioned parse_review_verdict from-import passes.
     """
     synthetic_source = (
         "from hephaestus.automation.claude_invoke import parse_review_verdict\n"
@@ -213,9 +210,10 @@ def test_plan_review_exemption_is_symbol_scoped() -> None:
     tree = ast.parse(synthetic_source, filename="<synthetic-plan-review>")
     violations = _collect_violations(tree, "plan_review.py", _CAPABILITY_EXEMPT["plan_review.py"])
 
-    # Exactly the two offending lines (3 and 4); the sanctioned symbol
-    # imports on lines 1-2 produce no violations.
-    assert len(violations) == 2, violations
+    # Lines 2, 3, and 4 violate the tightened exemption (only parse_review_verdict
+    # is allowed). Line 1 (parse_review_verdict) produces no violation.
+    assert len(violations) == 3, violations
+    assert any("import ReviewVerdict" in v for v in violations)
     assert any("import invoke_claude_with_session" in v for v in violations)
     # A bare module import exposes the whole surface: always a violation
     # under a symbol-scoped exemption.
@@ -223,7 +221,7 @@ def test_plan_review_exemption_is_symbol_scoped() -> None:
         v.startswith("plan_review.py:4: import hephaestus.automation.claude_invoke")
         for v in violations
     )
-    assert not any(":1:" in v or ":2:" in v for v in violations)
+    assert not any(":1:" in v for v in violations)
 
 
 def test_forbidden_detects_synthetic_forbidden_import() -> None:
