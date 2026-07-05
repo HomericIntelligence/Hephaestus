@@ -161,7 +161,8 @@ class TestMain:
         f.write_text(NO_SIGNOFF_MESSAGE)
         main([str(f)])
         out = capsys.readouterr().out
-        assert "git commit -s" in out
+        assert "git commit -S -s" in out
+        assert "git commit --amend --no-edit -S -s" in out
 
     def test_passes_valid_stdin(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
@@ -179,7 +180,8 @@ class TestMain:
         assert main(["-"]) == 1
         out = capsys.readouterr().out
         assert "FAILED" in out
-        assert "git commit -s" in out
+        assert "git commit -S -s" in out
+        assert "git commit --amend --no-edit -S -s" in out
 
     def test_passes_multiple_valid_messages_stdin(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture

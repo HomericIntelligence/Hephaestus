@@ -229,6 +229,9 @@ class TestCommitDirtyReusedWorktree:
         for c in mock_run.call_args_list:
             assert "-A" not in c[0][0], "'git add -A' must not appear in any git call"
 
+        commit_cmd = mock_run.call_args_list[1][0][0]
+        assert commit_cmd[:4] == ["git", "commit", "-S", "-s"]
+
         assert sha == "abc1234"
 
     def test_git_add_a_never_called_with_untracked_leftover(
@@ -295,6 +298,8 @@ class TestRestoreDirtyReusedWorktreeCommitAfterSync:
         assert mock_run.call_count == 1
         cmd = mock_run.call_args_list[0][0][0]
         assert "cherry-pick" in cmd
+        assert "-S" in cmd
+        assert "-s" in cmd
 
     def test_cherry_pick_conflict_does_not_raise(
         self, impl: IssueImplementer, tmp_path: Path

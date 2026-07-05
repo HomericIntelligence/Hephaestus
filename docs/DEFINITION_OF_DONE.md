@@ -13,7 +13,7 @@ A piece of work is **done** when every item below is true.
 |---|-------------|-------------|
 | 1 | Branch named `<issue-number>-<description>` | Convention (PR reviewer) |
 | 2 | PR body contains the literal line `Closes #<issue-number>` (capital C, no colon, on its own line) | CI gate `pr-policy` (`.github/workflows/_required.yml`) |
-| 3 | Every commit on the branch is cryptographically signed (`git commit -S`) | CI gate `pr-policy` |
+| 3 | Every commit on the branch is cryptographically signed and DCO-signed (`git commit -S -s`) | CI gate `pr-policy` |
 | 4 | Auto-merge is disabled until `state:implementation-go`, then enabled with `--squash` (NOT `--rebase`; the repo disallows rebase merges) | CI gate `pr-policy` |
 | 5 | Commit messages follow Conventional Commits (`type(scope): description`) | CI gate `pr-policy` (Check 3) + local `commit-msg` hook `conventional-commit-msg` |
 | 6 | `pixi run ruff check hephaestus/ tests/` passes | CI job `lint` |

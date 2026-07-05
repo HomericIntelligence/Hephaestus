@@ -1114,6 +1114,7 @@ class _CIDriverCore:
             issue_number=issue_number,
             pr_number=pr_number,
             pr_head_branch=pr_head_branch,
+            pr_base_branch=self._get_pr_base_branch(pr_number),
             session_id=None,
         )
         if not pushed:
@@ -1192,6 +1193,7 @@ class _CIDriverCore:
             # CI fix push must target THIS remote ref even if Claude switches
             # branches locally during the session (#832).
             pr_head_branch = self._get_pr_branch(pr_number)
+            pr_base_branch = self._get_pr_base_branch(pr_number)
 
             if self.options.dry_run:
                 logger.info(
@@ -1214,6 +1216,7 @@ class _CIDriverCore:
                 session_id,
                 advise_findings,
                 pr_head_branch=pr_head_branch,
+                pr_base_branch=pr_base_branch,
             )
             if fixed:
                 logger.info(
@@ -1322,6 +1325,16 @@ class _CIDriverCore:
         except Exception as e:
             logger.warning("Could not fetch branch for PR #%s: %s", pr_number, e)
             return f"pr-{pr_number}"
+
+    def _get_pr_base_branch(self, pr_number: int) -> str:
+        """Return the PR base branch, defaulting to ``main`` on lookup gaps."""
+        try:
+            gh_state = self._gh_pr_state(pr_number) or {}
+        except Exception as exc:
+            logger.warning("Could not fetch base branch for PR #%s: %s", pr_number, exc)
+            return "main"
+        base_branch = str(gh_state.get("baseRefName") or "main")
+        return base_branch or "main"
 
     def _get_worktree_path(self, issue_number: int, pr_number: int) -> Path:
         """Resolve the worktree path for a given issue/PR.
@@ -1433,7 +1446,7 @@ class _CIDriverCore:
             )
 
     def _gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
-        """Return ``{state, headRefOid, mergedAt, mergeStateStatus}`` or ``None``.
+        """Return ``{state, headRefOid, mergedAt, mergeStateStatus, baseRefName}`` or ``None``.
 
         Used by the on-drive-start check (#840) to detect post-merge so the
         ``/learn`` capture can fire exactly once per issue, and by
@@ -1447,7 +1460,7 @@ class _CIDriverCore:
                     "view",
                     str(pr_number),
                     "--json",
-                    "state,headRefOid,mergedAt,mergeStateStatus",
+                    "state,headRefOid,mergedAt,mergeStateStatus,baseRefName",
                 ],
                 check=False,
             )
@@ -2000,7 +2013,8 @@ class _CIDriverCore:
         issue_number: int,
         pr_number: int,
         pr_head_branch: str,
-        session_id: str | None,
+        session_id: str | None = None,
+        pr_base_branch: str = "main",
     ) -> bool:
         """Delegate to CIFixOrchestrator (extracted #1357)."""
         return self._fix_orchestrator.push_ci_fix(
@@ -2009,6 +2023,7 @@ class _CIDriverCore:
             issue_number=issue_number,
             pr_number=pr_number,
             pr_head_branch=pr_head_branch,
+            pr_base_branch=pr_base_branch,
             session_id=session_id,
         )
 
@@ -2104,6 +2119,7 @@ class _CIDriverCore:
         advise_findings: str = "",
         *,
         pr_head_branch: str,
+        pr_base_branch: str = "main",
     ) -> bool:
         """Delegate to CIFixOrchestrator (extracted #1357)."""
         return self._fix_orchestrator.run_ci_fix_session(
@@ -2114,6 +2130,7 @@ class _CIDriverCore:
             session_id,
             advise_findings,
             pr_head_branch=pr_head_branch,
+            pr_base_branch=pr_base_branch,
         )
 
     def _enable_auto_merge(self, pr_number: int, is_bot_pr: bool = False) -> bool:

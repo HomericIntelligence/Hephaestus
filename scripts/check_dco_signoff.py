@@ -104,8 +104,8 @@ def main(argv: list[str] | None = None) -> int:
     if failed:
         print(
             "Every commit MUST carry a 'Signed-off-by: Name <email>' trailer "
-            "(the DCO). Add it with: git commit -s  (re-sign existing commits "
-            "with: git rebase --exec 'git commit --amend --no-edit -s' origin/main). "
+            "(the DCO). Add it with: git commit -S -s  (re-sign existing commits "
+            "with: git rebase --exec 'git commit --amend --no-edit -S -s' origin/main). "
             "See CONTRIBUTING.md, section 'Developer Certificate of Origin (DCO)'."
         )
         return 1
