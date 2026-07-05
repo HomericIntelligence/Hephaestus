@@ -79,6 +79,19 @@ def format_called_process_error(
     return "; ".join(parts)
 
 
+def describe_claude_failure(exc: BaseException) -> str:
+    """Return a bounded diagnostic string for a failed ``claude`` invocation.
+
+    ``CalledProcessError`` carries the CLI's stderr/stdout, which is the only
+    place the actual failure reason lives (#1799) — surface it via
+    :func:`format_called_process_error`. Any other exception degrades to
+    ``str(exc)``.
+    """
+    if isinstance(exc, subprocess.CalledProcessError):
+        return format_called_process_error(exc)
+    return str(exc)
+
+
 # Substrings the Claude CLI returns when ``--resume`` targets a session that
 # no longer exists in local persistence.
 SESSION_EXPIRED_PHRASES: tuple[str, ...] = (

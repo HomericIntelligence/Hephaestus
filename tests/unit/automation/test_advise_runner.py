@@ -405,6 +405,9 @@ class TestRunAdvise:
 
         assert result.startswith("<!-- advise step skipped:")
         assert "No conversation found with session ID abc" in caplog.text
+        # The prompt-embedded skip marker must carry the stderr detail too —
+        # a bare str(e) is just an exit code for CalledProcessError (#1799).
+        assert "No conversation found with session ID abc" in result
 
     def test_called_process_error_warning_includes_log_safe_stderr(
         self, caplog: pytest.LogCaptureFixture

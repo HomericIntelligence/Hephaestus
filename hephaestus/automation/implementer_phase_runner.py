@@ -51,7 +51,7 @@ from ._review_phase import (
 )
 from ._review_utils import find_pr_for_issue, get_pr_head_branch
 from ._stage_context import StageContext
-from .claude_invoke import format_called_process_error, invoke_claude_with_session
+from .claude_invoke import describe_claude_failure, invoke_claude_with_session
 from .claude_models import advise_model
 from .git_utils import (
     commit_if_changes,
@@ -909,11 +909,7 @@ class ImplementationPhaseRunner:
                 )
             decision = _parse_dirty_reused_worktree_decision(output)
         except Exception as e:
-            detail = (
-                format_called_process_error(e)
-                if isinstance(e, subprocess.CalledProcessError)
-                else str(e)
-            )
+            detail = describe_claude_failure(e)
             self.impl._log(
                 "warning",
                 f"Issue #{issue_number}: dirty-worktree decision failed ({detail}); "
