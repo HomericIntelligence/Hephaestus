@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 import logging
 import threading
 import time
@@ -17,6 +18,90 @@ from .git_utils import issue_ref, pr_ref
 from .models import WorkerResult
 
 logger = logging.getLogger(__name__)
+
+
+class CiConclusion(enum.Enum):
+    """Pure classification of a PR's required-check rollup (issue #1816)."""
+
+    GREEN = "green"
+    FAILING = "failing"
+    PENDING = "pending"
+    NO_CHECKS = "no_checks"
+
+
+#: The legacy ``all_green`` conclusion set (``ci_driver._drive_issue`` /
+#: ``CIDriveRunCoordinator.drive_issue``): a PR is GREEN — and may be armed —
+#: only when every required check concluded in one of these.
+GREEN_CONCLUSIONS: frozenset[str] = frozenset({"success", "skipped", "neutral"})
+
+
+def classify_ci_state(checks: list[dict[str, Any]]) -> CiConclusion:
+    """Classify already-fetched CI checks WITHOUT any sleep/backoff.
+
+    Extracted from poll_ci_until_concluded (issue #1816) so a pipeline stage
+    can classify in one sub-second call and timer-park on PENDING. GREEN
+    mirrors the legacy ``all_green`` semantics EXACTLY (conclusions all in
+    :data:`GREEN_CONCLUSIONS`) — the pipeline must never arm a PR the legacy
+    driver would not have armed. Returns:
+        NO_CHECKS: empty list — no CI configured; caller treats as success.
+        PENDING:   at least one required check has status != "completed".
+        GREEN:     all required completed, conclusions all in
+                   {success, skipped, neutral} (legacy ``all_green``).
+        FAILING:   all required completed but not all green — an explicit
+                   "failure" or a residual conclusion (cancelled, timed_out,
+                   action_required, ...). The residual class is routed to the
+                   fix leg; the legacy driver no-op'd it
+                   (``_handle_failing_pr``: "non-failure conclusions are
+                   treated as no-op"), which stranded such PRs — sending them
+                   to the fix agent is the pipeline's deliberate repair.
+    """
+    if not checks:
+        return CiConclusion.NO_CHECKS
+    required = [c for c in checks if c.get("required", False)] or checks
+    if not all(c.get("status") == "completed" for c in required):
+        return CiConclusion.PENDING
+    if all(c.get("conclusion") in GREEN_CONCLUSIONS for c in required):
+        return CiConclusion.GREEN
+    return CiConclusion.FAILING
+
+
+class PrMergeState(enum.Enum):
+    """Pure classification of an armed PR's merge state (issue #1816)."""
+
+    MERGED = "merged"
+    CLOSED = "closed"
+    FAILING = "failing"
+    DIRTY = "dirty"
+    BLOCKED = "blocked"
+    PENDING = "pending"
+
+
+def classify_pr_merge_state(
+    gh_state: dict[str, Any] | None,
+    failing: list[str],
+    fixable_failing: list[str],
+    pending: list[str],
+) -> PrMergeState:
+    """Branch logic of _wait_for_pr_terminal (issue #1816), no sleep/no I/O.
+
+    Mirrors ci_driver.py:1515-1582 exactly. The policy-only-failure logging
+    branch (:1575-1582) is intentionally omitted: it only logs and does NOT
+    change the returned state (falls through to PENDING either way), so
+    dropping it preserves behavior — verified against ci_driver.py:1575-1582.
+    """
+    state = ((gh_state or {}).get("state") or "").upper()
+    if state == "MERGED":
+        return PrMergeState.MERGED
+    if state == "CLOSED":
+        return PrMergeState.CLOSED
+    if fixable_failing:
+        return PrMergeState.FAILING
+    merge_status = ((gh_state or {}).get("mergeStateStatus") or "").upper()
+    if merge_status in ("DIRTY", "CONFLICTING"):
+        return PrMergeState.DIRTY
+    if merge_status == "BLOCKED" and not failing and not pending:
+        return PrMergeState.BLOCKED
+    return PrMergeState.PENDING
 
 
 class CIDriveRunCoordinator:
@@ -209,11 +294,12 @@ class CIDriveRunCoordinator:
         poll_attempt = 0
         while True:
             checks = self._check_inspector.gh_pr_checks(pr_number, self._options().dry_run)
-            if not checks:
+            conclusion = classify_ci_state(checks)
+            if conclusion is CiConclusion.NO_CHECKS:
                 logger.info("Issue #%s: no CI checks found for PR #%s", issue_number, pr_number)
                 return None
-            required_checks = [c for c in checks if c.get("required", False)] or checks
-            if all(c["status"] == "completed" for c in required_checks):
+            if conclusion is not CiConclusion.PENDING:  # GREEN or FAILING → concluded
+                required_checks = [c for c in checks if c.get("required", False)] or checks
                 return checks, required_checks
             sleep_secs = min(2**poll_attempt, 60)
             if poll_elapsed + sleep_secs > max_wait:

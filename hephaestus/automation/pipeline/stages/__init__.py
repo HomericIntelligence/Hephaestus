@@ -14,15 +14,19 @@ from .base import (
     StageOutcome,
     StepResult,
 )
+from .ci import CiStage
 from .implementation import ImplementationStage
+from .merge_wait import MergeWaitStage
 from .plan_review import PlanReviewStage
 from .planning import PlanningStage
 from .pr_review import PrReviewStage
 
 __all__ = [
+    "CiStage",
     "Continue",
     "ImplementationStage",
     "JobRequest",
+    "MergeWaitStage",
     "PlanReviewStage",
     "PlanningStage",
     "PrReviewStage",
