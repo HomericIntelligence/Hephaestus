@@ -331,6 +331,27 @@ class StageGitHub(Protocol):
         """
         ...
 
+    # -- repo-stage surface (#1817) -----------------------------------------
+
+    def skip_epics(self, epics_labels: dict[int, list[str]]) -> None:
+        """Durably tag epics ``state:skip`` (the ONE sanctioned seeding write).
+
+        The coordinator (#1817) maps this onto the existing
+        ``github_api.skip_epics`` chokepoint; the repo stage calls it BEFORE
+        excluding epics (doc row "Epic tagging is the one seeding write; done
+        BEFORE excluding" — see :mod:`..seeding`'s write-path boundary note).
+        """
+        ...
+
+    def ensure_state_labels(self) -> None:
+        """Durably ensure the ``state:*`` label vocabulary exists on the repo.
+
+        Repo-stage step 1 [M] (doc section 1 ``ensure_state_labels``): the
+        coordinator maps this onto ``github_api._ensure_labels_exist`` over
+        the full ``state_labels`` vocabulary. Idempotent by construction.
+        """
+        ...
+
 
 @dataclass(frozen=True)
 class Continue:

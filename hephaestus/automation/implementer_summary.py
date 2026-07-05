@@ -16,6 +16,7 @@ import logging
 import sys
 
 from .models import WorkerResult
+from .pipeline.summary import format_preserved_worktrees
 from .worktree_manager import WorktreeManager
 
 logger = logging.getLogger(__name__)
@@ -94,18 +95,12 @@ class ImplementationSummaryPrinter:
         self._print_preserved_worktrees()
 
     def _print_preserved_worktrees(self) -> None:
-        """Log the preserved-worktree footer (issues with uncommitted changes)."""
-        preserved = self.worktree_manager.preserved
-        if not preserved:
-            return
-        issue_nums = [n for n, _ in preserved]
-        script = sys.argv[0]
-        issues_arg = " ".join(str(n) for n in issue_nums)
-        logger.info("\nPreserved worktrees (contain uncommitted changes):")
-        for issue_num, path in preserved:
-            logger.info("  #%s: %s", issue_num, path)
-        logger.info("\nRerun these issues after inspecting/cleaning the worktrees:")
-        logger.info("  %s --issues %s --resume", script, issues_arg)
-        logger.info("To discard them instead:")
-        for _, path in preserved:
-            logger.info("  git worktree remove --force %s", path)
+        """Log the preserved-worktree footer (issues with uncommitted changes).
+
+        The line sequence lives in
+        :func:`~hephaestus.automation.pipeline.summary.format_preserved_worktrees`
+        (re-housed by #1817) so the pipeline summary and this legacy printer
+        emit identical guidance.
+        """
+        for line in format_preserved_worktrees(self.worktree_manager.preserved, sys.argv[0]):
+            logger.info("%s", line)

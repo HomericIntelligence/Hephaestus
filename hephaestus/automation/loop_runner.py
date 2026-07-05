@@ -50,6 +50,10 @@ import traceback
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hephaestus.automation.pipeline.coordinator import PipelineConfig
 
 from hephaestus.agents.runtime import resolve_agent
 from hephaestus.automation._review_utils import build_automation_parser, find_pr_for_issue
@@ -479,6 +483,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--loops", type=int, default=5, help="Number of loop iterations (default: 5)")
     p.add_argument(
+        "--pipeline",
+        action="store_true",
+        help="Use the queue-based pipeline loop (default: off). "
+        "Env HEPH_PIPELINE=1 also enables it; the CLI flag wins.",
+    )
+    p.add_argument(
         "--max-merge-attempts",
         type=int,
         default=1,
@@ -598,7 +608,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=_default_phase_timeout_s(),
         help=(
             "Per-phase timeout in seconds (default: HEPH_PHASE_TIMEOUT or "
-            f"{int(_default_phase_timeout_s())}s). Pass 0 or a negative value to disable."
+            f"{int(_default_phase_timeout_s())}s). Pass 0 or a negative value to disable. "
+            "Under --pipeline this bounds each AGENT JOB, not a whole phase subprocess."
         ),
     )
     p.add_argument(
@@ -1658,6 +1669,93 @@ def _resolve_org_and_repos(
     return (detected_org, [detected_repo], None)
 
 
+def _build_pipeline_config(
+    args: argparse.Namespace, cfg: LoopConfig, org: str, repos: list[str]
+) -> PipelineConfig:
+    """Build a PipelineConfig from the parsed args and LoopConfig.
+
+    Args:
+        args: Parsed argparse Namespace.
+        cfg: The LoopConfig.
+        org: The organization name.
+        repos: List of repository names.
+
+    Returns:
+        A PipelineConfig instance compatible with pipeline.run_pipeline.
+
+    """
+    from hephaestus.automation.pipeline.coordinator import PipelineConfig
+
+    return PipelineConfig(
+        org=org,
+        repos=repos,
+        issues=cfg.issues,
+        prs=[],  # --prs not yet implemented in #1813
+        loops=cfg.loops,
+        max_workers=cfg.max_workers,
+        parallel_repos=cfg.parallel_repos,
+        dry_run=cfg.dry_run,
+        grace_s=30.0,  # Default grace period
+        phase_timeout_s=cfg.phase_timeout_s,
+        model=cfg.model,
+        planner_model=cfg.planner_model,
+        reviewer_model=cfg.reviewer_model,
+        implementer_model=cfg.implementer_model,
+        no_advise=cfg.no_advise,
+        nitpick=cfg.nitpick,
+        drive_green_all=cfg.drive_green_all,
+        projects_dir=cfg.projects_dir,
+        json_out=args.json,
+    )
+
+
+def _error_exit(args: argparse.Namespace, message: str, json_message: str | None = None) -> int:
+    """Log *message*, emit the JSON error envelope under --json, and return 1.
+
+    Args:
+        args: Parsed argparse Namespace (for the ``--json`` gate).
+        message: Human-readable error logged at ERROR level.
+        json_message: Envelope message override (defaults to *message*) —
+            preserves the legacy envelope strings exactly.
+
+    Returns:
+        The process exit code 1.
+
+    """
+    LOG.error("%s", message)
+    if args.json:
+        emit_json_status(1, message=json_message if json_message is not None else message)
+    return 1
+
+
+def _dispatch_pipeline(
+    args: argparse.Namespace, cfg: LoopConfig, org: str, repos: list[str]
+) -> int | None:
+    """Run the queue-based pipeline when enabled; return None when it is off.
+
+    Enabled by ``--pipeline`` or ``HEPH_PIPELINE=1`` (the CLI flag wins;
+    default OFF — the legacy path stays byte-identical when off). The repo
+    stage owns preflight + cloning, so this dispatch happens BEFORE
+    ``_preflight_token_scopes`` / ``_clone_missing_repos`` (no double-clone).
+    Under the pipeline, ``--phase-timeout`` bounds each agent job.
+
+    Args:
+        args: Parsed argparse Namespace.
+        cfg: The LoopConfig.
+        org: The organization name.
+        repos: List of repository names.
+
+    Returns:
+        The pipeline's exit code, or ``None`` when the pipeline is disabled.
+
+    """
+    if not (args.pipeline or os.environ.get("HEPH_PIPELINE") == "1"):
+        return None
+    from hephaestus.automation.pipeline.coordinator import run_pipeline
+
+    return run_pipeline(_build_pipeline_config(args, cfg, org, repos))
+
+
 def main(argv: list[str] | None = None) -> int:
     """Console-script entry point. Returns the process exit code."""
     args = _parse_args(argv)
@@ -1672,10 +1770,7 @@ def main(argv: list[str] | None = None) -> int:
     # hardcoded default.
     org, repos, err = _resolve_org_and_repos(args)
     if err:
-        LOG.error("%s", err)
-        if args.json:
-            emit_json_status(1, message=err)
-        return 1
+        return _error_exit(args, err)
 
     cfg = LoopConfig(
         loops=args.loops,
@@ -1717,10 +1812,13 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(signal.SIGHUP, _request_shutdown)
 
     if not repos:
-        LOG.error("Repo list is empty; nothing to do.")
-        if args.json:
-            emit_json_status(1, message="empty repo list")
-        return 1
+        return _error_exit(args, "Repo list is empty; nothing to do.", "empty repo list")
+
+    # Dispatch to the pipeline if --pipeline is set or HEPH_PIPELINE=1
+    # (BEFORE preflight/clone: the repo stage owns both — no double-clone).
+    pipeline_rc = _dispatch_pipeline(args, cfg, org, repos)
+    if pipeline_rc is not None:
+        return pipeline_rc
 
     if not cfg.dry_run:
         _preflight_token_scopes(cfg.org, repos[0])

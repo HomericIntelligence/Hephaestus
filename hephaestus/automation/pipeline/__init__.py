@@ -39,6 +39,7 @@ __all__ = [
     "ItemResult",
     "JobHandle",
     "JobResult",
+    "PipelineConfig",
     "PipelineScope",
     "Route",
     "StageName",
@@ -46,6 +47,7 @@ __all__ = [
     "StageQueue",
     "WorkItem",
     "WorkerPool",
+    "run_pipeline",
 ]
 
 _LAZY_EXPORTS: dict[str, str] = {
@@ -60,6 +62,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "ItemResult": "hephaestus.automation.pipeline.work_item",
     "JobHandle": "hephaestus.automation.pipeline.jobs",
     "JobResult": "hephaestus.automation.pipeline.jobs",
+    "PipelineConfig": "hephaestus.automation.pipeline.coordinator",
     "PipelineScope": "hephaestus.automation.pipeline.routing",
     "ROUTES": "hephaestus.automation.pipeline.routing",
     "Route": "hephaestus.automation.pipeline.routing",
@@ -68,6 +71,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "StageQueue": "hephaestus.automation.pipeline.queues",
     "WorkItem": "hephaestus.automation.pipeline.work_item",
     "WorkerPool": "hephaestus.automation.pipeline.worker_pool",
+    "run_pipeline": "hephaestus.automation.pipeline.coordinator",
 }
 
 

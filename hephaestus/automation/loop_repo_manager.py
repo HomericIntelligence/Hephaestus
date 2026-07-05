@@ -15,6 +15,7 @@ import json
 import logging
 import subprocess
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from hephaestus.automation.ci_driver import _pr_is_failing
@@ -116,6 +117,77 @@ def _gh_list_repos(org: str) -> list[str]:
     ]
 
 
+def _list_open_issue_meta(org: str, repo: str) -> list[dict[str, Any]]:
+    """Return open-issue metadata for ``org/repo`` — reads only, no tagging.
+
+    One ``gh issue list`` returning ``{number, labels, title}`` dicts (labels
+    flattened to names). Extracted from :func:`_list_open_issue_numbers` so
+    the pipeline repo stage (#1817) can reuse the read while routing the epic
+    ``state:skip`` tagging through its coordinator-owned accessor instead of
+    the in-band :func:`skip_epics` side effect below.
+
+    Returns an empty list on any failure (rate limit, auth error, timeout)
+    so callers fall back safely.
+    """
+    try:
+        out = gh_call(
+            [
+                "issue",
+                "list",
+                "--repo",
+                f"{org}/{repo}",
+                "--state",
+                "open",
+                "--limit",
+                "500",
+                "--json",
+                "number,labels,title",
+            ],
+            timeout=NETWORK_TIMEOUT,
+        )
+        entries = json.loads(out.stdout or "[]")
+    except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
+        return []
+    return [
+        {
+            "number": e["number"],
+            "labels": [lbl["name"] for lbl in e.get("labels", [])],
+            "title": e.get("title", ""),
+        }
+        for e in entries
+        if isinstance(e, dict) and "number" in e
+    ]
+
+
+def _list_open_pr_numbers(org: str, repo: str) -> list[int]:
+    """Return open PR numbers in ``org/repo``, sorted ascending.
+
+    Read-only helper for the pipeline repo stage's ``--drive-green-all``
+    orphan-PR discovery (#1817): PRs with no tracked issue route to the ci
+    stage. Empty list on any failure so discovery degrades safely.
+    """
+    try:
+        out = gh_call(
+            [
+                "pr",
+                "list",
+                "--repo",
+                f"{org}/{repo}",
+                "--state",
+                "open",
+                "--limit",
+                "500",
+                "--json",
+                "number",
+            ],
+            timeout=NETWORK_TIMEOUT,
+        )
+        entries = json.loads(out.stdout or "[]")
+    except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
+        return []
+    return sorted(int(e["number"]) for e in entries if isinstance(e, dict) and "number" in e)
+
+
 def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
     """Return open NON-epic issue numbers in ``org/repo``, sorted ascending.
 
@@ -138,35 +210,7 @@ def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
     an empty list on any failure (rate limit, auth error, timeout) so callers
     fall back safely.
     """
-    try:
-        out = gh_call(
-            [
-                "issue",
-                "list",
-                "--repo",
-                f"{org}/{repo}",
-                "--state",
-                "open",
-                "--limit",
-                "500",
-                "--json",
-                "number,labels,title",
-            ],
-            timeout=NETWORK_TIMEOUT,
-        )
-        entries = json.loads(out.stdout or "[]")
-    except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
-        return []
-
-    meta = [
-        {
-            "number": e["number"],
-            "labels": [lbl["name"] for lbl in e.get("labels", [])],
-            "title": e.get("title", ""),
-        }
-        for e in entries
-        if isinstance(e, dict) and "number" in e
-    ]
+    meta = _list_open_issue_meta(org, repo)
     kept, epics = partition_epics(meta)
     if epics:
         epic_set = set(epics)
