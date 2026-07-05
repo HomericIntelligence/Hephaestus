@@ -4,16 +4,38 @@ from __future__ import annotations
 
 from typing import Any
 
-from hephaestus.automation.pipeline.jobs import JobResult
+from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
-from hephaestus.automation.pipeline.stages.planning import PlanningStage
+from hephaestus.automation.pipeline.stages.planning import (
+    PlanningStage,
+    build_plan_prompt,
+)
+from hephaestus.automation.prompts.planning import get_plan_prompt
+from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
 from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
     STATE_PLAN_GO,
     STATE_SKIP,
 )
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+
+
+class TestBuildPlanPrompt:
+    """build_plan_prompt composes the plan prompt with the advise block."""
+
+    def test_without_findings_is_plan_prompt_verbatim(self) -> None:
+        """No advise findings means the untouched template output."""
+        assert build_plan_prompt(7) == get_plan_prompt(7)
+        assert build_plan_prompt(7, "") == get_plan_prompt(7)
+
+    def test_with_findings_appends_learnings_block(self) -> None:
+        """Advise findings ride in the legacy learnings block."""
+        prompt = build_plan_prompt(7, "Use the retry helper from utils.")
+
+        assert prompt.startswith(get_plan_prompt(7))  # template reused verbatim
+        assert "## Prior Learnings from Team Knowledge Base" in prompt
+        assert prompt.endswith("Use the retry helper from utils.")
 
 
 class TestPlanningStageEnter:
@@ -140,6 +162,41 @@ class TestPlanningStageEnter:
         assert outcome is not None
         assert outcome.disposition == Disposition.FINISH_FAIL
 
+    def test_existing_plan_fast_forwards_to_verify(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A restart with a posted plan comment jumps straight to VERIFY.
+
+        Real has-plan semantics: advise + plan are never redone mid-stage.
+        """
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN], has_plan=True)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=9, state="ENTER")
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome is None  # proceed, but...
+        assert item.state == "VERIFY"  # ...straight to verification
+        assert github.mutation_log == []  # no rewrites on re-entry
+
+    def test_double_on_enter_is_idempotent(self, make_ctx: Any, make_work_item: Any) -> None:
+        """A literal double on_enter produces no extra mutations or moves."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(has_plan=True)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=10, state="ENTER")
+
+        assert stage.on_enter(item, ctx) is None
+        assert item.state == "VERIFY"
+        log_after_first = list(github.mutation_log)
+        assert log_after_first == [("gh_issue_add_labels", (10, (STATE_NEEDS_PLAN,)))]
+
+        assert stage.on_enter(item, ctx) is None  # second literal call
+
+        assert item.state == "VERIFY"
+        assert github.mutation_log == log_after_first  # nothing new written
+
 
 class TestPlanningStageStep:
     """step state machine: ENTER -> ADVISE_WAIT -> PLAN_WAIT -> VERIFY."""
@@ -186,25 +243,98 @@ class TestPlanningStageStep:
         stage = PlanningStage()
         ctx = make_ctx()
         item = make_work_item(issue=4, state="PLAN_WAIT")
+        item.payload["advise_findings"] = "prior learnings"
 
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert result.on_done_state == "VERIFY"
         assert result.job.descr == "plan"
-        assert result.job.prompt_kwargs == {"issue_number": 4}
+        assert result.job.prompt_builder is build_plan_prompt
+        # Advise findings travel via prompt_kwargs (builders run in-worker;
+        # AgentJob is frozen, so no closures over payload).
+        assert result.job.prompt_kwargs == {
+            "issue_number": 4,
+            "advise_findings": "prior learnings",
+        }
 
     def test_verify_with_plan_advances(self, make_ctx: Any, make_work_item: Any) -> None:
-        """VERIFY with an existing plan comment advances."""
+        """VERIFY with an existing plan comment advances without re-posting."""
         stage = PlanningStage()
         github = FakeStageGitHub(has_plan=True)
         ctx = make_ctx(github=github)
         item = make_work_item(issue=5, state="VERIFY")
+        item.payload["plan_text"] = "# Implementation Plan\n\nAlready posted."
 
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.ADVANCE
+        assert github.mutation_log == []  # existing plan: no duplicate upsert
+
+    def test_verify_posts_plan_comment_then_advances(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The PIPELINE posts the plan comment (M1).
+
+        VERIFY upserts the durable artifact BEFORE the verify/ADVANCE
+        decision (journal order).
+        """
+        stage = PlanningStage()
+        github = FakeStageGitHub(has_plan=False)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=11, state="VERIFY")
+        item.payload["plan_text"] = "# Implementation Plan\n\nDo the thing."
+
+        result = stage.step(item, ctx)
+
+        # Durable write happened, in journal order, before ADVANCE existed.
+        assert github.mutation_log == [
+            ("gh_issue_upsert_comment", (11, PLAN_COMMENT_MARKER)),
+        ]
+        assert github.comments[11] == ["# Implementation Plan\n\nDo the thing."]
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.ADVANCE
+
+    def test_verify_posts_exactly_once_on_reentry(self, make_ctx: Any, make_work_item: Any) -> None:
+        """Re-entering VERIFY never double-posts.
+
+        The upsert is guarded by has_existing_plan (idempotent on re-entry).
+        """
+        stage = PlanningStage()
+        github = FakeStageGitHub(has_plan=False)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=12, state="VERIFY")
+        item.payload["plan_text"] = "# Implementation Plan\n\nOnce only."
+
+        first = stage.step(item, ctx)
+        second = stage.step(item, ctx)  # re-entry (e.g. after a restart)
+
+        upserts = [m for m in github.mutation_log if m[0] == "gh_issue_upsert_comment"]
+        assert len(upserts) == 1  # exactly one durable post
+        assert isinstance(first, StageOutcome)
+        assert first.disposition == Disposition.ADVANCE
+        assert isinstance(second, StageOutcome)
+        assert second.disposition == Disposition.ADVANCE
+
+    def test_verify_normalizes_plan_body_to_marker(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Marker normalization is re-housed from _upsert_plan_comment.
+
+        A markerless (or whitespace-prefixed) plan gets the marker prepended.
+        """
+        stage = PlanningStage()
+        github = FakeStageGitHub(has_plan=False)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=13, state="VERIFY")
+        item.payload["plan_text"] = "\n\nSome plan without the heading."
+
+        stage.step(item, ctx)
+
+        (body,) = github.comments[13]
+        assert body.startswith(PLAN_COMMENT_MARKER)  # upsert helper keys on this
+        assert body == f"{PLAN_COMMENT_MARKER}\n\nSome plan without the heading."
 
     def test_verify_without_plan_retries(self, make_ctx: Any, make_work_item: Any) -> None:
         """VERIFY without a plan retries while within the plan budget."""
@@ -290,3 +420,59 @@ class TestPlanningStageOnJobDone:
         stage.on_job_done(item, result, ctx)
 
         assert "plan_text" not in item.payload
+
+
+class TestPlanningFlowWithFakePool:
+    """Drive the whole stage through the canonical FakeWorkerPool (m6)."""
+
+    def test_full_walk_enter_to_advance(self, make_ctx: Any, make_work_item: Any) -> None:
+        """Full pool-driven walk of the whole stage.
+
+        ENTER -> ADVISE_WAIT -> PLAN_WAIT -> VERIFY -> ADVANCE, with the
+        durable writes in journal order.
+        """
+        from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+
+        stage = PlanningStage()
+        github = FakeStageGitHub()  # unlabeled, no PRs, no plan yet
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=40, state="ENTER")
+
+        pool = FakeWorkerPool()
+        pool.script(
+            JobResult(ok=True, value="advise findings"),  # advise
+            JobResult(ok=True, value="# Implementation Plan\n\nSteps."),  # plan
+        )
+
+        assert stage.on_enter(item, ctx) is None
+
+        outcome = None
+        for _ in range(10):  # bounded driver loop
+            result = stage.step(item, ctx)
+            if isinstance(result, Continue):
+                item.state = result.next_state
+                continue
+            if isinstance(result, JobRequest):
+                pool.submit(result.job, result.on_done_state)  # type: ignore[arg-type]
+                _handle, job_result = pool.completion_q.get_nowait()
+                assert not job_result.interrupted
+                stage.on_job_done(item, job_result, ctx)
+                item.state = result.on_done_state
+                continue
+            outcome = result
+            break
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.ADVANCE
+        # Both agent jobs ran, in order, with the payload threaded through.
+        assert [h.job.descr for h in pool.submitted] == ["advise", "plan"]
+        plan_job = pool.submitted[1].job
+        assert isinstance(plan_job, AgentJob)  # narrows the job union for mypy
+        assert plan_job.prompt_kwargs["advise_findings"] == "advise findings"
+        # Durable writes, pinned in journal order: entry label first, then
+        # the plan-comment artifact — both before the ADVANCE outcome.
+        assert github.mutation_log == [
+            ("gh_issue_add_labels", (40, (STATE_NEEDS_PLAN,))),
+            ("gh_issue_upsert_comment", (40, PLAN_COMMENT_MARKER)),
+        ]
+        assert github.comments[40] == ["# Implementation Plan\n\nSteps."]

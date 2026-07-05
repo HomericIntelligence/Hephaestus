@@ -8,9 +8,19 @@ as a pipeline stage (docs/AUTOMATION_LOOP_ARCHITECTURE.md section
 - Budget: ``plan`` = 2 (max plan attempts per issue); exhaustion ->
   finished(fail).
 - Owned label: ``state:needs-plan`` (idempotent, on entry) [durable].
+- Plan comment: the PIPELINE posts it (doc section 2: "plan comment =
+  durable artifact"). VERIFY upserts ``item.payload["plan_text"]`` via
+  ``ctx.github.upsert_plan_comment`` BEFORE the verify/ADVANCE decision
+  (journal order: durable write precedes the queue push). Marker
+  normalization is re-housed from
+  ``planner_review_loop._upsert_plan_comment``; the content-missing banner
+  and "Changes from review" enrichment stay with the legacy loop until the
+  cutover issue.
 - Prompt functions (imported, never re-authored):
   ``prompts/advise.py get_advise_prompt_builder`` and
-  ``prompts/planning.py get_plan_prompt``.
+  ``prompts/planning.py get_plan_prompt`` (composed with the advise
+  findings block by :func:`build_plan_prompt`, mirroring the legacy
+  ``planner_review_loop.generate_plan`` context assembly).
 """
 
 from __future__ import annotations
@@ -25,6 +35,7 @@ from hephaestus.automation.agent_config import (
 )
 from hephaestus.automation.prompts.advise import get_advise_prompt_builder
 from hephaestus.automation.prompts.planning import get_plan_prompt
+from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
 from hephaestus.automation.session_naming import AGENT_ADVISE, AGENT_PLANNER
 from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
@@ -46,6 +57,63 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def build_plan_prompt(issue_number: int, advise_findings: str = "") -> str:
+    """Compose the plan prompt with the advise-findings block.
+
+    Module-level composed builder (NOT a closure): :class:`AgentJob` is
+    frozen and prompt builders run in-worker, so the builder must be a
+    top-level function receiving everything via ``prompt_kwargs``. Mirrors
+    the "Prior Learnings from Team Knowledge Base" block that the legacy
+    ``planner_review_loop.generate_plan`` appends when advise findings are
+    available; the prompt template itself is reused verbatim via
+    :func:`get_plan_prompt`.
+
+    Args:
+        issue_number: GitHub issue number to plan.
+        advise_findings: Advise-step findings; empty string means no block.
+
+    Returns:
+        The full planner prompt, with the findings block appended when
+        ``advise_findings`` is non-empty.
+
+    """
+    prompt = get_plan_prompt(issue_number)
+    if not advise_findings:
+        return prompt
+    block = "\n".join(
+        [
+            "",
+            "---",
+            "",
+            "## Prior Learnings from Team Knowledge Base",
+            "",
+            advise_findings,
+        ]
+    )
+    return prompt + block
+
+
+def _normalize_plan_comment(plan: str) -> str:
+    """Normalize plan text so the body begins exactly at the plan marker.
+
+    Re-housed from ``planner_review_loop._upsert_plan_comment``: the upsert
+    helper keys off ``body.startswith(PLAN_COMMENT_MARKER)``, and
+    ``plan.lstrip()`` is load-bearing — a plan arriving with leading
+    whitespace would otherwise keep it and break the marker match (#700).
+
+    Args:
+        plan: Raw plan text from the planner agent.
+
+    Returns:
+        The plan body, guaranteed to start with ``PLAN_COMMENT_MARKER``.
+
+    """
+    stripped = plan.lstrip()
+    if stripped.startswith(PLAN_COMMENT_MARKER):
+        return stripped
+    return f"{PLAN_COMMENT_MARKER}\n\n{stripped}"
 
 
 def _issue_labels(item: WorkItem, ctx: StageContext) -> list[str]:
@@ -90,6 +158,10 @@ class PlanningStage(Stage):
     - merged closing PR -> close issue as covered, SKIP
     - open PR -> SKIP (PR already covers implementation)
     - unlabeled entry -> durably add ``state:needs-plan`` before proceeding
+    - plan comment already exists (``ctx.github.has_existing_plan``) ->
+      fast-forward ``item.state`` to VERIFY so a restart mid-stage never
+      redoes advise + plan (the base-protocol idempotency promise); the
+      ``is_plan_review_go`` label check above stays the primary gate.
     """
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
@@ -136,6 +208,15 @@ class PlanningStage(Stage):
         if STATE_NEEDS_PLAN not in labels:
             logger.info("planning:%d: adding %s label", item.issue, STATE_NEEDS_PLAN)
             ctx.github.add_labels(item.issue, [STATE_NEEDS_PLAN])
+
+        # Restart fast-forward: a plan comment already exists (real has-plan
+        # semantics via ctx.github), so re-entry must not redo advise + plan.
+        # Jump straight to VERIFY; idempotent on repeated on_enter calls.
+        if ctx.github.has_existing_plan(item.issue):
+            logger.info(
+                "planning:%d: plan comment already exists; fast-forward to VERIFY", item.issue
+            )
+            item.state = "VERIFY"
 
         return None  # proceed to step()
 
@@ -189,21 +270,34 @@ class PlanningStage(Stage):
                 issue=item.issue,
                 agent=AGENT_PLANNER,
                 model=planner_model(),
-                prompt_builder=get_plan_prompt,
+                prompt_builder=build_plan_prompt,
                 cwd=ctx.paths.worktree,
                 timeout_s=planner_claude_timeout(),
-                # The worker prepends the issue context + advise findings when
-                # opening the planner session, exactly as the legacy
-                # planner_review_loop.generate_plan composes it (#1817 wires
-                # that session setup; the prompt template itself is reused
-                # verbatim via get_plan_prompt).
-                prompt_kwargs={"issue_number": item.issue},
+                # build_plan_prompt composes get_plan_prompt with the advise
+                # findings block in-worker, mirroring the legacy
+                # planner_review_loop.generate_plan(cached_advise=...)
+                # context assembly. The issue title/body header is prepended
+                # by the worker session setup (#1817).
+                prompt_kwargs={
+                    "issue_number": item.issue,
+                    "advise_findings": item.payload.get("advise_findings", ""),
+                },
                 descr="plan",
             )
             return JobRequest(job, on_done_state="VERIFY")
 
         if item.state == "VERIFY":
-            # Doc step 4 [M]: verify the plan comment exists (the
+            # Doc step 4 [M], part 1: the pipeline POSTS the plan comment
+            # (doc section 2: "plan comment = durable artifact"). The upsert
+            # is the durable write and happens BEFORE the verify/ADVANCE
+            # decision (journal order). Guarded by has_existing_plan so
+            # re-entry never double-posts.
+            plan_text = item.payload.get("plan_text")
+            if plan_text and not ctx.github.has_existing_plan(item.issue):
+                logger.info("planning:%d: upserting plan comment", item.issue)
+                ctx.github.upsert_plan_comment(item.issue, _normalize_plan_comment(plan_text))
+
+            # Doc step 4 [M], part 2: verify the plan comment exists (the
             # PlannerStateManager.has_existing_plan read, via ctx.github).
             if ctx.github.has_existing_plan(item.issue):
                 logger.info("planning:%d: plan verified; advancing", item.issue)

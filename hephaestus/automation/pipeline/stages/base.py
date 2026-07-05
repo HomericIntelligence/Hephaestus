@@ -30,6 +30,13 @@ Coordinator convention (binding for #1817, the coordinator slice):
 - All durable GitHub mutations go through ``ctx.github`` and happen
   immediately BEFORE the outcome that causes a queue push ("durable write
   precedes the queue push").
+- ``ctx.github`` implements the :class:`StageGitHub` protocol. Its mutator
+  surface (``add_labels`` / ``remove_labels`` / ``close_issue_as_covered`` /
+  ``upsert_plan_comment``) uses coordinator-neutral names the coordinator
+  (#1817) maps onto the ``github_api`` mutators; ``upsert_plan_comment`` is
+  the durable plan-comment channel (doc section 2: "plan comment = durable
+  artifact") — the planning stage calls it in VERIFY so the plan the agent
+  produced is journaled BEFORE the verify/ADVANCE decision.
 """
 
 from __future__ import annotations
@@ -53,11 +60,77 @@ __all__ = [
     "JobResult",
     "Stage",
     "StageContext",
+    "StageGitHub",
     "StageName",
     "StageOutcome",
     "StepResult",
     "WorkItem",
 ]
+
+
+@runtime_checkable
+class StageGitHub(Protocol):
+    """Coordinator-owned GitHub accessor injected as ``StageContext.github``.
+
+    The single seam through which stages read GitHub facts and request
+    durable mutations. Dry-run is honored INSIDE the accessor implementation
+    (#1817): when the coordinator runs with ``--dry-run``, the mutator
+    methods below log-and-skip the underlying ``gh`` calls, so stages never
+    branch on ``ctx.dry_run`` around a write.
+
+    Read surface mirrors the existing helper names; the mutator surface uses
+    coordinator-neutral names the coordinator maps onto ``github_api``
+    mutators (the pipeline architecture guard forbids ``github_api`` mutator
+    names inside pipeline modules).
+    """
+
+    def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+        """Fetch issue JSON (mirrors ``github_api.issues.gh_issue_json``)."""
+        ...
+
+    def find_merged_closing_pr(self, issue_number: int) -> int | None:
+        """Return the merged PR closing this issue, if any (``_review_utils``)."""
+        ...
+
+    def find_pr_for_issue(self, issue_number: int) -> int | None:
+        """Return an open PR covering this issue, if any (``_review_utils``)."""
+        ...
+
+    def has_existing_plan(self, issue_number: int) -> bool:
+        """Return True when the issue already counts as planned.
+
+        Contract for the real implementation (#1817): this must reuse the
+        labels-first ``is_plan_review_go`` semantics INCLUDING its one-time
+        comment-scan backfill for issues that converged before the labels
+        rollout (reference: ``planner.py`` ``Planner._has_existing_plan``,
+        which delegates to ``state.review.is_plan_review_go``). A pure
+        label-equality check is NOT sufficient.
+        """
+        ...
+
+    def add_labels(self, issue_number: int, labels: list[str]) -> None:
+        """Durably add labels (coordinator maps to ``gh_issue_add_labels``)."""
+        ...
+
+    def remove_labels(self, issue_number: int, labels: list[str]) -> None:
+        """Durably remove labels (coordinator maps to ``gh_issue_remove_labels``)."""
+        ...
+
+    def close_issue_as_covered(self, issue_number: int, pr_number: int) -> None:
+        """Close the issue as covered by a merged PR (``_review_utils``)."""
+        ...
+
+    def upsert_plan_comment(self, issue_number: int, body: str) -> None:
+        """Upsert the single plan comment, keyed on ``PLAN_COMMENT_MARKER``.
+
+        Durable plan-comment channel (doc section 2: "plan comment = durable
+        artifact"). The coordinator maps this onto
+        ``gh_issue_upsert_comment(issue_number, PLAN_COMMENT_MARKER, body)``
+        so the issue holds exactly one plan comment, updated in place
+        (re-housed from ``planner_review_loop._upsert_plan_comment``).
+        Callers pass a body already normalized to start with the marker.
+        """
+        ...
 
 
 @dataclass(frozen=True)
@@ -91,11 +164,12 @@ class StageContext:
 
     All coordinator-owned accessors (github, paths, clock, budgets) are
     injected here so stages never construct their own I/O helpers. The
-    ``github`` accessor is the coordinator's single mutation channel: its
-    mutator surface uses coordinator-neutral names (``add_labels``,
-    ``remove_labels``, ``close_issue_as_covered``) that the coordinator
-    (#1817) maps onto the ``github_api`` mutators, while its read surface
-    mirrors the existing helper names (``gh_issue_json``,
+    ``github`` accessor is the coordinator's single mutation channel and
+    implements the :class:`StageGitHub` protocol: its mutator surface uses
+    coordinator-neutral names (``add_labels``, ``remove_labels``,
+    ``close_issue_as_covered``, ``upsert_plan_comment``) that the
+    coordinator (#1817) maps onto the ``github_api`` mutators, while its
+    read surface mirrors the existing helper names (``gh_issue_json``,
     ``find_merged_closing_pr``, ``find_pr_for_issue``,
     ``has_existing_plan``). Stages never import ``github_api`` directly —
     enforced by ``tests/unit/automation/pipeline/test_pipeline_architecture``.
@@ -104,7 +178,7 @@ class StageContext:
     config: Any  # PlannerOptions-like (enable_advise, enable_learn, force, agent, dry_run)
     org: str
     dry_run: bool
-    github: Any  # coordinator-owned GitHub accessor (label/comment/PR writes+reads)
+    github: StageGitHub  # coordinator-owned GitHub accessor (label/comment/PR writes+reads)
     paths: Any  # coordinator-owned path accessor (repo_root, worktree)
     now_fn: Callable[[], float] | None = None  # injectable clock (tests pass a fake)
     budget_fn: Callable[[str], int] | None = None  # routing accessor: ROUTES budget lookup

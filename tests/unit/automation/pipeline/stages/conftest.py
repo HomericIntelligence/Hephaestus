@@ -10,19 +10,21 @@ format stay identical to what coordinator tests (#1817) will assert.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
-from hephaestus.automation.pipeline.stages import StageContext
+from hephaestus.automation.pipeline.stages import StageContext, StageGitHub
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
 from tests.unit.automation.pipeline.conftest import FakeGitHub
 
 
 class FakeStageGitHub(FakeGitHub):
     """Canonical FakeGitHub plus the stage read queries.
 
+    Implements the :class:`StageGitHub` protocol (mypy-checked below).
     Reads mirror the real helper names the stages call through
     ``ctx.github``: ``gh_issue_json`` (github_api.issues),
     ``find_merged_closing_pr`` / ``find_pr_for_issue`` /
@@ -93,6 +95,23 @@ class FakeStageGitHub(FakeGitHub):
         """Coordinator-neutral label remove (delegates to gh_issue_remove_labels)."""
         self._issue_labels(issue_number)
         self.gh_issue_remove_labels(issue_number, labels)
+
+    def upsert_plan_comment(self, issue_number: int, body: str) -> None:
+        """Mirror the coordinator plan-comment upsert (PLAN_COMMENT_MARKER-keyed).
+
+        Delegates to the canonical ``gh_issue_upsert_comment`` recorder so
+        the mutation_log keeps the canonical format, and flips the
+        ``has_existing_plan`` answer to True — the posted comment IS the
+        durable plan artifact the verify step reads back.
+        """
+        self._has_plan = True
+        self.gh_issue_upsert_comment(issue_number, PLAN_COMMENT_MARKER, body)
+
+
+if TYPE_CHECKING:
+    # mypy-enforced declaration that FakeStageGitHub satisfies the
+    # StageGitHub protocol (m5): a drifted signature fails type checking.
+    _stage_github_protocol_check: StageGitHub = FakeStageGitHub()
 
 
 def _budget_fn(name: str) -> int:

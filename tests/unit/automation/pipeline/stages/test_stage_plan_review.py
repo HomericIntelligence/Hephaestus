@@ -8,7 +8,12 @@ from hephaestus.automation.claude_invoke import ReviewVerdict, parse_review_verd
 from hephaestus.automation.pipeline.jobs import JobResult
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
-from hephaestus.automation.pipeline.stages.plan_review import PlanReviewStage
+from hephaestus.automation.pipeline.stages.plan_review import (
+    REVIEW_ERROR_RETRY_CAP,
+    PlanReviewStage,
+    build_amend_prompt,
+)
+from hephaestus.automation.prompts.planning import get_plan_prompt
 from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
     STATE_PLAN_GO,
@@ -22,11 +27,24 @@ def _verdict(kind: str) -> ReviewVerdict:
     return ReviewVerdict(grade=None, verdict=kind, raw=f"review text ({kind})")
 
 
-class TestPlanReviewStageStep:
-    """step state machine: ENTER -> REVIEW_WAIT -> EVAL -> AMEND/LEARN."""
+class TestBuildAmendPrompt:
+    """build_amend_prompt composes the plan prompt with the feedback block."""
 
-    def test_on_enter_is_noop(self, make_ctx: Any, make_work_item: Any) -> None:
-        """on_enter writes nothing and always proceeds (idempotent)."""
+    def test_contains_plan_prompt_and_feedback_block(self) -> None:
+        """The output is the verbatim plan prompt plus the critique block."""
+        prompt = build_amend_prompt(42, "The plan misses the tests section.")
+
+        assert prompt.startswith(get_plan_prompt(42))  # template reused verbatim
+        assert "## Prior reviewer critique — your previous plan got NOGO" in prompt
+        assert "Address every concrete finding below in your revised plan:" in prompt
+        assert prompt.endswith("The plan misses the tests section.")
+
+
+class TestPlanReviewStageOnEnter:
+    """on_enter cycle-relative counter reset (attempts are per-lifetime)."""
+
+    def test_on_enter_writes_nothing(self, make_ctx: Any, make_work_item: Any) -> None:
+        """on_enter performs no durable writes and always proceeds."""
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
@@ -34,6 +52,50 @@ class TestPlanReviewStageStep:
 
         assert stage.on_enter(item, ctx) is None
         assert github.mutation_log == []
+
+    def test_on_enter_resets_round_for_new_cycle(self, make_ctx: Any, make_work_item: Any) -> None:
+        """Entering with a fresh plan_cycles value resets the cycle counter."""
+        stage = PlanReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="ENTER")
+        item.attempts["plan_cycles"] = 1  # fail-back happened; new cycle
+        item.payload["review_cycle"] = 0
+        item.payload["review_round"] = 3  # cycle 1 exhausted its rounds
+
+        stage.on_enter(item, ctx)
+
+        assert item.payload["review_cycle"] == 1
+        assert item.payload["review_round"] == 0  # cycle 2 gets a full budget
+
+    def test_on_enter_same_cycle_keeps_round(self, make_ctx: Any, make_work_item: Any) -> None:
+        """Same-cycle re-entry (e.g. the ERROR-path RETRY) keeps the round count."""
+        stage = PlanReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=2, state="ENTER")
+        item.payload["review_cycle"] = 0
+        item.payload["review_round"] = 1  # one NOGO round already done
+
+        stage.on_enter(item, ctx)
+
+        assert item.payload["review_round"] == 1  # progress preserved
+
+    def test_on_enter_double_call_is_idempotent(self, make_ctx: Any, make_work_item: Any) -> None:
+        """A literal double on_enter changes nothing the second time."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=3, state="ENTER")
+
+        assert stage.on_enter(item, ctx) is None
+        snapshot = dict(item.payload)
+        assert stage.on_enter(item, ctx) is None
+
+        assert item.payload == snapshot
+        assert github.mutation_log == []
+
+
+class TestPlanReviewStageStep:
+    """step state machine: ENTER -> REVIEW_WAIT -> EVAL -> AMEND/LEARN."""
 
     def test_enter_routes_to_review(self, make_ctx: Any, make_work_item: Any) -> None:
         """ENTER advances to REVIEW_WAIT."""
@@ -47,7 +109,11 @@ class TestPlanReviewStageStep:
         assert result.next_state == "REVIEW_WAIT"
 
     def test_review_wait_requests_review(self, make_ctx: Any, make_work_item: Any) -> None:
-        """REVIEW_WAIT submits the review job with in-worker verdict parsing."""
+        """REVIEW_WAIT submits the review job with in-worker verdict parsing.
+
+        A submission is NOT an iteration: counters advance only in EVAL and
+        only for real verdicts (#1554/#1794).
+        """
         stage = PlanReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=2, state="REVIEW_WAIT")
@@ -59,7 +125,7 @@ class TestPlanReviewStageStep:
         assert result.on_done_state == "EVAL"
         assert result.job.descr == "review"
         assert result.job.parse is parse_review_verdict  # verdict parsed in-worker
-        assert item.attempts["plan_review_iter"] == 1
+        assert item.attempts["plan_review_iter"] == 0  # submission burns nothing
         assert result.job.prompt_kwargs["iteration"] == 0  # 0-based for the prompt
         assert result.job.prompt_kwargs["prior_review"] is None  # first round
         assert result.job.prompt_kwargs["plan_text"] == "# Plan"
@@ -69,15 +135,31 @@ class TestPlanReviewStageStep:
         stage = PlanReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=3, state="REVIEW_WAIT")
-        item.attempts["plan_review_iter"] = 1
+        item.payload["review_round"] = 1  # one review round completed
         item.payload["prior_review"] = "fix the tests section"
 
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
-        assert item.attempts["plan_review_iter"] == 2
         assert result.job.prompt_kwargs["iteration"] == 1
         assert result.job.prompt_kwargs["prior_review"] == "fix the tests section"
+        assert item.attempts["plan_review_iter"] == 0  # still EVAL's job to count
+
+    def test_review_wait_clears_stale_verdict(self, make_ctx: Any, make_work_item: Any) -> None:
+        """Submission clears any stale verdict (M3).
+
+        Clearing payload["review_verdict"] at submission means a failed
+        later round can never replay an earlier round's verdict in EVAL.
+        """
+        stage = PlanReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=4, state="REVIEW_WAIT")
+        item.payload["review_verdict"] = _verdict("NOGO")  # stale round-1 verdict
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert "review_verdict" not in item.payload
 
     def test_eval_go_applies_label_advances(self, make_ctx: Any, make_work_item: Any) -> None:
         """GO durably applies state:plan-go then advances (learn disabled)."""
@@ -96,6 +178,8 @@ class TestPlanReviewStageStep:
             ("gh_issue_add_labels", (2, (STATE_PLAN_GO,))),
             ("gh_issue_remove_labels", (2, (STATE_PLAN_NO_GO, STATE_NEEDS_PLAN))),
         ]
+        assert item.attempts["plan_review_iter"] == 1  # real verdict counted
+        assert item.payload["review_round"] == 1
 
     def test_eval_go_with_learn_continues_to_learn(
         self, make_ctx: Any, make_work_item: Any
@@ -115,12 +199,12 @@ class TestPlanReviewStageStep:
         assert STATE_PLAN_GO in github.labels[3]
 
     def test_eval_nogo_within_budget_amends(self, make_ctx: Any, make_work_item: Any) -> None:
-        """NOGO within the iteration budget continues to AMEND_WAIT, no writes."""
+        """NOGO within the cycle budget continues to AMEND_WAIT, no writes."""
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
         item = make_work_item(issue=4, state="EVAL")
-        item.attempts["plan_review_iter"] = 1  # 1 < budget 3
+        item.payload["review_round"] = 0  # first review round of the cycle
         item.payload["review_verdict"] = _verdict("NOGO")
 
         result = stage.step(item, ctx)
@@ -128,6 +212,8 @@ class TestPlanReviewStageStep:
         assert isinstance(result, Continue)
         assert result.next_state == "AMEND_WAIT"
         assert github.mutation_log == []
+        assert item.payload["review_round"] == 1  # round counted in EVAL
+        assert item.attempts["plan_review_iter"] == 1  # lifetime audit trail
 
     def test_eval_nogo_exhausted_fails_back_nogo(self, make_ctx: Any, make_work_item: Any) -> None:
         """NOGO at the iteration cap applies no-go and fails back ("nogo")."""
@@ -135,7 +221,7 @@ class TestPlanReviewStageStep:
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
         item = make_work_item(issue=5, state="EVAL")
-        item.attempts["plan_review_iter"] = 3  # 3 >= budget 3
+        item.payload["review_round"] = 2  # this verdict is round 3/3
         item.payload["review_verdict"] = _verdict("NOGO")
 
         result = stage.step(item, ctx)
@@ -155,7 +241,7 @@ class TestPlanReviewStageStep:
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
         item = make_work_item(issue=6, state="EVAL")
-        item.attempts["plan_review_iter"] = 3
+        item.payload["review_round"] = 2
         item.attempts["plan_cycles"] = 1  # this fail-back becomes 2/2
         item.payload["review_verdict"] = _verdict("NOGO")
 
@@ -175,7 +261,7 @@ class TestPlanReviewStageStep:
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
         item = make_work_item(issue=7, state="EVAL")
-        item.attempts["plan_review_iter"] = 3
+        item.payload["review_round"] = 2
         item.payload["review_verdict"] = _verdict("AMBIGUOUS")
 
         result = stage.step(item, ctx)
@@ -185,7 +271,11 @@ class TestPlanReviewStageStep:
         assert STATE_PLAN_NO_GO in github.labels[7]
 
     def test_eval_error_leaves_labels_untouched(self, make_ctx: Any, make_work_item: Any) -> None:
-        """ERROR (reviewer infrastructure) retries with zero label writes."""
+        """ERROR retries with zero label writes and burns no iteration.
+
+        Reviewer-infrastructure failure must not stamp a go/no-go label or
+        consume review budget (#911/#1554/#1794).
+        """
         stage = PlanReviewStage()
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
@@ -197,6 +287,9 @@ class TestPlanReviewStageStep:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.RETRY
         assert github.mutation_log == []  # labels untouched on ERROR
+        assert item.attempts["plan_review_iter"] == 0  # no iteration burned
+        assert item.payload.get("review_round", 0) == 0
+        assert item.payload["review_error_retries"] == 1  # bounded retry loop
 
     def test_eval_missing_verdict_retries(self, make_ctx: Any, make_work_item: Any) -> None:
         """EVAL without a stored verdict retries instead of guessing."""
@@ -208,9 +301,11 @@ class TestPlanReviewStageStep:
 
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.RETRY
+        assert item.attempts["plan_review_iter"] == 0  # no iteration burned
+        assert item.payload["review_error_retries"] == 1
 
     def test_amend_wait_requests_plan(self, make_ctx: Any, make_work_item: Any) -> None:
-        """AMEND_WAIT submits the planner amend job and loops to REVIEW_WAIT."""
+        """AMEND_WAIT submits the amend job carrying the reviewer feedback."""
         stage = PlanReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=10, state="AMEND_WAIT")
@@ -221,7 +316,13 @@ class TestPlanReviewStageStep:
         assert isinstance(result, JobRequest)
         assert result.on_done_state == "REVIEW_WAIT"  # loop back to review
         assert result.job.descr == "amend"
-        assert result.job.prompt_kwargs == {"issue_number": 10}
+        assert result.job.prompt_builder is build_amend_prompt
+        # The feedback block travels via prompt_kwargs (builders run
+        # in-worker; AgentJob is frozen, so no closures over payload).
+        assert result.job.prompt_kwargs == {
+            "issue_number": 10,
+            "prior_review": "Feedback: improve clarity",
+        }
 
     def test_learn_wait_requests_learn(self, make_ctx: Any, make_work_item: Any) -> None:
         """LEARN_WAIT submits the learn job carrying the approved plan."""
@@ -337,7 +438,7 @@ class TestDurableWriteOrdering:
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
         item = make_work_item(issue=12, state="EVAL")
-        item.attempts["plan_review_iter"] = 3
+        item.payload["review_round"] = 2  # this verdict is round 3/3
         item.payload["review_verdict"] = _verdict("NOGO")
 
         result = stage.step(item, ctx)
@@ -345,6 +446,214 @@ class TestDurableWriteOrdering:
         assert github.mutation_log[0][0] == "gh_issue_add_labels"
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.FAIL_BACK
+
+
+class TestStaleVerdictAndErrorAccounting:
+    """M3 (no stale-verdict replay) + M4 (ERROR burns nothing, bounded)."""
+
+    def test_failed_round2_job_retries_instead_of_replaying_round1_nogo(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed round-2 job hits EVAL's no-verdict RETRY, not round 1's NOGO.
+
+        Scenario: round 1 produced a NOGO verdict; the amend ran; the round-2
+        review job FAILS (on_job_done stores nothing). Because REVIEW_WAIT
+        cleared the stale verdict at submission, EVAL must RETRY — without
+        amending again and without burning iteration budget.
+        """
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=30, state="EVAL")
+        item.payload["review_verdict"] = _verdict("NOGO")  # round 1
+        item.payload["review_round"] = 0
+
+        assert isinstance(stage.step(item, ctx), Continue)  # round 1 -> AMEND_WAIT
+        item.state = "AMEND_WAIT"
+        stage.on_job_done(item, JobResult(ok=True, value="# Amended"), ctx)
+        item.state = "REVIEW_WAIT"
+
+        request = stage.step(item, ctx)  # round-2 submission clears the verdict
+        assert isinstance(request, JobRequest)
+
+        failed = JobResult(ok=False, error="reviewer crashed")
+        stage.on_job_done(item, failed, ctx)  # stores nothing
+        item.state = "EVAL"
+        iter_before = item.attempts["plan_review_iter"]
+        round_before = item.payload["review_round"]
+
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.RETRY  # NOT a replayed NOGO
+        assert item.attempts["plan_review_iter"] == iter_before  # budget intact
+        assert item.payload["review_round"] == round_before
+        assert github.mutation_log == []  # no labels on the error path
+
+    def test_error_round_burns_nothing_and_nogo_still_amendable(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An ERROR round burns nothing; the next NOGO can still amend.
+
+        R1 NOGO -> R2 ERROR -> RETRY (iter unchanged, no labels) -> R2 NOGO
+        -> amend still available (no premature no-go).
+        """
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=31, state="EVAL")
+        assert stage.on_enter(item, ctx) is None
+
+        # Round 1: NOGO -> amend (round 1/3 consumed).
+        item.payload["review_verdict"] = _verdict("NOGO")
+        assert isinstance(stage.step(item, ctx), Continue)
+        assert item.attempts["plan_review_iter"] == 1
+
+        # Round 2 attempt: reviewer infrastructure ERROR.
+        item.payload["review_verdict"] = _verdict("ERROR")
+        outcome = stage.step(item, ctx)
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.RETRY
+        assert item.attempts["plan_review_iter"] == 1  # iter unchanged
+        assert item.payload["review_round"] == 1
+        assert github.mutation_log == []  # no labels
+
+        # Round 2 rerun: a real NOGO — the cycle still has amends left.
+        item.payload["review_verdict"] = _verdict("NOGO")
+        result = stage.step(item, ctx)
+        assert isinstance(result, Continue)
+        assert result.next_state == "AMEND_WAIT"  # no premature no-go
+        assert item.payload["review_error_retries"] == 0  # reset on real verdict
+        assert github.mutation_log == []
+
+    def test_error_retry_cap_trips(self, make_ctx: Any, make_work_item: Any) -> None:
+        """Consecutive reviewer failures beyond the cap FINISH_FAIL, no labels."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=32, state="EVAL")
+
+        for expected_retry in range(1, REVIEW_ERROR_RETRY_CAP + 1):
+            item.payload["review_verdict"] = _verdict("ERROR")
+            outcome = stage.step(item, ctx)
+            assert isinstance(outcome, StageOutcome)
+            assert outcome.disposition == Disposition.RETRY
+            assert item.payload["review_error_retries"] == expected_retry
+
+        item.payload["review_verdict"] = _verdict("ERROR")
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.FINISH_FAIL
+        assert "reviewer error retries exhausted" in outcome.note
+        assert github.mutation_log == []  # labels stay untouched on ERROR path
+        assert item.attempts["plan_review_iter"] == 0  # nothing ever burned
+
+
+class TestCycleRelativeBudget:
+    """m1: cycle 2 gets a full review budget; attempts stay per-lifetime."""
+
+    def test_full_cycle_two_path(self, make_ctx: Any, make_work_item: Any) -> None:
+        """Cycle 2 gets a full, fresh review budget.
+
+        Cycle 1 exhausts 3 NOGOs -> FAIL_BACK(nogo); cycle 2 gets 3 fresh
+        rounds (prompt iterations 0..2 again) -> plan_cycles_exhausted.
+        """
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=33, state="ENTER")
+
+        def run_cycle() -> StageOutcome:
+            assert stage.on_enter(item, ctx) is None
+            assert isinstance(stage.step(item, ctx), Continue)  # ENTER
+            item.state = "REVIEW_WAIT"
+            prompt_iterations = []
+            while True:
+                request = stage.step(item, ctx)
+                assert isinstance(request, JobRequest)
+                prompt_iterations.append(request.job.prompt_kwargs["iteration"])
+                stage.on_job_done(item, JobResult(ok=True, value=_verdict("NOGO")), ctx)
+                item.state = "EVAL"
+                result = stage.step(item, ctx)
+                if isinstance(result, StageOutcome):
+                    assert prompt_iterations == [0, 1, 2]  # 0-based, per cycle
+                    return result
+                assert isinstance(result, Continue)  # AMEND_WAIT
+                item.state = "AMEND_WAIT"
+                amend = stage.step(item, ctx)
+                assert isinstance(amend, JobRequest)
+                stage.on_job_done(item, JobResult(ok=True, value="# Amended"), ctx)
+                item.state = "REVIEW_WAIT"
+
+        first = run_cycle()
+        assert first.disposition == Disposition.FAIL_BACK
+        assert first.note == "nogo"
+        assert item.attempts["plan_review_iter"] == 3
+        assert item.attempts["plan_cycles"] == 1
+
+        # Fail-back routes through planning; the item re-enters this stage.
+        item.state = "ENTER"
+        second = run_cycle()  # full fresh budget: 3 more reviews
+        assert second.disposition == Disposition.FAIL_BACK
+        assert second.note == "plan_cycles_exhausted"
+        assert item.attempts["plan_review_iter"] == 6  # lifetime audit trail
+        assert item.attempts["plan_cycles"] == 2
+
+
+class TestNonFatalLabelWrites:
+    """m3: EVAL label-pair writes follow the legacy try/except-warn pattern."""
+
+    def test_add_label_failure_does_not_propagate_and_remove_still_runs(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An add_labels exception is swallowed; remove_labels still runs.
+
+        Mirrors the legacy planner_review_loop._apply_state_label pattern.
+        """
+
+        class AddFailsGitHub(FakeStageGitHub):
+            def add_labels(self, issue_number: int, labels: list[str]) -> None:
+                raise RuntimeError("gh add failed")
+
+        stage = PlanReviewStage()
+        github = AddFailsGitHub()
+        ctx = make_ctx(github=github)
+        ctx.config.enable_learn = False
+        item = make_work_item(issue=34, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        result = stage.step(item, ctx)  # must not raise
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.ADVANCE
+        assert github.mutation_log == [
+            ("gh_issue_remove_labels", (34, (STATE_PLAN_NO_GO, STATE_NEEDS_PLAN))),
+        ]
+
+    def test_remove_label_failure_does_not_propagate(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A remove_labels exception after the add is swallowed too."""
+
+        class RemoveFailsGitHub(FakeStageGitHub):
+            def remove_labels(self, issue_number: int, labels: list[str]) -> None:
+                raise RuntimeError("gh remove failed")
+
+        stage = PlanReviewStage()
+        github = RemoveFailsGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=35, state="EVAL")
+        item.payload["review_round"] = 2
+        item.payload["review_verdict"] = _verdict("NOGO")
+
+        result = stage.step(item, ctx)  # must not raise
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.FAIL_BACK
+        assert github.mutation_log == [
+            ("gh_issue_add_labels", (35, (STATE_PLAN_NO_GO,))),
+        ]
 
 
 class TestReviewFlowWithFakePool:
@@ -379,3 +688,57 @@ class TestReviewFlowWithFakePool:
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.ADVANCE
         assert STATE_PLAN_GO in github.labels[20]
+
+    def test_full_walk_enter_to_advance(self, make_ctx: Any, make_work_item: Any) -> None:
+        """Full pool-driven walk of the whole stage.
+
+        ENTER -> REVIEW -> EVAL(NOGO) -> AMEND -> REVIEW -> EVAL(GO) ->
+        LEARN -> FINISH -> ADVANCE.
+        """
+        from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        ctx.config.enable_learn = True
+        item = make_work_item(issue=21, state="ENTER")
+        item.payload["plan_text"] = "# Plan v1"
+
+        pool = FakeWorkerPool()
+        pool.script(
+            JobResult(ok=True, value=_verdict("NOGO")),  # review round 1
+            JobResult(ok=True, value="# Plan v2"),  # amend
+            JobResult(ok=True, value=_verdict("GO")),  # review round 2
+            JobResult(ok=True, value="learn bullets"),  # learn
+        )
+
+        assert stage.on_enter(item, ctx) is None
+
+        outcome = None
+        for _ in range(20):  # bounded driver loop
+            result = stage.step(item, ctx)
+            if isinstance(result, Continue):
+                item.state = result.next_state
+                continue
+            if isinstance(result, JobRequest):
+                pool.submit(result.job, result.on_done_state)  # type: ignore[arg-type]
+                _handle, job_result = pool.completion_q.get_nowait()
+                assert not job_result.interrupted
+                stage.on_job_done(item, job_result, ctx)
+                item.state = result.on_done_state
+                continue
+            outcome = result
+            break
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.ADVANCE
+        # The amended plan and both counters reflect the two real rounds.
+        assert item.payload["plan_text"] == "# Plan v2"
+        assert item.attempts["plan_review_iter"] == 2
+        # All four jobs ran, in order.
+        assert [h.job.descr for h in pool.submitted] == ["review", "amend", "review", "learn"]
+        # Durable GO write happened (before the ADVANCE outcome).
+        assert github.mutation_log == [
+            ("gh_issue_add_labels", (21, (STATE_PLAN_GO,))),
+            ("gh_issue_remove_labels", (21, (STATE_PLAN_NO_GO, STATE_NEEDS_PLAN))),
+        ]

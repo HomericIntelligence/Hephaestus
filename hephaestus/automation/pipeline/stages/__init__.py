@@ -10,6 +10,7 @@ from .base import (
     JobRequest,
     Stage,
     StageContext,
+    StageGitHub,
     StageOutcome,
     StepResult,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "PlanningStage",
     "Stage",
     "StageContext",
+    "StageGitHub",
     "StageOutcome",
     "StepResult",
 ]
