@@ -74,13 +74,18 @@ def test_parse_planned_files_stops_at_next_heading() -> None:
 def test_fetch_planned_files_no_plan_comment_returns_none() -> None:
     """Comments present but none is a plan comment → None (fail-open)."""
     comments = [{"body": "just a chat comment"}, {"body": "## 🔍 Plan Review"}]
-    with patch.object(loop_runner, "_fetch_issue_comment_ids", return_value=comments):
+    # Patch the admission module where _fetch_issue_comment_ids is used
+    with patch(
+        "hephaestus.automation.pipeline.admission._fetch_issue_comment_ids", return_value=comments
+    ):
         assert loop_runner._fetch_planned_files(101) is None
 
 
 def test_fetch_planned_files_empty_comment_list_returns_none() -> None:
     """An empty fetch (the swallowed-error signal) → None; no try/except needed."""
-    with patch.object(loop_runner, "_fetch_issue_comment_ids", return_value=[]):
+    with patch(
+        "hephaestus.automation.pipeline.admission._fetch_issue_comment_ids", return_value=[]
+    ):
         assert loop_runner._fetch_planned_files(102) is None
 
 
@@ -95,7 +100,9 @@ def test_fetch_planned_files_returns_plan_file_set() -> None:
             )
         },
     ]
-    with patch.object(loop_runner, "_fetch_issue_comment_ids", return_value=comments):
+    with patch(
+        "hephaestus.automation.pipeline.admission._fetch_issue_comment_ids", return_value=comments
+    ):
         assert loop_runner._fetch_planned_files(103) == {"hephaestus/automation/address_review.py"}
 
 
@@ -110,7 +117,11 @@ def test_select_non_overlapping_defers_second_of_overlapping_pair() -> None:
         1: {"hephaestus/automation/address_review.py", "hephaestus/automation/a.py"},
         2: {"hephaestus/automation/address_review.py", "hephaestus/automation/b.py"},
     }
-    with patch.object(loop_runner, "_fetch_planned_files", side_effect=lambda i: plans[i]):
+    # Patch in the admission module where _select_non_overlapping is defined
+    with patch(
+        "hephaestus.automation.pipeline.admission._fetch_planned_files",
+        side_effect=lambda i: plans[i],
+    ):
         dispatch, defer = loop_runner._select_non_overlapping([1, 2])
     assert dispatch == [1]
     assert defer == [2]
@@ -122,7 +133,10 @@ def test_select_non_overlapping_disjoint_both_dispatched() -> None:
         1: {"hephaestus/automation/a.py"},
         2: {"hephaestus/automation/b.py"},
     }
-    with patch.object(loop_runner, "_fetch_planned_files", side_effect=lambda i: plans[i]):
+    with patch(
+        "hephaestus.automation.pipeline.admission._fetch_planned_files",
+        side_effect=lambda i: plans[i],
+    ):
         dispatch, defer = loop_runner._select_non_overlapping([1, 2])
     assert dispatch == [1, 2]
     assert defer == []
@@ -135,7 +149,10 @@ def test_select_non_overlapping_unknown_plan_fails_open() -> None:
         2: None,  # no plan yet — fail open
         3: {"hephaestus/automation/address_review.py"},
     }
-    with patch.object(loop_runner, "_fetch_planned_files", side_effect=lambda i: plans[i]):
+    with patch(
+        "hephaestus.automation.pipeline.admission._fetch_planned_files",
+        side_effect=lambda i: plans[i],
+    ):
         dispatch, defer = loop_runner._select_non_overlapping([1, 2, 3])
     # #1 claims address_review.py; #2 unknown → dispatched; #3 overlaps #1 → deferred.
     assert dispatch == [1, 2]
@@ -148,7 +165,10 @@ def test_select_non_overlapping_first_issue_always_dispatched() -> None:
         1: {"hephaestus/automation/address_review.py"},
         2: {"hephaestus/automation/address_review.py"},
     }
-    with patch.object(loop_runner, "_fetch_planned_files", side_effect=lambda i: plans[i]):
+    with patch(
+        "hephaestus.automation.pipeline.admission._fetch_planned_files",
+        side_effect=lambda i: plans[i],
+    ):
         dispatch, defer = loop_runner._select_non_overlapping([1, 2])
     assert dispatch[0] == 1
     assert defer == [2]
@@ -200,7 +220,15 @@ def test_process_repo_inner_defers_overlapping_issue(tmp_path: object) -> None:
         patch.object(loop_runner, "_resolve_repo_dir", return_value=repo_dir),
         patch.object(loop_runner, "_rebase_main", return_value=("abc123", True)),
         patch.object(loop_runner, "_list_open_issue_numbers", return_value=[1, 2]),
-        patch.object(loop_runner, "_fetch_planned_files", side_effect=lambda i: plans[i]),
+        # Patch both: admission (where _select_non_overlapping uses it) and loop_runner (the shim)
+        patch(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            side_effect=lambda i: plans[i],
+        ),
+        patch(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            side_effect=lambda i: plans[i],
+        ),
         patch.object(loop_runner, "_process_one_issue", side_effect=fake_process_one_issue),
     ):
         out = loop_runner._process_repo_inner("Repo", 1, cfg, result)
@@ -297,7 +325,10 @@ def test_terminal_catchup_runs_after_post_loop_with_guard_on() -> None:
         patch.object(loop_runner, "_run_post_loop_stages", side_effect=fake_post_loop),
         # Both deferred issues are the only open ones → no claiming peers.
         patch.object(loop_runner, "_list_open_issue_numbers", return_value=[2, 3]),
-        patch.object(loop_runner, "_fetch_planned_files", side_effect=lambda i: plans.get(i)),
+        patch(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            side_effect=lambda i: plans.get(i),
+        ),
         patch.object(loop_runner, "find_pr_for_issue", return_value=None),
         patch.object(
             loop_runner,
@@ -347,7 +378,10 @@ def test_terminal_catchup_withholds_issue_while_peer_pr_open(
         patch.object(loop_runner, "_run_post_loop_stages", return_value=[]),
         # Peer #2 is still open alongside deferred #3 ...
         patch.object(loop_runner, "_list_open_issue_numbers", return_value=[2, 3]),
-        patch.object(loop_runner, "_fetch_planned_files", side_effect=lambda i: plans.get(i)),
+        patch(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            side_effect=lambda i: plans.get(i),
+        ),
         # ... and still owns an OPEN PR → its planned files stay claimed.
         patch.object(loop_runner, "find_pr_for_issue", return_value=77),
         patch.object(loop_runner, "_maybe_sleep_for_rate_budget"),
@@ -379,7 +413,10 @@ def test_terminal_catchup_peer_without_open_pr_does_not_block() -> None:
         patch.object(loop_runner, "process_repo", side_effect=fake_process_repo),
         patch.object(loop_runner, "_run_post_loop_stages", return_value=[]),
         patch.object(loop_runner, "_list_open_issue_numbers", return_value=[2, 3]),
-        patch.object(loop_runner, "_fetch_planned_files", side_effect=lambda i: plans.get(i)),
+        patch(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            side_effect=lambda i: plans.get(i),
+        ),
         patch.object(loop_runner, "find_pr_for_issue", return_value=None),
         patch.object(loop_runner, "_maybe_sleep_for_rate_budget"),
     ):
@@ -406,7 +443,7 @@ def test_terminal_catchup_shutdown_stops_cleanly() -> None:
         patch.object(loop_runner, "process_repo", side_effect=fake_process_repo),
         patch.object(loop_runner, "_run_post_loop_stages", return_value=[]),
         patch.object(loop_runner, "_list_open_issue_numbers", return_value=[2, 3]),
-        patch.object(loop_runner, "_fetch_planned_files", return_value=None),
+        patch("hephaestus.automation.pipeline.admission._fetch_planned_files", return_value=None),
         patch.object(loop_runner, "find_pr_for_issue", return_value=None),
         patch.object(loop_runner, "_maybe_sleep_for_rate_budget"),
         patch.object(loop_runner, "_shutdown_requested", side_effect=[False, False, True]),
@@ -424,7 +461,10 @@ def test_open_peer_pr_claims_only_open_pr_peers_claim() -> None:
 
     with (
         patch.object(loop_runner, "_list_open_issue_numbers", return_value=[2, 3, 4, 5]),
-        patch.object(loop_runner, "_fetch_planned_files", side_effect=lambda i: plans.get(i)),
+        patch(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            side_effect=lambda i: plans.get(i),
+        ),
         patch.object(loop_runner, "find_pr_for_issue", side_effect=lambda i: open_prs.get(i)),
     ):
         claims = loop_runner._open_peer_pr_claims(LoopConfig(), "Repo", deferred={3})

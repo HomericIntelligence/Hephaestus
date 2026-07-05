@@ -313,8 +313,10 @@ def test_filter_open_issues_drops_closed() -> None:
         return num == 1552
 
     with (
-        patch.object(loop_runner, "prefetch_issue_states", return_value={}),
-        patch.object(loop_runner, "is_issue_closed", side_effect=fake_is_closed),
+        patch("hephaestus.automation.pipeline.admission.prefetch_issue_states", return_value={}),
+        patch(
+            "hephaestus.automation.pipeline.admission.is_issue_closed", side_effect=fake_is_closed
+        ),
     ):
         kept = loop_runner._filter_open_issues("r", [1554, 1552])
     assert kept == [1554]
@@ -322,7 +324,10 @@ def test_filter_open_issues_drops_closed() -> None:
 
 def test_filter_open_issues_keeps_all_on_prefetch_failure() -> None:
     """Fail-open: a prefetch error keeps every issue (never silently drop work)."""
-    with patch.object(loop_runner, "prefetch_issue_states", side_effect=RuntimeError("boom")):
+    with patch(
+        "hephaestus.automation.pipeline.admission.prefetch_issue_states",
+        side_effect=RuntimeError("boom"),
+    ):
         kept = loop_runner._filter_open_issues("r", [1554, 1552])
     assert kept == [1554, 1552]
 

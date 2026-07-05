@@ -36,7 +36,11 @@ _FORBIDDEN_PREFIXES = (
 # Modules exempt from the zero-I/O guard.
 # worker_pool.py is the ONLY place that executes jobs (agent, git, build/test),
 # so it must import I/O modules; all other workers offload to it.
-_ALLOWLIST = frozenset({"worker_pool.py"})
+# seeding.py and admission.py are the sanctioned "thin fetch over
+# github_api" layer (epic #1809 PR-4): they READ GitHub facts for the
+# classifier/serializer but perform no mutations (the AST mutator guard in
+# test_pipeline_architecture.py still applies to them).
+_ALLOWLIST = frozenset({"worker_pool.py", "seeding.py", "admission.py"})
 
 
 def _forbidden(name: str) -> bool:
