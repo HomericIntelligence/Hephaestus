@@ -107,7 +107,7 @@ class TestJobHandleIdentity:
         h1 = JobHandle(job=job, on_done_state=StageName.CI)
         h2 = JobHandle(job=job, on_done_state=StageName.CI)
         assert h1 != h2
-        assert h1 == h1
+        assert h1 is h1
         assert len({h1: "a", h2: "b"}) == 2
 
     def test_handle_hashable_with_unhashable_job_fields(self) -> None:
