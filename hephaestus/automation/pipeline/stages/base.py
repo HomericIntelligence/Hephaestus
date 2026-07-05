@@ -27,6 +27,14 @@ Coordinator convention (binding for #1817, the coordinator slice):
   the job), then sets ``item.state = on_done_state`` and steps again.
   ``on_job_done`` is never called for interrupted results — interrupts
   leave items resumable, never failed.
+- Timer-park (RETRY delay) contract: ``StageOutcome`` has NO delay field,
+  so a stage that returns ``StageOutcome(Disposition.RETRY, ...)`` for a
+  non-blocking poll records the backoff delay in
+  ``item.payload["retry_delay_s"]`` immediately before returning. The
+  coordinator (#1817) consumes ``payload["retry_delay_s"]`` to park the
+  item on its timer heap and re-steps it after that many seconds (a
+  missing key means "retry on the next drain tick"). Stages NEVER sleep —
+  the heap owns every wait.
 - All durable GitHub mutations go through ``ctx.github`` and happen
   immediately BEFORE the outcome that causes a queue push ("durable write
   precedes the queue push").
@@ -236,6 +244,90 @@ class StageGitHub(Protocol):
 
         Mirrors ``pr_manager.enable_auto_merge_after_implementation_go``;
         only ever called after :meth:`mark_pr_implementation_go` succeeded.
+        """
+        ...
+
+    # -- merge_wait surface (#1816) ------------------------------------------
+
+    def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+        """Return ``{state, headRefOid, mergedAt, mergeStateStatus, baseRefName}``.
+
+        Returns ``None`` on a transient read failure. Mirrors
+        ``ci_driver.CIDriver._gh_pr_state``: the single PR-state read the
+        merge_wait ARM step uses to capture the head OID at arming time, and
+        the POLL step uses to classify MERGED/CLOSED/FAILING/DIRTY/BLOCKED.
+        """
+        ...
+
+    def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:
+        """Durably persist the drive-green arming record (crash-safe).
+
+        Mirrors ``ci_driver.CIDriver._arm_drive_green`` /
+        ``ArmingStateStore.save``: written immediately after
+        :meth:`arm_auto_merge` succeeds so a crash between arming and the
+        next POLL cannot lose the fact that this PR (at this head SHA) was
+        armed — the post-merge ``/learn`` dedupe keys off this record.
+        """
+        ...
+
+    def failing_required_check_names(self, pr_number: int) -> list[str]:
+        """Return names of required checks currently failing.
+
+        Mirrors ``CICheckInspector.failing_required_check_names``; the
+        merge_wait POLL step classifies FAILING vs. PENDING from this list
+        (after excluding the auto-merge-policy check via
+        :func:`~hephaestus.automation.auto_merge_coordinator.without_auto_merge_policy`).
+        """
+        ...
+
+    def pending_required_check_names(self, pr_number: int) -> list[str]:
+        """Return names of required checks still in flight (not completed).
+
+        Mirrors ``CICheckInspector.pending_required_check_names``; the
+        merge_wait POLL step uses this to distinguish a BLOCKED
+        branch-protection state from a still-pending CI state.
+        """
+        ...
+
+    def pr_checks(self, pr_number: int) -> list[dict[str, Any]]:
+        """Return all checks for the PR (mirrors ``gh_pr_checks``).
+
+        Used by CI stage's ``_poll`` to classify via ``classify_ci_state``.
+        The coordinator handles the I/O and dry-run logic; the stage simply
+        calls this accessor.
+        """
+        ...
+
+    def pr_is_genuinely_stuck(self, pr_number: int) -> bool:
+        """Return True iff the PR cannot merge without manual/agent action.
+
+        Mirrors ``pr_manager.pr_is_genuinely_stuck`` (#1576): a merge
+        CONFLICT or a red required check is stuck; a BLOCKED-awaiting-review
+        PR is NOT. Gates any ``state:skip`` tagging on the merge_wait
+        BLOCKED-exhaustion path — exactly the legacy skip-ownership guard.
+        """
+        ...
+
+    def drive_green_learn_terminal(self, issue_number: int) -> bool:
+        """Return True when the post-merge ``/learn`` is already terminal.
+
+        Mirrors ``ci_driver.CIDriver._learn_record_terminal`` over the
+        issue's ``ArmingStateStore`` record: a record whose
+        ``learn_captured_at``/``learn_succeeded_at`` is set, or whose
+        ``learn_status`` is ``succeeded``/``failed``, must never fire
+        ``/learn`` again — the merge_wait MERGED path dedupes on this read
+        (doc section 7: "Post-merge learn (deduped via arming_state)").
+        """
+        ...
+
+    def mark_drive_green_learn_result(self, issue_number: int, *, succeeded: bool) -> None:
+        """Durably record the post-merge ``/learn`` outcome on the arming record.
+
+        Mirrors ``post_merge_processor.mark_drive_green_learn_result``:
+        written as soon as the learn job completes (success or failure
+        alike) and BEFORE the FINISH_PASS outcome, so a restart can never
+        replay ``/learn`` for the same merged PR —
+        :meth:`drive_green_learn_terminal` reads this record back.
         """
         ...
 

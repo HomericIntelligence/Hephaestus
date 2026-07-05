@@ -65,6 +65,7 @@ from .ci_check_inspector import (
     CICheckInspector,
 )
 from .ci_fix_orchestrator import CIFixOrchestrator
+from .ci_run_coordinator import PrMergeState, classify_pr_merge_state
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import advise_model, codex_advise_model
 from .git_utils import (
@@ -1504,6 +1505,14 @@ class _CIDriverCore:
         also inspect required checks: a required check concluding ``failure``
         returns ``FAILING`` straight away rather than waiting out the timeout.
 
+        Each poll's branch decision DELEGATES to the pure
+        :func:`~hephaestus.automation.ci_run_coordinator.classify_pr_merge_state`
+        (issue #1816) — the same classifier the pipeline merge_wait stage
+        uses — so the terminal-state vocabulary cannot drift between the
+        legacy loop and the pipeline. This method keeps only the fetch
+        laziness (check names skipped for MERGED/CLOSED; pending fetched
+        only for a BLOCKED-with-no-failing poll) and the sleep/timeout tail.
+
         Args:
             issue_number: GitHub issue number (for status/log lines).
             pr_number: PR whose merge we are waiting on.
@@ -1528,23 +1537,35 @@ class _CIDriverCore:
         while True:
             gh_state = self._gh_pr_state(pr_number)
             state = ((gh_state or {}).get("state") or "").upper()
+            merge_status = ((gh_state or {}).get("mergeStateStatus") or "").upper()
 
-            if state == "MERGED":
+            # Fetch check names lazily, exactly as the pre-#1816 loop did:
+            # a MERGED/CLOSED PR needs no check reads, and the pending read
+            # only disambiguates a BLOCKED-with-no-failing poll (GitHub also
+            # reports BLOCKED while required checks are still running).
+            failing: list[str] = []
+            fixable_failing: list[str] = []
+            pending: list[str] = []
+            if state not in ("MERGED", "CLOSED"):
+                failing = self._failing_required_check_names(pr_number)
+                fixable_failing = _without_auto_merge_policy(failing)
+                if merge_status == "BLOCKED" and not failing:
+                    pending = self._pending_required_check_names(pr_number)
+
+            outcome = classify_pr_merge_state(gh_state, failing, fixable_failing, pending)
+            if outcome is PrMergeState.MERGED:
                 logger.info("Issue #%s: PR #%s merged", issue_number, pr_number)
                 return "MERGED"
-            if state == "CLOSED":
+            if outcome is PrMergeState.CLOSED:
                 logger.info(
                     "Issue #%s: PR #%s closed without merging while waiting",
                     issue_number,
                     pr_number,
                 )
                 return "CLOSED"
-
-            # Still OPEN (or unknown). If a required check has gone red since
-            # arming, stop waiting and let the caller drive a fix.
-            failing = self._failing_required_check_names(pr_number)
-            fixable_failing = _without_auto_merge_policy(failing)
-            if fixable_failing:
+            if outcome is PrMergeState.FAILING:
+                # A required check has gone red since arming: stop waiting
+                # and let the caller drive a fix.
                 logger.warning(
                     "Issue #%s: PR #%s went red while awaiting merge (failing: %s)",
                     issue_number,
@@ -1552,13 +1573,9 @@ class _CIDriverCore:
                     ", ".join(fixable_failing),
                 )
                 return "FAILING"
-
-            # An armed PR that is DIRTY/CONFLICTING has a merge conflict with
-            # the base branch — it can never merge while armed, so waiting out
-            # the full timeout is pointless. Stop and let the caller rebase /
-            # hand it to the agent to resolve the conflict.
-            merge_status = ((gh_state or {}).get("mergeStateStatus") or "").upper()
-            if merge_status in ("DIRTY", "CONFLICTING"):
+            if outcome is PrMergeState.DIRTY:
+                # A merge conflict can never merge while armed — waiting out
+                # the full timeout is pointless; caller rebases/resolves.
                 logger.warning(
                     "Issue #%s: PR #%s is %s (merge conflict) while armed; needs rebase/resolution",
                     issue_number,
@@ -1566,26 +1583,20 @@ class _CIDriverCore:
                     merge_status,
                 )
                 return "DIRTY"
+            if outcome is PrMergeState.BLOCKED:
+                logger.warning(
+                    "Issue #%s: PR #%s is BLOCKED by branch protection "
+                    "(unresolved conversations or required review) — "
+                    "cannot auto-merge; leaving armed and exiting poll early",
+                    issue_number,
+                    pr_number,
+                )
+                return "BLOCKED"
 
-            # A BLOCKED PR is gated by branch protection (e.g. required
-            # conversation resolution, required human review) rather than by
-            # CI checks. Exit early only when we can confirm the block is a
-            # branch-protection gate and not just in-flight checks: GitHub
-            # also reports BLOCKED while required checks are still running.
-            # Guard: no failing AND no pending required checks.
-            policy_only_failure = bool(failing) and not fixable_failing
-            if merge_status == "BLOCKED" and not failing:
-                pending = self._pending_required_check_names(pr_number)
-                if not pending:
-                    logger.warning(
-                        "Issue #%s: PR #%s is BLOCKED by branch protection "
-                        "(unresolved conversations or required review) — "
-                        "cannot auto-merge; leaving armed and exiting poll early",
-                        issue_number,
-                        pr_number,
-                    )
-                    return "BLOCKED"
-            if merge_status == "BLOCKED" and policy_only_failure:
+            # PENDING: keep waiting (below). Surface the one informational
+            # sub-case the old loop logged: BLOCKED only by the stale
+            # auto-merge-policy check refreshing after arming.
+            if merge_status == "BLOCKED" and bool(failing) and not fixable_failing:
                 logger.info(
                     "Issue #%s: PR #%s is BLOCKED only by auto-merge-policy; "
                     "waiting for the policy check to refresh after arming",
