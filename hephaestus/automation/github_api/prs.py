@@ -282,7 +282,7 @@ def gh_pr_label_names(pr_number: int) -> list[str]:
     try:
         result = _api._gh_call(["pr", "view", str(pr_number), "--json", "labels"], check=False)
         pr = cast(dict[str, Any], json.loads(result.stdout or "{}"))
-    except (json.JSONDecodeError, OSError) as exc:
+    except (json.JSONDecodeError, OSError, subprocess.SubprocessError) as exc:
         _api.logger.warning("Could not fetch PR #%s labels: %s", pr_number, exc)
         return []
     labels = pr.get("labels")

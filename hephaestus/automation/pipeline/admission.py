@@ -168,7 +168,7 @@ def order_for_implementation(issue_infos: Sequence[IssueInfo]) -> list[int]:
     in_set = {info.number for info in issue_infos}
     resolver = DependencyResolver(skip_closed=False)
     for info in issue_infos:
-        resolver.graph.add_issue(info)
+        resolver.add_issue(info)
     for info in issue_infos:
         for dep in info.dependencies:
             if dep in in_set:
