@@ -239,6 +239,57 @@ class StageGitHub(Protocol):
         """
         ...
 
+    # -- merge_wait surface (#1816) ------------------------------------------
+
+    def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+        """Return ``{state, headRefOid, mergedAt, mergeStateStatus, baseRefName}``.
+
+        Returns ``None`` on a transient read failure. Mirrors
+        ``ci_driver.CIDriver._gh_pr_state``: the single PR-state read the
+        merge_wait ARM step uses to capture the head OID at arming time, and
+        the POLL step uses to classify MERGED/CLOSED/FAILING/DIRTY/BLOCKED.
+        """
+        ...
+
+    def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:
+        """Durably persist the drive-green arming record (crash-safe).
+
+        Mirrors ``ci_driver.CIDriver._arm_drive_green`` /
+        ``ArmingStateStore.save``: written immediately after
+        :meth:`arm_auto_merge` succeeds so a crash between arming and the
+        next POLL cannot lose the fact that this PR (at this head SHA) was
+        armed — the post-merge ``/learn`` dedupe keys off this record.
+        """
+        ...
+
+    def failing_required_check_names(self, pr_number: int) -> list[str]:
+        """Return names of required checks currently failing.
+
+        Mirrors ``CICheckInspector.failing_required_check_names``; the
+        merge_wait POLL step classifies FAILING vs. PENDING from this list
+        (after excluding the auto-merge-policy check via
+        :func:`~hephaestus.automation.auto_merge_coordinator.without_auto_merge_policy`).
+        """
+        ...
+
+    def pending_required_check_names(self, pr_number: int) -> list[str]:
+        """Return names of required checks still in flight (not completed).
+
+        Mirrors ``CICheckInspector.pending_required_check_names``; the
+        merge_wait POLL step uses this to distinguish a BLOCKED
+        branch-protection state from a still-pending CI state.
+        """
+        ...
+
+    def pr_checks(self, pr_number: int) -> list[dict[str, Any]]:
+        """Return all checks for the PR (mirrors ``gh_pr_checks``).
+
+        Used by CI stage's ``_poll`` to classify via ``classify_ci_state``.
+        The coordinator handles the I/O and dry-run logic; the stage simply
+        calls this accessor.
+        """
+        ...
+
 
 @dataclass(frozen=True)
 class Continue:

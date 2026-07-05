@@ -100,6 +100,7 @@ class WorkItem:
     labels_cache: dict[str, bool] = field(default_factory=dict)
     payload: dict[str, Any] = field(default_factory=dict)
     result: ItemResult | None = None
+    armed: bool = False
 
     def add_history_event(self, stage: StageName, state: str, note: str = "") -> None:
         """Record a stage transition in the history (capped at HISTORY_CAP events)."""
