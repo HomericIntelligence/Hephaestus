@@ -8,6 +8,7 @@ suite; here we exercise the shared logic with a stub invoker.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -372,6 +373,78 @@ class TestRunAdvise:
             )
         assert result.startswith("<!-- advise step skipped:")
         assert "git boom" in result
+
+    def test_called_process_error_warning_includes_stderr(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        err = subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["claude", "--resume", "abc"],
+            stderr="No conversation found with session ID abc",
+        )
+        with (
+            patch.object(advise_runner, "get_repo_root", return_value=Path("/repo")),
+            patch.object(advise_runner, "default_mnemosyne_root", return_value=Path("/mnemosyne")),
+            patch.object(
+                advise_runner,
+                "resolve_marketplace",
+                return_value=(Path("/mnemosyne/.claude-plugin/marketplace.json"), ""),
+            ),
+            patch.object(
+                advise_runner, "marketplace_prompt_payload", return_value='{"plugins": []}'
+            ),
+            caplog.at_level(logging.WARNING, logger="hephaestus.automation.advise_runner"),
+        ):
+            result = advise_runner.run_advise(
+                issue_number=121,
+                issue_title="t",
+                issue_body="b",
+                invoke=lambda _prompt: (_ for _ in ()).throw(err),
+                build_prompt=_build_prompt,
+            )
+
+        assert result.startswith("<!-- advise step skipped:")
+        assert "No conversation found with session ID abc" in caplog.text
+        # The prompt-embedded skip marker must carry the stderr detail too —
+        # a bare str(e) is just an exit code for CalledProcessError (#1799).
+        assert "No conversation found with session ID abc" in result
+
+    def test_called_process_error_warning_includes_log_safe_stderr(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Multiline/control-char stderr is repr-escaped, never raw, in logs+marker."""
+        err = subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["claude", "--resume", "abc"],
+            stderr="No conversation found\nretry later\x00",
+        )
+        with (
+            patch.object(advise_runner, "get_repo_root", return_value=Path("/repo")),
+            patch.object(advise_runner, "default_mnemosyne_root", return_value=Path("/mnemosyne")),
+            patch.object(
+                advise_runner,
+                "resolve_marketplace",
+                return_value=(Path("/mnemosyne/.claude-plugin/marketplace.json"), ""),
+            ),
+            patch.object(
+                advise_runner, "marketplace_prompt_payload", return_value='{"plugins": []}'
+            ),
+            caplog.at_level(logging.WARNING, logger="hephaestus.automation.advise_runner"),
+        ):
+            result = advise_runner.run_advise(
+                issue_number=121,
+                issue_title="t",
+                issue_body="b",
+                invoke=lambda _prompt: (_ for _ in ()).throw(err),
+                build_prompt=_build_prompt,
+            )
+
+        # The !r formatting in format_called_process_error escapes newlines
+        # and control characters, so neither the log record nor the
+        # prompt-embedded marker carries raw multiline/NUL content.
+        assert "\\nretry later\\x00" in caplog.text
+        assert "\x00" not in result
+        assert "No conversation found" in result
 
     def test_rejects_selected_skill_outside_skills_tree(self, tmp_path: Path) -> None:
         mnemosyne_root = tmp_path / "ProjectMnemosyne"

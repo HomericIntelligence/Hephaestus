@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from hephaestus.automation.post_merge_processor import PostMergeProcessor
 
@@ -141,6 +145,25 @@ class TestRunDriveGreenLearnings:
         ):
             result = processor.run_drive_green_learnings(7, 8)
         assert result is False
+
+    def test_called_process_error_log_includes_stderr(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        processor, _ = _make_processor(tmp_path)
+        err = subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["claude", "--resume", "abc"],
+            stderr="No conversation found with session ID abc",
+        )
+        with (
+            patch(f"{_MOD}.get_repo_slug", return_value="o/r"),
+            patch(f"{_MOD}.invoke_claude_with_session", side_effect=err),
+            caplog.at_level(logging.WARNING, logger=_MOD),
+        ):
+            result = processor.run_drive_green_learnings(7, 8)
+
+        assert result is False
+        assert "No conversation found with session ID abc" in caplog.text
 
 
 class TestRunDriveGreenCompact:
