@@ -1,0 +1,24 @@
+{
+  "follow_ups": [
+    {
+      "category": "critical_bug",
+      "title": "JobRequest(None) contract violations crash coordinator",
+      "body": "Seven instances of JobRequest(None, ...) violate the constructor contract: job parameter must be AgentJob|BuildTestJob|GitJob, not None. Coordinator will crash attempting to execute these placeholders.\n\nAffected locations:\n- ci.py:82 (_poll PENDING path returns JobRequest(None, 'POLL'))\n- ci.py:96 (_request_fix returns JobRequest(None, 'PUSH_READY'))\n- ci.py:100 (_request_push returns JobRequest(None, 'POLL'))\n- merge_wait.py:109 (_poll PENDING path returns JobRequest(None, 'POLL'))\n- merge_wait.py:114 (_request_dirty_resolve returns JobRequest(None, 'POLL'))\n- merge_wait.py:119 (_request_blocked_address returns JobRequest(None, 'PUSH_BLOCKED_READY'))\n- merge_wait.py:123 (_request_learn returns JobRequest(None, '_FINISH_PASS'))\n\nFix: Replace with real job submissions (AgentJob for agent work, GitJob for git operations) or use Continue/StageOutcome outcomes to avoid job submission where appropriate."
+    },
+    {
+      "category": "core",
+      "title": "Module-level I/O import violates pipeline architecture (AC1)",
+      "body": "ci.py:13 imports gh_pr_checks at module level, violating AC1 requirement (zero I/O imports in stage modules) and pipeline architecture principle that all I/O must be coordinator-owned and injected via StageContext.\n\nThe gh_pr_checks call at ci.py:76 should be mediated through ctx.github.pr_checks() accessor instead. This requires:\n1. Add pr_checks(pr_number) method to StageGitHub protocol in base.py\n2. Move import to method-local scope in _poll()\n3. Update coordinator (#1817) to implement the new accessor"
+    }
+  ],
+  "rejected": [
+    {
+      "title": "Implement on_job_done routing logic",
+      "reason": "Current placeholders (pass statements) are intentional — real job routing depends on coordinator (#1817) integration and job result types not yet finalized in this scope."
+    },
+    {
+      "title": "Add stage-level integration tests",
+      "reason": "Stage tests (test_stage_ci.py, test_stage_merge_wait.py) depend on JobRequest contract fixes first; testing invalid JobRequest(None) would validate broken behavior."
+    }
+  ]
+}

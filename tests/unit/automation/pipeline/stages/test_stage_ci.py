@@ -644,7 +644,8 @@ class TestCiOnJobDone:
         assert "retry_delay_s" not in item.payload
 
         stage.on_job_done(item, JobResult(ok=True, value=False), ctx)
-        assert item.payload.pop("push_no_commit") is True
+        push_no_commit = item.payload.pop("push_no_commit")
+        assert push_no_commit is True
 
         stage.on_job_done(item, JobResult(ok=False, error="remote gone"), ctx)
         assert item.payload["push_failed"] is True
