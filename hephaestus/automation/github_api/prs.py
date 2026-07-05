@@ -261,6 +261,44 @@ def fetch_open_prs() -> list[dict[str, Any]]:
     return cast(list[dict[str, Any]], json.loads(result.stdout or "[]"))
 
 
+def gh_pr_label_names(pr_number: int) -> list[str]:
+    """Return the label names on a PR by number, best-effort (read-only).
+
+    Fetches ``gh pr view <n> --json labels`` and normalizes the ``labels``
+    array (each entry is a ``{"name": ...}`` dict) to a flat list of names.
+    Any subprocess or JSON failure yields an empty list so callers can treat a
+    fetch error as "no labels" without raising — mirroring
+    ``pr_manager._pr_label_names`` (the ``_review_existing_pr`` seam) so
+    pipeline seeding's ``--prs`` mapping shares its semantics without
+    importing the ``pr_manager`` product module.
+
+    Args:
+        pr_number: GitHub PR number.
+
+    Returns:
+        The PR's label names, or an empty list on any fetch failure.
+
+    """
+    try:
+        result = _api._gh_call(["pr", "view", str(pr_number), "--json", "labels"], check=False)
+        pr = cast(dict[str, Any], json.loads(result.stdout or "{}"))
+    except (json.JSONDecodeError, OSError, subprocess.SubprocessError) as exc:
+        _api.logger.warning("Could not fetch PR #%s labels: %s", pr_number, exc)
+        return []
+    labels = pr.get("labels")
+    if not isinstance(labels, list):
+        return []
+    names: list[str] = []
+    for label in labels:
+        if isinstance(label, str):
+            names.append(label)
+        elif isinstance(label, dict):
+            name = label.get("name")
+            if isinstance(name, str):
+                names.append(name)
+    return names
+
+
 def gh_current_login() -> str | None:
     """Return the authenticated GitHub login for the current ``gh`` token."""
     try:

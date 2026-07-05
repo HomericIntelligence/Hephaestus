@@ -33,16 +33,53 @@ _FORBIDDEN_PREFIXES = (
     "hephaestus.resilience",
 )
 
-# Modules exempt from the zero-I/O guard.
+# Modules exempt from the zero-I/O guard entirely.
 # worker_pool.py is the ONLY place that executes jobs (agent, git, build/test),
 # so it must import I/O modules; all other workers offload to it.
 _ALLOWLIST = frozenset({"worker_pool.py"})
+
+# Capability-scoped exemptions: seeding.py and admission.py are the sanctioned
+# "thin fetch over github_api" layer (epic #1809 PR-4): they READ GitHub facts
+# for the classifier/serializer but perform no mutations (the AST mutator guard
+# in test_pipeline_architecture.py still applies to them). Their exemption is
+# NOT module-wide — only the read-seam prefixes below are permitted, so a
+# direct `import subprocess` / `import os` in either file still trips the
+# guard.
+_THIN_FETCH_PREFIXES = (
+    "hephaestus.automation.github_api",
+    "hephaestus.automation._review_utils",
+    "hephaestus.automation.state_labels",
+    "hephaestus.automation.dependency_resolver",
+)
+_CAPABILITY_EXEMPT: dict[str, tuple[str, ...]] = {
+    "seeding.py": _THIN_FETCH_PREFIXES,
+    "admission.py": _THIN_FETCH_PREFIXES,
+}
 
 
 def _forbidden(name: str) -> bool:
     """Check if a module name is forbidden."""
     root = name.split(".")[0]
     return root in _FORBIDDEN_MODULES or name.startswith(_FORBIDDEN_PREFIXES)
+
+
+def _collect_violations(tree: ast.AST, filename: str, exempt: tuple[str, ...]) -> list[str]:
+    """Walk *tree* and return forbidden-import violations, honoring *exempt* prefixes."""
+
+    def _is_violation(module: str) -> bool:
+        return _forbidden(module) and not module.startswith(exempt)
+
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if _is_violation(alias.name):
+                    violations.append(f"{filename}:{node.lineno}: import {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if _is_violation(mod):
+                violations.append(f"{filename}:{node.lineno}: from {mod} import ...")
+    return violations
 
 
 def test_pipeline_modules_have_zero_io_imports() -> None:
@@ -53,24 +90,47 @@ def test_pipeline_modules_have_zero_io_imports() -> None:
     conditional and lazy imports that a text-scan would miss.
 
     Exceptions: worker_pool.py is the only place that executes jobs
-    (agent, git, build/test), so it must import I/O modules.
+    (agent, git, build/test), so it must import I/O modules; seeding.py and
+    admission.py get a capability-scoped exemption for their sanctioned
+    read seams only (see ``_CAPABILITY_EXEMPT``).
     """
     violations: list[str] = []
     # rglob so future pipeline/ subpackages (e.g. stages/) stay guarded.
     for py in sorted(_PIPELINE_DIR.rglob("*.py")):
         if py.name in _ALLOWLIST:
             continue
+        exempt = _CAPABILITY_EXEMPT.get(py.name, ())
         tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if _forbidden(alias.name):
-                        violations.append(f"{py.name}:{node.lineno}: import {alias.name}")
-            elif isinstance(node, ast.ImportFrom):
-                mod = node.module or ""
-                if _forbidden(mod):
-                    violations.append(f"{py.name}:{node.lineno}: from {mod} import ...")
+        violations.extend(_collect_violations(tree, py.name, exempt))
     assert not violations, "pipeline modules must do zero I/O imports:\n" + "\n".join(violations)
+
+
+def test_capability_scope_still_blocks_io_in_seeding() -> None:
+    """The seeding/admission exemption is capability-scoped, not module-wide.
+
+    A synthetic seeding.py that imports subprocess/os alongside its sanctioned
+    read seams must still be flagged for the I/O modules — only imports under
+    the ``_THIN_FETCH_PREFIXES`` capability prefixes escape the guard.
+    """
+    synthetic_source = (
+        "import subprocess\n"
+        "import os\n"
+        "from hephaestus.automation.github_api import fetch_issue_info\n"
+        "from hephaestus.automation._review_utils import find_pr_for_issue\n"
+        "from hephaestus.automation.state_labels import is_epic\n"
+        "from hephaestus.automation.dependency_resolver import DependencyResolver\n"
+        "import hephaestus.utils.helpers\n"  # NOT a sanctioned seam — must trip
+    )
+    tree = ast.parse(synthetic_source, filename="<synthetic-seeding>")
+    violations = _collect_violations(tree, "seeding.py", _CAPABILITY_EXEMPT["seeding.py"])
+
+    assert any("import subprocess" in v for v in violations)
+    assert any("import os" in v for v in violations)
+    assert any("hephaestus.utils.helpers" in v for v in violations)
+    assert not any("github_api" in v for v in violations)
+    assert not any("_review_utils" in v for v in violations)
+    assert not any("state_labels" in v for v in violations)
+    assert not any("dependency_resolver" in v for v in violations)
 
 
 def test_forbidden_detects_synthetic_forbidden_import() -> None:
@@ -80,8 +140,8 @@ def test_forbidden_detects_synthetic_forbidden_import() -> None:
     would let `test_pipeline_modules_have_zero_io_imports` pass vacuously
     with an empty `violations` list. Here we parse synthetic source
     containing known-forbidden imports (stdlib module, forbidden prefix,
-    and a from-import) through the same AST walk and assert each is
-    caught, plus that an allowed import is not.
+    and a from-import) through the same collector (no exemptions) and
+    assert each is caught, plus that an allowed import is not.
     """
     synthetic_source = (
         "import subprocess\n"
@@ -90,21 +150,11 @@ def test_forbidden_detects_synthetic_forbidden_import() -> None:
         "import json\n"  # allowed stdlib module; must NOT be flagged
     )
     tree = ast.parse(synthetic_source, filename="<synthetic>")
+    violations = _collect_violations(tree, "<synthetic>", ())
 
-    violations: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if _forbidden(alias.name):
-                    violations.append(f"import {alias.name}")
-        elif isinstance(node, ast.ImportFrom):
-            mod = node.module or ""
-            if _forbidden(mod):
-                violations.append(f"from {mod} import ...")
-
-    assert "import subprocess" in violations
-    assert "import hephaestus.automation.git_utils" in violations
-    assert "from os import ..." in violations
+    assert any("import subprocess" in v for v in violations)
+    assert any("import hephaestus.automation.git_utils" in v for v in violations)
+    assert any("from os import ..." in v for v in violations)
     assert not any("json" in v for v in violations)
 
 

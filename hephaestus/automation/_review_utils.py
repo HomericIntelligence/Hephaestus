@@ -884,6 +884,56 @@ def find_merged_closing_pr(issue_number: int) -> int | None:
     return None
 
 
+def find_merged_pr_for_issue(issue_number: int) -> int | None:
+    """Find the MERGED PR for a single issue (tri-state fetch layer, epic #1809).
+
+    Mirrors :func:`find_pr_for_issue`'s strategies with ``--state merged``:
+
+    1. Branch name lookup (``{issue}-auto-impl``, merged PRs).
+    2. Exact ``Closes #N`` body search via :func:`find_merged_closing_pr`.
+
+    Used by pipeline seeding so the "PR merged → finished" classification row
+    is reachable: when the open-PR lookup misses, this lookup distinguishes
+    merged work (finished, idempotent) from closed/abandoned PRs (invisible —
+    normalized to "no PR") and from genuinely PR-less issues.
+
+    Args:
+        issue_number: GitHub issue number.
+
+    Returns:
+        The merged PR number if found, ``None`` otherwise.
+
+    """
+    branch_name = f"{issue_number}-auto-impl"
+    try:
+        result = _gh_call(
+            [
+                "pr",
+                "list",
+                "--head",
+                branch_name,
+                "--state",
+                "merged",
+                "--json",
+                "number",
+                "--limit",
+                "1",
+            ],
+            check=False,
+        )
+        pr_data = json.loads(result.stdout or "[]")
+        if pr_data:
+            pr_number = int(pr_data[0]["number"])
+            logger.info(
+                "Found merged PR #%d for issue #%d via branch name", pr_number, issue_number
+            )
+            return pr_number
+    except Exception as e:
+        logger.debug("Merged branch-name lookup failed for issue #%d: %s", issue_number, e)
+
+    return find_merged_closing_pr(issue_number)
+
+
 def close_issue_as_covered(issue_number: int, pr_number: int) -> bool:
     """Close an OPEN issue already covered by a merged closing PR (idempotent).
 
