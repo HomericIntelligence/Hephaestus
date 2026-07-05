@@ -14,6 +14,7 @@ import pytest
 
 from hephaestus.automation.agent_config import OPUS_48
 from hephaestus.automation.claude_invoke import (
+    _session_expired,
     invoke_claude_with_session,
     is_model_capped,
     reset_capped_models,
@@ -164,6 +165,9 @@ class TestCreateThenResume:
                 )
         # Exactly one attempt — no recreate/fresh cascade.
         assert m.call_count == 1
+
+    def test_session_expired_detects_no_conversation_found(self) -> None:
+        assert _session_expired("No conversation found with session ID abc", "") is True
 
 
 class TestArgvAssembly:
