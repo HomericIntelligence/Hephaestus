@@ -567,10 +567,9 @@ class CIFixOrchestrator:
             ci_logs: Combined CI failure log text.
             session_id: Optional agent session ID to resume.
             advise_findings: Prior learnings prepended to the prompt.
-            pr_head_branch: Remote PR head branch used as the push destination.
-                Threaded explicitly (not read from the local worktree) because
-                an agent can switch branches mid-session — the push must target
-                the PR's original remote refspec regardless (#832).
+            pr_head_branch: Remote PR head branch the push targets, even if
+                the agent switches branches mid-session (#832).
+            pr_base_branch: PR base branch used for commit-metadata repair.
 
         Returns:
             True if the fix session succeeded and the branch was pushed.
