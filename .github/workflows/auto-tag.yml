@@ -9,6 +9,7 @@ on:
         default: "patch"
 
 permissions:
+  actions: write
   contents: write
 
 # Serialize manual dispatches: this workflow pushes a signed vX.Y.Z tag, a
@@ -45,6 +46,7 @@ jobs:
           git_tag_gpgsign: true
 
       - name: Compute next version and push tag
+        id: tag
         shell: bash
         env:
           BUMP_KIND: ${{ github.event.inputs.bump_kind || 'patch' }}
@@ -57,7 +59,7 @@ jobs:
             # means the tags were not fetched (missing fetch-depth/fetch-tags) or
             # a fresh repo with no release line — NOT a request to seed a version.
             # Fail loudly rather than silently inventing a stale base tag, which
-            # would push a wrong release tag and trigger release.yml.
+            # would push a wrong release tag and dispatch release.yml.
             echo "::error::No vX.Y.Z tags found. Refusing to seed a version automatically." >&2
             echo "::error::Ensure tags are fetched (fetch-depth: 0, fetch-tags: true) or create the initial tag manually." >&2
             exit 1
@@ -94,4 +96,23 @@ jobs:
           git tag -s "${TAG}" -m "Release ${TAG}"
           git push origin "${TAG}"
           echo "Created and pushed tag: ${TAG}"
-          # release.yml triggers automatically on push: tags: ['v*']
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch release workflow
+        # An empty tag output means the compute step took its idempotent-skip
+        # path (tag already existed, nothing was pushed). Skipping here keeps
+        # us from dispatching release.yml with a blank tag, which release.yml
+        # would resolve to "latest tag" and could re-publish an old release.
+        if: steps.tag.outputs.tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          # The tag is already pushed at this point; a dispatch failure strands
+          # it. Point the operator at the recovery procedure — re-running this
+          # workflow would compute and push a NEW tag, not rescue this one.
+          gh workflow run release.yml --repo "${GITHUB_REPOSITORY}" -f tag="${TAG}" || {
+            echo "::error::Dispatch failed after tag ${TAG} was pushed — the tag is stranded. Do NOT re-run Auto Tag Release (it would compute and push a NEW tag). Recover with: gh workflow run release.yml -f tag=${TAG} — see docs/RELEASING.md, 'Dispatch failed after tag push'."
+            exit 1
+          }

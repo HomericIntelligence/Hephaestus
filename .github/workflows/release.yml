@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*"  # fires automatically when auto-tag.yml pushes a vX.Y.Z tag
+      - "v*"  # fires for human/PAT tag pushes; auto-tag.yml dispatches explicitly
   workflow_dispatch:
     inputs:
       tag:
@@ -18,10 +18,12 @@ permissions:
 
 # Serialize per-tag: this workflow builds, publishes to PyPI, and creates a
 # GitHub release — none idempotent. Two runs for the SAME tag must not race
-# (double-publish); different tags proceed independently. Never cancel a publish
-# in flight, hence cancel-in-progress: false.
+# (double-publish); different tags proceed independently. Key on the resolved
+# tag: dispatched runs group on the explicit `tag` input (previously they all
+# shared the branch ref's group), tag-push runs group on the tag ref. Never
+# cancel a publish in flight, hence cancel-in-progress: false.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
