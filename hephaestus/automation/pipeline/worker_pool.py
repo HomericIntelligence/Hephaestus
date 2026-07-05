@@ -145,8 +145,9 @@ class WorkerPool:
         If the future was cancelled, do not emit a completion (the coordinator
         synthesizes one later). For every OTHER outcome a completion MUST be
         queued: ``_run`` already converts normal job failures into error
-        results, and anything that still escapes ``future.result()`` — up to
-        and including ``BaseException`` — is converted here to a
+        results, and anything that still escapes ``future.result()`` — any
+        ``Exception`` plus the process-control escapes ``KeyboardInterrupt``,
+        ``SystemExit``, and ``GeneratorExit`` — is converted here to a
         ``worker_crash`` result so a non-cancelled submit never silently loses
         its completion. ``KeyboardInterrupt`` is intentionally NOT re-raised
         after queuing: this callback runs on an executor worker thread where a
@@ -156,7 +157,7 @@ class WorkerPool:
             return  # cancel_futures synthesizes NO completion
         try:
             result = future.result()
-        except BaseException as exc:
+        except (KeyboardInterrupt, SystemExit, GeneratorExit, Exception) as exc:
             logger.exception("Worker future raised; converting to worker_crash result")
             result = JobResult(
                 ok=False,
@@ -168,8 +169,8 @@ class WorkerPool:
         """Execute a job and return its result.
 
         Catches Exception subclasses so a single job failure does not crash the
-        worker thread; BaseException escapes (KeyboardInterrupt, SystemExit) are
-        caught in _on_future_done's BaseException handler. After every job,
+        worker thread; process-control escapes (KeyboardInterrupt, SystemExit,
+        GeneratorExit) are caught in _on_future_done's crash handler. After every job,
         post-checks the shutdown event and marks interrupted=True if it was set
         (SIGINT to the process group makes children return normally; the
         interrupt flag prevents misreading a killed job as success).
