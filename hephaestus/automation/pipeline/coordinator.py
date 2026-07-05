@@ -325,7 +325,6 @@ class Coordinator:
         started = time.monotonic()
         if self._install_signals:
             self._install_signal_handlers()
-        exit_code = 1
         try:
             self._loops_run = 1
             self._seed_pass()

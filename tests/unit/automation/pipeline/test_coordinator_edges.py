@@ -9,12 +9,16 @@ chokepoint, grace-window expiry, and run_pipeline's production wiring.
 
 from __future__ import annotations
 
+import ast
+import inspect
+import textwrap
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
+import hephaestus.automation.pipeline as pipeline_pkg
 from hephaestus.automation.pipeline import coordinator as coordinator_mod, seeding as seeding_mod
 from hephaestus.automation.pipeline.coordinator import (
     Coordinator,
@@ -64,6 +68,26 @@ def _item(issue: int = 1, stage: StageName = StageName.PLANNING) -> WorkItem:
 
 class TestWiring:
     """Constructor and run_pipeline production wiring."""
+
+    def test_package_binds_public_coordinator_exports(self) -> None:
+        """Public coordinator exports are concrete module attributes, not only lazy names."""
+        assert "PipelineConfig" in vars(pipeline_pkg)
+        assert "run_pipeline" in vars(pipeline_pkg)
+        assert pipeline_pkg.PipelineConfig is PipelineConfig
+        assert pipeline_pkg.run_pipeline is run_pipeline
+
+    def test_run_has_single_exit_code_assignment(self) -> None:
+        """The run loop has one authoritative exit-code assignment in ``finally``."""
+        tree = ast.parse(textwrap.dedent(inspect.getsource(Coordinator.run)))
+        assignments = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "exit_code" for target in node.targets
+            )
+        ]
+        assert len(assignments) == 1
 
     def test_default_pool_constructed_with_product_size(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
