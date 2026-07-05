@@ -684,7 +684,7 @@ class TestGitLocking:
             with lock:
                 events.append(f"{job_name}:entered_lock")
             try:
-                barrier.wait(timeout=0.5)
+                barrier.wait(timeout=2.0)
             except threading.BrokenBarrierError:
                 # Expected under serialization: the peer never arrives
                 # while we are inside the pool's critical section.

@@ -110,6 +110,11 @@ class FakeWorkerPool:
             return JobResult(ok=True, value="fake agent output")
         if isinstance(job, BuildTestJob):
             return JobResult(ok=True, value=0)
+        # GitJob: mirror the real _dispatch_git_op value semantics so
+        # coordinator tests reading result.value see the same shapes —
+        # rebase reports clean-rebase True, commit_push reports changed True.
+        if job.op in ("rebase", "commit_push"):
+            return JobResult(ok=True, value=True)
         return JobResult(ok=True)
 
     def shutdown(self) -> None:
