@@ -19,20 +19,36 @@ from unittest.mock import MagicMock
 import pytest
 
 import hephaestus.automation.pipeline as pipeline_pkg
-from hephaestus.automation.pipeline import coordinator as coordinator_mod, seeding as seeding_mod
-from hephaestus.automation.pipeline.coordinator import (
-    Coordinator,
-    PipelineConfig,
-    _budget_lookup,
-    run_pipeline,
-)
-from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
-from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
-from hephaestus.automation.pipeline.seeding import EPIC_NEEDS_SKIP_TAG, SeedEntry
-from hephaestus.automation.pipeline.stages.base import Continue, JobRequest
-from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+import hephaestus.automation.pipeline.coordinator as coordinator_mod
+import hephaestus.automation.pipeline.jobs as jobs_mod
+import hephaestus.automation.pipeline.routing as routing_mod
+import hephaestus.automation.pipeline.seeding as seeding_mod
+import hephaestus.automation.pipeline.stages.base as stage_base_mod
+import hephaestus.automation.pipeline.work_item as work_item_mod
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+
+Coordinator = coordinator_mod.Coordinator
+PipelineConfig = coordinator_mod.PipelineConfig
+_budget_lookup = coordinator_mod._budget_lookup
+run_pipeline = coordinator_mod.run_pipeline
+
+AgentJob = jobs_mod.AgentJob
+GitJob = jobs_mod.GitJob
+JobResult = jobs_mod.JobResult
+
+Disposition = routing_mod.Disposition
+StageName = routing_mod.StageName
+StageOutcome = routing_mod.StageOutcome
+
+EPIC_NEEDS_SKIP_TAG = seeding_mod.EPIC_NEEDS_SKIP_TAG
+SeedEntry = seeding_mod.SeedEntry
+
+Continue = stage_base_mod.Continue
+JobRequest = stage_base_mod.JobRequest
+
+ItemKind = work_item_mod.ItemKind
+WorkItem = work_item_mod.WorkItem
 
 
 def _agent_job(descr: str = "stub") -> AgentJob:
