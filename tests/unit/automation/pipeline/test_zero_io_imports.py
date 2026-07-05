@@ -51,9 +51,21 @@ _THIN_FETCH_PREFIXES = (
     "hephaestus.automation.state_labels",
     "hephaestus.automation.dependency_resolver",
 )
-_CAPABILITY_EXEMPT: dict[str, tuple[str, ...]] = {
-    "seeding.py": _THIN_FETCH_PREFIXES,
-    "admission.py": _THIN_FETCH_PREFIXES,
+# Each exemption maps a permitted prefix to an allowed-symbols set, or None
+# for an unscoped (whole-prefix) exemption. A symbol-scoped prefix only
+# permits `from <prefix...> import <allowed symbol>` — a bare
+# `import <prefix>` or a from-import of any other symbol still trips.
+_CAPABILITY_EXEMPT: dict[str, dict[str, frozenset[str] | None]] = {
+    "seeding.py": dict.fromkeys(_THIN_FETCH_PREFIXES),
+    "admission.py": dict.fromkeys(_THIN_FETCH_PREFIXES),
+    # stages/plan_review.py may import ONLY the pure verdict parser pieces
+    # (claude_invoke.parse_review_verdict — the ONLY allowed symbol) to attach as
+    # AgentJob.parse — the architecture doc's plan_review contract says the
+    # "verdict [is] parsed in-worker by claude_invoke.parse_review_verdict"
+    # (#1814). The exemption is SYMBOL-scoped: importing any other
+    # claude_invoke symbol (e.g. invoke_claude_with_session) or the module
+    # itself still trips the guard, as does any other I/O-flavored import.
+    "plan_review.py": {"hephaestus.automation.claude_invoke": frozenset({"parse_review_verdict"})},
 }
 
 
@@ -63,22 +75,71 @@ def _forbidden(name: str) -> bool:
     return root in _FORBIDDEN_MODULES or name.startswith(_FORBIDDEN_PREFIXES)
 
 
-def _collect_violations(tree: ast.AST, filename: str, exempt: tuple[str, ...]) -> list[str]:
-    """Walk *tree* and return forbidden-import violations, honoring *exempt* prefixes."""
+def _matching_prefix(module: str, exempt: dict[str, frozenset[str] | None]) -> str | None:
+    """Return the exempt prefix that covers *module*, or None."""
+    for prefix in exempt:
+        if module.startswith(prefix):
+            return prefix
+    return None
 
-    def _is_violation(module: str) -> bool:
-        return _forbidden(module) and not module.startswith(exempt)
 
+def _import_violations(
+    node: ast.Import, filename: str, exempt: dict[str, frozenset[str] | None]
+) -> list[str]:
+    """Violations for a plain ``import X`` statement.
+
+    Only an UNscoped exemption can permit a whole-module import: a bare
+    import of a symbol-scoped prefix exposes the whole module surface.
+    """
+    violations = []
+    for alias in node.names:
+        if not _forbidden(alias.name):
+            continue
+        prefix = _matching_prefix(alias.name, exempt)
+        if prefix is not None and exempt[prefix] is None:
+            continue
+        violations.append(f"{filename}:{node.lineno}: import {alias.name}")
+    return violations
+
+
+def _import_from_violations(
+    node: ast.ImportFrom, filename: str, exempt: dict[str, frozenset[str] | None]
+) -> list[str]:
+    """Violations for a ``from X import Y`` statement (symbol scoping applies)."""
+    mod = node.module or ""
+    if not _forbidden(mod):
+        return []
+    prefix = _matching_prefix(mod, exempt)
+    if prefix is None:
+        return [f"{filename}:{node.lineno}: from {mod} import ..."]
+    allowed = exempt[prefix]
+    if allowed is None:
+        return []  # unscoped exemption: whole prefix permitted
+    return [
+        f"{filename}:{node.lineno}: from {mod} import {alias.name} "
+        f"(symbol not in allowed set {sorted(allowed)})"
+        for alias in node.names
+        if alias.name not in allowed
+    ]
+
+
+def _collect_violations(
+    tree: ast.AST, filename: str, exempt: dict[str, frozenset[str] | None]
+) -> list[str]:
+    """Walk *tree* and return forbidden-import violations, honoring *exempt*.
+
+    ``exempt`` maps permitted module prefixes to an allowed-symbols set
+    (``None`` = whole prefix permitted). Symbol scoping applies to
+    ``from X import Y`` only: each imported name must be in the allowed set.
+    A plain ``import X`` of a symbol-scoped prefix exposes the whole module
+    surface, so it is always a violation.
+    """
     violations: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            for alias in node.names:
-                if _is_violation(alias.name):
-                    violations.append(f"{filename}:{node.lineno}: import {alias.name}")
+            violations.extend(_import_violations(node, filename, exempt))
         elif isinstance(node, ast.ImportFrom):
-            mod = node.module or ""
-            if _is_violation(mod):
-                violations.append(f"{filename}:{node.lineno}: from {mod} import ...")
+            violations.extend(_import_from_violations(node, filename, exempt))
     return violations
 
 
@@ -99,7 +160,7 @@ def test_pipeline_modules_have_zero_io_imports() -> None:
     for py in sorted(_PIPELINE_DIR.rglob("*.py")):
         if py.name in _ALLOWLIST:
             continue
-        exempt = _CAPABILITY_EXEMPT.get(py.name, ())
+        exempt = _CAPABILITY_EXEMPT.get(py.name, {})
         tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
         violations.extend(_collect_violations(tree, py.name, exempt))
     assert not violations, "pipeline modules must do zero I/O imports:\n" + "\n".join(violations)
@@ -133,6 +194,36 @@ def test_capability_scope_still_blocks_io_in_seeding() -> None:
     assert not any("dependency_resolver" in v for v in violations)
 
 
+def test_plan_review_exemption_is_symbol_scoped() -> None:
+    """The plan_review.py claude_invoke exemption permits ONLY parse_review_verdict.
+
+    A synthetic plan_review.py importing ReviewVerdict, an execution symbol
+    (invoke_claude_with_session), or the whole claude_invoke module must
+    all be flagged. Only the sanctioned parse_review_verdict from-import passes.
+    """
+    synthetic_source = (
+        "from hephaestus.automation.claude_invoke import parse_review_verdict\n"
+        "from hephaestus.automation.claude_invoke import ReviewVerdict\n"
+        "from hephaestus.automation.claude_invoke import invoke_claude_with_session\n"
+        "import hephaestus.automation.claude_invoke\n"
+    )
+    tree = ast.parse(synthetic_source, filename="<synthetic-plan-review>")
+    violations = _collect_violations(tree, "plan_review.py", _CAPABILITY_EXEMPT["plan_review.py"])
+
+    # Lines 2, 3, and 4 violate the tightened exemption (only parse_review_verdict
+    # is allowed). Line 1 (parse_review_verdict) produces no violation.
+    assert len(violations) == 3, violations
+    assert any("import ReviewVerdict" in v for v in violations)
+    assert any("import invoke_claude_with_session" in v for v in violations)
+    # A bare module import exposes the whole surface: always a violation
+    # under a symbol-scoped exemption.
+    assert any(
+        v.startswith("plan_review.py:4: import hephaestus.automation.claude_invoke")
+        for v in violations
+    )
+    assert not any(":1:" in v for v in violations)
+
+
 def test_forbidden_detects_synthetic_forbidden_import() -> None:
     """Negative test: the guard must actually flag forbidden imports.
 
@@ -150,7 +241,7 @@ def test_forbidden_detects_synthetic_forbidden_import() -> None:
         "import json\n"  # allowed stdlib module; must NOT be flagged
     )
     tree = ast.parse(synthetic_source, filename="<synthetic>")
-    violations = _collect_violations(tree, "<synthetic>", ())
+    violations = _collect_violations(tree, "<synthetic>", {})
 
     assert any("import subprocess" in v for v in violations)
     assert any("import hephaestus.automation.git_utils" in v for v in violations)

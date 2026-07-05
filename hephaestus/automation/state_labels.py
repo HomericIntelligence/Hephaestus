@@ -221,3 +221,28 @@ def needs_plan(labels: Iterable[str]) -> bool:
     """
     label_set = set(labels)
     return STATE_PLAN_GO not in label_set and STATE_PLAN_NO_GO not in label_set
+
+
+def apply_plan_verdict(*, is_go: bool) -> tuple[str, list[str]]:
+    """Compute the atomic plan-state transition for a reviewer verdict.
+
+    Pure: returns (label_to_add, labels_to_remove). The caller performs the
+    GitHub writes and any logging. Promoted from
+    planner_review_loop._apply_state_label (#1814) so the legacy loop, the
+    plan_review stage, and seeding compute the transition identically.
+
+    On GO   → add state:plan-go,    remove [state:plan-no-go, state:needs-plan].
+    On NOGO → add state:plan-no-go, remove [state:plan-go,     state:needs-plan].
+
+    Args:
+        is_go: ``True`` when the reviewer's verdict is GO; ``False`` for NOGO.
+
+    Returns:
+        A tuple (label_to_add, labels_to_remove) where label_to_add is the
+        single label to apply and labels_to_remove is the list of labels to
+        remove.
+
+    """
+    if is_go:
+        return STATE_PLAN_GO, [STATE_PLAN_NO_GO, STATE_NEEDS_PLAN]
+    return STATE_PLAN_NO_GO, [STATE_PLAN_GO, STATE_NEEDS_PLAN]

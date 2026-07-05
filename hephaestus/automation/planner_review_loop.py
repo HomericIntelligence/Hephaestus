@@ -44,7 +44,7 @@ from .models import PLAN_COMMENT_MARKER
 from .prompts import get_plan_loop_review_prompt, get_plan_prompt
 from .review_state import PLAN_REVIEW_PREFIX
 from .session_naming import AGENT_PLAN_REVIEWER, AGENT_PLANNER, reviewer_agent
-from .state_labels import STATE_NEEDS_PLAN, STATE_PLAN_GO, STATE_PLAN_NO_GO
+from .state_labels import apply_plan_verdict
 
 logger = logging.getLogger(__name__)
 
@@ -441,6 +441,9 @@ class PlanReviewLoop:
     def _apply_state_label(self, issue_number: int, *, is_go: bool) -> None:
         """Apply the verdict's ``state:*`` label and remove the others (#704).
 
+        Delegates the label-set computation to state_labels.apply_plan_verdict
+        (#1814); the gh writes + non-fatal warnings stay here unchanged.
+
         The state-label family is mutually exclusive. On GO, set
         ``state:plan-go`` and remove both ``state:plan-no-go`` and
         ``state:needs-plan``. On NOGO (each iteration), set
@@ -457,12 +460,7 @@ class PlanReviewLoop:
                 NOGO (either per-iteration or NOGO-exhausted).
 
         """
-        if is_go:
-            label_to_add = STATE_PLAN_GO
-            labels_to_remove = [STATE_PLAN_NO_GO, STATE_NEEDS_PLAN]
-        else:
-            label_to_add = STATE_PLAN_NO_GO
-            labels_to_remove = [STATE_PLAN_GO, STATE_NEEDS_PLAN]
+        label_to_add, labels_to_remove = apply_plan_verdict(is_go=is_go)
         try:
             gh_issue_add_labels(issue_number, [label_to_add])
         except Exception as e:
