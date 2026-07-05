@@ -12,6 +12,7 @@ from __future__ import annotations
 import queue
 import threading
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -47,6 +48,7 @@ class FakeWorkerPool:
         size: int = 1,
         shutdown: threading.Event | None = None,
         completion_q: CompletionQueue | None = None,
+        lock_dir: Path | None = None,
     ) -> None:
         """Initialize the fake pool.
 
@@ -54,6 +56,7 @@ class FakeWorkerPool:
             size: Accepted for signature parity with WorkerPool; unused.
             shutdown: Accepted for signature parity with WorkerPool; unused.
             completion_q: Queue to drain results to (created if omitted).
+            lock_dir: Accepted for signature parity with WorkerPool; unused.
 
         """
         self.size = size

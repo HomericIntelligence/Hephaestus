@@ -167,11 +167,12 @@ class WorkerPool:
     def _run(self, job: AgentJob | BuildTestJob | GitJob) -> JobResult:
         """Execute a job and return its result.
 
-        Catches all exceptions so a single job failure does not crash the
-        worker thread. After every job, post-checks the shutdown event and
-        marks interrupted=True if it was set (SIGINT to the process group
-        makes children return normally; the interrupt flag prevents misreading
-        a killed job as success).
+        Catches Exception subclasses so a single job failure does not crash the
+        worker thread; BaseException escapes (KeyboardInterrupt, SystemExit) are
+        caught in _on_future_done's BaseException handler. After every job,
+        post-checks the shutdown event and marks interrupted=True if it was set
+        (SIGINT to the process group makes children return normally; the
+        interrupt flag prevents misreading a killed job as success).
         """
         start = time.monotonic()
 

@@ -714,7 +714,7 @@ class TestGitLocking:
 
         # Verify serialization: both jobs must have failed the barrier —
         # they never overlapped inside the pool's critical section.
-        assert [e for e in events if e.endswith(":barrier_failed_expected")], events
+        assert len([e for e in events if e.endswith(":barrier_failed_expected")]) == 2, events
 
     def test_different_repo_jobs_run_concurrently(
         self,
