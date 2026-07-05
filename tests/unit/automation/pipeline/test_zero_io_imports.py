@@ -33,6 +33,11 @@ _FORBIDDEN_PREFIXES = (
     "hephaestus.resilience",
 )
 
+# Modules exempt from the zero-I/O guard.
+# worker_pool.py is the ONLY place that executes jobs (agent, git, build/test),
+# so it must import I/O modules; all other workers offload to it.
+_ALLOWLIST = frozenset({"worker_pool.py"})
+
 
 def _forbidden(name: str) -> bool:
     """Check if a module name is forbidden."""
@@ -46,10 +51,15 @@ def test_pipeline_modules_have_zero_io_imports() -> None:
     Uses AST parsing to detect imports anywhere in the module (including
     inside function bodies), not just at the top level. This catches
     conditional and lazy imports that a text-scan would miss.
+
+    Exceptions: worker_pool.py is the only place that executes jobs
+    (agent, git, build/test), so it must import I/O modules.
     """
     violations: list[str] = []
     # rglob so future pipeline/ subpackages (e.g. stages/) stay guarded.
     for py in sorted(_PIPELINE_DIR.rglob("*.py")):
+        if py.name in _ALLOWLIST:
+            continue
         tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
