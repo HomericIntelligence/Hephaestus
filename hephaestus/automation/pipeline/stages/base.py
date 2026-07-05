@@ -195,10 +195,6 @@ class StageContext:
             return self.budget_fn(name)
         return 1  # conservative default
 
-    def option(self, name: str, default: Any = None) -> Any:
-        """Read an optional config attribute with a default (POLA accessor)."""
-        return getattr(self.config, name, default)
-
 
 @runtime_checkable
 class Stage(Protocol):
@@ -231,6 +227,15 @@ class Stage(Protocol):
 
         Returns:
             None to proceed with step(), or a StageOutcome to skip/finish.
+
+        Note:
+            Implementations MAY mutate ``item.state`` as a side effect during
+            ``on_enter`` to fast-forward past already-completed work (e.g. an
+            existing plan comment jumps ``item.state`` to VERIFY so a restart
+            never redoes finished sub-steps). This side effect is *in addition*
+            to the return value; a ``None`` return does not imply ``item.state``
+            is unchanged. Callers MUST re-read ``item.state`` after ``on_enter``
+            to observe any fast-forward.
 
         """
         ...

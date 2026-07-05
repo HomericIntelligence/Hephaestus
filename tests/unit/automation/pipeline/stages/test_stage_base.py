@@ -43,16 +43,6 @@ class TestStageContext:
         ctx = self._bare_ctx()
         assert ctx.budget("anything") == 1
 
-    def test_option_reads_config_with_default(self) -> None:
-        """option() reads config attributes and falls back to the default."""
-
-        class Config:
-            enable_learn = False
-
-        ctx = self._bare_ctx(config=Config())
-        assert ctx.option("enable_learn") is False
-        assert ctx.option("missing", "fallback") == "fallback"
-
 
 class TestStageProtocol:
     """Both concrete stages satisfy the runtime-checkable Stage protocol."""
