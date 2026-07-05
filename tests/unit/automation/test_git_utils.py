@@ -10,9 +10,11 @@ from unittest.mock import Mock, patch
 import pytest
 
 from hephaestus.automation.git_utils import (
+    _commit_policy_rebase_command,
     _remove_untracked_files_tracked_by_ref,
     clear_repo_caches,
     commit_if_changes,
+    ensure_branch_commit_metadata,
     get_current_branch,
     get_repo_info,
     get_repo_root,
@@ -573,6 +575,7 @@ class TestRebaseWorktreeOnto:
         assert rebase_args[0] == [
             "git",
             "rebase",
+            "--force-rebase",
             "origin/main",
             "--exec",
             "git commit --amend --no-edit -S -s",
@@ -592,10 +595,20 @@ class TestRebaseWorktreeOnto:
         assert rebase_args == [
             "git",
             "rebase",
+            "--force-rebase",
             "origin/main",
             "--exec",
             "git commit --amend --no-edit -S -s",
         ]
+
+    def test_policy_rebase_forces_replay_when_branch_already_based_on_target(
+        self,
+    ) -> None:
+        """The metadata-repair command must not fast-forward/no-op before --exec."""
+        command = _commit_policy_rebase_command("origin/main")
+
+        assert "--force-rebase" in command
+        assert command.index("--force-rebase") < command.index("--exec")
 
     def test_conflict_aborts_and_returns_false(self, git_utils_mocks: Any) -> None:
         """A rebase conflict triggers ``git rebase --abort`` and returns False."""
@@ -673,7 +686,94 @@ class TestRebaseWorktreeOnto:
         assert git_utils_mocks.run.call_args_list[2][0][0] == [
             "git",
             "rebase",
+            "--force-rebase",
             "upstream/develop",
             "--exec",
             "git commit --amend --no-edit -S -s",
         ]
+
+
+class TestEnsureBranchCommitMetadata:
+    """Tests for policy metadata repair before pushing CI fixes."""
+
+    def test_removes_stale_untracked_files_before_metadata_rebase(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """Metadata repair should not be blocked by stale untracked base files."""
+        tracked_shadow = tmp_path / "scripts" / "generated_ci_fix.py"
+        tracked_shadow.parent.mkdir()
+        tracked_shadow.write_text("leftover from previous agent turn\n")
+        git_utils_mocks.run.side_effect = [
+            Mock(returncode=0),
+            Mock(returncode=0, stdout="scripts/generated_ci_fix.py\0"),
+            Mock(returncode=0),
+            Mock(returncode=0),
+        ]
+
+        ensure_branch_commit_metadata(tmp_path, "main")
+
+        assert not tracked_shadow.exists()
+        assert git_utils_mocks.run.call_count == 4
+        fetch_args, fetch_kwargs = git_utils_mocks.run.call_args_list[0]
+        assert fetch_args[0] == ["git", "fetch", "origin", "main"]
+        assert fetch_kwargs["cwd"] == tmp_path
+        ls_files_args, ls_files_kwargs = git_utils_mocks.run.call_args_list[1]
+        assert ls_files_args[0] == ["git", "ls-files", "--others", "--exclude-standard", "-z"]
+        assert ls_files_kwargs["cwd"] == tmp_path
+        cat_file_args, cat_file_kwargs = git_utils_mocks.run.call_args_list[2]
+        assert cat_file_args[0] == [
+            "git",
+            "cat-file",
+            "-e",
+            "origin/main:scripts/generated_ci_fix.py",
+        ]
+        assert cat_file_kwargs["cwd"] == tmp_path
+        rebase_args, rebase_kwargs = git_utils_mocks.run.call_args_list[3]
+        assert rebase_args[0] == [
+            "git",
+            "rebase",
+            "--force-rebase",
+            "origin/main",
+            "--exec",
+            "git commit --amend --no-edit -S -s",
+        ]
+        assert rebase_kwargs["cwd"] == tmp_path
+
+    def test_rebase_failure_aborts_and_reraises(self, git_utils_mocks: Any) -> None:
+        """A failed policy rebase is aborted so later automation gets a clean worktree."""
+        rebase_err = subprocess.CalledProcessError(
+            1, ["git", "rebase"], output="", stderr="CONFLICT (content)\n"
+        )
+        git_utils_mocks.run.side_effect = [
+            Mock(returncode=0),
+            Mock(returncode=0, stdout=""),
+            rebase_err,
+            Mock(returncode=0),
+        ]
+        worktree = Path("/tmp/worktree-xyz")
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            ensure_branch_commit_metadata(worktree, "main")
+
+        assert exc_info.value is rebase_err
+        assert git_utils_mocks.run.call_count == 4
+        fetch_args, fetch_kwargs = git_utils_mocks.run.call_args_list[0]
+        assert fetch_args[0] == ["git", "fetch", "origin", "main"]
+        assert fetch_kwargs["cwd"] == worktree
+        ls_files_args, ls_files_kwargs = git_utils_mocks.run.call_args_list[1]
+        assert ls_files_args[0] == ["git", "ls-files", "--others", "--exclude-standard", "-z"]
+        assert ls_files_kwargs["cwd"] == worktree
+        rebase_args, rebase_kwargs = git_utils_mocks.run.call_args_list[2]
+        assert rebase_args[0] == [
+            "git",
+            "rebase",
+            "--force-rebase",
+            "origin/main",
+            "--exec",
+            "git commit --amend --no-edit -S -s",
+        ]
+        assert rebase_kwargs["cwd"] == worktree
+        abort_args, abort_kwargs = git_utils_mocks.run.call_args_list[3]
+        assert abort_args[0] == ["git", "rebase", "--abort"]
+        assert abort_kwargs["cwd"] == worktree
+        assert abort_kwargs.get("check") is False

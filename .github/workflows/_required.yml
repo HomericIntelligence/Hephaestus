@@ -420,7 +420,7 @@ jobs:
             # shellcheck disable=SC2086  # word-splitting of $bad is intentional
             printf '  %s\n' $bad
             msg="::error::Every commit MUST be cryptographically signed."
-            msg+=" Re-sign with: git rebase --exec 'git commit --amend --no-edit -S' origin/main"
+            msg+=" Re-sign with: git rebase --exec 'git commit --amend --no-edit -S -s' origin/main"
             echo "$msg"
             exit 1
           fi

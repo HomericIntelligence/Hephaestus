@@ -251,6 +251,48 @@ class TestLocalAheadCount:
         assert count == 0
 
 
+class TestRebaseMain:
+    """Tests for loop repo preparation rebase behavior."""
+
+    def test_local_ahead_rebase_resigns_and_signs_off_commits(self, tmp_path: Path) -> None:
+        commands: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
+            del kwargs
+            commands.append(cmd)
+            m = MagicMock()
+            m.returncode = 0
+            m.stdout = ""
+            if "symbolic-ref" in cmd:
+                m.stdout = "origin/main\n"
+            elif "rev-list" in cmd:
+                m.stdout = "2\n"
+            elif "rev-parse" in cmd:
+                m.stdout = "abc1234\n"
+            return m
+
+        fetch_result = MagicMock(returncode=0, stderr="")
+        with (
+            patch(
+                "hephaestus.automation.loop_repo_manager.resilient_call", return_value=fetch_result
+            ),
+            patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run),
+        ):
+            sha, fetch_ok = loop_repo_manager._rebase_main("MyRepo", tmp_path)
+
+        assert (sha, fetch_ok) == ("abc1234", True)
+        assert [
+            "git",
+            "-C",
+            str(tmp_path),
+            "rebase",
+            "origin/main",
+            "--exec",
+            "git commit --amend --no-edit -S -s",
+            "--quiet",
+        ] in commands
+
+
 class TestEnsureClone:
     """Tests for _ensure_clone."""
 

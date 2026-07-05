@@ -35,6 +35,7 @@ from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
 from .git_utils import (
     commit_if_changes,
+    ensure_branch_commit_metadata,
     get_repo_slug,
     issue_ref,
     pr_ref,
@@ -206,10 +207,10 @@ class CIFixOrchestrator:
             f"`pre-commit run --all-files` locally to verify before committing. "
             f"This MUST include any markdown/lint hooks — every file you add or "
             f"edit has to pass the repo's own linters, with no rule disabled.\n"
-            f"4. **Every commit MUST be cryptographically signed and DCO signed off "
-            f"(`git commit -S -s`).** NEVER use `--no-verify`. The repository's CI "
-            f"gate rejects unsigned commits, missing sign-offs, and any commit that "
-            f"bypassed pre-commit hooks.\n"
+            f"4. **Every commit MUST be cryptographically signed and DCO-signed "
+            f"(`git commit -S -s`).** NEVER use `--no-verify`. The repository's "
+            f"CI gate rejects unsigned commits, commits without Signed-off-by "
+            f"trailers, and any commit that bypassed pre-commit hooks.\n"
             f"5. Do NOT run `git checkout -b`, `git switch -c`, or any command "
             f"that creates or switches branches — the fix has to land on "
             f"`{pr_head_branch}`.\n"
@@ -291,6 +292,7 @@ class CIFixOrchestrator:
         pr_number: int,
         pr_head_branch: str,
         session_id: str | None,
+        pr_base_branch: str = "main",
     ) -> bool:
         """Check head advancement, retry if needed, then push CI fixes.
 
@@ -307,10 +309,12 @@ class CIFixOrchestrator:
                 session_id=session_id,
             ):
                 return False
-        if not self._ci_fix_head_is_pushable(worktree_path, issue_number):
+        base_ref = f"origin/{pr_base_branch}"
+        if not self._ci_fix_head_is_pushable(worktree_path, issue_number, base_ref=base_ref):
             if not self._ci_fix_residual_commit_is_safe(
                 worktree_path=worktree_path,
                 issue_number=issue_number,
+                base_ref=base_ref,
             ):
                 return False
             if not self._commit_residual_ci_fix_changes(
@@ -318,8 +322,19 @@ class CIFixOrchestrator:
                 issue_number=issue_number,
             ):
                 return False
-            if not self._ci_fix_head_is_pushable(worktree_path, issue_number):
+            if not self._ci_fix_head_is_pushable(worktree_path, issue_number, base_ref=base_ref):
                 return False
+        try:
+            ensure_branch_commit_metadata(worktree_path, base_branch=pr_base_branch)
+        except Exception as metadata_err:
+            logger.error(
+                "Issue #%s: failed to enforce signed+DCO commit metadata before push: %s",
+                issue_number,
+                metadata_err,
+            )
+            return False
+        if not self._ci_fix_head_is_pushable(worktree_path, issue_number, base_ref=base_ref):
+            return False
         try:
             push_current_branch_with_lease_on_divergence(
                 worktree_path,
@@ -526,7 +541,7 @@ class CIFixOrchestrator:
             "3. Commit changes (do NOT push) on the current branch — DO NOT run "
             "`git checkout -b`, `git switch -c`, or any other command that creates "
             "or switches to a different branch\n"
-            "4. Every commit MUST be cryptographically signed and DCO signed off "
+            "4. Every commit MUST be cryptographically signed and DCO-signed "
             "(`git commit -S -s`); NEVER use `--no-verify`.\n\n"
             f"Commit message: fix: Address CI failures for PR {pr_ref(pr_number)}\n"
         )
@@ -541,6 +556,7 @@ class CIFixOrchestrator:
         advise_findings: str = "",
         *,
         pr_head_branch: str,
+        pr_base_branch: str = "main",
     ) -> bool:
         """Invoke the selected coding agent to fix CI failures, then push the result.
 
@@ -550,12 +566,10 @@ class CIFixOrchestrator:
             worktree_path: Path to the checked-out worktree.
             ci_logs: Combined CI failure log text.
             session_id: Optional agent session ID to resume.
-            advise_findings: Prior learnings from the advise step, prepended to
-                the prompt as context. Empty or a skip marker contributes nothing.
-            pr_head_branch: The PR's head-branch name on the remote. The push
-                uses this as the destination refspec so the fix lands on the
-                actual PR branch even if the agent switched branches locally
-                during the session (#832).
+            advise_findings: Prior learnings prepended to the prompt.
+            pr_head_branch: Remote PR head branch the push targets, even if
+                the agent switches branches mid-session (#832).
+            pr_base_branch: PR base branch used for commit-metadata repair.
 
         Returns:
             True if the fix session succeeded and the branch was pushed.
@@ -609,6 +623,7 @@ class CIFixOrchestrator:
             issue_number=issue_number,
             pr_number=pr_number,
             pr_head_branch=pr_head_branch,
+            pr_base_branch=pr_base_branch,
             session_id=session_id,
         )
 
