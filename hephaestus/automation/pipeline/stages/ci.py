@@ -228,7 +228,19 @@ class CiStage(Stage):
         """
         if item.payload.pop("ci_fix_failed", None):
             return Continue("POLL")
-        return JobRequest(None, "POLL")  # type: ignore
+        push_job = GitJob(
+            repo=item.repo,
+            op="commit_push",
+            timeout_s=GIT_JOB_TIMEOUT_S,
+            kwargs={
+                "issue_number": item.issue if item.issue is not None else 0,
+                "worktree_path": _worktree_path(item, ctx),
+                "branch": item.branch,
+                "agent": AGENT_CI_DRIVER,
+            },
+            descr="push_ci_fix",
+        )
+        return JobRequest(push_job, on_done_state="POLL")
 
     def on_job_done(self, item: WorkItem, result: Any, ctx: StageContext) -> None:
         """Record a completed job's outcome so the next state can route on it.

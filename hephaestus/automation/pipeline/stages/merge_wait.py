@@ -108,7 +108,11 @@ class MergeWaitStage(Stage):
         PR's current head OID, and durably persists the arming record
         (``ctx.github.arm_drive_green``) BEFORE flipping ``item.armed`` and
         advancing to POLL — the durable write precedes the state advance so
-        a crash between arming and POLL cannot lose the arming record.
+        a crash between arming and POLL cannot lose the arming record. If the
+        arming-record write itself fails (AC3), the item is NOT flipped to
+        armed/POLL: the stage finishes ``FINISH_FAIL("arm_record_failed")`` so
+        the drive retries from a clean, unarmed state rather than leaving the
+        PR armed with no durable dedupe record for the post-merge ``/learn``.
         """
         if item.armed:
             item.state = "POLL"
@@ -134,6 +138,7 @@ class MergeWaitStage(Stage):
                     item.pr,
                     e,
                 )
+                return StageOutcome(Disposition.FINISH_FAIL, "arm_record_failed")
         item.armed = True
         item.state = "POLL"
         return Continue("POLL")
