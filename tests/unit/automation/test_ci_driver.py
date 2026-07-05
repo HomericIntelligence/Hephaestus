@@ -2706,6 +2706,24 @@ class TestWaitForPrTerminal:
         # With a 0s budget the very first sleep would overrun → no sleep at all.
         mock_sleep.assert_not_called()
 
+    def test_malformed_max_wait_falls_back_without_crashing(
+        self, driver: CIDriver, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Regression for #1429: a non-numeric HEPH_PR_MERGE_MAX_WAIT must fall
+        # back to the default budget rather than raise ValueError at the read.
+        monkeypatch.setenv("HEPH_PR_MERGE_MAX_WAIT", "not-a-number")
+        with (
+            patch.object(
+                driver,
+                "_gh_pr_state",
+                return_value={"state": "MERGED"},
+            ),
+            patch("hephaestus.automation.ci_driver.time.sleep"),
+        ):
+            # A MERGED PR returns immediately; the point is the env read no
+            # longer crashes before the poll loop begins.
+            assert driver._wait_for_pr_terminal(1, 2) == "MERGED"
+
     def test_open_blocked_no_failing_no_pending_returns_blocked(self, driver: CIDriver) -> None:
         # OPEN, mergeStateStatus BLOCKED (e.g. unresolved conversations), no
         # failing and no pending CI checks → branch-protection gate, exit immediately.

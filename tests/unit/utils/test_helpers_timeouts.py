@@ -44,3 +44,14 @@ def test_network_timeout_reads_valid_override(monkeypatch: pytest.MonkeyPatch) -
     finally:
         monkeypatch.delenv("HEPHAESTUS_SUBPROCESS_NETWORK_TIMEOUT", raising=False)
         importlib.reload(helpers)
+
+
+def test_metadata_timeout_reads_valid_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A valid integer METADATA override is honoured on reimport."""
+    monkeypatch.setenv("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", "33")
+    reloaded = importlib.reload(helpers)
+    try:
+        assert reloaded.METADATA_TIMEOUT == 33
+    finally:
+        monkeypatch.delenv("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", raising=False)
+        importlib.reload(helpers)

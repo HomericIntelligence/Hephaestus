@@ -165,3 +165,31 @@ def test_read_timeout_env_prefers_primary_over_legacy(
         )
         == 301
     )
+
+
+@pytest.mark.parametrize("bad_value", ["foo", "12.5", "", "  ", "0x10"])
+def test_read_timeout_env_falls_back_on_malformed_value(
+    monkeypatch: pytest.MonkeyPatch,
+    bad_value: str,
+) -> None:
+    """A non-integer override is ignored: the default is returned, never raised."""
+    monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", bad_value)
+
+    assert constants.read_timeout_env("HEPH_AGENT_GIT_TIMEOUT", 77) == 77
+
+
+def test_read_timeout_env_falls_back_on_malformed_legacy_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed legacy override falls back to the default rather than crashing."""
+    monkeypatch.delenv("HEPH_AGENT_PLAN_TIMEOUT", raising=False)
+    monkeypatch.setenv("HEPH_PLANNER_AGENT_TIMEOUT", "not-a-number")
+
+    assert (
+        constants.read_timeout_env(
+            "HEPH_AGENT_PLAN_TIMEOUT",
+            constants.AGENT_PLAN_TIMEOUT,
+            legacy_names=("HEPH_PLANNER_AGENT_TIMEOUT",),
+        )
+        == constants.AGENT_PLAN_TIMEOUT
+    )
