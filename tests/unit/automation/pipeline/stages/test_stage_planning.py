@@ -234,6 +234,7 @@ class TestPlanningStageStep:
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)  # narrow the job union
         assert result.on_done_state == "PLAN_WAIT"
         assert result.job.descr == "advise"
         assert result.job.prompt_kwargs["issue_number"] == 3
@@ -248,6 +249,7 @@ class TestPlanningStageStep:
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)  # narrow the job union
         assert result.on_done_state == "VERIFY"
         assert result.job.descr == "plan"
         assert result.job.prompt_builder is build_plan_prompt

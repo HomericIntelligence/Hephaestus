@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from hephaestus.automation.claude_invoke import ReviewVerdict, parse_review_verdict
-from hephaestus.automation.pipeline.jobs import JobResult
+from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.plan_review import (
@@ -122,6 +122,7 @@ class TestPlanReviewStageStep:
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)  # narrow the job union
         assert result.on_done_state == "EVAL"
         assert result.job.descr == "review"
         assert result.job.parse is parse_review_verdict  # verdict parsed in-worker
@@ -141,6 +142,7 @@ class TestPlanReviewStageStep:
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)  # narrow the job union
         assert result.job.prompt_kwargs["iteration"] == 1
         assert result.job.prompt_kwargs["prior_review"] == "fix the tests section"
         assert item.attempts["plan_review_iter"] == 0  # still EVAL's job to count
@@ -314,6 +316,7 @@ class TestPlanReviewStageStep:
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)  # narrow the job union
         assert result.on_done_state == "REVIEW_WAIT"  # loop back to review
         assert result.job.descr == "amend"
         assert result.job.prompt_builder is build_amend_prompt
@@ -334,6 +337,7 @@ class TestPlanReviewStageStep:
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)  # narrow the job union
         assert result.on_done_state == "FINISH"
         assert result.job.descr == "learn"
         assert result.job.prompt_kwargs == {"context": "# My Plan\n..."}
@@ -572,6 +576,7 @@ class TestCycleRelativeBudget:
             while True:
                 request = stage.step(item, ctx)
                 assert isinstance(request, JobRequest)
+                assert isinstance(request.job, AgentJob)  # narrow the job union
                 prompt_iterations.append(request.job.prompt_kwargs["iteration"])
                 stage.on_job_done(item, JobResult(ok=True, value=_verdict("NOGO")), ctx)
                 item.state = "EVAL"

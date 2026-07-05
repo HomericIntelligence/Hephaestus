@@ -54,6 +54,7 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
+    _issue_labels,
 )
 
 logger = logging.getLogger(__name__)
@@ -114,26 +115,6 @@ def _normalize_plan_comment(plan: str) -> str:
     if stripped.startswith(PLAN_COMMENT_MARKER):
         return stripped
     return f"{PLAN_COMMENT_MARKER}\n\n{stripped}"
-
-
-def _issue_labels(item: WorkItem, ctx: StageContext) -> list[str]:
-    """Refresh the item's labels from GitHub and update ``labels_cache``.
-
-    Reads through ``ctx.github.gh_issue_json`` (mirrors
-    ``github_api.issues.gh_issue_json``); on any read failure the cached
-    labels are used so a transient API blip cannot mis-route the item.
-    """
-    if item.issue is None:
-        return []
-    try:
-        data = ctx.github.gh_issue_json(item.issue)
-    except Exception as e:  # transient gh failure: fall back to cache
-        logger.warning("planning:%d: label refresh failed (using cache): %s", item.issue, e)
-        return list(item.labels_cache)
-    raw = data.get("labels", []) if isinstance(data, dict) else []
-    labels = [entry["name"] if isinstance(entry, dict) else str(entry) for entry in raw]
-    item.labels_cache = dict.fromkeys(labels, True)
-    return labels
 
 
 class PlanningStage(Stage):
