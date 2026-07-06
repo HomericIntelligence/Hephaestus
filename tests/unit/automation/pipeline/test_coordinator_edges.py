@@ -535,6 +535,50 @@ class TestLivenessAndFatal:
 
         assert ran == [1]
 
+    def test_force_run_one_asserts_no_in_flight_work(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The stall escape hatch must only run after the event loop is truly idle."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+        item = _item(1, StageName.MERGE_WAIT)
+        coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
+        coordinator.in_flight[object()] = _item(2)  # type: ignore[index]
+
+        with pytest.raises(AssertionError, match="force-run requires no in-flight work"):
+            coordinator._force_run_one()
+
+        assert coordinator.queues[StageName.MERGE_WAIT].snapshot() == [item]
+
+    def test_force_run_one_logs_inflight_per_repo_snapshot(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A forced run should expose leaked per-repo slots in its diagnostic log."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+
+        class SinkStage:
+            def on_enter(self, i: WorkItem, ctx: Any) -> Any:
+                return None
+
+            def step(self, i: WorkItem, ctx: Any) -> Any:
+                return StageOutcome(Disposition.SKIP, "forced")
+
+            def on_job_done(self, i: WorkItem, result: Any, ctx: Any) -> None:
+                pass
+
+        coordinator.stages[StageName.MERGE_WAIT] = SinkStage()
+        coordinator.inflight_per_repo["repo-a"] = 1
+        coordinator._push_item(_item(1, StageName.MERGE_WAIT), StageName.MERGE_WAIT, enter=False)
+
+        with caplog.at_level("ERROR"):
+            coordinator._force_run_one()
+
+        assert any(
+            "inflight_per_repo={'repo-a': 1}" in record.message for record in caplog.records
+        )
+
     def test_idle_wait_resets_stall_counter_on_progress(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
