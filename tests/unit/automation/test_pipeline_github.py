@@ -603,3 +603,145 @@ class TestRateBudget:
 
         monkeypatch.setattr(pg, "gh_call", lambda argv: SimpleNamespace(stdout="{}"))
         assert pg.rate_limit_remaining() is None
+
+
+class TestSeverityMarker:
+    """Severity marker embedding and classification for the GO gate (#1856)."""
+
+    def test_with_severity_marker_embeds(self) -> None:
+        """_with_severity_marker embeds severity marker in body."""
+        comment = {
+            "severity": "minor",
+            "body": "Fix this",
+        }
+        result = pg._with_severity_marker(comment)
+        assert result.startswith("<!-- hephaestus-severity: minor -->")
+        assert "Fix this" in result
+
+    def test_with_severity_marker_defaults_absent_to_major(self) -> None:
+        """_with_severity_marker defaults absent severity to major (fail-safe)."""
+        comment = {
+            "body": "Fix this",
+        }
+        result = pg._with_severity_marker(comment)
+        assert result.startswith("<!-- hephaestus-severity: major -->")
+
+    def test_with_severity_marker_is_idempotent(self) -> None:
+        """_with_severity_marker does not double-stamp already-marked bodies."""
+        comment = {
+            "body": "<!-- hephaestus-severity: critical -->\nAlready marked",
+            "severity": "minor",
+        }
+        result = pg._with_severity_marker(comment)
+        # Should return the body unchanged because it already has the marker
+        assert result == comment["body"]
+
+    def test_thread_severity_is_blocking_critical(self) -> None:
+        """_thread_severity_is_blocking returns True for critical severity."""
+        thread = {"body": "<!-- hephaestus-severity: critical -->\nSome issue"}
+        assert pg._thread_severity_is_blocking(thread) is True
+
+    def test_thread_severity_is_blocking_major(self) -> None:
+        """_thread_severity_is_blocking returns True for major severity."""
+        thread = {"body": "<!-- hephaestus-severity: major -->\nSome issue"}
+        assert pg._thread_severity_is_blocking(thread) is True
+
+    def test_thread_severity_is_blocking_minor_false(self) -> None:
+        """_thread_severity_is_blocking returns False for minor severity."""
+        thread = {"body": "<!-- hephaestus-severity: minor -->\nSome issue"}
+        assert pg._thread_severity_is_blocking(thread) is False
+
+    def test_thread_severity_is_blocking_nitpick_false(self) -> None:
+        """_thread_severity_is_blocking returns False for nitpick severity."""
+        thread = {"body": "<!-- hephaestus-severity: nitpick -->\nSome issue"}
+        assert pg._thread_severity_is_blocking(thread) is False
+
+    def test_thread_severity_is_blocking_missing_defaults_true(self) -> None:
+        """_thread_severity_is_blocking returns True (blocking) for missing marker."""
+        thread = {"body": "No marker here\nJust plain text"}
+        assert pg._thread_severity_is_blocking(thread) is True
+
+    def test_thread_severity_anchors_on_marker_line(self) -> None:
+        """_thread_severity_is_blocking anchors on marker line, not substring."""
+        thread = {
+            "body": "Some text mentioning minor\n<!-- hephaestus-severity: critical -->\nMore text"
+        }
+        # Should find 'critical' in marker, not 'minor' in prose
+        assert pg._thread_severity_is_blocking(thread) is True
+
+    def test_count_unresolved_threads_by_severity_classifies(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """count_unresolved_threads_by_severity classifies threads by severity."""
+        automation_thread_critical = {
+            "body": "<!-- hephaestus-severity: critical -->\nIssue",
+            "author": "automation-bot",
+        }
+        automation_thread_minor = {
+            "body": "<!-- hephaestus-severity: minor -->\nNit",
+            "author": "automation-bot",
+        }
+        human_thread = {
+            "body": "Human comment",
+            "author": "reviewer",
+        }
+
+        threads = [automation_thread_critical, automation_thread_minor, human_thread]
+
+        monkeypatch.setattr(adapter, "_unresolved_threads", lambda pr: threads)
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
+
+        blocking, minor, human = adapter.count_unresolved_threads_by_severity(42)
+
+        assert blocking == 1
+        assert minor == 1
+        assert human == 1
+
+    def test_count_unresolved_threads_by_severity_unmarked_is_blocking(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """count_unresolved_threads_by_severity treats unmarked automation as blocking."""
+        automation_thread_unmarked = {
+            "body": "No marker",
+            "author": "automation-bot",
+        }
+
+        threads = [automation_thread_unmarked]
+
+        monkeypatch.setattr(adapter, "_unresolved_threads", lambda pr: threads)
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
+
+        blocking, minor, human = adapter.count_unresolved_threads_by_severity(42)
+
+        assert blocking == 1
+        assert minor == 0
+        assert human == 0
+
+    def test_resolve_automation_threads_skips_human(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """resolve_automation_threads skips human-owned threads."""
+        automation_thread = {
+            "id": "auto_thread_id",
+            "author": "automation-bot",
+        }
+        human_thread = {
+            "id": "human_thread_id",
+            "author": "reviewer",
+        }
+
+        threads = [automation_thread, human_thread]
+        resolved_ids = []
+
+        def capture_resolve(thread_id: str, dry_run: bool = False) -> None:
+            resolved_ids.append(thread_id)
+
+        monkeypatch.setattr(adapter, "_unresolved_threads", lambda pr: threads)
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "automation-bot")
+        monkeypatch.setattr(github_api_mod, "gh_pr_resolve_thread", capture_resolve)
+
+        count = adapter.resolve_automation_threads(42)
+
+        assert count == 1
+        assert "auto_thread_id" in resolved_ids
+        assert "human_thread_id" not in resolved_ids

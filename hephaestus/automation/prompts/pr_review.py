@@ -100,6 +100,19 @@ _NITPICK_INCLUDE = (
     "downstream."
 )
 
+#: Severities that BLOCK a GO when their automation thread is unresolved (#1856).
+#: ``minor``/``nitpick`` are advisory — a GO the reviewer returned must not
+#: deadlock to state:skip over a nit it declined to block on. An unmarked or
+#: unknown severity is treated as BLOCKING (fail-safe), which reproduces the
+#: pre-#1856 all-blocking behavior when severity is not yet seeded.
+BLOCKING_SEVERITIES: frozenset[str] = frozenset({"critical", "major"})
+VALID_SEVERITIES: frozenset[str] = frozenset({"critical", "major", "minor", "nitpick"})
+
+#: HTML-comment marker prepended to each posted review-thread body so the GO
+#: gate can recover the reviewer's severity after the GitHub round-trip.
+#: Anchored as a full marker line — never matched by a free substring scan.
+SEVERITY_MARKER_PREFIX = "<!-- hephaestus-severity:"
+
 
 def get_pr_review_analysis_prompt(
     pr_number: int,
