@@ -719,30 +719,8 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             7800.0,
             help_text=(
                 "Per-phase timeout in seconds (default: HEPH_PHASE_TIMEOUT or 7800s). "
-                "Pass 0 or a negative value to disable. Under --pipeline this bounds "
-                "each AGENT JOB, not a whole phase subprocess."
-            ),
-        ),
-        _action_spec(
-            ("--pipeline",),
-            "pipeline",
-            "_StoreTrueAction",
-            SUPPRESS_DEFAULT,
-            nargs=0,
-            help_text=(
-                "Use the queue-based pipeline loop (default: on). "
-                "Env HEPH_PIPELINE=0 disables it; the CLI flag wins."
-            ),
-        ),
-        _action_spec(
-            ("--legacy-loop",),
-            "pipeline",
-            "_StoreFalseAction",
-            SUPPRESS_DEFAULT,
-            nargs=0,
-            help_text=(
-                "Use the pre-pipeline legacy loop path. "
-                "Overrides HEPH_PIPELINE and is intended as a rollback hatch."
+                "Pass 0 or a negative value to disable. This bounds each AGENT JOB the "
+                "pipeline runs, not a whole phase subprocess."
             ),
         ),
         _action_spec(

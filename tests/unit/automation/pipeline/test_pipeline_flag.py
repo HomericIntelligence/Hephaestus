@@ -1,9 +1,10 @@
-"""Pipeline-default dispatch tests for loop_runner.main (#1818).
+"""Pipeline dispatch tests for loop_runner.main.
 
-The pipeline is DEFAULT ON; ``--legacy-loop`` and ``HEPH_PIPELINE=0`` are
-the rollback hatches.
-The pipeline branch dispatches after token preflight but BEFORE
-``_clone_missing_repos`` (C3: the repo stage owns cloning — no double-clone).
+The queue-based pipeline is the only automation-loop path (epic #1809, cutover
+#1818, legacy-path removal #1819). ``loop_runner.main`` parses the CLI, builds a
+``PipelineConfig``, runs a repo-token preflight, and hands off to
+``run_pipeline``. The repo stage owns cloning, so ``main`` does not clone
+(C3: no double-clone).
 """
 
 from __future__ import annotations
@@ -18,62 +19,28 @@ import hephaestus.automation.pipeline.coordinator as coordinator_mod
 
 @pytest.fixture
 def dispatch(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
-    """Patch both dispatch targets and the legacy pre-clone collaborators."""
+    """Patch the pipeline dispatch target and the pre-dispatch collaborators."""
     mocks = {
         "run_pipeline": MagicMock(return_value=0),
-        "run_loop": MagicMock(return_value=[]),
         "preflight": MagicMock(),
         "clone": MagicMock(),
     }
     monkeypatch.setattr(coordinator_mod, "run_pipeline", mocks["run_pipeline"])
-    monkeypatch.setattr(loop_runner, "run_loop", mocks["run_loop"])
     monkeypatch.setattr(loop_runner, "_preflight_token_scopes", mocks["preflight"])
     monkeypatch.setattr(loop_runner, "_clone_missing_repos", mocks["clone"])
     monkeypatch.setattr(
         loop_runner, "_resolve_org_and_repos", lambda args: ("org", ["repo-a"], None)
     )
     monkeypatch.setattr(loop_runner, "resolve_agent", lambda agent: "claude")
-    monkeypatch.delenv("HEPH_PIPELINE", raising=False)
     return mocks
 
 
-@pytest.mark.parametrize(
-    ("argv", "env", "expect_pipeline"),
-    [
-        ([], None, True),  # default ON
-        ([], "0", False),  # env rollback
-        ([], "1", True),
-        (["--pipeline"], "0", True),  # CLI wins over env
-        (["--pipe"], "0", True),  # argparse abbreviation still counts as CLI
-        (["--legacy-loop"], None, False),
-        (["--legacy-loop"], "1", False),  # CLI rollback wins over env
-        (["--leg"], "1", False),  # argparse abbreviation still counts as CLI
-    ],
-)
-def test_flag_env_matrix(
-    dispatch: dict[str, MagicMock],
-    monkeypatch: pytest.MonkeyPatch,
-    argv: list[str],
-    env: str | None,
-    expect_pipeline: bool,
-) -> None:
-    """--pipeline/--legacy-loop x HEPH_PIPELINE precedence matrix."""
-    if env is not None:
-        monkeypatch.setenv("HEPH_PIPELINE", env)
-
-    exit_code = loop_runner.main(argv)
+def test_main_dispatches_to_pipeline(dispatch: dict[str, MagicMock]) -> None:
+    """main() always runs the queue-based pipeline."""
+    exit_code = loop_runner.main([])
 
     assert exit_code == 0
-    assert dispatch["run_pipeline"].called is expect_pipeline
-    assert dispatch["run_loop"].called is not expect_pipeline
-
-
-def test_pipeline_and_legacy_flags_conflict() -> None:
-    """--pipeline and --legacy-loop are rollback selectors, not stackable modes."""
-    with pytest.raises(SystemExit) as excinfo:
-        loop_runner._parse_args(["--pipeline", "--legacy-loop"])
-
-    assert excinfo.value.code == 2
+    dispatch["run_pipeline"].assert_called_once()
 
 
 def test_pipeline_path_preflights_but_skips_clone(dispatch: dict[str, MagicMock]) -> None:
@@ -85,46 +52,19 @@ def test_pipeline_path_preflights_but_skips_clone(dispatch: dict[str, MagicMock]
     dispatch["clone"].assert_not_called()
 
 
-def test_legacy_path_still_preflights_and_clones(dispatch: dict[str, MagicMock]) -> None:
-    """Rollback hatch: the legacy pre-loop sequence is untouched."""
-    loop_runner.main(["--legacy-loop"])
-
-    dispatch["preflight"].assert_called_once()
-    dispatch["clone"].assert_called_once()
-    dispatch["run_loop"].assert_called_once()
-    dispatch["run_pipeline"].assert_not_called()
-
-
-@pytest.mark.parametrize(
-    ("argv", "env", "expected"),
-    [
-        ([], None, "Path: pipeline"),
-        ([], "0", "Path: legacy-loop"),
-        (["--legacy-loop"], None, "Path: legacy-loop"),
-    ],
-)
-def test_main_logs_selected_path(
-    dispatch: dict[str, MagicMock],
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    argv: list[str],
-    env: str | None,
-    expected: str,
-) -> None:
-    """Startup logs identify which loop implementation is active."""
-    if env is not None:
-        monkeypatch.setenv("HEPH_PIPELINE", env)
-    with caplog.at_level("INFO", logger="hephaestus.automation.loop_runner"):
-        loop_runner.main(argv)
-
-    assert any(expected in rec.message for rec in caplog.records)
-
-
 def test_pipeline_exit_code_propagates(dispatch: dict[str, MagicMock]) -> None:
     """run_pipeline's exit code IS main's exit code."""
     dispatch["run_pipeline"].return_value = 130
 
     assert loop_runner.main([]) == 130
+
+
+def test_dry_run_skips_preflight(dispatch: dict[str, MagicMock]) -> None:
+    """A dry run must not hit the live gh token preflight."""
+    loop_runner.main(["--dry-run"])
+
+    dispatch["run_pipeline"].assert_called_once()
+    dispatch["preflight"].assert_not_called()
 
 
 def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -> None:
@@ -187,8 +127,8 @@ def test_build_pipeline_config_maps_agent_and_models(
     assert config.implementer_model == "gpt-impl"
 
 
-def test_phase_timeout_help_documents_pipeline_shift() -> None:
-    """M4: the --phase-timeout help names the agent-job semantic shift."""
+def test_phase_timeout_help_documents_agent_job_scope() -> None:
+    """The --phase-timeout help names the per-agent-job semantic."""
     parser = loop_runner._build_parser()
     action = next(a for a in parser._actions if "--phase-timeout" in a.option_strings)
 
