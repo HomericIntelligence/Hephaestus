@@ -577,6 +577,31 @@ class TestPipelineScopeWiring:
         assert entries[0].stage is StageName.PLANNING
         assert "force re-plan" in entries[0].reason
 
+    def test_force_leaves_pre_scope_stage_untouched(self, tmp_path: Path) -> None:
+        """--force must NOT pull a PRE-scope stage forward into the scope.
+
+        Regression (#1820 review): under a later scope (e.g.
+        implementation->pr_review) a PLANNING classification is upstream of the
+        scope. force is a redo knob for work at-or-past the scope, not a
+        fast-forward that advances un-started upstream work into it.
+        """
+        from hephaestus.automation.pipeline.routing import PipelineScope
+
+        # Scope starts at IMPLEMENTATION; PLANNING is pre-scope.
+        scope = PipelineScope(frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW}))
+        config = self._scoped_config(tmp_path, issues=[1], force=True)
+        object.__setattr__(config, "scope", scope)
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        stage, reason = coordinator._clamp_seed_stage_to_scope(
+            1, StageName.PLANNING, "needs-plan", scope.stages
+        )
+
+        assert stage is StageName.PLANNING  # left untouched, NOT forced to IMPLEMENTATION
+        assert "force re-plan" not in reason
+
     def test_needs_plan_issue_seeds_into_planning_within_scope(self, tmp_path: Path) -> None:
         """An in-scope PLANNING classification is preserved (no clamp)."""
         gh = FakeStageGitHub(labels=["state:needs-plan"])

@@ -967,8 +967,18 @@ class Coordinator:
 
         first_in_scope = next((s for s in PIPELINE_ORDER if s in scope_stages), None)
         if self.config.force:
+            # Force re-routes an at-or-past-scope stage back to the scope's
+            # entry so the scoped work is redone. A PRE-scope stage (earlier in
+            # PIPELINE_ORDER than first_in_scope) is left untouched — force is a
+            # redo knob for work already in/past the scope, not a fast-forward
+            # that pulls un-started upstream work into the scope. (For the
+            # planner planning->plan_review scope direct seeding produces no
+            # pre-scope items, but a later scope, e.g. implementation->pr_review,
+            # has repo/planning/plan_review upstream.)
             if first_in_scope is not None and stage != first_in_scope:
-                return first_in_scope, f"#{issue} force re-plan ({reason})"
+                first_idx = PIPELINE_ORDER.index(first_in_scope)
+                if PIPELINE_ORDER.index(stage) >= first_idx:
+                    return first_in_scope, f"#{issue} force re-plan ({reason})"
             return stage, reason
 
         if stage not in scope_stages:
