@@ -106,6 +106,10 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror _review_utils.find_merged_closing_pr."""
         return self._merged_pr
 
+    def find_merged_pr_for_issue(self, issue_number: int) -> int | None:
+        """Mirror _review_utils.find_merged_pr_for_issue."""
+        return self._merged_pr
+
     def find_pr_for_issue(self, issue_number: int) -> int | None:
         """Mirror _review_utils.find_pr_for_issue (open PR lookup)."""
         return self._open_pr
@@ -239,6 +243,15 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror post_merge_processor.mark_drive_green_learn_result [durable]."""
         self.learn_results[issue_number] = succeeded
         self._log("mark_drive_green_learn_result", issue_number, succeeded)
+
+    def ensure_state_labels(self) -> None:
+        """Mirror the repo-stage label-vocabulary ensure (records mutation).
+
+        The canonical ``skip_epics`` recorder is inherited from
+        :class:`FakeGitHub`; this is the only repo-stage (#1817) protocol
+        method without a canonical recorder there.
+        """
+        self._log("ensure_state_labels")
 
 
 if TYPE_CHECKING:

@@ -15,21 +15,25 @@ from .base import (
     StepResult,
 )
 from .ci import CiStage
+from .finished import FinishedStage
 from .implementation import ImplementationStage
 from .merge_wait import MergeWaitStage
 from .plan_review import PlanReviewStage
 from .planning import PlanningStage
 from .pr_review import PrReviewStage
+from .repo import RepoStage
 
 __all__ = [
     "CiStage",
     "Continue",
+    "FinishedStage",
     "ImplementationStage",
     "JobRequest",
     "MergeWaitStage",
     "PlanReviewStage",
     "PlanningStage",
     "PrReviewStage",
+    "RepoStage",
     "Stage",
     "StageContext",
     "StageGitHub",

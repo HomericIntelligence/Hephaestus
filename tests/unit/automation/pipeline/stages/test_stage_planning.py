@@ -260,6 +260,37 @@ class TestPlanningStageStep:
             "advise_findings": "prior learnings",
         }
 
+    def test_plan_job_uses_selected_provider_and_planner_session_role(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Provider selection is distinct from the persisted planner session role."""
+        stage = PlanningStage()
+        config = type(
+            "Cfg",
+            (),
+            {
+                "enable_advise": True,
+                "enable_learn": True,
+                "force": False,
+                "agent": "codex",
+                "model": "gpt-default",
+                "planner_model": "gpt-plan",
+                "reviewer_model": "",
+                "implementer_model": "",
+                "dry_run": False,
+            },
+        )()
+        ctx = make_ctx(config=config)
+        item = make_work_item(issue=9, state="PLAN_WAIT")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.agent == "codex"
+        assert result.job.session_agent == "planner"
+        assert result.job.model == "gpt-plan"
+
     def test_verify_with_plan_advances(self, make_ctx: Any, make_work_item: Any) -> None:
         """VERIFY with an existing plan comment advances without re-posting."""
         stage = PlanningStage()

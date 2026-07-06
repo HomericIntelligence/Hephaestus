@@ -80,6 +80,8 @@ __all__ = [
     "StageOutcome",
     "StepResult",
     "WorkItem",
+    "agent_provider",
+    "stage_model",
     "write_skip_label",
 ]
 
@@ -113,6 +115,10 @@ class StageGitHub(Protocol):
 
     def find_merged_closing_pr(self, issue_number: int) -> int | None:
         """Return the merged PR closing this issue, if any (``_review_utils``)."""
+        ...
+
+    def find_merged_pr_for_issue(self, issue_number: int) -> int | None:
+        """Return the merged PR for this issue, if any (tri-state seeding lookup)."""
         ...
 
     def find_pr_for_issue(self, issue_number: int) -> int | None:
@@ -331,6 +337,27 @@ class StageGitHub(Protocol):
         """
         ...
 
+    # -- repo-stage surface (#1817) -----------------------------------------
+
+    def skip_epics(self, epics_labels: dict[int, list[str]]) -> None:
+        """Durably tag epics ``state:skip`` (the ONE sanctioned seeding write).
+
+        The coordinator (#1817) maps this onto the existing
+        ``github_api.skip_epics`` chokepoint; the repo stage calls it BEFORE
+        excluding epics (doc row "Epic tagging is the one seeding write; done
+        BEFORE excluding" — see :mod:`..seeding`'s write-path boundary note).
+        """
+        ...
+
+    def ensure_state_labels(self) -> None:
+        """Durably ensure the ``state:*`` label vocabulary exists on the repo.
+
+        Repo-stage step 1 [M] (doc section 1 ``ensure_state_labels``): the
+        coordinator maps this onto ``github_api._ensure_labels_exist`` over
+        the full ``state_labels`` vocabulary. Idempotent by construction.
+        """
+        ...
+
 
 @dataclass(frozen=True)
 class Continue:
@@ -394,6 +421,18 @@ class StageContext:
         if self.budget_fn is not None:
             return self.budget_fn(name)
         return 1  # conservative default
+
+
+def agent_provider(ctx: StageContext) -> str:
+    """Return the selected agent backend provider for an agent job."""
+    return str(getattr(ctx.config, "agent", "") or "claude")
+
+
+def stage_model(ctx: StageContext, phase: str, fallback: Callable[[], str]) -> str:
+    """Return a phase model override, the catch-all model, or the legacy fallback."""
+    phase_value = getattr(ctx.config, f"{phase}_model", "")
+    catch_all = getattr(ctx.config, "model", "")
+    return str(phase_value or catch_all or fallback())
 
 
 def _issue_labels(item: WorkItem, ctx: StageContext) -> list[str]:

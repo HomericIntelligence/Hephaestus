@@ -32,6 +32,7 @@ class AgentJob:
     prompt_builder: Callable[..., str]
     cwd: Path
     timeout_s: int
+    session_agent: str = ""
     prompt_kwargs: dict[str, Any] = field(default_factory=dict)
     output_format: str = "text"
     parse: Callable[[str], Any] | None = None  # e.g. claude_invoke.parse_review_verdict
@@ -107,4 +108,4 @@ class JobHandle:
     """
 
     job: AgentJob | BuildTestJob | GitJob
-    on_done_state: StageName
+    on_done_state: str | StageName

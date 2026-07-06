@@ -55,6 +55,8 @@ from .base import (
     StepResult,
     WorkItem,
     _issue_labels,
+    agent_provider,
+    stage_model,
 )
 
 logger = logging.getLogger(__name__)
@@ -226,11 +228,12 @@ class PlanningStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=AGENT_ADVISE,
-                model=advise_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "advise", advise_model),
                 prompt_builder=get_advise_prompt_builder(ctx.config.agent),
                 cwd=ctx.paths.worktree,
                 timeout_s=advise_claude_timeout(),
+                session_agent=AGENT_ADVISE,
                 # Issue title/body and the Mnemosyne marketplace path are
                 # seeded into item.payload by the coordinator (#1817), which
                 # owns issue fetching and advise_runner setup.
@@ -249,11 +252,12 @@ class PlanningStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=AGENT_PLANNER,
-                model=planner_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "planner", planner_model),
                 prompt_builder=build_plan_prompt,
                 cwd=ctx.paths.worktree,
                 timeout_s=planner_claude_timeout(),
+                session_agent=AGENT_PLANNER,
                 # build_plan_prompt composes get_plan_prompt with the advise
                 # findings block in-worker, mirroring the legacy
                 # planner_review_loop.generate_plan(cached_advise=...)

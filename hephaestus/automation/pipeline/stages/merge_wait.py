@@ -90,6 +90,8 @@ from .base import (
     StepResult,
     WorkItem,
     _worktree_path,
+    agent_provider,
+    stage_model,
     write_skip_label,
 )
 
@@ -438,11 +440,12 @@ class MergeWaitStage(Stage):
         job = AgentJob(
             repo=item.repo,
             issue=item.issue if item.issue is not None else 0,
-            agent=AGENT_ADDRESS_REVIEW,
-            model=implementer_model(),
+            agent=agent_provider(ctx),
+            model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=get_address_review_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=address_review_claude_timeout(),
+            session_agent=AGENT_ADDRESS_REVIEW,
             prompt_kwargs={
                 "pr_number": item.pr,
                 "issue_number": item.issue if item.issue is not None else 0,
@@ -490,11 +493,12 @@ class MergeWaitStage(Stage):
         job = AgentJob(
             repo=item.repo,
             issue=item.issue if item.issue is not None else 0,
-            agent=AGENT_CI_DRIVER,
-            model=implementer_model(),
+            agent=agent_provider(ctx),
+            model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=build_drive_green_learn_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=learn_claude_timeout(),
+            session_agent=AGENT_CI_DRIVER,
             prompt_kwargs={
                 "issue_number": item.issue if item.issue is not None else 0,
                 "pr_number": item.pr,

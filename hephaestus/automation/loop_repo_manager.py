@@ -15,6 +15,7 @@ import json
 import logging
 import subprocess
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from hephaestus.automation.ci_driver import _pr_is_failing
@@ -116,27 +117,17 @@ def _gh_list_repos(org: str) -> list[str]:
     ]
 
 
-def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
-    """Return open NON-epic issue numbers in ``org/repo``, sorted ascending.
+def _list_open_issue_meta(org: str, repo: str) -> list[dict[str, Any]]:
+    """Return open-issue metadata for ``org/repo`` — reads only, no tagging.
 
-    This is the loop's single canonical issue-discovery call: the result is
-    passed down to the plan/implement child phases via ``--issues`` so they do
-    NOT each re-run their own ``gh issue list``. The scope is ALL open issues
-    (no ``@me`` author/assignee filter) so it matches the child phases'
-    ``gh_list_open_issues`` semantics exactly — the loop's convergence and
-    failing-PR gates then agree with the work the phases actually do.
+    One ``gh issue list`` returning ``{number, labels, title}`` dicts (labels
+    flattened to names). Extracted from :func:`_list_open_issue_numbers` so
+    the pipeline repo stage (#1817) can reuse the read while routing the epic
+    ``state:skip`` tagging through its coordinator-owned accessor instead of
+    the in-band :func:`skip_epics` side effect below.
 
-    Epic/roadmap **tracking** issues are excluded (#1669): they are checklists
-    of child work, not code tasks, so the loop must never plan/implement them.
-    Each excluded epic is tagged ``state:skip`` (best-effort) via
-    :func:`skip_epics` so dashboards see it as intentionally bypassed; that
-    tagging never raises and never affects the returned list. Detection uses
-    label names + title because native GitHub issue types are not exposed by the
-    installed ``gh`` — see :func:`~hephaestus.automation.state_labels.is_epic`.
-
-    Sorted ascending so the implementer phase processes oldest-first. Returns
-    an empty list on any failure (rate limit, auth error, timeout) so callers
-    fall back safely.
+    Raises RuntimeError on GitHub/JSON failures so pipeline discovery never
+    converts an unreadable repo into a successful empty run.
     """
     try:
         out = gh_call(
@@ -155,10 +146,9 @@ def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
             timeout=NETWORK_TIMEOUT,
         )
         entries = json.loads(out.stdout or "[]")
-    except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
-        return []
-
-    meta = [
+    except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"failed to list open issues for {org}/{repo}: {exc}") from exc
+    return [
         {
             "number": e["number"],
             "labels": [lbl["name"] for lbl in e.get("labels", [])],
@@ -167,6 +157,61 @@ def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
         for e in entries
         if isinstance(e, dict) and "number" in e
     ]
+
+
+def _list_open_pr_numbers(org: str, repo: str) -> list[int]:
+    """Return open PR numbers in ``org/repo``, sorted ascending.
+
+    Read-only helper for the pipeline repo stage's ``--drive-green-all``
+    orphan-PR discovery (#1817): PRs with no tracked issue route to the ci
+    stage. Raises RuntimeError on failures so discovery does not masquerade
+    as a clean empty run.
+    """
+    try:
+        out = gh_call(
+            [
+                "pr",
+                "list",
+                "--repo",
+                f"{org}/{repo}",
+                "--state",
+                "open",
+                "--limit",
+                "500",
+                "--json",
+                "number",
+            ],
+            timeout=NETWORK_TIMEOUT,
+        )
+        entries = json.loads(out.stdout or "[]")
+    except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"failed to list open PRs for {org}/{repo}: {exc}") from exc
+    return sorted(int(e["number"]) for e in entries if isinstance(e, dict) and "number" in e)
+
+
+def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
+    """Return open NON-epic issue numbers in ``org/repo``, sorted ascending.
+
+    This is the loop's single canonical issue-discovery call: the result is
+    passed down to the plan/implement child phases via ``--issues`` so they do
+    NOT each re-run their own ``gh issue list``. The scope is ALL open issues
+    (no ``@me`` author/assignee filter) so it matches the child phases'
+    ``gh_list_open_issues`` semantics exactly — the loop's convergence and
+    failing-PR gates then agree with the work the phases actually do.
+
+    Epic/roadmap **tracking** issues are excluded (#1669): they are checklists
+    of child work, not code tasks, so the loop must never plan/implement them.
+    Each excluded epic is tagged ``state:skip`` (best-effort) via
+    :func:`skip_epics` so dashboards see it as intentionally bypassed; that
+    tagging never raises and never affects the returned list. Detection uses
+    label names + title because native GitHub issue types are not exposed by the
+    installed ``gh`` — see :func:`~hephaestus.automation.state_labels.is_epic`.
+
+    Sorted ascending so the implementer phase processes oldest-first. GitHub
+    read failures propagate as RuntimeError so automation does not treat an
+    unreadable repo as converged.
+    """
+    meta = _list_open_issue_meta(org, repo)
     kept, epics = partition_epics(meta)
     if epics:
         epic_set = set(epics)
