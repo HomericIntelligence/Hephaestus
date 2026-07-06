@@ -10,6 +10,7 @@ asserts-no-submit, poisoned-item isolation, and FAIL_BACK routing.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,7 @@ def make_coordinator(
     max_workers: int = 1,
     dry_run: bool = False,
     github: FakeStageGitHub | None = None,
+    rate_budget_ok: Callable[[], tuple[bool, float]] | None = None,
 ) -> tuple[Coordinator, FakeWorkerPool, FakeStageGitHub]:
     """Build a Coordinator wired to fakes, with seeding scripted per pass."""
     config = PipelineConfig(
@@ -94,6 +96,7 @@ def make_coordinator(
 
     monkeypatch.setattr(seeding_mod, "seed_from_cli", fake_seed)
     coordinator = Coordinator(config, github=gh, pool=pool, install_signals=False)
+    coordinator._rate_budget_ok = rate_budget_ok or (lambda: (True, 0.0))  # type: ignore[method-assign]
     return coordinator, pool, gh
 
 
@@ -105,6 +108,39 @@ def _issue_item(
 
 class TestQuiescence:
     """Full-run tests driving seeded items to the finished ledger."""
+
+    def test_explicit_issue_scope_suppresses_repo_discovery_seed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--issues N scopes the run to N instead of reconstructing the whole repo."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[1850],
+            loops=1,
+            projects_dir=tmp_path,
+        )
+        gh = FakeStageGitHub(merged_pr=1851)
+
+        def fake_seed(
+            repos_arg: list[str], issues_arg: list[int], prs_arg: list[int]
+        ) -> list[SeedEntry]:
+            assert repos_arg == []
+            assert issues_arg == []
+            assert prs_arg == []
+            return []
+
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", fake_seed)
+        coordinator = Coordinator(
+            config,
+            github=gh,
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        assert coordinator.run() == 0
+        assert [item.issue for item in coordinator.items] == [1850]
+        assert all(item.kind is not ItemKind.REPO for item in coordinator.items)
 
     def test_repo_products_flow_to_finished(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -321,11 +357,11 @@ class TestRateBudget:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Low GraphQL budget: the AgentJob is timer-parked, never submitted."""
-        monkeypatch.setattr(
-            "hephaestus.automation.pipeline_github.rate_budget_ok",
-            lambda now_epoch=None: (False, 60.0),
+        coordinator, pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            rate_budget_ok=lambda: (False, 60.0),
         )
-        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch)
         coordinator.stages[StageName.PLANNING] = StubStage(
             JobRequest(_agent_job(), on_done_state="VERIFY")
         )

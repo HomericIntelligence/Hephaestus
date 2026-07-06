@@ -727,11 +727,22 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             ("--pipeline",),
             "pipeline",
             "_StoreTrueAction",
-            False,
+            SUPPRESS_DEFAULT,
             nargs=0,
             help_text=(
-                "Use the queue-based pipeline loop (default: off). "
-                "Env HEPH_PIPELINE=1 also enables it; the CLI flag wins."
+                "Use the queue-based pipeline loop (default: on). "
+                "Env HEPH_PIPELINE=0 disables it; the CLI flag wins."
+            ),
+        ),
+        _action_spec(
+            ("--legacy-loop",),
+            "pipeline",
+            "_StoreFalseAction",
+            SUPPRESS_DEFAULT,
+            nargs=0,
+            help_text=(
+                "Use the pre-pipeline legacy loop path. "
+                "Overrides HEPH_PIPELINE and is intended as a rollback hatch."
             ),
         ),
         _action_spec(

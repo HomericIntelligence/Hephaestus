@@ -1,14 +1,22 @@
 # Runbook: CI-Driver Stall (Green-but-BLOCKED PR)
 
-Use this when the CI driver keeps exiting cleanly each loop but PRs never
-merge — they sit armed for auto-merge with all checks green, yet stay
-un-mergeable. Grounded in `hephaestus/automation/ci_driver.py`.
+Use this when the CI/merge stage keeps running but PRs never merge — they sit
+armed for auto-merge with all checks green, yet stay un-mergeable. The default
+pipeline handles this in `hephaestus/automation/pipeline/stages/merge_wait.py`;
+the legacy standalone drive-green behavior is grounded in
+`hephaestus/automation/ci_driver.py`.
 
 ## Symptom
 
-- The drive-green stage exits `0` every loop, but open PRs pile up
-  un-mergeable.
-- The log shows (from `ci_driver.py`):
+- In the default pipeline, `=== Pipeline summary ===` shows the affected issue
+  cycling through or ending around `merge_wait`, `ci`, or `pr_review`, but the
+  PR remains open and armed.
+- Pipeline logs show one of the `merge_wait` routes:
+  - `merge_wait:N: PR #M still BLOCKED after address budget; regressing`
+  - `merge_wait:N: PR #M genuinely stuck after address budget; skipping`
+  - `merge_wait:N: PR #M still OPEN after ...; timing out`
+- In the legacy path, the drive-green stage exits `0`, open PRs pile up
+  un-mergeable, and the log shows (from `ci_driver.py`):
 
   > Issue #N: PR #M is BLOCKED by branch protection (unresolved conversations
   > or required review) — cannot auto-merge; leaving armed and exiting poll
@@ -19,14 +27,19 @@ un-mergeable. Grounded in `hephaestus/automation/ci_driver.py`.
 
 ## Root cause
 
-The driver treats `mergeStateStatus == "BLOCKED"` as failing-to-merge. The
-common cause is **required-context drift**: an org ruleset requires a check
-context that the repo's CI never emits, so the PR is `BLOCKED` permanently.
-A second cause is an unresolved review thread when the ruleset requires
-`required_review_thread_resolution`. The driver attempts to address
+The merge classifier treats `mergeStateStatus == "BLOCKED"` as a merge gate
+that cannot be satisfied by waiting alone. The common cause is
+**required-context drift**: an org ruleset requires a check context that the
+repo's CI never emits, so the PR is `BLOCKED` permanently. A second cause is an
+unresolved review thread when the ruleset requires
+`required_review_thread_resolution`.
+
+In the default pipeline, `merge_wait` addresses blocked threads while the
+`blocked_address` budget remains. After that budget is exhausted, genuinely
+stuck PRs receive `state:skip`; other blocked PRs regress to `pr_review` via
+`blocked_exhausted`. In the legacy path, `ci_driver.py` attempts to address
 green-but-BLOCKED PRs at most `_BLOCKED_ADDRESS_MAX_ATTEMPTS = 2` times, then
-**leaves the PR armed** and exits the poll early — it does not loop forever, so
-the loop's clean exit hides the stall.
+leaves the PR armed and exits the poll early.
 
 ## Diagnose
 
@@ -58,8 +71,8 @@ gh pr view <N> --json reviewDecision,reviewRequests
    review threads, then the armed auto-merge proceeds on its own.
 
 After the gate is satisfied, the already-armed PR merges without re-running the
-driver; re-run `hephaestus-automation-loop` only if you need to drive other
-issues.
+driver; re-run `hephaestus-automation-loop --pipeline` only if you need to
+drive other issues, continue a regressed item, or refresh the pipeline summary.
 
 ## See also
 

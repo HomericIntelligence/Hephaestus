@@ -47,6 +47,7 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
     STATE_SKIP,
+    has_label,
     is_epic,
     is_implementation_go,
 )
@@ -88,6 +89,10 @@ class IssueFacts:
             merged), None otherwise.
         pr_is_open: True iff PR exists and is open.
         pr_is_merged: True iff PR exists and is merged.
+        pr_has_implementation_go: True iff the open PR carries
+            ``state:implementation-go``.
+        pr_has_implementation_no_go: True iff the open PR carries
+            ``state:implementation-no-go``.
 
     Invariants (established by :func:`seed_issue`'s tri-state fetch):
         - Exactly one of {no live PR, open PR, merged PR} holds:
@@ -106,6 +111,8 @@ class IssueFacts:
     pr_number: int | None
     pr_is_open: bool
     pr_is_merged: bool
+    pr_has_implementation_go: bool = False
+    pr_has_implementation_no_go: bool = False
 
 
 @dataclass(frozen=True)
@@ -117,6 +124,9 @@ class SeedEntry:
         identifier: Repo name, issue number, or PR number.
         stage: Entry stage, or ``None`` when the item is excluded.
         reason: Human-readable classification reason (logged by the caller).
+        pr_number: Open PR number for directly-seeded issue entries, when one
+            exists. Repo discovery carries this in products; direct ``--issues``
+            seeding needs the same value so downstream PR stages have context.
 
     """
 
@@ -124,6 +134,7 @@ class SeedEntry:
     identifier: int | str
     stage: StageName | None
     reason: str
+    pr_number: int | None = None
 
 
 def _get_state_label(labels: set[str]) -> str | None:
@@ -217,7 +228,13 @@ def classify_issue(facts: IssueFacts) -> Classification:
 
     # Routing logic: open PR path
     if facts.pr_is_open:
-        # Open PR + implementation-go → ready for CI
+        # Open PR + PR-level implementation-go → ready for CI. The
+        # issue-label fallback preserves compatibility with pre-PR-label
+        # snapshots while PR-level no-go remains authoritative.
+        if facts.pr_has_implementation_go:
+            return StageName.CI, f"#{facts.number} open PR with {STATE_IMPLEMENTATION_GO}"
+        if facts.pr_has_implementation_no_go:
+            return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"
         if _label_at_or_past(state_label, STATE_IMPLEMENTATION_GO):
             return StageName.CI, f"#{facts.number} open PR with {STATE_IMPLEMENTATION_GO}"
         # Open PR, no implementation-go → awaiting PR review
@@ -271,9 +288,14 @@ def seed_issue(issue_number: int) -> IssueFacts:
     # neither lookup (normalized to "no live PR"). No try/except: fail-closed.
     pr_is_open = False
     pr_is_merged = False
+    pr_has_implementation_go = False
+    pr_has_implementation_no_go = False
     pr_number: int | None = find_pr_for_issue(issue_number)
     if pr_number is not None:
         pr_is_open = True
+        pr_labels = gh_pr_label_names(pr_number)
+        pr_has_implementation_go = is_implementation_go(pr_labels)
+        pr_has_implementation_no_go = has_label(pr_labels, STATE_IMPLEMENTATION_NO_GO)
     else:
         pr_number = find_merged_pr_for_issue(issue_number)
         if pr_number is not None:
@@ -287,6 +309,8 @@ def seed_issue(issue_number: int) -> IssueFacts:
         pr_number=pr_number,
         pr_is_open=pr_is_open,
         pr_is_merged=pr_is_merged,
+        pr_has_implementation_go=pr_has_implementation_go,
+        pr_has_implementation_no_go=pr_has_implementation_no_go,
     )
 
 
@@ -304,9 +328,14 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
 
     pr_is_open = False
     pr_is_merged = False
+    pr_has_implementation_go = False
+    pr_has_implementation_no_go = False
     pr_number: int | None = github.find_pr_for_issue(issue_number)
     if pr_number is not None:
         pr_is_open = True
+        pr_has_implementation_go, pr_has_implementation_no_go = (
+            github.pr_has_implementation_state_label(pr_number)
+        )
     else:
         pr_number = github.find_merged_pr_for_issue(issue_number)
         if pr_number is not None:
@@ -320,6 +349,8 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
         pr_number=pr_number,
         pr_is_open=pr_is_open,
         pr_is_merged=pr_is_merged,
+        pr_has_implementation_go=pr_has_implementation_go,
+        pr_has_implementation_no_go=pr_has_implementation_no_go,
     )
 
 
@@ -356,8 +387,17 @@ def seed_from_cli(
         for repo in repos
     ]
     for issue in issues:
-        stage, reason = classify_issue(seed_issue(issue))
-        entries.append(SeedEntry(kind="issue", identifier=issue, stage=stage, reason=reason))
+        facts = seed_issue(issue)
+        stage, reason = classify_issue(facts)
+        entries.append(
+            SeedEntry(
+                kind="issue",
+                identifier=issue,
+                stage=stage,
+                reason=reason,
+                pr_number=facts.pr_number if facts.pr_is_open else None,
+            )
+        )
     for pr in prs:
         labels = gh_pr_label_names(pr)
         if is_implementation_go(labels):

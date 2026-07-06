@@ -64,7 +64,10 @@ def test_main_health_check_returns_zero(
 
     monkeypatch.setattr(sys, "argv", ["impl", "--health-check", "--no-ui", "--agent", "claude"])
 
-    with patch.object(implementer, "get_repo_root", return_value=tmp_path):
+    with (
+        patch.object(implementer, "get_repo_root", return_value=tmp_path),
+        patch("hephaestus.github.client.gh_call", side_effect=OSError("missing gh")),
+    ):
         rc = implementer.main()
 
     assert rc == 0

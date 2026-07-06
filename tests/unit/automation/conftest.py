@@ -22,16 +22,21 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.github import client as github_client
 from hephaestus.resilience.circuit_breaker import reset_all_circuit_breakers
 
 
 @pytest.fixture(autouse=True)
-def _reset_circuit_breakers_for_automation_tests() -> None:
+def _reset_circuit_breakers_for_automation_tests() -> Generator[None, None, None]:
     """Reset all circuit breakers before each automation test.
 
     Prevents cross-test contamination when a prior test trips a breaker via
     rate-limit retries.
     """
+    github_client._GH_BREAKER.reset()
+    reset_all_circuit_breakers()
+    yield
+    github_client._GH_BREAKER.reset()
     reset_all_circuit_breakers()
 
 

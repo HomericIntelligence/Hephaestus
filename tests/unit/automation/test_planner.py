@@ -533,14 +533,17 @@ class TestGeneratePlan:
 class TestEnsureMnemosyne:
     """Tests for _ensure_mnemosyne method."""
 
-    def test_clone_success(self, planner: Any, tmp_path: Any) -> None:
-        """Test successful clone returns True and clones the resolved slug."""
-        mnemosyne_root = tmp_path / "ProjectMnemosyne"
-        target = MnemosyneTarget(
+    def _target(self) -> MnemosyneTarget:
+        return MnemosyneTarget(
             owner="HomericIntelligence",
             slug="HomericIntelligence/ProjectMnemosyne",
             is_fork_of_upstream=False,
         )
+
+    def test_clone_success(self, planner: Any, tmp_path: Any) -> None:
+        """Test successful clone returns True and clones the resolved slug."""
+        mnemosyne_root = tmp_path / "ProjectMnemosyne"
+        target = self._target()
 
         with (
             patch("hephaestus.automation.advise_runner.gh_call") as mock_gh,
@@ -565,7 +568,13 @@ class TestEnsureMnemosyne:
         """Test clone failure returns False and logs warning."""
         mnemosyne_root = tmp_path / "ProjectMnemosyne"
 
-        with patch("hephaestus.automation.advise_runner.gh_call") as mock_gh:
+        with (
+            patch("hephaestus.automation.advise_runner.gh_call") as mock_gh,
+            patch(
+                "hephaestus.automation.advise_runner.resolve_mnemosyne_target",
+                return_value=self._target(),
+            ),
+        ):
             mock_gh.side_effect = subprocess.CalledProcessError(
                 1, "gh", stderr="authentication failed"
             )
@@ -606,7 +615,13 @@ class TestEnsureMnemosyne:
         mnemosyne_root = tmp_path / "ProjectMnemosyne"
         lock_path = tmp_path / ".mnemosyne.lock"
 
-        with patch("hephaestus.automation.advise_runner.gh_call") as mock_gh:
+        with (
+            patch("hephaestus.automation.advise_runner.gh_call") as mock_gh,
+            patch(
+                "hephaestus.automation.advise_runner.resolve_mnemosyne_target",
+                return_value=self._target(),
+            ),
+        ):
             mock_gh.return_value = MagicMock(returncode=0)
 
             result = planner._ensure_mnemosyne(mnemosyne_root)
@@ -696,6 +711,10 @@ class TestEnsureMnemosyne:
         with (
             patch("subprocess.run", side_effect=fake_subprocess),
             patch("hephaestus.automation.advise_runner.gh_call", side_effect=fake_gh_call),
+            patch(
+                "hephaestus.automation.advise_runner.resolve_mnemosyne_target",
+                return_value=self._target(),
+            ),
         ):
             t1.start()
             t2.start()
@@ -710,7 +729,13 @@ class TestEnsureMnemosyne:
         """TimeoutExpired on gh repo clone must return False without raising (#368)."""
         mnemosyne_root = tmp_path / "ProjectMnemosyne"
 
-        with patch("hephaestus.automation.advise_runner.gh_call") as mock_gh:
+        with (
+            patch("hephaestus.automation.advise_runner.gh_call") as mock_gh,
+            patch(
+                "hephaestus.automation.advise_runner.resolve_mnemosyne_target",
+                return_value=self._target(),
+            ),
+        ):
             mock_gh.side_effect = subprocess.TimeoutExpired("gh", 120)
 
             result = planner._ensure_mnemosyne(mnemosyne_root)
@@ -725,7 +750,13 @@ class TestEnsureMnemosyne:
         """
         mnemosyne_root = tmp_path / "ProjectMnemosyne"
 
-        with patch("hephaestus.automation.advise_runner.gh_call") as mock_gh:
+        with (
+            patch("hephaestus.automation.advise_runner.gh_call") as mock_gh,
+            patch(
+                "hephaestus.automation.advise_runner.resolve_mnemosyne_target",
+                return_value=self._target(),
+            ),
+        ):
             mock_gh.return_value = MagicMock(returncode=0)
 
             planner._ensure_mnemosyne(mnemosyne_root)
