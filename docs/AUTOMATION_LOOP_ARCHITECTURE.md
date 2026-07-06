@@ -404,7 +404,7 @@ semantics.
 |---|---|---|
 | state:skip or epic | excluded | Epic tagging is the one seeding write; done BEFORE excluding. |
 | PR merged | finished | pass, idempotent. |
-| Open PR + state:implementation-go | ci | existing-PR advanced to merge-ready. |
+| Open PR + PR carries state:implementation-go | ci | existing-PR advanced to merge-ready. |
 | Open PR, no impl-go | pr_review | existing-PR path; will be reviewed. |
 | No PR, at-or-past state:plan-go | implementation | plan approved; ready to implement. |
 | No PR, state:plan-no-go | planning | plan rejected; amend with feedback. |

@@ -383,6 +383,28 @@ class TestSeedingEdges:
         item = coordinator.queues[StageName.CI].snapshot()[0]
         assert item.kind is ItemKind.PR and item.pr == 88 and item.repo == "repo-a"
 
+    def test_issue_entry_with_pr_preserves_pr_number(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Direct --issues entries with open PRs must enter PR stages with item.pr set."""
+        seed = [
+            SeedEntry(
+                kind="issue",
+                identifier=1818,
+                stage=StageName.PR_REVIEW,
+                reason="open PR awaiting review",
+                pr_number=1854,
+            )
+        ]
+        coordinator = _coordinator(tmp_path, monkeypatch, seed=seed)
+
+        coordinator._seed_pass()
+
+        item = coordinator.queues[StageName.PR_REVIEW].snapshot()[0]
+        assert item.kind is ItemKind.ISSUE
+        assert item.issue == 1818
+        assert item.pr == 1854
+
     def test_repo_product_finished_entry_gets_pass_result(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

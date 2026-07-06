@@ -43,6 +43,8 @@ def _facts(
     pr_number: int | None = None,
     pr_is_open: bool = False,
     pr_is_merged: bool = False,
+    pr_has_implementation_go: bool = False,
+    pr_has_implementation_no_go: bool = False,
 ) -> IssueFacts:
     """Build IssueFacts with defaults for classifier-matrix tests."""
     return IssueFacts(
@@ -53,6 +55,8 @@ def _facts(
         pr_number=pr_number,
         pr_is_open=pr_is_open,
         pr_is_merged=pr_is_merged,
+        pr_has_implementation_go=pr_has_implementation_go,
+        pr_has_implementation_no_go=pr_has_implementation_no_go,
     )
 
 
@@ -104,6 +108,19 @@ class TestClassifyIssue:
         """Open PR + state:implementation-go → ready for CI."""
         stage, reason = classify_issue(
             _facts(labels={STATE_IMPLEMENTATION_GO}, pr_number=42, pr_is_open=True)
+        )
+        assert stage is StageName.CI
+        assert "implementation-go" in reason
+
+    def test_open_pr_with_pr_impl_go_routes_to_ci(self) -> None:
+        """Open PR + PR-level state:implementation-go → ready for CI."""
+        stage, reason = classify_issue(
+            _facts(
+                labels={STATE_PLAN_GO},
+                pr_number=42,
+                pr_is_open=True,
+                pr_has_implementation_go=True,
+            )
         )
         assert stage is StageName.CI
         assert "implementation-go" in reason
@@ -241,7 +258,14 @@ def _issue_info(number: int, labels: list[str], title: str = "A task") -> MagicM
 class TestSeedIssueFetchLayer:
     """Tri-state fetch: {open, merged, closed, none} against mocked gh responses."""
 
-    def _seed(self, issue: int, labels: list[str], prs: list[dict[str, Any]]) -> IssueFacts:
+    def _seed(
+        self,
+        issue: int,
+        labels: list[str],
+        prs: list[dict[str, Any]],
+        *,
+        pr_labels: list[str] | None = None,
+    ) -> IssueFacts:
         with (
             patch(
                 "hephaestus.automation.pipeline.seeding.fetch_issue_info",
@@ -250,6 +274,10 @@ class TestSeedIssueFetchLayer:
             patch(
                 "hephaestus.automation._review_utils._gh_call",
                 side_effect=_fake_gh_backend(prs),
+            ),
+            patch(
+                "hephaestus.automation.pipeline.seeding.gh_pr_label_names",
+                return_value=pr_labels or [],
             ),
         ):
             return seed_issue(issue)
@@ -264,6 +292,19 @@ class TestSeedIssueFetchLayer:
         assert facts.pr_number == 42
         assert facts.pr_is_open is True
         assert facts.pr_is_merged is False
+
+    def test_open_pr_reads_implementation_state_labels(self) -> None:
+        """An OPEN PR carrying implementation-go records the PR-level GO fact."""
+        facts = self._seed(
+            7,
+            [STATE_PLAN_GO],
+            [{"number": 42, "state": "OPEN", "headRefName": "7-auto-impl", "body": "Closes #7"}],
+            pr_labels=[STATE_IMPLEMENTATION_GO],
+        )
+        assert facts.pr_has_implementation_go is True
+        assert facts.pr_has_implementation_no_go is False
+        stage, _ = classify_issue(facts)
+        assert stage is StageName.CI
 
     def test_merged_pr_found_when_open_lookup_misses(self) -> None:
         """A MERGED PR is surfaced by the merged lookup → pr_is_merged (finished row)."""
@@ -433,6 +474,28 @@ class TestSeedFromCli:
                 identifier=9,
                 stage=StageName.IMPLEMENTATION,
                 reason=f"#9 at-or-past {STATE_PLAN_GO}, no PR yet",
+            )
+        ]
+
+    def test_issues_arm_open_pr_preserves_pr_number(self) -> None:
+        """Direct --issues seeding must keep the open PR number for PR stages."""
+        facts = _facts(
+            number=9,
+            labels={STATE_PLAN_GO},
+            pr_number=77,
+            pr_is_open=True,
+            pr_has_implementation_go=True,
+        )
+        with patch("hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts):
+            entries = seed_from_cli([], [9], [])
+
+        assert entries == [
+            SeedEntry(
+                kind="issue",
+                identifier=9,
+                stage=StageName.CI,
+                reason=f"#9 open PR with {STATE_IMPLEMENTATION_GO}",
+                pr_number=77,
             )
         ]
 

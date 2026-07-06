@@ -917,6 +917,7 @@ class Coordinator:
                 repo=default_repo,
                 kind=ItemKind.ISSUE,
                 issue=int(entry.identifier),
+                pr=entry.pr_number,
                 stage=entry.stage,
             )
         item.state = "ENTER"
