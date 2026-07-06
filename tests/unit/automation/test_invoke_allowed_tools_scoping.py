@@ -21,7 +21,11 @@ CALL_SITES = [
     # planning agent calls now go through the pipeline stages'
     # ``AgentJob``/worker pool, not a direct ``invoke_claude_with_session``
     # call site, so it is no longer scanned here.
-    ("ci_driver.py", {"Read", "Glob", "Grep", "Bash"}, True),
+    # ci_driver.py was re-pointed at the queue-based pipeline (#1822): its
+    # CI-fix / drive-green agent calls now go through the pipeline stages'
+    # ``AgentJob``/worker pool (``pipeline/stages/ci.py`` + ``merge_wait.py``),
+    # not a direct ``invoke_claude_with_session`` call site, so it is no longer
+    # scanned here.
     # implementer.py was re-pointed at the queue-based pipeline (#1821): its
     # implementation agent calls now go through the pipeline stages'
     # ``AgentJob``/worker pool (the legacy per-issue phase runner was deleted),

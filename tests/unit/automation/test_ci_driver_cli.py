@@ -52,6 +52,26 @@ def test_parse_args_accepts_max_fix_iterations(monkeypatch: pytest.MonkeyPatch) 
     assert ci_driver._parse_args().max_fix_iterations == 1
 
 
+def test_prs_parses_integers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--prs accepts PR numbers as integers (#918)."""
+    monkeypatch.setattr(sys, "argv", ["ci", "--prs", "661", "662", "664", "666"])
+    assert ci_driver._parse_args().prs == [661, 662, 664, 666]
+
+
+def test_prs_defaults_to_empty_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--prs defaults to empty list when omitted."""
+    monkeypatch.setattr(sys, "argv", ["ci"])
+    assert ci_driver._parse_args().prs == []
+
+
+def test_prs_combined_with_issues(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--prs and --issues can be used together."""
+    monkeypatch.setattr(sys, "argv", ["ci", "--issues", "918", "--prs", "661", "662"])
+    args = ci_driver._parse_args()
+    assert args.issues == [918]
+    assert args.prs == [661, 662]
+
+
 def test_parse_args_issues_flag_without_values_exits_2(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

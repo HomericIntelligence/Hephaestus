@@ -423,7 +423,9 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
                 "etc.) into the work set. By default the driver unions every open "
                 "is_bot=true PR with the issue-driven list so Dependabot PRs are not "
                 "architecturally invisible (#848). Pass this flag only when you explicitly "
-                "want issue-driven scope."
+                "want issue-driven scope. (NOT yet honored under the pipeline "
+                "drive-green-all sweep, which currently discovers every open PR regardless "
+                "of author; tracked in a follow-up.)"
             ),
         ),
         _store_true(
@@ -432,7 +434,9 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "Include PRs opened by other actors (teammates, bots). Without this flag, "
             "only PRs authored by the authenticated viewer (`gh api user`) are driven "
             "(#821). NOTE: when scoped to issues (--issues N), the resolved PR is processed "
-            "regardless of author — issue-scoped takes precedence.",
+            "regardless of author — issue-scoped takes precedence. (The author filter is "
+            "NOT yet honored under the pipeline drive-green-all sweep, which currently "
+            "discovers every open PR regardless of author; tracked in a follow-up.)",
         ),
         _action_spec(
             ("--no-mechanical-rebase",),

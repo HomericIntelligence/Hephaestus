@@ -248,8 +248,10 @@ ADVISE_FIRST_STAGES_ADVISE_AGENT: list[tuple[str, tuple[str, ...]]] = [
     # ``pipeline/stages/planning.py`` runs advise under AGENT_ADVISE gated by
     # ``enable_advise`` (asserted by test_stage_planning.py), so the legacy
     # ``planner.py`` row was dropped.
-    # Stage 3: the CI driver runs advise before the fix loop.
-    ("ci_driver.py", ()),
+    # Stage 3's advise step moved into the pipeline CI stage (#1822):
+    # ``pipeline/stages/ci.py`` seeds ``advise_findings`` (coordinator-owned,
+    # gated by ``enable_advise`` — asserted by test_stage_ci.py), so the legacy
+    # ``ci_driver.py`` row was dropped.
 ]
 
 

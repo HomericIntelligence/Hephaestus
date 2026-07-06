@@ -17,7 +17,10 @@ class ClassBudget:
 
 
 _BUDGETS = {
-    "hephaestus.automation.ci_driver.CIDriver": ClassBudget(240, 4, 120),
+    # Slimmed to an importable placeholder (#1822): the drive-green
+    # orchestration now lives in pipeline/stages/ci.py + merge_wait.py, driven
+    # by run_pipeline. The class body is docstring-only, no methods.
+    "hephaestus.automation.ci_driver.CIDriver": ClassBudget(20, 0, 0),
     "hephaestus.automation.ci_run_coordinator.CIDriveRunCoordinator": ClassBudget(360, 8, 80),
     "hephaestus.automation.ci_fix_flow.CIFixFlow": ClassBudget(260, 5, 80),
     "hephaestus.automation.auto_merge_coordinator.AutoMergeCoordinator": ClassBudget(320, 7, 80),

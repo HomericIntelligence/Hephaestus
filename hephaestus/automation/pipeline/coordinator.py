@@ -180,6 +180,14 @@ class PipelineConfig:
     no_advise: bool = False
     nitpick: bool = False
     drive_green_all: bool = False
+    # When False, the CI stage's pre-fix mechanical rebase is skipped and every
+    # behind/conflicting PR falls through to the fix agent (``--no-mechanical-rebase``).
+    # Read by ``stages/ci.py`` via ``ctx.config.enable_mechanical_rebase``.
+    enable_mechanical_rebase: bool = True
+    # Per-budget overrides applied on top of the ROUTES defaults by the
+    # coordinator's budget accessor. ``--max-fix-iterations N`` maps to
+    # ``{"ci_fix": N}`` so the CI-fix attempt budget is caller-tunable.
+    budget_overrides: dict[str, int] = field(default_factory=dict)
     projects_dir: Path = field(default_factory=lambda: Path.home() / "Projects")
     json_out: bool = False
     # Optional contiguous stage subset. When set, the coordinator routes items
@@ -211,6 +219,7 @@ class _StageRunConfig:
     dry_run: bool = False
     nitpick: bool = False
     drive_green_all: bool = False
+    enable_mechanical_rebase: bool = True
 
 
 @dataclass
@@ -320,6 +329,7 @@ class Coordinator:
             dry_run=config.dry_run,
             nitpick=config.nitpick,
             drive_green_all=config.drive_green_all,
+            enable_mechanical_rebase=config.enable_mechanical_rebase,
         )
         self._ctx_cache: dict[str, StageContext] = {}
 
@@ -357,7 +367,7 @@ class Coordinator:
                     worktree=root,
                     projects_dir=Path(self.config.projects_dir),
                 ),
-                budget_fn=_budget_lookup,
+                budget_fn=self._budget_for,
             )
             self._ctx_cache[repo] = ctx
         return ctx
@@ -365,6 +375,18 @@ class Coordinator:
     def _ctx_for(self, item: WorkItem) -> StageContext:
         """Return the (cached, per-repo) StageContext for *item*."""
         return self._ctx_for_repo(item.repo)
+
+    def _budget_for(self, name: str) -> int:
+        """Config-aware budget accessor injected as ``StageContext.budget_fn``.
+
+        A ``config.budget_overrides`` entry (e.g. ``--max-fix-iterations N`` ->
+        ``{"ci_fix": N}``) takes precedence over the ROUTES default, so a caller
+        can tune a stage's per-item budget without editing the routing table.
+        """
+        override = self.config.budget_overrides.get(name)
+        if override is not None:
+            return override
+        return _budget_lookup(name)
 
     # -- run loop ---------------------------------------------------------------
 
