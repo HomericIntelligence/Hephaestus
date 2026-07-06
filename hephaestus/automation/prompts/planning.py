@@ -63,7 +63,14 @@ you know the line.</files_to_modify>
 <implementation_order>A numbered sequence of concrete steps.</implementation_order>
 <verification>One runnable command per acceptance criterion in the issue, each
 labelled with the criterion it proves. Use the repo's real runner
-(e.g. `pixi run pytest <path>`).</verification>
+(e.g. `pixi run pytest <path>`). RUNNABLE-EVIDENCE RULE (ADR-014): if a
+criterion's honest verification requires a run longer than the session/timeout
+budget (e.g. a full training epoch), the plan authors the *command* but MUST
+NOT make the run's measured *result* (an accuracy/loss/metric number) a
+deliverable of this task. Split the measured result into a separate, gated
+evidence-collection step whose only acceptable input is verbatim output from a
+run the agent does not author. Never plan to hand-write or commit a log/metric
+file as evidence.</verification>
 <skills_used>Skills you invoked during planning AND any team knowledge-base
 skills from the Prior Learnings section above.</skills_used>
 <changes_from_review>ONLY when a prior `## 🔍 Plan Review` is in your context

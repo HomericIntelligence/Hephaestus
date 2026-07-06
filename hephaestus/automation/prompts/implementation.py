@@ -58,6 +58,19 @@ Implement GitHub issue #{issue_number}.
 5. Ensure all tests pass before finishing
 6. Follow the code quality guidelines in CLAUDE.md
 
+**Evidence Integrity (MANDATORY — ADR-014):**
+- NEVER hand-write, edit, or commit a log, metric, accuracy, loss, benchmark,
+  or training-run output to represent a run that did not actually execute.
+  Plausible invented numbers are the failure, not a shortcut.
+- A file you commit (e.g. `validation/epoch1.log`, a results table, a metrics
+  JSON) is NOT evidence — the reviewer treats it as unproven.
+- If honest verification of a criterion requires a run longer than your
+  session/timeout budget (e.g. a full training epoch), DO NOT report its result
+  as done. Deliver the code and the runnable command, and state plainly in your
+  summary that the measured result is deferred to a separate evidence step.
+- When blocked from obtaining a measurement, say so — what you tried and why it
+  did not finish. A truthful failure is acceptable; an invented success is not.
+
 **Testing:**
 - Write unit tests for new functionality
 - Ensure existing tests still pass
