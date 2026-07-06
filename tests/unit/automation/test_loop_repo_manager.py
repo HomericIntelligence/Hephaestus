@@ -352,3 +352,122 @@ class TestSortReposByOpenCount:
         with patch.object(loop_repo_manager, "_count_open_issues", side_effect=fake_count):
             result = _sort_repos_by_open_count("MyOrg", ["alpha", "beta", "gamma"])
         assert result == ["alpha", "beta", "gamma"]
+
+
+class TestCountFailingPrs:
+    """Tests for _count_failing_prs gate function.
+
+    Re-homed from the deleted test_drive_green_pr_discovery.py: _count_failing_prs
+    lives in loop_repo_manager, so its coverage belongs here rather than behind a
+    loop_runner re-export that no longer exists.
+    """
+
+    def test_count_failing_prs_counts_only_failing_conclusions(self) -> None:
+        """PRs with failing conclusions are counted."""
+        import json
+
+        from hephaestus.automation.loop_repo_manager import _count_failing_prs
+
+        mock_output = [
+            {
+                "number": 1,
+                "isDraft": False,
+                "statusCheckRollup": [{"conclusion": "FAILURE"}],
+                "mergeStateStatus": "CLEAN",
+            },
+            {
+                "number": 2,
+                "isDraft": False,
+                "statusCheckRollup": [{"conclusion": "SUCCESS"}],
+                "mergeStateStatus": "CLEAN",
+            },
+            {
+                "number": 3,
+                "isDraft": False,
+                "statusCheckRollup": [{"conclusion": "CANCELLED"}],
+                "mergeStateStatus": "CLEAN",
+            },
+        ]
+        with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh:
+            mock_gh.return_value = MagicMock(stdout=json.dumps(mock_output))
+            result = _count_failing_prs("MyOrg", "MyRepo")
+        assert result == 2
+
+    def test_count_failing_prs_excludes_draft_prs(self) -> None:
+        """Draft PRs are excluded from the count."""
+        import json
+
+        from hephaestus.automation.loop_repo_manager import _count_failing_prs
+
+        mock_output = [
+            {
+                "number": 1,
+                "isDraft": True,
+                "statusCheckRollup": [{"conclusion": "FAILURE"}],
+                "mergeStateStatus": "CLEAN",
+            },
+        ]
+        with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh:
+            mock_gh.return_value = MagicMock(stdout=json.dumps(mock_output))
+            result = _count_failing_prs("MyOrg", "MyRepo")
+        assert result == 0
+
+    def test_count_failing_prs_returns_zero_on_gh_error(self) -> None:
+        """Returns 0 on gh command failure (fail-closed)."""
+        from hephaestus.automation.loop_repo_manager import _count_failing_prs
+
+        with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh:
+            mock_gh.side_effect = subprocess.CalledProcessError(1, ["gh"])
+            result = _count_failing_prs("MyOrg", "MyRepo")
+        assert result == 0
+
+    def test_count_failing_prs_returns_zero_on_timeout(self) -> None:
+        """Returns 0 on timeout (fail-closed)."""
+        from hephaestus.automation.loop_repo_manager import _count_failing_prs
+
+        with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh:
+            mock_gh.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=30)
+            result = _count_failing_prs("MyOrg", "MyRepo")
+        assert result == 0
+
+    def test_count_failing_prs_returns_zero_on_invalid_json(self) -> None:
+        """Returns 0 on invalid JSON (fail-closed)."""
+        from hephaestus.automation.loop_repo_manager import _count_failing_prs
+
+        with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh:
+            mock_gh.return_value = MagicMock(stdout="not-json")
+            result = _count_failing_prs("MyOrg", "MyRepo")
+        assert result == 0
+
+    def test_count_failing_prs_uses_network_timeout(self) -> None:
+        """PR discovery gh call uses the shared network timeout."""
+        from hephaestus.automation.loop_repo_manager import _count_failing_prs
+        from hephaestus.utils.helpers import NETWORK_TIMEOUT
+
+        with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh:
+            mock_gh.return_value = MagicMock(stdout="[]")
+            _count_failing_prs("MyOrg", "MyRepo")
+
+        assert mock_gh.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
+
+    def test_count_failing_prs_logs_warning_on_limit_hit(self) -> None:
+        """A warning is logged when the 1000-PR cap is hit."""
+        import json
+
+        from hephaestus.automation.loop_repo_manager import _count_failing_prs
+
+        mock_output = [
+            {
+                "number": i,
+                "isDraft": False,
+                "statusCheckRollup": [{"conclusion": "FAILURE"}],
+                "mergeStateStatus": "CLEAN",
+            }
+            for i in range(1, 1001)
+        ]
+        with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh:
+            mock_gh.return_value = MagicMock(stdout=json.dumps(mock_output))
+            with patch("hephaestus.automation.loop_repo_manager.LOG") as mock_logger:
+                result = _count_failing_prs("MyOrg", "MyRepo")
+        assert result == 1000
+        mock_logger.warning.assert_called()

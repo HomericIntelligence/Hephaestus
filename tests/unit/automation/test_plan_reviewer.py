@@ -802,3 +802,149 @@ class TestMain:
         monkeypatch.setattr(plan_reviewer.PlanReviewer, "run", fake_run)
         assert plan_reviewer.main() == 0
         assert seen_issues == [[5]]
+
+
+class TestPlanReviewerAlreadyReviewedFlag:
+    """Tests for WorkerResult.already_reviewed flag (#613).
+
+    Re-homed from the deleted test_loop_runner_early_exit.py. ``already_reviewed``
+    is the per-issue convergence signal: a short-circuited review (latest verdict
+    already GO, or no plan to review) sets it True so it does NOT count as work,
+    while an actual review pass leaves it False. ``plan_reviewer.main`` sums the
+    False-and-successful results into the work report.
+    """
+
+    def _reviewer(self) -> PlanReviewer:
+        return PlanReviewer(
+            PlanReviewerOptions(issues=[123], dry_run=False, max_workers=1, enable_ui=False)
+        )
+
+    def test_skip_already_approved_sets_flag(self) -> None:
+        """A latest-GO plan short-circuits with success=True, already_reviewed=True."""
+        reviewer = self._reviewer()
+        with patch.object(reviewer, "_latest_review_is_final", return_value=True):
+            result = reviewer._review_issue(123, slot_id=0)
+
+        assert result.success is True
+        assert result.already_reviewed is True
+
+    def test_skip_no_plan_sets_flag(self) -> None:
+        """No plan comment short-circuits with success=True, already_reviewed=True."""
+        reviewer = self._reviewer()
+        with (
+            patch.object(reviewer, "_latest_review_is_final", return_value=False),
+            patch.object(reviewer, "_get_latest_plan", return_value=None),
+        ):
+            result = reviewer._review_issue(123, slot_id=0)
+
+        assert result.success is True
+        assert result.already_reviewed is True
+
+    def test_review_attempt_unsets_flag(self) -> None:
+        """A real review pass leaves already_reviewed=False."""
+        reviewer = self._reviewer()
+        with (
+            patch.object(reviewer, "_latest_review_is_final", return_value=False),
+            patch.object(reviewer, "_get_latest_plan", return_value="# Implementation Plan\nDo it"),
+            patch(
+                "hephaestus.automation.plan_reviewer.gh_issue_json",
+                return_value={"title": "T", "body": "B"},
+            ),
+            patch.object(reviewer, "_run_claude_analysis", return_value="Looks good\nVerdict: GO"),
+            patch.object(reviewer, "_post_review") as mock_post,
+        ):
+            result = reviewer._review_issue(123, slot_id=0)
+
+        assert result.success is True
+        assert result.already_reviewed is False
+        mock_post.assert_called_once()
+
+    def test_plan_reviewer_main_writes_correct_work_count(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """main() reports only successful, non-skipped reviews as work units."""
+        from hephaestus.automation import plan_reviewer as plan_reviewer_mod
+        from hephaestus.automation.models import WorkerResult
+
+        # Two genuine reviews, one short-circuited skip, one failure → work=2.
+        results = {
+            1: WorkerResult(issue_number=1, success=True, already_reviewed=False),
+            2: WorkerResult(issue_number=2, success=True, already_reviewed=False),
+            3: WorkerResult(issue_number=3, success=True, already_reviewed=True),
+            4: WorkerResult(issue_number=4, success=False, already_reviewed=False),
+        }
+        mock_reviewer = MagicMock()
+        mock_reviewer.run.return_value = results
+        report = tmp_path / "report.txt"
+
+        monkeypatch.setenv("HEPH_WORK_REPORT", str(report))
+        monkeypatch.setattr(
+            "sys.argv",
+            ["plan-reviewer", "--issues", "1", "2", "3", "4", "--agent", "claude"],
+        )
+        with patch.object(plan_reviewer_mod, "PlanReviewer", return_value=mock_reviewer):
+            rc = plan_reviewer_mod.main()
+
+        # issue 4 failed → rc=1, but the work report still reflects the 2 real reviews.
+        assert rc == 1
+        assert report.read_text(encoding="utf-8") == "2"
+
+
+class TestPlannerMainWorkReport:
+    """Tests for planner.main() work reporting (#613).
+
+    Re-homed from the deleted test_loop_runner_early_exit.py. The planner's
+    convergence signal is the count of NEW plans:
+    ``max(0, successful - already_planned)``. A pass that only re-confirms
+    existing plans reports zero work, which lets the loop converge.
+    """
+
+    def test_planner_writes_new_plans_count(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """main() writes (successful - already_planned) new plans to the report."""
+        from hephaestus.automation import planner as planner_mod
+        from hephaestus.automation.models import PlanResult
+
+        # 3 successes, 1 of which already had a plan → 2 new plans.
+        results = {
+            10: PlanResult(issue_number=10, success=True, plan_already_exists=False),
+            11: PlanResult(issue_number=11, success=True, plan_already_exists=False),
+            12: PlanResult(issue_number=12, success=True, plan_already_exists=True),
+        }
+        mock_planner = MagicMock()
+        mock_planner.run.return_value = results
+        report = tmp_path / "report.txt"
+
+        monkeypatch.setenv("HEPH_WORK_REPORT", str(report))
+        monkeypatch.setattr(
+            "sys.argv", ["planner", "--issues", "10", "11", "12", "--agent", "claude"]
+        )
+        with patch.object(planner_mod, "Planner", return_value=mock_planner):
+            rc = planner_mod.main()
+
+        assert rc == 0
+        assert report.read_text(encoding="utf-8") == "2"
+
+    def test_planner_reports_zero_when_all_plans_exist(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pass that only re-confirms existing plans reports zero work units."""
+        from hephaestus.automation import planner as planner_mod
+        from hephaestus.automation.models import PlanResult
+
+        results = {
+            10: PlanResult(issue_number=10, success=True, plan_already_exists=True),
+            11: PlanResult(issue_number=11, success=True, plan_already_exists=True),
+        }
+        mock_planner = MagicMock()
+        mock_planner.run.return_value = results
+        report = tmp_path / "report.txt"
+
+        monkeypatch.setenv("HEPH_WORK_REPORT", str(report))
+        monkeypatch.setattr("sys.argv", ["planner", "--issues", "10", "11", "--agent", "claude"])
+        with patch.object(planner_mod, "Planner", return_value=mock_planner):
+            rc = planner_mod.main()
+
+        assert rc == 0
+        assert report.read_text(encoding="utf-8") == "0"

@@ -1,59 +1,38 @@
-"""Multi-repo automation loop CLI.
+"""Multi-repo automation loop CLI — a thin wrapper over the queue pipeline.
 
-By default, :func:`main` dispatches to the queue-based in-process pipeline in
-``hephaestus.automation.pipeline.coordinator``. The legacy issue-major
-subprocess loop remains in this module as the rollback path selected by
-``--legacy-loop`` or ``HEPH_PIPELINE=0`` until the cleanup wave removes it.
+This module is the ``hephaestus-automation-loop`` console-script entry point.
+It has three responsibilities and nothing more:
 
-The legacy path replaced ``scripts/run_automation_loop.sh``. It iterates over
-all non-archived HomericIntelligence repos. Within each repo, work is
-ISSUE-MAJOR (#1560): each open issue is carried through the FULL selected phase
-sequence (``plan`` → ``implement`` → ``drive-green``) end to end by a single
-worker before that worker takes the next issue. Up to ``--max-workers`` issues
-are in flight at once.
+1. **CLI parsing** — build the argparse parser (flag-compatible with the
+   historical bash script so operator muscle memory and pinned callers keep
+   working) and validate the selected phases.
+2. **Scope + config construction** — resolve the ``(org, repos)`` scope from
+   ``--org`` / ``--repos`` / cwd detection, then translate the parsed args and
+   the derived :class:`LoopConfig` into a
+   :class:`~hephaestus.automation.pipeline.coordinator.PipelineConfig`.
+3. **Dispatch** — run a repo-token preflight and hand off to
+   :func:`hephaestus.automation.pipeline.coordinator.run_pipeline`.
 
-``drive-green`` is the BLOCKING per-worker phase: scoped to one issue's PR it
-waits for the PR to MERGE (driving CI green, bounded by
-``--max-merge-attempts``); if the PR does not merge within that budget and is
-genuinely stuck, the issue is tagged ``state:skip`` and the worker frees its
-slot for a human/another agent. Because each worker drives only its current
-issue, sibling workers never touch each other's PR worktrees. After all
-workers finish, one final repo-level drive-green catch-up sweep handles PRs
-left behind by transient or cross-issue ordering effects.
+All execution — repo cloning, issue seeding, admission control, and the
+plan → implement → review → drive-green → merge-wait stage graph — lives in the
+:mod:`hephaestus.automation.pipeline` package. This module owns no loop body,
+no per-phase subprocess machinery, and no post-loop stage sequencing; the
+legacy subprocess-per-phase path (the pre-pipeline rollback story) was removed
+once the pipeline became the default automation-loop path (epic #1809, cutover
+#1818, cleanup #1819).
 
-Phase selection still works per issue: ``--phases plan`` runs only plan per
-issue; ``--phases implement`` only implement; etc. Plan-review, PR-review, and
-address-review are not standalone phases — the planner owns its review loop and
-the implementer absorbs PR-review + thread-addressing in-loop (#455/#468/#484).
-
-The key correctness invariant is that each phase is a plain ``subprocess.run``
-call inside a Python ``for`` loop. Phase N failing returns a
-``PhaseResult(rc=N)`` and control unconditionally proceeds to phase N+1. No
-shell-option landmine (``set -e`` / ``set -m`` / subshell exec-optimization)
-can silently skip the rest of the pipeline.
-
-The CLI remains flag-compatible with the previous bash script so operator
-muscle memory and any pinned callers keep working.
+``--phase-timeout`` bounds each agent job the pipeline runs. Repo discovery
+helpers are re-exported from :mod:`hephaestus.automation.loop_repo_manager`
+(#1360 / #1179).
 """
 
 from __future__ import annotations
 
 import argparse
-import contextlib
-import json
 import logging
-import os
-import shlex
-import shutil
-import signal
 import subprocess
 import sys
-import tempfile
-import threading
-import time
-import traceback
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -61,77 +40,22 @@ if TYPE_CHECKING:
     from hephaestus.automation.pipeline.coordinator import PipelineConfig
 
 from hephaestus.agents.runtime import resolve_agent
-from hephaestus.automation._review_utils import build_automation_parser, find_pr_for_issue
-from hephaestus.automation.github_api import (
-    gh_issue_add_labels,
-)
+from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.loop_repo_manager import (
     _clone_missing_repos as _clone_missing_repos,
-    _count_failing_prs as _count_failing_prs,
-    _count_open_issues as _count_open_issues,
     _detect_cwd_repo as _detect_cwd_repo,
-    _detect_remote_base_ref as _detect_remote_base_ref,
-    _ensure_clone as _ensure_clone,
     _gh_list_repos as _gh_list_repos,
-    _list_open_issue_numbers as _list_open_issue_numbers,
-    _local_ahead_count as _local_ahead_count,
-    _rebase_main as _rebase_main,
     _resolve_repo_dir as _resolve_repo_dir,
     _sort_repos_by_open_count as _sort_repos_by_open_count,
 )
-
-# Admission-control seams live in pipeline.admission (#1813, epic #1809);
-# internal call sites go through the `_admission` module attribute so tests
-# patch one canonical seam, and the `as name` imports re-export the moved
-# symbols for external callers (ruff's explicit re-export idiom).
-from hephaestus.automation.pipeline import admission as _admission
-from hephaestus.automation.pipeline.admission import (
-    _fetch_planned_files as _fetch_planned_files,
-    _filter_open_issues as _filter_open_issues,
-    _parse_planned_files as _parse_planned_files,
-    _select_non_overlapping as _select_non_overlapping,
-)
-from hephaestus.automation.pr_manager import pr_is_genuinely_stuck
-from hephaestus.automation.state_labels import STATE_SKIP
 from hephaestus.cli.utils import (
     configure_github_throttle_from_args,
     emit_json_status,
 )
 from hephaestus.config.paths import DEFAULT_PROJECTS_DIR, resolve_projects_dir
-from hephaestus.constants import read_timeout_env
 from hephaestus.github.client import gh_call
 
 LOG = logging.getLogger(__name__)
-
-
-def _default_phase_timeout_s() -> float:
-    """Return the default per-phase timeout in seconds.
-
-    A phase that shells out to an external coding agent can stall indefinitely
-    on a network hang; a non-``None`` default ensures the worker thread is
-    always bounded even when the operator does not pass ``--phase-timeout``.
-    Overridable via ``HEPH_PHASE_TIMEOUT`` (seconds). Mirrors the
-    graceful-fallback contract of :mod:`hephaestus.automation.agent_config`:
-    a malformed env value logs a warning and falls back to the default rather
-    than crashing at startup.
-
-    The 7800s default lets the outer phase guard safely exceed the longest
-    in-phase agent timeout (2h) so a healthy phase never trips it.
-    """
-    default = 7800
-    raw = os.environ.get("HEPH_PHASE_TIMEOUT")
-    if raw is None:
-        return float(default)
-    try:
-        return float(raw)
-    except ValueError:
-        LOG.warning("Ignoring non-numeric HEPH_PHASE_TIMEOUT=%r — using default %ds", raw, default)
-        return float(default)
-
-
-def _pipeline_default() -> bool:
-    """Return whether the queue-based pipeline is enabled by default."""
-    return os.environ.get("HEPH_PIPELINE", "").strip() != "0"
 
 
 # The two non-blocking iteration phases. Plan-review, PR-review, and
@@ -141,23 +65,17 @@ ALL_PHASES: tuple[str, ...] = (
     "implement",
 )
 
-# drive-green is both the per-issue BLOCKING phase (#1560) and the final
-# catch-up stage. Per-issue workers pass exactly one issue; the catch-up pass
-# deliberately passes no issue scope so the CI driver can use PR discovery.
-# Kept as a distinct tuple (rather than folded into ALL_PHASES) so
-# ``_run_post_loop_stages`` and the explicit ``--phases drive-green`` operator
-# re-run path keep working.
+# drive-green is the terminal blocking stage — selectable per issue, kept as a
+# distinct tuple so ``--phases drive-green`` operator re-runs keep working.
 ALL_POST_LOOP_STAGES: tuple[str, ...] = ("drive-green",)
 
-# Per-issue phase sequence, in order: plan → implement → drive-green. Operators
-# select any subset via --phases; unselected phases are skipped per issue.
+# Per-phase sequence, in order: plan → implement → drive-green. Operators select
+# any subset via --phases; unselected phases are skipped.
 ALL_SELECTABLE: tuple[str, ...] = ALL_PHASES + ALL_POST_LOOP_STAGES
 
 # DEFAULT_PROJECTS_DIR is re-exported from hephaestus.config.paths so existing
 # tests that patch this module-level name continue to work. See #704: the
-# projects root is now resolved at runtime via resolve_projects_dir() so that
-# the ``PROJECTS_ROOT`` env var can override the historical ``~/Projects``
-# default without code changes here.
+# projects root is now resolved at runtime via resolve_projects_dir().
 
 # Sentinel for ``--org`` invoked with no argument (auto-detect from cwd).
 # Module-level identity guarantees ``args.org is _ORG_AUTODETECT`` is the
@@ -196,210 +114,54 @@ def _parse_issue_list(value: str) -> list[int]:
     return issues
 
 
-# drive-green discovers PRs directly via gh and no longer requires an
-# input issue list (#820, #819) — see ``_count_failing_prs`` and the
-# post-loop check in ``_run_post_loop_stages``. plan + implement
-# auto-discover their own. The set is kept (currently empty) so any
-# future phase that genuinely needs an issue list has one place to opt in.
-PHASES_REQUIRING_ISSUES: frozenset[str] = frozenset()
+def _default_phase_timeout_s() -> float:
+    """Return the default per-agent-job timeout in seconds.
 
-# Sentinel for cooperative shutdown on SIGINT/SIGTERM. Worker threads
-# check this between phases so an in-flight subprocess can still finish
-# but the next phase is skipped. threading.Event provides atomic, GIL-safe
-# set/check semantics without the global-mutation footgun.
-_SHUTDOWN_EVENT = threading.Event()
+    An agent job that shells out to an external coding agent can stall
+    indefinitely on a network hang; a non-``None`` default keeps every job
+    bounded even when the operator does not pass ``--phase-timeout``.
+    Overridable via ``HEPH_PHASE_TIMEOUT`` (seconds). A malformed env value logs
+    a warning and falls back to the default rather than crashing at startup.
 
-
-def _shutdown_requested() -> bool:
-    return _SHUTDOWN_EVENT.is_set()
-
-
-def _request_shutdown(signum: int, _frame: object) -> None:
-    _SHUTDOWN_EVENT.set()
-    LOG.warning("Signal %s received — requesting cooperative shutdown", signum)
-
-
-@dataclass
-class PhaseResult:
-    """Outcome of a single phase invocation for a single repo+loop."""
-
-    name: str
-    rc: int = 0
-    elapsed_s: float = 0.0
-    skipped: bool = False
-    skip_reason: str | None = None
-    # If subprocess.run itself raised (OSError, TimeoutExpired, …), the
-    # exception text lands here. The phase is treated as rc=1.
-    error: str | None = None
-    # Work units produced by this phase (e.g., issues planned or reviewed).
-    # None means unknown (phase did not report). Used for loop convergence (#613).
-    work_units: int | None = None
-
-    @property
-    def failed(self) -> bool:
-        """True when the phase ran and returned a non-zero exit code."""
-        return not self.skipped and self.rc != 0
-
-    @property
-    def produced_work(self) -> bool:
-        """Whether this phase did convergence-relevant work.
-
-        Unknown (un-instrumented) phases return True conservatively so the
-        loop never early-exits on a phase it can't measure.
-        """
-        if self.skipped:
-            return False
-        if self.work_units is None:
-            return True
-        return self.work_units > 0
-
-
-# Phases that count toward loop convergence. Future phases opting into
-# convergence must be added here AND must call write_work_report. The former
-# review-plans phase folded into ``plan`` (the planner now owns its review
-# loop), so ``plan`` is the sole convergence signal.
-_CONVERGENCE_PHASES: frozenset[str] = frozenset({"plan"})
-
-
-@dataclass
-class RepoResult:
-    """Per-repo, per-loop outcome — collection of phase results."""
-
-    repo: str
-    loop_idx: int
-    phases: list[PhaseResult] = field(default_factory=list)
-    # Post-loop terminal stages (drive-green) recorded separately from
-    # per-loop ``phases`` so they don't pollute per-loop convergence
-    # metrics (#818). Populated only by the post-loop RepoResult returned
-    # by ``_run_post_loop_stages``; per-loop RepoResults leave this empty.
-    post_loop_phases: list[PhaseResult] = field(default_factory=list)
-    # True only for records produced by ``_run_post_loop_stages`` (#818).
-    # Tagging explicitly lets per-loop counting exclude post-loop records
-    # even when a crashed/uncloned repo leaves BOTH phase lists empty —
-    # emptiness alone cannot distinguish a post-loop record from a per-loop one.
-    is_post_loop: bool = False
-    # True only for records produced by the terminal deferred-issue catch-up
-    # (``_run_terminal_deferred_issues``, #1762). Like ``is_post_loop``, the
-    # tag excludes these terminal replays from per-loop convergence and
-    # loops-run accounting — they are not an additional loop iteration.
-    is_catchup: bool = False
-    # Populated when the WORKER itself crashed (not a phase failure).
-    runner_error: str | None = None
-    # Issues withheld from this round because their planned file set overlaps
-    # an in-flight peer's (#1623). Non-empty means the round did NOT finish all
-    # discoverable work, so run_loop must NOT early-exit — they are re-attempted
-    # next round against freshly-merged trunk.
-    deferred_issues: list[int] = field(default_factory=list)
-
-    @property
-    def any_failure(self) -> bool:
-        """True when any phase (loop or post-loop) failed or the worker crashed."""
-        return (
-            self.runner_error is not None
-            or any(p.failed for p in self.phases)
-            or any(p.failed for p in self.post_loop_phases)
-        )
-
-    @property
-    def produced_work(self) -> bool:
-        """Whether this loop record still has convergence-relevant work.
-
-        Counts (a) any convergence-phase (``plan``) work AND (b) issues deferred
-        this round for file-overlap (#1623): a deferred issue is unfinished work
-        that MUST keep the loop iterating, otherwise the early-exit at the end of
-        ``run_loop`` (``loop_runner.py`` ``not any(r.produced_work ...)``) would
-        strand it — the exact failure #1623 fixes.
-
-        Post-loop stages never count toward convergence — they are
-        terminal, not iterative — so ``post_loop_phases`` is intentionally
-        excluded here. The early-exit predicate at the end of ``run_loop``
-        operates on per-loop ``loop_results`` only, so this property is
-        never consulted on a post-loop RepoResult.
-        """
-        if self.deferred_issues:
-            return True
-        return any(p.produced_work for p in self.phases if p.name in _CONVERGENCE_PHASES)
-
-
-def _summarize_loop(loop_results: list[RepoResult], loop_idx: int, elapsed_s: float) -> str:
-    """Generate a one-line summary of loop execution for logs.
-
-    Counts: planned (issues actually planned, from the plan phase's
-    ``work_units``; falls back to 1 per un-instrumented plan phase whose
-    ``work_units`` is unknown), implemented (non-skipped implement stages —
-    the implement phase reports no ``work_units``), skipped (all skipped
-    stages). Plan-review and PR-review are now in-loop steps of plan/implement,
-    so they no longer have their own count.
-
-    Counting plan by ``work_units`` keeps this human-facing summary consistent
-    with the machine convergence signal (``produced_work``): a plan phase that
-    ran but planned 0 issues now reads ``planned=0`` instead of inflating to
-    ``planned=1`` (the 2026-06-21 output.log regression — closed-issue runs
-    logged ``planned=N`` directly above ``produced 0 new plans``).
-
-    Args:
-        loop_results: Results from all repos in this loop iteration.
-        loop_idx: Loop iteration number (1-indexed).
-        elapsed_s: Wall-clock seconds elapsed for the loop.
-
-    Returns:
-        A summary string like "loop 1: planned=5 implemented=3 skipped=2 elapsed=45s".
-
+    The 7800s default lets the outer job guard safely exceed the longest
+    in-agent timeout (2h) so a healthy job never trips it.
     """
-    total_planned = 0
-    total_implemented = 0
-    total_skipped = 0
+    import os
 
-    for result in loop_results:
-        for phase in result.phases:
-            if phase.skipped:
-                total_skipped += 1
-            elif phase.name == "plan":
-                # Count issues actually planned. ``work_units is None`` means the
-                # phase didn't report (un-instrumented) → count it as 1
-                # conservatively, matching ``produced_work``'s unknown→work rule.
-                total_planned += phase.work_units if phase.work_units is not None else 1
-            elif phase.name == "implement":
-                total_implemented += 1
-
-    elapsed = f"{elapsed_s:.0f}s"
-    return (
-        f"loop {loop_idx}: planned={total_planned} implemented={total_implemented} "
-        f"skipped={total_skipped} elapsed={elapsed}"
-    )
-
-
-def _summarize_post_loop(results: list[RepoResult]) -> str:
-    """One-line summary of post-loop terminal stage outcomes per repo."""
-    ran = sum(1 for r in results for p in r.post_loop_phases if not p.skipped and not p.failed)
-    skipped = sum(1 for r in results for p in r.post_loop_phases if p.skipped)
-    failed = sum(1 for r in results for p in r.post_loop_phases if p.failed)
-    return f"post-loop: stages_ran={ran} skipped={skipped} failed={failed} repos={len(results)}"
+    default = 7800
+    raw = os.environ.get("HEPH_PHASE_TIMEOUT")
+    if raw is None:
+        return float(default)
+    try:
+        return float(raw)
+    except ValueError:
+        LOG.warning("Ignoring non-numeric HEPH_PHASE_TIMEOUT=%r — using default %ds", raw, default)
+        return float(default)
 
 
 @dataclass
 class LoopConfig:
-    """Top-level CLI-derived configuration."""
+    """Top-level CLI-derived configuration.
+
+    Carries the parsed scope/model/throttle knobs from :func:`main` into
+    :func:`_build_pipeline_config`, which maps them onto the coordinator's
+    :class:`~hephaestus.automation.pipeline.coordinator.PipelineConfig`.
+    """
 
     loops: int = 5
     max_workers: int = 3
     parallel_repos: int = 1
     # Dataclass default covers ONLY the iteration phases (``ALL_PHASES`` =
-    # plan, implement), deliberately excluding drive-green. This differs from
-    # the CLI ``--phases`` default (``ALL_SELECTABLE`` = plan, implement,
-    # drive-green, set in ``_parse_args``): an operator on the CLI opts into
-    # the blocking per-issue drive-green by default, but a bare ``LoopConfig()``
-    # (tests/programmatic callers) gets a quiet plan+implement run that never
-    # drives existing PRs to merge.
+    # plan, implement), deliberately excluding drive-green — a bare
+    # ``LoopConfig()`` gets a quiet plan+implement run. The CLI ``--phases``
+    # default is ``ALL_SELECTABLE`` (set in the parser), so an operator opts
+    # into the blocking drive-green by default.
     phases: tuple[str, ...] = ALL_PHASES
     # Bound on per-issue drive-green merge attempts before the issue is tagged
-    # ``state:skip`` and the worker frees its slot for the next issue (#1560).
-    # Defaults to the CIDriver ``max_fix_iterations`` default (1) so behavior
-    # matches the pre-issue-major drive-green retry budget unless overridden.
+    # ``state:skip`` (#1560). Defaults to 1, matching the CIDriver default.
     max_merge_attempts: int = 1
     # When True (default), never dispatch two issues whose plans touch the same
-    # file concurrently — defer the later one to the next loop (#1623). Only
-    # active when max_workers > 1 and more than one issue is in the round.
+    # file concurrently — defer the later one (#1623).
     serialize_file_overlap: bool = True
     agent: str = "claude"
     issues: list[int] = field(default_factory=list)
@@ -409,8 +171,7 @@ class LoopConfig:
     drive_green_all: bool = False
     allow_unsafe_phase_order: bool = False
     # ``model`` is the catch-all applied to every phase when set; per-phase
-    # fields below take precedence over it. The /learn step is not a separate
-    # knob — it inherits its parent phase's model at the call site.
+    # fields below take precedence over it.
     model: str = ""
     planner_model: str = ""
     reviewer_model: str = ""
@@ -418,55 +179,13 @@ class LoopConfig:
     gh_global_rate: float = 10.0
     gh_global_burst: float = 30.0
     # Org is resolved at runtime from --org / --repos / cwd detection; no
-    # hardcoded fallback. Always set by main() before ``run_loop``.
+    # hardcoded fallback. Always set by main() before dispatch.
     org: str = ""
     projects_dir: Path = DEFAULT_PROJECTS_DIR
-    # Per-phase timeout in seconds. Defaults to an env-overridable bound
-    # (``HEPH_PHASE_TIMEOUT``) so a stalled subprocess can never hang a worker
-    # thread indefinitely (#684). Passing ``--phase-timeout`` overrides it;
-    # ``None`` explicitly disables the bound.
+    # Per-agent-job timeout in seconds. Defaults to an env-overridable bound
+    # (``HEPH_PHASE_TIMEOUT``); ``--phase-timeout`` overrides it and a
+    # non-positive value disables the bound (``None``).
     phase_timeout_s: float | None = field(default_factory=_default_phase_timeout_s)
-
-
-# ---------------------------------------------------------------------------
-# Work report helpers (#613)
-# ---------------------------------------------------------------------------
-
-
-def _make_work_report_path(build_dir: str) -> str:
-    """Create a temp work report file path under build/.
-
-    Args:
-        build_dir: Path to the build directory.
-
-    Returns:
-        Path to a new temp file for work reporting.
-
-    """
-    build_path = Path(build_dir)
-    build_path.mkdir(parents=True, exist_ok=True)
-    fd, path = tempfile.mkstemp(prefix="work_report_", dir=str(build_path))
-    os.close(fd)
-    return path
-
-
-def _read_work_report(path: str) -> int | None:
-    """Read and parse work-unit count from a work report file.
-
-    Args:
-        path: Path to the work report file.
-
-    Returns:
-        The work-unit count, or None if the file is missing, empty, or malformed.
-
-    """
-    try:
-        content = Path(path).read_text(encoding="utf-8").strip()
-        if not content:
-            return None
-        return int(content)
-    except (OSError, ValueError):
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -478,10 +197,7 @@ def _build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser for the loop runner."""
     p = build_automation_parser(
         prog="hephaestus-automation-loop",
-        description=(
-            "Run the 2-stage loop body and post-loop terminal stages across "
-            "HomericIntelligence repos."
-        ),
+        description=("Run the queue-based automation pipeline across HomericIntelligence repos."),
         max_workers_help=(
             "Parallel workers per repo per phase (1-32, default: 3). Passes to child phases."
         ),
@@ -492,23 +208,6 @@ def _build_parser() -> argparse.ArgumentParser:
         verbose_help="Enable DEBUG logging",
     )
     p.add_argument("--loops", type=int, default=5, help="Number of loop iterations (default: 5)")
-    pipeline_group = p.add_mutually_exclusive_group()
-    pipeline_group.add_argument(
-        "--pipeline",
-        dest="pipeline",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="Use the queue-based pipeline loop (default: on). "
-        "Env HEPH_PIPELINE=0 disables it; the CLI flag wins.",
-    )
-    pipeline_group.add_argument(
-        "--legacy-loop",
-        dest="pipeline",
-        action="store_false",
-        default=argparse.SUPPRESS,
-        help="Use the pre-pipeline legacy loop path. "
-        "Overrides HEPH_PIPELINE and is intended as a rollback hatch.",
-    )
     p.add_argument(
         "--max-merge-attempts",
         type=int,
@@ -630,7 +329,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Per-phase timeout in seconds (default: HEPH_PHASE_TIMEOUT or "
             f"{int(_default_phase_timeout_s())}s). Pass 0 or a negative value to disable. "
-            "Under --pipeline this bounds each AGENT JOB, not a whole phase subprocess."
+            "This bounds each AGENT JOB the pipeline runs, not a whole phase subprocess."
         ),
     )
     p.add_argument(
@@ -647,10 +346,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command line arguments for the loop runner."""
-    args = _build_parser().parse_args(argv)
-    if not hasattr(args, "pipeline"):
-        args.pipeline = _pipeline_default()
-    return args
+    return _build_parser().parse_args(argv)
 
 
 def _validate_phases(phases_csv: str) -> tuple[str, ...]:
@@ -681,516 +377,14 @@ def _phase_order_warnings(cfg: LoopConfig) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Repo discovery — re-exported from loop_repo_manager (refs #1360 / #1179)
-# All 12 functions are imported at module level above with explicit
-# ``as`` aliases, keeping ``patch.object(loop_runner, "_fn")`` working.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Phase execution
-# ---------------------------------------------------------------------------
-
-
-def _console_script_is_usable(path: str) -> bool:
-    """Return False for stale entry-point stubs with missing shebang interpreters."""
-    script = Path(path)
-    try:
-        with script.open("rb") as fh:
-            first_line = fh.readline(512)
-    except OSError as exc:
-        LOG.warning("Ignoring phase console script %s: cannot inspect it (%s)", path, exc)
-        return False
-
-    if not first_line.startswith(b"#!"):
-        return True
-
-    try:
-        shebang = first_line[2:].decode("utf-8").strip()
-    except UnicodeDecodeError:
-        LOG.warning("Ignoring phase console script %s: invalid shebang encoding", path)
-        return False
-    if not shebang:
-        LOG.warning("Ignoring phase console script %s: empty shebang", path)
-        return False
-
-    try:
-        parts = shlex.split(shebang)
-    except ValueError as exc:
-        LOG.warning("Ignoring phase console script %s: invalid shebang (%s)", path, exc)
-        return False
-    if not parts:
-        return False
-
-    interpreter = parts[0]
-    if Path(interpreter).name == "env":
-        if len(parts) < 2:
-            LOG.warning("Ignoring phase console script %s: /usr/bin/env without command", path)
-            return False
-        return shutil.which(parts[1]) is not None
-
-    if Path(interpreter).exists():
-        return True
-
-    LOG.warning(
-        "Ignoring phase console script %s: shebang interpreter does not exist: %s",
-        path,
-        interpreter,
-    )
-    return False
-
-
-def _resolve_console_or_module(script_name: str, module: str) -> tuple[str, list[str]]:
-    """Resolve an installed console script or fall back to this checkout's module."""
-    bin_path = shutil.which(script_name)
-    if bin_path and _console_script_is_usable(bin_path):
-        return (bin_path, [])
-    return (sys.executable, ["-m", module])
-
-
-def _resolve_phase_bin(phase: str) -> tuple[str, list[str]] | None:
-    """Return ``(executable, leading_args)`` for ``phase``.
-
-    Known phases fall back to this source checkout when console scripts are
-    not installed on PATH. Unknown phases still return ``None``.
-    """
-    if phase == "plan":
-        return _resolve_console_or_module("hephaestus-plan-issues", "hephaestus.automation.planner")
-    if phase == "implement":
-        return _resolve_console_or_module(
-            "hephaestus-implement-issues",
-            "hephaestus.automation.implementer",
-        )
-    if phase == "drive-green":
-        return (sys.executable, ["-m", "hephaestus.automation.ci_driver"])
-    return None
-
-
-# Per-phase argv flag matrix. Mirrors the bash script's per-phase blocks
-# at scripts/run_automation_loop.sh:444-576. Encoded as a table so each
-# phase's flags are obvious at a glance and impossible to duplicate.
-#
-# - "worker_arg": pass this worker-count flag with N, or None for no worker flag
-# - "no_ui":       pass `--no-ui`
-# - "issues":      "explicit" passes loop-level --issues only when set;
-#                  "open" passes the repo open-issue list when non-empty
-# - "advise":      pass `--no-advise` when the loop-level flag is set
-# - "follow_up_loop_threshold": if non-None, pass `--no-follow-up` when
-#                  loop_idx >= threshold (bash equivalent: FOLLOW_UP_FLAG
-#                  set on loop ≥ 3, scripts/run_automation_loop.sh:415-418)
-_PHASE_FLAGS: dict[str, dict[str, object]] = {
-    # plan/implement use "open": forward the loop-discovered open-issue list so
-    # the child phase does NOT re-run its own ``gh issue list`` every phase /
-    # every loop. Per-issue drive-green also uses "open" because
-    # _process_one_issue passes exactly [issue]; the final catch-up pass passes
-    # [] so drive-green can fall back to PR discovery.
-    "plan": {"worker_arg": "--parallel", "no_ui": False, "issues": "open", "advise": True},
-    "implement": {
-        "worker_arg": "--max-workers",
-        "no_ui": True,
-        "issues": "open",
-        "advise": True,
-        "nitpick": True,
-        "follow_up_loop_threshold": 3,
-    },
-    "drive-green": {
-        "worker_arg": "--max-workers",
-        "no_ui": True,
-        "issues": "open",
-        "advise": True,
-        "nitpick": True,
-    },
-}
-
-
-def _build_phase_argv(
-    phase: str,
-    cfg: LoopConfig,
-    open_issues: list[int],
-    loop_idx: int = 1,
-) -> list[str] | None:
-    """Construct the full argv for ``phase``; ``None`` when binary unresolved."""
-    resolved = _resolve_phase_bin(phase)
-    if resolved is None:
-        return None
-    executable, leading = resolved
-    argv: list[str] = [executable, *leading]
-
-    flags = _PHASE_FLAGS[phase]
-
-    # All phases support -v / --dry-run uniformly.
-    argv.append("-v")
-    argv.extend(["--agent", cfg.agent])
-    if cfg.dry_run:
-        argv.append("--dry-run")
-    if cfg.no_advise and flags.get("advise"):
-        argv.append("--no-advise")
-    if cfg.nitpick and flags.get("nitpick"):
-        argv.append("--nitpick")
-
-    issue_mode = flags.get("issues")
-    issue_numbers = cfg.issues if issue_mode == "explicit" else open_issues
-    if issue_mode and issue_numbers:
-        argv.append("--issues")
-        argv.extend(str(n) for n in issue_numbers)
-
-    worker_arg = flags.get("worker_arg")
-    if isinstance(worker_arg, str):
-        # _process_one_issue already provides the outer issue-level
-        # concurrency. When a child phase receives exactly one issue, letting it
-        # create its own worker pool only multiplies git/GitHub contention
-        # against the same repo and can race shared .git metadata.
-        child_workers = 1 if len(open_issues) == 1 else cfg.max_workers
-        argv.extend([worker_arg, str(child_workers)])
-
-    argv.extend(
-        [
-            "--gh-global-rate",
-            str(cfg.gh_global_rate),
-            "--gh-global-burst",
-            str(cfg.gh_global_burst),
-        ]
-    )
-
-    if flags["no_ui"]:
-        argv.append("--no-ui")
-
-    threshold = flags.get("follow_up_loop_threshold")
-    if isinstance(threshold, int) and loop_idx >= threshold:
-        argv.append("--no-follow-up")
-
-    if phase == "drive-green" and cfg.drive_green_all:
-        argv.append("--all")
-
-    # Per-issue drive-green is the blocking merge step (#1560): forward the
-    # operator's merge-attempt budget so a PR that will not go green is
-    # abandoned after N tries (the caller then applies state:skip).
-    if phase == "drive-green":
-        argv.extend(["--max-fix-iterations", str(cfg.max_merge_attempts)])
-
-    return argv
-
-
-def _phase_env(
-    cfg: LoopConfig,
-    loop_idx: int,
-    trunk_sha: str,
-    phase: str,
-) -> dict[str, str]:
-    """Build the environment dict for a phase subprocess."""
-    env = os.environ.copy()
-    # Precedence per phase: explicit per-phase flag > catch-all --model > any
-    # ambient HEPH_*_MODEL the operator exported > the phase default resolved
-    # in the child. Only export when we have a value so we never clobber an
-    # ambient env var with an empty string. Advise model selection is handled at
-    # the call site because Codex and Claude intentionally use different quick
-    # selector defaults.
-    if planner := (cfg.planner_model or cfg.model):
-        env["HEPH_PLANNER_MODEL"] = planner
-    if reviewer := (cfg.reviewer_model or cfg.model):
-        env["HEPH_REVIEWER_MODEL"] = reviewer
-    if implementer := (cfg.implementer_model or cfg.model):
-        env["HEPH_IMPLEMENTER_MODEL"] = implementer
-    env["HEPH_TRUNK_GITHASH"] = trunk_sha
-    project_root = str(Path(__file__).resolve().parents[2])
-    if env.get("PYTHONPATH"):
-        env["PYTHONPATH"] = f"{project_root}{os.pathsep}{env['PYTHONPATH']}"
-    else:
-        env["PYTHONPATH"] = project_root
-    return env
-
-
-def run_phase(
-    repo: str,
-    repo_dir: Path,
-    phase: str,
-    cfg: LoopConfig,
-    loop_idx: int,
-    open_issues: list[int],
-    trunk_sha: str,
-) -> PhaseResult:
-    """Run one phase as a subprocess. Never raises — always returns a result.
-
-    Exit codes, timeouts, and OS errors are normalized into ``PhaseResult``
-    so the caller can unconditionally proceed to the next phase.
-    """
-    t0 = time.monotonic()
-    argv = _build_phase_argv(phase, cfg, open_issues, loop_idx=loop_idx)
-    if argv is None:
-        return PhaseResult(
-            name=phase,
-            rc=127,
-            skipped=False,
-            error=f"could not resolve binary for phase {phase!r}",
-            elapsed_s=time.monotonic() - t0,
-        )
-
-    LOG.info("[%s] phase %s START", repo, phase)
-    env = _phase_env(cfg, loop_idx, trunk_sha, phase)
-
-    # Create work report file path and inject into env (#613)
-    build_dir = repo_dir / "build"
-    work_report_path = _make_work_report_path(str(build_dir))
-    env["HEPH_WORK_REPORT"] = work_report_path
-
-    try:
-        completed = subprocess.run(
-            argv,
-            cwd=str(repo_dir),
-            env=env,
-            timeout=cfg.phase_timeout_s,
-            check=False,
-        )
-        rc = completed.returncode
-    except subprocess.TimeoutExpired as exc:
-        LOG.error("[%s] phase %s TIMEOUT after %.0fs", repo, phase, exc.timeout or 0.0)
-        return PhaseResult(
-            name=phase,
-            rc=124,
-            elapsed_s=time.monotonic() - t0,
-            error=f"timeout after {exc.timeout}s",
-        )
-    except OSError as exc:
-        LOG.error("[%s] phase %s OSError: %s", repo, phase, exc)
-        return PhaseResult(
-            name=phase,
-            rc=126,
-            elapsed_s=time.monotonic() - t0,
-            error=f"OSError: {exc}",
-        )
-    finally:
-        # Read work report and clean up
-        work_units = None
-        try:
-            work_units = _read_work_report(work_report_path)
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(work_report_path)
-
-    elapsed = time.monotonic() - t0
-    LOG.info("[%s] phase %s done in %.1fs (rc=%d)", repo, phase, elapsed, rc)
-    return PhaseResult(name=phase, rc=rc, elapsed_s=elapsed, work_units=work_units)
-
-
-# ---------------------------------------------------------------------------
-# Per-repo orchestration
-# ---------------------------------------------------------------------------
-
-
-def process_repo(
-    repo: str,
-    loop_idx: int,
-    cfg: LoopConfig,
-) -> RepoResult:
-    """Run the 3-stage pipeline for one repo. Never raises.
-
-    Any exception inside the function (filesystem error, gh API explosion,
-    unexpected programming bug) is caught and stashed in
-    ``RepoResult.runner_error`` so the outer loop never sees a thread
-    crash. Per-phase failures live in ``RepoResult.phases``.
-    """
-    result = RepoResult(repo=repo, loop_idx=loop_idx)
-    try:
-        return _process_repo_inner(repo, loop_idx, cfg, result)
-    except Exception as exc:
-        tb = traceback.format_exc()
-        result.runner_error = f"{type(exc).__name__}: {exc}\n{tb}"
-        LOG.error("[%s] runner crashed: %s", repo, exc)
-        return result
-
-
-def _process_repo_inner(
-    repo: str,
-    loop_idx: int,
-    cfg: LoopConfig,
-    result: RepoResult,
-) -> RepoResult:
-    # Clones are done in an upfront sequential pass in main() — see
-    # _clone_missing_repos. process_repo runs concurrently across repos
-    # (--parallel-repos > 1), so doing the clone here would race two
-    # workers on the same gh-clone call when both target the same missing
-    # repo. Bash equivalent: scripts/run_automation_loop.sh:326-336.
-    repo_dir = _resolve_repo_dir(cfg.projects_dir, repo)
-    if not (repo_dir / ".git").exists():
-        result.runner_error = f"repo {repo} not cloned at {repo_dir}"
-        return result
-
-    LOG.info("── %s (loop %d) ──", repo, loop_idx)
-    trunk_sha, fetch_ok = _rebase_main(repo, repo_dir)
-    stale_suffix = "" if fetch_ok else " (stale)"
-    LOG.info("[%s] trunk=%s%s", repo, trunk_sha, stale_suffix)
-
-    # Open-issue discovery happens once per repo per loop. When the operator
-    # scopes the loop explicitly, reuse that bounded list — but drop any that are
-    # CLOSED (#1576): an explicit ``--issues`` list bypasses the open-state
-    # filter that ``_list_open_issue_numbers`` applies, so a closed issue would
-    # otherwise be driven (and wrongly tagged ``state:skip``) every loop.
-    open_issues = cfg.issues or _list_open_issue_numbers(cfg.org, repo)
-    if cfg.issues:
-        open_issues = _admission._filter_open_issues(repo, open_issues)
-
-    # ISSUE-MAJOR control flow (#1560): iterate issues outermost and run the
-    # FULL selected-phase sequence (plan → implement → drive-green) for each
-    # issue before it is considered done. Up to ``max_workers`` issues are in
-    # flight at once. drive-green per issue blocks on the PR MERGING (see
-    # _process_one_issue), so each subsequent issue's branch is cut from the
-    # freshly-merged trunk — eliminating the stale-plan and sibling-branch
-    # merge-conflict classes the old phase-major batching suffered.
-    if not open_issues:
-        LOG.info("[%s] no open issues to process", repo)
-        return result
-
-    workers = max(1, cfg.max_workers)
-    # File-overlap serialization (#1623): with >1 worker, N branches cut from
-    # the same trunk snapshot that edit the same file mutually conflict — the
-    # first PR to merge strands the rest DIRTY. Dispatch only a non-overlapping
-    # subset this round; deferred issues re-run next --loops iteration (kept
-    # alive by RepoResult.produced_work), by which point the conflicting peer
-    # has merged and the deferred branch rebases cleanly.
-    if cfg.serialize_file_overlap and workers > 1 and len(open_issues) > 1:
-        open_issues, deferred = _admission._select_non_overlapping(open_issues)
-        if deferred:
-            LOG.info(
-                "[%s] deferring %d file-overlapping issue(s) to next round: %s",
-                repo,
-                len(deferred),
-                deferred,
-            )
-            result.deferred_issues = deferred
-
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {
-            executor.submit(
-                _process_one_issue,
-                repo=repo,
-                repo_dir=repo_dir,
-                issue=issue,
-                cfg=cfg,
-                loop_idx=loop_idx,
-                trunk_sha=trunk_sha,
-            ): issue
-            for issue in open_issues
-        }
-        for future in as_completed(futures):
-            issue = futures[future]
-            try:
-                result.phases.extend(future.result())
-            except Exception as exc:  # worker boundary: never let one issue crash the repo
-                LOG.error("[%s] issue #%s pipeline crashed: %s", repo, issue, exc)
-                result.phases.append(PhaseResult(name="implement", rc=1, elapsed_s=0.0))
-
-    return result
-
-
-def _issue_owns_genuinely_failing_pr(issue: int) -> bool:
-    """Return True iff *issue* has a PR that is genuinely stuck (#1576).
-
-    Guards the drive-green ``state:skip`` tag so the loop tags an issue ONLY when
-    that issue's OWN PR genuinely cannot merge (conflict or red CI) — never for a
-    PR that is merely awaiting implementation review, and never for an issue with
-    no PR at all (which covers closed / no-PR issues that share the repo-wide
-    drive-green rc). The PR state is fetched LIVE via
-    :func:`pr_is_genuinely_stuck`. A missing PR or any lookup failure yields
-    False (never tag on uncertainty).
-
-    Args:
-        issue: GitHub issue number.
-
-    Returns:
-        True only when the issue owns a genuinely-stuck PR.
-
-    """
-    try:
-        pr_number = find_pr_for_issue(issue)
-    except Exception as exc:
-        LOG.warning("Could not resolve PR for issue #%s before skip-tagging: %s", issue, exc)
-        return False
-    if pr_number is None:
-        return False
-    return pr_is_genuinely_stuck(pr_number)
-
-
-def _process_one_issue(
-    *,
-    repo: str,
-    repo_dir: Path,
-    issue: int,
-    cfg: LoopConfig,
-    loop_idx: int,
-    trunk_sha: str,
-) -> list[PhaseResult]:
-    """Run the full selected-phase sequence for ONE issue, in order.
-
-    Each selected phase (plan, implement, drive-green) runs scoped to this
-    single issue. The ``--phases`` selection is honored per issue: a disabled
-    phase is recorded skipped and the sequence continues. When ``drive-green``
-    is selected it is the BLOCKING phase — ``run_phase`` waits for the issue's
-    PR to merge (or skip on exhaustion) before returning, so the worker only
-    frees its slot once the issue is fully settled.
-    """
-    phases: list[PhaseResult] = []
-    for phase in ALL_SELECTABLE:
-        if _shutdown_requested():
-            LOG.warning("[%s] issue #%s phase %s SKIP (shutdown requested)", repo, issue, phase)
-            phases.append(PhaseResult(name=phase, skipped=True, skip_reason="shutdown requested"))
-            continue
-
-        if phase not in cfg.phases:
-            phases.append(PhaseResult(name=phase, skipped=True, skip_reason="disabled by --phases"))
-            continue
-
-        phase_result = run_phase(
-            repo=repo,
-            repo_dir=repo_dir,
-            phase=phase,
-            cfg=cfg,
-            loop_idx=loop_idx,
-            open_issues=[issue],
-            trunk_sha=trunk_sha,
-        )
-        phases.append(phase_result)
-        if phase_result.failed:
-            LOG.warning(
-                "[%s] issue #%s phase %s FAILED rc=%d — continuing to next phase",
-                repo,
-                issue,
-                phase,
-                phase_result.rc,
-            )
-            # drive-green is the blocking merge phase. Its rc is REPO-LEVEL (one
-            # CI-driver run over the whole batch), so a non-zero rc does NOT mean
-            # THIS issue's PR failed — it may be a sibling's PR, or merely a
-            # PR awaiting implementation review. Tag ``state:skip`` ONLY when this
-            # issue OWNS a genuinely-stuck PR (conflict / red CI), verified LIVE
-            # (#1576). This stops the self-perpetuating skip cycle where an
-            # awaiting-review PR (or a closed / no-PR issue sharing the rc) was
-            # re-tagged every loop. ``state:skip`` is operator-only thereafter.
-            # A dry-run must not mutate GitHub state.
-            if (
-                phase == "drive-green"
-                and not cfg.dry_run
-                and _issue_owns_genuinely_failing_pr(issue)
-            ):
-                LOG.warning(
-                    "[%s] issue #%s did not merge after %d attempt(s) — tagging %s",
-                    repo,
-                    issue,
-                    cfg.max_merge_attempts,
-                    STATE_SKIP,
-                )
-                with contextlib.suppress(Exception):
-                    gh_issue_add_labels(issue, [STATE_SKIP])
-
-    return phases
-
-
-# ---------------------------------------------------------------------------
-# Outer loop
+# Repo discovery — re-exported from loop_repo_manager (refs #1360 / #1179).
+# The helpers above are imported at module level with explicit ``as`` aliases,
+# keeping ``patch.object(loop_runner, "_fn")`` working.
 # ---------------------------------------------------------------------------
 
 
 def _preflight_token_scopes(org: str, probe_repo: str) -> None:
-    """Mirror the bash script's gh-token preflight."""
+    """Verify the gh token can read ``org/probe_repo`` before dispatch."""
     try:
         out = gh_call(
             [
@@ -1224,403 +418,6 @@ def _preflight_token_scopes(org: str, probe_repo: str) -> None:
             org,
             probe_repo,
         )
-
-
-def _rate_limit_remaining() -> tuple[int, int] | None:
-    """Return ``(remaining, reset_epoch)`` for the GraphQL budget, or None."""
-    try:
-        out = gh_call(["api", "rate_limit"])
-    except (subprocess.SubprocessError, RuntimeError, OSError):
-        return None
-    try:
-        data = json.loads(out.stdout)
-        gql = data["resources"]["graphql"]
-        return int(gql["remaining"]), int(gql["reset"])
-    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
-        return None
-
-
-def _maybe_sleep_for_rate_budget(loop_idx: int, total_loops: int) -> None:
-    """Sleep until the upstream reset when GraphQL budget would be exhausted."""
-    if os.environ.get("HEPHAESTUS_RATE_GUARD", "1") == "0":
-        return
-    if loop_idx >= total_loops:
-        return
-    threshold = read_timeout_env("HEPHAESTUS_RATE_GUARD_THRESHOLD", 200)
-    rl = _rate_limit_remaining()
-    if rl is None:
-        return
-    remaining, reset_epoch = rl
-    if remaining >= threshold:
-        return
-    wait_s = max(0, reset_epoch - int(time.time()) + 5)
-    if wait_s <= 0:
-        return
-    LOG.info(
-        "Rate budget low (%d/%d GraphQL remaining); sleeping %ds until reset",
-        remaining,
-        threshold,
-        wait_s,
-    )
-    # Cooperatively cancellable sleep so SIGINT during the wait still works.
-    deadline = time.monotonic() + wait_s
-    while time.monotonic() < deadline:
-        if _shutdown_requested():
-            LOG.warning("Rate-budget sleep cancelled by shutdown request")
-            return
-        time.sleep(min(1.0, deadline - time.monotonic()))
-
-
-def _post_loop_stage_skip_reason(
-    cfg: LoopConfig, repo: str, stage: str, open_issues: list[int]
-) -> str | None:
-    """Return a skip reason for ``stage`` in repo ``repo``, or ``None`` to run.
-
-    Encapsulates the per-stage work-discovery gates so ``_run_post_loop_stages``
-    stays under the project complexity budget. Matches the in-loop gating used
-    pre-#818 plus the issue-list gate retained for any future stage opting in
-    via :data:`PHASES_REQUIRING_ISSUES`.
-    """
-    if stage in PHASES_REQUIRING_ISSUES and not open_issues:
-        return "no open issues"
-    # drive-green discovers failing PRs directly (#819 / PR #1060).
-    # When --issues pins specific PRs, defer to drive-green itself.
-    if stage == "drive-green" and not cfg.issues:
-        failing = _count_failing_prs(cfg.org, repo)
-        if failing == 0:
-            return "no failing PRs"
-        LOG.info("[%s] stage %s has %d failing PR(s) — running", repo, stage, failing)
-    return None
-
-
-def _run_post_loop_stages(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
-    """Run final catch-up stages (drive-green) once per repo.
-
-    Iterates ``repos`` sequentially (no thread pool) — post-loop stages are
-    terminal and per-repo, so concurrent execution offers no benefit and
-    risks two workers hitting the same PRs. Per-issue workers already passed
-    their issue scopes; this catch-up pass intentionally leaves drive-green
-    unscoped so the CI driver can discover any remaining open PRs. Returns a
-    list of RepoResult with ``loop_idx=cfg.loops`` and ``post_loop_phases`` populated. Any
-    repo-level exception is captured in ``runner_error`` so the helper
-    never raises to the caller (parity with ``process_repo``).
-
-    Post-loop stages run ``run_phase`` with ``loop_idx=cfg.loops`` to mark
-    this as the terminal pass. The old ``HEPH_LOOP_INDEX``/``HEPH_TOTAL_LOOPS``
-    env-gating contract was removed in #820/#1061, so ``_phase_env`` no longer
-    injects loop-index env vars for any phase; the post-loop semantics are now
-    expressed purely by this dedicated terminal stage rather than via env vars.
-    """
-    selected_post = [s for s in ALL_POST_LOOP_STAGES if s in cfg.phases]
-    if not selected_post:
-        return []
-
-    LOG.info("━" * 60)
-    LOG.info("▶ POST-LOOP STAGES: %s", ",".join(selected_post))
-    LOG.info("━" * 60)
-
-    results: list[RepoResult] = []
-    for repo in repos:
-        if _shutdown_requested():
-            LOG.warning("[%s] post-loop SKIP (shutdown requested)", repo)
-            break
-        result = RepoResult(repo=repo, loop_idx=cfg.loops, is_post_loop=True)
-        repo_dir = _resolve_repo_dir(cfg.projects_dir, repo)
-        if not (repo_dir / ".git").exists():
-            result.runner_error = f"repo {repo} not cloned at {repo_dir}"
-            results.append(result)
-            continue
-        try:
-            trunk_sha, _fetch_ok = _rebase_main(repo, repo_dir)
-            open_issues = cfg.issues or _list_open_issue_numbers(cfg.org, repo)
-            if cfg.issues:
-                open_issues = _admission._filter_open_issues(repo, open_issues)
-            for stage in selected_post:
-                skip_reason = _post_loop_stage_skip_reason(cfg, repo, stage, open_issues)
-                if skip_reason is not None:
-                    LOG.info("[%s] stage %s SKIP (%s)", repo, stage, skip_reason)
-                    result.post_loop_phases.append(
-                        PhaseResult(name=stage, skipped=True, skip_reason=skip_reason)
-                    )
-                    continue
-                stage_result = run_phase(
-                    repo=repo,
-                    repo_dir=repo_dir,
-                    phase=stage,
-                    cfg=cfg,
-                    loop_idx=cfg.loops,
-                    open_issues=[] if stage == "drive-green" else open_issues,
-                    trunk_sha=trunk_sha,
-                )
-                result.post_loop_phases.append(stage_result)
-                if stage_result.failed:
-                    LOG.warning(
-                        "[%s] post-loop stage %s FAILED rc=%d — retry with: "
-                        "hephaestus-automation-loop --phases %s --repos %s --loops 1",
-                        repo,
-                        stage,
-                        stage_result.rc,
-                        stage,
-                        repo,
-                    )
-        except Exception as exc:
-            tb = traceback.format_exc()
-            result.runner_error = f"{type(exc).__name__}: {exc}\n{tb}"
-            LOG.error("[%s] post-loop runner crashed: %s", repo, exc)
-        results.append(result)
-    return results
-
-
-def _open_peer_pr_claims(cfg: LoopConfig, repo: str, deferred: set[int]) -> dict[int, set[str]]:
-    """Map open peer issues that still own an OPEN PR to their planned file sets.
-
-    A "peer" is any open issue in *repo* outside the deferred set. Only peers
-    that still own an open PR (per :func:`find_pr_for_issue`, which searches
-    open PRs only) AND have a parseable plan claim files: a merged PR releases
-    its claim (the same-file conflict risk is gone once the peer's edits are on
-    trunk), and an unknown plan claims nothing — fail-open, matching
-    :func:`_select_non_overlapping`. Any per-peer lookup failure likewise drops
-    that peer's claim rather than blocking catch-up on a transient API blip.
-
-    Args:
-        cfg: Loop configuration (supplies the GitHub org).
-        repo: Repository name.
-        deferred: Issue numbers deferred this round (excluded from peers).
-
-    Returns:
-        ``{peer_issue: planned_file_set}`` for every claiming peer.
-
-    """
-    try:
-        open_issues = _list_open_issue_numbers(cfg.org, repo)
-    except Exception as exc:  # fail-open: no claims → catch-up proceeds
-        LOG.warning("[%s] could not list open issues for catch-up peer check: %s", repo, exc)
-        return {}
-    claims: dict[int, set[str]] = {}
-    for peer in open_issues:
-        if peer in deferred:
-            continue
-        try:
-            pr_number = find_pr_for_issue(peer)
-        except Exception as exc:  # fail-open per peer
-            LOG.warning("[%s] could not resolve PR for peer issue #%s: %s", repo, peer, exc)
-            continue
-        if pr_number is None:
-            continue
-        files = _admission._fetch_planned_files(peer)
-        if files:
-            claims[peer] = files
-    return claims
-
-
-def _run_terminal_deferred_issues(
-    cfg: LoopConfig,
-    terminal_results: list[RepoResult],
-) -> tuple[list[RepoResult], list[str]]:
-    """Replay final-round file-overlap deferrals after the post-loop sweep.
-
-    File-overlap serialization (#1623) normally relies on the next ``--loops``
-    round to pick up deferred siblings; on the terminal round there is no next
-    iteration. This catch-up therefore runs AFTER ``_run_post_loop_stages`` —
-    the drive-green sweep in which the overlapping peers' PRs actually merge —
-    and replays each deferred issue serially through :func:`process_repo` with
-    the overlap guard left ON (issue #1762, option (b)).
-
-    An issue whose planned files still overlap a peer that owns an OPEN PR is
-    NOT redispatched — doing so would recreate the exact same-file conflict
-    race #1623 exists to prevent. It stays deferred and is reported in the
-    returned ``blocked`` lines, which ``run_loop`` surfaces as a WARNING in
-    the loop summary (never silently dropped).
-
-    Args:
-        cfg: Loop configuration.
-        terminal_results: Per-repo results of the last executed loop round.
-
-    Returns:
-        ``(catchup_results, blocked)``: catch-up ``RepoResult`` records —
-        tagged ``is_catchup=True`` so per-loop convergence and loops-run
-        accounting exclude them — plus human-readable descriptions of the
-        issues still blocked and why.
-
-    """
-    deferred_by_repo: dict[str, list[int]] = {}
-    for result in terminal_results:
-        if result.deferred_issues:
-            deferred_by_repo.setdefault(result.repo, []).extend(result.deferred_issues)
-
-    if not deferred_by_repo:
-        return [], []
-
-    total_deferred = sum(len(issues) for issues in deferred_by_repo.values())
-    LOG.warning(
-        "Terminal loop left %d file-overlap deferred issue(s); running post-merge serial catch-up.",
-        total_deferred,
-    )
-
-    catchup_results: list[RepoResult] = []
-    blocked: list[str] = []
-    for repo, issues in deferred_by_repo.items():
-        pending = list(dict.fromkeys(issues))
-        claims = _open_peer_pr_claims(cfg, repo, set(pending))
-        for issue in pending:
-            if _shutdown_requested():
-                LOG.warning(
-                    "[%s] terminal deferred catch-up stopped before issue #%s (shutdown requested)",
-                    repo,
-                    issue,
-                )
-                return catchup_results, blocked
-
-            planned = _admission._fetch_planned_files(issue)
-            blocker = next(
-                (peer for peer, files in claims.items() if planned and planned & files),
-                None,
-            )
-            if blocker is not None:
-                LOG.warning(
-                    "[%s] catch-up for issue #%s withheld: planned files overlap "
-                    "issue #%s, whose PR is still open — re-run the loop after it merges",
-                    repo,
-                    issue,
-                    blocker,
-                )
-                blocked.append(f"{repo}#{issue} (peer #{blocker} PR still open)")
-                continue
-
-            if catchup_results:
-                # (0, 1) keeps the rate guard active between serial dispatches:
-                # its ``loop_idx >= total_loops`` short-circuit is meant for the
-                # terminal loop boundary, and more work still follows here.
-                _maybe_sleep_for_rate_budget(0, 1)
-
-            # Overlap serialization stays at the configured default (ON); only
-            # the scope (one issue) and worker count are narrowed.
-            catchup_cfg = replace(cfg, issues=[issue], max_workers=1)
-            LOG.warning("[%s] redispatching terminal deferred issue #%s", repo, issue)
-            result = process_repo(repo, cfg.loops, catchup_cfg)
-            result.is_catchup = True
-            catchup_results.append(result)
-            if result.deferred_issues:
-                blocked.append(f"{repo}#{issue} (re-deferred: {result.deferred_issues})")
-
-    return catchup_results, blocked
-
-
-def run_loop(cfg: LoopConfig, repos: list[str]) -> list[RepoResult]:
-    """Drive ``cfg.loops`` iterations across ``repos``. Returns flat result list.
-
-    Early-exits when a full loop produces no convergence-relevant work (#613).
-
-    Any single thread raising is contained — ``process_repo`` already
-    swallows all exceptions, and ``Future.exception()`` is the second-line
-    safety net for the rare case where the work submission itself dies.
-    """
-    all_results: list[RepoResult] = []
-    terminal_loop_results: list[RepoResult] = []
-
-    for loop_idx in range(1, cfg.loops + 1):
-        if _shutdown_requested():
-            LOG.warning("Shutdown requested before loop %d — stopping", loop_idx)
-            break
-
-        LOG.info("━" * 60)
-        LOG.info("▶ LOOP %d / %d", loop_idx, cfg.loops)
-        LOG.info("━" * 60)
-
-        loop_t0 = time.monotonic()
-        loop_results: list[RepoResult] = []
-
-        with ThreadPoolExecutor(
-            max_workers=max(1, cfg.parallel_repos),
-            thread_name_prefix="repo-",
-        ) as pool:
-            futures: dict[Future[RepoResult], str] = {
-                pool.submit(process_repo, repo, loop_idx, cfg): repo for repo in repos
-            }
-            for fut, repo in futures.items():
-                try:
-                    result = fut.result()
-                except Exception as exc:
-                    LOG.error("[%s] future raised: %s", repo, exc)
-                    result = RepoResult(
-                        repo=repo,
-                        loop_idx=loop_idx,
-                        runner_error=f"future raised: {type(exc).__name__}: {exc}",
-                    )
-                loop_results.append(result)
-                all_results.append(result)
-                if result.any_failure:
-                    LOG.warning(
-                        "[%s] loop %d had failures (see phase rcs above)",
-                        repo,
-                        loop_idx,
-                    )
-
-        elapsed_s = time.monotonic() - loop_t0
-        terminal_loop_results = loop_results
-        LOG.info("%s", _summarize_loop(loop_results, loop_idx, elapsed_s))
-        LOG.info("Loop %d complete.", loop_idx)
-
-        # Early-exit: when the full pass across ALL repos produced zero
-        # convergence-relevant work (0 new plans) and no failures, the
-        # iteration body has converged. Post-loop stages still run after
-        # the break (see below). --loops remains an upper bound. (#614/#818)
-        if (
-            loop_idx < cfg.loops
-            and not any(r.any_failure for r in loop_results)
-            and not any(r.produced_work for r in loop_results)
-        ):
-            LOG.info(
-                "Early exit after loop %d/%d: full pass produced 0 new plans"
-                " across all %d repo(s). Remaining loops skipped;"
-                " post-loop stages will still run.",
-                loop_idx,
-                cfg.loops,
-                len(repos),
-            )
-            break
-
-        _maybe_sleep_for_rate_budget(loop_idx, cfg.loops)
-
-    # Each worker already ran drive-green for only its current issue. Run one
-    # final sequential catch-up sweep per repo so transient CI or ordering
-    # leftovers are reported and driven without cross-worker worktree races.
-    post_loop_results = _run_post_loop_stages(cfg, repos)
-    all_results.extend(post_loop_results)
-
-    # Final-round overlap deferrals are replayed only AFTER the post-loop
-    # drive-green sweep above has had its chance to merge the overlapping
-    # peers' PRs, with the overlap guard kept ON (#1762, option (b)) —
-    # replaying earlier or with the guard off would reintroduce the same-file
-    # conflict race the deferral exists to prevent (#1623).
-    catchup_results, blocked_catchups = _run_terminal_deferred_issues(cfg, terminal_loop_results)
-    all_results.extend(catchup_results)
-
-    # Report actual loops run (may be less than cfg.loops due to early
-    # exit). Post-loop RepoResults are tagged ``is_post_loop=True`` by
-    # ``_run_post_loop_stages`` and catch-up ones ``is_catchup=True`` by
-    # ``_run_terminal_deferred_issues``, so filtering on those flags reliably
-    # excludes them even when a crashed/uncloned repo leaves both phase lists
-    # empty. This prevents such a record's loop_idx=cfg.loops from spuriously
-    # inflating the count when early-exit cut the loop body short.
-    per_loop_results = [r for r in all_results if not (r.is_post_loop or r.is_catchup)]
-    actual_loops = max((r.loop_idx for r in per_loop_results), default=0)
-    LOG.info(
-        "✓ Completed %d of %d loop(s) across %d repo(s).",
-        actual_loops,
-        cfg.loops,
-        len(repos),
-    )
-    if post_loop_results:
-        LOG.info("%s", _summarize_post_loop(post_loop_results))
-    if blocked_catchups:
-        LOG.warning(
-            "⚠ %d file-overlap deferred issue(s) remain blocked after terminal "
-            "catch-up: %s. Re-run the loop once the peer PR(s) merge.",
-            len(blocked_catchups),
-            "; ".join(blocked_catchups),
-        )
-    return all_results
 
 
 # ---------------------------------------------------------------------------
@@ -1755,14 +552,12 @@ def _error_exit(args: argparse.Namespace, message: str, json_message: str | None
 
 def _dispatch_pipeline(
     args: argparse.Namespace, cfg: LoopConfig, org: str, repos: list[str]
-) -> int | None:
-    """Run the queue-based pipeline when enabled; return None when it is off.
+) -> int:
+    """Run the queue-based pipeline and return its exit code.
 
-    Enabled by default unless ``HEPH_PIPELINE=0`` or ``--legacy-loop`` disables
-    it. The repo token preflight still happens before dispatch, while the repo
-    stage owns cloning, so this branch skips ``_clone_missing_repos`` (no
-    double-clone). Under the pipeline, ``--phase-timeout`` bounds each agent
-    job.
+    The repo token preflight happens before dispatch; the repo stage owns
+    cloning, so this branch does not clone. ``--phase-timeout`` bounds each
+    agent job.
 
     Args:
         args: Parsed argparse Namespace.
@@ -1771,11 +566,9 @@ def _dispatch_pipeline(
         repos: List of repository names.
 
     Returns:
-        The pipeline's exit code, or ``None`` when the pipeline is disabled.
+        The pipeline's exit code.
 
     """
-    if not args.pipeline:
-        return None
     if not cfg.dry_run:
         _preflight_token_scopes(cfg.org, repos[0])
     from hephaestus.automation.pipeline.coordinator import run_pipeline
@@ -1832,28 +625,8 @@ def main(argv: list[str] | None = None) -> int:
         for w in _phase_order_warnings(cfg):
             LOG.warning("%s (pass --allow-unsafe-phase-order to silence)", w)
 
-    signal.signal(signal.SIGINT, _request_shutdown)
-    signal.signal(signal.SIGTERM, _request_shutdown)
-    # SIGHUP missing on Windows; not the target platform but be tolerant.
-    with contextlib.suppress(AttributeError, ValueError):
-        signal.signal(signal.SIGHUP, _request_shutdown)
-
     if not repos:
         return _error_exit(args, "Repo list is empty; nothing to do.", "empty repo list")
-
-    LOG.info("Path: %s", "pipeline" if args.pipeline else "legacy-loop")
-
-    # Dispatch to the pipeline unless --legacy-loop or HEPH_PIPELINE=0 selected
-    # the rollback path (after token preflight, before legacy clone; the repo
-    # stage owns clone).
-    pipeline_rc = _dispatch_pipeline(args, cfg, org, repos)
-    if pipeline_rc is not None:
-        return pipeline_rc
-
-    if not cfg.dry_run:
-        _preflight_token_scopes(cfg.org, repos[0])
-
-    _clone_missing_repos(cfg.org, repos, cfg.projects_dir)
 
     LOG.info("Repos to process: %s", " ".join(repos))
     LOG.info(
@@ -1867,45 +640,8 @@ def main(argv: list[str] | None = None) -> int:
     LOG.info("Phases: %s", ",".join(cfg.phases))
     if cfg.issues:
         LOG.info("Issues: %s", ",".join(str(n) for n in cfg.issues))
-    LOG.info(
-        "Models: planner=%s reviewer=%s implementer=%s advise=%s",
-        cfg.planner_model or cfg.model or "<default>",
-        cfg.reviewer_model or cfg.model or "<default>",
-        cfg.implementer_model or cfg.model or "<default>",
-        cfg.model or "<default>",
-    )
 
-    results = run_loop(cfg, repos)
-
-    # Compute actual loops run (may be less than cfg.loops due to early exit).
-    # Post-loop and terminal-catch-up records carry loop_idx=cfg.loops but are
-    # not loop iterations — exclude both (see run_loop's per_loop_results).
-    loops_run = max(
-        (r.loop_idx for r in results if not (r.is_post_loop or r.is_catchup)),
-        default=0,
-    )
-
-    failures = [r for r in results if r.any_failure]
-    if failures:
-        LOG.warning("%d/%d repo-loop results had failures", len(failures), len(results))
-        if args.json:
-            emit_json_status(
-                1,
-                repos=repos,
-                loops_run=loops_run,
-                failed_repos=[r.repo for r in failures],
-            )
-        return 1
-
-    exit_code = 130 if _shutdown_requested() else 0
-    if args.json:
-        emit_json_status(
-            exit_code,
-            repos=repos,
-            loops_run=loops_run,
-            failed_repos=[],
-        )
-    return exit_code
+    return _dispatch_pipeline(args, cfg, org, repos)
 
 
 if __name__ == "__main__":
