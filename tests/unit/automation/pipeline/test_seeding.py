@@ -38,6 +38,7 @@ def _facts(
     *,
     number: int = 1,
     title: str = "A task",
+    body: str = "",
     is_epic: bool = False,
     labels: set[str] | None = None,
     pr_number: int | None = None,
@@ -57,6 +58,7 @@ def _facts(
         pr_is_merged=pr_is_merged,
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
+        body=body,
     )
 
 
@@ -462,7 +464,12 @@ class TestSeedFromCli:
 
     def test_issues_arm_classified_via_seed_issue(self) -> None:
         """Issues run through seed_issue + classify_issue."""
-        facts = _facts(number=9, labels={STATE_PLAN_GO})
+        facts = _facts(
+            number=9,
+            title="Hydrate planner context",
+            body="Use the real issue body.",
+            labels={STATE_PLAN_GO},
+        )
         with patch(
             "hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts
         ) as mock_seed:
@@ -474,6 +481,8 @@ class TestSeedFromCli:
                 identifier=9,
                 stage=StageName.IMPLEMENTATION,
                 reason=f"#9 at-or-past {STATE_PLAN_GO}, no PR yet",
+                issue_title="Hydrate planner context",
+                issue_body="Use the real issue body.",
             )
         ]
 
@@ -496,6 +505,7 @@ class TestSeedFromCli:
                 stage=StageName.CI,
                 reason=f"#9 open PR with {STATE_IMPLEMENTATION_GO}",
                 pr_number=77,
+                issue_title="A task",
             )
         ]
 

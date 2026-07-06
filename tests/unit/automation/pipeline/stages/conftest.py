@@ -36,6 +36,8 @@ class FakeStageGitHub(FakeGitHub):
         self,
         *,
         labels: list[str] | None = None,
+        issue_title: str = "A task",
+        issue_body: str = "",
         merged_pr: int | None = None,
         open_pr: int | None = None,
         has_plan: bool = False,
@@ -55,6 +57,8 @@ class FakeStageGitHub(FakeGitHub):
 
         Args:
             labels: Seed labels applied to any issue on first read/mutation.
+            issue_title: Canned issue title returned by gh_issue_json.
+            issue_body: Canned issue body returned by gh_issue_json.
             merged_pr: Canned answer for find_merged_closing_pr.
             open_pr: Canned answer for find_pr_for_issue.
             has_plan: Canned answer for has_existing_plan.
@@ -82,6 +86,8 @@ class FakeStageGitHub(FakeGitHub):
         """
         super().__init__()
         self._seed_labels = list(labels or [])
+        self._issue_title = issue_title
+        self._issue_body = issue_body
         self._merged_pr = merged_pr
         self._open_pr = open_pr
         self._has_plan = has_plan
@@ -111,8 +117,13 @@ class FakeStageGitHub(FakeGitHub):
 
     # -- read surface used by the stages -----------------------------------
     def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
-        """Mirror github_api.issues.gh_issue_json (labels subset only)."""
-        return {"labels": [{"name": name} for name in sorted(self._issue_labels(issue_number))]}
+        """Mirror github_api.issues.gh_issue_json (issue context plus labels)."""
+        return {
+            "number": issue_number,
+            "title": self._issue_title,
+            "body": self._issue_body,
+            "labels": [{"name": name} for name in sorted(self._issue_labels(issue_number))],
+        }
 
     def find_merged_closing_pr(self, issue_number: int) -> int | None:
         """Mirror _review_utils.find_merged_closing_pr."""
