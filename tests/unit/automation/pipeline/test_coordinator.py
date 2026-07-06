@@ -612,3 +612,59 @@ class TestPipelineScopeWiring:
 
         assert len(entries) == 1
         assert entries[0].stage is StageName.PLANNING
+
+
+class TestConfigWiring:
+    """PipelineConfig fields reach the per-repo StageContext the stages read."""
+
+    def test_budget_override_takes_precedence_over_routes_default(self, tmp_path: Path) -> None:
+        """budget_overrides={"ci_fix": N} overrides the ROUTES ci_fix default (1)."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            projects_dir=tmp_path,
+            budget_overrides={"ci_fix": 3},
+        )
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+        ctx = coordinator._ctx_for_repo("repo-a")
+
+        assert ctx.budget("ci_fix") == 3
+        # A non-overridden key still resolves from ROUTES (rebase default 2).
+        assert ctx.budget("rebase") == 2
+
+    def test_no_budget_override_uses_routes_default(self, tmp_path: Path) -> None:
+        """Without an override the ci_fix budget is the ROUTES default (1)."""
+        config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path)
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+        ctx = coordinator._ctx_for_repo("repo-a")
+
+        assert ctx.budget("ci_fix") == 1
+
+    def test_enable_mechanical_rebase_flows_to_stage_config(self, tmp_path: Path) -> None:
+        """enable_mechanical_rebase=False reaches ctx.config (read by stages/ci.py)."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            projects_dir=tmp_path,
+            enable_mechanical_rebase=False,
+        )
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+        ctx = coordinator._ctx_for_repo("repo-a")
+
+        assert ctx.config.enable_mechanical_rebase is False
+
+    def test_enable_mechanical_rebase_defaults_true(self, tmp_path: Path) -> None:
+        """The default keeps the CI stage's mechanical rebase enabled."""
+        config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path)
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+        ctx = coordinator._ctx_for_repo("repo-a")
+
+        assert ctx.config.enable_mechanical_rebase is True
