@@ -450,6 +450,45 @@ class TestSeedingEdges:
         assert item.issue == 1818
         assert item.pr == 1854
 
+    def test_direct_pr_scope_uses_repo_scoped_github_accessor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Direct --prs seeding must read PR labels through the target repo accessor."""
+        monkeypatch.setattr(
+            seeding_mod,
+            "gh_pr_label_names",
+            MagicMock(side_effect=AssertionError("ambient PR label seeding called")),
+        )
+        target_github = FakeStageGitHub(pr_impl_state=(True, False))
+        created: list[tuple[str, Path]] = []
+
+        def github_factory(repo: str, repo_root: Path) -> FakeStageGitHub:
+            created.append((repo, repo_root))
+            return target_github
+
+        config = PipelineConfig(
+            org="org",
+            repos=["target-repo"],
+            prs=[1854],
+            projects_dir=tmp_path,
+        )
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            github_factory=github_factory,
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+
+        coordinator._seed_pass()
+
+        assert created == [("target-repo", tmp_path / "target-repo")]
+        item = coordinator.queues[StageName.CI].snapshot()[0]
+        assert item.repo == "target-repo"
+        assert item.kind is ItemKind.PR
+        assert item.pr == 1854
+
     def test_repo_product_finished_entry_gets_pass_result(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
