@@ -163,6 +163,29 @@ D4 — CI failure analysis (only when CI Status block is non-empty).
     the failing job(s), quote the relevant error signal, and tie each
     failure to a diff hunk (or note "unrelated to diff" with evidence).
     Silently ignoring red CI is a major finding against the review.
+
+D5 — Runnable evidence for metric / training-run claims (NOGO gate).
+    Per ADR-014 (Odysseus docs/adr/014-runnable-evidence-for-metric-claims.md):
+    any claim of a measured metric, accuracy, loss, convergence, benchmark
+    number, or "successful run" is treated as UNPROVEN unless it is backed by
+    output produced by a gate the author does not control — a CI-produced
+    artifact or independently re-executed output pasted verbatim. A log file
+    committed into the diff (e.g. ``validation/epoch1.log``, a results table, a
+    metrics JSON) is NOT evidence, no matter how plausible: the author can write
+    any numbers into it. Grade this dimension:
+      - If the PR/issue asserts a metric/convergence/run result AND the only
+        support is a committed artifact or the author's own prose ("I ran it and
+        got X"), that is a MAJOR finding and forces NOGO. Absence of runnable
+        evidence is evidence of absence.
+      - Watch for forensic tells of fabrication and call them out explicitly:
+        uniform fixed-decimal losses where the code prints full
+        ``String(Float32)`` precision, monotone evenly-spaced loss curves, or a
+        "completed" artifact whose timestamp predates any run finishing.
+      - A PR that delivers code + a runnable command and HONESTLY defers the
+        measured result to a separate gated evidence step (per ADR-014) is
+        CORRECT and must NOT be penalized for the deferral. A truthful "did not
+        complete in the window" is acceptable; an invented number is not.
+    N/A only when the PR makes no metric/run claim at all.
 """
 
 
