@@ -66,8 +66,13 @@ from .base import (
 logger = logging.getLogger(__name__)
 
 
-def build_plan_prompt(issue_number: int, advise_findings: str = "") -> str:
-    """Compose the plan prompt with the advise-findings block.
+def build_plan_prompt(
+    issue_number: int,
+    issue_title: str = "",
+    issue_body: str = "",
+    advise_findings: str = "",
+) -> str:
+    """Compose the plan prompt with the issue TASK and advise-findings block.
 
     Module-level composed builder (NOT a closure): :class:`AgentJob` is
     frozen and prompt builders run in-worker, so the builder must be a
@@ -78,6 +83,8 @@ def build_plan_prompt(issue_number: int, advise_findings: str = "") -> str:
 
     Args:
         issue_number: GitHub issue number to plan.
+        issue_title: Source issue title.
+        issue_body: Source issue body.
         advise_findings: Advise-step findings; empty string means no block.
 
     Returns:
@@ -85,20 +92,24 @@ def build_plan_prompt(issue_number: int, advise_findings: str = "") -> str:
         ``advise_findings`` is non-empty.
 
     """
-    prompt = get_plan_prompt(issue_number)
-    if not advise_findings:
-        return prompt
-    block = "\n".join(
-        [
-            "",
-            "---",
-            "",
-            "## Prior Learnings from Team Knowledge Base",
-            "",
-            advise_findings,
-        ]
-    )
-    return prompt + block
+    context_parts = [
+        f"# Issue #{issue_number}: {issue_title or f'Issue #{issue_number}'}",
+        "",
+        issue_body,
+    ]
+    if advise_findings:
+        context_parts.extend(
+            [
+                "",
+                "---",
+                "",
+                "## Prior Learnings from Team Knowledge Base",
+                "",
+                advise_findings,
+            ]
+        )
+    context_parts.extend(["", "---", "", get_plan_prompt(issue_number)])
+    return "\n".join(context_parts)
 
 
 def _normalize_plan_comment(plan: str) -> str:
@@ -277,11 +288,14 @@ class PlanningStage(Stage):
                 cwd=ctx.paths.worktree,
                 timeout_s=planner_claude_timeout(),
                 session_agent=AGENT_PLANNER,
-                # build_plan_prompt composes get_plan_prompt with the advise
-                # findings block in-worker. The issue title/body header is
-                # prepended by the worker session setup (#1817).
+                # build_plan_prompt composes get_plan_prompt with the issue
+                # title/body and advise findings in-worker, mirroring the
+                # legacy planner_review_loop.generate_plan(cached_advise=...)
+                # context assembly.
                 prompt_kwargs={
                     "issue_number": item.issue,
+                    "issue_title": item.payload.get("issue_title", ""),
+                    "issue_body": item.payload.get("issue_body", ""),
                     "advise_findings": item.payload.get("advise_findings", ""),
                 },
                 descr="plan",

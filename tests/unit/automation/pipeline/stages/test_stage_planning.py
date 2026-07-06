@@ -25,18 +25,26 @@ from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 class TestBuildPlanPrompt:
     """build_plan_prompt composes the plan prompt with the advise block."""
 
-    def test_without_findings_is_plan_prompt_verbatim(self) -> None:
-        """No advise findings means the untouched template output."""
-        assert build_plan_prompt(7) == get_plan_prompt(7)
-        assert build_plan_prompt(7, "") == get_plan_prompt(7)
+    def test_without_findings_includes_issue_context(self) -> None:
+        """The planner prompt carries the TASK title/body before the template."""
+        prompt = build_plan_prompt(7, "Retry failure", "The loop retries forever.")
+
+        assert prompt.startswith("# Issue #7: Retry failure\n\nThe loop retries forever.")
+        assert prompt.endswith(get_plan_prompt(7))
 
     def test_with_findings_appends_learnings_block(self) -> None:
         """Advise findings ride in the legacy learnings block."""
-        prompt = build_plan_prompt(7, "Use the retry helper from utils.")
+        prompt = build_plan_prompt(
+            7,
+            "Retry failure",
+            "The loop retries forever.",
+            "Use the retry helper from utils.",
+        )
 
-        assert prompt.startswith(get_plan_prompt(7))  # template reused verbatim
+        assert prompt.startswith("# Issue #7: Retry failure")
         assert "## Prior Learnings from Team Knowledge Base" in prompt
-        assert prompt.endswith("Use the retry helper from utils.")
+        assert "Use the retry helper from utils." in prompt
+        assert prompt.endswith(get_plan_prompt(7))
 
 
 class TestPlanningStageEnter:
@@ -298,6 +306,8 @@ class TestPlanningStageStep:
         stage = PlanningStage()
         ctx = make_ctx()
         item = make_work_item(issue=4, state="PLAN_WAIT")
+        item.payload["issue_title"] = "Retry failure"
+        item.payload["issue_body"] = "The loop retries forever."
         item.payload["advise_findings"] = "prior learnings"
 
         result = stage.step(item, ctx)
@@ -311,6 +321,8 @@ class TestPlanningStageStep:
         # AgentJob is frozen, so no closures over payload).
         assert result.job.prompt_kwargs == {
             "issue_number": 4,
+            "issue_title": "Retry failure",
+            "issue_body": "The loop retries forever.",
             "advise_findings": "prior learnings",
         }
 
