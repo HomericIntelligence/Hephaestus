@@ -13,7 +13,7 @@ import hephaestus.automation.models as automation_models
 from hephaestus.automation import (
     address_review,
     ci_driver,
-    implementer_cli,
+    implementer,
     plan_reviewer,
     planner,
     pr_reviewer,
@@ -231,7 +231,7 @@ def test_worker_option_classes_use_narrowest_base_class() -> None:
     (
         (planner._build_parser, ("--parallel", "--dry-run", "--force")),
         (
-            implementer_cli._build_parser,
+            implementer._build_parser,
             ("--max-workers", "--dry-run", "--resume", "--no-skip-closed"),
         ),
         (pr_reviewer._build_parser, ("--max-workers", "--dry-run", "--no-ui", "--verbose")),

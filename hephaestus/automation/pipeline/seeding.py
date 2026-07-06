@@ -367,9 +367,8 @@ def seed_from_cli(
     - ``issues`` → :func:`seed_issue` + :func:`classify_issue` per issue.
     - ``prs`` → :attr:`StageName.CI` when the PR carries
       ``state:implementation-go``, else :attr:`StageName.PR_REVIEW` —
-      mirroring ``_review_existing_pr`` semantics
-      (``implementer_phase_runner.py:750``): GO short-circuits review, and a
-      failed label fetch reads as "not yet reviewed" (→ pr_review).
+      mirroring the legacy existing-PR review semantics: GO short-circuits
+      review, and a failed label fetch reads as "not yet reviewed" (→ pr_review).
 
     Args:
         repos: Repository names to seed for discovery.

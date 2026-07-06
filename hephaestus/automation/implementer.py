@@ -1,92 +1,60 @@
-r"""Bulk issue implementation using the selected coding agent in parallel worktrees.
+r"""``hephaestus-implement-issues`` CLI — a thin wrapper over the queue-based pipeline.
 
-Provides:
-- Dependency-aware parallel implementation
-- Git worktree isolation
-- State persistence and resume
-- CI fix automation
+Epic #1809 made the queue-based pipeline
+(:mod:`hephaestus.automation.pipeline.coordinator`) the single implementation
+of the plan → implement → review → CI → merge flow. This module is now the
+console-script entry point only: :func:`main` parses the historical implementer
+argument surface (``--issues``, ``--epic``, ``--max-workers``, ``--dry-run``,
+the ``--no-*`` toggles, timeout + GitHub-throttle flags), builds a
+:class:`~hephaestus.automation.pipeline.coordinator.PipelineConfig` trimmed to
+the ``(implementation, pr_review)`` stage scope via
+:class:`~hephaestus.automation.pipeline.routing.PipelineScope`, seeds the
+requested (or discovered) issues, and dispatches to
+:func:`~hephaestus.automation.pipeline.coordinator.run_pipeline`.
 
-Test-Patch Contract
--------------------
-This module owns a **minimal** patch surface.  After the #714 extraction, most
-patchable collaborators moved to :mod:`.implementer_phase_runner` (see its
-top-level comment block for the full list).  These patch paths still target
-``hephaestus.automation.implementer.<name>`` in the test suite:
+The seeding classifier enforces the plan-go gate: an issue that is not yet at
+``state:plan-go`` classifies to PLANNING, which is out of the implementation
+scope and is therefore clamped to FINISHED(pass) by the coordinator — only an
+at-or-past ``state:plan-go`` issue seeds into the IMPLEMENTATION queue. The
+per-issue implementation / review sequencing that the legacy phase runner used
+to own now lives entirely in ``pipeline/stages/implementation.py`` and
+``pipeline/stages/pr_review.py``.
 
-  Symbol                       Mechanism                Notes
-  ---------------------------- ------------------------ ----------------------------------------
-  get_repo_root                direct import + ``as``   Used by ``IssueImplementer.__init__``
-                               alias (mypy re-export)   and ``main``; patched in every test that
-                                                        constructs an ``IssueImplementer``.
-  subprocess.run               stdlib top-level         Patched at the dotted path
-                               ``import subprocess``    ``…implementer.subprocess.run`` via
-                                                        Python's standard attribute-traversal
-                                                        during ``patch()``.
-  commit_changes               direct import + ``as``   Used by the legacy ``_commit_changes``
-                               alias (mypy re-export)   dynamic delegate.
-  create_pr                    direct import + ``as``   Used by the legacy ``_create_pr``
-                               alias (mypy re-export)   dynamic delegate.
-  ImplementationSummaryPrinter direct import + ``as``   Used by the legacy ``_print_summary``
-                               alias (mypy re-export)   dynamic delegate.
+:class:`IssueImplementer` is retained as a slim session-setup helper (dependency
+resolution + worktree / state / status bookkeeping) — the per-issue phase runner
+and end-of-run summary printer were removed with the pipeline conversion.
 
-All former per-method phase-runner shims (``_finalize_pr``, ``_run_advise``,
-``_collect_diff``, …) now resolve through ``__getattr__`` via
-``_PHASE_RUNNER_DYNAMIC_DELEGATES`` (see #1439); they are no longer class
-methods.  ``patch.object(impl, "_method")`` still intercepts them.  That
-frozenset is the single source of truth for the mechanical phase-runner
-delegates.
-
-Keep-in-sync command (run when adding a new patch surface here):
-
-    grep -rn 'patch.*hephaestus\\.automation\\.implementer\\.' tests/ \\
-      | grep -v 'implementer_phase_runner\\|implementer_cli\\|implementer_state'
-
-When adding a new patchable dependency to *this* module:
-
-  1. Import it here using ``from .module import name as name`` (mypy
-     ``implicit_reexport=false``) so the re-export is explicit.
-  2. Add a row to the table above.
-  3. If the dependency is also called from :mod:`.implementer_phase_runner`,
-     add it there with a top-level import instead — do NOT bridge it back
-     through this module (that recreates the #714 cycle).
-
-For the full list of patchable symbols in the phase-runner (``fetch_issue_info``,
-``find_pr_for_issue``, ``is_plan_review_go``, ``invoke_claude_with_session``,
-``get_repo_slug``, ``AGENT_IMPLEMENTER``, ``AGENT_ADVISE``,
-``current_trunk_githash``, ``review_state``, …) see the comment block in
-:mod:`.implementer_phase_runner` above its ``from .session_naming import`` line.
-
-Why not constructor-injected collaborators: this module is patched by 16+
-existing test call sites across ``test_implementer.py`` and
-``test_implementer_loop.py``.  Converting to DI would require editing every
-one.  See issue #710's tradeoff analysis and the team's
-``python-module-decomposition-and-refactor-patterns`` skill, Phase 11
-(Reverse-Delegation), validated by PR #674.
+Usage:
+    hephaestus-implement-issues [--issues N ...] [--epic N] [--dry-run] \
+        [--max-workers N] [--no-advise] [--no-learn] [--no-follow-up]
 """
 
 from __future__ import annotations
 
+import argparse
 import logging
 import subprocess
 import sys
 import threading
-import time
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any, ClassVar
 
 from hephaestus.agents.runtime import (
     agent_cli_name,
     agent_display_name,
+    resolve_agent,
 )
+from hephaestus.cli.utils import (
+    add_advise_timeout_arg,
+    add_agent_timeout_arg,
+    add_follow_up_timeout_arg,
+    add_git_message_timeout_arg,
+    add_learn_timeout_arg,
+)
+from hephaestus.config.paths import resolve_projects_dir
+from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 
-from ._review_utils import ensure_state_dir
-
-# Imports for the Test-Patch Contract — see module docstring for the full table.
-# Each symbol here is either a real call site in IssueImplementer/main or an
-# explicit re-export required by tests or the public API.
+from ._review_utils import build_automation_parser, ensure_state_dir
 from .agent_config import AGENT_IMPL_TIMEOUT
-from .curses_ui import CursesUI, ThreadLogManager
 from .dependency_resolver import CyclicDependencyError, DependencyResolver
 
 # Patched at ``hephaestus.automation.implementer.get_repo_root`` by every test
@@ -97,43 +65,24 @@ from .git_utils import (
     run,
 )
 from .github_api import (
+    GitHubRateLimitError,
     fetch_issue_info,
     gh_list_open_issues as gh_list_open_issues,
 )
-
-# _parse_args / _setup_logging live in implementer_cli (SRP extraction #468).
-# Re-exported with explicit ``as`` aliases so tests calling
-# ``implementer._parse_args()`` continue to work unchanged.
-from .implementer_cli import (
-    _parse_args as _parse_args,
-    _setup_logging as _setup_logging,
-)
-from .implementer_phase_runner import (
-    MAX_REVIEW_ITERATIONS,
-    MAX_REVIEW_ITERATIONS_HARD_CAP,
-    ImplementationPhaseRunner,
-)
 from .implementer_state import ImplementationStateManager
-from .implementer_summary import ImplementationSummaryPrinter as ImplementationSummaryPrinter
 from .models import (
     ImplementationState,
     ImplementerOptions,
     WorkerResult,
 )
-from .pr_manager import (
-    commit_changes as commit_changes,
-    create_pr as create_pr,
-)
 from .state_labels import is_skipped
 from .status_tracker import StatusTracker
 from .worktree_manager import WorktreeManager
 
-# Public API of this module. `_CLAUDE_IMPL_TIMEOUT` keeps its leading underscore
-# (it is an internal default, not for general use) but is exported because
-# tests assert on it as the documented default.
+# Public API of this module. ``_CLAUDE_IMPL_TIMEOUT`` keeps its leading
+# underscore (it is an internal default, not for general use) but is exported
+# because tests assert on it as the documented default.
 __all__ = [
-    "MAX_REVIEW_ITERATIONS",
-    "MAX_REVIEW_ITERATIONS_HARD_CAP",
     "_CLAUDE_IMPL_TIMEOUT",
     "IssueImplementer",
     "main",
@@ -145,63 +94,159 @@ __all__ = [
 # ``AGENT_IMPL_TIMEOUT``). This constant serves as the documented default and
 # can be used in tests.
 _CLAUDE_IMPL_TIMEOUT: int = AGENT_IMPL_TIMEOUT
-_FUTURE_POLL_INTERVAL_SECONDS: float = 1.0
 
 
 logger = logging.getLogger(__name__)
 
 
+def _setup_logging(verbose: bool = False, log_dir: Path | None = None) -> None:
+    """Configure logging for the CLI.
+
+    Args:
+        verbose: Enable verbose (DEBUG) logging.
+        log_dir: Optional directory to write a ``run.log`` file into.
+
+    """
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(level=level, format=AUTOMATION_LOG_FORMAT, datefmt=LOG_DATEFMT)
+
+    if log_dir:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(log_dir / "run.log", mode="a")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(AUTOMATION_LOG_FORMAT, datefmt=LOG_DATEFMT))
+        logging.getLogger().addHandler(fh)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the argparse parser for the implementer CLI.
+
+    Extracted so tests can inspect the flag surface without invoking
+    ``parse_args``. Preserves the historical ``hephaestus-implement-issues``
+    flag surface (``--issues``, ``--epic``, ``--max-workers``, ``--dry-run``,
+    the ``--no-*`` toggles, timeout + GitHub-throttle flags) so pinned callers
+    and the loop runner's child-phase argv keep working.
+    """
+    parser = build_automation_parser(
+        description="Bulk implement GitHub issues using Claude Code or Codex",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Implement all open issues (no arguments needed)
+  %(prog)s
+
+  # Implement all issues in an epic
+  %(prog)s --epic 123
+
+  # Implement specific issues
+  %(prog)s --issues 595 596 597
+
+  # Analyze dependencies without implementing
+  %(prog)s --epic 123 --analyze
+
+  # Resume previous implementation
+  %(prog)s --epic 123 --resume
+
+  # Health check
+  %(prog)s --health-check
+
+  # Dry run
+  %(prog)s --issues 595 --dry-run
+        """,
+        add_github_throttle=True,
+        dry_run_prefix="Suppress GitHub mutations and git pushes (no PR creation, no commits).",
+        add_no_ui=True,
+    )
+
+    parser.add_argument(
+        "--epic",
+        type=int,
+        help="Epic issue number containing sub-issues",
+    )
+    parser.add_argument(
+        "--issues",
+        type=int,
+        nargs="+",
+        help="Specific issue numbers to implement (alternative to --epic)",
+    )
+    parser.add_argument(
+        "--analyze",
+        action="store_true",
+        help="(Deprecated, ignored) kept for CLI compatibility; analysis lives in the pipeline",
+    )
+    parser.add_argument(
+        "--health-check",
+        action="store_true",
+        help="Run health check of dependencies and environment",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="(Deprecated, ignored) kept for CLI compatibility; the pipeline resumes from state",
+    )
+    parser.add_argument(
+        "--no-skip-closed",
+        action="store_true",
+        help="Implement closed issues (default: skip closed issues)",
+    )
+    parser.add_argument(
+        "--no-auto-merge",
+        action="store_true",
+        help="Don't enable auto-merge after implementation-review GO",
+    )
+    parser.add_argument(
+        "--no-learn",
+        action="store_true",
+        help="Disable /learn after implementation (enabled by default)",
+    )
+    parser.add_argument(
+        "--no-follow-up",
+        action="store_true",
+        help="Disable automatic filing of follow-up issues (enabled by default)",
+    )
+    parser.add_argument(
+        "--no-advise",
+        action="store_true",
+        help="Skip the advise step before implementation",
+    )
+    parser.add_argument(
+        "--nitpick",
+        action="store_true",
+        help="Let the reviewer emit nitpick-severity comments (suppressed by default)",
+    )
+    add_agent_timeout_arg(parser)
+    add_advise_timeout_arg(parser)
+    add_git_message_timeout_arg(parser)
+    add_learn_timeout_arg(parser)
+    add_follow_up_timeout_arg(parser)
+    return parser
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command line arguments for the implementer CLI."""
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    if args.epic and args.issues:
+        parser.error("Cannot specify both --epic and --issues")
+
+    return args
+
+
 class IssueImplementer:
-    """Implements GitHub issues in parallel using the selected coding agent.
+    """Slim session-setup helper for issue implementation.
+
+    Since the epic #1809 pipeline conversion the per-issue implementation /
+    review sequencing lives in the pipeline stages
+    (``pipeline/stages/implementation.py`` + ``pr_review.py``), not here. What
+    remains is the session bootstrap the pipeline and its tests reuse:
+    dependency resolution, worktree isolation, and state/status bookkeeping.
 
     Features:
     - Dependency resolution and topological ordering
-    - Parallel execution in isolated git worktrees
+    - Isolated git worktree management
     - State persistence for resume capability
-    - Automatic CI fix attempts
-    - Real-time curses UI for status monitoring
     """
-
-    _PHASE_RUNNER_DYNAMIC_DELEGATES: ClassVar[frozenset[str]] = frozenset(
-        {
-            # pre-existing mechanical delegates (#714)
-            "_parse_follow_up_items",
-            "_can_resume_state_session",
-            "_run_follow_up_issues",
-            "_learn_needs_rerun",
-            "_rerun_failed_learns",
-            "_run_learn",
-            "_run_advise_as_implementer_turn",
-            "_run_claude_impl_session",
-            "_run_codex_code",
-            "_save_review_log",
-            "_load_review_iteration_state",
-            # #1438/#1439: former explicit pure-forward shims, now resolved here
-            "_finalize_pr",
-            "_run_post_pr_followup",
-            "_implement_issue",
-            "_has_plan",
-            "_generate_plan",
-            "_run_advise",
-            "_run_impl_review_loop",
-            "_run_impl_review_step",
-            "_run_address_review_step",
-            "_resume_impl_with_feedback",
-            "_run_impl_review",
-            "_collect_diff",
-            "_collect_changed_files",
-            "_save_review_iteration_state",
-            "_run_tests_in_worktree",
-            "_run_claude_code",
-            "_ensure_pr_created",
-        }
-    )
-    _STATE_MANAGER_DYNAMIC_DELEGATES: ClassVar[dict[str, str]] = {
-        "_get_or_create_state": "get_or_create",
-        "_get_state": "get",
-        "_save_state": "save",
-        "_load_state": "load_all",
-    }
 
     def __init__(self, options: ImplementerOptions):
         """Initialize issue implementer.
@@ -217,12 +262,8 @@ class IssueImplementer:
         self.resolver = DependencyResolver(skip_closed=options.skip_closed)
         self.worktree_manager = WorktreeManager()
         self.status_tracker = StatusTracker(options.max_workers)
-        self.log_manager = ThreadLogManager()
 
         self.state_mgr = ImplementationStateManager(self.state_dir)
-        self.phase_runner = ImplementationPhaseRunner(self)
-
-        self.ui: CursesUI | None = None
 
     # ------------------------------------------------------------------
     # Compatibility shims: callers that pre-date the #597 state-manager
@@ -246,143 +287,16 @@ class IssueImplementer:
         """Return the component that owns implementation state persistence."""
         return self.state_mgr
 
-    @property
-    def summary_printer(self) -> ImplementationSummaryPrinter:
-        """Return the summary printer component for the current worktree manager."""
-        return ImplementationSummaryPrinter(self.worktree_manager)
-
-    def __getattr__(self, name: str) -> Any:
-        """Resolve mechanical legacy helper names through their owning components."""
-        if name in self._PHASE_RUNNER_DYNAMIC_DELEGATES:
-            phase_runner = self.__dict__.get("phase_runner")
-            if phase_runner is not None:
-                return getattr(phase_runner, name)
-
-        state_delegate = self._STATE_MANAGER_DYNAMIC_DELEGATES.get(name)
-        if state_delegate is not None:
-            state_mgr = self.__dict__.get("state_mgr")
-            if state_mgr is not None:
-                return getattr(state_mgr, state_delegate)
-
-        if name == "_commit_changes":
-
-            def _commit_changes(issue_number: int, worktree_path: Path) -> None:
-                commit_changes(
-                    issue_number,
-                    worktree_path,
-                    self.options.agent,
-                    git_message_timeout=self.options.git_message_timeout,
-                )
-
-            return _commit_changes
-
-        if name == "_create_pr":
-
-            def _create_pr(issue_number: int, branch_name: str) -> int:
-                return create_pr(
-                    issue_number,
-                    branch_name,
-                    auto_merge=False,
-                    agent=self.options.agent,
-                    git_message_timeout=self.options.git_message_timeout,
-                )
-
-            return _create_pr
-
-        if name == "_print_summary":
-            return self.summary_printer.print
-
-        raise AttributeError(f"{type(self).__name__} object has no attribute {name!r}")
-
     def _log(self, level: str, msg: str, thread_id: int | None = None) -> None:
-        """Log to both standard logger and UI thread buffer.
+        """Log to the standard logger.
 
         Args:
             level: Log level ("error", "warning", or "info")
             msg: Message to log
-            thread_id: Thread ID (defaults to current thread)
+            thread_id: Unused; retained for signature compatibility.
 
         """
         getattr(logger, level)(msg)
-        tid = thread_id or threading.get_ident()
-        prefix = {"error": "ERROR", "warning": "WARN", "info": ""}.get(level, "")
-        ui_msg = f"{prefix}: {msg}" if prefix else msg
-        self.log_manager.log(tid, ui_msg)
-
-    def run(self) -> dict[int, WorkerResult]:
-        """Run the implementer.
-
-        Returns:
-            Dictionary mapping issue number to WorkerResult
-
-        """
-        # Health check mode
-        if self.options.health_check:
-            return self._health_check()
-
-        # Short-circuit when there's nothing to implement. The CLI's auto-
-        # discovery branch (implementer.main → gh_list_open_issues) sets
-        # ``args.issues = []`` for repos with zero open issues, then defaults
-        # ``epic_number=0``. Without this guard we fall through to
-        # ``load_epic(0)`` and pay 5 retries × exponential backoff against
-        # ``gh issue view 0`` before crashing — wasting ~12s per empty repo
-        # and dominating wall-clock for the parallel-repos loop. Mirrors
-        # ``planner.py:107-108`` which warns and returns ``{}`` on the same
-        # condition. See #574.
-        if not self.options.issues and not self.options.epic_number:
-            logger.warning("No issues to implement (repo has no open issues / nothing discovered)")
-            return {}
-
-        # Load issues or epic and resolve dependencies
-        if self.options.issues:
-            logger.info("Loading issues: %s", self.options.issues)
-            self._load_issues(self.options.issues)
-        else:
-            logger.info("Loading epic #%s", self.options.epic_number)
-            self.resolver.load_epic(self.options.epic_number)
-
-        # Detect cycles
-        try:
-            self.resolver.detect_cycles()
-        except CyclicDependencyError as e:
-            logger.error("Dependency cycle detected: %s", e)
-            return {}
-
-        # Analyze only mode
-        if self.options.analyze_only:
-            return self._analyze_dependencies()
-
-        # Keep issue-scoped runs from hydrating stale state for unrelated
-        # historical issues. Epic/global runs still load all state so the
-        # failed-learn sweep can see their full dependency context.
-        if self.options.issues:
-            self.state_mgr.load_only(self.options.issues)
-        else:
-            self._load_state()
-
-        # Re-run failed learns before normal processing
-        if self.options.enable_learn:
-            retro_results = self._rerun_failed_learns()
-            if retro_results:
-                logger.info("Re-ran %s failed learn(s)", len(retro_results))
-
-        # Start UI if enabled and not in dry run
-        if not self.options.dry_run and self.options.enable_ui:
-            self.ui = CursesUI(self.status_tracker, self.log_manager)
-            self.ui.start()
-
-        try:
-            # Implement issues
-            results = self._implement_all()
-            return results
-        finally:
-            # Stop UI
-            if self.ui:
-                self.ui.stop()
-
-            # Cleanup worktrees
-            if not self.options.dry_run:
-                self.worktree_manager.cleanup_all()
 
     def _load_issues(self, issue_numbers: list[int]) -> None:
         """Load specific issues into the dependency graph.
@@ -510,123 +424,47 @@ class IssueImplementer:
 
         return {}
 
-    def _implement_all(self) -> dict[int, WorkerResult]:  # noqa: C901  # orchestration: many retry/outcome paths
-        """Implement all issues with dependency awareness.
 
-        Returns:
-            Dictionary mapping issue number to WorkerResult
+def _resolve_repo() -> tuple[str, str]:
+    """Resolve ``(org, repo)`` for the current checkout.
 
-        """
-        results: dict[int, WorkerResult] = {}
+    Returns:
+        The GitHub ``owner`` and ``repo`` name derived from the local repo
+        slug (``owner/repo``).
 
-        with ThreadPoolExecutor(max_workers=self.options.max_workers) as executor:
-            futures: dict[Future[Any], int] = {}
-            active_issues: set[int] = set()
+    """
+    from .git_utils import get_repo_slug
 
-            while True:
-                # Get ready issues
-                ready = self.resolver.get_ready_issues()
-
-                # Submit new work
-                submitted_any = False
-                for issue in ready:
-                    if issue.number not in active_issues and issue.number not in results:
-                        future = executor.submit(self._implement_issue, issue.number)
-                        futures[future] = issue.number
-                        active_issues.add(issue.number)
-                        submitted_any = True
-
-                # Check for completed work
-                if not futures:
-                    # No active futures and no more work to do
-                    break
-
-                # Wait for at least one to complete
-                try:
-                    done, _pending = wait(
-                        futures.keys(),
-                        timeout=_FUTURE_POLL_INTERVAL_SECONDS,
-                        return_when=FIRST_COMPLETED,
-                    )
-                except Exception:  # broad catch: thread pool can raise various internal errors
-                    # Timeout or error - check if we should continue
-                    if not submitted_any and not futures:
-                        break
-                    # Add backoff when no work available
-                    time.sleep(0.1)
-                    continue
-
-                # Process completed futures
-                for future in done:
-                    issue_num = futures[future]
-                    active_issues.remove(issue_num)
-                    del futures[future]
-
-                    try:
-                        result = future.result()
-                        results[issue_num] = result
-
-                        if result.success and result.plan_review_not_go:
-                            # Deferred: plan exists but latest review is not GO.
-                            # Do NOT mark completed — dependents must still wait,
-                            # and the issue will be retried on the next
-                            # automation loop after re-review. See #551.
-                            logger.info(
-                                "Issue #%s deferred: waiting for GO plan-review",
-                                issue_num,
-                            )
-                        elif result.success:
-                            self.resolver.mark_completed(issue_num)
-                            logger.info("Issue #%s completed successfully", issue_num)
-                        else:
-                            logger.error("Issue #%s failed: %s", issue_num, result.error)
-
-                    except Exception as e:  # broad catch: worker threads can raise any exception
-                        logger.error("Issue #%s raised exception: %s", issue_num, e)
-                        results[issue_num] = WorkerResult(
-                            issue_number=issue_num,
-                            success=False,
-                            error=str(e),
-                        )
-
-                # If no futures pending and no new work submitted, we're done
-                if not futures and not ready:
-                    break
-
-        # Detect and log issues that were skipped due to unresolved dependencies
-        attempted_issues = set(results.keys())
-        all_issues = set(self.resolver.graph.issues.keys())
-        skipped_issues = all_issues - attempted_issues - self.resolver.completed
-
-        if skipped_issues:
-            logger.warning("Skipped %s issue(s) due to failed dependencies:", len(skipped_issues))
-            for issue_num in sorted(skipped_issues):
-                deps = self.resolver.graph.get_dependencies(issue_num)
-                failed_deps = [d for d in deps if d not in self.resolver.completed]
-                logger.warning("  #%s: blocked by failed issue(s) %s", issue_num, failed_deps)
-
-        self._print_summary(results)
-        return results
+    slug = get_repo_slug()
+    org, _, repo = slug.partition("/")
+    return org, repo
 
 
 def main() -> int:
-    """Execute the issue implementation workflow.
+    """Execute the issue implementation workflow via the pipeline.
 
-    Relocated from :mod:`.implementer_cli` to break the deferred-import cycle
-    (#714): ``main`` resolves ``gh_list_open_issues``, ``get_repo_root``, and
-    ``IssueImplementer`` directly through this module's namespace instead of
-    importing ``implementer`` lazily from ``implementer_cli``. The console-script
-    entry point ``hephaestus.automation.implementer:main`` (declared in
-    pyproject.toml) continues to resolve unchanged, and tests patching
-    ``implementer.<dep>`` still intercept these lookups.
+    Parses the historical implementer argument surface, builds a
+    :class:`PipelineConfig` scoped to ``(implementation, pr_review)``, seeds the
+    requested (or discovered) issues into the implementation queue (the plan-go
+    gate is enforced by the seeding classifier), and runs the coordinator.
+
+    ``--health-check`` short-circuits to the standalone environment probe and
+    never dispatches to the pipeline.
 
     Returns:
-        Exit code: 0 on success, 1 on failure, 130 on keyboard interrupt
+        Exit code: the coordinator's exit code (0 clean, non-zero on
+        fail/skip/blocked), 0 on a clean rate-limited skip or a health check,
+        130 on keyboard interrupt.
 
     """
-    from hephaestus.agents.runtime import resolve_agent
     from hephaestus.cli.utils import configure_github_throttle_from_args, emit_json_status
-    from hephaestus.utils.terminal import terminal_guard
+
+    # Imported here (not at module top) so ``import hephaestus.automation.implementer``
+    # — and the ``from hephaestus.automation.implementer import main`` import-cycle
+    # smoke test — stays free of the coordinator's heavier import surface until
+    # the CLI actually runs.
+    from .pipeline.coordinator import PipelineConfig, run_pipeline
+    from .pipeline.routing import PipelineScope, StageName
 
     args = _parse_args()
     configure_github_throttle_from_args(args)
@@ -637,74 +475,74 @@ def main() -> int:
 
     log = logging.getLogger(__name__)
 
-    # Auto-discover all open issues when neither --issues nor --epic is given
-    if not args.health_check and not args.epic and not args.issues:
-        discovered = gh_list_open_issues()
-        log.info(
-            "No --issues/--epic given; discovered %s open issues: %s", len(discovered), discovered
-        )
-        args.issues = discovered
-
-    options = ImplementerOptions(
-        epic_number=args.epic or 0,
-        issues=args.issues or [],
-        agent=agent,
-        analyze_only=args.analyze,
-        health_check=args.health_check,
-        resume=args.resume,
-        max_workers=args.max_workers,
-        skip_closed=not args.no_skip_closed,
-        auto_merge=not args.no_auto_merge,
-        dry_run=args.dry_run,
-        enable_advise=not args.no_advise,
-        enable_learn=not args.no_learn,
-        enable_follow_up=not args.no_follow_up,
-        enable_ui=not args.no_ui and not args.json,
-        include_nitpicks=args.nitpick,
-        **({"agent_timeout": args.agent_timeout} if args.agent_timeout is not None else {}),
-        **({"advise_timeout": args.advise_timeout} if args.advise_timeout is not None else {}),
-        **({"learn_timeout": args.learn_timeout} if args.learn_timeout is not None else {}),
-        **(
-            {"follow_up_timeout": args.follow_up_timeout}
-            if args.follow_up_timeout is not None
-            else {}
-        ),
-        **(
-            {"git_message_timeout": args.git_message_timeout}
-            if args.git_message_timeout is not None
-            else {}
-        ),
-    )
-
+    # ``--health-check`` is a standalone environment probe; it never touches
+    # the pipeline. Mirrors the legacy behavior (best-effort probes, always
+    # exit 0).
     if args.health_check:
         log.info("Running health check")
-    elif args.issues:
-        log.info("Starting implementation of issues: %s", args.issues)
-    else:
-        log.info("Starting implementation of epic #%s", args.epic)
+        options = ImplementerOptions(
+            issues=[],
+            agent=agent,
+            health_check=True,
+            max_workers=args.max_workers,
+        )
+        IssueImplementer(options)._health_check()
+        if args.json:
+            emit_json_status(0, message="health-check")
+        return 0
 
-    with terminal_guard():
+    log.info("Starting issue implementer (pipeline, implementation scope)")
+
+    org, repo = _resolve_repo()
+
+    issues = list(args.issues) if args.issues else []
+    if not issues and not args.epic:
         try:
-            implementer = IssueImplementer(options)
-            results = implementer.run()
-
-            if not args.health_check and not args.analyze:
-                failed = [num for num, result in results.items() if not result.success]
-                if failed:
-                    log.error("Failed to implement %s issue(s): %s", len(failed), failed)
-                    if args.json:
-                        emit_json_status(1, issues=args.issues or [], failed=failed)
-                    return 1
-
-            log.info("Complete")
+            issues = gh_list_open_issues()
+        except GitHubRateLimitError as e:
+            # Don't smear a traceback across the driver's loop output when the
+            # only problem is that the GraphQL hourly budget is gone. Exit
+            # cleanly so the outer loop moves on to the next repo.
+            log.error(
+                "GitHub API rate-limited; cannot discover issues this run "
+                "(reset at epoch %s). Skipping cleanly.",
+                e.reset_epoch,
+            )
             if args.json:
-                emit_json_status(0, issues=args.issues or [], epic=args.epic or 0)
+                emit_json_status(0, message="rate-limited; skipped", reset_epoch=e.reset_epoch)
             return 0
-        except KeyboardInterrupt:
-            log.warning("Interrupted by user")
-            if args.json:
-                emit_json_status(130, message="interrupted")
-            return 130
+        log.info("No --issues/--epic given; discovered %s open issues: %s", len(issues), issues)
+
+    # Dedupe while preserving first-seen order (dict.fromkeys is the canonical
+    # "ordered set" trick) so ``--issues 123 123`` never queues the same issue
+    # twice.
+    issues = list(dict.fromkeys(issues))
+    log.info("Issues to implement: %s", issues)
+
+    config = PipelineConfig(
+        org=org,
+        repos=[repo],
+        issues=issues,
+        # A single loop pass: the review/address cycle is bounded in-stage
+        # (pr_review_iter / pr_review_hard budgets), so the implementer CLI does
+        # not need multi-loop convergence.
+        loops=1,
+        # --max-workers maps to the pipeline worker-pool size.
+        max_workers=args.max_workers,
+        dry_run=args.dry_run,
+        agent=agent,
+        no_advise=args.no_advise,
+        nitpick=args.nitpick,
+        projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
+        json_out=args.json,
+        scope=PipelineScope(frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW})),
+    )
+
+    rc = run_pipeline(config)
+    log.info("Implementation complete (rc=%d)", rc)
+    if args.json:
+        emit_json_status(rc, issues=issues, epic=args.epic or 0)
+    return rc
 
 
 if __name__ == "__main__":

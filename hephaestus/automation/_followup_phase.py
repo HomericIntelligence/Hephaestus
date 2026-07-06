@@ -1,7 +1,8 @@
 """Post-PR follow-up phase (/learn + follow-up issue filing).
 
-Extracted from :class:`ImplementationPhaseRunner` as part of the #712
-decomposition. :class:`FollowUpPhase` owns everything that runs *after* the
+Part of the #712 phase decomposition (the per-issue control flow it once
+fed now lives in the pipeline stages, epic #1809).
+:class:`FollowUpPhase` owns everything that runs *after* the
 review loop converges: resuming the implementer session to run ``/learn``,
 compacting it, filing follow-up issues, and finally marking the issue
 ``COMPLETED``. It also owns the cross-issue ``_rerun_failed_learns`` sweep.
