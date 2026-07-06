@@ -68,6 +68,14 @@ def test_flag_env_matrix(
     assert dispatch["run_loop"].called is not expect_pipeline
 
 
+def test_pipeline_and_legacy_flags_conflict() -> None:
+    """--pipeline and --legacy-loop are rollback selectors, not stackable modes."""
+    with pytest.raises(SystemExit) as excinfo:
+        loop_runner._parse_args(["--pipeline", "--legacy-loop"])
+
+    assert excinfo.value.code == 2
+
+
 def test_pipeline_path_preflights_but_skips_clone(dispatch: dict[str, MagicMock]) -> None:
     """C3: pipeline keeps token preflight, while the repo stage owns cloning."""
     loop_runner.main([])
