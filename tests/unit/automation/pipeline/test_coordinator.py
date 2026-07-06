@@ -113,7 +113,6 @@ class TestQuiescence:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """--issues N scopes the run to N instead of reconstructing the whole repo."""
-        captured: dict[str, list[Any]] = {}
         config = PipelineConfig(
             org="org",
             repos=["repo-a"],
@@ -121,32 +120,25 @@ class TestQuiescence:
             loops=1,
             projects_dir=tmp_path,
         )
+        gh = FakeStageGitHub(merged_pr=1851)
 
         def fake_seed(
             repos_arg: list[str], issues_arg: list[int], prs_arg: list[int]
         ) -> list[SeedEntry]:
-            captured["repos"] = list(repos_arg)
-            captured["issues"] = list(issues_arg)
-            captured["prs"] = list(prs_arg)
-            return [
-                SeedEntry(
-                    kind="issue",
-                    identifier=1850,
-                    stage=StageName.FINISHED,
-                    reason="already done",
-                )
-            ]
+            assert repos_arg == []
+            assert issues_arg == []
+            assert prs_arg == []
+            return []
 
         monkeypatch.setattr(seeding_mod, "seed_from_cli", fake_seed)
         coordinator = Coordinator(
             config,
-            github=FakeStageGitHub(),
+            github=gh,
             pool=FakeWorkerPool(),
             install_signals=False,
         )
 
         assert coordinator.run() == 0
-        assert captured == {"repos": [], "issues": [1850], "prs": []}
         assert [item.issue for item in coordinator.items] == [1850]
         assert all(item.kind is not ItemKind.REPO for item in coordinator.items)
 

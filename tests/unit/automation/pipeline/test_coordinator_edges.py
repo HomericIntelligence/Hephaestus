@@ -25,6 +25,7 @@ import hephaestus.automation.pipeline.routing as routing_mod
 import hephaestus.automation.pipeline.seeding as seeding_mod
 import hephaestus.automation.pipeline.stages.base as stage_base_mod
 import hephaestus.automation.pipeline.work_item as work_item_mod
+from hephaestus.automation.state_labels import STATE_PLAN_GO
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -401,6 +402,50 @@ class TestSeedingEdges:
         coordinator._seed_pass()
 
         item = coordinator.queues[StageName.PR_REVIEW].snapshot()[0]
+        assert item.kind is ItemKind.ISSUE
+        assert item.issue == 1818
+        assert item.pr == 1854
+
+    def test_direct_issue_scope_uses_repo_scoped_github_accessor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Direct --issues seeding must read the target repo, not ambient cwd state."""
+        monkeypatch.setattr(
+            seeding_mod,
+            "seed_issue",
+            MagicMock(side_effect=AssertionError("ambient issue seeding called")),
+        )
+        target_github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO],
+            open_pr=1854,
+            pr_impl_state=(True, False),
+        )
+        created: list[tuple[str, Path]] = []
+
+        def github_factory(repo: str, repo_root: Path) -> FakeStageGitHub:
+            created.append((repo, repo_root))
+            return target_github
+
+        config = PipelineConfig(
+            org="org",
+            repos=["target-repo"],
+            issues=[1818],
+            projects_dir=tmp_path,
+        )
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            github_factory=github_factory,
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+
+        coordinator._seed_pass()
+
+        assert created == [("target-repo", tmp_path / "target-repo")]
+        item = coordinator.queues[StageName.CI].snapshot()[0]
+        assert item.repo == "target-repo"
         assert item.kind is ItemKind.ISSUE
         assert item.issue == 1818
         assert item.pr == 1854
