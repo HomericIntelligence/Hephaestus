@@ -871,7 +871,8 @@ class Coordinator:
 
         """
         self._pass_work_count = 0
-        entries = _seeding.seed_from_cli(self.config.repos, self.config.issues, self.config.prs)
+        discovery_repos = [] if self.config.issues or self.config.prs else self.config.repos
+        entries = _seeding.seed_from_cli(discovery_repos, self.config.issues, self.config.prs)
         pushed = 0
         for entry in entries:
             if entry.stage is None:

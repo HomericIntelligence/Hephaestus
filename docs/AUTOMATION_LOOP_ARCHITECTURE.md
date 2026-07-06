@@ -415,7 +415,9 @@ semantics.
 - `--repos` seeds one repo item per named repository.
 - `--issues` seeds issue-scoped items through the classifier and routes them to
   planning, implementation, pr_review, ci, or finished according to durable
-  labels/PR state.
+  labels/PR state. When explicit issue or PR scope is present, the resolved
+  repository list is used only as context for those items; repo discovery is not
+  enqueued, so a scoped run cannot reconstruct every open issue in the repo.
 - `--org` expands to non-fork, non-archived repository seeds.
 
 The standalone console scripts remain legacy/manual compatibility paths at the

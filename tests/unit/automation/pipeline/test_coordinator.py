@@ -106,6 +106,47 @@ def _issue_item(
 class TestQuiescence:
     """Full-run tests driving seeded items to the finished ledger."""
 
+    def test_explicit_issue_scope_suppresses_repo_discovery_seed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--issues N scopes the run to N instead of reconstructing the whole repo."""
+        captured: dict[str, list[Any]] = {}
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[1850],
+            loops=1,
+            projects_dir=tmp_path,
+        )
+
+        def fake_seed(
+            repos_arg: list[str], issues_arg: list[int], prs_arg: list[int]
+        ) -> list[SeedEntry]:
+            captured["repos"] = list(repos_arg)
+            captured["issues"] = list(issues_arg)
+            captured["prs"] = list(prs_arg)
+            return [
+                SeedEntry(
+                    kind="issue",
+                    identifier=1850,
+                    stage=StageName.FINISHED,
+                    reason="already done",
+                )
+            ]
+
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", fake_seed)
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        assert coordinator.run() == 0
+        assert captured == {"repos": [], "issues": [1850], "prs": []}
+        assert [item.issue for item in coordinator.items] == [1850]
+        assert all(item.kind is not ItemKind.REPO for item in coordinator.items)
+
     def test_repo_products_flow_to_finished(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
