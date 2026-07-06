@@ -263,8 +263,8 @@ class ImplementationStage(Stage):
             logger.info("implementation:%d: requesting worktree job", item.issue)
             adopted = bool(item.payload.get("existing_pr"))
             kwargs: dict[str, object] = {
-                "issue": item.issue,
-                "branch": item.branch,
+                "issue_number": item.issue,
+                "branch_name": item.branch,
                 # Fresh branch: cut from a freshly refreshed trunk (doc step
                 # 2: worktree_manager.create_worktree(refresh_base=True)).
                 # ADOPTED branch: never reset to trunk — sync to the PR's

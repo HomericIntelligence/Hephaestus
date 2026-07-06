@@ -98,13 +98,18 @@ class TestCleanup:
     def test_pass_with_worktree_submits_remove_job(
         self, stage: FinishedStage, make_ctx: Any
     ) -> None:
+        ctx = make_ctx()
         item = _item(passed=True, worktree="/wt/issue-42", state="CLEANUP")
 
-        result = stage.step(item, make_ctx())
+        result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob) and result.job.op == "remove_worktree"
-        assert result.job.kwargs == {"issue_number": 42, "force": True}
+        assert result.job.kwargs == {
+            "worktree_path": "/wt/issue-42",
+            "repo_root": str(ctx.paths.repo_root),
+            "force": True,
+        }
         assert result.on_done_state == "DONE"
 
     def test_fail_with_worktree_preserves_for_debugging(

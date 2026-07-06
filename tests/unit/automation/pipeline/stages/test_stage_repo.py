@@ -234,6 +234,26 @@ class TestDiscover:
         assert repo_item.payload["products"][0]["stage"] is StageName.CI
         assert repo_item.payload["products"][0]["pr"] == 44
 
+    def test_discover_failure_finishes_fail(
+        self,
+        repo_item: WorkItem,
+        repo_ctx: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Discovery failures are not converted into a successful empty run."""
+        monkeypatch.setattr(
+            loop_repo_manager_mod,
+            "_list_open_issue_meta",
+            lambda org, repo: (_ for _ in ()).throw(RuntimeError("gh failed")),
+        )
+        repo_item.state = "DISCOVER"
+
+        result = RepoStage().step(repo_item, repo_ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition is Disposition.FINISH_FAIL
+        assert "discovery failed" in result.note
+
     def test_discover_classifies_dedups_and_stages_products(
         self,
         repo_item: WorkItem,

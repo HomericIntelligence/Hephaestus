@@ -26,8 +26,6 @@ if TYPE_CHECKING:
     from .work_item import HistoryEvent, ItemKind, ItemResult, WorkItem
     from .worker_pool import WorkerPool
 
-from .coordinator import PipelineConfig as PipelineConfig, run_pipeline as run_pipeline
-
 __all__ = [
     "GIT_OPS",
     "ROUTES",

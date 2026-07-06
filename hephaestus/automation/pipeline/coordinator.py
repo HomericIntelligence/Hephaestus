@@ -81,7 +81,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline import admission as _admission, seeding as _seeding
@@ -511,10 +511,11 @@ class Coordinator:
             )
             self._finish(item, passed=False, reason="poisoned: on_job_done raised")
             return
-        # JobHandle.on_done_state is annotated StageName upstream but carries
-        # the stage-local state string the JobRequest specified (see
-        # JobRequest.on_done_state: str) — runtime values are plain strings.
-        item.state = cast(str, handle.on_done_state)
+        item.state = (
+            handle.on_done_state.value
+            if isinstance(handle.on_done_state, StageName)
+            else handle.on_done_state
+        )
         if self.shutdown.is_set():
             # Graceful shutdown: the durable write for this completion is
             # already journaled by on_job_done's owning stage; do not step
@@ -698,7 +699,7 @@ class Coordinator:
                 # --phase-timeout semantic shift (M4): under --pipeline it
                 # bounds each AGENT JOB, not a phase subprocess.
                 job = replace(job, timeout_s=int(self.config.phase_timeout_s))
-        handle = self.pool.submit(job, cast(StageName, request.on_done_state))
+        handle = self.pool.submit(job, request.on_done_state)
         self.in_flight[handle] = item
         self.inflight_per_repo[item.repo] += 1
         self.event_log.append(

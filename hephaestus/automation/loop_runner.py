@@ -1736,8 +1736,8 @@ def _dispatch_pipeline(
 
     Enabled by ``--pipeline`` or ``HEPH_PIPELINE=1`` (the CLI flag wins;
     default OFF — the legacy path stays byte-identical when off). The repo
-    stage owns preflight + cloning, so this dispatch happens BEFORE
-    ``_preflight_token_scopes`` / ``_clone_missing_repos`` (no double-clone).
+    token preflight still happens before dispatch, while the repo stage owns
+    cloning, so this branch skips ``_clone_missing_repos`` (no double-clone).
     Under the pipeline, ``--phase-timeout`` bounds each agent job.
 
     Args:
@@ -1752,6 +1752,8 @@ def _dispatch_pipeline(
     """
     if not (args.pipeline or os.environ.get("HEPH_PIPELINE") == "1"):
         return None
+    if not cfg.dry_run:
+        _preflight_token_scopes(cfg.org, repos[0])
     from hephaestus.automation.pipeline.coordinator import run_pipeline
 
     return run_pipeline(_build_pipeline_config(args, cfg, org, repos))
@@ -1816,7 +1818,7 @@ def main(argv: list[str] | None = None) -> int:
         return _error_exit(args, "Repo list is empty; nothing to do.", "empty repo list")
 
     # Dispatch to the pipeline if --pipeline is set or HEPH_PIPELINE=1
-    # (BEFORE preflight/clone: the repo stage owns both — no double-clone).
+    # (after token preflight, before legacy clone; the repo stage owns clone).
     pipeline_rc = _dispatch_pipeline(args, cfg, org, repos)
     if pipeline_rc is not None:
         return pipeline_rc

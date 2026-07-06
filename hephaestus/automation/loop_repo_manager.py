@@ -126,8 +126,8 @@ def _list_open_issue_meta(org: str, repo: str) -> list[dict[str, Any]]:
     ``state:skip`` tagging through its coordinator-owned accessor instead of
     the in-band :func:`skip_epics` side effect below.
 
-    Returns an empty list on any failure (rate limit, auth error, timeout)
-    so callers fall back safely.
+    Raises RuntimeError on GitHub/JSON failures so pipeline discovery never
+    converts an unreadable repo into a successful empty run.
     """
     try:
         out = gh_call(
@@ -146,8 +146,8 @@ def _list_open_issue_meta(org: str, repo: str) -> list[dict[str, Any]]:
             timeout=NETWORK_TIMEOUT,
         )
         entries = json.loads(out.stdout or "[]")
-    except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
-        return []
+    except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"failed to list open issues for {org}/{repo}: {exc}") from exc
     return [
         {
             "number": e["number"],
@@ -164,7 +164,8 @@ def _list_open_pr_numbers(org: str, repo: str) -> list[int]:
 
     Read-only helper for the pipeline repo stage's ``--drive-green-all``
     orphan-PR discovery (#1817): PRs with no tracked issue route to the ci
-    stage. Empty list on any failure so discovery degrades safely.
+    stage. Raises RuntimeError on failures so discovery does not masquerade
+    as a clean empty run.
     """
     try:
         out = gh_call(
@@ -183,8 +184,8 @@ def _list_open_pr_numbers(org: str, repo: str) -> list[int]:
             timeout=NETWORK_TIMEOUT,
         )
         entries = json.loads(out.stdout or "[]")
-    except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
-        return []
+    except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"failed to list open PRs for {org}/{repo}: {exc}") from exc
     return sorted(int(e["number"]) for e in entries if isinstance(e, dict) and "number" in e)
 
 
@@ -206,9 +207,9 @@ def _list_open_issue_numbers(org: str, repo: str) -> list[int]:
     label names + title because native GitHub issue types are not exposed by the
     installed ``gh`` — see :func:`~hephaestus.automation.state_labels.is_epic`.
 
-    Sorted ascending so the implementer phase processes oldest-first. Returns
-    an empty list on any failure (rate limit, auth error, timeout) so callers
-    fall back safely.
+    Sorted ascending so the implementer phase processes oldest-first. GitHub
+    read failures propagate as RuntimeError so automation does not treat an
+    unreadable repo as converged.
     """
     meta = _list_open_issue_meta(org, repo)
     kept, epics = partition_epics(meta)

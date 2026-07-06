@@ -134,8 +134,13 @@ class FinishedStage(Stage):
             repo=item.repo,
             op="remove_worktree",
             timeout_s=GIT_JOB_TIMEOUT_S,
-            # worker_pool dispatches to WorktreeManager.remove_worktree(**kwargs).
-            kwargs={"issue_number": item.issue or 0, "force": True},
+            # Use the concrete worktree path: the cleanup worker constructs a
+            # fresh WorktreeManager, so its in-memory issue map is empty.
+            kwargs={
+                "worktree_path": item.worktree,
+                "repo_root": str(ctx.paths.repo_root),
+                "force": True,
+            },
             descr=f"remove worktree {item.worktree}",
         )
         return JobRequest(job=job, on_done_state="DONE")

@@ -227,6 +227,158 @@ class TestRepoScoping:
             ],
         ]
 
+    def test_repo_scoped_pr_lookup_raises_on_gh_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Repo-scoped seeding must fail closed instead of inventing no-PR state."""
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            raise RuntimeError("gh unavailable")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        with pytest.raises(RuntimeError, match="gh unavailable"):
+            pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).find_pr_for_issue(5)
+
+    def test_repo_scoped_unresolved_threads_counts_automation_and_human(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            payload = {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [
+                                    {
+                                        "id": "T1",
+                                        "isResolved": False,
+                                        "path": "a.py",
+                                        "line": 1,
+                                        "side": "RIGHT",
+                                        "comments": {
+                                            "nodes": [
+                                                {"body": "bot", "author": {"login": "ci-bot"}}
+                                            ]
+                                        },
+                                    },
+                                    {
+                                        "id": "T2",
+                                        "isResolved": False,
+                                        "path": "b.py",
+                                        "line": 2,
+                                        "side": "RIGHT",
+                                        "comments": {
+                                            "nodes": [
+                                                {"body": "human", "author": {"login": "reviewer"}}
+                                            ]
+                                        },
+                                    },
+                                    {
+                                        "id": "T3",
+                                        "isResolved": True,
+                                        "comments": {"nodes": []},
+                                    },
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+            return SimpleNamespace(stdout=json.dumps(payload))
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "ci-bot")
+
+        assert pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).count_unresolved_threads(
+            7
+        ) == (1, 1)
+
+        assert calls[0][:2] == ["api", "graphql"]
+        assert "-F" in calls[0]
+        assert "owner=org" in calls[0]
+        assert "name=repo-a" in calls[0]
+
+    def test_repo_scoped_upsert_plan_comment_updates_marker_comment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv[:2] == ["api", "graphql"]:
+                payload = {
+                    "data": {
+                        "repository": {
+                            "issue": {
+                                "comments": {
+                                    "nodes": [
+                                        {"databaseId": 9, "body": f"{PLAN_COMMENT_MARKER}\nold"}
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+                return SimpleNamespace(stdout=json.dumps(payload))
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).upsert_plan_comment(
+            5, f"{PLAN_COMMENT_MARKER}\nnew"
+        )
+
+        assert any(call[:3] == ["api", "--method", "PATCH"] for call in calls)
+        assert any("/repos/org/repo-a/issues/comments/9" in call for call in calls)
+        assert not any(call[:2] == ["issue", "comment"] for call in calls)
+
+    def test_repo_scoped_review_post_uses_repo_endpoint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv[:2] == ["api", "graphql"]:
+                payload = {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [
+                                        {
+                                            "id": "thread-1",
+                                            "isResolved": False,
+                                            "comments": {
+                                                "nodes": [
+                                                    {"pullRequestReview": {"id": "review-node"}}
+                                                ]
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+                return SimpleNamespace(stdout=json.dumps(payload))
+            if "repos/org/repo-a/pulls/7/reviews" in argv:
+                return SimpleNamespace(stdout=json.dumps({"node_id": "review-node"}))
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        posted = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).post_review_threads(
+            7, [], "summary"
+        )
+
+        assert posted == ["thread-1"]
+        assert any("repos/org/repo-a/pulls/7/reviews" in call for call in calls)
+
 
 class TestCreatePr:
     """create_pr: idempotent reuse, given-body create, dry-run neutral."""

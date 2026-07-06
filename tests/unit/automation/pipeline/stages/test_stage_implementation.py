@@ -229,8 +229,8 @@ class TestGate:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
         assert result.job.kwargs == {
-            "issue": 1,
-            "branch": "1-some-real-branch",
+            "issue_number": 1,
+            "branch_name": "1-some-real-branch",
             "refresh_base": False,
             "sync_to_remote": True,
         }
@@ -411,7 +411,11 @@ class TestWorktreeAndAdvise:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
         assert result.job.op == "create_worktree"
-        assert result.job.kwargs == {"issue": 1, "branch": "1-auto-impl", "refresh_base": True}
+        assert result.job.kwargs == {
+            "issue_number": 1,
+            "branch_name": "1-auto-impl",
+            "refresh_base": True,
+        }
         assert result.on_done_state == "DIRTY_DECISION_WAIT"
 
     def test_worktree_result_stores_path_and_dirty_state(

@@ -86,9 +86,9 @@ class TestWiring:
     """Constructor and run_pipeline production wiring."""
 
     def test_package_binds_public_coordinator_exports(self) -> None:
-        """Public coordinator exports are concrete module attributes, not only lazy names."""
-        assert "PipelineConfig" in vars(pipeline_pkg)
-        assert "run_pipeline" in vars(pipeline_pkg)
+        """Public coordinator exports resolve lazily without eager package imports."""
+        assert "PipelineConfig" not in vars(pipeline_pkg)
+        assert "run_pipeline" not in vars(pipeline_pkg)
         assert pipeline_pkg.PipelineConfig is PipelineConfig
         assert pipeline_pkg.run_pipeline is run_pipeline
 

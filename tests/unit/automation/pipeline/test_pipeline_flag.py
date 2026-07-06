@@ -1,7 +1,7 @@
 """--pipeline / HEPH_PIPELINE dispatch tests for loop_runner.main (#1817).
 
 The pipeline is DEFAULT OFF; the legacy path stays byte-identical when off.
-The pipeline branch dispatches BEFORE ``_preflight_token_scopes`` and
+The pipeline branch dispatches after token preflight but BEFORE
 ``_clone_missing_repos`` (C3: the repo stage owns cloning — no double-clone).
 """
 
@@ -65,12 +65,12 @@ def test_flag_env_matrix(
     assert dispatch["run_loop"].called is not expect_pipeline
 
 
-def test_pipeline_path_skips_preflight_and_clone(dispatch: dict[str, MagicMock]) -> None:
-    """C3: the pipeline branch runs BEFORE preflight/clone (repo stage owns both)."""
+def test_pipeline_path_preflights_but_skips_clone(dispatch: dict[str, MagicMock]) -> None:
+    """C3: pipeline keeps token preflight, while the repo stage owns cloning."""
     loop_runner.main(["--pipeline"])
 
     dispatch["run_pipeline"].assert_called_once()
-    dispatch["preflight"].assert_not_called()
+    dispatch["preflight"].assert_called_once_with("org", "repo-a")
     dispatch["clone"].assert_not_called()
 
 

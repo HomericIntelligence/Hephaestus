@@ -159,6 +159,25 @@ class PipelineGitHub:
             return None
         return f"{self.org}/{self.repo}"
 
+    def _owner_name(self) -> tuple[str, str]:
+        """Return explicit owner/name for repo-scoped GitHub API calls."""
+        if self.repo is None:
+            raise RuntimeError("repo-scoped GitHub operation requires a repo")
+        return self.org, self.repo
+
+    def _graphql(self, query: str, **fields: int | str) -> dict[str, Any]:
+        """Run a repo-scoped GraphQL query with explicit owner/repo fields."""
+        owner, name = self._owner_name()
+        argv = ["api", "graphql", "-f", f"query={query}"]
+        for key, value in {"owner": owner, "name": name, **fields}.items():
+            argv.extend(["-F", f"{key}={value}"])
+        result = gh_call(argv)
+        data = json.loads(result.stdout or "{}")
+        if not isinstance(data, dict):
+            raise RuntimeError("GraphQL response was not an object")
+        github_api._check_graphql_errors(data, "repo-scoped pipeline GraphQL")
+        return data
+
     def _with_repo(self, argv: list[str]) -> list[str]:
         """Append an explicit repo selector when this accessor is repo-scoped."""
         if self._repo_slug is None:
@@ -250,51 +269,156 @@ class PipelineGitHub:
 
     def _find_pr_for_issue(self, issue_number: int, *, state: str) -> int | None:
         branch_name = f"{issue_number}-auto-impl"
-        try:
-            result = self._gh(
-                [
-                    "pr",
-                    "list",
-                    "--head",
-                    branch_name,
-                    "--state",
-                    state,
-                    "--json",
-                    "number",
-                    "--limit",
-                    "1",
-                ],
-                check=False,
-            )
-            pr_data = json.loads(result.stdout or "[]")
-            if pr_data:
-                return int(pr_data[0]["number"])
-        except Exception as exc:
-            logger.debug("%s PR branch lookup failed for issue #%d: %s", state, issue_number, exc)
+        result = self._gh(
+            [
+                "pr",
+                "list",
+                "--head",
+                branch_name,
+                "--state",
+                state,
+                "--json",
+                "number",
+                "--limit",
+                "1",
+            ]
+        )
+        pr_data = json.loads(result.stdout or "[]")
+        if pr_data:
+            return int(pr_data[0]["number"])
 
-        try:
-            result = self._gh(
-                [
-                    "pr",
-                    "list",
-                    "--state",
-                    state,
-                    "--search",
-                    f"Closes #{issue_number} in:body",
-                    "--json",
-                    "number,body",
-                    "--limit",
-                    "10",
-                ],
-                check=False,
-            )
-            closes_pattern = re.compile(rf"^Closes #{issue_number}\b", re.MULTILINE)
-            for candidate in json.loads(result.stdout or "[]"):
-                if closes_pattern.search(candidate.get("body") or ""):
-                    return int(candidate["number"])
-        except Exception as exc:
-            logger.debug("%s PR body lookup failed for issue #%d: %s", state, issue_number, exc)
+        result = self._gh(
+            [
+                "pr",
+                "list",
+                "--state",
+                state,
+                "--search",
+                f"Closes #{issue_number} in:body",
+                "--json",
+                "number,body",
+                "--limit",
+                "10",
+            ]
+        )
+        closes_pattern = re.compile(rf"^Closes #{issue_number}\b", re.MULTILINE)
+        for candidate in json.loads(result.stdout or "[]"):
+            if closes_pattern.search(candidate.get("body") or ""):
+                return int(candidate["number"])
         return None
+
+    def _repo_unresolved_threads(self, pr_number: int) -> list[dict[str, Any]]:
+        """List unresolved PR review threads for this accessor's explicit repo."""
+        query = (
+            "query($owner:String!,$name:String!,$number:Int!){"
+            "  repository(owner:$owner,name:$name){"
+            "    pullRequest(number:$number){"
+            "      reviewThreads(first:100){"
+            "        nodes{ id isResolved path line side:diffSide "
+            "comments(first:20){ nodes{ body author{ login } } } }"
+            "      }"
+            "    }"
+            "  }"
+            "}"
+        )
+        data = self._graphql(query, number=int(pr_number))
+        nodes = (
+            data.get("data", {})
+            .get("repository", {})
+            .get("pullRequest", {})
+            .get("reviewThreads", {})
+            .get("nodes", [])
+        )
+        threads: list[dict[str, Any]] = []
+        for node in nodes:
+            if node.get("isResolved"):
+                continue
+            comment_nodes = node.get("comments", {}).get("nodes", [])
+            first_comment = comment_nodes[0] if comment_nodes else {}
+            comments: list[dict[str, str]] = []
+            authors: list[str] = []
+            for comment in comment_nodes:
+                author_node = comment.get("author")
+                author = author_node.get("login") if isinstance(author_node, dict) else ""
+                author = author or ""
+                if author:
+                    authors.append(author)
+                comments.append({"body": comment.get("body") or "", "author": author})
+            threads.append(
+                {
+                    "id": node["id"],
+                    "path": node.get("path", ""),
+                    "line": node.get("line"),
+                    "side": node.get("side") or "RIGHT",
+                    "body": first_comment.get("body", ""),
+                    "author": authors[0] if authors else "",
+                    "authors": authors,
+                    "comments": comments,
+                }
+            )
+        return threads
+
+    def _repo_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
+        """Fetch issue comment ids/bodies for explicit-repo marker upserts."""
+        query = (
+            "query($owner:String!,$name:String!,$number:Int!){"
+            "  repository(owner:$owner,name:$name){"
+            "    issue(number:$number){"
+            "      comments(first:100){ nodes{ databaseId body } }"
+            "    }"
+            "  }"
+            "}"
+        )
+        data = self._graphql(query, number=int(issue_number))
+        nodes = (
+            data.get("data", {})
+            .get("repository", {})
+            .get("issue", {})
+            .get("comments", {})
+            .get("nodes", [])
+        )
+        return [node for node in nodes if isinstance(node, dict)]
+
+    def _repo_review_threads_for_review(self, pr_number: int, review_id: str) -> list[str]:
+        """Return unresolved review-thread ids created by one REST review."""
+        query = (
+            "query($owner:String!,$name:String!,$number:Int!){"
+            "  repository(owner:$owner,name:$name){"
+            "    pullRequest(number:$number){"
+            "      reviewThreads(first:100){"
+            "        nodes{ id isResolved comments(first:1){ "
+            "nodes{ pullRequestReview{ id } } } }"
+            "      }"
+            "    }"
+            "  }"
+            "}"
+        )
+        try:
+            data = self._graphql(query, number=int(pr_number))
+        except (subprocess.SubprocessError, RuntimeError, json.JSONDecodeError) as exc:
+            logger.warning("Could not fetch review threads for PR #%s: %s", pr_number, exc)
+            return []
+        nodes = (
+            data.get("data", {})
+            .get("repository", {})
+            .get("pullRequest", {})
+            .get("reviewThreads", {})
+            .get("nodes", [])
+        )
+        seen: dict[str, None] = {}
+        for node in nodes:
+            if node.get("isResolved"):
+                continue
+            first_comments = node.get("comments", {}).get("nodes", [])
+            if not first_comments:
+                continue
+            review = first_comments[0].get("pullRequestReview") or {}
+            if review.get("id") != review_id:
+                continue
+            thread_id = node.get("id")
+            if thread_id:
+                seen[thread_id] = None
+        return list(seen)
 
     def _skip(self, what: str) -> bool:
         """Return True (and log) when dry-run should skip a mutation."""
@@ -398,14 +522,17 @@ class PipelineGitHub:
         """Return ``(automation_unresolved, human_unresolved)`` thread counts.
 
         Mirrors ``_review_phase._count_unresolved_threads_blocking_go``
-        (#1152): resolves nothing; fails open to ``(0, 0)`` on a fetch error
-        so a transient API blip cannot strand a GO.
+        (#1152): resolves nothing. Current-repo legacy helpers still fail
+        open on fetch errors; repo-scoped pipeline runs query the configured
+        repo directly so unresolved human threads are not hidden.
         """
         if self._repo_slug is not None:
-            # TODO(#1823): move the full GraphQL thread ownership query behind a
-            # repo-scoped helper. Until then, fail open like the legacy adapter
-            # on fetch errors rather than resolving or mutating anything.
-            return (0, 0)
+            threads = self._repo_unresolved_threads(pr_number)
+            if not threads:
+                return (0, 0)
+            current_login = github_api.gh_current_login()
+            automation = sum(1 for t in threads if _is_automation_owned_thread(t, current_login))
+            return (automation, len(threads) - automation)
         try:
             threads = github_api.gh_pr_list_unresolved_threads(pr_number, dry_run=False)
         except Exception as exc:
@@ -559,12 +686,43 @@ class PipelineGitHub:
         """Upsert the single plan comment keyed on ``PLAN_COMMENT_MARKER``."""
         if self._skip(f"upsert plan comment on #{issue_number}"):
             return
-        # TODO(#1823): exact repo-scoped upsert needs the GraphQL comment-id
-        # helper to accept owner/repo. Until then, repo-scoped runs post a new
-        # durable comment rather than silently targeting the current repo.
         if self._repo_slug is not None:
+            comments = self._repo_issue_comments(issue_number)
+            matching = [
+                c
+                for c in comments
+                if str(c.get("body", "")).startswith(PLAN_COMMENT_MARKER)
+                and c.get("databaseId") is not None
+            ]
+            if not matching:
+                with github_api._body_file(body) as path:
+                    self._gh(["issue", "comment", str(issue_number), "--body-file", path])
+                return
+
+            owner, name = self._owner_name()
+            target_id = int(matching[-1]["databaseId"])
+            for dup in matching[:-1]:
+                dup_id = dup.get("databaseId")
+                if dup_id is not None:
+                    gh_call(
+                        [
+                            "api",
+                            "--method",
+                            "DELETE",
+                            f"/repos/{owner}/{name}/issues/comments/{int(dup_id)}",
+                        ]
+                    )
             with github_api._body_file(body) as path:
-                self._gh(["issue", "comment", str(issue_number), "--body-file", path])
+                gh_call(
+                    [
+                        "api",
+                        "--method",
+                        "PATCH",
+                        f"/repos/{owner}/{name}/issues/comments/{target_id}",
+                        "-F",
+                        f"body=@{path}",
+                    ]
+                )
             return
         github_api.gh_issue_upsert_comment(issue_number, PLAN_COMMENT_MARKER, body)
 
@@ -666,9 +824,40 @@ class PipelineGitHub:
         """Post surviving review threads (``gh_pr_review_post``)."""
         if self._skip(f"post {len(threads)} review thread(s) on PR #{pr_number}"):
             return []
-        # TODO(#1823): repo-scope the GraphQL review-post helper. This remains
-        # delegated for now because it needs diff-position validation and GraphQL
-        # review creation, not a simple gh CLI command.
+        if self._repo_slug is not None:
+            if threads:
+                diff_result = self._gh(["pr", "diff", str(pr_number)], check=False)
+                threads = github_api._filter_comments_to_diff(threads, diff_result.stdout or "")
+            review_comments = [
+                {
+                    "path": c["path"],
+                    "line": c["line"],
+                    "side": c.get("side", "RIGHT"),
+                    "body": c["body"],
+                }
+                for c in threads
+            ]
+            owner, name = self._owner_name()
+            request_body = json.dumps(
+                {"body": summary, "event": "COMMENT", "comments": review_comments}
+            )
+            with github_api._body_file(request_body) as input_path:
+                result = gh_call(
+                    [
+                        "api",
+                        "-X",
+                        "POST",
+                        f"repos/{owner}/{name}/pulls/{pr_number}/reviews",
+                        "--input",
+                        input_path,
+                    ]
+                )
+            review = json.loads(result.stdout or "{}")
+            review_node_id = review.get("node_id")
+            if not review_node_id:
+                logger.warning("Posted PR review on #%s but no review node id returned", pr_number)
+                return []
+            return self._repo_review_threads_for_review(pr_number, str(review_node_id))
         return github_api.gh_pr_review_post(pr_number, threads, summary)
 
     def arm_drive_green(self, issue_number: int, pr_number: int, head_sha: str) -> None:

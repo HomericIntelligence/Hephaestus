@@ -108,4 +108,4 @@ class JobHandle:
     """
 
     job: AgentJob | BuildTestJob | GitJob
-    on_done_state: StageName
+    on_done_state: str | StageName

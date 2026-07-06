@@ -151,7 +151,11 @@ class RepoStage(Stage):
 
     def _discover(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """[M] List, dedup, tag-then-exclude epics, classify, stage products."""
-        meta = _repo_manager._list_open_issue_meta(ctx.org, item.repo)
+        try:
+            meta = _repo_manager._list_open_issue_meta(ctx.org, item.repo)
+        except Exception as exc:
+            logger.warning("repo:%s: discovery failed: %s", item.repo, exc)
+            return StageOutcome(Disposition.FINISH_FAIL, note=f"discovery failed: {exc}")
 
         # Dedup while preserving listing order.
         seen: set[int] = set()
@@ -206,7 +210,12 @@ class RepoStage(Stage):
 
         # --drive-green-all: orphan PRs (no tracked issue) -> ci stage.
         if getattr(ctx.config, "drive_green_all", False):
-            for pr_number in _repo_manager._list_open_pr_numbers(ctx.org, item.repo):
+            try:
+                open_pr_numbers = _repo_manager._list_open_pr_numbers(ctx.org, item.repo)
+            except Exception as exc:
+                logger.warning("repo:%s: PR discovery failed: %s", item.repo, exc)
+                return StageOutcome(Disposition.FINISH_FAIL, note=f"discovery failed: {exc}")
+            for pr_number in open_pr_numbers:
                 if pr_number in covered_prs:
                     continue
                 products.append(

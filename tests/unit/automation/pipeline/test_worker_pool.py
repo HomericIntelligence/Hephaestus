@@ -421,12 +421,51 @@ class TestGitOps:
             kwargs={"issue_number": 7, "branch_name": "7-auto"},
         )
         instance = MagicMock()
+        instance.create_worktree.return_value = Path("/tmp/wt")
         with patch(f"{_WP}.WorktreeManager", return_value=instance):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
         instance.create_worktree.assert_called_once_with(issue_number=7, branch_name="7-auto")
         assert result.ok is True
+        assert result.value == "/tmp/wt"
+
+    def test_create_worktree_syncs_adopted_clean_branch(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """sync_to_remote is a worker concern, not leaked into WorktreeManager."""
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-existing",
+                "refresh_base": False,
+                "sync_to_remote": True,
+            },
+        )
+        instance = MagicMock()
+        instance.create_worktree.return_value = Path("/tmp/wt")
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True) as mock_clean,
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch") as mock_sync,
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        instance.create_worktree.assert_called_once_with(
+            issue_number=7,
+            branch_name="7-existing",
+            refresh_base=False,
+        )
+        mock_clean.assert_called_once_with(Path("/tmp/wt"))
+        mock_sync.assert_called_once_with(Path("/tmp/wt"), "7-existing")
+        assert result.ok is True
+        assert result.value == {"path": "/tmp/wt", "dirty": False, "status": "", "diff": ""}
 
     def test_remove_worktree_dispatch(
         self,
@@ -446,6 +485,34 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         instance.remove_worktree.assert_called_once_with(issue_number=7, force=True)
+        assert result.ok is True
+
+    def test_remove_worktree_path_dispatch(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Path cleanup removes the known worktree path even with a fresh manager."""
+        job = GitJob(
+            repo="test/repo",
+            op="remove_worktree",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path / "issue-7"),
+                "repo_root": str(tmp_path),
+                "force": True,
+            },
+        )
+        with patch(f"{_WP}.git_utils.run") as mock_run:
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        mock_run.assert_any_call(
+            ["git", "worktree", "remove", str(tmp_path / "issue-7"), "--force"],
+            cwd=tmp_path,
+        )
+        mock_run.assert_any_call(["git", "worktree", "prune"], cwd=tmp_path, check=False)
         assert result.ok is True
 
     @pytest.mark.parametrize("rebase_clean", [True, False])
