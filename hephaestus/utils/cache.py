@@ -68,9 +68,11 @@ class ThreadSafeCache(Generic[K, V]):
     def add_to_entry(self, key: K, item: Any) -> None:
         """If *key* holds a set entry, add *item* to it under the lock.
 
-        No-op when the key is absent or expired — mirrors the label cache's
-        "only augment an already-populated entry" contract. TTL timestamp is
-        preserved (augmenting does not refresh expiry).
+        No-op when the key is absent — mirrors the label cache's "only
+        augment an already-populated entry" contract. This does not check TTL
+        expiry, so an entry past its TTL is still augmented; the stale
+        augmented entry is replaced on the next ``get_or_compute`` call. TTL
+        timestamp is preserved (augmenting does not refresh expiry).
 
         Intended for use with ``ThreadSafeCache[K, set[V]]`` where adding an
         element to a cached set is atomic (label cache in github_api).

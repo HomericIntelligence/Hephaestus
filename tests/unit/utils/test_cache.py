@@ -159,11 +159,11 @@ def test_add_to_entry_augments_existing_set() -> None:
     c: ThreadSafeCache[str, set[str]] = ThreadSafeCache()
     c.get_or_compute("k", lambda: {"a"})
     c.add_to_entry("k", "b")
-    assert c.get_or_compute("k", lambda: set()) == {"a", "b"}
+    assert c.get_or_compute("k", set) == {"a", "b"}
 
 
 def test_add_to_entry_noop_when_key_absent() -> None:
-    """add_to_entry is a no-op when the key is absent or expired."""
+    """add_to_entry is a no-op when the key is absent."""
     c: ThreadSafeCache[str, set[str]] = ThreadSafeCache()
     c.add_to_entry("missing", "b")
     # No entry created; accessing the key triggers a fresh compute.
