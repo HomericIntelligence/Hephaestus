@@ -85,6 +85,8 @@ from .base import (
     StepResult,
     WorkItem,
     _worktree_path,
+    agent_provider,
+    stage_model,
 )
 
 logger = logging.getLogger(__name__)
@@ -436,11 +438,12 @@ class CiStage(Stage):
         job = AgentJob(
             repo=item.repo,
             issue=item.issue if item.issue is not None else 0,
-            agent=AGENT_CI_DRIVER,
-            model=implementer_model(),
+            agent=agent_provider(ctx),
+            model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=prompt_builder,
             cwd=_worktree_path(item, ctx),
             timeout_s=ci_driver_claude_timeout(),
+            session_agent=AGENT_CI_DRIVER,
             prompt_kwargs=prompt_kwargs,
             descr="force_engagement" if escalate else "ci_fix",
         )

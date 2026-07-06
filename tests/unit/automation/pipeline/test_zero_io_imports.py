@@ -1,6 +1,9 @@
 """Guard that pipeline modules have zero I/O imports (ast-based, not text-scan)."""
 
 import ast
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import hephaestus.automation.pipeline as pkg
@@ -169,6 +172,27 @@ def test_pipeline_modules_have_zero_io_imports() -> None:
         tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
         violations.extend(_collect_violations(tree, py.name, exempt))
     assert not violations, "pipeline modules must do zero I/O imports:\n" + "\n".join(violations)
+
+
+def test_pipeline_package_import_stays_lazy() -> None:
+    """Importing the package must not eagerly load coordinator I/O dependencies."""
+    probe = (
+        "import json, sys\n"
+        "import hephaestus.automation.pipeline\n"
+        "watched = [\n"
+        "  'hephaestus.automation.pipeline.coordinator',\n"
+        "  'hephaestus.automation.github_api',\n"
+        "  'hephaestus.automation.claude_invoke',\n"
+        "]\n"
+        "print(json.dumps([name for name in watched if name in sys.modules]))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    assert json.loads(result.stdout) == []
 
 
 def test_capability_scope_still_blocks_io_in_seeding() -> None:

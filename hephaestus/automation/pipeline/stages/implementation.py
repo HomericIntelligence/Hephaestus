@@ -99,6 +99,8 @@ from .base import (
     WorkItem,
     _issue_labels,
     _worktree_path,
+    agent_provider,
+    stage_model,
     write_skip_label,
 )
 
@@ -261,8 +263,8 @@ class ImplementationStage(Stage):
             logger.info("implementation:%d: requesting worktree job", item.issue)
             adopted = bool(item.payload.get("existing_pr"))
             kwargs: dict[str, object] = {
-                "issue": item.issue,
-                "branch": item.branch,
+                "issue_number": item.issue,
+                "branch_name": item.branch,
                 # Fresh branch: cut from a freshly refreshed trunk (doc step
                 # 2: worktree_manager.create_worktree(refresh_base=True)).
                 # ADOPTED branch: never reset to trunk — sync to the PR's
@@ -298,11 +300,12 @@ class ImplementationStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=AGENT_IMPLEMENTER,
-                model=implementer_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "implementer", implementer_model),
                 prompt_builder=get_dirty_reused_worktree_decision_prompt,
                 cwd=_worktree_path(item, ctx),
                 timeout_s=implementer_claude_timeout(),
+                session_agent=AGENT_IMPLEMENTER,
                 prompt_kwargs={
                     "branch_name": item.branch,
                     "status_text": item.payload.get("worktree_status", ""),
@@ -332,11 +335,12 @@ class ImplementationStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=AGENT_ADVISE,
-                model=advise_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "advise", advise_model),
                 prompt_builder=get_advise_prompt_builder(ctx.config.agent),
                 cwd=_worktree_path(item, ctx),
                 timeout_s=advise_claude_timeout(),
+                session_agent=AGENT_ADVISE,
                 prompt_kwargs={
                     "issue_number": item.issue,
                     "issue_title": item.payload.get("issue_title", ""),
@@ -365,11 +369,12 @@ class ImplementationStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=AGENT_IMPLEMENTER,
-                model=implementer_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "implementer", implementer_model),
                 prompt_builder=build_implementation_prompt,
                 cwd=_worktree_path(item, ctx),
                 timeout_s=implementer_claude_timeout(),
+                session_agent=AGENT_IMPLEMENTER,
                 prompt_kwargs={
                     "issue_number": item.issue,
                     "issue_title": item.payload.get("issue_title", ""),
@@ -415,11 +420,12 @@ class ImplementationStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=AGENT_IMPLEMENTER,
-                model=implementer_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "implementer", implementer_model),
                 prompt_builder=build_test_fix_prompt,
                 cwd=_worktree_path(item, ctx),
                 timeout_s=implementer_claude_timeout(),
+                session_agent=AGENT_IMPLEMENTER,
                 prompt_kwargs={
                     "issue_number": item.issue,
                     "prev_iteration": item.attempts.get("test_fix", 0),
@@ -437,7 +443,12 @@ class ImplementationStage(Stage):
                 repo=item.repo,
                 op="commit_push",
                 timeout_s=GIT_JOB_TIMEOUT_S,
-                kwargs={"branch": item.branch},
+                kwargs={
+                    "issue_number": item.issue,
+                    "worktree_path": item.worktree,
+                    "branch": item.branch,
+                    "agent": agent_provider(ctx),
+                },
                 descr="commit_push",
             )
             return JobRequest(push_job, on_done_state=PR_CREATE)
@@ -490,20 +501,26 @@ class ImplementationStage(Stage):
             return
 
         if item.state == COMMIT_PUSH_WAIT:
-            if result.ok:
-                # A successful push ends the consecutive-git-failure streak.
-                item.payload.pop("git_error_retries", None)
-                return
-            error_text = (result.error or "").lower()
-            if "no commits" in error_text:
-                # Legacy _handle_runtime_error (:348): "no commits between
-                # base and branch" maps to state:skip, not a hard failure.
+            self._on_commit_push_done(item, result)
+
+    @staticmethod
+    def _on_commit_push_done(item: WorkItem, result: JobResult) -> None:
+        """Record commit+push success, no-commit skip, or git failure."""
+        if result.ok:
+            if not bool(result.value):
                 item.payload["no_commits"] = True
-            else:
-                logger.warning(
-                    "implementation:%s: commit+push failed: %s", item.issue, result.error
-                )
-                item.payload["git_error"] = True
+            # A successful worker result ends the consecutive-git-failure
+            # streak even when no commit was produced; PR_CREATE handles skip.
+            item.payload.pop("git_error_retries", None)
+            return
+        error_text = (result.error or "").lower()
+        if "no commits" in error_text:
+            # Legacy _handle_runtime_error (:348): "no commits between
+            # base and branch" maps to state:skip, not a hard failure.
+            item.payload["no_commits"] = True
+            return
+        logger.warning("implementation:%s: commit+push failed: %s", item.issue, result.error)
+        item.payload["git_error"] = True
 
     @staticmethod
     def _on_implement_done(item: WorkItem, result: JobResult) -> None:

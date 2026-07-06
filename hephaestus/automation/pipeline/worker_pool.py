@@ -111,7 +111,9 @@ class WorkerPool:
         with self._repo_locks_guard:
             return self._repo_locks.setdefault(repo, threading.Lock())
 
-    def submit(self, job: AgentJob | BuildTestJob | GitJob, on_done_state: StageName) -> JobHandle:
+    def submit(
+        self, job: AgentJob | BuildTestJob | GitJob, on_done_state: str | StageName
+    ) -> JobHandle:
         """Submit a job for execution.
 
         Args:
@@ -230,6 +232,7 @@ class WorkerPool:
         try:
             agent = resolve_agent(job.agent)
             is_claude = agent == "claude"
+            session_agent = job.session_agent or job.agent
             prompt = job.prompt_builder(**job.prompt_kwargs)
 
             def _invoke() -> str:
@@ -237,7 +240,7 @@ class WorkerPool:
                     stdout, _ = claude_invoke.invoke_claude_with_session(
                         repo=job.repo,
                         issue=job.issue,
-                        agent=job.agent,
+                        agent=session_agent,
                         prompt=prompt,
                         model=job.model,
                         cwd=job.cwd,
@@ -355,18 +358,10 @@ class WorkerPool:
         below documents that gap rather than silently dropping the budget.
         """
         if job.op == "create_worktree":
-            manager = WorktreeManager()
-            # WorktreeManager.create_worktree has no timeout parameter;
-            # job.timeout_s cannot be enforced here.
-            manager.create_worktree(**job.kwargs)
-            return JobResult(ok=True)
+            return self._git_create_worktree(job)
 
         elif job.op == "remove_worktree":
-            manager = WorktreeManager()
-            # WorktreeManager.remove_worktree has no timeout parameter;
-            # job.timeout_s cannot be enforced here.
-            manager.remove_worktree(**job.kwargs)
-            return JobResult(ok=True)
+            return self._git_remove_worktree(job)
 
         elif job.op == "rebase":
             # rebase_worktree_onto(cwd, base_branch="main", *, remote) has no
@@ -400,6 +395,68 @@ class WorkerPool:
             # Should be impossible due to GitJob.__post_init__ validation
             return JobResult(ok=False, error=f"unknown op {job.op!r}")
 
+    def _git_create_worktree(self, job: GitJob) -> JobResult:
+        """Create a worktree and optionally sync an adopted PR branch."""
+        manager = WorktreeManager()
+        kwargs = dict(job.kwargs)
+        sync_to_remote = bool(kwargs.pop("sync_to_remote", False))
+        # WorktreeManager.create_worktree has no timeout parameter;
+        # job.timeout_s cannot be enforced here.
+        created = manager.create_worktree(**kwargs)
+        if created is None:
+            return JobResult(ok=True)
+        worktree_path = Path(created)
+        branch_name = str(kwargs.get("branch_name") or "")
+        if not sync_to_remote:
+            return JobResult(ok=True, value=str(worktree_path))
+
+        dirty = not git_utils.is_clean_working_tree(worktree_path)
+        status = ""
+        diff = ""
+        if dirty:
+            status_result = git_utils.run(
+                ["git", "status", "--short"],
+                cwd=worktree_path,
+                capture_output=True,
+                check=False,
+            )
+            diff_result = git_utils.run(
+                ["git", "diff"],
+                cwd=worktree_path,
+                capture_output=True,
+                check=False,
+            )
+            status = status_result.stdout or ""
+            diff = diff_result.stdout or ""
+        elif branch_name:
+            git_utils.sync_worktree_to_remote_branch(worktree_path, branch_name)
+        return JobResult(
+            ok=True,
+            value={
+                "path": str(worktree_path),
+                "dirty": dirty,
+                "status": status,
+                "diff": diff,
+            },
+        )
+
+    def _git_remove_worktree(self, job: GitJob) -> JobResult:
+        """Remove a worktree by known path, or fall back to manager state."""
+        if job.kwargs.get("worktree_path"):
+            worktree_path = Path(str(job.kwargs["worktree_path"]))
+            repo_root = Path(str(job.kwargs.get("repo_root") or get_repo_root()))
+            cmd = ["git", "worktree", "remove", str(worktree_path)]
+            if job.kwargs.get("force"):
+                cmd.append("--force")
+            git_utils.run(cmd, cwd=repo_root)
+            git_utils.run(["git", "worktree", "prune"], cwd=repo_root, check=False)
+            return JobResult(ok=True)
+        manager = WorktreeManager()
+        # WorktreeManager.remove_worktree has no timeout parameter;
+        # job.timeout_s cannot be enforced here.
+        manager.remove_worktree(**job.kwargs)
+        return JobResult(ok=True)
+
     def _git_commit_push(self, job: GitJob) -> JobResult:
         """Commit pending changes in a worktree, then push its branch.
 
@@ -418,16 +475,16 @@ class WorkerPool:
             )
         # NOTE: commit_if_changes returns False BOTH for "worktree clean,
         # nothing to commit" AND for "commit attempted but failed" (it logs
-        # and swallows the RuntimeError). value=False is therefore ambiguous;
-        # a failed commit still reaches the push below, which pushes whatever
-        # HEAD already holds. commit_if_changes has no timeout parameter;
-        # job.timeout_s cannot be enforced here.
+        # and swallows the RuntimeError). Do not push in either case; stages
+        # consume value=False as the no-real-commit path.
         changed = git_utils.commit_if_changes(
             int(issue_number),
             Path(worktree_path),
             str(job.kwargs.get("agent", "claude")),
             allowed_paths=job.kwargs.get("allowed_paths"),
         )
+        if not changed:
+            return JobResult(ok=True, value=False)
         # push_branch has no timeout parameter; job.timeout_s cannot be
         # enforced here.
         git_utils.push_branch(str(job.kwargs.get("branch", "HEAD")), Path(worktree_path))

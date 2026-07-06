@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from hephaestus.automation._review_utils import find_merged_pr_for_issue, find_pr_for_issue
 from hephaestus.automation.github_api import fetch_issue_info, gh_pr_label_names
@@ -282,6 +282,39 @@ def seed_issue(issue_number: int) -> IssueFacts:
     return IssueFacts(
         number=issue_number,
         title=issue_info.title,
+        is_epic=epic,
+        labels=labels,
+        pr_number=pr_number,
+        pr_is_open=pr_is_open,
+        pr_is_merged=pr_is_merged,
+    )
+
+
+def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
+    """Fetch and normalize issue facts through a repo-scoped StageGitHub accessor."""
+    issue_data = github.gh_issue_json(issue_number)
+    raw_labels = issue_data.get("labels", []) if isinstance(issue_data, dict) else []
+    labels = {
+        str(label.get("name", ""))
+        for label in raw_labels
+        if isinstance(label, dict) and label.get("name")
+    }
+    title = str(issue_data.get("title") or "") if isinstance(issue_data, dict) else ""
+    epic = is_epic(sorted(labels), title)
+
+    pr_is_open = False
+    pr_is_merged = False
+    pr_number: int | None = github.find_pr_for_issue(issue_number)
+    if pr_number is not None:
+        pr_is_open = True
+    else:
+        pr_number = github.find_merged_pr_for_issue(issue_number)
+        if pr_number is not None:
+            pr_is_merged = True
+
+    return IssueFacts(
+        number=issue_number,
+        title=title,
         is_epic=epic,
         labels=labels,
         pr_number=pr_number,

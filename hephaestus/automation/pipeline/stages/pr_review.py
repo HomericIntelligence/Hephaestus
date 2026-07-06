@@ -138,6 +138,8 @@ from .base import (
     StepResult,
     WorkItem,
     _worktree_path,
+    agent_provider,
+    stage_model,
     write_skip_label,
 )
 
@@ -379,11 +381,12 @@ class PrReviewStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=AGENT_PR_REVIEWER,
-                model=reviewer_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "reviewer", reviewer_model),
                 prompt_builder=get_pr_review_analysis_prompt,
                 cwd=_worktree_path(item, ctx),
                 timeout_s=pr_reviewer_claude_timeout(),
+                session_agent=AGENT_PR_REVIEWER,
                 # Diff / body / CI context are seeded into item.payload by
                 # the coordinator (#1817), which owns the gh reads.
                 prompt_kwargs={
@@ -411,11 +414,12 @@ class PrReviewStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=AGENT_PR_REVIEWER,
-                model=reviewer_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "reviewer", reviewer_model),
                 prompt_builder=get_review_validation_prompt,
                 cwd=_worktree_path(item, ctx),
                 timeout_s=pr_reviewer_claude_timeout(),
+                session_agent=AGENT_PR_REVIEWER,
                 prompt_kwargs={
                     "pr_number": item.pr,
                     "issue_number": item.issue,
@@ -434,11 +438,12 @@ class PrReviewStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=AGENT_COMMENT_CLASSIFIER,
-                model=reviewer_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "reviewer", reviewer_model),
                 prompt_builder=get_comment_difficulty_prompt,
                 cwd=_worktree_path(item, ctx),
                 timeout_s=pr_reviewer_claude_timeout(),
+                session_agent=AGENT_COMMENT_CLASSIFIER,
                 prompt_kwargs={
                     "issue_number": item.issue,
                     "comments_json": json.dumps(item.payload.get("review_threads", [])),
@@ -456,7 +461,12 @@ class PrReviewStage(Stage):
                 repo=item.repo,
                 op="commit_push",
                 timeout_s=GIT_JOB_TIMEOUT_S,
-                kwargs={"branch": item.branch},
+                kwargs={
+                    "issue_number": item.issue,
+                    "worktree_path": item.worktree,
+                    "branch": item.branch,
+                    "agent": agent_provider(ctx),
+                },
                 descr="push_fixes",
             )
             return JobRequest(git_job, on_done_state=EVAL)
@@ -469,11 +479,12 @@ class PrReviewStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=AGENT_IMPLEMENTER,  # resume the implementer's session (legacy parity)
-                model=implementer_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "implementer", implementer_model),
                 prompt_builder=get_follow_up_prompt,
                 cwd=_worktree_path(item, ctx),
                 timeout_s=follow_up_claude_timeout(),
+                session_agent=AGENT_IMPLEMENTER,  # resume implementer session (legacy parity)
                 prompt_kwargs={"issue_number": item.issue},
                 descr="follow_up",
             )
@@ -589,11 +600,12 @@ class PrReviewStage(Stage):
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue if item.issue is not None else 0,
-                agent=AGENT_ADDRESS_REVIEW,
-                model=implementer_model(),
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "implementer", implementer_model),
                 prompt_builder=get_address_review_prompt,
                 cwd=_worktree_path(item, ctx),
                 timeout_s=address_review_claude_timeout(),
+                session_agent=AGENT_ADDRESS_REVIEW,
                 prompt_kwargs={
                     "pr_number": item.pr,
                     "issue_number": item.issue,
@@ -612,11 +624,12 @@ class PrReviewStage(Stage):
         job = AgentJob(
             repo=item.repo,
             issue=item.issue if item.issue is not None else 0,
-            agent=AGENT_IMPLEMENTER,
-            model=implementer_model(),
+            agent=agent_provider(ctx),
+            model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=get_impl_resume_feedback_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=implementer_claude_timeout(),
+            session_agent=AGENT_IMPLEMENTER,
             prompt_kwargs={
                 "issue_number": item.issue,
                 "prev_iteration": item.payload.get("pr_review_round", 0),

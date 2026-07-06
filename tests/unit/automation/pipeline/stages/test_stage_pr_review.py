@@ -333,12 +333,19 @@ class TestPrReviewStageStep:
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
         item.branch = "1-auto-impl"
+        item.worktree = "/tmp/wt"
 
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
         assert result.job.op == "commit_push"
+        assert result.job.kwargs == {
+            "issue_number": 1,
+            "worktree_path": "/tmp/wt",
+            "branch": "1-auto-impl",
+            "agent": "claude",
+        }
         assert result.on_done_state == "EVAL"
 
     def test_followup_wait_requests_follow_up(self, make_ctx: Any, make_work_item: Any) -> None:

@@ -1,0 +1,194 @@
+"""Pipeline summary tests: rows, aggregates, preserved footer, JSON envelope (#1817).
+
+Includes a byte-parity check between :func:`format_preserved_worktrees` and
+the legacy ``implementer_summary._print_preserved_worktrees`` output (which
+now delegates to the shared helper).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from unittest.mock import MagicMock
+
+import pytest
+
+from hephaestus.automation.implementer_summary import ImplementationSummaryPrinter
+from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.pipeline.summary import (
+    RunStats,
+    format_preserved_worktrees,
+    print_summary,
+)
+from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
+
+
+def _stats(**overrides: object) -> RunStats:
+    defaults: dict[str, object] = {
+        "exit_code": 0,
+        "interrupted": False,
+        "loops_run": 1,
+        "agent_job_count": 3,
+        "agent_job_time_s": 12.5,
+        "wall_s": 40.0,
+    }
+    defaults.update(overrides)
+    return RunStats(**defaults)  # type: ignore[arg-type]
+
+
+def _item(
+    issue: int,
+    stage: StageName,
+    *,
+    passed: bool | None = None,
+    reason: str = "",
+    pr: int | None = None,
+) -> WorkItem:
+    item = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=issue, pr=pr, stage=stage)
+    item.payload["entry_stage"] = "planning"
+    if passed is not None:
+        item.result = ItemResult(passed=passed, reason=reason, final_stage=stage)
+    return item
+
+
+class TestFormatPreservedWorktrees:
+    """Exact legacy line sequence, shared by both printers."""
+
+    def test_empty_list_yields_no_lines(self) -> None:
+        assert format_preserved_worktrees([], "script.py") == []
+
+    def test_line_sequence_matches_legacy(self) -> None:
+        preserved = [(101, "/wt/issue-101"), (202, "/wt/issue-202")]
+
+        lines = format_preserved_worktrees(preserved, "impl.py")
+
+        assert lines == [
+            "\nPreserved worktrees (contain uncommitted changes):",
+            "  #101: /wt/issue-101",
+            "  #202: /wt/issue-202",
+            "\nRerun these issues after inspecting/cleaning the worktrees:",
+            "  impl.py --issues 101 202 --resume",
+            "To discard them instead:",
+            "  git worktree remove --force /wt/issue-101",
+            "  git worktree remove --force /wt/issue-202",
+        ]
+
+    def test_legacy_printer_delegates_to_shared_helper(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """implementer_summary emits exactly the shared helper's lines."""
+        wm = MagicMock()
+        wm.preserved = [(7, "/wt/issue-7")]
+        printer = ImplementationSummaryPrinter(wm)
+
+        with caplog.at_level(logging.INFO, logger="hephaestus.automation.implementer_summary"):
+            printer._print_preserved_worktrees()
+
+        import sys
+
+        logged = [record.getMessage() for record in caplog.records]
+        assert logged == format_preserved_worktrees([(7, "/wt/issue-7")], sys.argv[0])
+
+
+class TestPrintSummaryRows:
+    """Per-item rows and aggregates."""
+
+    def test_all_disposition_rows(self, caplog: pytest.LogCaptureFixture) -> None:
+        """PASS / FAIL:reason / SKIP / BLOCKED / RESUMABLE rows all render."""
+        items = [
+            _item(1, StageName.FINISHED, passed=True, reason="merged", pr=11),
+            _item(2, StageName.FINISHED, passed=False, reason="tests failed"),
+            _item(3, StageName.FINISHED, passed=False, reason="skip: state:skip"),
+            _item(4, StageName.FINISHED, passed=False, reason="blocked: human threads"),
+            _item(5, StageName.CI, passed=False, reason="resumable at ci"),
+        ]
+
+        with caplog.at_level(logging.INFO):
+            print_summary(items, _stats(), [], json_out=False)
+
+        text = caplog.text
+        assert "PASS" in text
+        assert "FAIL:tests failed" in text
+        assert "SKIP" in text
+        assert "BLOCKED" in text
+        assert "RESUMABLE at ci" in text
+        assert "#1" in text and "!11" in text
+
+    def test_aggregates_and_stats(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Disposition counts, per-stage throughput, agent time, loops, wall."""
+        items = [
+            _item(1, StageName.FINISHED, passed=True, reason="ok"),
+            _item(2, StageName.FINISHED, passed=True, reason="ok"),
+            _item(3, StageName.FINISHED, passed=False, reason="boom"),
+        ]
+
+        with caplog.at_level(logging.INFO):
+            print_summary(
+                items, _stats(loops_run=2, agent_job_count=5, wall_s=99.5), [], json_out=False
+            )
+
+        text = caplog.text
+        assert "'pass': 2" in text
+        assert "'fail': 1" in text
+        assert "agent jobs: 5" in text
+        assert "loops: 2" in text
+        assert "wall: 99.5s" in text
+
+    def test_nonzero_attempts_render(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Only non-zero attempt counters appear in the row."""
+        item = _item(6, StageName.FINISHED, passed=True, reason="ok")
+        item.attempts["plan"] = 2
+
+        with caplog.at_level(logging.INFO):
+            print_summary([item], _stats(), [], json_out=False)
+
+        assert "plan=2" in caplog.text
+        assert "ci_fix=" not in caplog.text
+
+    def test_item_without_result_renders_pending(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A never-finished item (no result) renders PENDING, never crashes."""
+        with caplog.at_level(logging.INFO):
+            print_summary([_item(9, StageName.PLANNING)], _stats(), [], json_out=False)
+
+        assert "PENDING" in caplog.text
+
+    def test_preserved_footer_present(self, caplog: pytest.LogCaptureFixture) -> None:
+        """The preserved-worktree footer prints via the shared helper."""
+        with caplog.at_level(logging.INFO):
+            print_summary([], _stats(exit_code=1), [(9, "/wt/9")], json_out=False)
+
+        assert "Preserved worktrees (contain uncommitted changes):" in caplog.text
+        assert "git worktree remove --force /wt/9" in caplog.text
+
+
+class TestJsonEnvelope:
+    """emit_json_status extension fields."""
+
+    def test_json_envelope_fields(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """The envelope carries dispositions, loops, resumable, preserved."""
+        items = [
+            _item(1, StageName.FINISHED, passed=True, reason="ok"),
+            _item(2, StageName.CI, passed=False, reason="resumable at ci"),
+        ]
+
+        print_summary(
+            items,
+            _stats(exit_code=130, interrupted=True, loops_run=3),
+            [(2, "/wt/2")],
+            json_out=True,
+        )
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope["exit_code"] == 130
+        assert envelope["status"] == "error"
+        assert envelope["message"] == "pipeline interrupted"
+        assert envelope["dispositions"] == {"pass": 1, "resumable": 1}
+        assert envelope["loops_run"] == 3
+        assert envelope["resumable"] == ["repo-a#2@ci"]
+        assert envelope["preserved_worktrees"] == [[2, "/wt/2"]]
+
+    def test_no_envelope_without_json_out(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """json_out=False never writes the JSON envelope to stdout."""
+        print_summary([], _stats(), [], json_out=False)
+
+        assert capsys.readouterr().out == ""

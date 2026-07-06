@@ -1242,14 +1242,17 @@ def test_list_open_issue_numbers_no_epics_skips_nothing() -> None:
     mock_skip.assert_not_called()
 
 
-def test_list_open_issue_numbers_returns_empty_on_bad_json() -> None:
-    """Malformed JSON yields the safe-fallback empty list."""
+def test_list_open_issue_numbers_raises_on_bad_json() -> None:
+    """Malformed JSON surfaces instead of pretending the repo has no work."""
 
     def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args=argv, returncode=0, stdout="not json", stderr="")
 
-    with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
-        assert loop_runner._list_open_issue_numbers("Org", "Repo") == []
+    with (
+        patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run),
+        pytest.raises(RuntimeError, match="failed to list open issues"),
+    ):
+        loop_runner._list_open_issue_numbers("Org", "Repo")
 
 
 def test_list_open_issue_numbers_queries_all_open_no_me_filter() -> None:
@@ -1691,11 +1694,12 @@ class TestSubprocessTimeouts:
             with pytest.raises(SystemExit, match="timed out"):
                 loop_runner._gh_list_repos("MyOrg")
 
-    def test_gh_issue_numbers_timeout_returns_empty_list(self) -> None:
-        """A timed-out issue query degrades to an empty list, not a crash."""
+    def test_gh_issue_numbers_timeout_raises(self) -> None:
+        """A timed-out issue query surfaces instead of hiding all work."""
         with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh_call:
             mock_gh_call.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=120)
-            assert loop_runner._list_open_issue_numbers("Org", "Repo") == []
+            with pytest.raises(RuntimeError, match="failed to list open issues"):
+                loop_runner._list_open_issue_numbers("Org", "Repo")
 
 
 class TestRateBudgetGuard:
