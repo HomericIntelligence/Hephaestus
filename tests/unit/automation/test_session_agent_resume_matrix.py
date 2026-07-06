@@ -11,8 +11,7 @@ import pytest
 
 from hephaestus.agents.runtime import session_agent_matches
 from hephaestus.automation.address_review import AddressReviewer
-from hephaestus.automation.ci_driver import CIDriver
-from hephaestus.automation.models import AddressReviewOptions, CIDriverOptions
+from hephaestus.automation.models import AddressReviewOptions
 
 
 @pytest.mark.parametrize("selected_agent", ["claude", "codex", "pi"])
@@ -50,27 +49,6 @@ def address_reviewer_factory(tmp_path: Path) -> Callable[[str], AddressReviewer]
     return _make
 
 
-@pytest.fixture
-def ci_driver_factory(tmp_path: Path) -> Callable[[str], CIDriver]:
-    """Create CI-driver instances with isolated state dirs."""
-
-    def _make(agent: str) -> CIDriver:
-        driver = CIDriver(
-            CIDriverOptions(
-                issues=[1578],
-                agent=agent,
-                max_workers=1,
-                dry_run=False,
-                enable_ui=False,
-            )
-        )
-        driver.repo_root = tmp_path
-        driver.state_dir = tmp_path
-        return driver
-
-    return _make
-
-
 @pytest.mark.parametrize(
     ("selected_agent", "saved_agent", "expected"),
     [
@@ -98,32 +76,3 @@ def test_address_review_load_impl_session_id_rejects_cross_provider_state(
     reviewer = address_reviewer_factory(selected_agent)
 
     assert reviewer._load_impl_session_id(1578) == expected
-
-
-@pytest.mark.parametrize(
-    ("selected_agent", "saved_agent", "expected"),
-    [
-        ("pi", "pi", "session-1578"),
-        ("pi", "codex", None),
-        ("pi", "claude", None),
-        ("pi", None, None),
-        ("codex", "pi", None),
-        ("claude", "pi", None),
-    ],
-)
-def test_ci_driver_load_impl_session_id_rejects_cross_provider_state(
-    ci_driver_factory: Callable[[str], CIDriver],
-    tmp_path: Path,
-    selected_agent: str,
-    saved_agent: str | None,
-    expected: str | None,
-) -> None:
-    """CI repair must respect persisted provider metadata before resuming."""
-    payload = {"session_id": "session-1578"}
-    if saved_agent is not None:
-        payload["session_agent"] = saved_agent
-    (tmp_path / "issue-1578.json").write_text(json.dumps(payload), encoding="utf-8")
-
-    driver = ci_driver_factory(selected_agent)
-
-    assert driver._load_impl_session_id(1578) == expected

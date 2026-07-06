@@ -706,65 +706,6 @@ class TestImplementerMainTimeoutThreading:
         assert config.issues == [42]
 
 
-class TestCIDriverAddressThreadsTimeoutThreading:
-    """Prove CIDriverOptions.agent_timeout reaches run_address_fix_session(timeout=...)."""
-
-    def test_agent_timeout_forwarded_to_run_address_fix_session(self, tmp_path: Path) -> None:
-        """CIDriverOptions.agent_timeout reaches run_address_fix_session timeout= kwarg.
-
-        This is the critical threading test for the ci_driver.py:1089 gap:
-        _address_threads_once must forward self.options.agent_timeout as timeout=
-        to run_address_fix_session.  Before the fix, the call omitted both
-        timeout= and advise_timeout=, so agent timeouts were silently ignored.
-        """
-        import threading
-        from unittest.mock import patch
-
-        from hephaestus.automation.ci_driver import CIDriver
-        from hephaestus.automation.models import CIDriverOptions
-
-        sentinel_agent = 3737
-        sentinel_advise = 2626
-
-        captured: dict[str, object] = {}
-
-        def fake_run_address_fix_session(**kwargs: object) -> dict:
-            captured.update(kwargs)
-            return {"addressed": [], "replies": {}}
-
-        opts = CIDriverOptions(agent_timeout=sentinel_agent, advise_timeout=sentinel_advise)
-
-        # Bypass __init__ (which calls get_repo_root / creates dirs) by constructing
-        # the instance bare and setting only the attributes _address_threads_once needs.
-        driver = object.__new__(CIDriver)
-        driver.options = opts
-        driver.repo_root = tmp_path
-        driver.state_dir = tmp_path
-        driver.lock = threading.Lock()
-
-        # Stub helper methods called by _address_threads_once before run_address_fix_session.
-        driver._get_worktree_path = lambda issue, pr: tmp_path / "wt"  # type: ignore[method-assign,assignment]
-        driver._get_pr_branch = lambda pr: "branch"  # type: ignore[method-assign,assignment]
-        driver._sync_worktree_and_snapshot_sha = lambda issue, wt, branch: "abc123"  # type: ignore[method-assign,assignment]
-        # Stub the push helper so execution does not need _fix_orchestrator.
-        driver._push_ci_fix = lambda **kw: False  # type: ignore[method-assign]
-
-        with patch(
-            "hephaestus.automation.ci_driver.run_address_fix_session",
-            side_effect=fake_run_address_fix_session,
-        ):
-            driver._address_threads_once(issue_number=1, pr_number=2, threads=[{"id": "T1"}])
-
-        # The session returned an empty addressed list → no commit pushed → False.
-        # What matters is that the call forwarded the sentinel timeouts.
-        assert captured.get("timeout") == sentinel_agent, (
-            f"expected timeout={sentinel_agent}, got {captured.get('timeout')}"
-        )
-        assert captured.get("advise_timeout") == sentinel_advise, (
-            f"expected advise_timeout={sentinel_advise}, got {captured.get('advise_timeout')}"
-        )
-
-
 class TestPostMergeLearnTimeoutThreading:
     """Prove CIDriverOptions.learn_timeout reaches agent call in run_drive_green_learnings."""
 
