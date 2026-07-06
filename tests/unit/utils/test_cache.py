@@ -159,7 +159,7 @@ def test_add_to_entry_augments_existing_set() -> None:
     c: ThreadSafeCache[str, set[str]] = ThreadSafeCache()
     c.get_or_compute("k", lambda: {"a"})
     c.add_to_entry("k", "b")
-    assert c.get_or_compute("k", set) == {"a", "b"}
+    assert c.get_or_compute("k", lambda: {"SENTINEL"}) == {"a", "b"}
 
 
 def test_add_to_entry_noop_when_key_absent() -> None:
