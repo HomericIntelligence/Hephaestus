@@ -408,11 +408,16 @@ semantics.
 | No PR, state:plan-no-go | planning | plan rejected; amend with feedback. |
 | state:needs-plan / no label | planning | entry point; no plan yet. |
 
-**Thin CLI scopes** (trim the ROUTES table to named stages):
+**Thin pipeline scopes** (within `hephaestus-automation-loop`):
 
-- `hephaestus-plan-issues` = planning → plan_review.
-- `hephaestus-implement-issues` = implementation → pr_review.
-- `ci_driver` = ci → merge_wait.
+- `--repos` seeds one repo item per named repository.
+- `--issues` seeds issue-scoped items through the classifier and routes them to
+  planning, implementation, pr_review, ci, or finished according to durable
+  labels/PR state.
+- `--org` expands to non-fork, non-archived repository seeds.
+
+The standalone console scripts remain legacy/manual compatibility paths at the
+issue #1818 cutover. Cleanup issues #1820-#1822 rewire or delete those wrappers.
 
 ## Interrupt semantics and exit codes
 
@@ -463,14 +468,18 @@ is retained as an explicit affirmative flag for scripts and evidence commands;
 `HEPH_PIPELINE=0` disables the pipeline when neither CLI flag is present, and
 the CLI flag always wins over the environment.
 
-The scoped entry points remain thin wrappers around slices of the same
-behavior:
+The default pipeline's scopes are the `hephaestus-automation-loop` selectors
+listed above. Standalone scripts are still legacy/manual compatibility paths at
+the #1818 cutover:
 
-- `hephaestus-plan-issues` owns planning plus in-loop plan review.
-- `hephaestus-implement-issues` owns implementation plus in-loop PR review and
-  thread addressing.
-- `hephaestus-merge-prs` owns CI/merge driving and is represented by the
-  pipeline's `ci` and `merge_wait` stages.
+- `hephaestus-plan-issues` still invokes the legacy planner entry point.
+- `hephaestus-implement-issues` still invokes the legacy implementer entry
+  point.
+- `hephaestus-merge-prs` still invokes the legacy merge-driving entry point.
+
+The target cleanup wave is to rewire or delete those wrappers so their behavior
+is represented by the pipeline's planning/plan_review, implementation/pr_review,
+and ci/merge_wait slices.
 
 ## Glossary
 

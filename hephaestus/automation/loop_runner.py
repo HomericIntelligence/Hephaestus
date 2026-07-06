@@ -1,11 +1,16 @@
-"""Multi-repo, ISSUE-MAJOR automation loop driver.
+"""Multi-repo automation loop CLI.
 
-Replaces ``scripts/run_automation_loop.sh``. Iterates over all
-non-archived HomericIntelligence repos. Within each repo, work is
-ISSUE-MAJOR (#1560): each open issue is carried through the FULL selected
-phase sequence (``plan`` → ``implement`` → ``drive-green``) end to end by a
-single worker before that worker takes the next issue. Up to
-``--max-workers`` issues are in flight at once.
+By default, :func:`main` dispatches to the queue-based in-process pipeline in
+``hephaestus.automation.pipeline.coordinator``. The legacy issue-major
+subprocess loop remains in this module as the rollback path selected by
+``--legacy-loop`` or ``HEPH_PIPELINE=0`` until the cleanup wave removes it.
+
+The legacy path replaced ``scripts/run_automation_loop.sh``. It iterates over
+all non-archived HomericIntelligence repos. Within each repo, work is
+ISSUE-MAJOR (#1560): each open issue is carried through the FULL selected phase
+sequence (``plan`` → ``implement`` → ``drive-green``) end to end by a single
+worker before that worker takes the next issue. Up to ``--max-workers`` issues
+are in flight at once.
 
 ``drive-green`` is the BLOCKING per-worker phase: scoped to one issue's PR it
 waits for the PR to MERGE (driving CI green, bounded by
@@ -27,8 +32,8 @@ call inside a Python ``for`` loop. Phase N failing returns a
 shell-option landmine (``set -e`` / ``set -m`` / subshell exec-optimization)
 can silently skip the rest of the pipeline.
 
-CLI is flag-compatible with the previous bash script so operator muscle
-memory and any pinned callers keep working.
+The CLI remains flag-compatible with the previous bash script so operator
+muscle memory and any pinned callers keep working.
 """
 
 from __future__ import annotations
