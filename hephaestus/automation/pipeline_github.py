@@ -41,6 +41,11 @@ from hephaestus.automation._review_utils import (
 )
 from hephaestus.automation.arming_state import ArmingStateStore
 from hephaestus.automation.ci_check_inspector import CICheckInspector
+from hephaestus.automation.prompts.pr_review import (
+    BLOCKING_SEVERITIES,
+    SEVERITY_MARKER_PREFIX,
+    VALID_SEVERITIES,
+)
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
 from hephaestus.automation.review_state import (
     PLAN_REVIEW_PREFIX,
@@ -111,6 +116,33 @@ def rate_budget_ok(now_epoch: float | None = None) -> tuple[bool, float]:
         return True, 0.0
     now = time.time() if now_epoch is None else now_epoch
     return False, max(0.0, reset_epoch - now + 5.0)
+
+
+def _with_severity_marker(comment: dict[str, Any]) -> str:
+    """Prepend the ``<!-- hephaestus-severity: X -->`` marker line (#1856).
+
+    An absent/unknown severity is written as ``major`` (blocking) so an
+    unclassifiable thread never silently unblocks a GO, and so the pre-#1856
+    all-blocking behavior is reproduced until the reviewer's severity is seeded.
+    """
+    sev = str(comment.get("severity") or "").strip().lower()
+    if sev not in VALID_SEVERITIES:
+        sev = "major"
+    body = str(comment.get("body") or "")
+    if body.startswith(SEVERITY_MARKER_PREFIX):
+        return body  # already marked (idempotent re-post)
+    return f"{SEVERITY_MARKER_PREFIX} {sev} -->\n{body}"
+
+
+def _thread_severity_is_blocking(thread: dict[str, Any]) -> bool:
+    """Return True if the thread's recovered severity is blocking; missing means blocking."""
+    body = str(thread.get("body") or "")
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(SEVERITY_MARKER_PREFIX) and stripped.endswith("-->"):
+            sev = stripped[len(SEVERITY_MARKER_PREFIX) : -3].strip().lower()
+            return sev in BLOCKING_SEVERITIES
+    return True
 
 
 class PipelineGitHub:
@@ -518,6 +550,16 @@ class PipelineGitHub:
             return is_implementation_go(labels), has_label(labels, STATE_IMPLEMENTATION_NO_GO)
         return pr_manager.pr_has_implementation_state_label(pr_number)
 
+    def _unresolved_threads(self, pr_number: int) -> list[dict[str, Any]]:
+        """Fetch unresolved threads (repo-scoped or legacy). Fails open to []."""
+        if self._repo_slug is not None:
+            return self._repo_unresolved_threads(pr_number)
+        try:
+            return github_api.gh_pr_list_unresolved_threads(pr_number, dry_run=False)
+        except Exception as exc:  # legacy path fails open (parity with existing code)
+            logger.warning("PR #%s: could not list unresolved threads: %s", pr_number, exc)
+            return []
+
     def count_unresolved_threads(self, pr_number: int) -> tuple[int, int]:
         """Return ``(automation_unresolved, human_unresolved)`` thread counts.
 
@@ -526,23 +568,52 @@ class PipelineGitHub:
         open on fetch errors; repo-scoped pipeline runs query the configured
         repo directly so unresolved human threads are not hidden.
         """
-        if self._repo_slug is not None:
-            threads = self._repo_unresolved_threads(pr_number)
-            if not threads:
-                return (0, 0)
-            current_login = github_api.gh_current_login()
-            automation = sum(1 for t in threads if _is_automation_owned_thread(t, current_login))
-            return (automation, len(threads) - automation)
-        try:
-            threads = github_api.gh_pr_list_unresolved_threads(pr_number, dry_run=False)
-        except Exception as exc:
-            logger.warning("PR #%s: could not list unresolved threads: %s", pr_number, exc)
-            return (0, 0)
+        threads = self._unresolved_threads(pr_number)
         if not threads:
             return (0, 0)
         current_login = github_api.gh_current_login()
         automation = sum(1 for t in threads if _is_automation_owned_thread(t, current_login))
         return (automation, len(threads) - automation)
+
+    def count_unresolved_threads_by_severity(self, pr_number: int) -> tuple[int, int, int]:
+        """Return ``(blocking_automation, minor_automation, human)`` (#1856).
+
+        Severity is read from the ``<!-- hephaestus-severity: X -->`` marker
+        prepended at post time; an automation thread with a missing/garbled marker
+        counts as BLOCKING (fail-safe). Resolves nothing.
+        """
+        threads = self._unresolved_threads(pr_number)
+        if not threads:
+            return (0, 0, 0)
+        current_login = github_api.gh_current_login()
+        blocking = minor = human = 0
+        for t in threads:
+            if _is_automation_owned_thread(t, current_login):
+                if _thread_severity_is_blocking(t):
+                    blocking += 1
+                else:
+                    minor += 1
+            else:
+                human += 1
+        return (blocking, minor, human)
+
+    def resolve_automation_threads(self, pr_number: int) -> int:
+        """Resolve unresolved AUTOMATION-owned threads; return the count (#1856).
+
+        Never resolves human threads. Used by the GO gate to clear advisory
+        minor/nitpick threads the reviewer waved so ``required_review_thread_
+        resolution`` does not re-block the armed PR at merge (merge_wait.py:427).
+        """
+        if self._skip(f"resolve automation threads on PR #{pr_number}"):
+            return 0
+        threads = self._unresolved_threads(pr_number)
+        current_login = github_api.gh_current_login()
+        resolved = 0
+        for t in threads:
+            if _is_automation_owned_thread(t, current_login) and t.get("id"):
+                github_api.gh_pr_resolve_thread(str(t["id"]), dry_run=self.dry_run)
+                resolved += 1
+        return resolved
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
         """Return the merge_wait PR-state read, or ``None`` on failure.
@@ -857,7 +928,7 @@ class PipelineGitHub:
                     "path": c["path"],
                     "line": c["line"],
                     "side": c.get("side", "RIGHT"),
-                    "body": c["body"],
+                    "body": _with_severity_marker(c),
                 }
                 for c in threads
             ]
