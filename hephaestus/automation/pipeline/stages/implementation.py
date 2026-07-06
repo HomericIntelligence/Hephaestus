@@ -1,9 +1,8 @@
 """Implementation stage: gate plan GO, cut worktree, implement, test, push, PR.
 
-Re-houses the implementation control flow from
-``implementer_phase_runner.py`` (``_dispatch_issue_work`` :208,
-``_ensure_plan_ready`` :429, ``_review_existing_pr`` :750, the
-``ensure_pr_auto_merge_deferred`` call :623) and
+Re-houses the implementation control flow from the legacy per-issue phase
+runner (dispatch, plan-ready gate, existing-PR review, and the
+``ensure_pr_auto_merge_deferred`` call) and
 ``_pr_create_phase.PRCreatePhase._finalize_pr`` (:36) as a pipeline stage
 (docs/AUTOMATION_LOOP_ARCHITECTURE.md section "4. implementation" is the
 binding contract):
@@ -44,8 +43,8 @@ binding contract):
   resets on any successful git job.
 - Owned labels: none — PR creation is the journal entry (doc section 4).
   The only label this stage ever writes is ``state:skip`` on the legacy
-  "no commits vs base" runtime error (re-housed
-  ``implementer_phase_runner._handle_runtime_error`` :348), non-fatally.
+  "no commits vs base" runtime error (re-housed from the legacy phase
+  runner's runtime-error handler), non-fatally.
 - PR_CREATE [M]: ``ctx.github.create_pr`` (idempotent ensure semantics)
   with a ``prompts/pr_review.py get_pr_description`` body [durable], then
   ``ctx.github.defer_auto_merge`` — the load-bearing legacy order (runner

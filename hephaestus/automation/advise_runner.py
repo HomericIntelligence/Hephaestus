@@ -4,8 +4,7 @@ Each of the three session-stable stages (plan, implement, drive-green) begins
 with an advise step that searches ProjectMnemosyne for relevant prior
 learnings before doing any work. The Mnemosyne clone/refresh, prompt
 construction, and skip-marker conventions are identical across stages, so they
-live here once (DRY) rather than being copied into ``planner.py``,
-``implementer_phase_runner.py``, and ``ci_driver.py``.
+live here once (DRY) rather than being copied into each stage's advise step.
 
 The only thing that differs per stage is *how* the selected agent is invoked.
 Callers therefore pass an ``invoke`` callable that takes the skill-selection

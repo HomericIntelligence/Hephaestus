@@ -4,9 +4,9 @@ Printed from the coordinator's ``finally`` — on completion AND interrupt:
 per-item rows (repo, issue, PR, entry queue, final stage,
 PASS/FAIL:reason/SKIP/BLOCKED/RESUMABLE, attempt counters, elapsed),
 aggregates (per-disposition counts, per-stage throughput, agent-job
-count/time, wall clock, loops), preserved worktrees (the exact
-``implementer_summary._print_preserved_worktrees`` line sequence, re-housed
-here as :func:`format_preserved_worktrees`), and the ``emit_json_status``
+count/time, wall clock, loops), preserved worktrees (the exact legacy
+implementer preserved-worktree line sequence, re-housed here as
+:func:`format_preserved_worktrees`), and the ``emit_json_status``
 envelope extension when ``--json`` is active.
 """
 
@@ -41,9 +41,9 @@ def format_preserved_worktrees(
 ) -> list[str]:
     """Format the preserved-worktree footer (legacy line sequence, verbatim).
 
-    Re-housed from ``implementer_summary._print_preserved_worktrees`` so the
-    pipeline and the legacy implementer print byte-identical guidance;
-    ``implementer_summary`` now delegates here.
+    Re-housed from the legacy implementer preserved-worktree footer so the
+    pipeline prints byte-identical guidance; the legacy printer was removed
+    with the pipeline conversion (#1821).
 
     Args:
         preserved: ``(issue_number, worktree_path)`` tuples for failed items.

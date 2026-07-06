@@ -14,7 +14,7 @@ from hephaestus.automation import (
     audit_reviewer,
     ci_driver,
     ensure_state_labels,
-    implementer_cli,
+    implementer,
     loop_runner,
     plan_reviewer,
     planner,
@@ -482,7 +482,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         *_github_throttle_specs(),
         _json_spec(),
     ),
-    "implementer_cli": (
+    "implementer": (
         _action_spec(
             ("--epic",),
             "epic",
@@ -499,13 +499,21 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             help_text="Specific issue numbers to implement (alternative to --epic)",
         ),
         _agent_spec(),
-        _store_true("--analyze", "analyze", "Analyze dependencies without implementing"),
+        _store_true(
+            "--analyze",
+            "analyze",
+            "(Deprecated, ignored) kept for CLI compatibility; analysis lives in the pipeline",
+        ),
         _store_true(
             "--health-check",
             "health_check",
             "Run health check of dependencies and environment",
         ),
-        _store_true("--resume", "resume", "Resume previous implementation from saved state"),
+        _store_true(
+            "--resume",
+            "resume",
+            "(Deprecated, ignored) kept for CLI compatibility; the pipeline resumes from state",
+        ),
         _max_workers_spec(COMMON_REVIEW_MAX_WORKERS),
         _store_true(
             "--no-skip-closed",
@@ -791,7 +799,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         ("pr_reviewer", pr_reviewer._build_parser),
         ("address_review", address_review._build_parser),
         ("ci_driver", ci_driver._build_parser),
-        ("implementer_cli", implementer_cli._build_parser),
+        ("implementer", implementer._build_parser),
         ("loop_runner", loop_runner._build_parser),
         ("audit_reviewer", audit_reviewer._build_parser),
         ("ensure_state_labels", ensure_state_labels._build_parser),

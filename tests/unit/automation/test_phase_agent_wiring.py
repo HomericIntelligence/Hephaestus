@@ -43,20 +43,17 @@ AUTOMATION_DIR = Path(automation_pkg.__file__).parent
 # Each entry is ``(module_file, expected_agent_constant, companion_files)``,
 # where ``companion_files`` is an optional tuple of sibling modules that
 # share the same self-agent identity. For ``implementer.py`` the
-# per-issue phase runner was extracted into ``implementer_phase_runner.py``
-# in #597, and #712 further split the runner into single-responsibility phase
-# modules (``_implement_phase.py`` / ``_review_phase.py`` hold the
-# ``invoke_claude_with_session`` callsites). All of these files participate in
-# the implementer's session and must be inspected together. Since #714 the
-# ``AGENT_IMPLEMENTER`` constant is imported and referenced directly in each of
-# those modules (no longer through the implementer module's namespace), so test
-# patches target ``<module>.AGENT_IMPLEMENTER``.
+# ``invoke_claude_with_session`` callsites live in the phase modules
+# (``_implement_phase.py`` / ``_review_phase.py``); ``implementer.py`` itself is
+# now a thin pipeline CLI wrapper (#1821) that carries no agent identity, so the
+# ``AGENT_IMPLEMENTER`` import and ``agent=`` kwarg are inspected on the
+# companions. Each phase module imports and references ``AGENT_IMPLEMENTER``
+# directly (no longer through the implementer module's namespace).
 SELF_AGENT_PHASES: list[tuple[str, str, tuple[str, ...]]] = [
     (
         "implementer.py",
         "AGENT_IMPLEMENTER",
         (
-            "implementer_phase_runner.py",
             "_implement_phase.py",
             "_review_phase.py",
         ),
@@ -115,9 +112,9 @@ def test_self_agent_phase_imports_expected_agent(
     """Each self-agent phase imports its dedicated AGENT_* constant.
 
     Imports may live in ``module_file`` itself or in any of its
-    ``companions`` (e.g. ``implementer_phase_runner.py`` was extracted from
-    ``implementer.py`` in #597 but still participates in the implementer's
-    session identity).
+    ``companions`` (e.g. ``_implement_phase.py`` / ``_review_phase.py`` hold the
+    implementer session's ``invoke_claude_with_session`` callsites, so they carry
+    the ``AGENT_IMPLEMENTER`` identity for the thin ``implementer.py`` wrapper).
     """
     src = _read_phase_sources(module_file, companions)
     import_pattern = re.compile(rf"from\s+\.session_naming\s+import\s+[^\n]*\b{expected_agent}\b")
@@ -133,11 +130,11 @@ def test_self_agent_phase_passes_expected_agent_kwarg(
 ) -> None:
     """Each self-agent phase passes its AGENT_* constant via ``agent=``.
 
-    The implementer module dispatches the actual call through
-    ``implementer_phase_runner`` and the phase modules, which since #714 import
-    the constant directly and reference it as the bare ``AGENT_IMPLEMENTER``.
-    The pattern below accepts both the bare ``AGENT_IMPLEMENTER`` form and the
-    namespaced ``X.AGENT_IMPLEMENTER`` form for resilience.
+    The implementer session's actual dispatch lives in the phase modules
+    (``_implement_phase.py`` / ``_review_phase.py``), which import the constant
+    directly and reference it as the bare ``AGENT_IMPLEMENTER``. The pattern
+    below accepts both the bare ``AGENT_IMPLEMENTER`` form and the namespaced
+    ``X.AGENT_IMPLEMENTER`` form for resilience.
     """
     src = _read_phase_sources(module_file, companions)
     kwarg_pattern = re.compile(rf"\bagent\s*=\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?{expected_agent}\b")
@@ -273,10 +270,17 @@ def test_stage_runs_advise_under_advise_agent(
 
 
 def test_implementer_prepends_advise_context_for_all_agents() -> None:
-    """The implementer injects selected-skill context into the implementation prompt."""
-    src = _read_phase_sources("implementer_phase_runner.py", ())
-    assert "_run_advise(" in src, "implementer_phase_runner.py must run shared advise"
-    assert "_prepend_advise(" in src, "implementer_phase_runner.py must inject advise findings"
-    assert "enable_advise" in src, (
-        "implementer_phase_runner.py must gate advise behind enable_advise"
+    """The implementation stage injects selected-skill context into the prompt.
+
+    The advise wiring moved from the deleted legacy phase runner into
+    the pipeline implementation stage (#1821): it gates the advise step behind
+    ``ctx.config.enable_advise`` and composes the findings block via
+    ``build_implementation_prompt``.
+    """
+    stage_src = (AUTOMATION_DIR / "pipeline" / "stages" / "implementation.py").read_text()
+    assert "enable_advise" in stage_src, (
+        "implementation stage must gate advise behind enable_advise"
+    )
+    assert "build_implementation_prompt" in stage_src, (
+        "implementation stage must inject advise findings into the prompt"
     )

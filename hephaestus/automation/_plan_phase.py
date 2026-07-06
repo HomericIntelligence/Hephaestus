@@ -1,7 +1,8 @@
 """Plan presence + generation phase for the implementation pipeline.
 
-Extracted from :class:`ImplementationPhaseRunner` as part of the #712
-decomposition. :class:`PlanPhase` owns the "does this issue already have an
+Part of the #712 phase decomposition (the per-issue control flow it once
+fed now lives in the pipeline stages, epic #1809).
+:class:`PlanPhase` owns the "does this issue already have an
 implementation plan, and if not, generate one" responsibility.
 """
 

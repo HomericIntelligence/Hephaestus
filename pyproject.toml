@@ -276,12 +276,12 @@ omit = [
     # (via ast import-parsing) that each omitted module has a backing unit-test suite
     # (issue #1422); and their importability is guarded by
     # tests/integration/test_orchestration_smoke.py.
+    # implementer.py is a thin CLI wrapper over the pipeline coordinator (epic
+    # #1809): main() seeds --issues into the (implementation, pr_review) scope
+    # and shells out to a live claude/gh orchestration loop, so it is
+    # integration-only. The former implementer_cli / implementer_phase_runner /
+    # implementer_summary modules were deleted in the conversion (#1821).
     "hephaestus/automation/implementer.py",
-    # implementer_cli.py holds main()/CLI parsing extracted from implementer.py (#468);
-    # main() drives the live claude/gh orchestration loop, so it is integration-only.
-    "hephaestus/automation/implementer_cli.py",
-    "hephaestus/automation/implementer_phase_runner.py",
-    "hephaestus/automation/implementer_summary.py",
     "hephaestus/automation/planner.py",
     "hephaestus/automation/address_review.py",
     "hephaestus/automation/ci_driver.py",

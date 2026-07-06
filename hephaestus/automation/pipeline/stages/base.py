@@ -239,9 +239,8 @@ class StageGitHub(Protocol):
         """Durably ensure auto-merge stays DISABLED until implementation GO.
 
         Mirrors ``pr_manager.ensure_pr_auto_merge_deferred`` — called
-        immediately after PR creation (legacy runner order,
-        ``implementer_phase_runner.py:623``): auto-merge must never be armed
-        before ``state:implementation-go``.
+        immediately after PR creation (the load-bearing legacy order):
+        auto-merge must never be armed before ``state:implementation-go``.
         """
         ...
 

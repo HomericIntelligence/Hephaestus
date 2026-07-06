@@ -14,7 +14,6 @@ PROVIDER_NEUTRAL_FILES = [
     "hephaestus/automation/planner.py",
     "hephaestus/automation/plan_reviewer.py",
     "hephaestus/automation/_implement_phase.py",
-    "hephaestus/automation/implementer_phase_runner.py",
     "hephaestus/automation/implementer.py",
     "hephaestus/automation/_review_phase.py",
     "hephaestus/automation/pr_reviewer.py",

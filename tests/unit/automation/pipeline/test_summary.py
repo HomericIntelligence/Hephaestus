@@ -1,19 +1,18 @@
 """Pipeline summary tests: rows, aggregates, preserved footer, JSON envelope (#1817).
 
-Includes a byte-parity check between :func:`format_preserved_worktrees` and
-the legacy ``implementer_summary._print_preserved_worktrees`` output (which
-now delegates to the shared helper).
+Pins the exact :func:`format_preserved_worktrees` line sequence. The legacy
+implementer summary printer that used to delegate to this helper was deleted
+when ``hephaestus-implement-issues`` became a thin pipeline wrapper (#1821); the
+pipeline summary is now the sole consumer.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from unittest.mock import MagicMock
 
 import pytest
 
-from hephaestus.automation.implementer_summary import ImplementationSummaryPrinter
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.summary import (
     RunStats,
@@ -72,22 +71,6 @@ class TestFormatPreservedWorktrees:
             "  git worktree remove --force /wt/issue-101",
             "  git worktree remove --force /wt/issue-202",
         ]
-
-    def test_legacy_printer_delegates_to_shared_helper(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """implementer_summary emits exactly the shared helper's lines."""
-        wm = MagicMock()
-        wm.preserved = [(7, "/wt/issue-7")]
-        printer = ImplementationSummaryPrinter(wm)
-
-        with caplog.at_level(logging.INFO, logger="hephaestus.automation.implementer_summary"):
-            printer._print_preserved_worktrees()
-
-        import sys
-
-        logged = [record.getMessage() for record in caplog.records]
-        assert logged == format_preserved_worktrees([(7, "/wt/issue-7")], sys.argv[0])
 
 
 class TestPrintSummaryRows:

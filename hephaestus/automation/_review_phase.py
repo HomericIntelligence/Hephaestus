@@ -1,7 +1,8 @@
 """Strict in-loop review + address phase.
 
-Extracted from :class:`ImplementationPhaseRunner` as part of the #712
-decomposition. :class:`ReviewPhase` owns the bounded review→address→re-review
+Part of the #712 phase decomposition (the per-issue control flow it once
+fed now lives in the pipeline stages, epic #1809).
+:class:`ReviewPhase` owns the bounded review→address→re-review
 cycle (#28/#1083/#1152): each iteration runs a fresh reviewer that posts inline
 PR threads, validates that prior comments were truly addressed, gates GO on
 zero unresolved threads, and resumes the implementer session to fix what
