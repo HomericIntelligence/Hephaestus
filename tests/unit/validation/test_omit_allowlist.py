@@ -51,7 +51,6 @@ class TestOmitAllowlist:
             # loop_repo_manager.py: repo-management cluster extracted from loop_runner.py
             "hephaestus/automation/loop_repo_manager.py",
             "hephaestus/automation/curses_ui.py",
-            "hephaestus/automation/pr_reviewer.py",
             "hephaestus/automation/audit_reviewer.py",
         }
 

@@ -1,20 +1,30 @@
 """Smoke tests for omitted orchestration modules — integration backstop.
 
-These tests validate that the 13 automation modules omitted from coverage
+These tests validate that the 12 automation modules omitted from coverage
 (per pyproject.toml[tool.coverage.run].omit) remain importable and their
 console entry points work correctly.
 
 Module enumeration and entry-point discovery verified at plan time:
-- All 13 modules are importable (guards against import regressions)
-- 5 modules have console scripts: implementer, planner, loop_runner, pr_reviewer, audit_reviewer
-- 2 modules are script-less but have main(): address_review, ci_driver
+- All 12 omitted modules are importable (guards against import regressions)
+- 4 omitted modules have console scripts: implementer, planner, loop_runner,
+    audit_reviewer
+- 1 omitted module is script-less but has main(): ci_driver
 - 6 modules lack main() entirely: curses_ui,
     the 4 CIDriver collaborators extracted in #1357 (pr_discovery,
     ci_check_inspector, ci_fix_orchestrator, post_merge_processor), and
     loop_repo_manager (repo-management cluster extracted from loop_runner #1360).
     The former implementer CLI / phase-runner / summary helper modules were
     deleted when hephaestus-implement-issues became a thin pipeline wrapper
-    (#1821), dropping the omit list from 16 to 13 entries.
+    (#1821), dropping the omit list from 16 to 13 entries. The #1823 wave then
+    split pr_reviewer.py into a thin ``hephaestus-review-prs`` pipeline wrapper
+    plus the unit-covered ``pr_review_core`` module (with a sibling
+    ``address_review_core``), removing pr_reviewer.py from omit (13 -> 12).
+    ``hephaestus-review-prs`` is still asserted below via CONSOLE_SCRIPTS —
+    its wrapper remains importable and --help-able — but it is no longer
+    omitted, so it is not enumerated in OMITTED_MODULES.
+    ``address_review.py`` stays omitted: it has no console script and its live
+    ``AddressReviewer`` orchestration is integration-only, while its parse/fix
+    cores now live in the unit-covered ``address_review_core``.
 """
 
 import subprocess

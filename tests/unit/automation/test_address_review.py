@@ -211,7 +211,7 @@ def test_codex_fix_session_falls_back_to_fresh_on_resume_failure(
             side_effect=resume_error,
         ),
         patch(
-            "hephaestus.automation.address_review.run_agent_session",
+            "hephaestus.automation.address_review_core.run_agent_session",
             return_value=fresh_result,
         ) as mock_fresh,
     ):
@@ -241,7 +241,9 @@ class TestResolveAddressedThreads:
         replies: dict[str, str] = {"thread-id-1": "Fixed the issue"}
         presented = {"thread-id-1", "thread-id-2"}
 
-        with patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve:
+        with patch(
+            "hephaestus.automation.address_review_core.gh_pr_resolve_thread"
+        ) as mock_resolve:
             reviewer._resolve_addressed_threads(addressed, replies, presented)
 
         mock_resolve.assert_called_once_with("thread-id-1", dry_run=False)
@@ -255,7 +257,9 @@ class TestResolveAddressedThreads:
         }
         presented = {"thread-1", "thread-2"}
 
-        with patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve:
+        with patch(
+            "hephaestus.automation.address_review_core.gh_pr_resolve_thread"
+        ) as mock_resolve:
             reviewer._resolve_addressed_threads(addressed, replies, presented)
 
         assert mock_resolve.call_count == 2
@@ -268,7 +272,9 @@ class TestResolveAddressedThreads:
         replies: dict[str, str] = {}
         presented = {"thread-1", "thread-2"}
 
-        with patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve:
+        with patch(
+            "hephaestus.automation.address_review_core.gh_pr_resolve_thread"
+        ) as mock_resolve:
             mock_resolve.side_effect = [RuntimeError("API error"), None]
             # Should not raise
             reviewer._resolve_addressed_threads(addressed, replies, presented)
@@ -288,7 +294,9 @@ class TestResolveAddressedThreads:
         }
         presented = {"thread-real"}  # only the real one was on this PR
 
-        with patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve:
+        with patch(
+            "hephaestus.automation.address_review_core.gh_pr_resolve_thread"
+        ) as mock_resolve:
             reviewer._resolve_addressed_threads(addressed, replies, presented)
 
         mock_resolve.assert_called_once_with("thread-real", dry_run=False)
@@ -310,7 +318,9 @@ class TestResolveAddressedThreads:
         replies: dict[str, str] = {"thread-1": "Fixed"}
         presented = {"thread-1"}
 
-        with patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve:
+        with patch(
+            "hephaestus.automation.address_review_core.gh_pr_resolve_thread"
+        ) as mock_resolve:
             # dry_run is forwarded from options via _resolve_addressed_threads
             dry_reviewer._resolve_addressed_threads(addressed, replies, presented)
 
@@ -392,7 +402,7 @@ class TestAddressIssue:
                 return_value=threads,
             ),
             patch.object(dry_reviewer, "_get_or_create_worktree") as mock_worktree,
-            patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve,
+            patch("hephaestus.automation.address_review_core.gh_pr_resolve_thread") as mock_resolve,
             patch.object(dry_reviewer, "_push_branch") as mock_push,
         ):
             result = dry_reviewer._address_issue(123, 456)
@@ -534,7 +544,9 @@ class TestResolveAddressedThreadsModuleLevel:
     """Module-level resolve_addressed_threads keeps the #661 hallucination guard."""
 
     def test_resolves_only_presented_threads(self) -> None:
-        with patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve:
+        with patch(
+            "hephaestus.automation.address_review_core.gh_pr_resolve_thread"
+        ) as mock_resolve:
             resolve_addressed_threads(
                 ["t-real", "t-hallucinated"],
                 {"t-real": "fixed"},
@@ -545,7 +557,9 @@ class TestResolveAddressedThreadsModuleLevel:
         mock_resolve.assert_called_once_with("t-real", dry_run=False)
 
     def test_forwards_dry_run(self) -> None:
-        with patch("hephaestus.automation.address_review.gh_pr_resolve_thread") as mock_resolve:
+        with patch(
+            "hephaestus.automation.address_review_core.gh_pr_resolve_thread"
+        ) as mock_resolve:
             resolve_addressed_threads(["t1"], {"t1": "r"}, {"t1"}, dry_run=True)
         mock_resolve.assert_called_once_with("t1", dry_run=True)
 
@@ -581,9 +595,9 @@ class TestRunAddressFixSessionModuleLevel:
             )
 
         with (
-            patch("hephaestus.automation.address_review.get_repo_slug", return_value="Repo"),
+            patch("hephaestus.automation.address_review_core.get_repo_slug", return_value="Repo"),
             patch(
-                "hephaestus.automation.address_review.invoke_claude_with_session",
+                "hephaestus.automation.address_review_core.invoke_claude_with_session",
                 side_effect=_fake_invoke,
             ),
         ):
@@ -616,9 +630,9 @@ class TestRunAddressFixSessionModuleLevel:
             return ('{"result": "```json\\n{\\"addressed\\": [], \\"replies\\": {}}\\n```"}', "")
 
         with (
-            patch("hephaestus.automation.address_review.get_repo_slug", return_value="Repo"),
+            patch("hephaestus.automation.address_review_core.get_repo_slug", return_value="Repo"),
             patch(
-                "hephaestus.automation.address_review.invoke_claude_with_session",
+                "hephaestus.automation.address_review_core.invoke_claude_with_session",
                 side_effect=_fake_invoke,
             ),
             # Force the classifier result so the todo line's difficulty is known.

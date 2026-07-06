@@ -87,14 +87,20 @@ SELF_AGENT_PHASES: list[tuple[str, str, tuple[str, ...]]] = [
 # legacy ``reviewer_agent(...)`` wrapper assertion no longer applies to it —
 # see ``tests/unit/automation/pipeline/stages/test_stage_plan_review.py``.
 PER_ITERATION_REVIEWER_PHASES: list[tuple[str, str, tuple[str, ...]]] = [
-    ("pr_reviewer.py", "AGENT_PR_REVIEWER", ()),
+    # The per-iteration reviewer_agent() wiring moved into pr_review_core.py in
+    # the #1823 omit-reduction split; pr_reviewer.py is now a thin CLI wrapper
+    # that re-exports the cores. Scan the core (its in-loop caller is empty).
+    ("pr_review_core.py", "AGENT_PR_REVIEWER", ()),
 ]
 
 
 # Continuation phases: deliberately resume the implementer's session to get
 # warm prompt cache while continuing the same line of work.
 CONTINUATION_PHASES: list[str] = [
-    "address_review.py",
+    # The address-review fix session (agent=AGENT_IMPLEMENTER, warm-cache resume)
+    # moved into address_review_core.py in the #1823 omit-reduction split;
+    # address_review.py is now a thin re-export wrapper over the core.
+    "address_review_core.py",
 ]
 
 
