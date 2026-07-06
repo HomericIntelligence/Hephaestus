@@ -682,16 +682,16 @@ class PrReviewStage(Stage):
             # Audit trail of progress-earned extension rounds (4..hard_cap).
             item.attempts["pr_review_hard"] = item.attempts.get("pr_review_hard", 0) + 1
 
-        # Fresh unresolved counts AFTER the address/push leg (the GO gate
-        # must see what is open NOW, not the pre-address snapshot).
-        automation_unresolved, human_unresolved = ctx.github.count_unresolved_threads(item.pr)
+        # Fresh counts AFTER the address/push leg, split by severity so a GO is
+        # downgraded only by BLOCKING automation threads (#1856 / re-introduced #1554).
+        blocking_auto, minor_auto, human_unresolved = (
+            ctx.github.count_unresolved_threads_by_severity(item.pr)
+        )
+        automation_unresolved = blocking_auto + minor_auto  # progress-trail parity (#1554)
         unresolved = automation_unresolved + human_unresolved
 
         if verdict.is_go and human_unresolved:
-            # A GO cannot stand while a HUMAN review thread is open —
-            # automation must not resolve it and cannot fix it. Post the
-            # explanatory stand-down comment [durable, before the outcome],
-            # then finish with the PR left UNLABELED (no go/no-go/skip).
+            # Unchanged human-blocked guard (pr_review.py:690-701).
             logger.info(
                 "pr_review:%d: GO blocked by %d human thread(s); finishing (unlabeled)",
                 item.issue,
@@ -700,12 +700,21 @@ class PrReviewStage(Stage):
             self._post_human_blocked_comment(item.pr, human_unresolved, ctx)
             return StageOutcome(Disposition.FINISH_FAIL, "human_blocked")
 
-        if verdict.is_go and unresolved == 0:
+        if verdict.is_go and blocking_auto == 0:
+            if minor_auto:
+                # Automation owns these waved minor/nitpick threads; resolve them so
+                # required_review_thread_resolution does not re-block at merge_wait.
+                logger.info(
+                    "pr_review:%d: GO with %d advisory minor thread(s); resolving before arm",
+                    item.issue,
+                    minor_auto,
+                )
+                ctx.github.resolve_automation_threads(item.pr)
             logger.info("pr_review:%d: clean GO; marking PR #%d and arming", item.issue, item.pr)
             self._write_go_and_arm(item.pr, ctx)
             if getattr(ctx.config, "enable_follow_up", True):
                 return Continue(next_state=FOLLOWUP_WAIT)
-            return StageOutcome(Disposition.ADVANCE, "GO with zero unresolved threads")
+            return StageOutcome(Disposition.ADVANCE, "GO with zero blocking threads")
 
         # NOGO/AMBIGUOUS — or a GO downgraded by open automation threads
         # (re-housed downgrade: address + re-review before GO can stand;

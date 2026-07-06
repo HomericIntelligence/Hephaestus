@@ -42,12 +42,14 @@ class FakeStageGitHub(FakeGitHub):
         pr_head_branch: str | None = None,
         pr_impl_state: tuple[bool, bool] = (False, False),
         unresolved: list[tuple[int, int]] | None = None,
+        by_severity: list[tuple[int, int, int]] | None = None,
         pr_state: dict[str, Any] | None = None,
         failing_checks: list[str] | None = None,
         pending_checks: list[str] | None = None,
         checks: list[dict[str, Any]] | None = None,
         pr_stuck: bool = False,
         learn_terminal: bool = False,
+        resolve_count: int = 0,
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -63,6 +65,9 @@ class FakeStageGitHub(FakeGitHub):
                 count_unresolved_threads — consumed one per call, last
                 entry repeating (lets tests script a decreasing /
                 plateauing thread count for the #1554 progress rule).
+            by_severity: FIFO of (blocking, minor, human) answers for
+                count_unresolved_threads_by_severity (#1856); defaults to
+                deriving from unresolved (legacy: all automation = blocking).
             pr_state: Canned answer for gh_pr_state (merge_wait's single
                 PR-state read); ``None`` mirrors a transient read failure.
             failing_checks: Canned answer for failing_required_check_names.
@@ -72,6 +77,7 @@ class FakeStageGitHub(FakeGitHub):
             learn_terminal: Seed answer for drive_green_learn_terminal —
                 True mirrors an issue whose post-merge /learn already ran
                 terminally (the #848 dedupe record).
+            resolve_count: Canned return count for resolve_automation_threads.
 
         """
         super().__init__()
@@ -82,12 +88,18 @@ class FakeStageGitHub(FakeGitHub):
         self._pr_head_branch = pr_head_branch
         self._pr_impl_state = pr_impl_state
         self._unresolved: list[tuple[int, int]] = list(unresolved or [(0, 0)])
+        self._by_severity = (
+            list(by_severity)
+            if by_severity is not None
+            else [(a, 0, h) for (a, h) in self._unresolved]  # legacy: all automation = blocking
+        )
         self._pr_state = pr_state
         self._failing_checks = list(failing_checks or [])
         self._pending_checks = list(pending_checks or [])
         self._checks = list(checks or [])
         self._pr_stuck = pr_stuck
         self._learn_terminal = learn_terminal
+        self._resolve_count = resolve_count
         self.arming_records: dict[int, tuple[int, str]] = {}
         self.learn_results: dict[int, bool] = {}
 
@@ -135,6 +147,16 @@ class FakeStageGitHub(FakeGitHub):
         if len(self._unresolved) > 1:
             return self._unresolved.pop(0)
         return self._unresolved[0]
+
+    def count_unresolved_threads_by_severity(self, pr_number: int) -> tuple[int, int, int]:
+        """FIFO of scripted (blocking, minor, human) answers (#1856)."""
+        if len(self._by_severity) > 1:
+            return self._by_severity.pop(0)
+        return self._by_severity[0]
+
+    def resolve_automation_threads(self, pr_number: int) -> int:
+        self._log("resolve_automation_threads", pr_number)
+        return self._resolve_count
 
     # -- mutator surface used by the stages ----------------------------------
     # Coordinator-neutral names (the pipeline architecture guard forbids

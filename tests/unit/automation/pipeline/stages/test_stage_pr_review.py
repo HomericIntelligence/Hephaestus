@@ -554,6 +554,93 @@ class TestEvalVerdicts:
         assert item.attempts["pr_review_iter"] == 0  # no round burned
         assert github.mutation_log == []
 
+    # Severity-aware GO gate tests (#1856)
+    def test_go_with_only_minor_automation_thread_arms(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """GO with only minor/nitpick automation threads resolves and arms.
+
+        This is the regression case from #1856: previously a GO with minor
+        automation threads would deadlock to skip because `unresolved == 0`
+        never held. Now severity filtering allows the GO to arm.
+        """
+        stage = PrReviewStage()
+        github = FakeStageGitHub(by_severity=[(0, 2, 0)])  # 0 blocking, 2 minor, 0 human
+        ctx = make_ctx(github=github)
+        ctx.config.enable_follow_up = False
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.ADVANCE
+        # Should resolve the minor threads AND arm
+        assert ("resolve_automation_threads", (1001,)) in github.mutation_log
+        assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
+        assert ("arm_auto_merge", (1001,)) in github.mutation_log
+
+    def test_go_with_blocking_automation_thread_downgrades(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """GO with blocking automation threads downgrades to NOGO.
+
+        Tightening check: blocking threads still block, minor threads don't.
+        """
+        stage = PrReviewStage()
+        github = FakeStageGitHub(by_severity=[(1, 0, 0)])  # 1 blocking, 0 minor, 0 human
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["pr_review_round"] = 1
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == "REVIEW_WAIT"
+        # Should NOT resolve (no minor threads), should write no-go
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+        # resolve_automation_threads should NOT be called
+        assert ("resolve_automation_threads", (1001,)) not in github.mutation_log
+
+    def test_go_with_human_thread_still_blocks(self, make_ctx: Any, make_work_item: Any) -> None:
+        """GO with human thread still hard-blocks (unregressed).
+
+        Human threads are never filtered by severity.
+        """
+        stage = PrReviewStage()
+        github = FakeStageGitHub(by_severity=[(0, 0, 1)])  # 0 blocking, 0 minor, 1 human
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.FINISH_FAIL
+        # The underlying function is gh_issue_comment (not post_pr_comment)
+        assert github.mutation_log[0][0] == "gh_issue_comment"
+
+    def test_go_zero_threads_does_not_resolve(self, make_ctx: Any, make_work_item: Any) -> None:
+        """GO with zero threads does not call resolve_automation_threads.
+
+        Optimization: no minor threads → no resolve needed.
+        """
+        stage = PrReviewStage()
+        github = FakeStageGitHub(by_severity=[(0, 0, 0)])  # 0 blocking, 0 minor, 0 human
+        ctx = make_ctx(github=github)
+        ctx.config.enable_follow_up = False
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.ADVANCE
+        # resolve should NOT be in the log
+        assert ("resolve_automation_threads", (1001,)) not in github.mutation_log
+        assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
+
 
 class TestEvalErrorNoBurn:
     """The #1554 doctrine: ERROR burns no budget, stamps no labels."""
@@ -834,7 +921,14 @@ class TestFullWalks:
         resolved -> mark + arm [durable] -> follow-up -> ADVANCE.
         """
         stage = PrReviewStage()
-        github = FakeStageGitHub(unresolved=[(2, 0), (1, 0), (0, 0), (0, 0)])
+        # POST calls count_unresolved_threads once per round; EVAL calls the
+        # new by_severity method once per round. Two rounds => one entry each
+        # per round. Round 1 has 2 open blocking threads (NOGO address leg);
+        # round 2 is clean (GO: skips difficulty/address, arms).
+        github = FakeStageGitHub(
+            unresolved=[(2, 0), (0, 0)],
+            by_severity=[(2, 0, 0), (0, 0, 0)],
+        )
         ctx = make_ctx(github=github)
         item = make_work_item(issue=21, pr=1001, state="ENTER")
         item.branch = "21-auto-impl"

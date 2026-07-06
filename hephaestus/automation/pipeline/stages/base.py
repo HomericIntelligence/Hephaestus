@@ -185,6 +185,14 @@ class StageGitHub(Protocol):
         """
         ...
 
+    def count_unresolved_threads_by_severity(self, pr_number: int) -> tuple[int, int, int]:
+        """Return (blocking_automation, minor_automation, human) unresolved counts (#1856)."""
+        ...
+
+    def resolve_automation_threads(self, pr_number: int) -> int:
+        """Resolve unresolved automation-owned review threads; return the count (#1856)."""
+        ...
+
     def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
         """Durably ensure the PR exists and return its number (idempotent).
 
