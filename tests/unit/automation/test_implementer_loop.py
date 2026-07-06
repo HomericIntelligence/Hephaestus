@@ -111,6 +111,7 @@ class TestRunImplReviewLoop:
                 "hephaestus.automation._review_phase.gh_pr_list_unresolved_threads",
                 return_value=[],
             ),
+            patch("hephaestus.automation._review_phase.gh_current_login", return_value=None),
             patch(
                 "hephaestus.automation._review_phase.validate_prior_comments_addressed",
                 return_value=([], True, set()),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
@@ -506,6 +507,11 @@ def _unknown_work_result(repo: str, loop_idx: int) -> RepoResult:
 class TestRunLoopEarlyExit:
     """Tests for early-exit logic in run_loop (#614)."""
 
+    @pytest.fixture(autouse=True)
+    def _no_rate_budget_probe(self) -> Iterator[None]:
+        with patch.object(loop_runner, "_rate_limit_remaining", return_value=None):
+            yield
+
     def test_early_exit_fires_on_zero_work_pass(self, tmp_path: Path) -> None:
         """When a non-final pass produces 0 new plans and 0 reviews, break early.
 
@@ -750,6 +756,7 @@ class TestMainLoopsRunReporting:
 
         argv = [
             "--json",
+            "--legacy-loop",
             "--repos",
             "r1",
             "--loops",

@@ -112,6 +112,7 @@ from hephaestus.automation.pipeline.stages import (
 from hephaestus.automation.pipeline.stages.repo import product_to_work_item
 from hephaestus.automation.pipeline.summary import RunStats, print_summary
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
+from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
 
 logger = logging.getLogger(__name__)
 
@@ -313,17 +314,17 @@ class Coordinator:
             StageName.FINISHED: FinishedStage(self.ledger, self.preserved),
         }
 
-    def _ctx_for(self, item: WorkItem) -> StageContext:
-        """Return the (cached, per-repo) StageContext for *item*."""
-        ctx = self._ctx_cache.get(item.repo)
+    def _ctx_for_repo(self, repo: str) -> StageContext:
+        """Return the (cached, per-repo) StageContext for *repo*."""
+        ctx = self._ctx_cache.get(repo)
         if ctx is None:
-            root = Path(self.config.projects_dir) / item.repo
+            root = Path(self.config.projects_dir) / repo
             ctx = StageContext(
                 config=self._stage_config,
                 org=self.config.org,
                 dry_run=self.config.dry_run,
                 github=(
-                    self._github_factory(item.repo, root)
+                    self._github_factory(repo, root)
                     if self._github_factory is not None
                     else self.github
                 ),
@@ -334,8 +335,12 @@ class Coordinator:
                 ),
                 budget_fn=_budget_lookup,
             )
-            self._ctx_cache[item.repo] = ctx
+            self._ctx_cache[repo] = ctx
         return ctx
+
+    def _ctx_for(self, item: WorkItem) -> StageContext:
+        """Return the (cached, per-repo) StageContext for *item*."""
+        return self._ctx_for_repo(item.repo)
 
     # -- run loop ---------------------------------------------------------------
 
@@ -871,7 +876,11 @@ class Coordinator:
 
         """
         self._pass_work_count = 0
-        entries = _seeding.seed_from_cli(self.config.repos, self.config.issues, self.config.prs)
+        discovery_repos = [] if self.config.issues or self.config.prs else self.config.repos
+        entries = _seeding.seed_from_cli(discovery_repos, [], [])
+        default_repo = self.config.repos[0] if self.config.repos else ""
+        if self.config.issues or self.config.prs:
+            entries.extend(self._seed_direct_scope(default_repo))
         pushed = 0
         for entry in entries:
             if entry.stage is None:
@@ -892,6 +901,44 @@ class Coordinator:
             self._push_item(item, item.stage, enter=True)
             pushed += 1
         return pushed
+
+    def _seed_direct_scope(self, repo: str) -> list[_seeding.SeedEntry]:
+        """Seed explicit ``--issues`` / ``--prs`` through the target repo accessor."""
+        github = self._ctx_for_repo(repo).github if repo else self.github
+        entries: list[_seeding.SeedEntry] = []
+        for issue in self.config.issues:
+            facts = _seeding.seed_issue_from_github(issue, github)
+            stage, reason = _seeding.classify_issue(facts)
+            entries.append(
+                _seeding.SeedEntry(
+                    kind="issue",
+                    identifier=issue,
+                    stage=stage,
+                    reason=reason,
+                    pr_number=facts.pr_number if facts.pr_is_open else None,
+                )
+            )
+        for pr in self.config.prs:
+            has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
+            if has_go:
+                entries.append(
+                    _seeding.SeedEntry(
+                        kind="pr",
+                        identifier=pr,
+                        stage=StageName.CI,
+                        reason=f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
+                    )
+                )
+            else:
+                entries.append(
+                    _seeding.SeedEntry(
+                        kind="pr",
+                        identifier=pr,
+                        stage=StageName.PR_REVIEW,
+                        reason=(f"PR #{pr} without {STATE_IMPLEMENTATION_GO} — awaiting review"),
+                    )
+                )
+        return entries
 
     @staticmethod
     def _entry_to_item(entry: _seeding.SeedEntry, default_repo: str) -> WorkItem:
@@ -916,6 +963,7 @@ class Coordinator:
                 repo=default_repo,
                 kind=ItemKind.ISSUE,
                 issue=int(entry.identifier),
+                pr=entry.pr_number,
                 stage=entry.stage,
             )
         item.state = "ENTER"
@@ -1000,8 +1048,8 @@ class Coordinator:
 def run_pipeline(config: PipelineConfig) -> int:
     """Run the queue-based pipeline to completion.
 
-    Public entry point called from ``loop_runner.main()`` when ``--pipeline``
-    (or ``HEPH_PIPELINE=1``) is enabled.
+    Public entry point called from ``loop_runner.main()`` on the default
+    pipeline path (or when ``--pipeline`` is passed explicitly).
 
     Args:
         config: Pipeline configuration.

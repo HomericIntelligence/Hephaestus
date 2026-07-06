@@ -7,29 +7,35 @@ for the catalog of skills the agents invoke, see the [`skills/`](skills/) direct
 
 ## Agents the codebase orchestrates
 
-The `hephaestus.automation` subpackage drives a 3-stage issue/PR pipeline
-(plan → implement → drive-green). Each stage runs an external coding agent —
-either **Claude Code** or **Codex** — chosen per invocation via the optional
-`--agent` CLI flag, or auto-detected with a Claude preference when omitted
-(see `hephaestus.agents.runtime.add_agent_argument`). Plan review and
-PR-review/address-review are no longer standalone stages: the planner owns its
-review loop and the implementer absorbs PR-review + thread-addressing in-loop.
+The default `hephaestus-automation-loop` path is the queue-based in-process
+pipeline in `hephaestus.automation.pipeline.coordinator`. The coordinator owns
+eight in-memory stage queues and dispatches agent/build/git jobs to a worker
+pool. Each agent job runs either **Claude Code** or **Codex**, chosen via the
+optional `--agent` CLI flag or auto-detected with a Claude preference when
+omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 
-| Stage | Module | Console script | Purpose |
-|-------|--------|----------------|---------|
-| Plan | `hephaestus.automation.planner` | `hephaestus-plan-issues` | Produce an implementation plan for an open issue |
-| ↳ plan review (in-loop) | `hephaestus.automation.plan_reviewer` (within planner loop) | (internal) | Strict R0/R1/R2 review of the plan |
-| Implement | `hephaestus.automation.implementer` | `hephaestus-implement-issues` | Carry out the plan in an isolated git worktree |
-| ↳ implementation review (in-loop) | `hephaestus.automation._review_utils` (within implementer loop) | (internal) | Strict review of the resulting diff |
-| ↳ PR review (in-loop) | `hephaestus.automation.pr_reviewer` (within implementer loop) | (internal) | Inline review of the open PR, policy-aware |
-| ↳ address review (in-loop) | `hephaestus.automation.address_review` (within implementer loop) | (internal) | Resolve outstanding inline-review threads |
-| Drive green | `hephaestus.automation.ci_driver` | `hephaestus-merge-prs` | Poll CI, fix failing required checks, enable auto-merge once green |
+| Queue stage | Module | Purpose |
+|-------------|--------|---------|
+| repo | `hephaestus.automation.pipeline.stages.repo` | Clone/discover, classify issues/PRs, and seed entry queues |
+| planning | `hephaestus.automation.pipeline.stages.planning` | Advise and produce an implementation plan |
+| plan_review | `hephaestus.automation.pipeline.stages.plan_review` | Strict plan review, amendment, and plan labels |
+| implementation | `hephaestus.automation.pipeline.stages.implementation` | Worktree creation, implementation, tests, commit/push, and PR creation |
+| pr_review | `hephaestus.automation.pipeline.stages.pr_review` | Inline PR review, validation, comment addressing, and implementation labels |
+| ci | `hephaestus.automation.pipeline.stages.ci` | Non-blocking CI classification and CI-fix routing |
+| merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Auto-merge arming, merge polling, dirty/blocked handling, and post-merge learn |
+| finished | `hephaestus.automation.pipeline.stages.finished` | Terminal ledger and worktree cleanup/preservation |
 
-`hephaestus.automation.pr_reviewer` is also exposed as the standalone
-`hephaestus-review-prs` console script for manual, out-of-band PR review.
+Legacy/manual console scripts remain available during the #1818 cutover and
+cleanup wave. They are rollback or out-of-band entry points until the scoped
+wrapper cleanup issues rewire/delete them:
 
-A single one-off stage can be invoked manually via
-`hephaestus-agent-stage` (`hephaestus.automation.agent_stage`).
+| Console script | Current module | Purpose |
+|----------------|----------------|---------|
+| `hephaestus-plan-issues` | `hephaestus.automation.planner` | Legacy/manual planning path |
+| `hephaestus-implement-issues` | `hephaestus.automation.implementer` | Legacy/manual implementation path |
+| `hephaestus-merge-prs` | `hephaestus.github.pr_merge` | Legacy/manual merge driving path |
+| `hephaestus-review-prs` | `hephaestus.automation.pr_reviewer` | Manual, out-of-band PR review |
+| `hephaestus-agent-stage` | `hephaestus.automation.agent_stage` | One-off stage invocation |
 
 ## Agent runtime
 

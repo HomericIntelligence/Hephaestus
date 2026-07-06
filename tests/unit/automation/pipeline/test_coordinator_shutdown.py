@@ -95,9 +95,11 @@ def _coordinator(
         org="org", repos=["repo-a"], loops=1, projects_dir=tmp_path, grace_s=grace_s
     )
     monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: list(seed or []))
-    return Coordinator(
+    coordinator = Coordinator(
         config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
     )
+    coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+    return coordinator
 
 
 class TestInterruptSemantics:

@@ -7,11 +7,15 @@ processing an issue, or a phase times out, and you need to resume safely.
 
 - The loop process exited unexpectedly (force-kill, OOM, terminal closed).
 - The log shows one of these crash markers (emitted from
-  `hephaestus/automation/loop_runner.py`):
-  - `[{repo}] issue #{issue} pipeline crashed: {exc}` — a single issue's
-    pipeline raised.
-  - `[{repo}] runner crashed: {exc}` — the per-repo runner raised.
-  - `[{repo}] phase {phase} TIMEOUT after {N}s` — a stage exceeded its timeout.
+  the default pipeline coordinator):
+  - `Path: pipeline` — confirms the queue-based coordinator path was selected.
+  - `pipeline run failed` — the coordinator hit a fatal top-level exception.
+  - `on_job_done poisoned item ...` or `poisoned item ...` — a single item
+    raised inside stage completion or stepping and was routed to failed.
+  - `RESUMABLE at <stage>` / `resumable at <stage>` in `=== Pipeline summary ===`
+    — the run was interrupted and left the item safe to resume.
+  - `error="timeout"` or phase-specific timeout text — under the pipeline,
+    `--phase-timeout` bounds agent jobs, not whole phase subprocesses.
 - An issue is left in an intermediate `state:*` label (see the
   [runbooks index](index.md) state-label table).
 
@@ -40,28 +44,35 @@ processing an issue, or a phase times out, and you need to resume safely.
 
 ## Recover
 
-The loop is idempotent per issue: it re-discovers open issues with a fresh
-`gh issue list` every loop iteration and re-reads each issue's `state:*` label,
-so re-running resumes from the last-known label state. There is no per-issue
-crash checkpoint — the label *is* the checkpoint.
+The loop is idempotent per issue: the coordinator re-seeds from GitHub labels,
+PR state, and local worktrees on startup, so re-running resumes from the
+last-known durable state. There is no persisted queue snapshot — the label and
+PR/worktree state are the checkpoint.
 
 ```bash
-hephaestus-automation-loop --issues <N> --loops <K> --repos <REPO>
+hephaestus-automation-loop --pipeline --issues <N> --loops <K> --repos <REPO>
+```
+
+`--pipeline` is optional because the pipeline is the default, but keeping it in
+recovery commands makes the selected path visible in logs. If the pipeline
+itself is the suspected cause, use the rollback hatch:
+
+```bash
+hephaestus-automation-loop --legacy-loop --issues <N> --loops <K> --repos <REPO>
 ```
 
 The shared checkout is reset between turns, so any uncommitted in-flight edit
-from the crashed turn is discarded; this is by design — the loop runner owns
-worktree isolation and resets the shared checkout each turn.
+from the crashed turn is discarded; this is by design. Issue work happens in
+`build/.worktrees/issue-<N>`, which is the recoverable worktree state.
 
 ## When `state:skip` applies
 
 `state:skip` is the only label that takes an issue out of the loop entirely. It
-is **operator-applied**, or **auto-applied** when a PR is genuinely stuck after
-the merge budget (`--max-merge-attempts`) is exhausted. A crash alone does
-**not** apply `state:skip`;
-re-running the loop is the correct first response to a crash. Apply
-`state:skip` yourself only when an issue is genuinely stuck after repeated
-attempts (for a stuck-but-green PR, see the
+is operator-applied, applied when the review loop exhausts its budget without a
+GO, or applied to epics before exclusion from the issue queue. A crash alone
+does **not** apply `state:skip`; re-running the loop is the correct first
+response to a crash. Apply `state:skip` yourself only when an issue is genuinely
+stuck after repeated attempts (for a stuck-but-green PR, see the
 [CI-driver stall runbook](ci-driver-stall.md)).
 
 ## See also

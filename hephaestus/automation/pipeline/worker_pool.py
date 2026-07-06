@@ -67,8 +67,10 @@ class WorkerPool:
     """Thread pool executor for submitting and tracking frozen jobs.
 
     Jobs are executed via :meth:`submit`; a future callback drains results to
-    the completion queue. Workers never look up PR numbers, build prompts, or
-    call the GitHub API — those are coordinator responsibilities.
+    the completion queue. Workers never mutate ``WorkItem`` objects or stage
+    queues. Agent jobs do build prompts in the worker; prompt builders may do
+    read-only GitHub fetches, while durable GitHub mutations remain coordinator
+    responsibilities.
 
     Completion contract: every non-cancelled :meth:`submit` produces EXACTLY
     ONE ``(handle, result)`` tuple on the completion queue — normal job

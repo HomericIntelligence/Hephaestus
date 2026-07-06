@@ -25,6 +25,7 @@ import hephaestus.automation.pipeline.routing as routing_mod
 import hephaestus.automation.pipeline.seeding as seeding_mod
 import hephaestus.automation.pipeline.stages.base as stage_base_mod
 import hephaestus.automation.pipeline.work_item as work_item_mod
+from hephaestus.automation.state_labels import STATE_PLAN_GO
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -73,9 +74,11 @@ def _coordinator(
 ) -> Coordinator:
     config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path, **config_overrides)
     monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: list(seed or []))
-    return Coordinator(
+    coordinator = Coordinator(
         config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
     )
+    coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+    return coordinator
 
 
 def _item(issue: int = 1, stage: StageName = StageName.PLANNING) -> WorkItem:
@@ -380,6 +383,111 @@ class TestSeedingEdges:
 
         item = coordinator.queues[StageName.CI].snapshot()[0]
         assert item.kind is ItemKind.PR and item.pr == 88 and item.repo == "repo-a"
+
+    def test_issue_entry_with_pr_preserves_pr_number(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Direct --issues entries with open PRs must enter PR stages with item.pr set."""
+        seed = [
+            SeedEntry(
+                kind="issue",
+                identifier=1818,
+                stage=StageName.PR_REVIEW,
+                reason="open PR awaiting review",
+                pr_number=1854,
+            )
+        ]
+        coordinator = _coordinator(tmp_path, monkeypatch, seed=seed)
+
+        coordinator._seed_pass()
+
+        item = coordinator.queues[StageName.PR_REVIEW].snapshot()[0]
+        assert item.kind is ItemKind.ISSUE
+        assert item.issue == 1818
+        assert item.pr == 1854
+
+    def test_direct_issue_scope_uses_repo_scoped_github_accessor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Direct --issues seeding must read the target repo, not ambient cwd state."""
+        monkeypatch.setattr(
+            seeding_mod,
+            "seed_issue",
+            MagicMock(side_effect=AssertionError("ambient issue seeding called")),
+        )
+        target_github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO],
+            open_pr=1854,
+            pr_impl_state=(True, False),
+        )
+        created: list[tuple[str, Path]] = []
+
+        def github_factory(repo: str, repo_root: Path) -> FakeStageGitHub:
+            created.append((repo, repo_root))
+            return target_github
+
+        config = PipelineConfig(
+            org="org",
+            repos=["target-repo"],
+            issues=[1818],
+            projects_dir=tmp_path,
+        )
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            github_factory=github_factory,
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+
+        coordinator._seed_pass()
+
+        assert created == [("target-repo", tmp_path / "target-repo")]
+        item = coordinator.queues[StageName.CI].snapshot()[0]
+        assert item.repo == "target-repo"
+        assert item.kind is ItemKind.ISSUE
+        assert item.issue == 1818
+        assert item.pr == 1854
+
+    def test_direct_pr_scope_uses_repo_scoped_github_accessor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Direct --prs seeding must read PR labels through the target repo accessor."""
+        monkeypatch.setattr(
+            seeding_mod,
+            "gh_pr_label_names",
+            MagicMock(side_effect=AssertionError("ambient PR label seeding called")),
+        )
+        target_github = FakeStageGitHub(pr_impl_state=(True, False))
+        created: list[tuple[str, Path]] = []
+
+        def github_factory(repo: str, repo_root: Path) -> FakeStageGitHub:
+            created.append((repo, repo_root))
+            return target_github
+
+        config = PipelineConfig(
+            org="org",
+            repos=["target-repo"],
+            prs=[1854],
+            projects_dir=tmp_path,
+        )
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            github_factory=github_factory,
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+
+        coordinator._seed_pass()
+
+        assert created == [("target-repo", tmp_path / "target-repo")]
+        item = coordinator.queues[StageName.CI].snapshot()[0]
+        assert item.repo == "target-repo"
+        assert item.kind is ItemKind.PR
+        assert item.pr == 1854
 
     def test_repo_product_finished_entry_gets_pass_result(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

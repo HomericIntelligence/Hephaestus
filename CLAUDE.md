@@ -27,7 +27,7 @@ ProjectHephaestus is the shared utilities and tooling repository of the HomericI
 ProjectHephaestus/
 ├── hephaestus/                 # Python source code (20 documented subpackages)
 │   ├── agents/                 # Agent frontmatter + loader + runtime
-│   ├── automation/             # Issue planning / implementation / PR review pipeline
+│   ├── automation/             # Queue-based issue planning / implementation / PR review pipeline
 │   ├── benchmarks/             # Benchmark comparison utilities
 │   ├── ci/                     # CI helpers (precommit, workflows, docker timing)
 │   ├── cli/                    # Command-line interface tools
@@ -87,7 +87,11 @@ import-parsing) fails CI if any omitted module lacks a backing unit-test suite.
 That guard checks a *proxy* (a test file imports the module and defines a test),
 not that every helper is asserted. Reducing the omit list (target: −50% over two
 releases, issue #1422) means promoting a module's orchestration logic to
-mocked-subprocess unit coverage and removing its `omit` entry.
+mocked-subprocess unit coverage and removing its `omit` entry. The
+`hephaestus.automation.pipeline` package follows the same product-layer
+boundary: adding or moving pipeline modules is not a reason to expand the omit
+list; prefer coordinator/stage seams that remain unit-testable without live
+agent or GitHub CLIs.
 
 ## Python Development Guidelines
 
