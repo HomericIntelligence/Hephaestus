@@ -575,9 +575,7 @@ class TestLivenessAndFatal:
         with caplog.at_level("ERROR"):
             coordinator._force_run_one()
 
-        assert any(
-            "inflight_per_repo={'repo-a': 1}" in record.message for record in caplog.records
-        )
+        assert any("inflight_per_repo={'repo-a': 1}" in record.message for record in caplog.records)
 
     def test_idle_wait_resets_stall_counter_on_progress(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

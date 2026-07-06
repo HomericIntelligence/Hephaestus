@@ -1,69 +1,106 @@
-"""Smoke tests for pr_reviewer.main() to lock in current CLI behavior.
+"""Tests for the thin ``hephaestus-review-prs`` CLI wrapper (issue #1823).
 
-These tests capture the current behavior of ``pr_reviewer.main()`` so the
-upcoming dedupe of helpers shared with ``address_review.py`` (issue #599)
-can be verified as a pure move-and-delegate refactor.
+``pr_reviewer.main()`` no longer runs a legacy ``PRReviewer`` class; it parses
+the historical reviewer argument surface, builds a ``PipelineConfig`` trimmed to
+the ``pr_review`` stage scope, and dispatches to
+``pipeline.coordinator.run_pipeline``. These tests exercise the wrapper end to
+end with ``run_pipeline`` mocked so no live agent or GitHub call is made.
 """
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import patch
 
-from hephaestus.automation import pr_reviewer
-from hephaestus.automation.models import WorkerResult
+import pytest
 
-
-def _patched_run(return_value: dict[int, WorkerResult]):
-    """Return a context-manager-friendly patch of PRReviewer.run."""
-    return patch.object(pr_reviewer.PRReviewer, "run", return_value=return_value)
+from hephaestus.automation import pr_reviewer as pr_reviewer_mod
+from hephaestus.automation.pipeline.routing import StageName
 
 
-def test_main_returns_0_when_no_prs_discovered(monkeypatch) -> None:
-    """When run() returns an empty dict, main() exits 0."""
-    monkeypatch.setattr(
-        "sys.argv", ["pr_reviewer", "--issues", "1", "--no-ui", "--dry-run", "--agent", "claude"]
-    )
+@pytest.fixture(autouse=True)
+def _silence_logging(caplog: Any) -> None:
+    """Keep test output tidy regardless of basicConfig calls in main()."""
+    caplog.set_level("CRITICAL")
+
+
+def _run_main_capturing_config(argv: list[str], *, rc: int = 0) -> dict[str, Any]:
+    """Run ``main()`` with ``argv``, capturing the PipelineConfig passed to run_pipeline.
+
+    Returns a dict with the captured ``config`` and the returned ``rc``.
+    ``run_pipeline`` is stubbed to return ``rc`` and ``_resolve_repo`` is pinned
+    so the test never shells out to ``git``.
+    """
+    captured: dict[str, Any] = {}
+
+    def _fake_run_pipeline(config: Any) -> int:
+        captured["config"] = config
+        return rc
+
     with (
-        patch.object(pr_reviewer.PRReviewer, "__init__", return_value=None),
-        _patched_run({}),
+        patch("sys.argv", ["hephaestus-review-prs", *argv]),
+        patch.object(pr_reviewer_mod, "_resolve_repo", return_value=("acme", "widget")),
+        patch(
+            "hephaestus.automation.pipeline.coordinator.run_pipeline",
+            side_effect=_fake_run_pipeline,
+        ),
+        patch.object(pr_reviewer_mod, "resolve_agent", return_value="claude"),
     ):
-        assert pr_reviewer.main() == 0
+        captured["rc"] = pr_reviewer_mod.main()
+    return captured
 
 
-def test_main_returns_0_on_all_success(monkeypatch) -> None:
-    """When every WorkerResult.success is True, main() exits 0."""
-    monkeypatch.setattr(
-        "sys.argv", ["pr_reviewer", "--issues", "1", "--no-ui", "--dry-run", "--agent", "claude"]
-    )
-    results = {1: WorkerResult(issue_number=1, success=True, pr_number=42)}
+def test_main_builds_pr_review_scope_and_dispatches() -> None:
+    """--issues N builds a pr_review-scoped config and returns run_pipeline's rc."""
+    captured = _run_main_capturing_config(["--issues", "123", "--dry-run"], rc=0)
+
+    assert captured["rc"] == 0
+    config = captured["config"]
+    assert config.org == "acme"
+    assert config.repos == ["widget"]
+    assert config.issues == [123]
+    assert config.dry_run is True
+    # Scope is trimmed to exactly the single pr_review stage.
+    assert config.scope is not None
+    assert config.scope.stages == frozenset({StageName.PR_REVIEW})
+
+
+def test_main_maps_max_workers_to_worker_pool() -> None:
+    """--max-workers maps onto the pipeline worker-pool size."""
+    captured = _run_main_capturing_config(["--issues", "5", "--max-workers", "4", "--dry-run"])
+
+    assert captured["config"].max_workers == 4
+
+
+def test_main_dedupes_issue_list() -> None:
+    """Duplicate --issues values are collapsed to a first-seen-ordered set."""
+    captured = _run_main_capturing_config(["--issues", "5", "5", "9", "5", "--dry-run"])
+
+    assert captured["config"].issues == [5, 9]
+
+
+def test_main_returns_run_pipeline_exit_code() -> None:
+    """main() surfaces the coordinator's non-zero exit code verbatim."""
+    captured = _run_main_capturing_config(["--issues", "5", "--dry-run"], rc=1)
+
+    assert captured["rc"] == 1
+
+
+def test_main_returns_130_on_keyboard_interrupt() -> None:
+    """A KeyboardInterrupt during run_pipeline is caught and returns 130."""
     with (
-        patch.object(pr_reviewer.PRReviewer, "__init__", return_value=None),
-        _patched_run(results),
+        patch("sys.argv", ["hephaestus-review-prs", "--issues", "1", "--dry-run"]),
+        patch.object(pr_reviewer_mod, "_resolve_repo", return_value=("acme", "widget")),
+        patch.object(pr_reviewer_mod, "resolve_agent", return_value="claude"),
+        patch(
+            "hephaestus.automation.pipeline.coordinator.run_pipeline",
+            side_effect=KeyboardInterrupt(),
+        ),
     ):
-        assert pr_reviewer.main() == 0
+        assert pr_reviewer_mod.main() == 130
 
 
-def test_main_returns_1_on_any_failure(monkeypatch) -> None:
-    """When any WorkerResult.success is False, main() exits 1."""
-    monkeypatch.setattr(
-        "sys.argv", ["pr_reviewer", "--issues", "1", "--no-ui", "--dry-run", "--agent", "claude"]
-    )
-    results = {1: WorkerResult(issue_number=1, success=False, error="boom")}
-    with (
-        patch.object(pr_reviewer.PRReviewer, "__init__", return_value=None),
-        _patched_run(results),
-    ):
-        assert pr_reviewer.main() == 1
-
-
-def test_main_returns_130_on_keyboard_interrupt(monkeypatch) -> None:
-    """A KeyboardInterrupt during run() is caught and returns 130."""
-    monkeypatch.setattr(
-        "sys.argv", ["pr_reviewer", "--issues", "1", "--no-ui", "--dry-run", "--agent", "claude"]
-    )
-    boom = MagicMock(side_effect=KeyboardInterrupt())
-    with (
-        patch.object(pr_reviewer.PRReviewer, "__init__", return_value=None),
-        patch.object(pr_reviewer.PRReviewer, "run", boom),
-    ):
-        assert pr_reviewer.main() == 130
+def test_parse_args_requires_issues() -> None:
+    """The reviewer CLI requires --issues (build_review_parser sets required=True)."""
+    with pytest.raises(SystemExit):
+        pr_reviewer_mod._parse_args([])

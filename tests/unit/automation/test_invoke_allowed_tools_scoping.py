@@ -13,8 +13,12 @@ AUTOMATION_DIR = pathlib.Path(__file__).parents[3] / "hephaestus" / "automation"
 # gh_required=True means the agent itself may shell to gh and so needs "Bash".
 # False = orchestrator posts on the agent's behalf; agent is read-only analysis.
 CALL_SITES = [
-    ("address_review.py", {"Read", "Write", "Edit", "Glob", "Grep", "Bash"}, True),
-    ("pr_reviewer.py", {"Read", "Glob", "Grep"}, False),
+    # The address-review and PR-review invoke_claude_with_session call sites
+    # moved into the unit-covered cores in the #1823 omit-reduction split;
+    # address_review.py / pr_reviewer.py are now thin re-export / CLI wrappers
+    # with no direct invoke_claude_with_session call site.
+    ("address_review_core.py", {"Read", "Write", "Edit", "Glob", "Grep", "Bash"}, True),
+    ("pr_review_core.py", {"Read", "Glob", "Grep"}, False),
     ("plan_reviewer.py", {"Read", "Glob", "Grep"}, False),
     ("review_validator.py", {"Read", "Glob", "Grep"}, False),
     # planner.py was re-pointed at the queue-based pipeline (#1820): its

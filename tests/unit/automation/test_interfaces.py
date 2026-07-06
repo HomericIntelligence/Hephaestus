@@ -1,4 +1,8 @@
-"""Verify that all four reviewer classes satisfy ReviewerProtocol."""
+"""Verify that the live reviewer classes satisfy ReviewerProtocol.
+
+``PRReviewer`` became a thin-wrapper placeholder in #1823 (PR review is now a
+pipeline stage), so it no longer implements ``run()`` and is not asserted here.
+"""
 
 from hephaestus.automation.protocol import ReviewerProtocol
 
@@ -23,13 +27,6 @@ def test_protocol_satisfied_by_stub() -> None:
 def test_protocol_violated_by_stub() -> None:
     """A class missing run() does not satisfy ReviewerProtocol."""
     assert not isinstance(_MissingReviewer(), ReviewerProtocol)
-
-
-def test_pr_reviewer_satisfies_protocol() -> None:
-    """PRReviewer satisfies ReviewerProtocol structurally."""
-    from hephaestus.automation.pr_reviewer import PRReviewer
-
-    assert issubclass(PRReviewer, ReviewerProtocol)
 
 
 def test_address_reviewer_satisfies_protocol() -> None:
