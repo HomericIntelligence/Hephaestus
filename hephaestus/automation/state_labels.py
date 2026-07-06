@@ -227,9 +227,8 @@ def apply_plan_verdict(*, is_go: bool) -> tuple[str, list[str]]:
     """Compute the atomic plan-state transition for a reviewer verdict.
 
     Pure: returns (label_to_add, labels_to_remove). The caller performs the
-    GitHub writes and any logging. Promoted from
-    planner_review_loop._apply_state_label (#1814) so the legacy loop, the
-    plan_review stage, and seeding compute the transition identically.
+    GitHub writes and any logging. Shared (#1814) so the plan_review stage and
+    seeding compute the transition identically.
 
     On GO   → add state:plan-go,    remove [state:plan-no-go, state:needs-plan].
     On NOGO → add state:plan-no-go, remove [state:plan-go,     state:needs-plan].

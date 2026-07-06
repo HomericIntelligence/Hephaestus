@@ -166,8 +166,7 @@ class StageGitHub(Protocol):
         Durable plan-comment channel (doc section 2: "plan comment = durable
         artifact"). The coordinator maps this onto
         ``gh_issue_upsert_comment(issue_number, PLAN_COMMENT_MARKER, body)``
-        so the issue holds exactly one plan comment, updated in place
-        (re-housed from ``planner_review_loop._upsert_plan_comment``).
+        so the issue holds exactly one plan comment, updated in place.
         Callers pass a body already normalized to start with the marker.
         """
         ...
