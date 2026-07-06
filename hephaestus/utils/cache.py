@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 K = TypeVar("K")
 V = TypeVar("V")
@@ -64,3 +64,26 @@ class ThreadSafeCache(Generic[K, V]):
         """Remove all entries. For test isolation and long-lived processes."""
         with self._lock:
             self._cache.clear()
+
+    def add_to_entry(self, key: K, item: Any) -> None:
+        """If *key* holds a set entry, add *item* to it under the lock.
+
+        No-op when the key is absent — mirrors the label cache's "only
+        augment an already-populated entry" contract. This does not check TTL
+        expiry, so an entry past its TTL is still augmented; the stale
+        augmented entry is replaced on the next ``get_or_compute`` call. TTL
+        timestamp is preserved (augmenting does not refresh expiry).
+
+        Intended for use with ``ThreadSafeCache[K, set[V]]`` where adding an
+        element to a cached set is atomic (label cache in github_api).
+        """
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is not None:
+                value, ts = entry
+                self._cache[key] = ({*value, item}, ts)  # type: ignore[assignment,misc]
+
+    def remove(self, key: K) -> None:
+        """Remove *key* from the cache. No-op if the key is absent."""
+        with self._lock:
+            self._cache.pop(key, None)

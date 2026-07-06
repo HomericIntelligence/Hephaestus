@@ -221,7 +221,9 @@ class PipelineGitHub:
 
     def _label_names(self) -> set[str]:
         if self._repo_slug is None:
-            return github_api.gh_list_labels()
+            # Org-scoped fallback: always re-fetch so a multithreaded
+            # coordinator never trusts another repo's slug-keyed entry (#1858).
+            return github_api.gh_list_labels(refresh=True)
         result = self._gh(["label", "list", "--json", "name", "--limit", "200"])
         data = json.loads(result.stdout or "[]")
         return {str(item["name"]) for item in data if isinstance(item, dict) and item.get("name")}

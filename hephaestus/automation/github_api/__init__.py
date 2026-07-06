@@ -23,6 +23,7 @@ from hephaestus.github.rate_limit import (
     gh_rate_limit_reset_epoch as gh_rate_limit_reset_epoch,
 )
 from hephaestus.io.utils import write_secure as write_secure
+from hephaestus.utils.cache import ThreadSafeCache as ThreadSafeCache
 from hephaestus.utils.helpers import strip_null_bytes as strip_null_bytes
 
 from ..git_utils import get_repo_info as get_repo_info, run as run
@@ -40,7 +41,11 @@ io_write_secure = write_secure
 
 # Mutable module state from the former flat module. Submodules read and write
 # through this package object so rebinding remains process-wide.
-_label_cache: set[str] | None = None
+# Repo-slug-keyed, lock-protected label cache (#1858). The former bare
+# `set[str] | None` module global was neither repo-keyed nor locked, so the
+# multithreaded pipeline coordinator let one repo's labels mask another's,
+# dropping durable state:* label writes. Mirrors git_utils._repo_info_cache.
+_label_cache: ThreadSafeCache[str, set[str]] = ThreadSafeCache()
 _issue_state_cache: dict[int, IssueState] = {}
 
 from .checks import (  # noqa: E402
