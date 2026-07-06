@@ -16,6 +16,7 @@ from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
 from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
     STATE_PLAN_GO,
+    STATE_PLAN_NO_GO,
     STATE_SKIP,
 )
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -196,6 +197,61 @@ class TestPlanningStageEnter:
 
         assert item.state == "VERIFY"
         assert github.mutation_log == log_after_first  # nothing new written
+
+    def test_replan_entry_swaps_no_go_for_needs_plan_atomically(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A state:plan-no-go fail-back entry swaps to needs-plan in ONE write."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=20, state="ENTER")
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome is None  # proceed to re-plan, not fast-forward
+        assert item.state == "ENTER"  # no premature VERIFY fast-forward
+        # Exactly one atomic edit — invariant never transiently broken.
+        assert github.mutation_log == [
+            ("edit_labels", (20, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO))),
+        ]
+        assert STATE_PLAN_NO_GO not in github.labels[20]
+        assert STATE_PLAN_GO not in github.labels[20]
+        assert STATE_NEEDS_PLAN in github.labels[20]
+
+    def test_replan_entry_with_stale_go_swaps_atomically(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Defense-in-depth: a stale state:plan-go on entry is also swapped."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=21, state="ENTER")
+
+        outcome = stage.on_enter(item, ctx)
+
+        # The STATE_PLAN_GO guard at line 168 should have caught this and
+        # returned ADVANCE, so we never reach the swap. But if a stale
+        # STATE_PLAN_GO somehow persisted past that check, the swap would
+        # remove it; this test is defense-in-depth.
+        assert outcome is not None
+        assert outcome.disposition == Disposition.ADVANCE
+
+    def test_replan_entry_idempotent_when_labels_already_swapped(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Re-entry after a successful swap writes nothing (idempotency)."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=22, state="ENTER")
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome is None
+        # No swap triggered (neither STATE_PLAN_NO_GO nor STATE_PLAN_GO present).
+        # No add triggered (STATE_NEEDS_PLAN already present).
+        assert github.mutation_log == []
 
 
 class TestPlanningStageStep:
