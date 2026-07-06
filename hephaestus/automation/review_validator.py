@@ -1,7 +1,7 @@
 """Validate that prior PR review comments were actually addressed.
 
-The in-loop review → address cycle (see
-:meth:`hephaestus.automation.implementer_phase_runner.ImplementationPhaseRunner._run_impl_review_loop`)
+The in-loop review → address cycle (now owned by the pipeline PR-review stage,
+``pipeline/stages/pr_review.py``)
 used to resolve review threads on the implementer's *self-report* — the
 implementer claimed it addressed a thread and the orchestrator resolved it,
 even when no commit was produced (#1083). This module is now the single owner

@@ -1,7 +1,8 @@
 """Implementation (advise + agent invocation) phase.
 
-Extracted from :class:`ImplementationPhaseRunner` as part of the #712
-decomposition. :class:`ImplementPhase` owns the advise-first lookup and the
+Part of the #712 phase decomposition (the per-issue control flow it once
+fed now lives in the pipeline stages, epic #1809).
+:class:`ImplementPhase` owns the advise-first lookup and the
 selected-agent (Claude/Codex) implementation session — the work that turns a
 GO plan into committed code on the issue branch.
 

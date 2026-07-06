@@ -1,7 +1,8 @@
 """PR-creation phase (pre-PR test gate + ensure-PR fallback).
 
-Extracted from :class:`ImplementationPhaseRunner` as part of the #712
-decomposition. :class:`PRCreatePhase` owns the optional pre-PR test gate and
+Part of the #712 phase decomposition (the per-issue control flow it once
+fed now lives in the pipeline stages, epic #1809).
+:class:`PRCreatePhase` owns the optional pre-PR test gate and
 the idempotent "make sure a PR exists for this branch" fallback, persisting
 the resulting PR number on the issue state.
 """

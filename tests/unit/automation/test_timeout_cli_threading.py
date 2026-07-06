@@ -658,150 +658,52 @@ class TestAddressReviewOptionsTimeoutFields:
 
 
 class TestImplementerMainTimeoutThreading:
-    """Prove implementer main() wires CLI timeout flags into ImplementerOptions."""
+    """Prove the thin implementer main() accepts the historical timeout flags.
 
-    def test_git_message_timeout_from_cli_reaches_options(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    Since the epic #1809 pipeline conversion (#1821) ``implementer.main()`` is a
+    thin wrapper that seeds ``--issues`` into the ``(implementation, pr_review)``
+    pipeline scope and dispatches to ``run_pipeline``. The per-phase timeout
+    flags (``--git-message-timeout`` / ``--agent-timeout`` / ``--learn-timeout``)
+    are retained on the CLI surface for backward compatibility with pinned
+    callers and the loop runner's child-phase argv; these tests pin that they
+    still parse and that main() dispatches cleanly. Per-agent-job timeout
+    behavior is exercised by the pipeline stage / coordinator tests.
+    """
+
+    @pytest.mark.parametrize(
+        "flag",
+        ["--git-message-timeout", "--agent-timeout", "--learn-timeout", "--advise-timeout"],
+    )
+    def test_timeout_flag_parses_and_main_dispatches(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, flag: str
     ) -> None:
-        """--git-message-timeout N from the CLI reaches ImplementerOptions.git_message_timeout.
-
-        This is the critical threading test for the implementer.py:855 gap: the
-        ImplementerOptions(...) constructor in main() must include git_message_timeout
-        from the parsed args, not just the fields wired before this fix.
-        """
+        """A historical per-phase timeout flag parses and main() reaches run_pipeline."""
         import sys
         from unittest.mock import patch
 
         from hephaestus.automation import implementer
 
-        sentinel = 9977
-        captured: dict[str, object] = {}
-
-        class FakeImplementer:
-            def __init__(self, options: object) -> None:
-                captured["options"] = options
-                self.options = options
-
-            def run(self) -> dict:
-                return {}
-
         monkeypatch.setattr(
             sys,
             "argv",
-            [
-                "impl",
-                "--issues",
-                "42",
-                "--dry-run",
-                "--no-ui",
-                "--agent",
-                "claude",
-                "--git-message-timeout",
-                str(sentinel),
-            ],
+            ["impl", "--issues", "42", "--dry-run", "--no-ui", "--agent", "claude", flag, "1234"],
         )
 
         with (
+            patch.object(implementer, "_resolve_repo", return_value=("acme", "widget")),
             patch.object(implementer, "get_repo_root", return_value=tmp_path),
-            patch.object(implementer, "IssueImplementer", FakeImplementer),
+            patch.object(implementer, "resolve_agent", return_value="claude"),
+            patch(
+                "hephaestus.automation.pipeline.coordinator.run_pipeline",
+                return_value=0,
+            ) as mock_run,
         ):
             rc = implementer.main()
 
         assert rc == 0
-        assert "options" in captured, "IssueImplementer.__init__ was never called"
-        assert captured["options"].git_message_timeout == sentinel  # type: ignore[attr-defined]
-
-    def test_agent_timeout_from_cli_reaches_options(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        """--agent-timeout N from the CLI reaches ImplementerOptions.agent_timeout."""
-        import sys
-        from unittest.mock import patch
-
-        from hephaestus.automation import implementer
-
-        sentinel = 1234
-
-        captured: dict[str, object] = {}
-
-        class FakeImplementer:
-            def __init__(self, options: object) -> None:
-                captured["options"] = options
-                self.options = options
-
-            def run(self) -> dict:
-                return {}
-
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            [
-                "impl",
-                "--issues",
-                "7",
-                "--dry-run",
-                "--no-ui",
-                "--agent",
-                "claude",
-                "--agent-timeout",
-                str(sentinel),
-            ],
-        )
-
-        with (
-            patch.object(implementer, "get_repo_root", return_value=tmp_path),
-            patch.object(implementer, "IssueImplementer", FakeImplementer),
-        ):
-            rc = implementer.main()
-
-        assert rc == 0
-        assert captured["options"].agent_timeout == sentinel  # type: ignore[attr-defined]
-
-    def test_learn_timeout_from_cli_reaches_options(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        """--learn-timeout N from the CLI reaches ImplementerOptions.learn_timeout."""
-        import sys
-        from unittest.mock import patch
-
-        from hephaestus.automation import implementer
-
-        sentinel = 5555
-
-        captured: dict[str, object] = {}
-
-        class FakeImplementer:
-            def __init__(self, options: object) -> None:
-                captured["options"] = options
-                self.options = options
-
-            def run(self) -> dict:
-                return {}
-
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            [
-                "impl",
-                "--issues",
-                "5",
-                "--dry-run",
-                "--no-ui",
-                "--agent",
-                "claude",
-                "--learn-timeout",
-                str(sentinel),
-            ],
-        )
-
-        with (
-            patch.object(implementer, "get_repo_root", return_value=tmp_path),
-            patch.object(implementer, "IssueImplementer", FakeImplementer),
-        ):
-            rc = implementer.main()
-
-        assert rc == 0
-        assert captured["options"].learn_timeout == sentinel  # type: ignore[attr-defined]
+        mock_run.assert_called_once()
+        config = mock_run.call_args.args[0]
+        assert config.issues == [42]
 
 
 class TestCIDriverAddressThreadsTimeoutThreading:
