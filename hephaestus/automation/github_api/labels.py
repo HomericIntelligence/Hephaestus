@@ -9,11 +9,28 @@ import hephaestus.automation.github_api as _api
 from ..state_labels import STATE_SKIP, is_skipped
 
 
+def _label_cache_key() -> str:
+    """Repo slug ("owner/name") keying the label cache, or "" if unresolved.
+
+    ``get_repo_info`` is memoized per repo root (git_utils._repo_info_cache),
+    so this is a cached dict lookup after the first call, not a git subprocess.
+    """
+    try:
+        owner, name = _api.get_repo_info()
+    except RuntimeError:
+        return ""
+    return f"{owner}/{name}"
+
+
 def gh_list_labels(refresh: bool = False, *, raise_on_error: bool = False) -> set[str]:
     """Return the set of label names that exist in the current repository.
 
+    Cached per repo slug under a lock (ThreadSafeCache) so concurrent per-repo
+    pipeline threads never observe another repo's label set (#1858). Returns a
+    defensive copy; callers must not mutate the cache.
+
     Args:
-        refresh: If True, bypass the in-process cache and re-fetch.
+        refresh: If True, bypass the in-process cache for the current repo and re-fetch.
         raise_on_error: If True, propagate label-list failures instead of
             returning an empty set.
 
@@ -21,14 +38,17 @@ def gh_list_labels(refresh: bool = False, *, raise_on_error: bool = False) -> se
         Set of existing label names.
 
     """
-    if _api._label_cache is not None and not refresh:
-        return _api._label_cache
+    key = _label_cache_key()
 
-    try:
+    def _fetch() -> set[str]:
         result = _api._gh_call(["label", "list", "--json", "name", "--limit", "200"])
         data = json.loads(result.stdout)
-        _api._label_cache = {item["name"] for item in data}
-        return _api._label_cache
+        return {item["name"] for item in data}
+
+    if refresh:
+        _api._label_cache.remove(key)
+    try:
+        return set(_api._label_cache.get_or_compute(key, _fetch))
     except Exception as e:
         _api.logger.warning("Could not fetch label list: %s; proceeding without validation", e)
         if raise_on_error:
@@ -49,8 +69,7 @@ def gh_create_label(name: str, color: str = "ededed", description: str = "") -> 
     if description:
         cmd.extend(["--description", description])
     _api._gh_call(cmd)
-    if _api._label_cache is not None:
-        _api._label_cache.add(name)
+    _api._label_cache.add_to_entry(_label_cache_key(), name)
     _api.logger.info("Created missing label '%s'", name)
 
 
