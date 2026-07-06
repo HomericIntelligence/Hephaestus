@@ -965,3 +965,129 @@ class TestDrainCompletedFutures:
 
     def test_empty_futures_yields_nothing(self) -> None:
         assert list(drain_completed_futures({})) == []
+
+
+class TestWriteWorkReport:
+    """Tests for write_work_report / work_report_context (#613).
+
+    Re-homed from the deleted test_loop_runner_early_exit.py: these helpers live
+    in _review_utils and are still used by planner.py / plan_reviewer.py to emit
+    per-phase work counts, so they keep their coverage here.
+    """
+
+    def test_env_unset_no_file(self) -> None:
+        """When HEPH_WORK_REPORT is unset, no file is created."""
+        import os
+
+        from hephaestus.automation._review_utils import write_work_report
+
+        os.environ.pop("HEPH_WORK_REPORT", None)
+        # Call with env unset — this is a no-op; no file path to write to
+        write_work_report(5)
+
+    def test_env_set_writes_int(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When HEPH_WORK_REPORT is set, writes the integer to that file."""
+        from hephaestus.automation._review_utils import write_work_report
+
+        path = tmp_path / "report.txt"
+        monkeypatch.setenv("HEPH_WORK_REPORT", str(path))
+
+        write_work_report(42)
+
+        assert path.read_text(encoding="utf-8") == "42"
+
+    def test_oserror_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """OSError (e.g., permission denied) is silently swallowed."""
+        from hephaestus.automation._review_utils import write_work_report
+
+        monkeypatch.setenv("HEPH_WORK_REPORT", "/nonexistent/path/report.txt")
+
+        # Should not raise
+        write_work_report(7)
+
+    def test_context_env_unset_does_not_call_work_units_fn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """work_report_context no-ops when no report was requested."""
+        from hephaestus.automation._review_utils import work_report_context
+
+        monkeypatch.delenv("HEPH_WORK_REPORT", raising=False)
+        called = False
+
+        def work_units() -> int:
+            nonlocal called
+            called = True
+            return 5
+
+        with work_report_context(work_units):
+            pass
+
+        assert called is False
+
+    def test_context_env_set_writes_on_exit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """work_report_context writes the callback result when exiting normally."""
+        from hephaestus.automation._review_utils import work_report_context
+
+        report = tmp_path / "report.txt"
+        monkeypatch.setenv("HEPH_WORK_REPORT", str(report))
+
+        with work_report_context(lambda: 42):
+            pass
+
+        assert report.read_text(encoding="utf-8") == "42"
+
+    def test_context_writes_when_body_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """work_report_context writes even when the protected block raises."""
+        from hephaestus.automation._review_utils import work_report_context
+
+        report = tmp_path / "report.txt"
+        monkeypatch.setenv("HEPH_WORK_REPORT", str(report))
+
+        with pytest.raises(RuntimeError, match=r"^boom$"):
+            with work_report_context(lambda: 7):
+                raise RuntimeError("boom")
+
+        assert report.read_text(encoding="utf-8") == "7"
+
+    def test_context_preserves_body_exception_when_reporting_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reporting failures must not mask the protected block's exception."""
+        from hephaestus.automation._review_utils import work_report_context
+
+        report = tmp_path / "report.txt"
+        monkeypatch.setenv("HEPH_WORK_REPORT", str(report))
+
+        def work_units() -> int:
+            raise ValueError("report failed")
+
+        with pytest.raises(RuntimeError, match=r"^boom$"):
+            with work_report_context(work_units):
+                raise RuntimeError("boom")
+
+        assert not report.exists()
+
+    def test_context_suppresses_reporting_failure_on_clean_exit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Best-effort reporting failures are non-fatal on clean exit too."""
+        from hephaestus.automation._review_utils import work_report_context
+
+        report = tmp_path / "report.txt"
+        monkeypatch.setenv("HEPH_WORK_REPORT", str(report))
+
+        def work_units() -> int:
+            raise ValueError("report failed")
+
+        with work_report_context(work_units):
+            pass
+
+        assert not report.exists()

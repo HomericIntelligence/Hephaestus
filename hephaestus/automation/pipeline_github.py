@@ -74,10 +74,9 @@ logger = logging.getLogger(__name__)
 def rate_limit_remaining() -> tuple[int, int] | None:
     """Return ``(remaining, reset_epoch)`` for the GraphQL budget, or ``None``.
 
-    Ported from ``loop_runner._rate_limit_remaining`` for the coordinator's
-    non-blocking rate gate (the legacy helper feeds a *sleeping* guard, which
-    is fatal for a single coordinator thread — the pipeline timer-parks
-    instead, see ``coordinator._rate_budget_ok``).
+    Feeds the coordinator's non-blocking rate gate. A blocking *sleeping* guard
+    would be fatal for a single coordinator thread, so the pipeline timer-parks
+    instead (see ``coordinator._rate_budget_ok``).
     """
     try:
         out = gh_call(["api", "rate_limit"])
@@ -92,7 +91,7 @@ def rate_limit_remaining() -> tuple[int, int] | None:
 
 
 def rate_budget_ok(now_epoch: float | None = None) -> tuple[bool, float]:
-    """Non-blocking port of ``loop_runner._maybe_sleep_for_rate_budget``.
+    """Non-blocking GraphQL rate-budget gate for the coordinator.
 
     Args:
         now_epoch: Current epoch seconds (injectable for tests).
