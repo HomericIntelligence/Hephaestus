@@ -1112,7 +1112,7 @@ class TestGhListLabels:
 
     def setup_method(self) -> None:
         """Reset module-level label cache before each test."""
-        _github_api_module._label_cache = None
+        _github_api_module._label_cache.clear()
 
     @patch("hephaestus.automation.github_api._gh_call")
     def test_returns_set_of_label_names(self, mock_gh_call: Any) -> None:
@@ -1161,22 +1161,90 @@ class TestGhListLabels:
         assert "testing" in args
         assert "--force" in args
 
+    @patch("hephaestus.automation.github_api.labels._label_cache_key", return_value="o/r")
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_create_label_updates_cache(self, mock_gh_call: Any) -> None:
-        """gh_create_label adds the new label to the cache if it exists."""
-        _github_api_module._label_cache = {"bug"}
+    def test_create_label_updates_cache(self, mock_gh_call: Any, _key: Any) -> None:
+        """gh_create_label augments the current repo's cache entry."""
+        _github_api_module._label_cache.get_or_compute("o/r", lambda: {"bug"})
         mock_gh_call.return_value = Mock()
 
         gh_create_label("testing")
 
-        assert "testing" in _github_api_module._label_cache
+        assert "testing" in gh_list_labels()
+
+
+class TestGhListLabelsRepoKeyedConcurrency:
+    """#1858: label cache is repo-keyed and lock-guarded."""
+
+    def setup_method(self) -> None:
+        _github_api_module._label_cache.clear()
+
+    @patch("hephaestus.automation.github_api.labels._label_cache_key")
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_distinct_repos_do_not_share_cache(self, mock_gh_call: Any, mock_key: Any) -> None:
+        """Distinct repos must not reuse each other's cached label sets."""
+
+        def _labels_for(_argv: Any, *a: Any, **k: Any) -> Any:
+            payload = {"x/x": [{"name": "state:skip"}], "y/y": [{"name": "bug"}]}[
+                mock_key.return_value
+            ]
+            return Mock(stdout=json.dumps(payload))
+
+        mock_gh_call.side_effect = _labels_for
+        mock_key.return_value = "x/x"
+        assert gh_list_labels() == {"state:skip"}
+        mock_key.return_value = "y/y"
+        assert gh_list_labels() == {"bug"}  # Y must not reuse X's entry
+
+    def test_concurrent_cross_repo_access_is_isolated(self) -> None:
+        """Concurrent threads on different repos never see cross-repo cache interference."""
+        import threading
+
+        results: dict[str, set[str]] = {}
+
+        def mock_key_fn() -> str:
+            """Return the currently-patched repo slug based on thread context."""
+            import threading
+
+            return threading.current_thread().name
+
+        def mock_gh_call(argv: Any) -> Any:
+            """Return label payload based on the calling thread's repo slug."""
+            slug = mock_key_fn()
+            payload = {"t1": [{"name": "state:skip"}], "t2": [{"name": "bug"}]}[slug]
+            return Mock(stdout=json.dumps(payload))
+
+        def _run(slug: str) -> None:
+            t = threading.current_thread()
+            t.name = slug
+            results[slug] = gh_list_labels(refresh=True)
+
+        with patch(
+            "hephaestus.automation.github_api.labels._label_cache_key", side_effect=mock_key_fn
+        ):
+            with patch("hephaestus.automation.github_api._gh_call", side_effect=mock_gh_call):
+                t1 = threading.Thread(target=_run, args=("t1",), name="t1")
+                t2 = threading.Thread(target=_run, args=("t2",), name="t2")
+                t1.start()
+                t2.start()
+                t1.join(timeout=5)
+                t2.join(timeout=5)
+
+        assert "state:skip" in results["t1"] and "bug" in results["t2"]
+
+    @patch("hephaestus.automation.github_api.labels._label_cache_key", return_value="")
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_unresolved_repo_key_is_empty_string(self, mock_gh_call: Any, _key: Any) -> None:
+        """RuntimeError from get_repo_info degrades to the '' key, not a crash."""
+        mock_gh_call.return_value = Mock(stdout=json.dumps([{"name": "bug"}]))
+        assert gh_list_labels() == {"bug"}
 
 
 class TestGhIssueAddLabels:
     """Tests for gh_issue_add_labels (#704)."""
 
     def teardown_method(self) -> None:
-        _github_api_module._label_cache = None
+        _github_api_module._label_cache.clear()
 
     @patch("hephaestus.automation.github_api._gh_call")
     def test_no_labels_is_noop(self, mock_gh_call: Any) -> None:
@@ -1232,7 +1300,7 @@ class TestSkipEpics:
     """Tests for skip_epics — idempotent ``state:skip`` tagging of excluded epics."""
 
     def teardown_method(self) -> None:
-        _github_api_module._label_cache = None
+        _github_api_module._label_cache.clear()
 
     @patch("hephaestus.automation.github_api.gh_issue_add_labels")
     def test_tags_unskipped_epics(self, mock_add: Any) -> None:

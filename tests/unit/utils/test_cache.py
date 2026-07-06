@@ -152,3 +152,37 @@ def test_concurrency_distinct_keys_no_lost_writes() -> None:
     # Every key is present afterward with its correct value (no lost writes).
     observed = {i: cache.get_or_compute(i, lambda: -1) for i in range(num_threads)}
     assert observed == {i: i for i in range(num_threads)}
+
+
+def test_add_to_entry_augments_existing_set() -> None:
+    """add_to_entry adds an item to an existing set-typed entry."""
+    c: ThreadSafeCache[str, set[str]] = ThreadSafeCache()
+    c.get_or_compute("k", lambda: {"a"})
+    c.add_to_entry("k", "b")
+    assert c.get_or_compute("k", lambda: set()) == {"a", "b"}
+
+
+def test_add_to_entry_noop_when_key_absent() -> None:
+    """add_to_entry is a no-op when the key is absent or expired."""
+    c: ThreadSafeCache[str, set[str]] = ThreadSafeCache()
+    c.add_to_entry("missing", "b")
+    # No entry created; accessing the key triggers a fresh compute.
+    assert c.get_or_compute("missing", lambda: {"x"}) == {"x"}
+
+
+def test_remove_deletes_entry() -> None:
+    """remove(key) deletes the entry; subsequent access recomputes."""
+    c: ThreadSafeCache[str, int] = ThreadSafeCache()
+    compute = Mock(side_effect=[1, 2])
+
+    assert c.get_or_compute("k", compute) == 1
+    c.remove("k")
+    assert c.get_or_compute("k", compute) == 2
+    assert compute.call_count == 2
+
+
+def test_remove_noop_when_key_absent() -> None:
+    """remove(key) is a no-op when the key is absent."""
+    c: ThreadSafeCache[str, int] = ThreadSafeCache()
+    c.remove("missing")  # should not raise
+    assert c.get_or_compute("missing", lambda: 42) == 42
