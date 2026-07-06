@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
@@ -11,6 +12,7 @@ from hephaestus.automation.pipeline.stages.planning import (
     PlanningStage,
     build_plan_prompt,
 )
+from hephaestus.automation.prompts._shared import _UNTRUSTED_NOTICE
 from hephaestus.automation.prompts.planning import get_plan_prompt
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
 from hephaestus.automation.state_labels import (
@@ -22,18 +24,30 @@ from hephaestus.automation.state_labels import (
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
+def _fence_present(prompt: str, label: str) -> bool:
+    """Return True when a prompt has nonce-delimited markers for label."""
+    return bool(
+        re.search(rf"BEGIN_[0-9A-F]+_{label}\b", prompt)
+        and re.search(rf"END_[0-9A-F]+_{label}\b", prompt)
+    )
+
+
 class TestBuildPlanPrompt:
     """build_plan_prompt composes the plan prompt with the advise block."""
 
     def test_without_findings_includes_issue_context(self) -> None:
-        """The planner prompt carries the TASK title/body before the template."""
+        """The planner prompt carries fenced TASK title/body before the template."""
         prompt = build_plan_prompt(7, "Retry failure", "The loop retries forever.")
 
-        assert prompt.startswith("# Issue #7: Retry failure\n\nThe loop retries forever.")
+        assert _UNTRUSTED_NOTICE in prompt
+        assert _fence_present(prompt, "ISSUE_TITLE")
+        assert _fence_present(prompt, "ISSUE_BODY")
+        assert "Retry failure" in prompt
+        assert "The loop retries forever." in prompt
         assert prompt.endswith(get_plan_prompt(7))
 
     def test_with_findings_appends_learnings_block(self) -> None:
-        """Advise findings ride in the legacy learnings block."""
+        """Advise findings ride in a fenced learnings block."""
         prompt = build_plan_prompt(
             7,
             "Retry failure",
@@ -41,8 +55,8 @@ class TestBuildPlanPrompt:
             "Use the retry helper from utils.",
         )
 
-        assert prompt.startswith("# Issue #7: Retry failure")
-        assert "## Prior Learnings from Team Knowledge Base" in prompt
+        assert "## Prior Learnings from Team Knowledge Base (untrusted)" in prompt
+        assert _fence_present(prompt, "ADVISE_FINDINGS")
         assert "Use the retry helper from utils." in prompt
         assert prompt.endswith(get_plan_prompt(7))
 

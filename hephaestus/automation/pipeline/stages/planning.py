@@ -34,6 +34,7 @@ from hephaestus.automation.agent_config import (
     planner_claude_timeout,
     planner_model,
 )
+from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.advise import get_advise_prompt_builder
 from hephaestus.automation.prompts.planning import get_plan_prompt
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
@@ -92,10 +93,15 @@ def build_plan_prompt(
         ``advise_findings`` is non-empty.
 
     """
+    fenced = fence_content()
     context_parts = [
-        f"# Issue #{issue_number}: {issue_title or f'Issue #{issue_number}'}",
+        fenced.untrusted_notice,
         "",
-        issue_body,
+        f"**Issue Title (untrusted, GitHub issue #{issue_number}):**",
+        fenced.fence("ISSUE_TITLE", issue_title or f"Issue #{issue_number}"),
+        "",
+        "**Issue Description (untrusted):**",
+        fenced.fence("ISSUE_BODY", issue_body),
     ]
     if advise_findings:
         context_parts.extend(
@@ -103,9 +109,9 @@ def build_plan_prompt(
                 "",
                 "---",
                 "",
-                "## Prior Learnings from Team Knowledge Base",
+                "## Prior Learnings from Team Knowledge Base (untrusted)",
                 "",
-                advise_findings,
+                fenced.fence("ADVISE_FINDINGS", advise_findings),
             ]
         )
     context_parts.extend(["", "---", "", get_plan_prompt(issue_number)])
