@@ -12,6 +12,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from hephaestus.automation.claude_invoke import parse_review_verdict
 from hephaestus.automation.pr_review_core import (
     gather_impl_review_context,
@@ -120,6 +122,47 @@ class TestRunPrReviewAnalysis:
                 dry_run=False,
             )
         assert captured["agent"] == "pr-reviewer-r1"
+
+    def test_error_envelope_propagates_not_parsed_as_verdict(self, tmp_path: Path) -> None:
+        """An is_error:true envelope must raise, not be parsed into a bogus verdict.
+
+        Guards the #1528 defence: the Claude CLI can exit 0 with an error
+        envelope (e.g. a 429 quota cap); run_pr_review_analysis calls
+        raise_for_error_envelope so the review-phase handler waits for reset
+        instead of recording a silently-fabricated GO/NOGO. Assert the raised
+        error propagates out of run_pr_review_analysis rather than being
+        swallowed and turned into review text.
+        """
+
+        def _fake_invoke(**_: object) -> tuple[str, str]:
+            return ('{"is_error": true, "result": "usage cap reached"}', "")
+
+        def _raise(_stdout: str) -> None:
+            raise RuntimeError("usage cap (#1528)")
+
+        with (
+            patch("hephaestus.automation.pr_review_core.get_repo_root", return_value=tmp_path),
+            patch("hephaestus.automation.pr_review_core.get_repo_slug", return_value="Repo"),
+            patch(
+                "hephaestus.automation.pr_review_core.invoke_claude_with_session",
+                side_effect=_fake_invoke,
+            ),
+            patch(
+                "hephaestus.automation.pr_review_core.raise_for_error_envelope",
+                side_effect=_raise,
+            ),
+        ):
+            with pytest.raises(RuntimeError, match=r"usage cap"):
+                run_pr_review_analysis(
+                    pr_number=1,
+                    issue_number=1,
+                    worktree_path=tmp_path,
+                    context={"pr_diff": "d"},
+                    agent="claude",
+                    review_agent="pr-reviewer-r1",
+                    state_dir=tmp_path,
+                    dry_run=False,
+                )
 
     def test_passes_advise_findings_to_prompt_builder(self, tmp_path: Path) -> None:
         captured: dict[str, object] = {}
