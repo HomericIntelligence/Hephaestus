@@ -534,15 +534,14 @@ class PipelineGitHub:
                 return False
 
             comments = data.get("comments")
-            if self._comments_have_plan(comments):
+            latest_review_body = self._latest_plan_review_body(comments)
+            if latest_review_body is not None:
+                if latest_verdict(latest_review_body) != "GO":
+                    return False
+                self._backfill_plan_go(issue_number)
                 return True
 
-            latest_review_body = self._latest_plan_review_body(comments)
-            if latest_review_body is None or latest_verdict(latest_review_body) != "GO":
-                return False
-
-            self._backfill_plan_go(issue_number)
-            return True
+            return bool(self._comments_have_plan(comments))
         return bool(is_plan_review_go(issue_number))
 
     def get_pr_head_branch(self, pr_number: int) -> str | None:
