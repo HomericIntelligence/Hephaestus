@@ -129,7 +129,7 @@ def _with_severity_marker(comment: dict[str, Any]) -> str:
     if sev not in VALID_SEVERITIES:
         sev = "major"
     body = str(comment.get("body") or "")
-    if body.lstrip().startswith(SEVERITY_MARKER_PREFIX):
+    if body.startswith(SEVERITY_MARKER_PREFIX):
         return body  # already marked (idempotent re-post)
     return f"{SEVERITY_MARKER_PREFIX} {sev} -->\n{body}"
 
