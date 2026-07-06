@@ -39,6 +39,9 @@ from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
 from hephaestus.automation.session_naming import AGENT_ADVISE, AGENT_PLANNER
 from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
+    STATE_PLAN_GO,
+    STATE_PLAN_NO_GO,
+    enter_planning_transition,
     is_plan_go,
     is_skipped,
 )
@@ -140,7 +143,12 @@ class PlanningStage(Stage):
     - ``state:skip`` -> SKIP
     - merged closing PR -> close issue as covered, SKIP
     - open PR -> SKIP (PR already covers implementation)
-    - unlabeled entry -> durably add ``state:needs-plan`` before proceeding
+    - unlabeled entry -> idempotent bare add of ``state:needs-plan``; entry
+      carrying ``state:plan-no-go`` (or a stale ``state:plan-go``) after a
+      plan_review fail-back -> ONE atomic ``edit_labels`` swap adding
+      ``state:needs-plan`` and removing both siblings, so the labels-first
+      ``has_existing_plan`` gate can pass once a fresh plan comment is posted
+      and the mutually-exclusive-label invariant holds (#1857)
     - plan comment already exists (``ctx.github.has_existing_plan``) ->
       fast-forward ``item.state`` to VERIFY so a restart mid-stage never
       redoes advise + plan (the base-protocol idempotency promise); the
@@ -187,8 +195,20 @@ class PlanningStage(Stage):
             logger.info("planning:%d: open PR #%d exists; skipping", item.issue, open_pr)
             return StageOutcome(Disposition.SKIP, f"open PR #{open_pr} exists")
 
-        # Owned label: state:needs-plan, idempotent durable write before proceeding
-        if STATE_NEEDS_PLAN not in labels:
+        # Entry label normalization. On the plan_review "nogo" fail-back the
+        # issue carries state:plan-no-go and NEITHER sibling (apply_plan_verdict
+        # ADDS no-go, removing needs-plan/plan-go). A bare add of needs-plan
+        # would leave state:plan-no-go in place — violating the
+        # mutually-exclusive invariant AND keeping the labels-first
+        # has_existing_plan gate stuck-False so VERIFY can never ADVANCE
+        # (#1857). Swap atomically: add needs-plan, remove both siblings, in
+        # ONE gh issue edit. Restores state:plan-no-go ──re-plan──▶ needs-plan.
+        if STATE_PLAN_NO_GO in labels or STATE_PLAN_GO in labels:
+            add, remove = enter_planning_transition()
+            logger.info("planning:%d: entry swap; add %s, remove %s", item.issue, add, remove)
+            ctx.github.edit_labels(item.issue, add=add, remove=remove)
+        # Owned label: state:needs-plan, idempotent durable add before proceeding.
+        elif STATE_NEEDS_PLAN not in labels:
             logger.info("planning:%d: adding %s label", item.issue, STATE_NEEDS_PLAN)
             ctx.github.add_labels(item.issue, [STATE_NEEDS_PLAN])
 

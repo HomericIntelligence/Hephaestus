@@ -145,6 +145,17 @@ class StageGitHub(Protocol):
         """Durably remove labels (coordinator maps to ``gh_issue_remove_labels``)."""
         ...
 
+    def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+        """Durably add and remove labels in ONE atomic ``gh issue edit`` call.
+
+        The single-transition primitive the skill mandates (one HTTP call so
+        the issue never has zero or two state labels mid-window). The
+        coordinator maps this onto a single
+        ``gh issue edit --add-label ... --remove-label ...``. Prefer this over
+        paired :meth:`add_labels`/:meth:`remove_labels` for any state:* swap.
+        """
+        ...
+
     def close_issue_as_covered(self, issue_number: int, pr_number: int) -> None:
         """Close the issue as covered by a merged PR (``_review_utils``)."""
         ...
