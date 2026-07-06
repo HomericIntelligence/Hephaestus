@@ -1,18 +1,17 @@
 # Automation Loop Architecture
 
-> Status: pre-implementation — this document is the design contract for epic
-> #1809. Sections marked "Finalized in the cutover issue" are completed in
-> issue #1818/#1819.
+Status: as-built for the epic #1809 queue-based automation loop. The
+`hephaestus-automation-loop` CLI defaults to this pipeline; the legacy loop
+remains available only through `--legacy-loop` or `HEPH_PIPELINE=0`.
 
 ## Overview and goals
 
-Replace the subprocess-per-phase issue-major loop with a single-coordinator,
-eight-queue state-machine pipeline. The coordinator (main thread) owns queues
-and performs validation, logging, and GitHub manipulation. A single worker pool
-executes all agent invocations, build/test subprocesses, and git/network
-operations. GitHub labels and PR state are the persistent journal; queues are
-in-memory and reconstructed from labels at startup. An interrupt leaves items
-resumable, never failed.
+The automation loop is a single-coordinator, eight-queue state-machine
+pipeline. The coordinator (main thread) owns queues and performs validation,
+logging, and GitHub manipulation. A single worker pool executes all agent
+invocations, build/test subprocesses, and git/network operations. GitHub labels
+and PR state are the persistent journal; queues are in-memory and reconstructed
+from labels at startup. An interrupt leaves items resumable, never failed.
 
 ## Queue topology
 
@@ -285,12 +284,11 @@ unresolved-thread count decreases).
    `is_implementation_go` (fast-forward if not).
 2. [W:G] **Mechanical rebase** (optional, if base changed): attempt rebase via
    git; on success, push.
-3. [M] **POLL** (non-blocking): call `classify_ci_state(pr)` — a NEW pure
-   function this epic extracts from `ci_run_coordinator.
-   poll_ci_until_concluded`'s conclusion classifier (dropping its sleep
-   loop); it does not exist yet. Returns the new vocabulary PENDING, GREEN,
-   FAILING, or terminal states. If PENDING → RETRY with timer backoff; if
-   GREEN → ADVANCE; if FAILING → step 4.
+3. [M] **POLL** (non-blocking): call
+   `ci_run_coordinator.classify_ci_state(ctx.github.pr_checks(pr))`. This is
+   the pure classifier extracted from the legacy sleep loop. It returns
+   PENDING, GREEN, FAILING, or terminal states. If PENDING → RETRY with timer
+   backoff; if GREEN → ADVANCE; if FAILING → step 4.
 4. [W:A] **CI fix step** (budget ci_fix = 1) — `ci_fix_orchestrator.py:483
    build_ci_fix_prompt`; escalation via `ci_fix_orchestrator.py:147
    force_engagement_prompt`.
@@ -397,8 +395,8 @@ Uses ordered label rank at-or-past comparisons (never equality):
 - `state:implementation-go` — rank 4 (highest).
 
 `state:skip` carries no rank: it is handled by exclusion (a skipped item
-never enters the rank comparison at all), matching its operator-only,
-absolute semantics.
+never enters the rank comparison at all), matching its absolute exclusion
+semantics.
 
 | GitHub state | Entry queue | Notes |
 |---|---|---|
@@ -410,7 +408,7 @@ absolute semantics.
 | No PR, state:plan-no-go | planning | plan rejected; amend with feedback. |
 | state:needs-plan / no label | planning | entry point; no plan yet. |
 
-**Thin CLI scopes** (new; trim the ROUTES table to named stages):
+**Thin CLI scopes** (trim the ROUTES table to named stages):
 
 - `hephaestus-plan-issues` = planning → plan_review.
 - `hephaestus-implement-issues` = implementation → pr_review.
@@ -418,8 +416,76 @@ absolute semantics.
 
 ## Interrupt semantics and exit codes
 
-Finalized in the cutover issue (#1818/#1819).
+`Coordinator.run()` installs SIGINT, SIGTERM, and SIGHUP handlers unless tests
+disable signal installation. The first signal sets the shutdown event and starts
+a graceful drain window (`PipelineConfig.grace_s`, default 30s). During that
+window the coordinator stops admitting new work, drains completed jobs, and
+parks touched items as resumable. A second signal, or an expired grace window,
+tears down the worker pool immediately and synthesizes interrupted results for
+remaining in-flight jobs.
 
-## Concurrency, CLI scopes, dry-run, glossary
+Interrupted items never route through stage success/failure logic. The
+coordinator records them as `resumable at <stage>` and the end-of-run summary
+prints them under `=== Pipeline summary ===`; with `--json`, the JSON envelope
+also carries a `resumable` list. Queued and timer-parked items are finalized the
+same way on shutdown. Resume is therefore label/PR/worktree reconstruction:
+rerun the same scoped command and seeding will classify each issue back into
+the correct entry queue. There is no persisted queue snapshot.
 
-Finalized in the cutover issue (#1818/#1819).
+Exit codes are stable: `130` for interrupted runs, `1` if any item failed,
+skipped, blocked, or the coordinator itself hit a fatal error, and `0` for a
+clean run.
+
+## Concurrency and tuning
+
+The coordinator thread is the only owner of `WorkItem`, `StageQueue`, timers,
+routing, and GitHub mutations. Worker threads receive immutable job requests
+and return `(JobHandle, JobResult)` through the completion queue. Pool size is
+`parallel_repos * max_workers`; `max_workers` also caps in-flight work per
+repo. Implementation admission adds dependency ordering and file-overlap
+serialization unless `--no-serialize-file-overlap` is passed.
+
+The pipeline never sleeps inside stage logic. Backoff uses the coordinator's
+timer heap, and low GitHub rate budget parks agent jobs until the reset instead
+of blocking the loop. Under the pipeline, `--phase-timeout` bounds each agent
+job. Under the legacy loop, the same flag still bounds a phase subprocess.
+
+Dry-run mode logs GitHub mutations and job submissions without executing them;
+`_submit` asserts that no worker job is submitted in dry-run. This makes
+`hephaestus-automation-loop --pipeline --dry-run --loops 1 -v` the operator
+check for seed classification and route reconstruction.
+
+## CLI scopes and rollout controls
+
+`hephaestus-automation-loop` runs the queue pipeline by default. `--pipeline`
+is retained as an explicit affirmative flag for scripts and evidence commands;
+`--legacy-loop` forces the pre-pipeline path for rollback. Environment default:
+`HEPH_PIPELINE=0` disables the pipeline when neither CLI flag is present, and
+the CLI flag always wins over the environment.
+
+The scoped entry points remain thin wrappers around slices of the same
+behavior:
+
+- `hephaestus-plan-issues` owns planning plus in-loop plan review.
+- `hephaestus-implement-issues` owns implementation plus in-loop PR review and
+  thread addressing.
+- `hephaestus-merge-prs` owns CI/merge driving and is represented by the
+  pipeline's `ci` and `merge_wait` stages.
+
+## Glossary
+
+- **Coordinator**: the main-thread event loop that owns queues, routing,
+  timers, GitHub writes, summaries, and signal handling.
+- **Worker pool**: the executor for agent, build/test, and git jobs. Workers
+  never mutate queues directly.
+- **WorkItem**: an in-memory repo, issue, or PR unit moving through a stage.
+- **StageQueue**: FIFO queue for one `StageName`, owned only by the
+  coordinator.
+- **CompletionQueue**: the only cross-thread channel from workers back to the
+  coordinator.
+- **Durable journal**: GitHub labels, comments, PR state, and local worktrees;
+  this is what restart reconstruction reads.
+- **Timer-park**: non-blocking retry/backoff by moving an item to the
+  coordinator timer heap.
+- **Resumable**: interrupted item outcome. It is not a failure verdict and is
+  reconstructed from durable state on the next run.

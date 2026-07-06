@@ -1000,8 +1000,8 @@ class Coordinator:
 def run_pipeline(config: PipelineConfig) -> int:
     """Run the queue-based pipeline to completion.
 
-    Public entry point called from ``loop_runner.main()`` when ``--pipeline``
-    (or ``HEPH_PIPELINE=1``) is enabled.
+    Public entry point called from ``loop_runner.main()`` on the default
+    pipeline path (or when ``--pipeline`` is passed explicitly).
 
     Args:
         config: Pipeline configuration.

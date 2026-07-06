@@ -124,6 +124,11 @@ def _default_phase_timeout_s() -> float:
         return float(default)
 
 
+def _pipeline_default() -> bool:
+    """Return whether the queue-based pipeline is enabled by default."""
+    return os.environ.get("HEPH_PIPELINE", "").strip() != "0"
+
+
 # The two non-blocking iteration phases. Plan-review, PR-review, and
 # address-review fold into plan/implement (#455/#468/#484).
 ALL_PHASES: tuple[str, ...] = (
@@ -482,11 +487,22 @@ def _build_parser() -> argparse.ArgumentParser:
         verbose_help="Enable DEBUG logging",
     )
     p.add_argument("--loops", type=int, default=5, help="Number of loop iterations (default: 5)")
-    p.add_argument(
+    pipeline_group = p.add_mutually_exclusive_group()
+    pipeline_group.add_argument(
         "--pipeline",
+        dest="pipeline",
         action="store_true",
-        help="Use the queue-based pipeline loop (default: off). "
-        "Env HEPH_PIPELINE=1 also enables it; the CLI flag wins.",
+        default=argparse.SUPPRESS,
+        help="Use the queue-based pipeline loop (default: on). "
+        "Env HEPH_PIPELINE=0 disables it; the CLI flag wins.",
+    )
+    pipeline_group.add_argument(
+        "--legacy-loop",
+        dest="pipeline",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="Use the pre-pipeline legacy loop path. "
+        "Overrides HEPH_PIPELINE and is intended as a rollback hatch.",
     )
     p.add_argument(
         "--max-merge-attempts",
@@ -626,7 +642,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command line arguments for the loop runner."""
-    return _build_parser().parse_args(argv)
+    args = _build_parser().parse_args(argv)
+    if not hasattr(args, "pipeline"):
+        args.pipeline = _pipeline_default()
+    return args
 
 
 def _validate_phases(phases_csv: str) -> tuple[str, ...]:
@@ -1734,11 +1753,11 @@ def _dispatch_pipeline(
 ) -> int | None:
     """Run the queue-based pipeline when enabled; return None when it is off.
 
-    Enabled by ``--pipeline`` or ``HEPH_PIPELINE=1`` (the CLI flag wins;
-    default OFF — the legacy path stays byte-identical when off). The repo
-    token preflight still happens before dispatch, while the repo stage owns
-    cloning, so this branch skips ``_clone_missing_repos`` (no double-clone).
-    Under the pipeline, ``--phase-timeout`` bounds each agent job.
+    Enabled by default unless ``HEPH_PIPELINE=0`` or ``--legacy-loop`` disables
+    it. The repo token preflight still happens before dispatch, while the repo
+    stage owns cloning, so this branch skips ``_clone_missing_repos`` (no
+    double-clone). Under the pipeline, ``--phase-timeout`` bounds each agent
+    job.
 
     Args:
         args: Parsed argparse Namespace.
@@ -1750,7 +1769,7 @@ def _dispatch_pipeline(
         The pipeline's exit code, or ``None`` when the pipeline is disabled.
 
     """
-    if not (args.pipeline or os.environ.get("HEPH_PIPELINE") == "1"):
+    if not args.pipeline:
         return None
     if not cfg.dry_run:
         _preflight_token_scopes(cfg.org, repos[0])
@@ -1817,8 +1836,11 @@ def main(argv: list[str] | None = None) -> int:
     if not repos:
         return _error_exit(args, "Repo list is empty; nothing to do.", "empty repo list")
 
-    # Dispatch to the pipeline if --pipeline is set or HEPH_PIPELINE=1
-    # (after token preflight, before legacy clone; the repo stage owns clone).
+    LOG.info("Path: %s", "pipeline" if args.pipeline else "legacy-loop")
+
+    # Dispatch to the pipeline unless --legacy-loop or HEPH_PIPELINE=0 selected
+    # the rollback path (after token preflight, before legacy clone; the repo
+    # stage owns clone).
     pipeline_rc = _dispatch_pipeline(args, cfg, org, repos)
     if pipeline_rc is not None:
         return pipeline_rc

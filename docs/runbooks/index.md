@@ -35,4 +35,4 @@ copy — the module is the source of truth.
 | `state:plan-no-go` | Plan reviewed and rejected; needs re-planning. |
 | `state:implementation-go` | Implementation reviewed and approved; PR may arm auto-merge. |
 | `state:implementation-no-go` | Implementation reviewed and rejected; needs re-work. |
-| `state:skip` | Work item taken out of the loop entirely — operator-applied, or auto-applied when the review loop exhausts its budget without a GO. Independent of all other state labels. |
+| `state:skip` | Work item taken out of the loop entirely — operator-applied, auto-applied when the review loop exhausts its budget without a GO, or applied to epics before exclusion. Independent of all other state labels. |

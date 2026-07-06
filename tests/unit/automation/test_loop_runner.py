@@ -1976,7 +1976,18 @@ class TestDefaultPhaseTimeout:
             patch.object(loop_runner, "_clone_missing_repos"),
             patch.object(loop_runner, "run_loop", side_effect=_capture),
         ):
-            main(["--repos", "Repo", "--dry-run", "--loops", "1", "--agent", "claude"])
+            main(
+                [
+                    "--legacy-loop",
+                    "--repos",
+                    "Repo",
+                    "--dry-run",
+                    "--loops",
+                    "1",
+                    "--agent",
+                    "claude",
+                ]
+            )
         assert captured["cfg"].phase_timeout_s == _default_phase_timeout_s()
 
     def test_main_prefers_current_checkout_parent_for_projects_dir_default(
@@ -2005,7 +2016,18 @@ class TestDefaultPhaseTimeout:
             ) as resolve_projects_dir,
             patch.object(loop_runner, "run_loop", side_effect=_capture),
         ):
-            main(["--repos", "Repo", "--dry-run", "--loops", "1", "--agent", "claude"])
+            main(
+                [
+                    "--legacy-loop",
+                    "--repos",
+                    "Repo",
+                    "--dry-run",
+                    "--loops",
+                    "1",
+                    "--agent",
+                    "claude",
+                ]
+            )
 
         resolve_projects_dir.assert_called_once_with(None, prefer_cwd_parent=True)
         assert captured["cfg"].projects_dir == projects_dir
@@ -2029,7 +2051,7 @@ class TestDefaultPhaseTimeout:
             patch.object(loop_runner, "resolve_agent", return_value="codex") as mock_resolve,
             patch.object(loop_runner, "run_loop", side_effect=_capture),
         ):
-            main(["--repos", "Repo", "--dry-run", "--loops", "1"])
+            main(["--legacy-loop", "--repos", "Repo", "--dry-run", "--loops", "1"])
 
         mock_resolve.assert_called_once_with(None)
         assert captured["cfg"].agent == "codex"
@@ -2052,7 +2074,19 @@ class TestDefaultPhaseTimeout:
             patch.object(loop_runner, "_clone_missing_repos"),
             patch.object(loop_runner, "run_loop", side_effect=_capture),
         ):
-            main(["--repos", "Repo", "--phase-timeout", "0", "--loops", "1", "--agent", "claude"])
+            main(
+                [
+                    "--legacy-loop",
+                    "--repos",
+                    "Repo",
+                    "--phase-timeout",
+                    "0",
+                    "--loops",
+                    "1",
+                    "--agent",
+                    "claude",
+                ]
+            )
         assert captured["cfg"].phase_timeout_s is None
 
 
