@@ -44,6 +44,10 @@ def _run_main_capturing_config(argv: list[str], *, rc: int = 0) -> dict[str, Any
         patch.object(ci_driver_mod, "_resolve_repo", return_value=("acme", "widget")),
         patch.object(ci_driver_mod, "resolve_agent", return_value="claude"),
         patch(
+            # main() does ``from .pipeline.coordinator import run_pipeline`` at
+            # call time (a deferred import, not a module-level binding), so the
+            # name must be patched on the coordinator module where it is
+            # defined — patching ``ci_driver_mod.run_pipeline`` would miss it.
             "hephaestus.automation.pipeline.coordinator.run_pipeline",
             side_effect=_fake_run_pipeline,
         ),
@@ -123,6 +127,36 @@ def test_main_no_advise_propagates() -> None:
     captured = _run_main_capturing_config(["--issues", "5", "--no-advise", "--dry-run"])
 
     assert captured["config"].no_advise is True
+
+
+def test_main_default_enables_mechanical_rebase() -> None:
+    """Without --no-mechanical-rebase the config keeps the rebase enabled (default)."""
+    captured = _run_main_capturing_config(["--issues", "5", "--dry-run"])
+
+    assert captured["config"].enable_mechanical_rebase is True
+
+
+def test_main_no_mechanical_rebase_propagates() -> None:
+    """--no-mechanical-rebase flows to PipelineConfig.enable_mechanical_rebase=False."""
+    captured = _run_main_capturing_config(["--issues", "5", "--no-mechanical-rebase", "--dry-run"])
+
+    assert captured["config"].enable_mechanical_rebase is False
+
+
+def test_main_default_ci_fix_budget_is_one() -> None:
+    """Without --max-fix-iterations the ci_fix budget override defaults to 1."""
+    captured = _run_main_capturing_config(["--issues", "5", "--dry-run"])
+
+    assert captured["config"].budget_overrides == {"ci_fix": 1}
+
+
+def test_main_max_fix_iterations_sets_ci_fix_budget() -> None:
+    """--max-fix-iterations N wires the ci_fix budget override to N."""
+    captured = _run_main_capturing_config(
+        ["--issues", "5", "--max-fix-iterations", "3", "--dry-run"]
+    )
+
+    assert captured["config"].budget_overrides == {"ci_fix": 3}
 
 
 def test_main_dedupes_issue_and_pr_lists() -> None:
