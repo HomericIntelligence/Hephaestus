@@ -750,6 +750,7 @@ class TestMainLoopsRunReporting:
 
         argv = [
             "--json",
+            "--legacy-loop",
             "--repos",
             "r1",
             "--loops",
