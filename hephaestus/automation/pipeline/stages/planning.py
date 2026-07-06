@@ -1,8 +1,10 @@
 """Planning stage: generate and verify issue plans (issue #1814).
 
-Re-houses the planning control flow from ``planner.py::Planner._plan_issue``
-as a pipeline stage (docs/AUTOMATION_LOOP_ARCHITECTURE.md section
-"2. planning" is the binding contract):
+The single planning control flow as a pipeline stage
+(docs/AUTOMATION_LOOP_ARCHITECTURE.md section "2. planning" is the binding
+contract). Since ``hephaestus-plan-issues`` was re-pointed at the pipeline
+(#1820) this stage — with :class:`~...plan_review.PlanReviewStage` — is the
+only issue-planning implementation:
 
 - States: ENTER -> ADVISE_WAIT -> PLAN_WAIT -> VERIFY.
 - Budget: ``plan`` = 2 (max plan attempts per issue); exhaustion ->
@@ -11,16 +13,15 @@ as a pipeline stage (docs/AUTOMATION_LOOP_ARCHITECTURE.md section
 - Plan comment: the PIPELINE posts it (doc section 2: "plan comment =
   durable artifact"). VERIFY upserts ``item.payload["plan_text"]`` via
   ``ctx.github.upsert_plan_comment`` BEFORE the verify/ADVANCE decision
-  (journal order: durable write precedes the queue push). Marker
-  normalization is re-housed from
-  ``planner_review_loop._upsert_plan_comment``; the content-missing banner
-  and "Changes from review" enrichment stay with the legacy loop until the
-  cutover issue.
+  (journal order: durable write precedes the queue push). The body is
+  normalized to begin at ``PLAN_COMMENT_MARKER`` by
+  :func:`_normalize_plan_comment`. (The legacy content-missing banner and
+  "Changes from review" enrichment were dropped with the legacy loop in
+  #1820; the pipeline does not apply them.)
 - Prompt functions (imported, never re-authored):
   ``prompts/advise.py get_advise_prompt_builder`` and
   ``prompts/planning.py get_plan_prompt`` (composed with the advise
-  findings block by :func:`build_plan_prompt`, mirroring the legacy
-  ``planner_review_loop.generate_plan`` context assembly).
+  findings block by :func:`build_plan_prompt`).
 """
 
 from __future__ import annotations
@@ -70,9 +71,8 @@ def build_plan_prompt(issue_number: int, advise_findings: str = "") -> str:
 
     Module-level composed builder (NOT a closure): :class:`AgentJob` is
     frozen and prompt builders run in-worker, so the builder must be a
-    top-level function receiving everything via ``prompt_kwargs``. Mirrors
-    the "Prior Learnings from Team Knowledge Base" block that the legacy
-    ``planner_review_loop.generate_plan`` appends when advise findings are
+    top-level function receiving everything via ``prompt_kwargs``. Appends a
+    "Prior Learnings from Team Knowledge Base" block when advise findings are
     available; the prompt template itself is reused verbatim via
     :func:`get_plan_prompt`.
 
@@ -104,8 +104,7 @@ def build_plan_prompt(issue_number: int, advise_findings: str = "") -> str:
 def _normalize_plan_comment(plan: str) -> str:
     """Normalize plan text so the body begins exactly at the plan marker.
 
-    Re-housed from ``planner_review_loop._upsert_plan_comment``: the upsert
-    helper keys off ``body.startswith(PLAN_COMMENT_MARKER)``, and
+    The upsert helper keys off ``body.startswith(PLAN_COMMENT_MARKER)``, and
     ``plan.lstrip()`` is load-bearing — a plan arriving with leading
     whitespace would otherwise keep it and break the marker match (#700).
 
@@ -279,10 +278,8 @@ class PlanningStage(Stage):
                 timeout_s=planner_claude_timeout(),
                 session_agent=AGENT_PLANNER,
                 # build_plan_prompt composes get_plan_prompt with the advise
-                # findings block in-worker, mirroring the legacy
-                # planner_review_loop.generate_plan(cached_advise=...)
-                # context assembly. The issue title/body header is prepended
-                # by the worker session setup (#1817).
+                # findings block in-worker. The issue title/body header is
+                # prepended by the worker session setup (#1817).
                 prompt_kwargs={
                     "issue_number": item.issue,
                     "advise_findings": item.payload.get("advise_findings", ""),

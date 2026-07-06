@@ -88,8 +88,10 @@ from hephaestus.automation.pipeline import admission as _admission, seeding as _
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
 from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue
 from hephaestus.automation.pipeline.routing import (
+    PIPELINE_ORDER,
     ROUTES,
     Disposition,
+    PipelineScope,
     Route,
     StageName,
     StageOutcome,
@@ -180,6 +182,16 @@ class PipelineConfig:
     drive_green_all: bool = False
     projects_dir: Path = field(default_factory=lambda: Path.home() / "Projects")
     json_out: bool = False
+    # Optional contiguous stage subset. When set, the coordinator routes items
+    # through ``scope.trimmed_routes()`` instead of the full ``ROUTES`` table,
+    # so a caller (e.g. ``hephaestus-plan-issues``) can run a partial pipeline
+    # (planning -> plan_review) with every out-of-scope target rewritten to
+    # FINISHED. ``None`` runs the full pipeline.
+    scope: PipelineScope | None = None
+    # Re-seed override for scoped re-runs (``--force`` on the planner CLI):
+    # when True, issues already at-or-past ``state:plan-go`` are re-routed to
+    # PLANNING instead of being classified past the scope (and thus skipped).
+    force: bool = False
 
 
 @dataclass
@@ -272,6 +284,18 @@ class Coordinator:
         self.items: list[WorkItem] = []
         self.event_log: list[tuple[Any, ...]] = []
         self.stages: dict[StageName, Stage] = stages or self._default_stages()
+        # Route table for this run: the full ROUTES, or a scope-trimmed copy
+        # (out-of-scope next/fail targets rewritten to FINISHED) when the
+        # config pins a contiguous stage subset. Computed once — trimming is
+        # pure and the scope is immutable for the run's lifetime. FINISHED is
+        # the universal sink: ``trimmed_routes`` omits it unless it is in the
+        # scope set, so its terminal route is re-added here — every item
+        # eventually routes into FINISHED and _route must find it.
+        if config.scope is not None:
+            self._routes = config.scope.trimmed_routes()
+            self._routes.setdefault(StageName.FINISHED, ROUTES[StageName.FINISHED])
+        else:
+            self._routes = ROUTES
 
         self._install_signals = install_signals
         self._seq = 0
@@ -723,7 +747,7 @@ class Coordinator:
 
     def _route(self, item: WorkItem, outcome: StageOutcome) -> None:
         """Apply the Disposition -> action table (plan #1817)."""
-        route = ROUTES[item.stage]
+        route = self._routes[item.stage]
         disposition = outcome.disposition
 
         if item.stage is StageName.FINISHED:
@@ -902,13 +926,75 @@ class Coordinator:
             pushed += 1
         return pushed
 
+    def _clamp_seed_stage_to_scope(
+        self,
+        issue: int,
+        stage: StageName | None,
+        reason: str,
+        scope_stages: frozenset[StageName] | None,
+    ) -> tuple[StageName | None, str]:
+        """Reconcile a classified entry stage with the run's pipeline scope.
+
+        Full-pipeline runs (``scope_stages is None``) pass the classification
+        through unchanged. Under a partial scope (e.g. the planner CLI's
+        planning -> plan_review scope) an issue can classify PAST the scope —
+        an at-or-past ``state:plan-go`` issue seeds to IMPLEMENTATION, which is
+        out of scope. Two reconciliations:
+
+        - ``--force``: re-route any in-pipeline (non-excluded) stage that is not
+          already the scope's entry stage back to the scope's FIRST stage so
+          the work is redone (for the planner scope, re-plan from PLANNING).
+        - default: an issue that classifies past the scope has already
+          completed the scoped work, so clamp it to FINISHED (pass) rather than
+          push it into an out-of-scope stage the trimmed route table has no row
+          for. In-scope classifications (e.g. PLANNING/PLAN_REVIEW) are kept.
+
+        Exclusions (``stage is None``: ``state:skip`` / epic) are never
+        overridden — force is a re-plan knob, not a skip bypass.
+
+        Args:
+            issue: The issue number (for the reason string).
+            stage: The classified entry stage (or None when excluded).
+            reason: The classification reason.
+            scope_stages: The scope's stage set, or None for a full run.
+
+        Returns:
+            The reconciled ``(stage, reason)``.
+
+        """
+        if stage is None or scope_stages is None:
+            return stage, reason
+
+        first_in_scope = next((s for s in PIPELINE_ORDER if s in scope_stages), None)
+        if self.config.force:
+            # Force re-routes an at-or-past-scope stage back to the scope's
+            # entry so the scoped work is redone. A PRE-scope stage (earlier in
+            # PIPELINE_ORDER than first_in_scope) is left untouched — force is a
+            # redo knob for work already in/past the scope, not a fast-forward
+            # that pulls un-started upstream work into the scope. (For the
+            # planner planning->plan_review scope direct seeding produces no
+            # pre-scope items, but a later scope, e.g. implementation->pr_review,
+            # has repo/planning/plan_review upstream.)
+            if first_in_scope is not None and stage != first_in_scope:
+                first_idx = PIPELINE_ORDER.index(first_in_scope)
+                if PIPELINE_ORDER.index(stage) >= first_idx:
+                    return first_in_scope, f"#{issue} force re-plan ({reason})"
+            return stage, reason
+
+        if stage not in scope_stages:
+            # Classified past the scope: the scoped work is already done.
+            return StageName.FINISHED, f"#{issue} already past planning scope ({reason})"
+        return stage, reason
+
     def _seed_direct_scope(self, repo: str) -> list[_seeding.SeedEntry]:
         """Seed explicit ``--issues`` / ``--prs`` through the target repo accessor."""
         github = self._ctx_for_repo(repo).github if repo else self.github
         entries: list[_seeding.SeedEntry] = []
+        scope_stages = self.config.scope.stages if self.config.scope is not None else None
         for issue in self.config.issues:
             facts = _seeding.seed_issue_from_github(issue, github)
             stage, reason = _seeding.classify_issue(facts)
+            stage, reason = self._clamp_seed_stage_to_scope(issue, stage, reason, scope_stages)
             entries.append(
                 _seeding.SeedEntry(
                     kind="issue",

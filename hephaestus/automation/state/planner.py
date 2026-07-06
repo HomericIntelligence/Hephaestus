@@ -1,4 +1,4 @@
-"""State manager for :class:`hephaestus.automation.planner.Planner`.
+"""State manager for the issue-planning phase.
 
 Owns the cheap, idempotent state queries the planner runs against GitHub:
 

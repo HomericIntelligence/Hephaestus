@@ -1,22 +1,23 @@
-"""Smoke tests for ``Planner.run()`` and ``planner.main()``.
+"""Tests for the thin ``hephaestus-plan-issues`` CLI wrapper (issue #1820).
 
-Captures the current end-to-end behavior of the planner CLI entry point so
-the upcoming Planner-class decomposition (issue #598) can be verified as a
-pure move-and-delegate refactor. These tests intentionally exercise a
-narrow set of code paths through ``main()`` and ``Planner.run()`` and
-mock all external collaborators (GitHub API + Claude calls).
+``planner.main()`` no longer runs a legacy ``Planner`` class; it parses the
+historical planner argument surface, builds a ``PipelineConfig`` trimmed to the
+``(planning, plan_review)`` stage scope, and dispatches to
+``pipeline.coordinator.run_pipeline``. These tests exercise the wrapper end to
+end with ``run_pipeline`` (and issue discovery) mocked so no live agent or
+GitHub call is made.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
 from hephaestus.automation import planner as planner_mod
-from hephaestus.automation.models import DEFAULT_WORKER_COUNT, PlannerOptions, PlanResult
+from hephaestus.automation.models import DEFAULT_WORKER_COUNT
+from hephaestus.automation.pipeline.routing import StageName
 
 
 @pytest.fixture(autouse=True)
@@ -25,38 +26,32 @@ def _silence_logging(caplog: Any) -> None:
     caplog.set_level("CRITICAL")
 
 
-def test_main_returns_zero_with_no_open_issues(monkeypatch: Any) -> None:
-    """``main()`` with no --issues and no discovered issues exits 0."""
-    monkeypatch.setattr("sys.argv", ["planner", "--dry-run", "--agent", "claude"])
-    with patch(
-        "hephaestus.automation.planner.gh_list_open_issues",
-        return_value=[],
-    ):
-        rc = planner_mod.main()
-    assert rc == 0
+def _run_main_capturing_config(argv: list[str], *, rc: int = 0) -> Any:
+    """Run ``main()`` with ``argv``, capturing the PipelineConfig passed to run_pipeline.
 
+    Returns the captured ``PipelineConfig`` instance. ``run_pipeline`` is
+    stubbed to return ``rc`` and ``_resolve_repo`` is pinned so the test never
+    shells out to ``git``.
+    """
+    captured: dict[str, Any] = {}
 
-def test_main_resolves_agent_when_omitted(monkeypatch: Any) -> None:
-    """PlannerOptions should receive the concrete auto-detected provider."""
-    captured: dict[str, PlannerOptions] = {}
+    def _fake_run_pipeline(config: Any) -> int:
+        captured["config"] = config
+        return rc
 
-    class FakePlanner:
-        def __init__(self, options: PlannerOptions) -> None:
-            captured["options"] = options
-
-        def run(self) -> dict[int, PlanResult]:
-            return {123: PlanResult(issue_number=123, success=True)}
-
-    monkeypatch.setattr("sys.argv", ["planner", "--issues", "123", "--dry-run"])
     with (
-        patch("hephaestus.automation.planner.resolve_agent", return_value="codex") as mock_resolve,
-        patch.object(planner_mod, "Planner", FakePlanner),
+        patch("sys.argv", ["hephaestus-plan-issues", *argv]),
+        patch.object(planner_mod, "_resolve_repo", return_value=("acme", "widget")),
+        patch(
+            "hephaestus.automation.pipeline.coordinator.run_pipeline",
+            side_effect=_fake_run_pipeline,
+        ),
+        patch.object(planner_mod, "resolve_agent", return_value="claude"),
     ):
-        rc = planner_mod.main()
+        result_rc = planner_mod.main()
 
-    assert rc == 0
-    mock_resolve.assert_called_once_with(None)
-    assert captured["options"].agent == "codex"
+    captured["rc"] = result_rc
+    return captured
 
 
 def test_parse_args_default_parallel_uses_shared_worker_default() -> None:
@@ -66,103 +61,103 @@ def test_parse_args_default_parallel_uses_shared_worker_default() -> None:
     assert args.parallel == DEFAULT_WORKER_COUNT
 
 
-def test_main_returns_zero_when_rate_limited(monkeypatch: Any, tmp_path: Path) -> None:
-    """If issue discovery is rate-limited, main() exits cleanly and writes 0 work."""
-    from hephaestus.automation.github_api import GitHubRateLimitError
+def test_main_builds_planning_scope_and_dispatches() -> None:
+    """--issues N builds a (planning, plan_review) scoped config and returns run_pipeline's rc."""
+    captured = _run_main_capturing_config(["--issues", "123", "--dry-run"], rc=0)
 
-    report = tmp_path / "report.txt"
-    monkeypatch.setenv("HEPH_WORK_REPORT", str(report))
-    monkeypatch.setattr("sys.argv", ["planner", "--agent", "claude"])
-    with patch(
-        "hephaestus.automation.planner.gh_list_open_issues",
-        side_effect=GitHubRateLimitError("rate limit", reset_epoch=0),
+    assert captured["rc"] == 0
+    config = captured["config"]
+    assert config.org == "acme"
+    assert config.repos == ["widget"]
+    assert config.issues == [123]
+    assert config.dry_run is True
+    # Scope is trimmed to exactly planning + plan_review.
+    assert config.scope is not None
+    assert config.scope.stages == frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})
+
+
+def test_main_maps_parallel_to_worker_pool() -> None:
+    """--parallel maps onto the pipeline worker-pool size."""
+    captured = _run_main_capturing_config(["--issues", "5", "--parallel", "7", "--dry-run"])
+
+    assert captured["config"].max_workers == 7
+
+
+def test_main_force_sets_config_force() -> None:
+    """--force maps to the seeding re-plan override on PipelineConfig."""
+    captured = _run_main_capturing_config(["--issues", "5", "--force", "--dry-run"])
+
+    assert captured["config"].force is True
+
+
+def test_main_no_force_leaves_force_false() -> None:
+    """Without --force the config force flag stays False."""
+    captured = _run_main_capturing_config(["--issues", "5", "--dry-run"])
+
+    assert captured["config"].force is False
+
+
+def test_main_no_advise_propagates() -> None:
+    """--no-advise maps to PipelineConfig.no_advise."""
+    captured = _run_main_capturing_config(["--issues", "5", "--no-advise", "--dry-run"])
+
+    assert captured["config"].no_advise is True
+
+
+def test_main_dedupes_issue_list() -> None:
+    """Duplicate --issues values are collapsed to a first-seen-ordered set."""
+    captured = _run_main_capturing_config(["--issues", "5", "5", "9", "5", "--dry-run"])
+
+    assert captured["config"].issues == [5, 9]
+
+
+def test_main_returns_run_pipeline_exit_code() -> None:
+    """main() surfaces the coordinator's non-zero exit code verbatim."""
+    captured = _run_main_capturing_config(["--issues", "5", "--dry-run"], rc=1)
+
+    assert captured["rc"] == 1
+
+
+def test_main_discovers_open_issues_when_none_given() -> None:
+    """With no --issues, main() seeds the discovered open-issue list."""
+    with (
+        patch("sys.argv", ["hephaestus-plan-issues", "--dry-run"]),
+        patch.object(planner_mod, "_resolve_repo", return_value=("acme", "widget")),
+        patch.object(planner_mod, "resolve_agent", return_value="claude"),
+        patch(
+            "hephaestus.automation.planner.gh_list_open_issues",
+            return_value=[41, 42],
+        ),
+        patch(
+            "hephaestus.automation.pipeline.coordinator.run_pipeline",
+            return_value=0,
+        ) as mock_run,
     ):
         rc = planner_mod.main()
+
     assert rc == 0
-    assert report.read_text(encoding="utf-8") == "0"
+    config = mock_run.call_args.args[0]
+    assert config.issues == [41, 42]
 
 
-def test_run_skips_issue_with_existing_plan() -> None:
-    """``Planner.run()`` short-circuits when the issue already has a plan.
-
-    The dry_run flag is irrelevant here: the existing-plan guard runs
-    BEFORE the dry-run branch, so neither a Claude call nor a GitHub post
-    should occur.
-    """
-    options = PlannerOptions(
-        issues=[123],
-        dry_run=False,
-        force=False,
-        parallel=1,
-        system_prompt_file=None,
-        skip_closed=False,
-        enable_advise=False,
-    )
-    planner = planner_mod.Planner(options)
+def test_main_returns_zero_when_rate_limited() -> None:
+    """If issue discovery is rate-limited, main() exits cleanly without dispatching."""
+    from hephaestus.automation.github_api import GitHubRateLimitError
 
     with (
-        patch.object(planner, "_pr_coverage_skip", return_value=None),
-        patch.object(planner, "_has_existing_plan", return_value=True) as mock_has,
-        patch.object(planner, "_call_claude") as mock_claude,
-        patch.object(planner, "_post_plan") as mock_post,
-        # Isolate the pre-pass label filter from the live repo: without this the
-        # batched fetch sees real issue #123's plan-go label and drops it before
-        # the worker, so _has_existing_plan never runs (#1156). Empty labels →
-        # the issue reaches the worker, where the mocked guard returns True.
+        patch("sys.argv", ["hephaestus-plan-issues", "--agent", "claude"]),
+        patch.object(planner_mod, "_resolve_repo", return_value=("acme", "widget")),
+        patch.object(planner_mod, "resolve_agent", return_value="claude"),
         patch(
-            "hephaestus.automation.state.planner.fetch_all_issue_labels_graphql",
-            return_value={},
+            "hephaestus.automation.planner.gh_list_open_issues",
+            side_effect=GitHubRateLimitError("rate limit", reset_epoch=0),
         ),
+        patch(
+            "hephaestus.automation.pipeline.coordinator.run_pipeline",
+            return_value=0,
+        ) as mock_run,
     ):
-        results = planner.run()
+        rc = planner_mod.main()
 
-    assert results[123].success is True
-    assert results[123].plan_already_exists is True
-    mock_has.assert_called_once_with(123)
-    mock_claude.assert_not_called()
-    mock_post.assert_not_called()
-
-
-def test_run_dry_run_does_not_post_or_call_claude() -> None:
-    """``--dry-run`` path: when no existing plan, run skips Claude + posting."""
-    options = PlannerOptions(
-        issues=[456],
-        dry_run=True,
-        force=True,  # bypass the existing-plan check
-        parallel=1,
-        system_prompt_file=None,
-        skip_closed=False,
-        enable_advise=False,
-    )
-    planner = planner_mod.Planner(options)
-
-    with (
-        patch.object(planner, "_pr_coverage_skip", return_value=None),
-        patch.object(planner, "_call_claude") as mock_claude,
-        patch.object(planner, "_post_plan") as mock_post,
-    ):
-        results = planner.run()
-
-    assert results[456] == PlanResult(issue_number=456, success=True)
-    mock_claude.assert_not_called()
-    mock_post.assert_not_called()
-
-
-def test_run_returns_empty_when_all_issues_filtered() -> None:
-    """``Planner.run()`` returns ``{}`` when every issue is filtered out."""
-    options = PlannerOptions(
-        issues=[1, 2],
-        dry_run=True,
-        force=False,
-        parallel=1,
-        system_prompt_file=None,
-        skip_closed=True,
-        enable_advise=False,
-    )
-    planner = planner_mod.Planner(options)
-
-    # Force _filter_issues to drop everything (simulates all-closed batch).
-    with patch.object(planner, "_filter_issues", return_value=[]):
-        results = planner.run()
-
-    assert results == {}
+    assert rc == 0
+    mock_run.assert_not_called()

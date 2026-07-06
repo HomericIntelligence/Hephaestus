@@ -248,28 +248,32 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         ),
         _agent_spec(),
         _dry_run_spec(
-            _dry_help("Suppress GitHub mutations and agent calls (no issue comments posted).")
+            _dry_help("Suppress GitHub mutations and agent calls (classify + preview only).")
         ),
-        _store_true("--force", "force", "Force re-planning even if plan already exists"),
+        _store_true(
+            "--force",
+            "force",
+            "Force re-planning even when the issue is already at-or-past state:plan-go",
+        ),
         _action_spec(
             ("--parallel",),
             "parallel",
             "_StoreAction",
             3,
             choices=WORKER_CHOICES,
-            help_text="Number of parallel workers, 1-32 (default: 3)",
+            help_text="Number of parallel workers, 1-32 (maps to the pipeline worker pool)",
         ),
         _action_spec(
             ("--system-prompt",),
             "system_prompt",
             "_StoreAction",
             None,
-            help_text="Path to system prompt file for Claude Code",
+            help_text="(Deprecated, ignored) system prompt file path; kept for CLI compatibility",
         ),
         _store_true(
             "--no-skip-closed",
             "no_skip_closed",
-            "Plan closed issues (default: skip closed issues)",
+            "(Deprecated, ignored) kept for CLI compatibility; closed issues never queue",
         ),
         _store_true(
             "--no-advise",

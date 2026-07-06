@@ -29,7 +29,6 @@ EXPECTED_PUBLIC_SYMBOLS = {
     "PRReviewer": "hephaestus.automation.pr_reviewer",
     "PlanReviewer": "hephaestus.automation.plan_reviewer",
     "PlanReviewerOptions": "hephaestus.automation.models",
-    "Planner": "hephaestus.automation.planner",
     "PlannerOptions": "hephaestus.automation.models",
     "ReviewerOptions": "hephaestus.automation.models",
 }
@@ -114,7 +113,6 @@ def test_public_surface_pins_expected_symbols() -> None:
         "IssueInfo",
         "PlanReviewer",
         "PlanReviewerOptions",
-        "Planner",
         "PlannerOptions",
         "PRReviewer",
         "ReviewerOptions",

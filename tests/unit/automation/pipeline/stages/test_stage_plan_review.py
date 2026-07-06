@@ -147,6 +147,25 @@ class TestPlanReviewStageStep:
         assert result.job.prompt_kwargs["prior_review"] == "fix the tests section"
         assert item.attempts["plan_review_iter"] == 0  # still EVAL's job to count
 
+    def test_review_wait_uses_reviewer_timeout(self, make_ctx: Any, make_work_item: Any) -> None:
+        """The review job is bounded by the plan-reviewer timeout, not the plan timeout.
+
+        Migrated from the deleted legacy ``test_planner_loop`` suite: the
+        reviewer runs under its own (typically shorter) timeout so a stalled
+        review cannot burn the whole planner timeout budget.
+        """
+        from hephaestus.automation.agent_config import plan_reviewer_claude_timeout
+
+        stage = PlanReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=7, state="REVIEW_WAIT")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)  # narrow the job union
+        assert result.job.timeout_s == plan_reviewer_claude_timeout()
+
     def test_review_wait_clears_stale_verdict(self, make_ctx: Any, make_work_item: Any) -> None:
         """Submission clears any stale verdict (M3).
 
@@ -614,7 +633,8 @@ class TestNonFatalLabelWrites:
     ) -> None:
         """An add_labels exception is swallowed; remove_labels still runs.
 
-        Mirrors the legacy planner_review_loop._apply_state_label pattern.
+        The add and remove writes are wrapped independently so a half-applied
+        pair never propagates.
         """
 
         class AddFailsGitHub(FakeStageGitHub):
