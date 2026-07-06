@@ -219,7 +219,8 @@ class PlanningStage(Stage):
         # has_existing_plan gate stuck-False so VERIFY can never ADVANCE
         # (#1857). Swap atomically: add needs-plan, remove both siblings, in
         # ONE gh issue edit. Restores state:plan-no-go ──re-plan──▶ needs-plan.
-        if STATE_PLAN_NO_GO in labels or STATE_PLAN_GO in labels:
+        is_replan_entry = STATE_PLAN_NO_GO in labels
+        if is_replan_entry or STATE_PLAN_GO in labels:
             add, remove = enter_planning_transition()
             logger.info("planning:%d: entry swap; add %s, remove %s", item.issue, add, remove)
             ctx.github.edit_labels(item.issue, add=add, remove=remove)
@@ -231,7 +232,7 @@ class PlanningStage(Stage):
         # Restart fast-forward: a plan comment already exists (real has-plan
         # semantics via ctx.github), so re-entry must not redo advise + plan.
         # Jump straight to VERIFY; idempotent on repeated on_enter calls.
-        if ctx.github.has_existing_plan(item.issue):
+        if not is_replan_entry and ctx.github.has_existing_plan(item.issue):
             logger.info(
                 "planning:%d: plan comment already exists; fast-forward to VERIFY", item.issue
             )

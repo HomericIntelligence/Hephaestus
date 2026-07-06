@@ -241,6 +241,23 @@ class TestPlanningStageEnter:
         assert STATE_PLAN_GO not in github.labels[20]
         assert STATE_NEEDS_PLAN in github.labels[20]
 
+    def test_replan_entry_ignores_existing_rejected_plan_comment(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A NOGO fail-back must not VERIFY against the stale rejected plan."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO], has_plan=True)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=23, state="ENTER")
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome is None
+        assert item.state == "ENTER"
+        assert github.mutation_log == [
+            ("edit_labels", (23, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO))),
+        ]
+
     def test_plan_go_on_entry_fast_forwards_without_swap(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
