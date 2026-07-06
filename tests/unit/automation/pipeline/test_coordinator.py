@@ -10,6 +10,7 @@ asserts-no-submit, poisoned-item isolation, and FAIL_BACK routing.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,7 @@ def make_coordinator(
     max_workers: int = 1,
     dry_run: bool = False,
     github: FakeStageGitHub | None = None,
+    rate_budget_ok: Callable[[], tuple[bool, float]] | None = None,
 ) -> tuple[Coordinator, FakeWorkerPool, FakeStageGitHub]:
     """Build a Coordinator wired to fakes, with seeding scripted per pass."""
     config = PipelineConfig(
@@ -94,6 +96,7 @@ def make_coordinator(
 
     monkeypatch.setattr(seeding_mod, "seed_from_cli", fake_seed)
     coordinator = Coordinator(config, github=gh, pool=pool, install_signals=False)
+    coordinator._rate_budget_ok = rate_budget_ok or (lambda: (True, 0.0))  # type: ignore[method-assign]
     return coordinator, pool, gh
 
 
@@ -362,11 +365,11 @@ class TestRateBudget:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Low GraphQL budget: the AgentJob is timer-parked, never submitted."""
-        monkeypatch.setattr(
-            "hephaestus.automation.pipeline_github.rate_budget_ok",
-            lambda now_epoch=None: (False, 60.0),
+        coordinator, pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            rate_budget_ok=lambda: (False, 60.0),
         )
-        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch)
         coordinator.stages[StageName.PLANNING] = StubStage(
             JobRequest(_agent_job(), on_done_state="VERIFY")
         )

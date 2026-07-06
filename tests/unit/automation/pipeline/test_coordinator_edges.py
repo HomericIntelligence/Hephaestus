@@ -73,9 +73,11 @@ def _coordinator(
 ) -> Coordinator:
     config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path, **config_overrides)
     monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: list(seed or []))
-    return Coordinator(
+    coordinator = Coordinator(
         config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
     )
+    coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+    return coordinator
 
 
 def _item(issue: int = 1, stage: StageName = StageName.PLANNING) -> WorkItem:

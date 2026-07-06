@@ -1151,14 +1151,14 @@ def test_gh_list_repos_filters_forks_and_archived() -> None:
         '{"name":"drop-archived","isFork":false,"isArchived":true},'
         '{"name":"Odysseus","isFork":false,"isArchived":false}]'
     )
-    with patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run:
-        mock_run.return_value = subprocess.CompletedProcess(
+    with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh_call:
+        mock_gh_call.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout=payload, stderr=""
         )
         names = loop_runner._gh_list_repos("MyOrg")
     # Odysseus is included — no name-based filtering (issue #814).
     assert sorted(names) == ["Odysseus", "keep"]
-    invoked_argv = mock_run.call_args[0][0]
+    invoked_argv = mock_gh_call.call_args[0][0]
     assert "--no-archived" in invoked_argv
     assert "name,isArchived,isFork" in invoked_argv
 
@@ -1170,8 +1170,8 @@ def test_gh_list_repos_does_not_filter_by_name() -> None:
         '{"name":"Hephaestus","isFork":false,"isArchived":false},'
         '{"name":"AnyName","isFork":false,"isArchived":false}]'
     )
-    with patch("hephaestus.automation.loop_repo_manager.subprocess.run") as mock_run:
-        mock_run.return_value = subprocess.CompletedProcess(
+    with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh_call:
+        mock_gh_call.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout=payload, stderr=""
         )
         names = loop_runner._gh_list_repos("MyOrg")
@@ -1191,10 +1191,10 @@ def test_list_open_issue_numbers_returns_all_open_sorted() -> None:
         {"number": 10, "labels": [], "title": "b"},
     )
 
-    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_gh_call(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args=argv, returncode=0, stdout=payload, stderr="")
 
-    with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
+    with patch("hephaestus.automation.loop_repo_manager.gh_call", side_effect=fake_gh_call):
         nums = loop_runner._list_open_issue_numbers("MyOrg", "MyRepo")
     assert nums == [7, 10, 12]
 
@@ -1207,11 +1207,11 @@ def test_list_open_issue_numbers_excludes_epics_and_tags_skip() -> None:
         {"number": 7, "labels": [{"name": "feature"}], "title": "Q3 Roadmap rollup"},
     )
 
-    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_gh_call(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args=argv, returncode=0, stdout=payload, stderr="")
 
     with (
-        patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run),
+        patch("hephaestus.automation.loop_repo_manager.gh_call", side_effect=fake_gh_call),
         patch("hephaestus.automation.loop_repo_manager.skip_epics") as mock_skip,
     ):
         nums = loop_runner._list_open_issue_numbers("Org", "Repo")
@@ -1230,11 +1230,11 @@ def test_list_open_issue_numbers_no_epics_skips_nothing() -> None:
         {"number": 2, "labels": [], "title": "b"},
     )
 
-    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_gh_call(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args=argv, returncode=0, stdout=payload, stderr="")
 
     with (
-        patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run),
+        patch("hephaestus.automation.loop_repo_manager.gh_call", side_effect=fake_gh_call),
         patch("hephaestus.automation.loop_repo_manager.skip_epics") as mock_skip,
     ):
         nums = loop_runner._list_open_issue_numbers("Org", "Repo")
@@ -1245,11 +1245,11 @@ def test_list_open_issue_numbers_no_epics_skips_nothing() -> None:
 def test_list_open_issue_numbers_raises_on_bad_json() -> None:
     """Malformed JSON surfaces instead of pretending the repo has no work."""
 
-    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_gh_call(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args=argv, returncode=0, stdout="not json", stderr="")
 
     with (
-        patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run),
+        patch("hephaestus.automation.loop_repo_manager.gh_call", side_effect=fake_gh_call),
         pytest.raises(RuntimeError, match="failed to list open issues"),
     ):
         loop_runner._list_open_issue_numbers("Org", "Repo")
@@ -1263,11 +1263,11 @@ def test_list_open_issue_numbers_queries_all_open_no_me_filter() -> None:
     """
     seen_argv: list[str] = []
 
-    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_gh_call(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         seen_argv.extend(argv)
         return subprocess.CompletedProcess(args=argv, returncode=0, stdout="[]", stderr="")
 
-    with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
+    with patch("hephaestus.automation.loop_repo_manager.gh_call", side_effect=fake_gh_call):
         loop_runner._list_open_issue_numbers("Org", "Repo")
     assert "--author" not in seen_argv
     assert "--assignee" not in seen_argv
@@ -1776,7 +1776,7 @@ class TestResilientCallAdoption:
         def _hang(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
             raise subprocess.TimeoutExpired(cmd="gh repo clone", timeout=120)
 
-        with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=_hang):
+        with patch("hephaestus.automation.loop_repo_manager.gh_call", side_effect=_hang):
             with pytest.raises(subprocess.TimeoutExpired):
                 _ensure_clone("Org", "Repo", dest)
 
