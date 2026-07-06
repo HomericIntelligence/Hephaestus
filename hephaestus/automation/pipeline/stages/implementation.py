@@ -443,7 +443,12 @@ class ImplementationStage(Stage):
                 repo=item.repo,
                 op="commit_push",
                 timeout_s=GIT_JOB_TIMEOUT_S,
-                kwargs={"branch": item.branch},
+                kwargs={
+                    "issue_number": item.issue,
+                    "worktree_path": item.worktree,
+                    "branch": item.branch,
+                    "agent": agent_provider(ctx),
+                },
                 descr="commit_push",
             )
             return JobRequest(push_job, on_done_state=PR_CREATE)
@@ -496,20 +501,26 @@ class ImplementationStage(Stage):
             return
 
         if item.state == COMMIT_PUSH_WAIT:
-            if result.ok:
-                # A successful push ends the consecutive-git-failure streak.
-                item.payload.pop("git_error_retries", None)
-                return
-            error_text = (result.error or "").lower()
-            if "no commits" in error_text:
-                # Legacy _handle_runtime_error (:348): "no commits between
-                # base and branch" maps to state:skip, not a hard failure.
+            self._on_commit_push_done(item, result)
+
+    @staticmethod
+    def _on_commit_push_done(item: WorkItem, result: JobResult) -> None:
+        """Record commit+push success, no-commit skip, or git failure."""
+        if result.ok:
+            if not bool(result.value):
                 item.payload["no_commits"] = True
-            else:
-                logger.warning(
-                    "implementation:%s: commit+push failed: %s", item.issue, result.error
-                )
-                item.payload["git_error"] = True
+            # A successful worker result ends the consecutive-git-failure
+            # streak even when no commit was produced; PR_CREATE handles skip.
+            item.payload.pop("git_error_retries", None)
+            return
+        error_text = (result.error or "").lower()
+        if "no commits" in error_text:
+            # Legacy _handle_runtime_error (:348): "no commits between
+            # base and branch" maps to state:skip, not a hard failure.
+            item.payload["no_commits"] = True
+            return
+        logger.warning("implementation:%s: commit+push failed: %s", item.issue, result.error)
+        item.payload["git_error"] = True
 
     @staticmethod
     def _on_implement_done(item: WorkItem, result: JobResult) -> None:

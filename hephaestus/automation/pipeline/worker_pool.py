@@ -475,16 +475,16 @@ class WorkerPool:
             )
         # NOTE: commit_if_changes returns False BOTH for "worktree clean,
         # nothing to commit" AND for "commit attempted but failed" (it logs
-        # and swallows the RuntimeError). value=False is therefore ambiguous;
-        # a failed commit still reaches the push below, which pushes whatever
-        # HEAD already holds. commit_if_changes has no timeout parameter;
-        # job.timeout_s cannot be enforced here.
+        # and swallows the RuntimeError). Do not push in either case; stages
+        # consume value=False as the no-real-commit path.
         changed = git_utils.commit_if_changes(
             int(issue_number),
             Path(worktree_path),
             str(job.kwargs.get("agent", "claude")),
             allowed_paths=job.kwargs.get("allowed_paths"),
         )
+        if not changed:
+            return JobResult(ok=True, value=False)
         # push_branch has no timeout parameter; job.timeout_s cannot be
         # enforced here.
         git_utils.push_branch(str(job.kwargs.get("branch", "HEAD")), Path(worktree_path))

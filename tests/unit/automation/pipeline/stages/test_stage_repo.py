@@ -340,6 +340,35 @@ class TestDiscover:
         orphan = [p for p in repo_item.payload["products"] if p.get("kind") == "pr"]
         assert [(p["number"], p["stage"]) for p in orphan] == [(66, StageName.CI)]
 
+    def test_drive_green_all_pr_discovery_failure_finishes_fail(
+        self,
+        repo_item: WorkItem,
+        tmp_path: Path,
+        make_ctx: Callable[..., Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Orphan-PR discovery failures are visible, not successful empty runs."""
+        config = type("Cfg", (), {"drive_green_all": True, "dry_run": False})()
+        ctx = make_ctx(config=config, paths=_RepoPaths(tmp_path))
+        self._patch_discovery(
+            monkeypatch,
+            meta=[{"number": 1, "labels": [], "title": "covered"}],
+            facts={1: _facts(1, pr=55, pr_open=True)},
+            classifications={1: (StageName.PR_REVIEW, "open PR")},
+        )
+        monkeypatch.setattr(
+            loop_repo_manager_mod,
+            "_list_open_pr_numbers",
+            lambda org, repo: (_ for _ in ()).throw(RuntimeError("pr list failed")),
+        )
+        repo_item.state = "DISCOVER"
+
+        result = RepoStage().step(repo_item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition is Disposition.FINISH_FAIL
+        assert "discovery failed" in result.note
+
     def test_seeded_finishes_pass_with_count(self, repo_item: WorkItem, repo_ctx: Any) -> None:
         """Terminal: FINISH_PASS(seeded:N) counting only queued products."""
         repo_item.state = "SEEDED"

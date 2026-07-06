@@ -739,13 +739,32 @@ class TestCommitPushAndPrCreate:
         ctx = make_ctx()
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
         item.branch = "1-auto-impl"
+        item.worktree = "/tmp/wt"
 
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
         assert result.job.op == "commit_push"
+        assert result.job.kwargs == {
+            "issue_number": 1,
+            "worktree_path": "/tmp/wt",
+            "branch": "1-auto-impl",
+            "agent": "claude",
+        }
         assert result.on_done_state == "PR_CREATE"
+
+    def test_commit_push_no_commit_sets_skip_payload(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A successful commit_push with value=False skips PR creation."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+
+        stage.on_job_done(item, JobResult(ok=True, value=False), ctx)
+
+        assert item.payload["no_commits"] is True
 
     def test_pr_create_journals_pr_then_defers_auto_merge(
         self, make_ctx: Any, make_work_item: Any

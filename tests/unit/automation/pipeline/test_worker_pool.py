@@ -593,13 +593,13 @@ class TestGitOps:
         assert result.ok is True
         assert result.value is True  # value carries commit_if_changes' bool
 
-    def test_commit_push_value_false_when_nothing_committed(
+    def test_commit_push_value_false_does_not_push_when_nothing_committed(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
         tmp_path: Path,
     ) -> None:
-        """commit_push still pushes and reports value=False on a clean tree."""
+        """commit_push reports value=False without pushing a clean tree."""
         job = GitJob(
             repo="test/repo",
             op="commit_push",
@@ -613,7 +613,7 @@ class TestGitOps:
             pool.submit(job, StageName.CI)
             _, result = completion_q.get(timeout=10)
 
-        mock_push.assert_called_once_with("HEAD", tmp_path)
+        mock_push.assert_not_called()
         assert result.ok is True
         assert result.value is False
 

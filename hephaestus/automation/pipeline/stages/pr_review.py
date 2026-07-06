@@ -461,7 +461,12 @@ class PrReviewStage(Stage):
                 repo=item.repo,
                 op="commit_push",
                 timeout_s=GIT_JOB_TIMEOUT_S,
-                kwargs={"branch": item.branch},
+                kwargs={
+                    "issue_number": item.issue,
+                    "worktree_path": item.worktree,
+                    "branch": item.branch,
+                    "agent": agent_provider(ctx),
+                },
                 descr="push_fixes",
             )
             return JobRequest(git_job, on_done_state=EVAL)
