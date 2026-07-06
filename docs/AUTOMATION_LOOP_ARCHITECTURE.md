@@ -119,7 +119,9 @@ causes a queue push.
 **Steps**:
 
 1. [M] on_enter: fast-forward check (if at-or-past `state:plan-go` →
-   ADVANCE; if `state:skip` → SKIP).
+   ADVANCE; if `state:skip` → SKIP); if the TASK context has only a placeholder
+   title such as `Issue #N` and a blank body, apply `state:skip` [durable] →
+   SKIP before agent jobs.
 2. [W:A] **Advise step** — `prompts/advise.py:130 get_advise_prompt_builder`.
 3. [W:A] **Plan step** — `prompts/planning.py:223 get_plan_prompt` (session:
    repo, issue, planner model; plan comment = durable artifact).
@@ -132,7 +134,8 @@ causes a queue push.
 
 **Budget**: `plan` = 2 (max plan attempts per issue).
 
-**Owned labels**: `state:needs-plan` (idempotent, on entry) [durable].
+**Owned labels**: `state:needs-plan` (idempotent, on entry) [durable];
+`state:skip` only for non-actionable placeholder TASK contexts.
 
 **Prompt functions**:
 

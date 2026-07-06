@@ -9,7 +9,8 @@ only issue-planning implementation:
 - States: ENTER -> ADVISE_WAIT -> PLAN_WAIT -> VERIFY.
 - Budget: ``plan`` = 2 (max plan attempts per issue); exhaustion ->
   finished(fail).
-- Owned label: ``state:needs-plan`` (idempotent, on entry) [durable].
+- Owned labels: ``state:needs-plan`` (idempotent, on entry) [durable];
+  ``state:skip`` for non-actionable placeholder TASK contexts.
 - Plan comment: the PIPELINE posts it (doc section 2: "plan comment =
   durable artifact"). VERIFY upserts ``item.payload["plan_text"]`` via
   ``ctx.github.upsert_plan_comment`` BEFORE the verify/ADVANCE decision
@@ -27,6 +28,7 @@ only issue-planning implementation:
 from __future__ import annotations
 
 import logging
+import re
 
 from hephaestus.automation.agent_config import (
     advise_claude_timeout,
@@ -61,9 +63,20 @@ from .base import (
     _issue_labels,
     agent_provider,
     stage_model,
+    write_skip_label,
 )
 
 logger = logging.getLogger(__name__)
+
+_PLACEHOLDER_TITLE_RE = re.compile(r"^(?:issue\s*)?#?\d+$", re.IGNORECASE)
+
+
+def _has_actionable_task_context(issue_title: str, issue_body: str) -> bool:
+    """Return False for placeholder issue titles with no body."""
+    if issue_body.strip():
+        return True
+    title = " ".join(issue_title.split())
+    return bool(title) and _PLACEHOLDER_TITLE_RE.fullmatch(title) is None
 
 
 def build_plan_prompt(issue_number: int, advise_findings: str = "") -> str:
@@ -140,6 +153,7 @@ class PlanningStage(Stage):
 
     - already at-or-past ``state:plan-go`` -> ADVANCE (zero jobs)
     - ``state:skip`` -> SKIP
+    - placeholder title with a blank body -> apply ``state:skip`` and SKIP
     - merged closing PR -> close issue as covered, SKIP
     - open PR -> SKIP (PR already covers implementation)
     - unlabeled entry -> idempotent bare add of ``state:needs-plan``; entry
@@ -180,6 +194,19 @@ class PlanningStage(Stage):
         if is_skipped(labels):
             logger.info("planning:%d: state:skip; skipping", item.issue)
             return StageOutcome(Disposition.SKIP, "state:skip")
+
+        # Non-actionable placeholder tasks cannot be planned safely. Skip before
+        # adding state:needs-plan or dispatching advise/planner agent jobs.
+        if not _has_actionable_task_context(
+            item.payload.get("issue_title", ""),
+            item.payload.get("issue_body", ""),
+        ):
+            logger.warning(
+                "planning:%d: issue has no actionable title/body; applying state:skip",
+                item.issue,
+            )
+            write_skip_label(item.issue, ctx)
+            return StageOutcome(Disposition.SKIP, "empty issue task context")
 
         # Re-housed _pr_coverage_skip gate A: merged closing PR covers the issue
         merged_pr = ctx.github.find_merged_closing_pr(item.issue)

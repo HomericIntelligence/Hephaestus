@@ -68,6 +68,57 @@ class TestPlanningStageEnter:
         assert outcome.disposition == Disposition.SKIP
         assert github.mutation_log == []
 
+    def test_placeholder_issue_without_body_skip_tags_before_needs_plan(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A generated placeholder TASK is skipped before any plan work starts."""
+        stage = PlanningStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1879)
+        item.payload["issue_title"] = "Issue #1879"
+        item.payload["issue_body"] = ""
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome is not None
+        assert outcome.disposition == Disposition.SKIP
+        assert outcome.note == "empty issue task context"
+        assert github.mutation_log == [("gh_issue_add_labels", (1879, (STATE_SKIP,)))]
+        assert STATE_NEEDS_PLAN not in github.labels[1879]
+
+    def test_placeholder_issue_with_body_still_enters_planning(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A generic title is acceptable when the body carries requirements."""
+        stage = PlanningStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1879)
+        item.payload["issue_title"] = "Issue #1879"
+        item.payload["issue_body"] = "Implement the retry fix."
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome is None
+        assert github.mutation_log == [("gh_issue_add_labels", (1879, (STATE_NEEDS_PLAN,)))]
+
+    def test_empty_body_with_actionable_title_still_enters_planning(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A meaningful title alone can still be enough to plan a small issue."""
+        stage = PlanningStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1880)
+        item.payload["issue_title"] = "Fix retry loop timeout"
+        item.payload["issue_body"] = ""
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome is None
+        assert github.mutation_log == [("gh_issue_add_labels", (1880, (STATE_NEEDS_PLAN,)))]
+
     def test_merged_pr_closes_issue(self, make_ctx: Any, make_work_item: Any) -> None:
         """A merged closing PR closes the issue as covered (gate A)."""
         stage = PlanningStage()
