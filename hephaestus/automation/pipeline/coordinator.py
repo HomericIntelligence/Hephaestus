@@ -480,15 +480,18 @@ class Coordinator:
 
     def _force_run_one(self) -> None:
         """Run the first item of the most-downstream non-empty queue."""
+        assert not self.in_flight, "force-run requires no in-flight work"  # noqa: S101
         self._stalled_ticks = 0
         for stage_name in _DRAIN_ORDER:
             q = self.queues[stage_name]
             if len(q):
                 item = q.pop()
                 logger.error(
-                    "pipeline stalled with no in-flight work; force-running %s item %s",
+                    "pipeline stalled with no in-flight work; "
+                    "force-running %s item %s; inflight_per_repo=%s",
                     stage_name.value,
                     self._item_key(item),
+                    dict(self.inflight_per_repo),
                 )
                 self._run_item(item)
                 return
