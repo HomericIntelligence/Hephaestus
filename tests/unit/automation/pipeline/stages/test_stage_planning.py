@@ -219,10 +219,10 @@ class TestPlanningStageEnter:
         assert STATE_PLAN_GO not in github.labels[20]
         assert STATE_NEEDS_PLAN in github.labels[20]
 
-    def test_replan_entry_with_stale_go_swaps_atomically(
+    def test_plan_go_on_entry_fast_forwards_without_swap(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Defense-in-depth: a stale state:plan-go on entry is also swapped."""
+        """The is_plan_go guard fires first and returns ADVANCE; swap block never reached."""
         stage = PlanningStage()
         github = FakeStageGitHub(labels=[STATE_PLAN_GO])
         ctx = make_ctx(github=github)
@@ -230,10 +230,8 @@ class TestPlanningStageEnter:
 
         outcome = stage.on_enter(item, ctx)
 
-        # The STATE_PLAN_GO guard at line 168 should have caught this and
-        # returned ADVANCE, so we never reach the swap. But if a stale
-        # STATE_PLAN_GO somehow persisted past that check, the swap would
-        # remove it; this test is defense-in-depth.
+        # The STATE_PLAN_GO guard at line 176 short-circuits and returns ADVANCE
+        # before the swap logic at line 206, so no label mutations occur.
         assert outcome is not None
         assert outcome.disposition == Disposition.ADVANCE
 
