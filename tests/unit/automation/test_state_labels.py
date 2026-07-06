@@ -214,9 +214,8 @@ class TestIsEpic:
 class TestApplyPlanVerdict:
     """``apply_plan_verdict`` returns the (add, remove) labels for a reviewer verdict.
 
-    Pure function: no I/O, no logging, no GitHub calls. Both the legacy
-    planner_review_loop and the new plan_review stage call it to ensure
-    identical transitions (#1814).
+    Pure function: no I/O, no logging, no GitHub calls. The plan_review stage
+    and seeding call it to ensure identical transitions (#1814).
     """
 
     def test_go_verdict_adds_go_removes_others(self) -> None:

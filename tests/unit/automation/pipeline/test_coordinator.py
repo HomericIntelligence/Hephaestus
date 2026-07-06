@@ -502,3 +502,88 @@ class TestImplementationAdmission:
 
         assert run_order == [22]  # dependency first; 21 deferred by overlap
         assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 1
+
+
+class TestPipelineScopeWiring:
+    """Scope-trimmed routing + the planner CLI's --force re-plan override (#1820)."""
+
+    def _scoped_config(
+        self, tmp_path: Path, *, issues: list[int], force: bool = False
+    ) -> PipelineConfig:
+        from hephaestus.automation.pipeline.routing import PipelineScope
+
+        return PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=issues,
+            loops=1,
+            projects_dir=tmp_path,
+            scope=PipelineScope(frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})),
+            force=force,
+        )
+
+    def test_scoped_routes_include_finished_sink(self, tmp_path: Path) -> None:
+        """A scoped run's route table always carries the FINISHED sink row."""
+        config = self._scoped_config(tmp_path, issues=[1])
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        # Only the two in-scope stages plus the always-present FINISHED sink.
+        assert set(coordinator._routes) == {
+            StageName.PLANNING,
+            StageName.PLAN_REVIEW,
+            StageName.FINISHED,
+        }
+        # PLANNING.next (PLAN_REVIEW) stays in scope; PLAN_REVIEW.next
+        # (IMPLEMENTATION) is out of scope -> rewritten to FINISHED.
+        assert coordinator._routes[StageName.PLANNING].next == StageName.PLAN_REVIEW
+        assert coordinator._routes[StageName.PLAN_REVIEW].next == StageName.FINISHED
+
+    def test_full_run_uses_global_routes(self, tmp_path: Path) -> None:
+        """Without a scope the coordinator routes through the full ROUTES table."""
+        from hephaestus.automation.pipeline.routing import ROUTES
+
+        config = PipelineConfig(org="org", repos=["repo-a"], loops=1, projects_dir=tmp_path)
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        assert coordinator._routes is ROUTES
+
+    def test_at_or_past_plan_go_issue_clamps_to_finished(self, tmp_path: Path) -> None:
+        """A plan-go issue classifies to IMPLEMENTATION; the scope clamps it to FINISHED-pass."""
+        gh = FakeStageGitHub(labels=["state:plan-go"])
+        config = self._scoped_config(tmp_path, issues=[1])
+        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+
+        assert coordinator.run() == 0
+        assert len(coordinator.ledger) == 1
+        result = coordinator.ledger[0]
+        assert result.passed
+        assert result.final_stage is StageName.FINISHED
+        # The item never entered an out-of-scope IMPLEMENTATION stage.
+        assert all(item.stage is StageName.FINISHED for item in coordinator.items)
+
+    def test_force_reroutes_plan_go_issue_to_planning(self, tmp_path: Path) -> None:
+        """--force re-routes an at-or-past-plan-go issue back to the scope's first stage."""
+        gh = FakeStageGitHub(labels=["state:plan-go"])
+        config = self._scoped_config(tmp_path, issues=[1], force=True)
+        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+
+        entries = coordinator._seed_direct_scope("repo-a")
+
+        assert len(entries) == 1
+        assert entries[0].stage is StageName.PLANNING
+        assert "force re-plan" in entries[0].reason
+
+    def test_needs_plan_issue_seeds_into_planning_within_scope(self, tmp_path: Path) -> None:
+        """An in-scope PLANNING classification is preserved (no clamp)."""
+        gh = FakeStageGitHub(labels=["state:needs-plan"])
+        config = self._scoped_config(tmp_path, issues=[1])
+        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+
+        entries = coordinator._seed_direct_scope("repo-a")
+
+        assert len(entries) == 1
+        assert entries[0].stage is StageName.PLANNING

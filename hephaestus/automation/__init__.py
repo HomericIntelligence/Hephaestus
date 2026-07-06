@@ -1,7 +1,8 @@
 """Automation product layer for the HomericIntelligence ecosystem.
 
-This subpackage is the Claude/Codex automation pipeline (Planner,
-Implementer, CIDriver, reviewers, loop runner, curses TUI). It is the
+This subpackage is the Claude/Codex automation pipeline (queue-based
+coordinator, Implementer, CIDriver, reviewers, loop runner, curses TUI).
+It is the
 product layer of ProjectHephaestus; the rest of `hephaestus.*` is a
 utility library. Install with
 ``pip install HomericIntelligence-Hephaestus[automation]`` to opt in.
@@ -31,7 +32,6 @@ if TYPE_CHECKING:
         ReviewerOptions,
     )
     from hephaestus.automation.plan_reviewer import PlanReviewer
-    from hephaestus.automation.planner import Planner
     from hephaestus.automation.pr_reviewer import PRReviewer
 
 __all__ = [
@@ -47,7 +47,6 @@ __all__ = [
     "PRReviewer",
     "PlanReviewer",
     "PlanReviewerOptions",
-    "Planner",
     "PlannerOptions",
     "ReviewerOptions",
 ]
@@ -65,7 +64,6 @@ _LAZY_EXPORTS: dict[str, str] = {
     "PRReviewer": "hephaestus.automation.pr_reviewer",
     "PlanReviewer": "hephaestus.automation.plan_reviewer",
     "PlanReviewerOptions": "hephaestus.automation.models",
-    "Planner": "hephaestus.automation.planner",
     "PlannerOptions": "hephaestus.automation.models",
     "ReviewerOptions": "hephaestus.automation.models",
 }

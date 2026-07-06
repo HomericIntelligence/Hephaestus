@@ -82,13 +82,14 @@ SELF_AGENT_PHASES: list[tuple[str, str, tuple[str, ...]]] = [
 # ``reviewer_agent(base, iteration)`` so successive iterations land on distinct
 # session UUIDs and the reviewer never reviews its own prior verdict.
 #
-# The wrapping call site differs by reviewer: the plan reviewer's lives in the
-# planner's in-loop driver (``planner_review_loop.py``), while the PR reviewer
-# carries its own in-loop callable (``review_pr_inline``) inside
-# ``pr_reviewer.py``. We scan the module together with its in-loop caller so the
-# guard holds regardless of which file owns the wrapper.
+# The PR reviewer carries its own in-loop callable (``review_pr_inline``)
+# inside ``pr_reviewer.py``, so it is scanned standalone. The plan reviewer's
+# per-iteration freshness is now owned by the queue-based pipeline stage
+# (``pipeline/stages/plan_review.py`` sets ``session_agent=AGENT_PLAN_REVIEWER``
+# and the worker layer applies the per-iteration session suffix, #1817), so the
+# legacy ``reviewer_agent(...)`` wrapper assertion no longer applies to it —
+# see ``tests/unit/automation/pipeline/stages/test_stage_plan_review.py``.
 PER_ITERATION_REVIEWER_PHASES: list[tuple[str, str, tuple[str, ...]]] = [
-    ("plan_reviewer.py", "AGENT_PLAN_REVIEWER", ("planner_review_loop.py",)),
     ("pr_reviewer.py", "AGENT_PR_REVIEWER", ()),
 ]
 
@@ -184,51 +185,13 @@ def test_continuation_phase_resumes_implementer_session(module_file: str) -> Non
     )
 
 
-def test_planner_module_uses_its_expected_agents() -> None:
-    """planner.py drives multiple call sites with distinct agents.
-
-    Stage 1 (#455/#468/#484) changed two of these:
-
-    AGENT_PLANNER       — main planning call AND post-plan /learn capture.
-                          Learnings RESUME the planner's own session with the
-                          user-facing /learn command (it previously opened a
-                          separate AGENT_LEARNINGS session), so the model still
-                          "remembers" the plan it wrote and ProjectMnemosyne is
-                          updated.
-    AGENT_ADVISE        — pre-plan advice call.
-    AGENT_PLAN_REVIEWER — in-process plan-review call, now wrapped in
-                          ``reviewer_agent(AGENT_PLAN_REVIEWER, iteration)`` so
-                          the reviewer gets a FRESH session every iteration and
-                          never re-reviews its own prior verdict. Because of the
-                          wrapper there is no bare ``agent=AGENT_PLAN_REVIEWER``
-                          assignment — see the dedicated assertion below.
-
-    AGENT_LEARNINGS is intentionally NO LONGER used by the planner.
-    """
-    # The planner package was split (#598): the strict review loop lives in
-    # planner_review_loop.py. Scan both source files for AGENT_* wiring so the
-    # invariant survives the split.
-    src = (AUTOMATION_DIR / "planner.py").read_text() + (
-        AUTOMATION_DIR / "planner_review_loop.py"
-    ).read_text()
-    found = set(re.findall(r"\bagent\s*=\s*(AGENT_[A-Z_]+)\b", src))
-    # Bare ``agent=AGENT_*`` assignments after Stage 1.
-    expected = {
-        "AGENT_PLANNER",
-        "AGENT_ADVISE",
-    }
-    assert found == expected, f"planner agent wiring drifted: found={found}, expected={expected}"
-
-    # The reviewer call must use the fresh-per-iteration wrapper, not a bare
-    # ``agent=AGENT_PLAN_REVIEWER`` (which would resume the same session).
-    assert re.search(r"\bagent\s*=\s*reviewer_agent\(\s*AGENT_PLAN_REVIEWER\s*,", src), (
-        "in-loop reviewer must use agent=reviewer_agent(AGENT_PLAN_REVIEWER, iteration)"
-    )
-
-    # AGENT_LEARNINGS must no longer be wired into any planner call.
-    assert "AGENT_LEARNINGS" not in found, (
-        "learnings capture must resume AGENT_PLANNER, not open an AGENT_LEARNINGS session"
-    )
+# The planner's per-agent session wiring (AGENT_PLANNER / AGENT_ADVISE /
+# AGENT_PLAN_REVIEWER) moved into the queue-based pipeline stages when
+# ``hephaestus-plan-issues`` was re-pointed at the pipeline (#1820): the plan
+# and learn calls live in ``pipeline/stages/planning.py`` and
+# ``pipeline/stages/plan_review.py`` (both asserted by their own stage tests).
+# ``planner.py`` is now a thin CLI wrapper with no ``agent=`` call sites, so the
+# former ``test_planner_module_uses_its_expected_agents`` guard was removed.
 
 
 @pytest.mark.parametrize("module_file, base_agent, in_loop_callers", PER_ITERATION_REVIEWER_PHASES)
@@ -284,8 +247,10 @@ def test_per_iteration_reviewer_does_not_pin_foreign_agent(
 # ``enable_advise``. Every provider receives the same selected-skill context
 # block explicitly injected into the downstream task prompt.
 ADVISE_FIRST_STAGES_ADVISE_AGENT: list[tuple[str, tuple[str, ...]]] = [
-    # Stage 1: the planner runs advise once before the plan loop.
-    ("planner.py", ("planner_review_loop.py",)),
+    # Stage 1's advise step moved into the pipeline planning stage (#1820):
+    # ``pipeline/stages/planning.py`` runs advise under AGENT_ADVISE gated by
+    # ``enable_advise`` (asserted by test_stage_planning.py), so the legacy
+    # ``planner.py`` row was dropped.
     # Stage 3: the CI driver runs advise before the fix loop.
     ("ci_driver.py", ()),
 ]

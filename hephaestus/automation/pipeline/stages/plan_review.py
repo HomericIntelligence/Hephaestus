@@ -1,9 +1,10 @@
 """Plan-review stage: review, amend, and approve issue plans (issue #1814).
 
-Re-houses the plan-review control flow from
-``planner_review_loop.py::PlanReviewLoop.run`` as a pipeline stage
+The single plan-review control flow as a pipeline stage
 (docs/AUTOMATION_LOOP_ARCHITECTURE.md section "3. plan_review" is the
-binding contract):
+binding contract). It fully owns the review/amend/learn loop that the legacy
+planner review loop used to run before ``hephaestus-plan-issues`` was
+re-pointed at the pipeline (#1820):
 
 - States: ENTER -> REVIEW_WAIT -> EVAL -> AMEND_WAIT -> (loop) -> LEARN_WAIT.
 - Budgets: ``plan_review_iter`` = 3 (max review iterations per cycle),
@@ -31,8 +32,7 @@ binding contract):
   (exhausted) [durable] — both computed by the shared pure
   ``state_labels.apply_plan_verdict`` so this stage and the legacy loop
   apply identical transitions; the paired add/remove writes are non-fatal
-  (legacy try/except-warn pattern from
-  ``planner_review_loop._apply_state_label``).
+  (independent try/except-warn per write).
 - Verdict parsed IN-WORKER by ``claude_invoke.parse_review_verdict``
   (carried as the review job's ``parse`` callable). REVIEW_WAIT clears any
   stale ``payload["review_verdict"]`` at submission so a failed later round
@@ -94,8 +94,7 @@ def build_amend_prompt(issue_number: int, prior_review: str) -> str:
     Module-level composed builder (NOT a closure): :class:`AgentJob` is
     frozen and prompt builders run in-worker, so the builder must be a
     top-level function receiving everything via ``prompt_kwargs``. The
-    feedback block mirrors the legacy
-    ``planner_review_loop.generate_plan(prior_review=...)`` formatting (doc
+    feedback block appends the prior reviewer critique to the plan prompt (doc
     section 3 step 3: "resume planner session with feedback block"); the
     prompt template itself is reused verbatim via :func:`get_plan_prompt`.
 
@@ -253,10 +252,8 @@ class PlanReviewStage(Stage):
                 session_agent=AGENT_PLANNER,
                 # build_amend_prompt composes get_plan_prompt with the
                 # reviewer feedback block in-worker (doc: "resume planner
-                # session with feedback block"; mirrors
-                # planner_review_loop.generate_plan(prior_review=...)). The
-                # worker resumes the planner session (#1817 wires that
-                # session setup).
+                # session with feedback block"). The worker resumes the planner
+                # session (#1817 wires that session setup).
                 prompt_kwargs={
                     "issue_number": item.issue,
                     "prior_review": item.payload.get("prior_review", ""),
@@ -385,12 +382,11 @@ class PlanReviewStage(Stage):
 
     @staticmethod
     def _write_verdict_labels(issue_number: int, ctx: StageContext, *, is_go: bool) -> None:
-        """Apply the verdict's label pair, each write non-fatal (legacy parity).
+        """Apply the verdict's label pair, each write non-fatal.
 
-        Mirrors ``planner_review_loop._apply_state_label``: the add and the
-        remove are wrapped independently so an exception between the pair
-        never propagates half-applied — the reviewer's verdict comment
-        remains the ultimate fallback for the backfill path.
+        The add and the remove are wrapped independently so an exception
+        between the pair never propagates half-applied — the reviewer's
+        verdict comment remains the ultimate fallback for the backfill path.
 
         Args:
             issue_number: GitHub issue number.
