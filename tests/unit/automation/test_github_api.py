@@ -1201,6 +1201,10 @@ class TestGhListLabelsRepoKeyedConcurrency:
         import threading
 
         results: dict[str, set[str]] = {}
+        # Force both threads to be *inside* gh_list_labels simultaneously so the
+        # test actually exercises concurrent cache access (a non-thread-safe
+        # cache could otherwise pass by running the threads sequentially).
+        overlap = threading.Barrier(2, timeout=5)
 
         def mock_key_fn() -> str:
             """Return the currently-patched repo slug based on thread context."""
@@ -1212,6 +1216,7 @@ class TestGhListLabelsRepoKeyedConcurrency:
             """Return label payload based on the calling thread's repo slug."""
             slug = mock_key_fn()
             payload = {"t1": [{"name": "state:skip"}], "t2": [{"name": "bug"}]}[slug]
+            overlap.wait()  # both threads block here until both are mid-fetch
             return Mock(stdout=json.dumps(payload))
 
         def _run(slug: str) -> None:
