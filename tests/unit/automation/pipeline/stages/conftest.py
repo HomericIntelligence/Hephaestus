@@ -154,6 +154,13 @@ class FakeStageGitHub(FakeGitHub):
         self._issue_labels(issue_number)
         self.gh_issue_remove_labels(issue_number, labels)
 
+    def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+        """Atomic add+remove recorded as ONE mutation (mirrors gh issue edit)."""
+        labels = self._issue_labels(issue_number)
+        labels.update(add)
+        labels.difference_update(remove)
+        self._log("edit_labels", issue_number, tuple(add), tuple(remove))
+
     def upsert_plan_comment(self, issue_number: int, body: str) -> None:
         """Mirror the coordinator plan-comment upsert (PLAN_COMMENT_MARKER-keyed).
 

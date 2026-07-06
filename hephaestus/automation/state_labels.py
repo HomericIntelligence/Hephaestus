@@ -246,3 +246,27 @@ def apply_plan_verdict(*, is_go: bool) -> tuple[str, list[str]]:
     if is_go:
         return STATE_PLAN_GO, [STATE_PLAN_NO_GO, STATE_NEEDS_PLAN]
     return STATE_PLAN_NO_GO, [STATE_PLAN_GO, STATE_NEEDS_PLAN]
+
+
+def enter_planning_transition() -> tuple[list[str], list[str]]:
+    """Compute the atomic label swap for (re-)entering the planning stage.
+
+    Pure: returns (labels_to_add, labels_to_remove). The caller performs the
+    single atomic GitHub write. When plan_review exhausts its iteration budget
+    it ADDS ``state:plan-no-go`` and fails back to planning (routing.py "nogo"
+    route). Re-entry must restore ``state:needs-plan`` AND remove the sibling
+    rejection/terminal labels in ONE transition, or (a) the mutually-exclusive
+    label invariant is transiently violated and (b) the labels-first
+    ``has_existing_plan`` gate stays False forever, so VERIFY can never ADVANCE
+    and the re-plan cycle deadlocks (#1857).
+
+    Restores the documented state-machine edge
+    ``state:plan-no-go ──re-plan──▶ needs-plan`` (module docstring lifecycle
+    diagram): add [state:needs-plan]; remove [state:plan-no-go, state:plan-go].
+
+    Returns:
+        A tuple (labels_to_add, labels_to_remove): ``[STATE_NEEDS_PLAN]`` and
+        the two sibling labels to clear.
+
+    """
+    return [STATE_NEEDS_PLAN], [STATE_PLAN_NO_GO, STATE_PLAN_GO]

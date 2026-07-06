@@ -664,6 +664,30 @@ class PipelineGitHub:
             return
         github_api.gh_issue_remove_labels(issue_number, labels)
 
+    def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+        """Atomically add+remove labels in a single ``gh issue edit``."""
+        if self._skip(f"edit labels on #{issue_number} (+{add} -{remove})"):
+            return
+        if self._repo_slug is not None:
+            if add:
+                existing = self._label_names()
+                for label in add:
+                    if label not in existing:
+                        self._create_label(label)
+                        existing.add(label)
+            cmd = ["issue", "edit", str(issue_number)]
+            for label in add:
+                cmd.extend(["--add-label", label])
+            for label in remove:
+                cmd.extend(["--remove-label", label])
+            if add or remove:
+                self._gh(cmd)
+            return
+        if add:
+            github_api.gh_issue_add_labels(issue_number, add)
+        if remove:
+            github_api.gh_issue_remove_labels(issue_number, remove)
+
     def close_issue_as_covered(self, issue_number: int, pr_number: int) -> None:
         """Close the issue as covered by a merged PR (``_review_utils``)."""
         if self._skip(f"close #{issue_number} as covered by PR #{pr_number}"):
