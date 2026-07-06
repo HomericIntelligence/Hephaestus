@@ -9,8 +9,9 @@ once each carried a near-identical ``_print_summary`` body
 failed-issue loop). PR #1612 consolidated that into the single canonical
 ``print_worker_summary`` helper in ``_review_utils.py``; these tests guard
 against the duplication drifting back in. (The former ``CIDriver`` delegate was
-removed in #1822 when drive-green became a thin pipeline wrapper — the pipeline
-summary lives in ``pipeline/summary.py``.)
+removed in #1822 when drive-green became a thin pipeline wrapper, and the
+``PRReviewer`` delegate in #1823 when PR review did the same — both summaries
+now live in ``pipeline/summary.py``.)
 """
 
 from __future__ import annotations
@@ -22,14 +23,12 @@ import hephaestus.automation as automation_pkg
 from hephaestus.automation.address_review import AddressReviewer
 from hephaestus.automation.models import WorkerResult
 from hephaestus.automation.plan_reviewer import PlanReviewer
-from hephaestus.automation.pr_reviewer import PRReviewer
 
 _AUTOMATION_DIR = Path(automation_pkg.__file__).parent
 
 # The reviewer classes the issue named, the module that holds each one, and the
 # exact ``print_worker_summary`` call the delegate must make.
 _DELEGATING_MODULES = (
-    "pr_reviewer.py",
     "address_review.py",
     "plan_reviewer.py",
 )
@@ -49,19 +48,6 @@ def test_named_classes_carry_no_inline_summary_separator() -> None:
             f"{name} re-introduced an inline summary separator; it must delegate "
             f"to print_worker_summary (issue #1461)."
         )
-
-
-def test_pr_reviewer_delegates_to_print_worker_summary() -> None:
-    """``PRReviewer._print_summary`` must delegate with the PR-specific args."""
-    results: dict[int, WorkerResult] = {}
-    with patch("hephaestus.automation.pr_reviewer.print_worker_summary") as mock_summary:
-        PRReviewer._print_summary(object.__new__(PRReviewer), results)
-    mock_summary.assert_called_once_with(
-        "PR Review Summary",
-        results,
-        count_noun="PRs",
-        failed_header="\nFailed issues:",
-    )
 
 
 def test_address_reviewer_delegates_to_print_worker_summary() -> None:
