@@ -384,8 +384,10 @@ pr_review → ci) remain globally bounded.
 
 ## Seeding and reconstruction
 
-One classifier serves both initial seeding (`--repos`, `--issues`, `--prs`
-args) and restart reconstruction (at startup, scan GitHub for labels/PR state).
+One classifier serves both initial seeding (`--repos`, `--issues`) and restart
+reconstruction (at startup, scan GitHub for labels/PR state). PR inputs are
+still reconstructed from GitHub state during the #1818 cutover; a public `--prs`
+seed argument remains deferred.
 Uses ordered label rank at-or-past comparisons (never equality):
 
 - `state:needs-plan` — rank 0 (lowest).
