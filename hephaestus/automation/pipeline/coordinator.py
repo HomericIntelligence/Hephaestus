@@ -130,6 +130,12 @@ _STEP_WATCHDOG_S = 5.0
 #: Grace period for graceful shutdown (drain in-flight jobs up to this long).
 _DEFAULT_GRACE_S = 30.0
 
+#: Coordinator idle poll interval while waiting for completions (seconds).
+_IDLE_POLL_S = 1.0
+
+#: Number of fully stalled idle ticks before the coordinator force-runs work.
+_STALL_TICKS_BEFORE_FORCE = 3
+
 #: Upper bound on Continue-transitions per _run_item call (defensive: a stage
 #: that never yields a JobRequest/StageOutcome would otherwise spin forever).
 _MAX_STEPS_PER_TICK = 100
@@ -553,10 +559,10 @@ class Coordinator:
             self._stalled_ticks = 0
         elif not self.in_flight and not self.timers:
             self._stalled_ticks += 1
-            if self._stalled_ticks >= 3:
+            if self._stalled_ticks >= _STALL_TICKS_BEFORE_FORCE:
                 self._force_run_one()
                 return
-        timeout = 1.0
+        timeout = _IDLE_POLL_S
         if self.timers:
             timeout = min(timeout, max(0.01, self.timers[0][0] - time.monotonic()))
         self._wait_for_completion(timeout=timeout)

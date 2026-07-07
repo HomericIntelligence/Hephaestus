@@ -658,6 +658,59 @@ class TestLivenessAndFatal:
 
         assert ran == [1]
 
+    def test_idle_wait_uses_named_poll_interval_constant(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The coordinator's idle sleep should come from the module constant."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+        delays: list[float] = []
+
+        assert coordinator_mod._IDLE_POLL_S == 1.0
+        monkeypatch.setattr(coordinator_mod, "_IDLE_POLL_S", 0.25)
+
+        def capture_wait(timeout: float) -> None:
+            delays.append(timeout)
+
+        coordinator._wait_for_completion = capture_wait  # type: ignore[method-assign]
+
+        coordinator._idle_wait()
+
+        assert delays == [0.25]
+
+    def test_idle_wait_uses_named_stall_threshold_constant(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The stall escape hatch should honor the module constant."""
+        coordinator = _coordinator(tmp_path, monkeypatch)
+        ran: list[int] = []
+
+        assert coordinator_mod._STALL_TICKS_BEFORE_FORCE == 3
+        monkeypatch.setattr(coordinator_mod, "_STALL_TICKS_BEFORE_FORCE", 1)
+
+        class SinkStage:
+            def on_enter(self, i: WorkItem, ctx: Any) -> Any:
+                return None
+
+            def step(self, i: WorkItem, ctx: Any) -> Any:
+                ran.append(i.issue or 0)
+                return StageOutcome(Disposition.SKIP, "forced")
+
+            def on_job_done(self, i: WorkItem, result: Any, ctx: Any) -> None:
+                pass
+
+        def unexpected_wait(timeout: float) -> None:
+            pytest.fail(f"unexpected wait with timeout={timeout}")
+
+        coordinator.stages[StageName.MERGE_WAIT] = SinkStage()
+        coordinator._push_item(_item(1, StageName.MERGE_WAIT), StageName.MERGE_WAIT, enter=False)
+        coordinator._progress = False
+        coordinator._stalled_ticks = 0
+        coordinator._wait_for_completion = unexpected_wait  # type: ignore[method-assign]
+
+        coordinator._idle_wait()
+
+        assert ran == [1]
+
     def test_force_run_one_asserts_no_in_flight_work(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
