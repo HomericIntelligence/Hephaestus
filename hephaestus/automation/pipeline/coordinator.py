@@ -1031,7 +1031,10 @@ class Coordinator:
         github = self._ctx_for_repo(repo).github if repo else self.github
         entries: list[_seeding.SeedEntry] = []
         scope_stages = self.config.scope.stages if self.config.scope is not None else None
-        for issue in self.config.issues:
+        issue_numbers = list(self.config.issues)
+        if issue_numbers:
+            issue_numbers = _admission._filter_open_issues(repo, issue_numbers)
+        for issue in issue_numbers:
             facts = _seeding.seed_issue_from_github(issue, github)
             stage, reason = _seeding.classify_issue(facts)
             stage, reason = self._clamp_seed_stage_to_scope(issue, stage, reason, scope_stages)
