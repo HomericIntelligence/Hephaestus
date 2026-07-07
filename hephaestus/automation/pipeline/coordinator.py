@@ -623,8 +623,25 @@ class Coordinator:
         self._progress = True
         item = self.in_flight.pop(handle, None)
         if item is None:
+            self._record_event(
+                "complete_unknown",
+                type(handle.job).__name__,
+                handle.on_done_state,
+                self._job_result_event_fields(result),
+            )
             logger.warning("completion for unknown handle (already torn down?): %s", handle)
             return
+        self._record_event(
+            "complete",
+            type(handle.job).__name__,
+            self._item_key(item),
+            item.stage.value,
+            handle.on_done_state,
+            {
+                "descr": getattr(handle.job, "descr", ""),
+                **self._job_result_event_fields(result),
+            },
+        )
         self.inflight_per_repo[item.repo] -= 1
         if self.inflight_per_repo[item.repo] <= 0:
             del self.inflight_per_repo[item.repo]
@@ -673,11 +690,22 @@ class Coordinator:
         )
         item.add_history_event(item.stage, item.state, note="interrupted; resumable")
         self._resumable.append(item)
+        self._record_event("resumable", self._item_key(item), item.stage.value, item.state)
         logger.info(
             "interrupt: item %s RESUMABLE at %s (never failed)",
             self._item_key(item),
             item.stage.value,
         )
+
+    @staticmethod
+    def _job_result_event_fields(result: JobResult) -> dict[str, Any]:
+        """Return bounded, output-free job result fields for durable event logs."""
+        return {
+            "ok": result.ok,
+            "interrupted": result.interrupted,
+            "error": result.error,
+            "duration_s": round(result.duration_s, 3),
+        }
 
     # -- queue draining and admission ---------------------------------------
 

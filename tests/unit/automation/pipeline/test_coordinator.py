@@ -590,6 +590,78 @@ class TestDurableEventLog:
         assert records[-1]["fields"] == ["planning", "repo-a#44"]
         assert coordinator.event_log[-1] == ("push", "planning", "repo-a#44")
 
+    def test_event_log_path_persists_job_completion_records(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Job completions are durable without logging raw agent output."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        stage = StubStage()
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            stages={StageName.PLANNING: stage},
+            install_signals=False,
+        )
+        item = _issue_item(44, StageName.PLANNING)
+
+        coordinator._submit(item, JobRequest(_agent_job(issue=44), "REVIEWED"))
+        coordinator._drain_completions()
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        complete = next(record for record in records if record["event"] == "complete")
+        assert complete["fields"] == [
+            "AgentJob",
+            "repo-a#44",
+            "planning",
+            "REVIEWED",
+            {
+                "descr": "stub agent job",
+                "duration_s": 0.0,
+                "error": None,
+                "interrupted": False,
+                "ok": True,
+            },
+        ]
+        assert "stdout_tail" not in complete["fields"][-1]
+        assert "stderr_tail" not in complete["fields"][-1]
+
+    def test_event_log_path_persists_resumable_records(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Interrupted items leave durable resumable breadcrumbs."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        item = _issue_item(44, StageName.PR_REVIEW)
+        item.state = "REVIEW_WAIT"
+
+        coordinator._park_resumable(item)
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        assert records[-1]["event"] == "resumable"
+        assert records[-1]["fields"] == ["repo-a#44", "pr_review", "REVIEW_WAIT"]
+
 
 class TestPipelineScopeWiring:
     """Scope-trimmed routing + the planner CLI's --force re-plan override (#1820)."""
