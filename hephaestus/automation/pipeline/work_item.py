@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from .routing import StageName
+from .routing import StageName, budget_keys
 
 #: Maximum retained history events per item (oldest dropped first).
 HISTORY_CAP = 200
@@ -24,26 +24,8 @@ def _utcnow() -> datetime:
 
 
 def _default_attempts() -> dict[str, int]:
-    """Return zeroed per-item-lifetime counters, one per ROUTES budget key.
-
-    Keys mirror the union of budget keys in ``routing.ROUTES``;
-    ``tests/unit/automation/pipeline/test_work_item.py`` pins the two in
-    lockstep so they cannot drift.
-    """
-    return {
-        "clone": 0,
-        "plan": 0,
-        "plan_review_iter": 0,
-        "plan_cycles": 0,
-        "implement": 0,
-        "test_fix": 0,
-        "pr_review_iter": 0,
-        "pr_review_hard": 0,
-        "ci_fix": 0,
-        "rebase": 0,
-        "blocked_address": 0,
-        "merge": 0,
-    }
+    """Return zeroed per-item-lifetime counters, one per budget key."""
+    return {key: 0 for key in budget_keys()}
 
 
 class ItemKind(str, Enum):

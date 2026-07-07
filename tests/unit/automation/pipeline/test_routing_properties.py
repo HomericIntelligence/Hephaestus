@@ -207,9 +207,3 @@ def test_scope_closure_over_generated_subsets(stages: frozenset[StageName]) -> N
         assert route.next in allowed
         for target in route.fail_routes.values():
             assert target in allowed
-
-
-def test_attempts_keys_match_routes_budget_keys() -> None:
-    """WorkItem.attempts default keys are exactly the union of ROUTES budgets."""
-    item = WorkItem(repo="r", kind=ItemKind.ISSUE, issue=1)
-    assert frozenset(item.attempts) == budget_keys()

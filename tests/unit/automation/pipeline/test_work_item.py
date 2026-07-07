@@ -11,6 +11,8 @@ from hephaestus.automation.pipeline import (
     StageName,
     WorkItem,
 )
+from hephaestus.automation.pipeline import work_item as work_item_module
+from hephaestus.automation.pipeline.routing import budget_keys
 
 
 class TestItemKind:
@@ -97,22 +99,23 @@ class TestWorkItem:
     def test_work_item_default_attempts(self) -> None:
         """WorkItem initializes all attempt counters to 0."""
         item = WorkItem(repo="repo", kind=ItemKind.REPO)
-        expected_keys = {
-            "clone",
-            "plan",
-            "plan_review_iter",
-            "plan_cycles",
-            "implement",
-            "pr_review_iter",
-            "pr_review_hard",
-            "test_fix",
-            "ci_fix",
-            "blocked_address",
-            "rebase",
-            "merge",
-        }
-        assert set(item.attempts.keys()) == expected_keys
+        assert set(item.attempts.keys()) == budget_keys()
         assert all(v == 0 for v in item.attempts.values())
+
+    def test_work_item_default_attempts_follow_budget_keys(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WorkItem default attempts derive their keys from budget_keys()."""
+        monkeypatch.setattr(
+            work_item_module,
+            "budget_keys",
+            lambda: frozenset({"alpha", "beta"}),
+            raising=False,
+        )
+
+        item = work_item_module.WorkItem(repo="repo", kind=ItemKind.REPO)
+
+        assert item.attempts == {"alpha": 0, "beta": 0}
 
     def test_work_item_mutable_defaults_do_not_alias(self) -> None:
         """Two WorkItems never share attempts/history/session_ids/payload."""
