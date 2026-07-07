@@ -172,7 +172,7 @@ def order_for_implementation(issue_infos: Sequence[IssueInfo]) -> list[int]:
     for info in issue_infos:
         for dep in info.dependencies:
             if dep in in_set:
-                resolver.graph.add_dependency(info.number, dep)
+                resolver.add_dependency(info.number, dep)
     try:
         return resolver.topological_sort()
     except CyclicDependencyError:

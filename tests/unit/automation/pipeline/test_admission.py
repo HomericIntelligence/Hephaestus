@@ -8,6 +8,7 @@ implementation queue, and the filtered-open-issues helper.
 from __future__ import annotations
 
 import logging
+from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
@@ -207,6 +208,48 @@ class TestOrderForImplementation:
         """#A depends on #B → B precedes A regardless of input order."""
         order = order_for_implementation([_info(10, dependencies=[20]), _info(20)])
         assert order.index(20) < order.index(10)
+
+    def test_uses_public_dependency_api(self) -> None:
+        """The admission layer routes dependency edges through the resolver API."""
+
+        class FakeDependencyResolver:
+            """Resolver double that fails if callers reach into ``graph`` directly."""
+
+            instances: ClassVar[list[FakeDependencyResolver]] = []
+
+            class Graph:
+                def add_dependency(self, issue_number: int, depends_on: int) -> None:
+                    pytest.fail(
+                        "order_for_implementation must call DependencyResolver.add_dependency()"
+                    )
+
+            def __init__(self, skip_closed: bool = True) -> None:
+                self.skip_closed = skip_closed
+                self.graph = self.Graph()
+                self.add_issue_calls: list[int] = []
+                self.add_dependency_calls: list[tuple[int, int]] = []
+                self.topological_sort_result = [20, 10]
+                type(self).instances.append(self)
+
+            def add_issue(self, issue: IssueInfo) -> None:
+                self.add_issue_calls.append(issue.number)
+
+            def add_dependency(self, issue_number: int, depends_on: int) -> None:
+                self.add_dependency_calls.append((issue_number, depends_on))
+
+            def topological_sort(self) -> list[int]:
+                return self.topological_sort_result
+
+        FakeDependencyResolver.instances = []
+
+        with patch(
+            "hephaestus.automation.pipeline.admission.DependencyResolver",
+            FakeDependencyResolver,
+        ):
+            order = order_for_implementation([_info(10, dependencies=[20]), _info(20)])
+
+        assert order == [20, 10]
+        assert FakeDependencyResolver.instances[0].add_dependency_calls == [(10, 20)]
 
     def test_no_dependencies_preserves_input_order(self) -> None:
         """Independent issues keep their dispatch-priority (input) order."""
