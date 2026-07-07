@@ -63,6 +63,7 @@ from ..routing import Disposition, StageName, StageOutcome
 from ..work_item import ItemKind, WorkItem
 
 __all__ = [
+    "BACKOFF_CAP_S",
     "GIT_JOB_TIMEOUT_S",
     "AgentJob",
     "BuildTestJob",
@@ -91,6 +92,10 @@ logger = logging.getLogger(__name__)
 #: by every stage that submits :class:`GitJob`s (single home — stages must
 #: not import it from each other).
 GIT_JOB_TIMEOUT_S = 600
+
+#: Poll backoff cap in seconds (legacy ``min(2**attempt, 60)`` — shared by
+#: every stage that uses the legacy exponential poll delay.
+BACKOFF_CAP_S = 60
 
 
 @runtime_checkable
