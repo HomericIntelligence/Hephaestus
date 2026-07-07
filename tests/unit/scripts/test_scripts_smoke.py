@@ -59,9 +59,7 @@ def test_script_help_exits_zero(script_path: Path) -> None:
     """``python scripts/<name>.py --help`` must succeed within the timeout."""
     env = {
         **os.environ,
-        "PYTHONPATH": os.pathsep.join(
-            [str(REPO_ROOT), *([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])]
-        ),
+        "PYTHONPATH": str(REPO_ROOT),
     }
     proc = subprocess.run(
         [sys.executable, str(script_path), "--help"],
