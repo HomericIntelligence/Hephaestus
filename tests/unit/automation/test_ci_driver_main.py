@@ -143,6 +143,13 @@ def test_main_no_mechanical_rebase_propagates() -> None:
     assert captured["config"].enable_mechanical_rebase is False
 
 
+def test_main_poll_max_wait_propagates() -> None:
+    """--poll-max-wait flows to PipelineConfig.poll_max_wait."""
+    captured = _run_main_capturing_config(["--issues", "5", "--poll-max-wait", "42", "--dry-run"])
+
+    assert captured["config"].poll_max_wait == 42
+
+
 def test_main_default_ci_fix_budget_is_one() -> None:
     """Without --max-fix-iterations the ci_fix budget override defaults to 1."""
     captured = _run_main_capturing_config(["--issues", "5", "--dry-run"])

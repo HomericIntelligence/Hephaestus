@@ -27,12 +27,11 @@ contract):
   is recorded in ``payload["retry_delay_s"]`` and the stage returns
   ``StageOutcome(RETRY)`` — the coordinator (#1817) consumes the delay from
   the payload (see the base.py coordinator convention; ``StageOutcome`` has
-  no delay field). POLL cycles are capped by the ``payload["ci_poll_count"]``
-  counter against :data:`POLL_DEADLINE` (the legacy 1200s
-  ``poll_max_wait`` expressed in capped-backoff cycles) ->
-  FINISH_FAIL(``timeout``). GREEN / NO_CHECKS ADVANCE (no CI configured is
-  the legacy success case); FAILING enters the fix leg while the ``ci_fix``
-  budget remains, else fails back ``fix_exhausted`` (routes to
+  no delay field). The PENDING window is capped by elapsed wall-clock via
+  ``ctx.now()`` against ``payload["ci_poll_started_at"]`` and the configured
+  ``poll_max_wait`` budget -> FINISH_FAIL(``timeout``). GREEN / NO_CHECKS
+  ADVANCE (no CI configured is the legacy success case); FAILING enters the
+  fix leg while the ``ci_fix`` budget remains, else fails back ``fix_exhausted`` (routes to
   implementation).
 - FIX_WAIT [W:A]: the CI-fix agent session. The prompt is composed
   in-worker by :func:`build_ci_fix_prompt`, which reuses
@@ -66,7 +65,11 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from hephaestus.automation.agent_config import ci_driver_claude_timeout, implementer_model
+from hephaestus.automation.agent_config import (
+    DEFAULT_CI_POLL_MAX_WAIT,
+    ci_driver_claude_timeout,
+    implementer_model,
+)
 from hephaestus.automation.ci_fix_orchestrator import CIFixOrchestrator
 from hephaestus.automation.ci_run_coordinator import CiConclusion, classify_ci_state
 from hephaestus.automation.session_naming import AGENT_CI_DRIVER
@@ -103,13 +106,12 @@ PUSH_WAIT = "PUSH_WAIT"
 #: ``ci_run_coordinator.poll_ci_until_concluded`` :288).
 BACKOFF_CAP_S = 60
 
-#: Max POLL cycles before FINISH_FAIL("timeout"). The legacy loop bounds by
-#: ``poll_max_wait`` wall-clock seconds (default 1200, ``agent_config.
-#: ci_poll_max_wait``); with the capped exponential backoff that budget is
-#: exhausted after ~25 parks (1+2+...+32 + 19*60 >= 1200), so the
-#: non-blocking stage counts cycles in ``payload["ci_poll_count"]`` against
-#: this constant instead of sleeping out a wall clock.
+#: Historical number of capped-backoff parks that approximately consumed the
+#: default 1200s CI poll budget. Kept as a compatibility constant for callers
+#: and tests; timeout enforcement is wall-clock based via ``ctx.now()``.
 POLL_DEADLINE = 25
+
+CI_POLL_STARTED_AT = "ci_poll_started_at"
 
 
 def build_ci_fix_prompt(
@@ -353,9 +355,9 @@ class CiStage(Stage):
           exhaustion.
 
         Then the pure classifier routes: PENDING timer-parks (RETRY with the
-        backoff delay in ``payload["retry_delay_s"]``, cycles capped by
-        :data:`POLL_DEADLINE`); GREEN / NO_CHECKS ADVANCE; FAILING enters the
-        fix leg while the ``ci_fix`` budget remains.
+        backoff delay in ``payload["retry_delay_s"]``, elapsed wall-clock
+        capped by ``poll_max_wait``); GREEN / NO_CHECKS ADVANCE; FAILING
+        enters the fix leg while the ``ci_fix`` budget remains.
         """
         if item.payload.pop("push_failed", None):
             logger.warning("ci:%s: fix push failed; failing back", item.issue)
@@ -380,14 +382,22 @@ class CiStage(Stage):
 
         conclusion = classify_ci_state(ctx.github.pr_checks(item.pr))
         if conclusion is CiConclusion.PENDING:
-            polls = item.payload.get("ci_poll_count", 0)
-            if polls >= POLL_DEADLINE:
+            now = ctx.now()
+            started = item.payload.get(CI_POLL_STARTED_AT)
+            if started is None:
+                started = now
+                item.payload[CI_POLL_STARTED_AT] = started
+            max_wait = _ci_poll_max_wait(ctx)
+            elapsed = now - float(started)
+            if elapsed > max_wait:
                 logger.warning(
-                    "ci:%s: CI still pending after %d poll cycles; timing out",
+                    "ci:%s: CI still pending after %ds (limit %ds); timing out",
                     item.issue,
-                    polls,
+                    int(elapsed),
+                    max_wait,
                 )
                 return StageOutcome(Disposition.FINISH_FAIL, "timeout")
+            polls = item.payload.get("ci_poll_count", 0)
             delay = min(2**polls, BACKOFF_CAP_S)
             item.payload["ci_poll_count"] = polls + 1
             # Timer-park contract (base.py): the coordinator (#1817) reads
@@ -528,6 +538,15 @@ class CiStage(Stage):
                 item.payload["push_no_commit"] = True
             else:
                 # Real commit pushed: CI restarts, so the poll backoff does too.
+                item.payload.pop(CI_POLL_STARTED_AT, None)
                 item.payload.pop("ci_poll_count", None)
                 item.payload.pop("retry_delay_s", None)
             return
+
+
+def _ci_poll_max_wait(ctx: StageContext) -> int:
+    """Return the wall-clock CI poll budget in seconds."""
+    value = getattr(ctx.config, "poll_max_wait", DEFAULT_CI_POLL_MAX_WAIT)
+    if value is None:
+        return DEFAULT_CI_POLL_MAX_WAIT
+    return int(value)
