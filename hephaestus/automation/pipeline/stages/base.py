@@ -60,7 +60,7 @@ from hephaestus.agents.runtime import DEFAULT_AGENT
 from hephaestus.automation.state_labels import STATE_SKIP
 
 from ..jobs import AgentJob, BuildTestJob, GitJob, JobHandle, JobResult
-from ..routing import Disposition, StageName, StageOutcome
+from ..routing import ROUTES, Disposition, StageName, StageOutcome
 from ..work_item import ItemKind, WorkItem
 
 __all__ = [
@@ -444,7 +444,7 @@ class StageContext:
     github: StageGitHub  # coordinator-owned GitHub accessor (label/comment/PR writes+reads)
     paths: Any  # coordinator-owned path accessor (repo_root, worktree)
     now_fn: Callable[[], float] | None = None  # injectable clock (tests pass a fake)
-    budget_fn: Callable[[str], int] | None = None  # routing accessor: ROUTES budget lookup
+    budget_fn: Callable[[str], int] | None = None  # injected overrides; falls back to ROUTES
 
     def now(self) -> float:
         """Return the current time in seconds since epoch (injectable for tests)."""
@@ -456,7 +456,10 @@ class StageContext:
         """Look up the budget for a given counter name from the routing tables."""
         if self.budget_fn is not None:
             return self.budget_fn(name)
-        return 1  # conservative default
+        for route in ROUTES.values():
+            if name in route.budgets:
+                return route.budgets[name]
+        return 1  # conservative default for unknown keys
 
 
 def agent_provider(ctx: StageContext) -> str:
