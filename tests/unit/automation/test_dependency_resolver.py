@@ -35,6 +35,15 @@ class TestDependencyResolver:
 
         assert resolver.graph.get_dependencies(123) == [100, 101]
 
+    def test_add_dependency(self) -> None:
+        """Test adding a dependency through the resolver public API."""
+        resolver = DependencyResolver()
+
+        resolver.add_issue(IssueInfo(number=123, title="Test"))
+        resolver.add_dependency(123, 100)
+
+        assert resolver.graph.get_dependencies(123) == [100]
+
     def test_detect_cycles_no_cycle(self) -> None:
         """Test cycle detection with no cycles."""
         resolver = DependencyResolver()
