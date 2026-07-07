@@ -351,7 +351,7 @@ FAIL_BACK(reason).
 
 ### 8. finished
 
-**States**: ENTER → CLEANUP.
+**States**: ENTER → RECORD → CLEANUP → DONE.
 
 **Steps**:
 
