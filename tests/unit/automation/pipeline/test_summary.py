@@ -25,7 +25,6 @@ from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkI
 def _stats(**overrides: object) -> RunStats:
     defaults: dict[str, object] = {
         "exit_code": 0,
-        "interrupted": False,
         "loops_run": 1,
         "agent_job_count": 3,
         "agent_job_time_s": 12.5,
@@ -33,6 +32,14 @@ def _stats(**overrides: object) -> RunStats:
     }
     defaults.update(overrides)
     return RunStats(**defaults)  # type: ignore[arg-type]
+
+
+class TestRunStats:
+    """Derived run-stat fields."""
+
+    def test_interrupted_is_derived_from_exit_code(self) -> None:
+        assert _stats(exit_code=130).interrupted is True
+        assert _stats(exit_code=1).interrupted is False
 
 
 def _item(
@@ -156,7 +163,7 @@ class TestJsonEnvelope:
 
         print_summary(
             items,
-            _stats(exit_code=130, interrupted=True, loops_run=3),
+            _stats(exit_code=130, loops_run=3),
             [(2, "/wt/2")],
             json_out=True,
         )
@@ -183,10 +190,10 @@ class TestJsonEnvelope:
         exit_code: int,
         expected_message: str,
     ) -> None:
-        """The envelope message derives from exit_code, not the interrupt flag."""
+        """The envelope message derives from exit_code."""
         print_summary(
             [],
-            _stats(exit_code=exit_code, interrupted=True),
+            _stats(exit_code=exit_code),
             [],
             json_out=True,
         )
