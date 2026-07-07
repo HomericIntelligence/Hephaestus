@@ -454,13 +454,8 @@ class WorkerPool:
     def _dispatch_git_op(self, job: GitJob) -> JobResult:
         """Dispatch a git operation to its handler.
 
-        ``job.timeout_s`` is threaded into every dispatch whose helper accepts
-        a timeout (currently only ``clone`` via ``git_utils.run``). The
-        remaining helpers (``WorktreeManager.create_worktree`` /
-        ``remove_worktree``, ``rebase_worktree_onto``,
-        ``push_current_branch_with_lease_on_divergence``, ``commit_if_changes``,
-        ``push_branch``) expose no timeout parameter today; each call site
-        below documents that gap rather than silently dropping the budget.
+        ``job.timeout_s`` is threaded into every git helper call so network
+        operations cannot outlive the job budget while holding repo locks.
         """
         if job.op == "create_worktree":
             return self._git_create_worktree(job)
@@ -469,16 +464,14 @@ class WorkerPool:
             return self._git_remove_worktree(job)
 
         elif job.op == "rebase":
-            # rebase_worktree_onto(cwd, base_branch="main", *, remote) has no
-            # timeout parameter; job.timeout_s cannot be enforced here.
-            result = git_utils.rebase_worktree_onto(**job.kwargs)
+            result = git_utils.rebase_worktree_onto(**job.kwargs, timeout=job.timeout_s)
             return JobResult(ok=result, value=result)
 
         elif job.op == "push":
-            # push_current_branch_with_lease_on_divergence(cwd, *, branch,
-            # remote, push_ref) has no timeout parameter; job.timeout_s
-            # cannot be enforced here.
-            git_utils.push_current_branch_with_lease_on_divergence(**job.kwargs)
+            git_utils.push_current_branch_with_lease_on_divergence(
+                **job.kwargs,
+                timeout=job.timeout_s,
+            )
             return JobResult(ok=True)
 
         elif job.op == "commit_push":
@@ -505,9 +498,7 @@ class WorkerPool:
         manager = WorktreeManager()
         kwargs = dict(job.kwargs)
         sync_to_remote = bool(kwargs.pop("sync_to_remote", False))
-        # WorktreeManager.create_worktree has no timeout parameter;
-        # job.timeout_s cannot be enforced here.
-        created = manager.create_worktree(**kwargs)
+        created = manager.create_worktree(**kwargs, timeout=job.timeout_s)
         if created is None:
             return JobResult(ok=True)
         worktree_path = Path(created)
@@ -515,7 +506,7 @@ class WorkerPool:
         if not sync_to_remote:
             return JobResult(ok=True, value=str(worktree_path))
 
-        dirty = not git_utils.is_clean_working_tree(worktree_path)
+        dirty = not git_utils.is_clean_working_tree(worktree_path, timeout=job.timeout_s)
         status = ""
         diff = ""
         if dirty:
@@ -524,17 +515,23 @@ class WorkerPool:
                 cwd=worktree_path,
                 capture_output=True,
                 check=False,
+                timeout=job.timeout_s,
             )
             diff_result = git_utils.run(
                 ["git", "diff"],
                 cwd=worktree_path,
                 capture_output=True,
                 check=False,
+                timeout=job.timeout_s,
             )
             status = status_result.stdout or ""
             diff = diff_result.stdout or ""
         elif branch_name:
-            git_utils.sync_worktree_to_remote_branch(worktree_path, branch_name)
+            git_utils.sync_worktree_to_remote_branch(
+                worktree_path,
+                branch_name,
+                timeout=job.timeout_s,
+            )
         return JobResult(
             ok=True,
             value={
@@ -553,13 +550,16 @@ class WorkerPool:
             cmd = ["git", "worktree", "remove", str(worktree_path)]
             if job.kwargs.get("force"):
                 cmd.append("--force")
-            git_utils.run(cmd, cwd=repo_root)
-            git_utils.run(["git", "worktree", "prune"], cwd=repo_root, check=False)
+            git_utils.run(cmd, cwd=repo_root, timeout=job.timeout_s)
+            git_utils.run(
+                ["git", "worktree", "prune"],
+                cwd=repo_root,
+                check=False,
+                timeout=job.timeout_s,
+            )
             return JobResult(ok=True)
         manager = WorktreeManager()
-        # WorktreeManager.remove_worktree has no timeout parameter;
-        # job.timeout_s cannot be enforced here.
-        manager.remove_worktree(**job.kwargs)
+        manager.remove_worktree(**job.kwargs, timeout=job.timeout_s)
         return JobResult(ok=True)
 
     def _git_commit_push(self, job: GitJob) -> JobResult:
@@ -587,10 +587,13 @@ class WorkerPool:
             Path(worktree_path),
             str(job.kwargs.get("agent", "claude")),
             allowed_paths=job.kwargs.get("allowed_paths"),
+            timeout=job.timeout_s,
         )
         if not changed:
             return JobResult(ok=True, value=False)
-        # push_branch has no timeout parameter; job.timeout_s cannot be
-        # enforced here.
-        git_utils.push_branch(str(job.kwargs.get("branch", "HEAD")), Path(worktree_path))
+        git_utils.push_branch(
+            str(job.kwargs.get("branch", "HEAD")),
+            Path(worktree_path),
+            timeout=job.timeout_s,
+        )
         return JobResult(ok=True, value=changed)
