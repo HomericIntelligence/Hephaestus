@@ -47,7 +47,9 @@ class FinishedStage(Stage):
     Args:
         ledger: The coordinator's run ledger; RECORD appends here.
         preserved: The coordinator's preserved-worktree list
-            (``(issue_number, worktree_path)`` tuples) the summary prints.
+            (``(item_number, worktree_path)`` tuples) the summary prints.
+            Failed issue items use the issue number; PR-only items use the PR
+            number; unknown items fall back to 0.
 
     """
 
@@ -116,7 +118,7 @@ class FinishedStage(Stage):
 
         passed = bool(item.result and item.result.passed)
         if not passed:
-            entry = (item.issue or 0, item.worktree)
+            entry = (item.issue or item.pr or 0, item.worktree)
             if entry not in self._preserved:
                 self._preserved.append(entry)
             logger.info(
