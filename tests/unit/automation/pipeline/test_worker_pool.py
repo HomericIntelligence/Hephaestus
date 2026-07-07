@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import subprocess
 import threading
@@ -26,6 +27,7 @@ from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.worker_pool import WorkerPool, _repo_lock_path
 from hephaestus.resilience import CircuitBreakerOpenError
+from hephaestus.utils.file_lock import LockUnavailableError
 from hephaestus.utils.helpers import get_repo_root
 
 _WP = "hephaestus.automation.pipeline.worker_pool"
@@ -959,6 +961,71 @@ class TestGitLocking:
 
         assert result.ok is True
         assert (tmp_path / "locks" / "git-test_repo.lock").exists()
+
+    def test_git_file_lock_timeout_returns_lock_timeout_and_releases_repo_lock(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """A held cross-process lock fails fast with lock_timeout."""
+        fcntl = pytest.importorskip("fcntl")
+        lock_path = _repo_lock_path("test/repo", tmp_path / "locks")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        held_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        job = GitJob(repo="test/repo", op="create_worktree", timeout_s=0, kwargs={})
+
+        try:
+            fcntl.flock(held_fd, fcntl.LOCK_EX)
+            with patch(f"{_WP}.WorktreeManager") as manager:
+                result = pool._run_git(job)
+        finally:
+            fcntl.flock(held_fd, fcntl.LOCK_UN)
+            os.close(held_fd)
+
+        manager.assert_not_called()
+        assert result.ok is False
+        assert result.error == "lock_timeout"
+        with pool._repo_locks_guard:
+            assert pool._repo_locks == {}
+
+    def test_git_file_lock_wait_is_interrupted_by_shutdown(
+        self,
+        pool: WorkerPool,
+        shutdown_event: threading.Event,
+    ) -> None:
+        """Shutdown while waiting for the file lock returns an interrupted result."""
+        job = GitJob(repo="test/repo", op="create_worktree", timeout_s=60, kwargs={})
+
+        def interrupting_wait(timeout: float | None = None) -> bool:
+            shutdown_event.set()
+            return True
+
+        with (
+            patch(f"{_WP}.file_lock", side_effect=LockUnavailableError("held")),
+            patch.object(shutdown_event, "wait", side_effect=interrupting_wait),
+            patch(f"{_WP}.WorktreeManager") as manager,
+        ):
+            result = pool._run_git(job)
+
+        manager.assert_not_called()
+        assert result.ok is False
+        assert result.interrupted is True
+        assert result.error == "interrupted_waiting_for_git_lock"
+        with pool._repo_locks_guard:
+            assert pool._repo_locks == {}
+
+    def test_git_file_lock_wait_does_not_swallow_dispatch_lock_errors(
+        self,
+        pool: WorkerPool,
+    ) -> None:
+        """Only outer lock acquisition failures are mapped to lock_timeout."""
+        job = GitJob(repo="test/repo", op="create_worktree", timeout_s=0, kwargs={})
+        instance = MagicMock()
+        instance.create_worktree.side_effect = LockUnavailableError("inner lock")
+
+        with patch(f"{_WP}.WorktreeManager", return_value=instance):
+            with pytest.raises(LockUnavailableError, match="inner lock"):
+                pool._run_git(job)
 
 
 class TestShutdownAndCancel:
