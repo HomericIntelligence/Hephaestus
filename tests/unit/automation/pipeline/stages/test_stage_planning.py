@@ -10,6 +10,7 @@ from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.planning import (
     PlanningStage,
+    _normalize_plan_comment,
     build_plan_prompt,
 )
 from hephaestus.automation.prompts._shared import _UNTRUSTED_NOTICE
@@ -488,6 +489,16 @@ class TestPlanningStageStep:
         (body,) = github.comments[13]
         assert body.startswith(PLAN_COMMENT_MARKER)  # upsert helper keys on this
         assert body == f"{PLAN_COMMENT_MARKER}\n\nSome plan without the heading."
+
+    def test_normalize_plan_comment_docstring_distinguishes_marker_from_advance_gate(
+        self,
+    ) -> None:
+        """Docstring says marker normalization is not the VERIFY ADVANCE gate."""
+        doc = _normalize_plan_comment.__doc__ or ""
+
+        assert "upsert dedupe key" in doc
+        assert "VERIFY ADVANCE gate" in doc
+        assert "ctx.github.has_existing_plan(item.issue)" in doc
 
     def test_verify_without_plan_retries(self, make_ctx: Any, make_work_item: Any) -> None:
         """VERIFY without a plan retries while within the plan budget."""
