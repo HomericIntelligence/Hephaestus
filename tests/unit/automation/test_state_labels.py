@@ -194,6 +194,10 @@ class TestIsEpic:
         assert is_epic([], title="Epic: ship the new pipeline") is True
         assert is_epic([], title="Q3 Roadmap tracking") is True
 
+    def test_title_marker_does_not_match_inside_identifier(self) -> None:
+        """Function names like skip_epics are code tasks, not epic trackers."""
+        assert is_epic([], title="repo _discover calls skip_epics unguarded") is False
+
     def test_title_match_is_case_insensitive(self) -> None:
         assert is_epic([], title="EPIC umbrella issue") is True
 

@@ -62,6 +62,27 @@ def _repo_checkout_path(item: WorkItem, ctx: StageContext) -> Path:
     return Path(str(ctx.paths.projects_dir)) / item.repo
 
 
+def _tag_epics_best_effort(
+    repo: str,
+    ctx: StageContext,
+    epics: list[int],
+    epics_labels: dict[int, list[str]],
+) -> None:
+    """Tag excluded epics without blocking repo discovery on label failures."""
+    skip_tagged = True
+    try:
+        ctx.github.skip_epics(epics_labels)
+    except Exception as exc:
+        skip_tagged = False
+        logger.warning("repo:%s: could not tag excluded epics state:skip: %s", repo, exc)
+
+    for num in epics:
+        if skip_tagged:
+            logger.info("repo:%s: #%d is an epic; tagged state:skip, excluded", repo, num)
+        else:
+            logger.info("repo:%s: #%d is an epic; state:skip tag failed, excluded", repo, num)
+
+
 class RepoStage(Stage):
     """Repo discovery and classification stage (the pipeline's sole producer).
 
@@ -178,9 +199,7 @@ class RepoStage(Stage):
                 for m in deduped
                 if int(m["number"]) in epic_set
             }
-            ctx.github.skip_epics(epics_labels)
-            for num in epics:
-                logger.info("repo:%s: #%d is an epic; tagged state:skip, excluded", item.repo, num)
+            _tag_epics_best_effort(item.repo, ctx, epics, epics_labels)
 
         products: list[dict[str, Any]] = [
             {
