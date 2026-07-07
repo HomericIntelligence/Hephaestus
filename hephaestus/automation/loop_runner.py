@@ -93,25 +93,35 @@ def _parse_repo_list(value: str) -> list[str]:
     return [s.strip() for s in value.split(",") if s.strip()]
 
 
-def _parse_issue_list(value: str) -> list[int]:
-    """Split a comma-separated issue list into positive integers."""
-    issues: list[int] = []
+def _parse_positive_int_list(value: str, label: str) -> list[int]:
+    """Split a comma-separated list into positive integers."""
+    numbers: list[int] = []
     for part in value.split(","):
         item = part.strip()
         if not item:
             continue
         try:
-            issue = int(item)
+            number = int(item)
         except ValueError as exc:
             raise argparse.ArgumentTypeError(
-                f"expected comma-separated issue numbers, got {item!r}"
+                f"expected comma-separated {label} numbers, got {item!r}"
             ) from exc
-        if issue <= 0:
+        if number <= 0:
             raise argparse.ArgumentTypeError(
-                f"issue numbers must be positive integers, got {issue}"
+                f"{label} numbers must be positive integers, got {number}"
             )
-        issues.append(issue)
-    return issues
+        numbers.append(number)
+    return numbers
+
+
+def _parse_issue_list(value: str) -> list[int]:
+    """Split a comma-separated issue list into positive integers."""
+    return _parse_positive_int_list(value, "issue")
+
+
+def _parse_pr_list(value: str) -> list[int]:
+    """Split a comma-separated PR list into positive integers."""
+    return _parse_positive_int_list(value, "PR")
 
 
 def _default_phase_timeout_s() -> float:
@@ -165,6 +175,7 @@ class LoopConfig:
     serialize_file_overlap: bool = True
     agent: str = "claude"
     issues: list[int] = field(default_factory=list)
+    prs: list[int] = field(default_factory=list)
     dry_run: bool = False
     no_advise: bool = False
     nitpick: bool = False
@@ -241,6 +252,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Comma-separated issue numbers to pass to issue-scoped phases "
             "(plan, implement, drive-green). Default: phase auto-discovery."
+        ),
+    )
+    p.add_argument(
+        "--prs",
+        type=_parse_pr_list,
+        default=None,
+        help=(
+            "Comma-separated PR numbers to seed directly into pipeline PR stages. "
+            "Default: no direct PR scope."
         ),
     )
     p.add_argument(
@@ -511,7 +531,7 @@ def _build_pipeline_config(
         org=org,
         repos=repos,
         issues=cfg.issues,
-        prs=[],  # --prs not yet implemented in #1813
+        prs=cfg.prs,
         loops=cfg.loops,
         max_workers=cfg.max_workers,
         parallel_repos=cfg.parallel_repos,
@@ -601,6 +621,7 @@ def main(argv: list[str] | None = None) -> int:
         phases=phases,
         agent=agent,
         issues=args.issues or [],
+        prs=args.prs or [],
         dry_run=args.dry_run,
         no_advise=args.no_advise,
         nitpick=args.nitpick,
@@ -640,6 +661,8 @@ def main(argv: list[str] | None = None) -> int:
     LOG.info("Phases: %s", ",".join(cfg.phases))
     if cfg.issues:
         LOG.info("Issues: %s", ",".join(str(n) for n in cfg.issues))
+    if cfg.prs:
+        LOG.info("PRs: %s", ",".join(str(n) for n in cfg.prs))
 
     return _dispatch_pipeline(args, cfg, org, repos)
 

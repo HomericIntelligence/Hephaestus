@@ -636,6 +636,16 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
                 "(plan, implement, drive-green). Default: phase auto-discovery."
             ),
         ),
+        _action_spec(
+            ("--prs",),
+            "prs",
+            "_StoreAction",
+            None,
+            help_text=(
+                "Comma-separated PR numbers to seed directly into pipeline PR stages. "
+                "Default: no direct PR scope."
+            ),
+        ),
         _store_true(
             "--no-advise",
             "no_advise",
