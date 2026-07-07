@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
 from types import SimpleNamespace
-
-import pytest
+from typing import Any
 
 import pytest
 
@@ -15,10 +13,10 @@ from hephaestus.automation.pipeline.stages import (
     PlanningStage,
     PlanReviewStage,
     Stage,
+    base as stage_base,
     ci,
     merge_wait,
 )
-from hephaestus.automation.pipeline.stages import base as stage_base
 from hephaestus.automation.pipeline.stages.base import (
     BACKOFF_CAP_S,
     Continue,
