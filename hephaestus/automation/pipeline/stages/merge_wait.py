@@ -42,9 +42,10 @@ binding contract):
     is recorded in ``payload["retry_delay_s"]`` and the stage returns
     ``StageOutcome(RETRY)`` (base.py coordinator convention). The
     wall-clock bound is preserved via ``ctx.now()`` against
-    ``payload["merge_wait_started_at"]`` (stamped at ARM) and
-    ``HEPH_PR_MERGE_MAX_WAIT`` (default 1800s, exactly the legacy
-    ``_wait_for_pr_terminal`` budget) -> FINISH_FAIL(``timeout``).
+    ``payload["merge_wait_started_at"]`` (stamped at ARM; missing in POLL
+    is an invariant failure, not a new stamp) and ``HEPH_PR_MERGE_MAX_WAIT``
+    (default 1800s, exactly the legacy ``_wait_for_pr_terminal`` budget)
+    -> FINISH_FAIL(``timeout``).
 - LEARN_WAIT [W:A]: the drive-green learnings session (re-housed
   ``post_merge_processor.run_drive_green_learnings``), prompt composed
   in-worker by :func:`build_drive_green_learn_prompt` reusing
@@ -256,6 +257,15 @@ class MergeWaitStage(Stage):
         """
         if item.pr is None:  # guarded by ARM; kept for restart safety
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        started = item.payload.get("merge_wait_started_at")
+        if started is None:
+            logger.error(
+                "merge_wait:%s: PR #%d reached POLL without merge_wait_started_at",
+                item.issue,
+                item.pr,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "missing_merge_wait_started_at")
+
         gh_state = ctx.github.gh_pr_state(item.pr)
         pr_state_str = ((gh_state or {}).get("state") or "").upper()
         failing: list[str] = []
@@ -288,10 +298,6 @@ class MergeWaitStage(Stage):
             return self._route_blocked(item, ctx)
         # PENDING: timer-park with exponential backoff, wall-clock bounded.
         now = ctx.now()
-        started = item.payload.get("merge_wait_started_at")
-        if started is None:
-            started = now
-            item.payload["merge_wait_started_at"] = started
         max_wait = read_timeout_env(MERGE_MAX_WAIT_ENV, MERGE_MAX_WAIT_DEFAULT_S)
         if now - float(started) > max_wait:
             logger.warning(
