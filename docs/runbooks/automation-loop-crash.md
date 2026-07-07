@@ -42,6 +42,28 @@ processing an issue, or a phase times out, and you need to resume safely.
    suspect, recover it with the
    [corrupted-worktree runbook](corrupted-worktree.md) before re-running.
 
+## Pipeline recovery semantics
+
+For `--pipeline` recovery, distinguish interrupts from fatal coordinator
+failures:
+
+- A first `SIGINT`, `SIGTERM`, or `SIGHUP` starts graceful shutdown. The
+  coordinator stops admitting new work and drains in-flight jobs for the
+  configured grace window (`30s` by default). An interrupted run exits with
+  exit code 130.
+- A second signal, or expiry of the grace window, forces immediate worker-pool
+  teardown and synthesizes interrupted results for any remaining in-flight
+  jobs.
+- Interrupted, queued, and timer-parked items are reported as `RESUMABLE at
+  <stage>` in `=== Pipeline summary ===`; they are never FAILED by the
+  interrupt path and do not run through normal stage success/failure routing.
+- Restart reconstructs the in-memory queues from the durable journal: GitHub
+  labels, PR state, and local worktrees. There is no persisted queue snapshot.
+  Re-run the same scoped command to let seeding classify the issue back into
+  the correct entry queue.
+- To inspect journal reconstruction without launching work, run the scoped
+  pipeline command with `--dry-run --loops 1 -v`.
+
 ## Recover
 
 The loop is idempotent per issue: the coordinator re-seeds from GitHub labels,
