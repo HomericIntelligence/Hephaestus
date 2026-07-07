@@ -13,6 +13,7 @@ row from docs/AUTOMATION_LOOP_ARCHITECTURE.md.
 
 from __future__ import annotations
 
+import signal as signal_mod
 from pathlib import Path
 from typing import Any
 
@@ -21,9 +22,9 @@ import pytest
 from hephaestus.automation.claude_invoke import ReviewVerdict
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
-from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
+from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
 from hephaestus.automation.pipeline.routing import PIPELINE_ORDER, StageName
-from hephaestus.automation.pipeline.seeding import IssueFacts, classify_issue
+from hephaestus.automation.pipeline.seeding import IssueFacts, SeedEntry, classify_issue
 from hephaestus.automation.pipeline.stages.base import (
     Continue,
     JobRequest,
@@ -97,19 +98,61 @@ class InterruptingPool(FakeWorkerPool):
         return super().submit(job, on_done_state)
 
 
+def _capture_signal_handlers(monkeypatch: pytest.MonkeyPatch) -> None:
+    handlers: dict[int, Any] = {}
+
+    def fake_signal(signum: int, handler: Any) -> Any:
+        previous = handlers.get(signum, signal_mod.SIG_DFL)
+        handlers[signum] = handler
+        return previous
+
+    def fake_getsignal(signum: int) -> Any:
+        return handlers.get(signum, signal_mod.SIG_DFL)
+
+    monkeypatch.setattr(signal_mod, "signal", fake_signal)
+    monkeypatch.setattr(signal_mod, "getsignal", fake_getsignal)
+
+
+def _raise_sigterm() -> None:
+    handler = signal_mod.getsignal(signal_mod.SIGTERM)
+    assert callable(handler)
+    handler(signal_mod.SIGTERM, None)
+
+
+class GracefulSignalCompletionPool(FakeWorkerPool):
+    """Send first SIGTERM during submit, then deliver a non-interrupted result."""
+
+    def submit(self, job: Any, on_done_state: Any) -> Any:
+        _raise_sigterm()
+        self.queue_result(JobResult(ok=True, value="completed after shutdown"))
+        return super().submit(job, on_done_state)
+
+
+class SecondSignalPool(FakeWorkerPool):
+    """Send two SIGTERMs during submit and leave the job in flight."""
+
+    def submit(self, job: Any, on_done_state: Any) -> Any:
+        handle = JobHandle(job=job, on_done_state=on_done_state)
+        self.submitted.append(handle)
+        _raise_sigterm()
+        _raise_sigterm()
+        return handle
+
+
 def _coordinator(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     seed: list[Any] | None = None,
     grace_s: float = 30.0,
+    install_signals: bool = False,
 ) -> Coordinator:
     config = PipelineConfig(
         org="org", repos=["repo-a"], loops=1, projects_dir=tmp_path, grace_s=grace_s
     )
     monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: list(seed or []))
     coordinator = Coordinator(
-        config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=install_signals
     )
     coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
     return coordinator
@@ -122,8 +165,6 @@ class TestInterruptSemantics:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An interrupted job parks its item RESUMABLE; on_job_done never runs."""
-        from hephaestus.automation.pipeline.seeding import SeedEntry
-
         seed = [SeedEntry(kind="issue", identifier=1, stage=StageName.PLANNING, reason="r")]
         coordinator = _coordinator(tmp_path, monkeypatch, seed=seed)
         pool = InterruptingPool(coordinator.shutdown)
@@ -165,47 +206,51 @@ class TestInterruptSemantics:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Immediate shutdown cancels the pool and parks in-flight items."""
-        coordinator = _coordinator(tmp_path, monkeypatch)
-        pool = coordinator.pool
-        assert isinstance(pool, FakeWorkerPool)
-        in_flight_item = WorkItem(
-            repo="repo-a", kind=ItemKind.ISSUE, issue=3, stage=StageName.IMPLEMENTATION
-        )
-        handle = object()
-        coordinator.in_flight[handle] = in_flight_item  # type: ignore[index]
-        coordinator.inflight_per_repo["repo-a"] = 1
-        coordinator._immediate = True
-        coordinator.shutdown.set()
+        seed = [SeedEntry(kind="issue", identifier=3, stage=StageName.IMPLEMENTATION, reason="r")]
+        _capture_signal_handlers(monkeypatch)
+        coordinator = _coordinator(tmp_path, monkeypatch, seed=seed, install_signals=True)
+        pool = SecondSignalPool()
+        coordinator.pool = pool
+        coordinator.completion_q = pool.completion_q
+        stage = JobRequestingStage()
+        coordinator.stages[StageName.IMPLEMENTATION] = stage
 
         exit_code = coordinator.run()
 
         assert exit_code == 130
+        assert len(pool.submitted) == 1
         assert pool.shutdown_event.is_set()
-        assert coordinator.in_flight == {}
-        assert in_flight_item.result is not None
-        assert in_flight_item.result.reason == "resumable at implementation"
+        assert stage.job_done_calls == 0
+        assert coordinator.ledger == []
+        item = coordinator.items[0]
+        assert item.result is not None
+        assert item.result.reason == "resumable at implementation"
+        assert not item.result.passed
+        assert item.stage is StageName.IMPLEMENTATION
 
     def test_completion_after_graceful_shutdown_does_not_advance(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A non-interrupted completion during shutdown still parks RESUMABLE."""
-        coordinator = _coordinator(tmp_path, monkeypatch)
+        seed = [SeedEntry(kind="issue", identifier=4, stage=StageName.PLANNING, reason="r")]
+        _capture_signal_handlers(monkeypatch)
+        coordinator = _coordinator(tmp_path, monkeypatch, seed=seed, install_signals=True)
+        pool = GracefulSignalCompletionPool()
+        coordinator.pool = pool
+        coordinator.completion_q = pool.completion_q
         stage = JobRequestingStage()
         coordinator.stages[StageName.PLANNING] = stage
-        item = WorkItem(
-            repo="repo-a", kind=ItemKind.ISSUE, issue=4, stage=StageName.PLANNING, state="WAIT"
-        )
-        request = JobRequest(_agent_job(4), on_done_state="VERIFY")
-        coordinator._submit(item, request)
-        coordinator.shutdown.set()
 
-        coordinator._drain_completions()
+        exit_code = coordinator.run()
 
-        # on_job_done ran (result was NOT interrupted -> durable parse is
-        # journaled), but the item must not step further during shutdown.
+        assert exit_code == 130
+        assert len(pool.submitted) == 1
         assert stage.job_done_calls == 1
+        assert coordinator.ledger == []
+        item = coordinator.items[0]
         assert item.result is not None
         assert item.result.reason == "resumable at planning"
+        assert item.stage is StageName.PLANNING
 
     def test_signal_handler_escalation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
