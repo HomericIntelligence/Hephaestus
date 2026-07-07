@@ -224,9 +224,17 @@ class WorkerPool:
             return  # cancel_futures synthesizes NO completion
         try:
             result = future.result()
-        except BaseException as exc:
-            # Intentionally convert every worker-thread escape into a queued
-            # result so the coordinator still receives one completion.
+        except (KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
+            # These can escape worker threads via ``future.result()``. Convert
+            # them into a queued crash result instead of re-raising from the
+            # executor callback, otherwise the coordinator can lose a
+            # non-cancelled submission completion.
+            logger.exception("Worker future raised; converting to worker_crash result")
+            result = JobResult(
+                ok=False,
+                error=f"worker_crash: {type(exc).__name__}: {exc!s}"[:500],
+            )
+        except Exception as exc:
             logger.exception("Worker future raised; converting to worker_crash result")
             result = JobResult(
                 ok=False,
@@ -238,7 +246,7 @@ class WorkerPool:
         """Execute a job and return its result.
 
         Catches Exception subclasses so a single job failure does not crash the
-        worker thread; BaseException escapes are converted in
+        worker thread; process-control escapes are converted in
         _on_future_done's crash handler. After every job, post-checks the
         shutdown event and marks interrupted=True if it was set (SIGINT to the
         process group makes children return normally; the interrupt flag
