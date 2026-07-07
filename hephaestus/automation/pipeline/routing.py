@@ -15,9 +15,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
-#: Default for the ``merge`` budget. Mirrors the ``--max-merge-attempts`` CLI
-#: default (loop_runner.py:373); the coordinator overrides it from config when
-#: the pipeline is wired up (epic #1809 coordinator slice).
+#: Default for the ``merge`` budget. Mirrors ``LoopConfig.max_merge_attempts``
+#: and the ``--max-merge-attempts`` CLI default in ``loop_runner.py``; the
+#: coordinator overrides it from config when the pipeline is wired up
+#: (epic #1809 coordinator slice).
 DEFAULT_MERGE_ATTEMPTS = 1
 
 
@@ -79,7 +80,8 @@ class Route:
 #   clone=2, plan=2, plan_cycles=2,
 #   implement=2, test_fix=1, ci_fix=1,
 #   rebase=2                               <- architecture doc stage sections
-#   merge=DEFAULT_MERGE_ATTEMPTS           <- loop_runner.py:373 max_merge_attempts
+#   merge=DEFAULT_MERGE_ATTEMPTS           <- loop_runner.py LoopConfig.max_merge_attempts
+#                                             and --max-merge-attempts defaults
 ROUTES: dict[StageName, Route] = {
     # The repo item itself is terminal: it seeds discovered issues/PRs into
     # their classified entry queues and then advances to finished(pass).
