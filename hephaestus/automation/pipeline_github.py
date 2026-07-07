@@ -78,9 +78,7 @@ def _split_threads(threads: list[dict[str, Any]]) -> tuple[int, int]:
     if not threads:
         return (0, 0)
     current_login = github_api.gh_current_login()
-    automation = sum(
-        1 for thread in threads if _is_automation_owned_thread(thread, current_login)
-    )
+    automation = sum(1 for thread in threads if _is_automation_owned_thread(thread, current_login))
     return automation, len(threads) - automation
 
 
@@ -422,25 +420,29 @@ class PipelineGitHub:
         return threads
 
     def _repo_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
-        """Fetch issue comment ids/bodies for explicit-repo marker upserts."""
-        query = (
-            "query($owner:String!,$name:String!,$number:Int!){"
-            "  repository(owner:$owner,name:$name){"
-            "    issue(number:$number){"
-            "      comments(first:100){ nodes{ databaseId body } }"
-            "    }"
-            "  }"
-            "}"
+        """Fetch issue/PR comment ids and bodies for explicit-repo marker upserts."""
+        owner, name = self._owner_name()
+        result = gh_call(
+            [
+                "api",
+                f"/repos/{owner}/{name}/issues/{int(issue_number)}/comments",
+                "--paginate",
+                "--slurp",
+            ]
         )
-        data = self._graphql(query, number=int(issue_number))
-        nodes = (
-            data.get("data", {})
-            .get("repository", {})
-            .get("issue", {})
-            .get("comments", {})
-            .get("nodes", [])
-        )
-        return [node for node in nodes if isinstance(node, dict)]
+        data = json.loads(result.stdout or "[]")
+        pages = data if isinstance(data, list) else []
+        nodes: list[dict[str, Any]] = []
+        for page in pages:
+            page_nodes = page if isinstance(page, list) else [page]
+            for node in page_nodes:
+                if not isinstance(node, dict):
+                    continue
+                normalized = dict(node)
+                if normalized.get("databaseId") is None and normalized.get("id") is not None:
+                    normalized["databaseId"] = normalized["id"]
+                nodes.append(normalized)
+        return nodes
 
     def _repo_review_threads_for_review(self, pr_number: int, review_id: str) -> list[str]:
         """Return unresolved review-thread ids created by one REST review."""

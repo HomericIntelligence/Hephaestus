@@ -233,6 +233,33 @@ class TestRepoScoping:
             ],
         ]
 
+    def test_repo_scoped_pr_comment_upsert_reads_pr_comments_via_rest_issue_channel(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PR numbers are valid issue-comment REST targets but not GraphQL issue nodes."""
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            if argv == ["api", "/repos/org/repo-a/issues/1001/comments", "--paginate", "--slurp"]:
+                payload = [[{"id": 42, "body": "<!-- marker -->\nstale"}]]
+                return SimpleNamespace(stdout=json.dumps(payload))
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).upsert_pr_comment(
+            1001, "<!-- marker -->", "<!-- marker -->\nupdated"
+        )
+
+        assert calls[0] == [
+            "api",
+            "/repos/org/repo-a/issues/1001/comments",
+            "--paginate",
+            "--slurp",
+        ]
+        assert all("graphql" not in call for call in calls)
+
     def test_repo_scoped_has_existing_plan_detects_plan_comment(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -355,20 +382,8 @@ class TestRepoScoping:
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             calls.append(argv)
-            if argv[:2] == ["api", "graphql"]:
-                payload = {
-                    "data": {
-                        "repository": {
-                            "issue": {
-                                "comments": {
-                                    "nodes": [
-                                        {"databaseId": 9, "body": f"{PLAN_COMMENT_MARKER}\nold"}
-                                    ]
-                                }
-                            }
-                        }
-                    }
-                }
+            if argv == ["api", "/repos/org/repo-a/issues/5/comments", "--paginate", "--slurp"]:
+                payload = [[{"id": 9, "body": f"{PLAN_COMMENT_MARKER}\nold"}]]
                 return SimpleNamespace(stdout=json.dumps(payload))
             return SimpleNamespace(stdout="")
 
@@ -390,18 +405,8 @@ class TestRepoScoping:
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             calls.append(argv)
-            if argv[:2] == ["api", "graphql"]:
-                payload = {
-                    "data": {
-                        "repository": {
-                            "issue": {
-                                "comments": {
-                                    "nodes": [{"databaseId": 12, "body": f"{marker}\nold"}]
-                                }
-                            }
-                        }
-                    }
-                }
+            if argv == ["api", "/repos/org/repo-a/issues/7/comments", "--paginate", "--slurp"]:
+                payload = [[{"id": 12, "body": f"{marker}\nold"}]]
                 return SimpleNamespace(stdout=json.dumps(payload))
             return SimpleNamespace(stdout="")
 
