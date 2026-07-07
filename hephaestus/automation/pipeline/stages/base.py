@@ -56,6 +56,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, TypeAlias, runtime_checkable
 
+from hephaestus.agents.runtime import DEFAULT_AGENT
 from hephaestus.automation.state_labels import STATE_SKIP
 
 from ..jobs import AgentJob, BuildTestJob, GitJob, JobHandle, JobResult
@@ -460,7 +461,7 @@ class StageContext:
 
 def agent_provider(ctx: StageContext) -> str:
     """Return the selected agent backend provider for an agent job."""
-    return str(getattr(ctx.config, "agent", "") or "claude")
+    return str(getattr(ctx.config, "agent", "") or DEFAULT_AGENT)
 
 
 def stage_model(ctx: StageContext, phase: str, fallback: Callable[[], str]) -> str:
