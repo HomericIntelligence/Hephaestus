@@ -183,32 +183,36 @@ class WorkerPool:
 
         # Pre-check: do not start a queued job if shutdown is set.
         if self._shutdown.is_set():
-            return JobResult(ok=False, interrupted=True, error="interrupted_before_start")
-
-        try:
-            if isinstance(job, AgentJob):
-                result = self._run_agent(job)
-            elif isinstance(job, BuildTestJob):
-                result = self._run_build_test(job)
-            elif isinstance(job, GitJob):
-                result = self._run_git(job)
-            else:
-                raise TypeError(f"unknown job type {type(job)}")
-        except Exception as exc:
-            # Convert job execution failures into a JobResult so the callback
-            # never re-raises into its thread. This catches normal runtime errors
-            # but allows process-control exceptions to propagate normally.
-            logger.exception("Job %s raised, returning error result", job)
             result = JobResult(
                 ok=False,
-                error=f"{type(exc).__name__}: {exc!s}"[:500],
+                interrupted=True,
+                error="interrupted_before_start",
             )
+        else:
+            try:
+                if isinstance(job, AgentJob):
+                    result = self._run_agent(job)
+                elif isinstance(job, BuildTestJob):
+                    result = self._run_build_test(job)
+                elif isinstance(job, GitJob):
+                    result = self._run_git(job)
+                else:
+                    raise TypeError(f"unknown job type {type(job)}")
+            except Exception as exc:
+                # Convert job execution failures into a JobResult so the callback
+                # never re-raises into its thread. This catches normal runtime errors
+                # but allows process-control exceptions to propagate normally.
+                logger.exception("Job %s raised, returning error result", job)
+                result = JobResult(
+                    ok=False,
+                    error=f"{type(exc).__name__}: {exc!s}"[:500],
+                )
 
-        # Mandatory post-check: SIGINT to the process group makes subprocess
-        # children return "normally" (rc=0 or some other code), so an
-        # interrupted job must never read as success.
-        if self._shutdown.is_set():
-            result = replace(result, interrupted=True, ok=False)
+            # Mandatory post-check: SIGINT to the process group makes subprocess
+            # children return "normally" (rc=0 or some other code), so an
+            # interrupted job must never read as success.
+            if self._shutdown.is_set():
+                result = replace(result, interrupted=True, ok=False)
 
         return replace(
             result,
