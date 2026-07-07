@@ -91,6 +91,11 @@ ALLOWED_CONVENTIONAL_TYPES = frozenset(
 _CONVENTIONAL_PREFIX = re.compile(r"^(?P<type>[a-z]+)(?P<scope>\([^)]*\))?(?P<bang>!)?:\s")
 
 
+def _git_timeout_kw(timeout: int | None) -> dict[str, Any]:
+    """Return a ``run`` kwargs fragment only when a git timeout was provided."""
+    return {} if timeout is None else {"timeout": timeout}
+
+
 def _normalize_conventional_type(subject: str, *, default: str = "chore") -> str:
     """Rewrite a subject's leading type to an allowlisted one if it is not already.
 
@@ -215,21 +220,27 @@ def _parse_agent_json(text: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _git_output(worktree_path: Path, args: list[str]) -> str:
+def _git_output(worktree_path: Path, args: list[str], *, timeout: int | None = None) -> str:
     """Return best-effort git output for message-agent context."""
     try:
-        result = run(["git", *args], cwd=worktree_path, capture_output=True, check=False)
+        result = run(
+            ["git", *args],
+            cwd=worktree_path,
+            capture_output=True,
+            check=False,
+            **_git_timeout_kw(timeout),
+        )
     except Exception as exc:
         logger.debug("Could not collect git message context for %s: %s", args, exc)
         return ""
     return (result.stdout or "").strip()
 
 
-def _staged_change_context(worktree_path: Path) -> tuple[str, str]:
+def _staged_change_context(worktree_path: Path, *, timeout: int | None = None) -> tuple[str, str]:
     """Return staged changed files and diff stat for commit-message generation."""
     return (
-        _git_output(worktree_path, ["diff", "--cached", "--name-status"]),
-        _git_output(worktree_path, ["diff", "--cached", "--stat"]),
+        _git_output(worktree_path, ["diff", "--cached", "--name-status"], timeout=timeout),
+        _git_output(worktree_path, ["diff", "--cached", "--stat"], timeout=timeout),
     )
 
 
@@ -399,9 +410,10 @@ def _generate_commit_message(
     worktree_path: Path,
     agent: str,
     git_message_timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
+    git_timeout: int | None = None,
 ) -> str:
     """Generate a commit message via a lightweight agent with deterministic fallback."""
-    changed_files, diff_stat = _staged_change_context(worktree_path)
+    changed_files, diff_stat = _staged_change_context(worktree_path, timeout=git_timeout)
     prompt = _commit_message_prompt(
         issue_number=issue_number,
         issue_title=issue_title,
@@ -711,6 +723,7 @@ def commit_changes(
     agent: str = "claude",
     git_message_timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
     allowed_paths: Collection[str] | None = None,
+    git_timeout: int | None = None,
 ) -> None:
     """Commit changes in worktree, filtering out secret files.
 
@@ -723,6 +736,7 @@ def commit_changes(
             agent. Defaults to :data:`DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT`.
         allowed_paths: Optional exact set of porcelain paths allowed to be
             staged. Secret filtering still applies.
+        git_timeout: Optional timeout in seconds for each local git command.
 
     Raises:
         RuntimeError: If there are no changes, or all changes are secret files.
@@ -733,6 +747,7 @@ def commit_changes(
         ["git", "status", "--porcelain"],
         cwd=worktree_path,
         capture_output=True,
+        **_git_timeout_kw(git_timeout),
     )
 
     if not result.stdout.strip():
@@ -794,9 +809,17 @@ def commit_changes(
 
     # Stage the files
     if files_to_update:
-        run(["git", "add", "-u", "--", *files_to_update], cwd=worktree_path)
+        run(
+            ["git", "add", "-u", "--", *files_to_update],
+            cwd=worktree_path,
+            **_git_timeout_kw(git_timeout),
+        )
     if files_to_add:
-        run(["git", "add", "--", *files_to_add], cwd=worktree_path)
+        run(
+            ["git", "add", "--", *files_to_add],
+            cwd=worktree_path,
+            **_git_timeout_kw(git_timeout),
+        )
 
     # Generate commit message
     issue = fetch_issue_info(issue_number)
@@ -807,12 +830,14 @@ def commit_changes(
         worktree_path=worktree_path,
         agent=agent,
         git_message_timeout=git_message_timeout,
+        git_timeout=git_timeout,
     )
 
     # Commit with cryptographic signature and DCO sign-off — required by repo policy.
     run(
         ["git", "commit", "-S", "-s", "-m", commit_msg],
         cwd=worktree_path,
+        **_git_timeout_kw(git_timeout),
     )
 
 

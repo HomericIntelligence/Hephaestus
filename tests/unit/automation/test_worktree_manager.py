@@ -247,6 +247,28 @@ class TestWorktreeManager:
         assert "999-auto-impl" in add_argv
         assert "origin/main" in add_argv
 
+    def test_create_worktree_threads_timeout_to_git_commands(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """create_worktree bounds local git probes and worktree creation."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        rev_parse = MagicMock(returncode=1)
+        ls_remote = MagicMock(returncode=0, stdout="")
+        detect = MagicMock(stdout="origin/main")
+        add = MagicMock(returncode=0)
+        worktree_mocks.run.side_effect = [rev_parse, ls_remote, detect, add]
+        manager = WorktreeManager()
+
+        with patch.object(manager, "_worktree_holding_branch", return_value=None):
+            manager.create_worktree(999, "999-auto-impl", timeout=42)
+
+        assert [call.kwargs["timeout"] for call in worktree_mocks.run.call_args_list] == [
+            42,
+            42,
+            42,
+            42,
+        ]
+
     def test_create_worktree_prefers_local_branch_over_remote(
         self, worktree_mocks: Any, tmp_path: Any
     ) -> None:
@@ -323,6 +345,23 @@ class TestWorktreeManager:
 
         call_args = worktree_mocks.run.call_args[0][0]
         assert "--force" in call_args
+
+    @patch("hephaestus.automation.worktree_manager.is_clean_working_tree", return_value=True)
+    def test_remove_worktree_threads_timeout(
+        self, mock_clean: Any, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """remove_worktree bounds the clean check and git worktree remove."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+
+        worktree_path = manager.base_dir / "issue-123"
+        worktree_path.mkdir(parents=True)
+        manager.worktrees[123] = worktree_path
+
+        manager.remove_worktree(123, timeout=42)
+
+        mock_clean.assert_called_once_with(worktree_path, timeout=42)
+        assert worktree_mocks.run.call_args.kwargs["timeout"] == 42
 
     def test_remove_worktree_not_found(self, worktree_mocks: Any, tmp_path: Any) -> None:
         """Test removing non-existent worktree."""

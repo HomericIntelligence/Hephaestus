@@ -11,6 +11,7 @@ import logging
 import subprocess
 from collections.abc import Collection
 from pathlib import Path
+from typing import Any
 
 from hephaestus.constants import agent_git_timeout
 
@@ -27,6 +28,11 @@ from hephaestus.utils.retry import retry_with_backoff
 logger = logging.getLogger(__name__)
 
 COMMIT_POLICY_REWRITE_EXEC = "git commit --amend --no-edit -S -s"
+
+
+def _timeout_kw(timeout: int | None) -> dict[str, Any]:
+    """Return a ``run`` kwargs fragment only when a timeout was provided."""
+    return {} if timeout is None else {"timeout": timeout}
 
 
 def run(
@@ -181,6 +187,7 @@ def commit_if_changes(
     *,
     committed_log_message: str = "Committed changes for issue #%s",
     allowed_paths: Collection[str] | None = None,
+    timeout: int | None = None,
 ) -> bool:
     """Commit pending changes in *worktree_path* if the worktree is dirty.
 
@@ -191,6 +198,7 @@ def commit_if_changes(
         committed_log_message: ``logging`` format string for a successful commit.
         allowed_paths: Optional exact path allowlist forwarded to the commit
             helper. When set, only those porcelain paths may be staged.
+        timeout: Optional timeout in seconds for local git commands.
 
     Returns:
         True if a commit was created, otherwise False.
@@ -200,6 +208,7 @@ def commit_if_changes(
         ["git", "status", "--porcelain"],
         cwd=worktree_path,
         capture_output=True,
+        **_timeout_kw(timeout),
     )
     if not result.stdout.strip():
         logger.info("No changes to commit for issue #%s", issue_number)
@@ -208,7 +217,15 @@ def commit_if_changes(
     try:
         from .pr_manager import commit_changes
 
-        commit_changes(issue_number, worktree_path, agent, allowed_paths=allowed_paths)
+        commit_kwargs: dict[str, Any] = {"allowed_paths": allowed_paths}
+        if timeout is not None:
+            commit_kwargs["git_timeout"] = timeout
+        commit_changes(
+            issue_number,
+            worktree_path,
+            agent,
+            **commit_kwargs,
+        )
         logger.info(committed_log_message, issue_number)
         return True
     except RuntimeError as e:
@@ -216,19 +233,24 @@ def commit_if_changes(
         return False
 
 
-def push_branch(branch_name: str, worktree_path: Path) -> None:
+def push_branch(branch_name: str, worktree_path: Path, *, timeout: int | None = None) -> None:
     """Push *branch_name* to ``origin``.
 
     Args:
         branch_name: Branch name to push.
         worktree_path: Path to the git worktree.
+        timeout: Optional timeout in seconds for the push.
 
     Raises:
         RuntimeError: If the push fails.
 
     """
     try:
-        run(["git", "push", "origin", branch_name], cwd=worktree_path)
+        run(
+            ["git", "push", "origin", branch_name],
+            cwd=worktree_path,
+            **_timeout_kw(timeout),
+        )
         logger.info("Pushed branch %s to origin", branch_name)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to push branch {branch_name}: {e}") from e
@@ -310,11 +332,12 @@ def clean_stale_git_locks(repo_root: Path) -> None:
                     logger.error("Failed to remove lock %s: %s", lock_pattern, e)
 
 
-def get_current_branch(repo_root: Path | None = None) -> str:
+def get_current_branch(repo_root: Path | None = None, *, timeout: int | None = None) -> str:
     """Get the current git branch name.
 
     Args:
         repo_root: Repository root (defaults to auto-detect)
+        timeout: Optional timeout in seconds for the git command.
 
     Returns:
         Branch name
@@ -332,6 +355,7 @@ def get_current_branch(repo_root: Path | None = None) -> str:
             cwd=repo_root,
             capture_output=True,
             check=True,
+            **_timeout_kw(timeout),
         )
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
@@ -360,6 +384,7 @@ def push_current_branch_with_lease_on_divergence(
     branch: str | None = None,
     remote: str = "origin",
     push_ref: str = "HEAD",
+    timeout: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Push ``HEAD`` to ``<remote>``; on divergence, fetch + force-with-lease retry.
 
@@ -388,6 +413,7 @@ def push_current_branch_with_lease_on_divergence(
             should pass an explicit refspec like ``f"HEAD:{branch}"`` to force
             the push to land on the named remote branch regardless of local
             branch state.
+        timeout: Optional timeout in seconds for each git command.
 
     Returns:
         The successful push's ``CompletedProcess``.
@@ -408,6 +434,7 @@ def push_current_branch_with_lease_on_divergence(
                 push_ref,
             ],
             cwd=cwd,
+            **_timeout_kw(timeout),
         )
     except subprocess.CalledProcessError as exc:
         if not _is_push_rejected_diverged(exc):
@@ -415,7 +442,7 @@ def push_current_branch_with_lease_on_divergence(
         # Resolve the branch name lazily — most callers know it, but we don't
         # want to require it on every caller.
         if branch is None:
-            branch = get_current_branch(cwd)
+            branch = get_current_branch(cwd, timeout=timeout)
         logger.warning(
             "git push to %s/%s rejected as diverged; fetching + force-with-lease retry",
             remote,
@@ -424,7 +451,7 @@ def push_current_branch_with_lease_on_divergence(
         # Fetch the canonical tip so the lease check has something current to
         # compare against. If this fetch fails, raise — we cannot safely
         # lease-push without an up-to-date remote-tracking ref.
-        run(["git", "fetch", remote, branch], cwd=cwd)
+        run(["git", "fetch", remote, branch], cwd=cwd, **_timeout_kw(timeout))
         # The lease retry preserves any explicit ``push_ref`` the caller passed
         # so HEAD lands on the right *remote* branch even if the local HEAD has
         # drifted (#832). The default ``"HEAD"`` is rewritten to
@@ -440,6 +467,7 @@ def push_current_branch_with_lease_on_divergence(
                 lease_push_ref,
             ],
             cwd=cwd,
+            **_timeout_kw(timeout),
         )
 
 
@@ -448,6 +476,7 @@ def sync_worktree_to_remote_branch(
     branch: str,
     *,
     remote: str = "origin",
+    timeout: int | None = None,
 ) -> None:
     """Reset ``cwd`` to ``<remote>/<branch>`` so the agent starts from the PR head.
 
@@ -472,6 +501,7 @@ def sync_worktree_to_remote_branch(
         cwd: Worktree path.
         branch: Remote branch name (the PR's head).
         remote: Remote name (default ``origin``).
+        timeout: Optional timeout in seconds for each git command.
 
     Raises:
         subprocess.CalledProcessError: If either git command fails. Callers
@@ -480,11 +510,16 @@ def sync_worktree_to_remote_branch(
 
     """
     logger.info("Syncing worktree at %s to %s/%s before agent run", cwd, remote, branch)
-    run(["git", "fetch", remote, branch], cwd=cwd)
-    run(["git", "reset", "--hard", f"{remote}/{branch}"], cwd=cwd)
+    run(["git", "fetch", remote, branch], cwd=cwd, **_timeout_kw(timeout))
+    run(["git", "reset", "--hard", f"{remote}/{branch}"], cwd=cwd, **_timeout_kw(timeout))
 
 
-def _remove_untracked_files_tracked_by_ref(cwd: Path, ref: str) -> list[Path]:
+def _remove_untracked_files_tracked_by_ref(
+    cwd: Path,
+    ref: str,
+    *,
+    timeout: int | None = None,
+) -> list[Path]:
     """Remove untracked worktree files whose paths are tracked by ``ref``.
 
     ``git reset --hard`` intentionally leaves untracked files behind. In reused
@@ -499,6 +534,7 @@ def _remove_untracked_files_tracked_by_ref(cwd: Path, ref: str) -> list[Path]:
             ["git", "ls-files", "--others", "--exclude-standard", "-z"],
             cwd=cwd,
             log_errors=False,
+            **_timeout_kw(timeout),
         )
     except subprocess.CalledProcessError:
         return []
@@ -512,7 +548,12 @@ def _remove_untracked_files_tracked_by_ref(cwd: Path, ref: str) -> list[Path]:
             logger.warning("Skipping unsafe untracked path before rebase: %s", rel)
             continue
         try:
-            run(["git", "cat-file", "-e", f"{ref}:{rel}"], cwd=cwd, log_errors=False)
+            run(
+                ["git", "cat-file", "-e", f"{ref}:{rel}"],
+                cwd=cwd,
+                log_errors=False,
+                **_timeout_kw(timeout),
+            )
         except subprocess.CalledProcessError:
             continue
 
@@ -554,17 +595,18 @@ def ensure_branch_commit_metadata(
     base_branch: str = "main",
     *,
     remote: str = "origin",
+    timeout: int | None = None,
 ) -> None:
     """Rewrite branch commits so each carries a verified signature and DCO trailer."""
     base_ref = f"{remote}/{base_branch}"
-    run(["git", "fetch", remote, base_branch], cwd=cwd)
-    _remove_untracked_files_tracked_by_ref(cwd, base_ref)
+    run(["git", "fetch", remote, base_branch], cwd=cwd, **_timeout_kw(timeout))
+    _remove_untracked_files_tracked_by_ref(cwd, base_ref, timeout=timeout)
     try:
-        run(_commit_policy_rebase_command(base_ref), cwd=cwd)
+        run(_commit_policy_rebase_command(base_ref), cwd=cwd, **_timeout_kw(timeout))
     except subprocess.CalledProcessError:
         # Leave the worktree ready for the caller's next automation attempt.
         # ``check=False`` preserves the original rebase failure signal.
-        run(["git", "rebase", "--abort"], cwd=cwd, check=False)
+        run(["git", "rebase", "--abort"], cwd=cwd, check=False, **_timeout_kw(timeout))
         raise
 
 
@@ -573,6 +615,7 @@ def rebase_worktree_onto(
     base_branch: str = "main",
     *,
     remote: str = "origin",
+    timeout: int | None = None,
 ) -> bool:
     """Mechanically rebase the worktree at ``cwd`` onto ``<remote>/<base_branch>``.
 
@@ -600,6 +643,7 @@ def rebase_worktree_onto(
         cwd: Worktree path (already synced to the PR head).
         base_branch: Branch to rebase onto (default ``main``).
         remote: Remote name (default ``origin``).
+        timeout: Optional timeout in seconds for each git command.
 
     Returns:
         ``True`` if the rebase applied cleanly. ``False`` if the rebase hit
@@ -613,17 +657,17 @@ def rebase_worktree_onto(
 
     """
     base_ref = f"{remote}/{base_branch}"
-    run(["git", "fetch", remote, base_branch], cwd=cwd)
-    _remove_untracked_files_tracked_by_ref(cwd, base_ref)
+    run(["git", "fetch", remote, base_branch], cwd=cwd, **_timeout_kw(timeout))
+    _remove_untracked_files_tracked_by_ref(cwd, base_ref, timeout=timeout)
     try:
-        run(_commit_policy_rebase_command(base_ref), cwd=cwd)
+        run(_commit_policy_rebase_command(base_ref), cwd=cwd, **_timeout_kw(timeout))
         logger.info("Rebased worktree at %s onto %s/%s cleanly", cwd, remote, base_branch)
         return True
     except subprocess.CalledProcessError:
         # Conflicts — abort so the worktree is restored to the PR head, then let
         # the caller hand the real conflict to the agent. ``check=False`` because
         # an abort that itself errors must not mask the conflict signal.
-        run(["git", "rebase", "--abort"], cwd=cwd, check=False)
+        run(["git", "rebase", "--abort"], cwd=cwd, check=False, **_timeout_kw(timeout))
         logger.info(
             "Rebase of worktree at %s onto %s/%s hit conflicts; aborted",
             cwd,
@@ -633,11 +677,12 @@ def rebase_worktree_onto(
         return False
 
 
-def is_clean_working_tree(repo_root: Path | None = None) -> bool:
+def is_clean_working_tree(repo_root: Path | None = None, *, timeout: int | None = None) -> bool:
     """Check if the working tree is clean (no uncommitted changes).
 
     Args:
         repo_root: Repository root (defaults to auto-detect)
+        timeout: Optional timeout in seconds for the git status probe.
 
     Returns:
         True if working tree is clean
@@ -652,6 +697,7 @@ def is_clean_working_tree(repo_root: Path | None = None) -> bool:
             cwd=repo_root,
             capture_output=True,
             check=True,
+            **_timeout_kw(timeout),
         )
         return len(result.stdout.strip()) == 0
     except subprocess.CalledProcessError:
