@@ -286,6 +286,45 @@ class TestRepoScoping:
         with pytest.raises(RuntimeError, match="gh unavailable"):
             pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).find_pr_for_issue(5)
 
+    def test_repo_scoped_pr_lookup_uses_shared_branch_formatter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The head-branch lookup should consult the shared branch-name formatter."""
+        calls: list[list[str]] = []
+
+        monkeypatch.setattr(
+            pg,
+            "issue_auto_impl_branch_name",
+            lambda issue_number: f"branch-{issue_number}",
+            raising=False,
+        )
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            return SimpleNamespace(stdout=json.dumps([{"number": 5}]))
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        pr_number = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).find_pr_for_issue(7)
+
+        assert pr_number == 5
+        assert calls == [
+            [
+                "pr",
+                "list",
+                "--head",
+                "branch-7",
+                "--state",
+                "open",
+                "--json",
+                "number",
+                "--limit",
+                "1",
+                "--repo",
+                "org/repo-a",
+            ]
+        ]
+
     def test_repo_scoped_unresolved_threads_counts_automation_and_human(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

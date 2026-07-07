@@ -70,6 +70,7 @@ from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .curses_ui import CursesUI
 from .git_utils import (
     commit_if_changes,
+    issue_auto_impl_branch_name,
     issue_ref,
     pr_ref,
     push_branch,
@@ -291,7 +292,7 @@ class AddressReviewer(BaseReviewer):
         session_id = self._load_impl_session_id(issue_number)
         review_state = self._load_review_state(issue_number)
         if review_state is None:
-            branch_name = f"{issue_number}-auto-impl"
+            branch_name = issue_auto_impl_branch_name(issue_number)
             review_state = ReviewState(
                 issue_number=issue_number,
                 pr_number=pr_number,
@@ -299,7 +300,7 @@ class AddressReviewer(BaseReviewer):
             )
         else:
             review_state.pr_number = pr_number
-        branch_name = review_state.branch_name or f"{issue_number}-auto-impl"
+        branch_name = review_state.branch_name or issue_auto_impl_branch_name(issue_number)
 
         self.status_tracker.update_slot(slot_id, f"{issue_ref(issue_number)}: Setting up worktree")
         worktree_path = self._get_or_create_worktree(issue_number, branch_name, review_state)
