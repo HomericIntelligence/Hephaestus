@@ -755,6 +755,34 @@ class TestGitOps:
         assert result.ok is False
         assert result.error == "timeout"
 
+    def test_git_called_process_error_returns_rc_and_tails(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """Git CalledProcessError maps to rc=<n> with stdout/stderr tails."""
+        job = GitJob(
+            repo="test/repo",
+            op="clone",
+            timeout_s=60,
+            kwargs={"repo": "owner/name", "dest": "/tmp/dest"},
+        )
+        exc = subprocess.CalledProcessError(
+            returncode=128,
+            cmd=["gh", "repo", "clone", "owner/name", "/tmp/dest"],
+            output="clone stdout tail",
+            stderr="fatal: repository access denied",
+        )
+
+        with patch("hephaestus.automation.git_utils.run", side_effect=exc):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "rc=128"
+        assert result.stdout_tail == "clone stdout tail"
+        assert result.stderr_tail == "fatal: repository access denied"
+
     def test_unknown_op_fallback(self, pool: WorkerPool) -> None:
         """The defensive unknown-op branch returns an error result.
 

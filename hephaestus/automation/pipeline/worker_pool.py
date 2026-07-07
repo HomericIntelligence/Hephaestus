@@ -443,6 +443,13 @@ class WorkerPool:
                 stdout_tail=str(exc.stdout or "")[-_TAIL:],
                 stderr_tail=str(exc.stderr or "")[-_TAIL:],
             )
+        except subprocess.CalledProcessError as exc:
+            return JobResult(
+                ok=False,
+                error=f"rc={exc.returncode}",
+                stdout_tail=(exc.stdout or "")[-_TAIL:],
+                stderr_tail=(exc.stderr or "")[-_TAIL:],
+            )
 
     def _dispatch_git_op(self, job: GitJob) -> JobResult:
         """Dispatch a git operation to its handler.
