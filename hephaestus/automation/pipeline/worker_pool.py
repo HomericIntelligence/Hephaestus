@@ -13,7 +13,7 @@ import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -34,12 +34,13 @@ from hephaestus.resilience import (
     CircuitBreakerOpenError,
     resilient_call,
 )
-from hephaestus.utils.file_lock import file_lock
+from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from hephaestus.utils.helpers import get_repo_root
 
 logger = logging.getLogger(__name__)
 
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
+_GIT_LOCK_WAIT_POLL_S = 0.1
 
 
 def _repo_lock_path(repo: str, lock_dir: Path | None = None) -> Path:
@@ -71,6 +72,47 @@ class _RepoLockEntry:
 
     lock: threading.Lock
     users: int = 0
+
+
+class _GitLockTimeoutError(TimeoutError):
+    """Raised when a Git job cannot acquire its cross-process repo lock in time."""
+
+
+class _GitLockInterruptedError(RuntimeError):
+    """Raised when shutdown interrupts a Git job while it waits for the repo lock."""
+
+
+@contextmanager
+def _interruptible_file_lock(
+    path: Path,
+    *,
+    shutdown: threading.Event,
+    timeout_s: float,
+) -> Iterator[None]:
+    """Acquire ``path`` without an unbounded blocking flock wait."""
+    deadline = time.monotonic() + max(timeout_s, 0.0)
+
+    while True:
+        if shutdown.is_set():
+            raise _GitLockInterruptedError
+
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(file_lock(path, blocking=False))
+            except LockUnavailableError as exc:
+                now = time.monotonic()
+                if now >= deadline:
+                    raise _GitLockTimeoutError from exc
+
+                wait_s = min(_GIT_LOCK_WAIT_POLL_S, deadline - now)
+                if shutdown.wait(timeout=wait_s):
+                    raise _GitLockInterruptedError from exc
+                continue
+
+            if shutdown.is_set():
+                raise _GitLockInterruptedError
+            yield
+            return
 
 
 class WorkerPool:
@@ -375,9 +417,25 @@ class WorkerPool:
         blocking flock wait to one thread. Both locks are held for the entire
         operation because worktrees share ``.git``.
         """
+        lock_path = _repo_lock_path(job.repo, self._lock_dir)
         try:
-            with self._repo_lock(job.repo), file_lock(_repo_lock_path(job.repo, self._lock_dir)):
+            with (
+                self._repo_lock(job.repo),
+                _interruptible_file_lock(
+                    lock_path,
+                    shutdown=self._shutdown,
+                    timeout_s=job.timeout_s,
+                ),
+            ):
                 return self._dispatch_git_op(job)
+        except _GitLockTimeoutError:
+            return JobResult(ok=False, error="lock_timeout")
+        except _GitLockInterruptedError:
+            return JobResult(
+                ok=False,
+                interrupted=True,
+                error="interrupted_waiting_for_git_lock",
+            )
         except subprocess.TimeoutExpired as exc:
             return JobResult(
                 ok=False,
