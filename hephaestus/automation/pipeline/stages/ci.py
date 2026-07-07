@@ -75,6 +75,7 @@ from hephaestus.automation.ci_run_coordinator import CiConclusion, classify_ci_s
 from hephaestus.automation.session_naming import AGENT_CI_DRIVER
 
 from .base import (
+    BACKOFF_CAP_S as _BACKOFF_CAP_S,
     GIT_JOB_TIMEOUT_S,
     AgentJob,
     Continue,
@@ -94,6 +95,8 @@ from .base import (
 
 logger = logging.getLogger(__name__)
 
+BACKOFF_CAP_S = _BACKOFF_CAP_S
+
 # In-memory mini-states (stage-local strings, never GitHub labels).
 ENTER = "ENTER"
 DISCOVER = "DISCOVER"
@@ -101,10 +104,6 @@ REBASE_WAIT = "REBASE_WAIT"
 POLL = "POLL"
 FIX_WAIT = "FIX_WAIT"
 PUSH_WAIT = "PUSH_WAIT"
-
-#: Poll backoff cap in seconds (legacy ``min(2**attempt, 60)`` —
-#: ``ci_run_coordinator.poll_ci_until_concluded`` :288).
-BACKOFF_CAP_S = 60
 
 #: Historical number of capped-backoff parks that approximately consumed the
 #: default 1200s CI poll budget. Kept as a compatibility constant for callers
