@@ -682,6 +682,18 @@ class TestReadSurface:
 class TestUnresolvedThreads:
     """count_unresolved_threads mirrors #1152: counts only, resolves nothing."""
 
+    def test_count_unresolved_threads_uses_split_helper(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """count_unresolved_threads delegates ownership splitting to _split_threads."""
+        threads = [{"id": "a"}, {"id": "b"}]
+        monkeypatch.setattr(adapter, "_unresolved_threads", lambda n: threads)
+        split = MagicMock(return_value=(3, 4))
+        monkeypatch.setattr(pg, "_split_threads", split)
+
+        assert adapter.count_unresolved_threads(7) == (3, 4)
+        split.assert_called_once_with(threads)
+
     def test_counts_by_ownership(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
