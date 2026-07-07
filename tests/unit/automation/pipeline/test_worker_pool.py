@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import subprocess
@@ -1202,33 +1203,65 @@ class TestOnFutureDone:
         pool._on_future_done(handle, future)
         assert completion_q.empty()
 
-    @pytest.mark.parametrize(
-        "exc",
-        [RuntimeError("boom"), KeyboardInterrupt(), SystemExit(3), GeneratorExit()],
-    )
-    def test_raising_future_emits_worker_crash_completion(
+    def test_exception_future_emits_worker_crash_completion_and_logs_traceback(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
-        exc: BaseException,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Any exception from future.result() becomes a worker_crash result.
+        """RuntimeError from future.result() becomes worker_crash with traceback."""
+        handle = JobHandle(
+            job=BuildTestJob(repo="r", cwd=Path("/tmp"), argv=("true",), timeout_s=1),
+            on_done_state=StageName.CI,
+        )
+        future: Future[JobResult] = Future()
+        future.set_exception(RuntimeError("boom"))
 
-        Guarantees the class contract: a non-cancelled submit never loses its
-        completion, even for BaseException escapes.
-        """
+        with caplog.at_level(logging.INFO, logger=_WP):
+            pool._on_future_done(handle, future)
+
+        got_handle, result = completion_q.get_nowait()
+        assert got_handle is handle
+        assert result.ok is False
+        assert result.error.startswith("worker_crash: RuntimeError")
+        assert any(
+            record.levelno == logging.ERROR and record.exc_info is not None
+            for record in caplog.records
+        )
+
+    @pytest.mark.parametrize(
+        ("exc", "expected_level"),
+        [
+            (KeyboardInterrupt(), logging.WARNING),
+            (SystemExit(3), logging.INFO),
+            (GeneratorExit(), logging.INFO),
+        ],
+    )
+    def test_process_control_future_emits_worker_crash_completion_without_traceback(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        caplog: pytest.LogCaptureFixture,
+        exc: BaseException,
+        expected_level: int,
+    ) -> None:
+        """Process-control escapes stay at lower severity and do not log tracebacks."""
         handle = JobHandle(
             job=BuildTestJob(repo="r", cwd=Path("/tmp"), argv=("true",), timeout_s=1),
             on_done_state=StageName.CI,
         )
         future: Future[JobResult] = Future()
         future.set_exception(exc)
-        pool._on_future_done(handle, future)
+
+        with caplog.at_level(logging.INFO, logger=_WP):
+            pool._on_future_done(handle, future)
 
         got_handle, result = completion_q.get_nowait()
         assert got_handle is handle
         assert result.ok is False
         assert result.error.startswith(f"worker_crash: {type(exc).__name__}")
+        assert any(record.levelno == expected_level for record in caplog.records)
+        assert not any(record.exc_info is not None for record in caplog.records)
 
     def test_raising_future_emits_truncated_worker_crash_completion(
         self,
