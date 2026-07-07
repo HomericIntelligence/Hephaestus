@@ -1,7 +1,10 @@
 """Tests for routing table, stages, and route computation."""
 
+from pathlib import Path
+
 import pytest
 
+import hephaestus.automation.pipeline.routing as routing
 from hephaestus.automation.pipeline import (
     ROUTES,
     Disposition,
@@ -203,6 +206,14 @@ class TestROUTES:
             StageName.FINISHED: Route(next=StageName.FINISHED),
         }
         assert expected == ROUTES
+
+    def test_merge_budget_provenance_uses_stable_source_references(self) -> None:
+        """#1902: merge-budget provenance should not pin volatile line numbers."""
+        assert routing.__file__ is not None
+        source = Path(routing.__file__).read_text(encoding="utf-8")
+        assert "loop_runner.py:" not in source
+        assert "LoopConfig.max_merge_attempts" in source
+        assert "--max-merge-attempts" in source
 
 
 class TestPipelineScope:
