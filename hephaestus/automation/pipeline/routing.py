@@ -54,6 +54,7 @@ class Disposition(str, Enum):
     # "PASS" trips ruff's hardcoded-password heuristic (S105); this is a
     # pipeline disposition, not a credential.
     FINISH_PASS = "finish_pass"  # noqa: S105
+    # terminal fail; no S105 needed
     FINISH_FAIL = "finish_fail"
 
 
