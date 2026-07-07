@@ -405,7 +405,13 @@ class PrReviewStage(Stage):
                     "ci_status": item.payload.get("ci_status", ""),
                     "pr_description": item.payload.get("pr_description", ""),
                     "advise_findings": item.payload.get("advise_findings", ""),
-                    "include_nitpicks": False,
+                    "include_nitpicks": bool(
+                        getattr(
+                            ctx.config,
+                            "nitpick",
+                            getattr(ctx.config, "include_nitpicks", False),
+                        )
+                    ),
                 },
                 parse=parse_review_verdict,  # verdict parsed in-worker
                 descr="review",

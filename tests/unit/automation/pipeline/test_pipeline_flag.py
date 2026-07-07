@@ -15,6 +15,7 @@ import pytest
 
 import hephaestus.automation.loop_runner as loop_runner
 import hephaestus.automation.pipeline.coordinator as coordinator_mod
+from hephaestus.automation.pipeline.routing import StageName
 
 
 @pytest.fixture
@@ -98,6 +99,50 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
     assert config.dry_run is True
     assert config.no_advise is True
     assert config.nitpick is True
+    assert config.scope is None
+
+
+def test_build_pipeline_config_maps_plan_phase_to_planning_scope(
+    dispatch: dict[str, MagicMock],
+) -> None:
+    """A planning-only top-level run must stop after plan_review."""
+    loop_runner.main(["--issues", "11", "--phases", "plan"])
+
+    (config,) = dispatch["run_pipeline"].call_args.args
+    assert config.scope is not None
+    assert config.scope.stages == frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})
+
+
+def test_build_pipeline_config_maps_implement_phase_to_review_scope(
+    dispatch: dict[str, MagicMock],
+) -> None:
+    """The implement phase owns implementation plus PR review."""
+    loop_runner.main(["--issues", "11", "--phases", "implement"])
+
+    (config,) = dispatch["run_pipeline"].call_args.args
+    assert config.scope is not None
+    assert config.scope.stages == frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW})
+
+
+def test_build_pipeline_config_maps_drive_green_phase_to_ci_scope(
+    dispatch: dict[str, MagicMock],
+) -> None:
+    """The drive-green phase owns CI classification plus merge wait."""
+    loop_runner.main(["--issues", "11", "--phases", "drive-green"])
+
+    (config,) = dispatch["run_pipeline"].call_args.args
+    assert config.scope is not None
+    assert config.scope.stages == frozenset({StageName.CI, StageName.MERGE_WAIT})
+
+
+def test_build_pipeline_config_maps_max_merge_attempts_to_budget(
+    dispatch: dict[str, MagicMock],
+) -> None:
+    """The loop CLI's merge-attempt flag must tune the merge_wait budget."""
+    loop_runner.main(["--max-merge-attempts", "3"])
+
+    (config,) = dispatch["run_pipeline"].call_args.args
+    assert config.budget_overrides["merge"] == 3
 
 
 def test_build_pipeline_config_maps_agent_and_models(

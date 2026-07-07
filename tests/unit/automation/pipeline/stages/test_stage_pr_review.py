@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 from hephaestus.automation.claude_invoke import ReviewVerdict, parse_review_verdict
@@ -162,6 +163,20 @@ class TestPrReviewStageStep:
         assert result.job.parse is parse_review_verdict  # verdict parsed in-worker
         assert result.job.prompt_kwargs["pr_number"] == 1001
         assert item.attempts["pr_review_iter"] == 0  # submission burns nothing
+
+    def test_review_wait_forwards_nitpick_config(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """--nitpick must reach the strict PR-review prompt."""
+        stage = PrReviewStage()
+        ctx = make_ctx(config=SimpleNamespace(agent="claude", nitpick=True))
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.prompt_kwargs["include_nitpicks"] is True
 
     def test_review_wait_clears_stale_round_payload(
         self, make_ctx: Any, make_work_item: Any

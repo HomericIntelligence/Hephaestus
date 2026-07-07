@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from hephaestus.automation.pipeline.coordinator import PipelineConfig
+    from hephaestus.automation.pipeline.routing import PipelineScope
 
 from hephaestus.agents.runtime import resolve_agent
 from hephaestus.automation._review_utils import build_automation_parser
@@ -396,6 +397,34 @@ def _phase_order_warnings(cfg: LoopConfig) -> list[str]:
     return warnings
 
 
+def _pipeline_scope_for_phases(phases: tuple[str, ...]) -> PipelineScope | None:
+    """Translate top-level phase names into a contiguous pipeline scope.
+
+    ``None`` preserves the default full pipeline, including repo discovery.
+    Partial selections use the same stage ownership as the focused wrapper
+    CLIs: plan = planning+plan_review, implement = implementation+pr_review,
+    drive-green = ci+merge_wait.
+    """
+    selected = set(phases)
+    if selected == set(ALL_SELECTABLE):
+        return None
+
+    from hephaestus.automation.pipeline.routing import PipelineScope, StageName
+
+    stage_sets = {
+        "plan": (StageName.PLANNING, StageName.PLAN_REVIEW),
+        "implement": (StageName.IMPLEMENTATION, StageName.PR_REVIEW),
+        "drive-green": (StageName.CI, StageName.MERGE_WAIT),
+    }
+    stages = frozenset(
+        stage for phase in ALL_SELECTABLE if phase in selected for stage in stage_sets[phase]
+    )
+    try:
+        return PipelineScope(stages)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 # ---------------------------------------------------------------------------
 # Repo discovery — re-exported from loop_repo_manager (refs #1360 / #1179).
 # The helpers above are imported at module level with explicit ``as`` aliases,
@@ -546,8 +575,10 @@ def _build_pipeline_config(
         no_advise=cfg.no_advise,
         nitpick=cfg.nitpick,
         drive_green_all=cfg.drive_green_all,
+        budget_overrides={"merge": cfg.max_merge_attempts},
         projects_dir=cfg.projects_dir,
         json_out=args.json,
+        scope=_pipeline_scope_for_phases(cfg.phases),
     )
 
 
