@@ -146,30 +146,41 @@ class SeedEntry:
 
 
 def _get_state_label(labels: set[str]) -> str | None:
-    """Extract the single active ``state:*`` label, or None when absent.
+    """Extract the single active known ``state:*`` label, or None when absent.
 
-    Contradictory combinations (multiple ``state:*`` labels) resolve
+    Contradictory combinations (multiple known ``state:*`` labels) resolve
     deterministically to the HIGHEST-rank (latest-stage) label and emit a
-    warning — they never return None.
+    warning. Unknown ``state:*`` labels are ignored after warning because they
+    have no rank in the automation state machine.
 
     Args:
         labels: Set of label names on an issue.
 
     Returns:
-        The state label; the highest-rank one when contradictory; None only
-        when no ``state:*`` label is present.
+        The known state label; the highest-rank one when contradictory; None
+        only when no known ``state:*`` label is present.
 
     """
-    state_labels = [lbl for lbl in labels if lbl.startswith("state:")]
+    state_labels = sorted(lbl for lbl in labels if lbl.startswith("state:"))
     if not state_labels:
         return None
-    if len(state_labels) > 1:
+
+    known_state_labels = [lbl for lbl in state_labels if lbl in _LABEL_RANK]
+    unknown_state_labels = [lbl for lbl in state_labels if lbl not in _LABEL_RANK]
+    if unknown_state_labels:
+        LOG.warning("Issue has unknown state labels ignored: %s", unknown_state_labels)
+
+    if not known_state_labels:
+        return None
+
+    if len(known_state_labels) > 1:
         LOG.warning(
-            "Issue has contradictory state labels: %s (using highest rank)", sorted(state_labels)
+            "Issue has contradictory state labels: %s (using highest rank)",
+            known_state_labels,
         )
         # Return the highest-rank (latest-stage) label when contradictory.
-        return max(state_labels, key=lambda lbl: _LABEL_RANK.get(lbl, -1))
-    return state_labels[0]
+        return max(known_state_labels, key=_LABEL_RANK.__getitem__)
+    return known_state_labels[0]
 
 
 def _label_at_or_past(label: str | None, target: str) -> bool:

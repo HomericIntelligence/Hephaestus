@@ -184,6 +184,32 @@ class TestClassifyIssue:
         assert stage is StageName.IMPLEMENTATION
         assert any("contradictory state labels" in record.message for record in caplog.records)
 
+    def test_unknown_state_labels_are_ignored_and_logged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Unknown-only state labels behave like no known state label."""
+        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.pipeline.seeding"):
+            stage, reason = classify_issue(_facts(labels={"state:foo", "state:bar"}))
+
+        assert stage is StageName.PLANNING
+        assert STATE_NEEDS_PLAN in reason
+        assert any("unknown state labels ignored" in record.message for record in caplog.records)
+        assert any(
+            "state:foo" in record.message and "state:bar" in record.message
+            for record in caplog.records
+        )
+
+    def test_unknown_state_label_does_not_displace_known_rank(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Known state labels remain the only candidates for highest-rank routing."""
+        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.pipeline.seeding"):
+            stage, _reason = classify_issue(_facts(labels={STATE_PLAN_GO, "state:zzz"}))
+
+        assert stage is StageName.IMPLEMENTATION
+        assert any("unknown state labels ignored" in record.message for record in caplog.records)
+        assert not any("contradictory state labels" in record.message for record in caplog.records)
+
 
 _STATE_LABEL_SETS: tuple[frozenset[str], ...] = (
     frozenset(),
