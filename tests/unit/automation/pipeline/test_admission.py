@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.automation.models import IssueInfo
+from hephaestus.automation.pipeline import admission
 from hephaestus.automation.pipeline.admission import (
     _filter_open_issues,
     _parse_planned_files,
@@ -76,6 +77,17 @@ class TestParsePlannedFiles:
         """## Files to Modify/Create headings are case-insensitive."""
         body = "# Implementation Plan\n\n## FILES TO MODIFY\n\n- `hephaestus/automation/test.py`\n"
         assert _parse_planned_files(body) == {"hephaestus/automation/test.py"}
+
+
+class TestCoordinatorCapOwnership:
+    """Traceability guard for the deferred per-repo cap."""
+
+    def test_admission_docstring_cross_references_coordinator_admit(self) -> None:
+        """The deferred cap is intentionally owned by Coordinator._admit."""
+        assert (
+            ":meth:`~hephaestus.automation.pipeline.coordinator.Coordinator._admit`"
+            in (admission.__doc__ or "")
+        )
 
 
 class TestFetchPlannedFiles:
