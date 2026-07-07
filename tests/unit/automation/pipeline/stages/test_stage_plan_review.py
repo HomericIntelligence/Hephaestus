@@ -12,6 +12,7 @@ from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.plan_review import (
+    PLAN_FINISH,
     REVIEW_ERROR_RETRY_CAP,
     PlanReviewStage,
     build_amend_prompt,
@@ -386,15 +387,15 @@ class TestPlanReviewStageStep:
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)  # narrow the job union
-        assert result.on_done_state == "FINISH"
+        assert result.on_done_state == PLAN_FINISH
         assert result.job.descr == "learn"
         assert result.job.prompt_kwargs == {"context": "# My Plan\n..."}
 
     def test_finish_advances(self, make_ctx: Any, make_work_item: Any) -> None:
-        """FINISH advances to the next stage."""
+        """PLAN_FINISH advances to the next stage."""
         stage = PlanReviewStage()
         ctx = make_ctx()
-        item = make_work_item(issue=12, state="FINISH")
+        item = make_work_item(issue=12, state=PLAN_FINISH)
 
         result = stage.step(item, ctx)
 
@@ -785,7 +786,7 @@ class TestReviewFlowWithFakePool:
         """Full pool-driven walk of the whole stage.
 
         ENTER -> REVIEW -> EVAL(NOGO) -> AMEND -> REVIEW -> EVAL(GO) ->
-        LEARN -> FINISH -> ADVANCE.
+        LEARN -> PLAN_FINISH -> ADVANCE.
         """
         from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 

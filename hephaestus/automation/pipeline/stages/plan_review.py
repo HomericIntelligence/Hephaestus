@@ -6,7 +6,8 @@ binding contract). It fully owns the review/amend/learn loop that the legacy
 planner review loop used to run before ``hephaestus-plan-issues`` was
 re-pointed at the pipeline (#1820):
 
-- States: ENTER -> REVIEW_WAIT -> EVAL -> AMEND_WAIT -> (loop) -> LEARN_WAIT.
+- States: ENTER -> REVIEW_WAIT -> EVAL -> AMEND_WAIT -> (loop) -> LEARN_WAIT
+  -> PLAN_FINISH.
 - Budgets: ``plan_review_iter`` = 3 (max review iterations per cycle),
   ``plan_cycles`` = 2 (max plan->review->amend cycles before giving up).
 - Iteration accounting: ``item.attempts["plan_review_iter"]`` is the
@@ -81,6 +82,15 @@ from .base import (
 from .planning import build_plan_prompt
 
 logger = logging.getLogger(__name__)
+
+# In-memory mini-states (stage-local strings, never GitHub labels).
+ENTER = "ENTER"
+REVIEW_WAIT = "REVIEW_WAIT"
+EVAL = "EVAL"
+AMEND_WAIT = "AMEND_WAIT"
+LEARN_WAIT = "LEARN_WAIT"
+PLAN_FINISH = "PLAN_FINISH"
+FINISH = PLAN_FINISH
 
 #: Max CONSECUTIVE reviewer-infrastructure failures (ERROR verdicts or
 #: failed/valueless review jobs) tolerated before the item FINISH_FAILs.
@@ -292,9 +302,9 @@ class PlanReviewStage(Stage):
                 prompt_kwargs={"context": item.payload.get("plan_text", "")},
                 descr="learn",
             )
-            return JobRequest(job, on_done_state="FINISH")
+            return JobRequest(job, on_done_state=PLAN_FINISH)
 
-        if item.state == "FINISH":
+        if item.state == PLAN_FINISH:
             logger.info("plan_review:%d: learn completed; advancing", item.issue)
             return StageOutcome(Disposition.ADVANCE, "plan approved and learned")
 
