@@ -121,7 +121,7 @@ causes a queue push.
 1. [M] on_enter: fast-forward check (if at-or-past `state:plan-go` →
    ADVANCE; if `state:skip` → SKIP).
 2. [W:A] **Advise step** — `prompts/advise.py:130 get_advise_prompt_builder`.
-3. [W:A] **Plan step** — `prompts/planning.py:223 get_plan_prompt` (session:
+3. [W:A] **Plan step** — `prompts/planning.py:232 get_plan_prompt` (session:
    repo, issue, planner model; plan comment = durable artifact).
 4. [M] Verify plan comment exists (check `PlannerStateManager`) → ADVANCE or
    RETRY.
@@ -137,7 +137,7 @@ causes a queue push.
 **Prompt functions**:
 
 - `prompts/advise.py:130 get_advise_prompt_builder`
-- `prompts/planning.py:223 get_plan_prompt`
+- `prompts/planning.py:232 get_plan_prompt`
 
 ### 3. plan_review
 
@@ -145,7 +145,7 @@ causes a queue push.
 
 **Steps**:
 
-1. [W:A] **Review step** — `prompts/planning.py:261 get_plan_loop_review_prompt`;
+1. [W:A] **Review step** — `prompts/planning.py:270 get_plan_loop_review_prompt`;
    verdict parsed in-worker by `claude_invoke.parse_review_verdict` (GO,
    NOGO, AMBIGUOUS, ERROR).
 2. [M] **EVAL**: if GO → apply `state:plan-go` label [durable] → ADVANCE; if
@@ -171,7 +171,7 @@ causes a queue push.
 
 **Prompt functions**:
 
-- `prompts/planning.py:261 get_plan_loop_review_prompt`
+- `prompts/planning.py:270 get_plan_loop_review_prompt`
 - `learn.py:111 build_learn_prompt`
 
 ### 4. implementation
@@ -189,10 +189,10 @@ per-repo in-flight cap.
    fast path (per `_review_existing_pr` semantics) → skip to step 8.
 2. [W:G] Create/refresh worktree (`worktree_manager.create_worktree(
    refresh_base=True)`).
-3. [W:A] **Dirty worktree decision** — `prompts/implementation.py:280
+3. [W:A] **Dirty worktree decision** — `prompts/implementation.py:293
    get_dirty_reused_worktree_decision_prompt`.
 4. [W:A] **Advise step**.
-5. [W:A] **Implement step** — `prompts/implementation.py:198
+5. [W:A] **Implement step** — `prompts/implementation.py:211
    get_implementation_prompt`.
 6. [W:B] **Test step** (optional) — `_run_tests_in_worktree` (`pixi run
    pytest`); on failure, RETRY with budget test_fix.
@@ -215,8 +215,8 @@ per-repo in-flight cap.
 
 **Prompt functions**:
 
-- `prompts/implementation.py:280 get_dirty_reused_worktree_decision_prompt`
-- `prompts/implementation.py:198 get_implementation_prompt`
+- `prompts/implementation.py:293 get_dirty_reused_worktree_decision_prompt`
+- `prompts/implementation.py:211 get_implementation_prompt`
 - `prompts/pr_review.py:339 get_pr_description`
 
 ### 5. pr_review
@@ -235,7 +235,7 @@ ADDRESS_WAIT → PUSH_WAIT → EVAL → (loop) → FOLLOWUP_WAIT.
 4. [W:A] **Difficulty step** — `prompts/pr_review.py:310
    get_comment_difficulty_prompt`.
 5. [W:A] **Address step**: if fresh PR → resume implementer with
-   `prompts/implementation.py:323 get_impl_resume_feedback_prompt`; if
+   `prompts/implementation.py:336 get_impl_resume_feedback_prompt`; if
    existing-PR path → `prompts/address_review.py:181
    get_address_review_prompt`.
 6. [W:G] Push (commit+force-push addressing changes).
@@ -269,7 +269,7 @@ unresolved-thread count decreases).
 - `prompts/pr_review.py:104 get_pr_review_analysis_prompt`
 - `prompts/pr_review.py:232 get_review_validation_prompt`
 - `prompts/pr_review.py:310 get_comment_difficulty_prompt`
-- `prompts/implementation.py:323 get_impl_resume_feedback_prompt`
+- `prompts/implementation.py:336 get_impl_resume_feedback_prompt`
 - `prompts/address_review.py:181 get_address_review_prompt`
 - `prompts/follow_up.py:105 get_follow_up_prompt`
 
@@ -291,8 +291,8 @@ unresolved-thread count decreases).
    `tests/unit/automation/pipeline/stages/test_classify_ci_state.py`. It returns
    PENDING, GREEN, FAILING, or terminal states. If PENDING → RETRY with timer
    backoff; if GREEN → ADVANCE; if FAILING → step 4.
-4. [W:A] **CI fix step** (budget ci_fix = 1) — `ci_fix_orchestrator.py:483
-   build_ci_fix_prompt`; escalation via `ci_fix_orchestrator.py:147
+4. [W:A] **CI fix step** (budget ci_fix = 1) — `ci_fix_orchestrator.py:498
+   build_ci_fix_prompt`; escalation via `ci_fix_orchestrator.py:148
    force_engagement_prompt`.
 5. [W:G] Push fix commit(s).
 6. Loop back to step 3 (POLL).
@@ -310,8 +310,8 @@ force_engagement), `rebase` = 2 (max mechanical rebase attempts).
 
 **Prompt functions**:
 
-- `ci_fix_orchestrator.py:483 build_ci_fix_prompt`
-- `ci_fix_orchestrator.py:147 force_engagement_prompt`
+- `ci_fix_orchestrator.py:498 build_ci_fix_prompt`
+- `ci_fix_orchestrator.py:148 force_engagement_prompt`
 
 ### 7. merge_wait
 
