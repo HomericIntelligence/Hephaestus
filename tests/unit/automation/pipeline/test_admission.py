@@ -85,9 +85,8 @@ class TestCoordinatorCapOwnership:
 
     def test_admission_docstring_cross_references_coordinator_admit(self) -> None:
         """The deferred cap is intentionally owned by Coordinator._admit."""
-        assert (
-            ":meth:`~hephaestus.automation.pipeline.coordinator.Coordinator._admit`"
-            in (admission.__doc__ or "")
+        assert ":meth:`~hephaestus.automation.pipeline.coordinator.Coordinator._admit`" in (
+            admission.__doc__ or ""
         )
 
 

@@ -25,7 +25,7 @@ def _utcnow() -> datetime:
 
 def _default_attempts() -> dict[str, int]:
     """Return zeroed per-item-lifetime counters, one per budget key."""
-    return {key: 0 for key in budget_keys()}
+    return dict.fromkeys(budget_keys(), 0)
 
 
 class ItemKind(str, Enum):
