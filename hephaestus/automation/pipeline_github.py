@@ -73,6 +73,17 @@ logger = logging.getLogger(__name__)
 _CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
 
 
+def _split_threads(threads: list[dict[str, Any]]) -> tuple[int, int]:
+    """Return ``(automation_unresolved, human_unresolved)`` for unresolved threads."""
+    if not threads:
+        return (0, 0)
+    current_login = github_api.gh_current_login()
+    automation = sum(
+        1 for thread in threads if _is_automation_owned_thread(thread, current_login)
+    )
+    return automation, len(threads) - automation
+
+
 def rate_limit_remaining() -> tuple[int, int] | None:
     """Return ``(remaining, reset_epoch)`` for the GraphQL budget, or ``None``.
 
@@ -606,12 +617,7 @@ class PipelineGitHub:
         open on fetch errors; repo-scoped pipeline runs query the configured
         repo directly so unresolved human threads are not hidden.
         """
-        threads = self._unresolved_threads(pr_number)
-        if not threads:
-            return (0, 0)
-        current_login = github_api.gh_current_login()
-        automation = sum(1 for t in threads if _is_automation_owned_thread(t, current_login))
-        return (automation, len(threads) - automation)
+        return _split_threads(self._unresolved_threads(pr_number))
 
     def count_unresolved_threads_by_severity(self, pr_number: int) -> tuple[int, int, int]:
         """Return ``(blocking_automation, minor_automation, human)`` (#1856).
