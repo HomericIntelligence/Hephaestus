@@ -287,6 +287,7 @@ class TestDiscover:
         products = repo_item.payload["products"]
         stages = {p["number"]: p["stage"] for p in products}
         assert stages == {1: StageName.PLANNING, 2: StageName.IMPLEMENTATION}
+        assert repo_item.payload["seeded_count"] == 2
 
     def test_epics_tagged_durably_before_exclusion(
         self,
@@ -407,20 +408,23 @@ class TestDiscover:
         assert result.disposition is Disposition.FINISH_FAIL
         assert "discovery failed" in result.note
 
-    def test_seeded_finishes_pass_with_count(self, repo_item: WorkItem, repo_ctx: Any) -> None:
-        """Terminal: FINISH_PASS(seeded:N) counting only queued products."""
+    def test_seeded_finishes_pass_with_cached_count(
+        self, repo_item: WorkItem, repo_ctx: Any
+    ) -> None:
+        """Terminal: FINISH_PASS(seeded:N) uses the cached discovery count."""
         repo_item.state = "SEEDED"
         repo_item.payload["products"] = [
             {"number": 1, "stage": StageName.PLANNING, "reason": "r"},
             {"number": 2, "stage": None, "reason": "excluded"},
             {"number": 3, "stage": StageName.CI, "reason": "r"},
         ]
+        repo_item.payload["seeded_count"] = 1
 
         result = RepoStage().step(repo_item, repo_ctx)
 
         assert isinstance(result, StageOutcome)
         assert result.disposition is Disposition.FINISH_PASS
-        assert result.note == "seeded:2"
+        assert result.note == "seeded:1"
 
     def test_unknown_state_finishes_failed(self, repo_item: WorkItem, repo_ctx: Any) -> None:
         repo_item.state = "BOGUS"
