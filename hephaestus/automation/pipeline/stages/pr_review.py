@@ -562,8 +562,8 @@ class PrReviewStage(Stage):
         Zero open automation threads skip the address leg straight to EVAL
         (the legacy zero-thread guard — nothing to classify or address).
         """
-        if item.pr is None:  # guarded by step(); kept for type narrowing
-            return self._fail_back_agent_error(item)
+        if item.pr is None:  # guarded by step(); kept for restart safety
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         raw_threads = [dict(t) for t in item.payload.get("review_threads") or []]
         threads = _surviving_threads(raw_threads, item.payload.get("validation_result"))
         item.payload["raw_review_threads"] = raw_threads
@@ -599,8 +599,8 @@ class PrReviewStage(Stage):
         leg is the designated recovery (bounded by the M1 agent_error
         budget consumption).
         """
-        if item.pr is None:  # guarded by step(); kept for type narrowing
-            return self._fail_back_agent_error(item)
+        if item.pr is None:  # guarded by step(); kept for restart safety
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         if not item.worktree:
             logger.warning(
                 "pr_review:%s: no worktree for the address step; failing back "
@@ -661,8 +661,10 @@ class PrReviewStage(Stage):
         and cycle-relative ``payload`` gate) advance here, and only for real
         verdicts — never for ERROR or missing verdicts (#911/#1554/#1794).
         """
-        if item.pr is None or item.issue is None:  # guarded by step(); narrowing
-            return self._fail_back_agent_error(item)
+        if item.pr is None:  # guarded by step(); kept for restart safety
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        if item.issue is None:  # guarded by step(); kept for type narrowing
+            return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
         payload = item.payload
 
         address_error = self._handle_address_error(item)

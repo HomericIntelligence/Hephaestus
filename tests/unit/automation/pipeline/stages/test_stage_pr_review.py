@@ -5,6 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from hephaestus.automation.claude_invoke import ReviewVerdict, parse_review_verdict
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
@@ -390,6 +392,33 @@ class TestPrReviewStageStep:
 
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.FINISH_FAIL
+
+
+class TestPrReviewRestartSafetyGuards:
+    """Unreachable PR-narrowing guards use the restart-safety no_pr contract."""
+
+    @pytest.mark.parametrize(
+        ("method_name", "state"),
+        [
+            pytest.param("_post", "POST", id="post"),
+            pytest.param("_address", "ADDRESS_WAIT", id="address"),
+            pytest.param("_eval", "EVAL", id="eval"),
+        ],
+    )
+    def test_unreachable_pr_none_guards_finish_no_pr(
+        self, make_ctx: Any, make_work_item: Any, method_name: str, state: str
+    ) -> None:
+        """Direct calls to the unreachable guards finish failed with no_pr."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=None, state=state)
+
+        result = getattr(stage, method_name)(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        assert "agent_error_failback" not in item.payload
+        assert github.mutation_log == []
 
 
 class TestEvalVerdicts:
