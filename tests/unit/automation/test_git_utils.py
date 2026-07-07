@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+import hephaestus.automation.git_utils as git_utils
 from hephaestus.automation.git_utils import (
     _commit_policy_rebase_command,
     _remove_untracked_files_tracked_by_ref,
@@ -169,6 +170,18 @@ class TestGetRepoInfo:
         # Next call should invoke run() again
         get_repo_info(repo_root)
         assert git_utils_mocks.run.call_count == 2
+
+
+class TestIssueAutoImplBranchName:
+    """Tests for the canonical issue auto-implementation branch formatter."""
+
+    def test_returns_canonical_branch_name(self) -> None:
+        """Issue branches must use the shared ``<issue>-auto-impl`` formatter."""
+        branch_name = getattr(
+            git_utils, "issue_auto_impl_branch_name", lambda issue_number: "missing"
+        )(123)
+
+        assert branch_name == "123-auto-impl"
 
 
 class TestCommitIfChanges:

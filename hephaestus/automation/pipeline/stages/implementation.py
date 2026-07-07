@@ -77,7 +77,11 @@ from hephaestus.automation.prompts.implementation import (
     get_implementation_prompt,
 )
 from hephaestus.automation.prompts.pr_review import get_pr_description
-from hephaestus.automation.session_naming import AGENT_ADVISE, AGENT_IMPLEMENTER
+from hephaestus.automation.session_naming import (
+    AGENT_ADVISE,
+    AGENT_IMPLEMENTER,
+    issue_auto_impl_branch_name,
+)
 from hephaestus.automation.state_labels import (
     STATE_SKIP,
     is_implementation_go,
@@ -708,7 +712,7 @@ class ImplementationStage(Stage):
             return StageOutcome(Disposition.FAIL_BACK, "plan_not_go")
 
         if not item.branch:
-            item.branch = f"{item.issue}-auto-impl"
+            item.branch = issue_auto_impl_branch_name(item.issue)
         return Continue(next_state=WORKTREE_WAIT)
 
     def _create_pr(self, item: WorkItem, ctx: StageContext) -> StageOutcome:

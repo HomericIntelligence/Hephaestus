@@ -39,6 +39,7 @@ from hephaestus.automation._review_utils import (
     find_pr_for_issue,
     get_pr_head_branch,
 )
+from hephaestus.automation.git_utils import issue_auto_impl_branch_name
 from hephaestus.automation.arming_state import ArmingStateStore
 from hephaestus.automation.ci_check_inspector import CICheckInspector
 from hephaestus.automation.prompts.pr_review import (
@@ -331,7 +332,7 @@ class PipelineGitHub:
             )
 
     def _find_pr_for_issue(self, issue_number: int, *, state: str) -> int | None:
-        branch_name = f"{issue_number}-auto-impl"
+        branch_name = issue_auto_impl_branch_name(issue_number)
         result = self._gh(
             [
                 "pr",
