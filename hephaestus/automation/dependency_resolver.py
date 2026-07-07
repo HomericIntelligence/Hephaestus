@@ -62,7 +62,17 @@ class DependencyResolver:
         """
         self.graph.add_issue(issue)
         for dep in issue.dependencies:
-            self.graph.add_dependency(issue.number, dep)
+            self.add_dependency(issue.number, dep)
+
+    def add_dependency(self, issue_number: int, depends_on: int) -> None:
+        """Add a dependency edge to the resolver's graph.
+
+        Args:
+            issue_number: Issue that depends on another issue.
+            depends_on: Issue that must complete first.
+
+        """
+        self.graph.add_dependency(issue_number, depends_on)
 
     def load_epic(self, epic_number: int) -> None:
         """Load an epic issue and all its sub-issues.
