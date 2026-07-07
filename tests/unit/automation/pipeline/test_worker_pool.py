@@ -275,11 +275,14 @@ class TestAgentErrorHandling:
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """An unexpected exception inside the job maps to an error result."""
+        """An unexpected exception inside the job is bounded by the shared cap."""
+        small_err_max = 40
+        monkeypatch.setattr(f"{_WP}._ERR_MAX", small_err_max)
 
         def exploding_builder() -> str:
-            raise RuntimeError("prompt builder exploded")
+            raise RuntimeError("prompt builder exploded " + ("x" * 200))
 
         job = _agent_job(model="model-generic-exc", prompt_builder=exploding_builder)
 
@@ -288,8 +291,9 @@ class TestAgentErrorHandling:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert "RuntimeError" in result.error
-        assert "prompt builder exploded" in result.error
+        assert result.error is not None
+        assert result.error.startswith("RuntimeError: ")
+        assert len(result.error) == small_err_max
 
     def test_run_agent_classifies_resolve_agent_exception(
         self,
@@ -318,6 +322,24 @@ class TestAgentErrorHandling:
         assert result.ok is False
         assert "KeyError" in (result.error or "")
         assert "prompt-template" in (result.error or "")
+
+    def test_run_converts_escaping_exception_to_bounded_error(
+        self,
+        pool: WorkerPool,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Exceptions escaping _run_agent are still capped in _run."""
+        small_err_max = 40
+        monkeypatch.setattr(f"{_WP}._ERR_MAX", small_err_max)
+        job = _agent_job(model="model-run-generic", prompt_builder=lambda: "prompt")
+
+        with patch.object(pool, "_run_agent", side_effect=RuntimeError("z" * 200)):
+            result = pool._run(job)
+
+        assert result.ok is False
+        assert result.error is not None
+        assert result.error.startswith("RuntimeError: ")
+        assert len(result.error) == small_err_max
 
     def test_run_agent_classifies_resilient_call_exception(self, pool: WorkerPool) -> None:
         """Unexpected resilience-wrapper failures are classified inside _run_agent."""
@@ -391,11 +413,14 @@ class TestParse:
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Parse callable raises -> error result."""
+        """Parse callable failures are bounded by the shared cap."""
+        small_err_max = 40
+        monkeypatch.setattr(f"{_WP}._ERR_MAX", small_err_max)
 
         def bad_parser(text: str) -> object:
-            raise ValueError("parse failed")
+            raise ValueError("parse failed " + ("y" * 200))
 
         job = _agent_job(prompt_builder=lambda: "prompt", parse=bad_parser)
 
@@ -408,7 +433,9 @@ class TestParse:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert "parse failed" in result.error
+        assert result.error is not None
+        assert result.error.startswith("parse failed: ValueError: ")
+        assert len(result.error) == small_err_max
 
 
 class TestInterruptedPostCheck:
@@ -1199,3 +1226,28 @@ class TestOnFutureDone:
         assert got_handle is handle
         assert result.ok is False
         assert result.error.startswith(f"worker_crash: {type(exc).__name__}")
+
+    def test_raising_future_emits_truncated_worker_crash_completion(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A worker crash message longer than the cap is truncated once."""
+        small_err_max = 40
+        monkeypatch.setattr(f"{_WP}._ERR_MAX", small_err_max)
+        handle = JobHandle(
+            job=BuildTestJob(repo="r", cwd=Path("/tmp"), argv=("true",), timeout_s=1),
+            on_done_state=StageName.CI,
+        )
+        future: Future[JobResult] = Future()
+        future.set_exception(RuntimeError("w" * 200))
+
+        pool._on_future_done(handle, future)
+
+        got_handle, result = completion_q.get_nowait()
+        assert got_handle is handle
+        assert result.ok is False
+        assert result.error is not None
+        assert result.error.startswith("worker_crash: RuntimeError: ")
+        assert len(result.error) == small_err_max

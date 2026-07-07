@@ -40,6 +40,7 @@ from hephaestus.utils.helpers import get_repo_root
 logger = logging.getLogger(__name__)
 
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
+_ERR_MAX = 500  # chars of error detail retained in a JobResult
 _GIT_LOCK_WAIT_POLL_S = 0.1
 
 
@@ -231,7 +232,7 @@ class WorkerPool:
             logger.exception("Worker future raised; converting to worker_crash result")
             result = JobResult(
                 ok=False,
-                error=f"worker_crash: {type(exc).__name__}: {exc!s}"[:500],
+                error=f"worker_crash: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
             )
         self._completion_q.put((handle, result))
 
@@ -271,7 +272,7 @@ class WorkerPool:
                 logger.exception("Job %s raised, returning error result", job)
                 result = JobResult(
                     ok=False,
-                    error=f"{type(exc).__name__}: {exc!s}"[:500],
+                    error=f"{type(exc).__name__}: {exc!s}"[:_ERR_MAX],
                 )
 
             # Mandatory post-check: SIGINT to the process group makes subprocess
@@ -351,7 +352,7 @@ class WorkerPool:
                     logger.exception("Parse callable raised for agent job")
                     return JobResult(
                         ok=False,
-                        error=f"parse failed: {type(exc).__name__}: {exc!s}"[:500],
+                        error=f"parse failed: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
                         stdout_tail=stdout[-_TAIL:],
                     )
 
@@ -376,7 +377,7 @@ class WorkerPool:
             logger.exception("Agent job raised, returning error result")
             return JobResult(
                 ok=False,
-                error=f"{type(exc).__name__}: {exc!s}"[:500],
+                error=f"{type(exc).__name__}: {exc!s}"[:_ERR_MAX],
             )
 
     def _run_build_test(self, job: BuildTestJob) -> JobResult:
