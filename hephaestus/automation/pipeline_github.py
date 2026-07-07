@@ -925,7 +925,7 @@ class PipelineGitHub:
             )
             data = json.loads(result.stdout or "{}")
             if data.get("autoMergeRequest") is not None:
-                self._gh(["pr", "merge", str(pr_number), "--disable-auto"])
+                self._gh(["pr", "merge", str(pr_number), "--disable-auto"], check=False)
             return
         pr_manager.ensure_pr_auto_merge_deferred(pr_number)
 
@@ -934,7 +934,7 @@ class PipelineGitHub:
         if self._skip(f"arm auto-merge on PR #{pr_number}"):
             return
         if self._repo_slug is not None:
-            self._gh(["pr", "merge", str(pr_number), "--auto", "--squash"])
+            self._gh(["pr", "merge", str(pr_number), "--auto", "--squash"], check=False)
             return
         pr_manager.enable_auto_merge_after_implementation_go(pr_number)
 

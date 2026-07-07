@@ -420,6 +420,58 @@ class TestRepoScoping:
         assert any("repos/org/repo-a/pulls/7/reviews" in call for call in calls)
 
 
+class TestRepoScopedAutoMerge:
+    """Repo-scoped auto-merge mutations are idempotent under racing workers."""
+
+    def test_defer_auto_merge_disables_with_check_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append((argv, kwargs))
+            if argv[:2] == ["pr", "view"]:
+                return SimpleNamespace(
+                    stdout=json.dumps({"autoMergeRequest": {"enabledAt": "now"}})
+                )
+            return SimpleNamespace(stdout="", returncode=1, stderr="already disabled")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).defer_auto_merge(7)
+
+        assert calls == [
+            (
+                ["pr", "view", "7", "--json", "autoMergeRequest", "--repo", "org/repo-a"],
+                {"check": False},
+            ),
+            (
+                ["pr", "merge", "7", "--disable-auto", "--repo", "org/repo-a"],
+                {"check": False},
+            ),
+        ]
+
+    def test_arm_auto_merge_arms_with_check_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append((argv, kwargs))
+            return SimpleNamespace(stdout="", returncode=1, stderr="already enabled")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).arm_auto_merge(7)
+
+        assert calls == [
+            (
+                ["pr", "merge", "7", "--auto", "--squash", "--repo", "org/repo-a"],
+                {"check": False},
+            )
+        ]
+
+
 class TestCreatePr:
     """create_pr: idempotent reuse, given-body create, dry-run neutral."""
 
