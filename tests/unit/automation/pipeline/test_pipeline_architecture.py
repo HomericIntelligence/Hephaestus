@@ -11,6 +11,9 @@ non-obvious mutators such as ``skip_epics``, ``gh_call``, and ``run``.
 Caveat: this is a static, import/attribute-level guard. Subprocess-level ``gh``
 calls (e.g. building a ``["gh", ...]`` argv and running it directly) are OUT OF
 SCOPE here and must be caught in code review.
+Coordinator-neutral ``ctx.github`` mutator names are also out of scope here:
+they are bound by the coordinator through ``StageGitHub`` and verified by the
+PipelineGitHub mapping tests.
 """
 
 from __future__ import annotations
@@ -23,7 +26,10 @@ import hephaestus.automation.github_api as github_api
 
 _PIPELINE = Path(hephaestus.__file__).parent / "automation" / "pipeline"
 
-# Public mutators from github_api.__all__ (avoids hardcoding drift)
+# Public mutators from github_api.__all__ (avoids hardcoding drift).
+# Scope note: this guard only tracks direct github_api mutator names. The
+# coordinator-neutral ``ctx.github`` surface is intentionally covered by the
+# coordinator adapter tests instead.
 _PUBLIC_MUTATORS = frozenset(
     n
     for n in github_api.__all__
@@ -158,6 +164,29 @@ def test_public_mutators_from_all() -> None:
         "gh_create_label",
     }
     assert expected <= _PUBLIC_MUTATORS, f"expected mutators missing: {expected - _PUBLIC_MUTATORS}"
+
+
+def test_guard_scope_excludes_coordinator_neutral_stage_github_calls(
+    tmp_path: Path,
+) -> None:
+    """Document the guard scope: only direct github_api mutator names are tracked.
+
+    The coordinator-neutral ``ctx.github`` mutator surface is bound by the
+    coordinator's ``StageGitHub`` adapter and covered by the mapping tests in
+    ``tests/unit/automation/test_pipeline_github.py``.
+    """
+    synthetic = (
+        "from hephaestus.automation import github_api\n"
+        "def f(ctx):\n"
+        "    ctx.github.add_labels(1, ['state:x'])\n"
+        "    ctx.github.create_pr(1, 'branch', 'title', 'body')\n"
+        "    ctx.github.arm_auto_merge(2)\n"
+        "    github_api.gh_issue_add_labels(3, ['state:y'])\n"
+    )
+    path = tmp_path / "synthetic_stage.py"
+    path.write_text(synthetic, encoding="utf-8")
+
+    assert _imported_mutators(path) == {"gh_issue_add_labels"}
 
 
 def _sleep_violations(tree: ast.AST, filename: str, *, allow_time_import: bool) -> list[str]:
