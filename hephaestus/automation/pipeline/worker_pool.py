@@ -230,6 +230,11 @@ class WorkerPool:
         every blip into a failed pipeline stage. Non-transient errors (rc!=0
         with non-transient stderr, timeouts) are NOT retried; they surface
         immediately as error results.
+
+        Unexpected Exception subclasses from agent resolution, prompt
+        construction, and the resilience wrapper are classified in this method
+        for symmetry with the specific agent failures below. Process-control
+        escapes still propagate to _on_future_done's crash handler.
         """
         try:
             agent = resolve_agent(job.agent)
@@ -295,6 +300,12 @@ class WorkerPool:
                 error=f"rc={exc.returncode}",
                 stdout_tail=(exc.stdout or "")[-_TAIL:],
                 stderr_tail=(exc.stderr or "")[-_TAIL:],
+            )
+        except Exception as exc:
+            logger.exception("Agent job raised, returning error result")
+            return JobResult(
+                ok=False,
+                error=f"{type(exc).__name__}: {exc!s}"[:500],
             )
 
     def _run_build_test(self, job: BuildTestJob) -> JobResult:
