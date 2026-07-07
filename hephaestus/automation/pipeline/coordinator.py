@@ -493,7 +493,6 @@ class Coordinator:
             exit_code = self._exit_code()
             stats = RunStats(
                 exit_code=exit_code,
-                interrupted=self.shutdown.is_set(),
                 loops_run=self._loops_run,
                 agent_job_count=self._agent_job_count,
                 agent_job_time_s=self._agent_job_time_s,
@@ -503,7 +502,7 @@ class Coordinator:
                 "run_end",
                 {
                     "exit_code": exit_code,
-                    "interrupted": self.shutdown.is_set(),
+                    "interrupted": stats.interrupted,
                     "items": len(self.items),
                     "agent_jobs": self._agent_job_count,
                     "wall_s": stats.wall_s,
