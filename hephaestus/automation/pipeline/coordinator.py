@@ -631,6 +631,15 @@ class Coordinator:
         q = self.queues[StageName.IMPLEMENTATION]
         if not len(q):
             return
+        queued = q.snapshot()
+        issue_numbers = [it.issue for it in queued if it.issue is not None]
+        duplicate_issues = sorted(
+            issue for issue, count in Counter(issue_numbers).items() if count > 1
+        )
+        assert not duplicate_issues, (  # noqa: S101
+            f"implementation queue must not contain duplicate issue numbers: {duplicate_issues}"
+        )
+
         items = [q.pop() for _ in range(len(q))]
         issue_items = {it.issue: it for it in items if it.issue is not None}
         infos = [
