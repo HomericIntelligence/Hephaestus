@@ -13,7 +13,7 @@ import ast
 import inspect
 import textwrap
 from pathlib import Path
-from typing import Any
+from typing import Any, get_type_hints
 from unittest.mock import MagicMock
 
 import pytest
@@ -146,6 +146,12 @@ class TestWiring:
     def test_budget_lookup_known_and_default(self) -> None:
         assert _budget_lookup("clone") == 2
         assert _budget_lookup("nonexistent") == 1
+
+    def test_step_with_watchdog_uses_stage_step_result_contract(self) -> None:
+        """The watchdog wrapper should preserve the stage step result union."""
+        assert hasattr(coordinator_mod, "StageStepResult")
+        hints = get_type_hints(Coordinator._step_with_watchdog)
+        assert hints["return"] is coordinator_mod.StageStepResult
 
 
 class TestCompletionEdges:
