@@ -332,6 +332,28 @@ class TestAgentErrorHandling:
         assert result.ok is False
         assert result.error == "OSError: retry wrapper failed"
 
+    def test_run_agent_does_not_retry_transient_error_after_shutdown(
+        self, pool: WorkerPool, shutdown_event: threading.Event
+    ) -> None:
+        """Shutdown suppresses retrying an interrupted agent session."""
+        job = _agent_job(model="model-shutdown-no-retry", prompt_builder=lambda: "prompt")
+        shutdown_event.set()
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(
+                f"{_WP}.claude_invoke.invoke_claude_with_session",
+                side_effect=OSError("connection reset"),
+            ) as invoke,
+            patch("hephaestus.utils.retry.time.sleep") as sleep,
+        ):
+            result = pool._run_agent(job)
+
+        assert result.ok is False
+        assert result.error == "OSError: connection reset"
+        assert invoke.call_count == 1
+        sleep.assert_not_called()
+
     def test_unknown_job_type_returns_error_result(self, pool: WorkerPool) -> None:
         """A job of unknown type is converted to a TypeError error result."""
         result = pool._run(cast(AgentJob, object()))

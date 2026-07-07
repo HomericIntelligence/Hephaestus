@@ -181,7 +181,15 @@ class FakeGitHub:
 
     def gh_issue_upsert_comment(self, issue_number: int, marker_prefix: str, body: str) -> int:
         """Mirror github_api.gh_issue_upsert_comment (returns a comment id)."""
-        self.comments.setdefault(issue_number, []).append(body)
+        comments = self.comments.setdefault(issue_number, [])
+        matches = [i for i, value in enumerate(comments) if value.startswith(marker_prefix)]
+        if matches:
+            keep = matches[-1]
+            comments[keep] = body
+            for index in reversed(matches[:-1]):
+                del comments[index]
+        else:
+            comments.append(body)
         self._log("gh_issue_upsert_comment", issue_number, marker_prefix)
         return len(self.comments[issue_number])
 

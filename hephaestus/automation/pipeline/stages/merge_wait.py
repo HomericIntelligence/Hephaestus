@@ -44,8 +44,10 @@ binding contract):
     wall-clock bound is preserved via ``ctx.now()`` against
     ``payload["merge_wait_started_at"]`` (stamped at ARM; missing in POLL
     is an invariant failure, not a new stamp) and ``HEPH_PR_MERGE_MAX_WAIT``
-    (default 1800s, exactly the legacy ``_wait_for_pr_terminal`` budget)
-    -> FINISH_FAIL(``timeout``).
+    (default 1800s, exactly the legacy ``_wait_for_pr_terminal`` budget).
+    The queue CLI's ``--max-merge-attempts`` feeds the ``merge`` budget:
+    once pending polls reach that count, the issue is durably tagged
+    ``state:skip`` and the item SKIPs.
 - LEARN_WAIT [W:A]: the drive-green learnings session (re-housed
   ``post_merge_processor.run_drive_green_learnings``), prompt composed
   in-worker by :func:`build_drive_green_learn_prompt` reusing
@@ -296,19 +298,33 @@ class MergeWaitStage(Stage):
             return self._route_dirty(item, ctx, gh_state)
         if state is PrMergeState.BLOCKED:
             return self._route_blocked(item, ctx)
-        # PENDING: timer-park with exponential backoff, wall-clock bounded.
+        return self._route_pending(item, ctx, float(started))
+
+    def _route_pending(self, item: WorkItem, ctx: StageContext, started: float) -> StageOutcome:
+        """PENDING: timer-park with exponential backoff, bounded by time and budget."""
         now = ctx.now()
         max_wait = read_timeout_env(MERGE_MAX_WAIT_ENV, MERGE_MAX_WAIT_DEFAULT_S)
-        if now - float(started) > max_wait:
+        if now - started > max_wait:
             logger.warning(
                 "merge_wait:%s: PR #%d still OPEN after %ds (limit %ds); timing out",
                 item.issue,
                 item.pr,
-                int(now - float(started)),
+                int(now - started),
                 max_wait,
             )
             return StageOutcome(Disposition.FINISH_FAIL, "timeout")
         polls = item.payload.get("merge_poll_count", 0)
+        if polls >= ctx.budget("merge"):
+            if item.issue is not None:
+                logger.warning(
+                    "merge_wait:%s: PR #%d exhausted merge pending budget (%d); skipping",
+                    item.issue,
+                    item.pr,
+                    ctx.budget("merge"),
+                )
+                write_skip_label(item.issue, ctx)
+                return StageOutcome(Disposition.SKIP, "merge_attempts_exhausted")
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
         delay = min(2**polls, BACKOFF_CAP_S)
         item.payload["merge_poll_count"] = polls + 1
         # Timer-park contract (base.py): the coordinator (#1817) reads the

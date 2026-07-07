@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 from hephaestus.automation.claude_invoke import ReviewVerdict, parse_review_verdict
@@ -162,6 +163,18 @@ class TestPrReviewStageStep:
         assert result.job.parse is parse_review_verdict  # verdict parsed in-worker
         assert result.job.prompt_kwargs["pr_number"] == 1001
         assert item.attempts["pr_review_iter"] == 0  # submission burns nothing
+
+    def test_review_wait_forwards_nitpick_config(self, make_ctx: Any, make_work_item: Any) -> None:
+        """--nitpick must reach the strict PR-review prompt."""
+        stage = PrReviewStage()
+        ctx = make_ctx(config=SimpleNamespace(agent="claude", nitpick=True))
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.prompt_kwargs["include_nitpicks"] is True
 
     def test_review_wait_clears_stale_round_payload(
         self, make_ctx: Any, make_work_item: Any
@@ -404,8 +417,32 @@ class TestEvalVerdicts:
         assert github.mutation_log == [
             ("mark_pr_implementation_go", (1001,)),
             ("arm_auto_merge", (1001,)),
+            ("gh_issue_upsert_comment", (1001, "<!-- hephaestus-pr-review-go -->")),
         ]
+        assert "<!-- hephaestus-pr-review-go -->" in github.comments[1001][0]
+        assert "Automated PR review result: GO" in github.comments[1001][0]
+        assert "marked this PR `state:implementation-go`" in github.comments[1001][0]
+        assert "armed auto-merge" in github.comments[1001][0]
         assert item.attempts["pr_review_iter"] == 1  # real verdict counted
+
+    def test_go_clean_artifact_is_upserted_not_duplicated(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Clean GO leaves one marker-keyed durable comment across retries."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)])
+        github.comments[1001] = ["<!-- hephaestus-pr-review-go -->\nstale"]
+        ctx = make_ctx(github=github)
+        ctx.config.enable_follow_up = False
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.ADVANCE
+        assert len(github.comments[1001]) == 1
+        assert "stale" not in github.comments[1001][0]
 
     def test_go_rechecks_human_threads_inside_arm_helper(
         self, make_ctx: Any, make_work_item: Any
@@ -442,6 +479,7 @@ class TestEvalVerdicts:
         assert isinstance(result, Continue)
         assert result.next_state == "FOLLOWUP_WAIT"
         assert github.mutation_log[0] == ("mark_pr_implementation_go", (1001,))
+        assert github.mutation_log[1] == ("arm_auto_merge", (1001,))
 
     def test_failed_mark_write_skips_arming(self, make_ctx: Any, make_work_item: Any) -> None:
         """If the implementation-go mark fails, auto-merge is NOT armed.
@@ -465,6 +503,9 @@ class TestEvalVerdicts:
 
         assert isinstance(result, Continue)  # still proceeds (non-fatal)
         assert ("arm_auto_merge", (1001,)) not in github.mutation_log
+        assert ("gh_issue_upsert_comment", (1001, "<!-- hephaestus-pr-review-go -->")) not in (
+            github.mutation_log
+        )
 
     def test_failed_arm_write_is_non_fatal(self, make_ctx: Any, make_work_item: Any) -> None:
         """A failing arm_auto_merge write is swallowed; the GO still proceeds."""
@@ -482,7 +523,12 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)  # must not raise
 
         assert isinstance(result, Continue)
-        assert github.mutation_log == [("mark_pr_implementation_go", (1001,))]
+        assert github.mutation_log == [
+            ("mark_pr_implementation_go", (1001,)),
+            ("gh_issue_upsert_comment", (1001, "<!-- hephaestus-pr-review-go -->")),
+        ]
+        assert "Auto-merge arming failed" in github.comments[1001][0]
+        assert "armed auto-merge" not in github.comments[1001][0]
 
     def test_go_with_human_thread_is_human_blocked_and_unlabeled(
         self, make_ctx: Any, make_work_item: Any
@@ -987,6 +1033,7 @@ class TestFullWalks:
             ("mark_pr_implementation_no_go", (1001,)),  # round 1 NOGO recorded (M2)
             ("mark_pr_implementation_go", (1001,)),
             ("arm_auto_merge", (1001,)),
+            ("gh_issue_upsert_comment", (1001, "<!-- hephaestus-pr-review-go -->")),
         ]
 
     def test_exhaustion_walk_applies_skip(self, make_ctx: Any, make_work_item: Any) -> None:

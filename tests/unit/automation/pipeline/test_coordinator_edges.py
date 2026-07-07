@@ -415,6 +415,10 @@ class TestSeedingEdges:
             "seed_issue",
             MagicMock(side_effect=AssertionError("ambient issue seeding called")),
         )
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
         target_github = FakeStageGitHub(
             labels=[STATE_PLAN_GO],
             open_pr=1854,
@@ -459,7 +463,7 @@ class TestSeedingEdges:
             "gh_pr_label_names",
             MagicMock(side_effect=AssertionError("ambient PR label seeding called")),
         )
-        target_github = FakeStageGitHub(pr_impl_state=(True, False))
+        target_github = FakeStageGitHub(pr_impl_state=(True, False), pr_issue=1818)
         created: list[tuple[str, Path]] = []
 
         def github_factory(repo: str, repo_root: Path) -> FakeStageGitHub:
@@ -487,7 +491,82 @@ class TestSeedingEdges:
         item = coordinator.queues[StageName.CI].snapshot()[0]
         assert item.repo == "target-repo"
         assert item.kind is ItemKind.PR
+        assert item.issue == 1818
         assert item.pr == 1854
+
+    def test_direct_pr_scope_hydrates_issue_for_pr_review_route(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Direct --prs seeding preserves linked issue context for PR review."""
+        monkeypatch.setattr(
+            seeding_mod,
+            "gh_pr_label_names",
+            MagicMock(side_effect=AssertionError("ambient PR label seeding called")),
+        )
+        target_github = FakeStageGitHub(pr_impl_state=(False, False), pr_issue=1818)
+
+        def github_factory(repo: str, repo_root: Path) -> FakeStageGitHub:
+            return target_github
+
+        config = PipelineConfig(
+            org="org",
+            repos=["target-repo"],
+            prs=[1854],
+            projects_dir=tmp_path,
+        )
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            github_factory=github_factory,
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+
+        coordinator._seed_pass()
+
+        item = coordinator.queues[StageName.PR_REVIEW].snapshot()[0]
+        assert item.repo == "target-repo"
+        assert item.kind is ItemKind.PR
+        assert item.issue == 1818
+        assert item.pr == 1854
+
+    def test_direct_pr_scope_respects_drive_green_phase_scope(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-implementation-go direct PR must not enter pr_review in CI scope."""
+        monkeypatch.setattr(
+            seeding_mod,
+            "gh_pr_label_names",
+            MagicMock(side_effect=AssertionError("ambient PR label seeding called")),
+        )
+        target_github = FakeStageGitHub(pr_impl_state=(False, False), pr_issue=1818)
+
+        def github_factory(repo: str, repo_root: Path) -> FakeStageGitHub:
+            return target_github
+
+        config = PipelineConfig(
+            org="org",
+            repos=["target-repo"],
+            prs=[1854],
+            projects_dir=tmp_path,
+            scope=routing_mod.PipelineScope(frozenset({StageName.CI, StageName.MERGE_WAIT})),
+        )
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            github_factory=github_factory,
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+
+        assert coordinator.run() == 1
+
+        assert not coordinator.queues[StageName.PR_REVIEW].snapshot()
+        assert len(coordinator.ledger) == 1
+        assert not coordinator.ledger[0].passed
+        assert "not ready for selected scope" in coordinator.ledger[0].reason
 
     def test_repo_product_finished_entry_gets_pass_result(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

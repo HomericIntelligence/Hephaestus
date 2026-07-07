@@ -32,6 +32,7 @@ assert ROUTES[StageName.MERGE_WAIT].fail_routes["ci_red"] == StageName.CI
 assert ROUTES[StageName.MERGE_WAIT].fail_routes["blocked_exhausted"] == StageName.PR_REVIEW
 assert ROUTES[StageName.MERGE_WAIT].budgets["blocked_address"] == 2
 assert ROUTES[StageName.MERGE_WAIT].budgets["rebase"] == 2
+assert ROUTES[StageName.MERGE_WAIT].budgets["merge"] == 1
 
 MERGED_STATE = {"state": "MERGED", "headRefOid": "abc123"}
 CLOSED_STATE = {"state": "CLOSED"}
@@ -313,7 +314,10 @@ class TestMergeWaitPoll:
     ) -> None:
         """PENDING parks with the legacy min(2**n, 60) delay in the payload."""
         stage = MergeWaitStage()
-        ctx = make_ctx(github=FakeStageGitHub(pr_state=OPEN_STATE))
+        ctx = make_ctx(
+            github=FakeStageGitHub(pr_state=OPEN_STATE),
+            budget_fn=lambda name: 10 if name == "merge" else 1,
+        )
         item = _armed_item(make_work_item)
         item.payload["merge_wait_started_at"] = 1000.0
 
@@ -325,6 +329,24 @@ class TestMergeWaitPoll:
         # The wall clock lives in the payload, NEVER in the attempts dict.
         assert "merge_elapsed" not in item.attempts
         assert "merge_poll" not in item.attempts
+
+    def test_pending_exhausts_merge_attempt_budget_before_wall_clock_timeout(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The CLI merge budget bounds pending polls and durably skips the issue."""
+        stage = MergeWaitStage()
+        github = FakeStageGitHub(pr_state=OPEN_STATE)
+        ctx = make_ctx(github=github, budget_fn=lambda _name: 1)
+        item = _armed_item(make_work_item)
+
+        first = stage.step(item, ctx)
+        assert first == StageOutcome(Disposition.RETRY, "merge_pending")
+        item.payload.pop("retry_delay_s")
+
+        second = stage.step(item, ctx)
+
+        assert second == StageOutcome(Disposition.SKIP, "merge_attempts_exhausted")
+        assert STATE_SKIP in github.labels[item.issue]
 
     def test_wall_clock_timeout_uses_ctx_now(
         self, make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch

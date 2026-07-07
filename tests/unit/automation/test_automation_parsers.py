@@ -96,13 +96,13 @@ def _agent_spec() -> ActionSpec:
     )
 
 
-def _max_workers_spec(help_text: str) -> ActionSpec:
+def _max_workers_spec(help_text: str, default: int = 3) -> ActionSpec:
     """Return the common --max-workers action spec."""
     return _action_spec(
         ("--max-workers",),
         "max_workers",
         "_StoreAction",
-        3,
+        default,
         choices=WORKER_CHOICES,
         help_text=help_text,
     )
@@ -593,7 +593,8 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             help_text="Number of loop iterations (default: 5)",
         ),
         _max_workers_spec(
-            "Parallel workers per repo per phase (1-32, default: 3). Passes to child phases."
+            "Parallel workers per repo per phase (1-32, default: 6). Passes to child phases.",
+            default=6,
         ),
         _action_spec(
             ("--max-merge-attempts",),

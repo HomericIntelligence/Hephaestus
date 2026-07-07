@@ -9,6 +9,7 @@ asserts-no-submit, poisoned-item isolation, and FAIL_BACK routing.
 
 from __future__ import annotations
 
+import json
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
@@ -75,6 +76,7 @@ def make_coordinator(
     loops: int = 1,
     max_workers: int = 1,
     dry_run: bool = False,
+    serialize_file_overlap: bool = True,
     github: FakeStageGitHub | None = None,
     rate_budget_ok: Callable[[], tuple[bool, float]] | None = None,
 ) -> tuple[Coordinator, FakeWorkerPool, FakeStageGitHub]:
@@ -85,6 +87,7 @@ def make_coordinator(
         loops=loops,
         max_workers=max_workers,
         dry_run=dry_run,
+        serialize_file_overlap=serialize_file_overlap,
         projects_dir=tmp_path,
     )
     gh = github or FakeStageGitHub()
@@ -131,6 +134,10 @@ class TestQuiescence:
             return []
 
         monkeypatch.setattr(seeding_mod, "seed_from_cli", fake_seed)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
         coordinator = Coordinator(
             config,
             github=gh,
@@ -529,9 +536,184 @@ class TestImplementationAdmission:
         assert run_order == [22]  # dependency first; 21 deferred by overlap
         assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 1
 
+    def test_file_overlap_serialization_can_be_disabled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--no-serialize-file-overlap lets all ready implementation items dispatch."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, max_workers=2, serialize_file_overlap=False
+        )
+        run_order: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_order.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        item_a = _issue_item(21, StageName.IMPLEMENTATION)
+        item_b = _issue_item(22, StageName.IMPLEMENTATION)
+        coordinator._push_item(item_a, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(item_b, StageName.IMPLEMENTATION, enter=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._select_non_overlapping",
+            lambda issues: (_ for _ in ()).throw(AssertionError("should not serialize overlap")),
+        )
+
+        coordinator._drain_implementation()
+
+        assert run_order == [21, 22]
+        assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 0
+
+
+class TestDurableEventLog:
+    """Optional JSONL event log mirrors the coordinator's in-memory event log."""
+
+    def test_event_log_path_persists_queue_events(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Configured event_log_path receives JSONL queue/event records."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+        item = _issue_item(44, StageName.PLANNING)
+
+        coordinator._push_item(item, StageName.PLANNING, enter=True)
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        assert records[-1]["event"] == "push"
+        assert records[-1]["fields"] == ["planning", "repo-a#44"]
+        assert coordinator.event_log[-1] == ("push", "planning", "repo-a#44")
+
+    def test_event_log_path_persists_job_completion_records(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Job completions are durable without logging raw agent output."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        stage = StubStage()
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            stages={StageName.PLANNING: stage},
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+        item = _issue_item(44, StageName.PLANNING)
+
+        coordinator._submit(item, JobRequest(_agent_job(issue=44), "REVIEWED"))
+        coordinator._drain_completions()
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        complete = next(record for record in records if record["event"] == "complete")
+        assert complete["fields"] == [
+            "AgentJob",
+            "repo-a#44",
+            "planning",
+            "REVIEWED",
+            {
+                "descr": "stub agent job",
+                "duration_s": 0.0,
+                "error": None,
+                "interrupted": False,
+                "ok": True,
+            },
+        ]
+        assert "stdout_tail" not in complete["fields"][-1]
+        assert "stderr_tail" not in complete["fields"][-1]
+
+    def test_event_log_path_sanitizes_job_error_text(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Job completions persist safe error classes, not raw error text."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        stage = StubStage()
+        pool = FakeWorkerPool()
+        pool.queue_result(JobResult(ok=False, error="token=secret private-endpoint"))
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=pool,
+            stages={StageName.PLANNING: stage},
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+        item = _issue_item(44, StageName.PLANNING)
+
+        coordinator._submit(item, JobRequest(_agent_job(issue=44), "REVIEWED"))
+        coordinator._drain_completions()
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        text = event_log_path.read_text()
+        complete = next(record for record in records if record["event"] == "complete")
+        assert "token=secret" not in text
+        assert "private-endpoint" not in text
+        assert complete["fields"][-1]["error"] == "error"
+
+    def test_event_log_path_persists_resumable_records(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Interrupted items leave durable resumable breadcrumbs."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        item = _issue_item(44, StageName.PR_REVIEW)
+        item.state = "REVIEW_WAIT"
+
+        coordinator._park_resumable(item)
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        assert records[-1]["event"] == "resumable"
+        assert records[-1]["fields"] == ["repo-a#44", "pr_review", "REVIEW_WAIT"]
+
 
 class TestPipelineScopeWiring:
     """Scope-trimmed routing + the planner CLI's --force re-plan override (#1820)."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_open_issue_filter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep scope-wiring tests unit-local; filter behavior has its own test."""
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
 
     def _scoped_config(
         self, tmp_path: Path, *, issues: list[int], force: bool = False
