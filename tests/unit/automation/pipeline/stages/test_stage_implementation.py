@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 from hephaestus.automation.pipeline.jobs import AgentJob, BuildTestJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
@@ -396,6 +397,19 @@ class TestGitErrorRetryCap:
 
 class TestWorktreeAndAdvise:
     """WORKTREE_WAIT / DIRTY_DECISION_WAIT / ADVISE_WAIT."""
+
+    def test_worktree_wait_dispatches_to_handler(self, make_ctx: Any, make_work_item: Any) -> None:
+        """WORKTREE_WAIT routes through the dedicated state handler."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        expected = StageOutcome(Disposition.ADVANCE, "dispatched")
+
+        with patch.object(stage, "_worktree_wait", create=True, return_value=expected) as mock:
+            result = stage.step(item, ctx)
+
+        assert result == expected
+        mock.assert_called_once_with(item, ctx)
 
     def test_worktree_wait_requests_refreshed_worktree(
         self, make_ctx: Any, make_work_item: Any
