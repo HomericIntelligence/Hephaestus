@@ -8,6 +8,8 @@ from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
 from hephaestus.automation.pipeline.routing import ROUTES, Disposition, StageName
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.ci import (
+    BACKOFF_CAP_S,
+    CI_POLL_STARTED_AT,
     DISCOVER,
     ENTER,
     FIX_WAIT,
@@ -293,17 +295,35 @@ class TestCiPoll:
             assert result == StageOutcome(Disposition.RETRY, "ci_pending")
             assert item.payload["retry_delay_s"] == expected_delay
         assert item.payload["ci_poll_count"] == 4
+        assert item.payload[CI_POLL_STARTED_AT] > 0
 
-    def test_poll_deadline_times_out(self, make_ctx: Any, make_work_item: Any) -> None:
-        """The POLL cycle counter capped at POLL_DEADLINE finishes timeout."""
+    def test_wall_clock_deadline_times_out(self, make_ctx: Any, make_work_item: Any) -> None:
+        """Elapsed wall-clock over poll_max_wait finishes timeout."""
         stage = CiStage()
         ctx = make_ctx(github=_go_github(checks=PENDING_CHECKS))
+        ctx.config.poll_max_wait = 10
         item = _item(make_work_item, state=POLL)
-        item.payload["ci_poll_count"] = POLL_DEADLINE
+        item.payload[CI_POLL_STARTED_AT] = 0.0
 
         result = stage.step(item, ctx)
 
         assert result == StageOutcome(Disposition.FINISH_FAIL, "timeout")
+
+    def test_pending_uses_wall_clock_not_durable_poll_count(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A restart with many prior polls keeps waiting until wall-clock expires."""
+        stage = CiStage()
+        ctx = make_ctx(github=_go_github(checks=PENDING_CHECKS))
+        item = _item(make_work_item, state=POLL)
+        item.payload[CI_POLL_STARTED_AT] = 1000.0
+        item.payload["ci_poll_count"] = POLL_DEADLINE
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.RETRY, "ci_pending")
+        assert item.payload["retry_delay_s"] == BACKOFF_CAP_S
+        assert item.payload["ci_poll_count"] == POLL_DEADLINE + 1
 
     def test_green_advances(self, make_ctx: Any, make_work_item: Any) -> None:
         """GREEN checks ADVANCE to merge_wait."""
@@ -637,9 +657,11 @@ class TestCiOnJobDone:
         ctx = make_ctx(github=_go_github())
         item = _item(make_work_item, state=PUSH_WAIT)
 
+        item.payload[CI_POLL_STARTED_AT] = 111.0
         item.payload["ci_poll_count"] = 9
         item.payload["retry_delay_s"] = 60
         stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        assert CI_POLL_STARTED_AT not in item.payload
         assert "ci_poll_count" not in item.payload
         assert "retry_delay_s" not in item.payload
 

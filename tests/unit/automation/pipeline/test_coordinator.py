@@ -703,6 +703,21 @@ class TestConfigWiring:
 
         assert ctx.config.enable_mechanical_rebase is False
 
+    def test_poll_max_wait_flows_to_stage_config(self, tmp_path: Path) -> None:
+        """poll_max_wait reaches ctx.config for wall-clock CI polling."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            projects_dir=tmp_path,
+            poll_max_wait=42,
+        )
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+        ctx = coordinator._ctx_for_repo("repo-a")
+
+        assert ctx.config.poll_max_wait == 42
+
     def test_enable_mechanical_rebase_defaults_true(self, tmp_path: Path) -> None:
         """The default keeps the CI stage's mechanical rebase enabled."""
         config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path)

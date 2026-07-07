@@ -52,6 +52,7 @@ from hephaestus.config.paths import resolve_projects_dir
 from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 
 from ._review_utils import build_automation_parser
+from .agent_config import ci_poll_max_wait
 from .ci_check_inspector import (
     FAILING_CHECK_CONCLUSIONS as FAILING_CHECK_CONCLUSIONS,  # re-export
 )
@@ -342,6 +343,9 @@ def main() -> int:
             # --no-mechanical-rebase: the CI stage reads this off ctx.config to
             # skip the pre-fix mechanical rebase (#871).
             enable_mechanical_rebase=args.enable_mechanical_rebase,
+            poll_max_wait=(
+                args.poll_max_wait if args.poll_max_wait is not None else ci_poll_max_wait()
+            ),
             # --max-fix-iterations N overrides the CI-fix attempt budget
             # (ROUTES ci=ci_fix default 1) for every failing PR in this run.
             budget_overrides={"ci_fix": args.max_fix_iterations},

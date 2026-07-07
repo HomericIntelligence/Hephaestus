@@ -83,6 +83,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from hephaestus.automation.agent_config import DEFAULT_CI_POLL_MAX_WAIT
 from hephaestus.automation.models import IssueInfo
 from hephaestus.automation.pipeline import admission as _admission, seeding as _seeding
 from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
@@ -184,6 +185,9 @@ class PipelineConfig:
     # behind/conflicting PR falls through to the fix agent (``--no-mechanical-rebase``).
     # Read by ``stages/ci.py`` via ``ctx.config.enable_mechanical_rebase``.
     enable_mechanical_rebase: bool = True
+    # Wall-clock seconds the CI stage may wait for pending checks before timing
+    # out. Mirrors ``CIDriverOptions.poll_max_wait`` / ``--poll-max-wait``.
+    poll_max_wait: int = DEFAULT_CI_POLL_MAX_WAIT
     # Per-budget overrides applied on top of the ROUTES defaults by the
     # coordinator's budget accessor. ``--max-fix-iterations N`` maps to
     # ``{"ci_fix": N}`` so the CI-fix attempt budget is caller-tunable.
@@ -220,6 +224,7 @@ class _StageRunConfig:
     nitpick: bool = False
     drive_green_all: bool = False
     enable_mechanical_rebase: bool = True
+    poll_max_wait: int = DEFAULT_CI_POLL_MAX_WAIT
 
 
 @dataclass
@@ -330,6 +335,7 @@ class Coordinator:
             nitpick=config.nitpick,
             drive_green_all=config.drive_green_all,
             enable_mechanical_rebase=config.enable_mechanical_rebase,
+            poll_max_wait=config.poll_max_wait,
         )
         self._ctx_cache: dict[str, StageContext] = {}
 
