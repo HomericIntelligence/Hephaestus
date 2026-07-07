@@ -170,6 +170,31 @@ class TestJsonEnvelope:
         assert envelope["resumable"] == ["repo-a#2@ci"]
         assert envelope["preserved_worktrees"] == [[2, "/wt/2"]]
 
+    @pytest.mark.parametrize(
+        ("exit_code", "expected_message"),
+        [
+            (0, "pipeline complete"),
+            (1, "pipeline failed"),
+        ],
+    )
+    def test_json_envelope_message_tracks_exit_code(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        exit_code: int,
+        expected_message: str,
+    ) -> None:
+        """The envelope message derives from exit_code, not the interrupt flag."""
+        print_summary(
+            [],
+            _stats(exit_code=exit_code, interrupted=True),
+            [],
+            json_out=True,
+        )
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope["exit_code"] == exit_code
+        assert envelope["message"] == expected_message
+
     def test_no_envelope_without_json_out(self, capsys: pytest.CaptureFixture[str]) -> None:
         """json_out=False never writes the JSON envelope to stdout."""
         print_summary([], _stats(), [], json_out=False)
