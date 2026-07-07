@@ -1202,7 +1202,10 @@ class TestOnFutureDone:
         pool._on_future_done(handle, future)
         assert completion_q.empty()
 
-    @pytest.mark.parametrize("exc", [RuntimeError("boom"), SystemExit(3)])
+    @pytest.mark.parametrize(
+        "exc",
+        [RuntimeError("boom"), KeyboardInterrupt(), SystemExit(3), GeneratorExit()],
+    )
     def test_raising_future_emits_worker_crash_completion(
         self,
         pool: WorkerPool,
