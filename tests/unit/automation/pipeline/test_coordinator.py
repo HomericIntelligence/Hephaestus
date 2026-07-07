@@ -703,6 +703,19 @@ class TestDurableEventLog:
         assert records[-1]["event"] == "resumable"
         assert records[-1]["fields"] == ["repo-a#44", "pr_review", "REVIEW_WAIT"]
 
+    def test_park_resumable_does_not_keep_private_buffer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RESUMABLE parking should not accumulate hidden coordinator state."""
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        item = _issue_item(44, StageName.PR_REVIEW)
+        item.state = "REVIEW_WAIT"
+
+        coordinator._park_resumable(item)
+
+        assert "_resumable" not in coordinator.__dict__
+
 
 class TestPipelineScopeWiring:
     """Scope-trimmed routing + the planner CLI's --force re-plan override (#1820)."""

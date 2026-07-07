@@ -342,7 +342,6 @@ class Coordinator:
         self._agent_job_time_s = 0.0
         self._loops_run = 0
         self._pass_work_count = 0
-        self._resumable: list[WorkItem] = []
         self._progress = False
         self._stalled_ticks = 0
         self._fatal = False
@@ -689,7 +688,6 @@ class Coordinator:
             final_stage=item.stage,
         )
         item.add_history_event(item.stage, item.state, note="interrupted; resumable")
-        self._resumable.append(item)
         self._record_event("resumable", self._item_key(item), item.stage.value, item.state)
         logger.info(
             "interrupt: item %s RESUMABLE at %s (never failed)",
