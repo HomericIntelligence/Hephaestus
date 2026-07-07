@@ -28,6 +28,7 @@ import os
 import shutil
 import threading
 from pathlib import Path
+from typing import Any
 
 from hephaestus.utils.file_lock import file_lock
 
@@ -41,6 +42,11 @@ _AUTOMATION_PROMPT_PREFIXES = (
     ".claude-prompt-",
     ".claude-followup-",
 )
+
+
+def _timeout_kw(timeout: int | None) -> dict[str, Any]:
+    """Return a ``run`` kwargs fragment only when a timeout was provided."""
+    return {} if timeout is None else {"timeout": timeout}
 
 
 def _loop_trunk_githash() -> str | None:
@@ -72,7 +78,7 @@ class WorktreeManager:
     Allows parallel issue implementation in isolated worktrees.
     """
 
-    def __init__(self, base_dir: Path | None = None, base_branch: str | None = None):
+    def __init__(self, base_dir: Path | None = None, base_branch: str | None = None) -> None:
         """Initialize worktree manager.
 
         Args:
@@ -112,15 +118,19 @@ class WorktreeManager:
     @property
     def base_branch(self) -> str:
         """The base branch, auto-detected on first access."""
+        return self._resolve_base_branch()
+
+    def _resolve_base_branch(self, *, timeout: int | None = None) -> str:
+        """Return the base branch, using ``timeout`` for lazy git detection."""
         if self._base_branch_resolved is not None:
             return self._base_branch_resolved
         if self._base_branch_override is not None:
             self._base_branch_resolved = self._base_branch_override
             return self._base_branch_resolved
-        self._base_branch_resolved = self._detect_base_branch()
+        self._base_branch_resolved = self._detect_base_branch(timeout=timeout)
         return self._base_branch_resolved
 
-    def refresh_base_branch(self) -> str:
+    def refresh_base_branch(self, *, timeout: int | None = None) -> str:
         """Re-fetch ``origin`` and re-resolve the auto-detected base branch.
 
         Issue-major loop (#1560): each issue's worktree should branch off the
@@ -141,17 +151,23 @@ class WorktreeManager:
             self._base_branch_override_source = None
         with file_lock(self._git_metadata_lock_path()):
             with contextlib.suppress(Exception):
-                run(["git", "fetch", "origin"], cwd=self.repo_root, capture_output=True)
+                run(
+                    ["git", "fetch", "origin"],
+                    cwd=self.repo_root,
+                    capture_output=True,
+                    **_timeout_kw(timeout),
+                )
             self._base_branch_resolved = None  # force re-detect on next access
-            return self.base_branch
+            return self._resolve_base_branch(timeout=timeout)
 
-    def _detect_base_branch(self) -> str:
+    def _detect_base_branch(self, *, timeout: int | None = None) -> str:
         try:
             result = run(
                 ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
                 cwd=self.repo_root,
                 capture_output=True,
                 log_errors=False,
+                **_timeout_kw(timeout),
             )
             detected = result.stdout.strip()
             logger.debug("Auto-detected base branch: %s", detected)
@@ -163,6 +179,7 @@ class WorktreeManager:
                         ["git", "rev-parse", "--verify", candidate],
                         cwd=self.repo_root,
                         capture_output=True,
+                        **_timeout_kw(timeout),
                     )
                     logger.warning("Could not auto-detect base branch, found %s", candidate)
                     return candidate
@@ -181,6 +198,7 @@ class WorktreeManager:
         branch_name: str | None = None,
         *,
         refresh_base: bool = False,
+        timeout: int | None = None,
     ) -> Path:
         """Create a new worktree for an issue.
 
@@ -193,6 +211,7 @@ class WorktreeManager:
                 so each issue branches off the latest trunk; no-op when the base
                 is explicitly pinned. Default False preserves prior behavior for
                 all other callers (review, address-review, ci-driver).
+            timeout: Optional timeout in seconds for each git command.
 
         Returns:
             Path to worktree directory
@@ -207,7 +226,7 @@ class WorktreeManager:
                 return self.worktrees[issue_number]
 
             if refresh_base:
-                self.refresh_base_branch()
+                self.refresh_base_branch(timeout=timeout)
 
             if branch_name is None:
                 branch_name = f"{issue_number}-auto"
@@ -221,7 +240,7 @@ class WorktreeManager:
             # with "already used by worktree at ..." (exit 128). Return that
             # existing worktree and register it under this issue; the caller then
             # syncs it to the PR head (fetch + reset --hard origin/<branch>).
-            existing = self._worktree_holding_branch(branch_name)
+            existing = self._worktree_holding_branch(branch_name, timeout=timeout)
             if existing is not None and existing != worktree_path:
                 logger.info(
                     "Branch %s already checked out at %s — reusing that worktree for issue #%s",
@@ -232,7 +251,7 @@ class WorktreeManager:
                 self.worktrees[issue_number] = existing
                 return existing
 
-            if self._reuse_existing_dirty_worktree(issue_number, worktree_path):
+            if self._reuse_existing_dirty_worktree(issue_number, worktree_path, timeout=timeout):
                 return worktree_path
 
             # Remove existing clean worktree directory if present. Dirty
@@ -240,7 +259,7 @@ class WorktreeManager:
             # unknown contents fail closed there instead of being removed.
             if worktree_path.exists():
                 logger.warning("Removing existing worktree directory: %s", worktree_path)
-                self._remove_worktree_path_forcefully(worktree_path)
+                self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
 
             try:
                 with file_lock(self._git_metadata_lock_path()):
@@ -249,10 +268,11 @@ class WorktreeManager:
                             worktree_path,
                             branch_name,
                             refresh_base=refresh_base,
+                            timeout=timeout,
                         )
                     except Exception:
                         self.worktrees.pop(issue_number, None)
-                        self._remove_worktree_path_forcefully(worktree_path)
+                        self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
                         raise
                 self.worktrees[issue_number] = worktree_path
                 logger.info("Created worktree for issue #%s at %s", issue_number, worktree_path)
@@ -261,7 +281,12 @@ class WorktreeManager:
             except Exception as e:
                 raise RuntimeError(f"Failed to create worktree: {e}") from e
 
-    def _remove_worktree_path_forcefully(self, worktree_path: Path) -> None:
+    def _remove_worktree_path_forcefully(
+        self,
+        worktree_path: Path,
+        *,
+        timeout: int | None = None,
+    ) -> None:
         """Remove a worktree path and prune stale git metadata."""
         # Try git worktree remove first to clean up git metadata.
         try:
@@ -269,6 +294,7 @@ class WorktreeManager:
                 ["git", "worktree", "remove", "--force", str(worktree_path)],
                 cwd=self.repo_root,
                 check=False,
+                **_timeout_kw(timeout),
             )
         except Exception as e:
             logger.debug("git worktree remove failed (expected if not a worktree): %s", e)
@@ -286,7 +312,12 @@ class WorktreeManager:
                     )
         finally:
             try:
-                run(["git", "worktree", "prune"], cwd=self.repo_root, check=False)
+                run(
+                    ["git", "worktree", "prune"],
+                    cwd=self.repo_root,
+                    check=False,
+                    **_timeout_kw(timeout),
+                )
             except Exception as e:
                 logger.debug("git worktree prune failed: %s", e)
 
@@ -296,6 +327,7 @@ class WorktreeManager:
         branch_name: str,
         *,
         refresh_base: bool = False,
+        timeout: int | None = None,
     ) -> None:
         """Add a git worktree, choosing the right source for ``branch_name``.
 
@@ -314,27 +346,30 @@ class WorktreeManager:
             branch_name: Branch the worktree should track.
             refresh_base: When True, reused issue automation branches are rebased
                 onto the refreshed base before the implementer starts.
+            timeout: Optional timeout in seconds for each git command.
 
         """
-        if self._local_branch_exists(branch_name):
-            self._refresh_stale_local_branch_if_safe(branch_name)
+        if self._local_branch_exists(branch_name, timeout=timeout):
+            self._refresh_stale_local_branch_if_safe(branch_name, timeout=timeout)
             logger.info("Branch %s already exists, reusing it", branch_name)
             run(
                 ["git", "worktree", "add", str(worktree_path), branch_name],
                 cwd=self.repo_root,
+                **_timeout_kw(timeout),
             )
             self._rebase_existing_issue_branch_if_requested(
                 worktree_path,
                 branch_name,
                 refresh_base=refresh_base,
+                timeout=timeout,
             )
-        elif self._remote_branch_exists(branch_name):
+        elif self._remote_branch_exists(branch_name, timeout=timeout):
             logger.info(
                 "Branch %s exists on origin, extending it from origin/%s",
                 branch_name,
                 branch_name,
             )
-            run(["git", "fetch", "origin", branch_name], cwd=self.repo_root)
+            run(["git", "fetch", "origin", branch_name], cwd=self.repo_root, **_timeout_kw(timeout))
             run(
                 [
                     "git",
@@ -346,11 +381,13 @@ class WorktreeManager:
                     f"origin/{branch_name}",
                 ],
                 cwd=self.repo_root,
+                **_timeout_kw(timeout),
             )
             self._rebase_existing_issue_branch_if_requested(
                 worktree_path,
                 branch_name,
                 refresh_base=refresh_base,
+                timeout=timeout,
             )
         else:
             run(
@@ -361,9 +398,10 @@ class WorktreeManager:
                     "-b",
                     branch_name,
                     str(worktree_path),
-                    self.base_branch,
+                    self._resolve_base_branch(timeout=timeout),
                 ],
                 cwd=self.repo_root,
+                **_timeout_kw(timeout),
             )
 
     def _rebase_existing_issue_branch_if_requested(
@@ -372,11 +410,12 @@ class WorktreeManager:
         branch_name: str,
         *,
         refresh_base: bool,
+        timeout: int | None = None,
     ) -> None:
         """Rebase reused issue automation branches before implementation starts."""
         if not refresh_base or not self._is_issue_automation_branch(branch_name):
             return
-        base_branch_name = self._origin_base_branch_name()
+        base_branch_name = self._origin_base_branch_name(timeout=timeout)
         if base_branch_name is None:
             logger.info(
                 "Skipping pre-implementation rebase for %s: base %s is not an origin branch",
@@ -389,7 +428,7 @@ class WorktreeManager:
             branch_name,
             self.base_branch,
         )
-        if not rebase_worktree_onto(worktree_path, base_branch_name):
+        if not rebase_worktree_onto(worktree_path, base_branch_name, **_timeout_kw(timeout)):
             logger.warning(
                 "Could not rebase reused issue branch %s onto %s before implementation; "
                 "proceeding with current branch head",
@@ -397,9 +436,9 @@ class WorktreeManager:
                 self.base_branch,
             )
 
-    def _origin_base_branch_name(self) -> str | None:
+    def _origin_base_branch_name(self, *, timeout: int | None = None) -> str | None:
         """Return the branch name portion for an ``origin/<branch>`` base."""
-        base_ref = self.base_branch
+        base_ref = self._resolve_base_branch(timeout=timeout)
         if base_ref.startswith("refs/remotes/origin/"):
             return base_ref.removeprefix("refs/remotes/origin/")
         if base_ref.startswith("origin/"):
@@ -408,7 +447,12 @@ class WorktreeManager:
             return base_ref
         return None
 
-    def _refresh_stale_local_branch_if_safe(self, branch_name: str) -> None:
+    def _refresh_stale_local_branch_if_safe(
+        self,
+        branch_name: str,
+        *,
+        timeout: int | None = None,
+    ) -> None:
         """Fast-forward a stale local branch that has no work beyond base.
 
         A killed or superseded automation run can leave ``<issue>-auto-impl``
@@ -421,17 +465,19 @@ class WorktreeManager:
         if not self._is_issue_automation_branch(branch_name):
             return
         try:
+            base_branch = self._resolve_base_branch(timeout=timeout)
             result = run(
                 [
                     "git",
                     "rev-list",
                     "--left-right",
                     "--count",
-                    f"{self.base_branch}...{branch_name}",
+                    f"{base_branch}...{branch_name}",
                 ],
                 cwd=self.repo_root,
                 capture_output=True,
                 check=False,
+                **_timeout_kw(timeout),
             )
             if result.returncode != 0:
                 return
@@ -449,17 +495,21 @@ class WorktreeManager:
         logger.info(
             "Branch %s has no commits beyond %s and is %s commit(s) behind; fast-forwarding",
             branch_name,
-            self.base_branch,
+            base_branch,
             behind_base,
         )
-        run(["git", "branch", "-f", branch_name, self.base_branch], cwd=self.repo_root)
+        run(
+            ["git", "branch", "-f", branch_name, base_branch],
+            cwd=self.repo_root,
+            **_timeout_kw(timeout),
+        )
 
     def _is_issue_automation_branch(self, branch_name: str) -> bool:
         """Return True for branch names owned by the issue automation loop."""
         issue_prefix, sep, suffix = branch_name.partition("-")
         return bool(sep and issue_prefix.isdigit() and suffix in {"auto", "auto-impl"})
 
-    def _local_branch_exists(self, branch_name: str) -> bool:
+    def _local_branch_exists(self, branch_name: str, *, timeout: int | None = None) -> bool:
         """Return True if ``branch_name`` exists in the local repository.
 
         Args:
@@ -475,12 +525,13 @@ class WorktreeManager:
                 cwd=self.repo_root,
                 capture_output=True,
                 check=False,
+                **_timeout_kw(timeout),
             )
             return result.returncode == 0
         except Exception:
             return False
 
-    def _remote_branch_exists(self, branch_name: str) -> bool:
+    def _remote_branch_exists(self, branch_name: str, *, timeout: int | None = None) -> bool:
         """Return True if ``branch_name`` exists on origin.
 
         Uses ``git ls-remote --heads origin <branch>`` and checks for the
@@ -502,6 +553,7 @@ class WorktreeManager:
                 capture_output=True,
                 check=False,
                 log_errors=False,
+                **_timeout_kw(timeout),
             )
             return f"refs/heads/{branch_name}" in (result.stdout or "")
         except Exception as e:
@@ -532,10 +584,15 @@ class WorktreeManager:
             if self._is_automation_prompt_artifact(child):
                 child.unlink()
 
-    def _path_is_registered_worktree(self, worktree_path: Path) -> bool:
+    def _path_is_registered_worktree(
+        self,
+        worktree_path: Path,
+        *,
+        timeout: int | None = None,
+    ) -> bool:
         """Return True when ``worktree_path`` appears in git's worktree list."""
         target = worktree_path.resolve()
-        for wt in self.list_worktrees(raise_on_error=True):
+        for wt in self.list_worktrees(raise_on_error=True, timeout=timeout):
             path = wt.get("path")
             if path and Path(path).resolve() == target:
                 return True
@@ -545,7 +602,13 @@ class WorktreeManager:
         """Return True if a path exists and contains any directory entries."""
         return path.exists() and path.is_dir() and any(path.iterdir())
 
-    def _reuse_existing_dirty_worktree(self, issue_number: int, worktree_path: Path) -> bool:
+    def _reuse_existing_dirty_worktree(
+        self,
+        issue_number: int,
+        worktree_path: Path,
+        *,
+        timeout: int | None = None,
+    ) -> bool:
         """Register and reuse an existing dirty worktree instead of deleting it.
 
         A previous automation process may have preserved dirty work for an
@@ -557,8 +620,8 @@ class WorktreeManager:
 
         self._cleanup_automation_prompt_artifacts(worktree_path)
 
-        if self._path_is_registered_worktree(worktree_path):
-            if not is_clean_working_tree(worktree_path):
+        if self._path_is_registered_worktree(worktree_path, timeout=timeout):
+            if not is_clean_working_tree(worktree_path, timeout=timeout):
                 logger.info(
                     "Reusing dirty existing worktree for issue #%s at %s",
                     issue_number,
@@ -576,12 +639,19 @@ class WorktreeManager:
 
         return False
 
-    def remove_worktree(self, issue_number: int, force: bool = False) -> None:
+    def remove_worktree(
+        self,
+        issue_number: int,
+        force: bool = False,
+        *,
+        timeout: int | None = None,
+    ) -> None:
         """Remove a worktree.
 
         Args:
             issue_number: Issue number
             force: Force removal even with uncommitted changes
+            timeout: Optional timeout in seconds for each git command.
 
         Raises:
             WorktreeDirtyError: If the worktree has uncommitted changes and force=False
@@ -608,12 +678,17 @@ class WorktreeManager:
                 )
                 del self.worktrees[issue_number]
                 with contextlib.suppress(Exception):
-                    run(["git", "worktree", "prune"], cwd=self.repo_root, check=False)
+                    run(
+                        ["git", "worktree", "prune"],
+                        cwd=self.repo_root,
+                        check=False,
+                        **_timeout_kw(timeout),
+                    )
                 return
 
             self._cleanup_automation_prompt_artifacts(worktree_path)
 
-            if not force and not is_clean_working_tree(worktree_path):
+            if not force and not is_clean_working_tree(worktree_path, timeout=timeout):
                 raise WorktreeDirtyError(issue_number, worktree_path)
 
             try:
@@ -622,7 +697,7 @@ class WorktreeManager:
                     cmd.append("--force")
 
                 with file_lock(self._git_metadata_lock_path()):
-                    run(cmd, cwd=self.repo_root)
+                    run(cmd, cwd=self.repo_root, **_timeout_kw(timeout))
 
                 del self.worktrees[issue_number]
                 logger.info("Removed worktree for issue #%s", issue_number)
@@ -643,7 +718,7 @@ class WorktreeManager:
         with self.lock:
             return self.worktrees.get(issue_number)
 
-    def cleanup_all(self, force: bool = False) -> None:
+    def cleanup_all(self, force: bool = False, *, timeout: int | None = None) -> None:
         """Remove all managed worktrees.
 
         Dirty worktrees (uncommitted changes) are skipped rather than force-removed.
@@ -651,6 +726,7 @@ class WorktreeManager:
 
         Args:
             force: Force removal even with uncommitted changes
+            timeout: Optional timeout in seconds for each git command.
 
         Note:
             Known limitation: Releases lock between iterations to avoid
@@ -681,7 +757,7 @@ class WorktreeManager:
                 )
                 continue
             try:
-                self.remove_worktree(issue_num, force=force)
+                self.remove_worktree(issue_num, force=force, timeout=timeout)
                 if path is not None:
                     removed_paths.add(path)
             except WorktreeDirtyError as e:
@@ -690,18 +766,23 @@ class WorktreeManager:
             except Exception as e:
                 logger.error("Failed to remove worktree for issue #%s: %s", issue_num, e)
 
-    def prune_worktrees(self) -> None:
+    def prune_worktrees(self, *, timeout: int | None = None) -> None:
         """Prune stale worktree administrative files.
 
         Useful for cleaning up after manual worktree deletion.
         """
         try:
-            run(["git", "worktree", "prune"], cwd=self.repo_root)
+            run(["git", "worktree", "prune"], cwd=self.repo_root, **_timeout_kw(timeout))
             logger.info("Pruned stale worktrees")
         except Exception as e:
             logger.error("Failed to prune worktrees: %s", e)
 
-    def _worktree_holding_branch(self, branch_name: str) -> Path | None:
+    def _worktree_holding_branch(
+        self,
+        branch_name: str,
+        *,
+        timeout: int | None = None,
+    ) -> Path | None:
         """Return the path of the worktree that has ``branch_name`` checked out.
 
         git refuses to check out the same branch in two worktrees, so before
@@ -712,7 +793,7 @@ class WorktreeManager:
         """
         target_ref = f"refs/heads/{branch_name}"
         try:
-            worktrees = self.list_worktrees(raise_on_error=True)
+            worktrees = self.list_worktrees(raise_on_error=True, timeout=timeout)
         except Exception as e:
             raise RuntimeError(
                 f"Cannot safely determine whether branch {branch_name!r} is already "
@@ -724,12 +805,18 @@ class WorktreeManager:
                 return Path(wt["path"])
         return None
 
-    def list_worktrees(self, *, raise_on_error: bool = False) -> list[dict[str, str]]:
+    def list_worktrees(
+        self,
+        *,
+        raise_on_error: bool = False,
+        timeout: int | None = None,
+    ) -> list[dict[str, str]]:
         """List all git worktrees in the repository.
 
         Args:
             raise_on_error: When True, propagate git/listing failures so callers
                 that would otherwise force-remove or collide fail closed.
+            timeout: Optional timeout in seconds for the git command.
 
         Returns:
             List of worktree info dictionaries
@@ -740,6 +827,7 @@ class WorktreeManager:
                 ["git", "worktree", "list", "--porcelain"],
                 cwd=self.repo_root,
                 capture_output=True,
+                **_timeout_kw(timeout),
             )
 
             worktrees = []
@@ -771,11 +859,12 @@ class WorktreeManager:
                 raise RuntimeError("Failed to list git worktrees") from e
             return []
 
-    def ensure_branch_deleted(self, branch_name: str) -> None:
+    def ensure_branch_deleted(self, branch_name: str, *, timeout: int | None = None) -> None:
         """Ensure a branch is deleted from local and remote.
 
         Args:
             branch_name: Branch name to delete
+            timeout: Optional timeout in seconds for each git command.
 
         """
         # Delete local branch
@@ -784,6 +873,7 @@ class WorktreeManager:
                 ["git", "branch", "-D", branch_name],
                 cwd=self.repo_root,
                 check=False,
+                **_timeout_kw(timeout),
             )
             logger.debug("Deleted local branch %s", branch_name)
         except Exception as e:
@@ -795,6 +885,7 @@ class WorktreeManager:
                 ["git", "push", "origin", "--delete", branch_name],
                 cwd=self.repo_root,
                 check=False,
+                **_timeout_kw(timeout),
             )
             logger.debug("Deleted remote branch %s", branch_name)
         except Exception as e:

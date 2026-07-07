@@ -116,6 +116,33 @@ class TestCommitChanges:
         assert commit_cmd[:4] == ["git", "commit", "-S", "-s"]
         assert "-m" in commit_cmd
 
+    def test_commit_changes_threads_git_timeout(self) -> None:
+        porcelain = " M src/foo.py\n"
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status("M\tsrc/foo.py\n"),  # changed files context
+                _status(" src/foo.py | 1 +\n"),  # stat context
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="Add foo", body="Implement it.")
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(3, Path("/tmp/wt"), git_timeout=42)
+
+        assert [call.kwargs["timeout"] for call in run_mock.call_args_list] == [
+            42,
+            42,
+            42,
+            42,
+            42,
+        ]
+
     def test_handles_renamed_files(self) -> None:
         porcelain = "R  old.py -> new.py\n"
         run_mock = MagicMock(

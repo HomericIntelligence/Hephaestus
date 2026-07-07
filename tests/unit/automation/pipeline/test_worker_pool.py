@@ -475,7 +475,11 @@ class TestGitOps:
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
-        instance.create_worktree.assert_called_once_with(issue_number=7, branch_name="7-auto")
+        instance.create_worktree.assert_called_once_with(
+            issue_number=7,
+            branch_name="7-auto",
+            timeout=60,
+        )
         assert result.ok is True
         assert result.value == "/tmp/wt"
 
@@ -510,9 +514,10 @@ class TestGitOps:
             issue_number=7,
             branch_name="7-existing",
             refresh_base=False,
+            timeout=60,
         )
-        mock_clean.assert_called_once_with(Path("/tmp/wt"))
-        mock_sync.assert_called_once_with(Path("/tmp/wt"), "7-existing")
+        mock_clean.assert_called_once_with(Path("/tmp/wt"), timeout=60)
+        mock_sync.assert_called_once_with(Path("/tmp/wt"), "7-existing", timeout=60)
         assert result.ok is True
         assert result.value == {"path": "/tmp/wt", "dirty": False, "status": "", "diff": ""}
 
@@ -533,7 +538,7 @@ class TestGitOps:
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
-        instance.remove_worktree.assert_called_once_with(issue_number=7, force=True)
+        instance.remove_worktree.assert_called_once_with(issue_number=7, force=True, timeout=60)
         assert result.ok is True
 
     def test_remove_worktree_path_dispatch(
@@ -560,8 +565,14 @@ class TestGitOps:
         mock_run.assert_any_call(
             ["git", "worktree", "remove", str(tmp_path / "issue-7"), "--force"],
             cwd=tmp_path,
+            timeout=60,
         )
-        mock_run.assert_any_call(["git", "worktree", "prune"], cwd=tmp_path, check=False)
+        mock_run.assert_any_call(
+            ["git", "worktree", "prune"],
+            cwd=tmp_path,
+            check=False,
+            timeout=60,
+        )
         assert result.ok is True
 
     @pytest.mark.parametrize("rebase_clean", [True, False])
@@ -585,7 +596,11 @@ class TestGitOps:
             pool.submit(job, StageName.MERGE_WAIT)
             _, result = completion_q.get(timeout=10)
 
-        mock_rebase.assert_called_once_with(cwd=Path("/tmp/wt"), base_branch="main")
+        mock_rebase.assert_called_once_with(
+            cwd=Path("/tmp/wt"),
+            base_branch="main",
+            timeout=60,
+        )
         assert result.ok is rebase_clean
         assert result.value is rebase_clean
 
@@ -607,7 +622,7 @@ class TestGitOps:
             pool.submit(job, StageName.MERGE_WAIT)
             _, result = completion_q.get(timeout=10)
 
-        mock_push.assert_called_once_with(cwd=Path("/tmp/wt"), branch="7-auto")
+        mock_push.assert_called_once_with(cwd=Path("/tmp/wt"), branch="7-auto", timeout=60)
         assert result.ok is True
 
     def test_commit_push_extracts_explicit_keys(
@@ -637,8 +652,14 @@ class TestGitOps:
             pool.submit(job, StageName.CI)
             _, result = completion_q.get(timeout=10)
 
-        mock_commit.assert_called_once_with(5, tmp_path, "claude", allowed_paths=None)
-        mock_push.assert_called_once_with("5-auto", tmp_path)
+        mock_commit.assert_called_once_with(
+            5,
+            tmp_path,
+            "claude",
+            allowed_paths=None,
+            timeout=60,
+        )
+        mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
         assert result.ok is True
         assert result.value is True  # value carries commit_if_changes' bool
 

@@ -190,6 +190,28 @@ class TestCommitIfChanges:
         mock_commit.assert_called_once_with(123, tmp_path, "codex", allowed_paths=None)
 
     @patch("hephaestus.automation.pr_manager.commit_changes")
+    def test_dirty_tree_threads_timeout_to_commit_helper(
+        self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        git_utils_mocks.run.return_value = Mock(stdout=" M fixed.py\n")
+
+        assert commit_if_changes(123, tmp_path, "codex", timeout=42) is True
+
+        git_utils_mocks.run.assert_called_once_with(
+            ["git", "status", "--porcelain"],
+            cwd=tmp_path,
+            capture_output=True,
+            timeout=42,
+        )
+        mock_commit.assert_called_once_with(
+            123,
+            tmp_path,
+            "codex",
+            allowed_paths=None,
+            git_timeout=42,
+        )
+
+    @patch("hephaestus.automation.pr_manager.commit_changes")
     def test_dirty_tree_forwards_allowed_paths(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -248,6 +270,16 @@ class TestPushBranch:
 
         with pytest.raises(RuntimeError, match="Failed to push branch 123-auto-impl"):
             push_branch("123-auto-impl", tmp_path)
+
+    def test_push_branch_threads_timeout(self, git_utils_mocks: Any, tmp_path: Path) -> None:
+        """push_branch bounds its git push with the caller's timeout."""
+        push_branch("123-auto-impl", tmp_path, timeout=42)
+
+        git_utils_mocks.run.assert_called_once_with(
+            ["git", "push", "origin", "123-auto-impl"],
+            cwd=tmp_path,
+            timeout=42,
+        )
 
 
 class TestGetCurrentBranch:
@@ -519,6 +551,31 @@ class TestPushCurrentBranchWithLeaseOnDivergence:
             "HEAD:5391-auto-impl",
         ]
 
+    def test_timeout_threads_through_push_and_divergence_retry(self, git_utils_mocks: Any) -> None:
+        """Initial push, branch lookup, fetch, and lease retry share one timeout."""
+        worktree = Path("/tmp/worktree-xyz")
+        push_err = subprocess.CalledProcessError(
+            1,
+            ["git", "push", "origin", "HEAD"],
+            output="",
+            stderr="non-fast-forward\n",
+        )
+        git_utils_mocks.run.side_effect = [
+            push_err,
+            Mock(returncode=0, stdout="511-impl\n"),
+            Mock(returncode=0),
+            Mock(returncode=0),
+        ]
+
+        push_current_branch_with_lease_on_divergence(worktree, timeout=42)
+
+        assert [call.kwargs["timeout"] for call in git_utils_mocks.run.call_args_list] == [
+            42,
+            42,
+            42,
+            42,
+        ]
+
 
 class TestSyncWorktreeToRemoteBranch:
     """Tests for sync_worktree_to_remote_branch (#832 — reset before agent)."""
@@ -552,6 +609,18 @@ class TestSyncWorktreeToRemoteBranch:
             sync_worktree_to_remote_branch(Path("/tmp/worktree-xyz"), "any-branch")
         # Reset must NOT have run after a fetch failure.
         assert git_utils_mocks.run.call_count == 1
+
+    def test_timeout_threads_through_fetch_and_reset(self, git_utils_mocks: Any) -> None:
+        """sync_worktree_to_remote_branch bounds fetch and reset."""
+        git_utils_mocks.run.return_value = Mock(returncode=0)
+        worktree = Path("/tmp/worktree-xyz")
+
+        sync_worktree_to_remote_branch(worktree, "5450-auto-impl", timeout=42)
+
+        assert [call.kwargs["timeout"] for call in git_utils_mocks.run.call_args_list] == [
+            42,
+            42,
+        ]
 
 
 class TestRebaseWorktreeOnto:
@@ -690,6 +759,19 @@ class TestRebaseWorktreeOnto:
             "upstream/develop",
             "--exec",
             "git commit --amend --no-edit -S -s",
+        ]
+
+    def test_timeout_threads_through_fetch_cleanup_and_rebase(self, git_utils_mocks: Any) -> None:
+        """rebase_worktree_onto bounds fetch, cleanup probes, and rebase."""
+        git_utils_mocks.run.return_value = Mock(returncode=0, stdout="")
+        worktree = Path("/tmp/worktree-xyz")
+
+        assert rebase_worktree_onto(worktree, "main", timeout=42) is True
+
+        assert [call.kwargs["timeout"] for call in git_utils_mocks.run.call_args_list] == [
+            42,
+            42,
+            42,
         ]
 
 
