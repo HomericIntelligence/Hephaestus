@@ -374,6 +374,37 @@ class TestGitErrorRetryCap:
         assert outcome.note == "git_error"
         assert item.attempts["implement"] == 0  # git failures never burn implement
 
+    def test_adopted_impl_go_worktree_failure_retries_worktree_not_ci(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed adopted worktree sync must not flow through ADOPTED_CI."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="WORKTREE_WAIT")
+        item.branch = "1-real-branch"
+        item.worktree = "/tmp/stale-worktree"
+        item.payload["existing_pr"] = True
+        item.payload["existing_pr_impl_go"] = True
+        item.payload["worktree_dirty"] = False
+
+        stage.on_job_done(item, JobResult(ok=False, error="missing remote ref"), ctx)
+        item.state = "DIRTY_DECISION_WAIT"
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.RETRY
+        assert outcome.note == "worktree creation failed"
+        assert item.state == "WORKTREE_WAIT"
+        assert item.worktree == ""
+        assert "worktree_dirty" not in item.payload
+
+        retry = stage.step(item, ctx)
+
+        assert isinstance(retry, JobRequest)
+        assert isinstance(retry.job, GitJob)
+        assert retry.job.op == "create_worktree"
+        assert retry.on_done_state == "DIRTY_DECISION_WAIT"
+
     def test_push_failures_share_the_same_cap(self, make_ctx: Any, make_work_item: Any) -> None:
         """Consecutive push failures hit the same bounded-RETRY path."""
         stage = ImplementationStage()
