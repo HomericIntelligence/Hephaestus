@@ -116,6 +116,7 @@ from hephaestus.automation.pipeline.stages import (
     StageContext,
     StageGitHub,
 )
+from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.stages.repo import product_to_work_item
 from hephaestus.automation.pipeline.summary import RunStats, print_summary
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
@@ -217,6 +218,10 @@ class PipelineConfig:
     # coordinator's budget accessor. ``--max-fix-iterations N`` maps to
     # ``{"ci_fix": N}`` so the CI-fix attempt budget is caller-tunable.
     budget_overrides: dict[str, int] = field(default_factory=dict)
+    # Configurable argv for the optional pre-PR unit-test gate. The
+    # implementation stage reads this vector instead of hardcoding the test
+    # command so non-pixi repos and non-standard unit-test layouts can opt in.
+    pre_pr_test_argv: tuple[str, ...] = PRE_PR_TEST_ARGV
     serialize_file_overlap: bool = True
     event_log_path: Path | None = None
     projects_dir: Path = field(default_factory=lambda: Path.home() / "Projects")
@@ -252,6 +257,7 @@ class _StageRunConfig:
     drive_green_all: bool = False
     enable_mechanical_rebase: bool = True
     poll_max_wait: int = DEFAULT_CI_POLL_MAX_WAIT
+    pre_pr_test_argv: tuple[str, ...] = PRE_PR_TEST_ARGV
 
 
 @dataclass
@@ -363,6 +369,7 @@ class Coordinator:
             drive_green_all=config.drive_green_all,
             enable_mechanical_rebase=config.enable_mechanical_rebase,
             poll_max_wait=config.poll_max_wait,
+            pre_pr_test_argv=config.pre_pr_test_argv,
         )
         self._ctx_cache: dict[str, StageContext] = {}
 
