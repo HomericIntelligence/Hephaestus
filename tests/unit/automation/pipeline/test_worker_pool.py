@@ -288,6 +288,47 @@ class TestAgentErrorHandling:
         assert "RuntimeError" in result.error
         assert "prompt builder exploded" in result.error
 
+    def test_run_agent_classifies_resolve_agent_exception(
+        self,
+        pool: WorkerPool,
+    ) -> None:
+        """resolve_agent failures are classified inside _run_agent."""
+        job = _agent_job(model="model-resolve-generic", agent="bad-agent")
+
+        with patch(f"{_WP}.resolve_agent", side_effect=ValueError("bad agent")):
+            result = pool._run_agent(job)
+
+        assert result.ok is False
+        assert result.error == "ValueError: bad agent"
+
+    def test_run_agent_classifies_prompt_builder_exception(self, pool: WorkerPool) -> None:
+        """Prompt builder failures are classified inside _run_agent."""
+
+        def missing_prompt() -> str:
+            raise KeyError("prompt-template")
+
+        job = _agent_job(model="model-prompt-generic", prompt_builder=missing_prompt)
+
+        with patch(f"{_WP}.resolve_agent", return_value="claude"):
+            result = pool._run_agent(job)
+
+        assert result.ok is False
+        assert "KeyError" in (result.error or "")
+        assert "prompt-template" in (result.error or "")
+
+    def test_run_agent_classifies_resilient_call_exception(self, pool: WorkerPool) -> None:
+        """Unexpected resilience-wrapper failures are classified inside _run_agent."""
+        job = _agent_job(model="model-resilient-generic", prompt_builder=lambda: "prompt")
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(f"{_WP}.resilient_call", side_effect=OSError("retry wrapper failed")),
+        ):
+            result = pool._run_agent(job)
+
+        assert result.ok is False
+        assert result.error == "OSError: retry wrapper failed"
+
     def test_unknown_job_type_returns_error_result(self, pool: WorkerPool) -> None:
         """A job of unknown type is converted to a TypeError error result."""
         result = pool._run(cast(AgentJob, object()))
