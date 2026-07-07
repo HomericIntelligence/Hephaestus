@@ -76,7 +76,7 @@ class Route:
 # is the doc's default target. Budget provenance:
 #   plan_review_iter=3, pr_review_iter=3  <- _review_phase.py:87 MAX_REVIEW_ITERATIONS
 #   pr_review_hard=6                       <- _review_phase.py:95 (=3*2, progress-aware)
-#   blocked_address=2                      <- ci_driver.py:104 _BLOCKED_ADDRESS_MAX_ATTEMPTS
+#   blocked_address=2                     <- review_thread_resolver.py _BLOCKED_ADDRESS_MAX_ATTEMPTS
 #   clone=2, plan=2, plan_cycles=2,
 #   implement=2, test_fix=1, ci_fix=1,
 #   rebase=2                               <- architecture doc stage sections
