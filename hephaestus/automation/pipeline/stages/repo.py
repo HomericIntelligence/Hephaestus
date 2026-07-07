@@ -128,8 +128,12 @@ class RepoStage(Stage):
             return self._discover(item, ctx)
 
         if item.state == "SEEDED":
-            products = item.payload.get("products", [])
-            seeded = sum(1 for p in products if p.get("stage") is not None)
+            seeded_count = item.payload.get("seeded_count")
+            if seeded_count is None:
+                seeded_count = sum(
+                    1 for p in item.payload.get("products", []) if p.get("stage") is not None
+                )
+            seeded = int(seeded_count)
             return StageOutcome(Disposition.FINISH_PASS, note=f"seeded:{seeded}")
 
         return StageOutcome(Disposition.FINISH_FAIL, note=f"unknown state: {item.state}")
@@ -249,6 +253,7 @@ class RepoStage(Stage):
                 )
 
         item.payload["products"] = products
+        item.payload["seeded_count"] = sum(1 for p in products if p.get("stage") is not None)
         return Continue(next_state="SEEDED")
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
