@@ -60,6 +60,17 @@ class TestDisposition:
         }
         assert {d.value for d in Disposition} == expected
 
+    def test_finish_fail_has_terminal_comment(self) -> None:
+        """FINISH_FAIL keeps the terse terminal-fail rationale comment."""
+        source_lines = Path(routing.__file__).read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(source_lines):
+            if line.strip() == 'FINISH_FAIL = "finish_fail"':
+                assert index > 0
+                assert source_lines[index - 1].strip() == "# terminal fail; no S105 needed"
+                break
+        else:
+            pytest.fail("FINISH_FAIL enum member not found")
+
 
 class TestStageOutcome:
     """Tests for StageOutcome dataclass."""
