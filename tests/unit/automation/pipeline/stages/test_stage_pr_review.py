@@ -1176,6 +1176,37 @@ class TestRealCommitGate:
         assert "Make sure to handle x.py:3" in prompt  # the #1575 directive block
         assert "NO commit on the previous turn" in prompt
 
+    def test_no_commit_retry_address_error_consumes_directive_without_burning_round(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A hard-failed no-commit retry is agent_error, not stale carry."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=45, pr=1001, state="EVAL")
+        threads = [{"id": "t1", "path": "x.py", "line": 3, "body": "fix the bug"}]
+        item.payload["review_verdict"] = _verdict("NOGO")
+        item.payload["address_error"] = True
+        item.payload["push_no_commit"] = True
+        item.payload["no_commit_retry_done"] = True
+        item.payload["unaddressed_findings"] = threads
+        item.payload["pr_review_round"] = 2
+        item.attempts["pr_review_iter"] = 2
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.FAIL_BACK
+        assert result.note == "agent_error"
+        assert item.payload["agent_error_failback"] is True
+        assert item.payload["pr_review_round"] == 2
+        assert item.attempts["pr_review_iter"] == 2
+        assert "address_error" not in item.payload
+        assert "push_no_commit" not in item.payload
+        assert "no_commit_retry_done" not in item.payload
+        assert "unaddressed_findings" not in item.payload
+        assert github.mutation_log == []
+
     def test_second_no_commit_counts_as_an_unaddressed_round(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

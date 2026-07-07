@@ -71,6 +71,11 @@ contract):
   step is retried ONCE with the ``build_unaddressed_directive`` block
   (via ``get_address_review_prompt``'s ``unaddressed_findings``), and a
   second consecutive no-commit turn is evaluated as an unaddressed round.
+- If the one-shot no-commit retry's address/push leg hard-fails, EVAL treats
+  that as an explicit agent infrastructure failure, not as a second no-commit
+  review round: it consumes the retry sentinel/directive, fails back
+  ``agent_error`` without burning ``pr_review_iter``, and relies on the bounded
+  implementation re-adoption path to run a fresh REVIEW->VALIDATE cycle.
 - agent_error fail-backs (address failure, reviewer-error cap, missing
   PR/worktree) set ``payload["agent_error_failback"]`` so the
   implementation GATE consumes the ``implement`` budget on re-adoption —
@@ -652,12 +657,9 @@ class PrReviewStage(Stage):
             return self._fail_back_agent_error(item)
         payload = item.payload
 
-        if payload.pop("address_error", None):
-            # The address/push leg hard-failed: the doc's agent_error route —
-            # back to implementation for a fresh implement pass (bounded by
-            # the implement budget). No labels, no round burned.
-            logger.warning("pr_review:%d: address step failed; failing back", item.issue)
-            return self._fail_back_agent_error(item)
+        address_error = self._handle_address_error(item)
+        if address_error is not None:
+            return address_error
 
         # Real-commit gate (#1575, M4): a no-commit push retries the address
         # once with the directive; the second no-commit turn falls through
@@ -764,6 +766,30 @@ class PrReviewStage(Stage):
         )
         write_skip_label(item.issue, ctx)
         return StageOutcome(Disposition.SKIP, "exhaustion")
+
+    def _handle_address_error(self, item: WorkItem) -> StageOutcome | None:
+        """Fail back hard address/push errors with explicit retry cleanup."""
+        payload = item.payload
+        if not payload.pop("address_error", None):
+            return None
+
+        if payload.get("no_commit_retry_done") or payload.get("unaddressed_findings"):
+            payload.pop("push_no_commit", None)
+            payload.pop("no_commit_retry_done", None)
+            payload.pop("unaddressed_findings", None)
+            logger.warning(
+                "pr_review:%d: no-commit retry address/push leg failed; "
+                "consuming retry directive and failing back agent_error without "
+                "burning a review round",
+                item.issue,
+            )
+            return self._fail_back_agent_error(item)
+
+        # The address/push leg hard-failed: the doc's agent_error route —
+        # back to implementation for a fresh implement pass (bounded by
+        # the implement budget). No labels, no round burned.
+        logger.warning("pr_review:%d: address step failed; failing back", item.issue)
+        return self._fail_back_agent_error(item)
 
     @staticmethod
     def _gate_no_commit(item: WorkItem) -> Continue | None:
