@@ -437,11 +437,16 @@ class TestInterruptedPostCheck:
 
         job = _agent_job(prompt_builder=MagicMock())
 
-        pool.submit(job, StageName.PLANNING)
-        _, result = completion_q.get(timeout=10)
+        with patch(f"{_WP}.time.monotonic", side_effect=[10.0, 10.25]):
+            pool.submit(job, StageName.PLANNING)
+            _, result = completion_q.get(timeout=10)
 
         assert result.interrupted is True
+        assert result.ok is False
         assert result.error == "interrupted_before_start"
+        assert result.duration_s == pytest.approx(0.25)
+        assert result.stdout_tail == ""
+        assert result.stderr_tail == ""
         # Callable should never have been invoked (was MagicMock above)
         assert not job.prompt_builder.called  # type: ignore[attr-defined]
 
