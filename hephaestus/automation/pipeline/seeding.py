@@ -85,6 +85,7 @@ class IssueFacts:
         title: Issue title (feeds the epic title-marker signal, #1669).
         is_epic: Whether this issue is an epic/roadmap (excluded from queuing).
         labels: Set of labels currently on this issue.
+        body: Issue body used to hydrate downstream task prompts.
         pr_number: GitHub PR number if one exists and is live (open or
             merged), None otherwise.
         pr_is_open: True iff PR exists and is open.
@@ -113,6 +114,7 @@ class IssueFacts:
     pr_is_merged: bool
     pr_has_implementation_go: bool = False
     pr_has_implementation_no_go: bool = False
+    body: str = ""
 
 
 @dataclass(frozen=True)
@@ -127,6 +129,10 @@ class SeedEntry:
         pr_number: Open PR number for directly-seeded issue entries, when one
             exists. Repo discovery carries this in products; direct ``--issues``
             seeding needs the same value so downstream PR stages have context.
+        issue_title: Issue title copied into the issue WorkItem payload for
+            planner/reviewer/implementer prompts.
+        issue_body: Issue body copied into the issue WorkItem payload for
+            planner/reviewer/implementer prompts.
 
     """
 
@@ -135,6 +141,8 @@ class SeedEntry:
     stage: StageName | None
     reason: str
     pr_number: int | None = None
+    issue_title: str = ""
+    issue_body: str = ""
 
 
 def _get_state_label(labels: set[str]) -> str | None:
@@ -306,6 +314,7 @@ def seed_issue(issue_number: int) -> IssueFacts:
         title=issue_info.title,
         is_epic=epic,
         labels=labels,
+        body=issue_info.body,
         pr_number=pr_number,
         pr_is_open=pr_is_open,
         pr_is_merged=pr_is_merged,
@@ -324,6 +333,7 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
         if isinstance(label, dict) and label.get("name")
     }
     title = str(issue_data.get("title") or "") if isinstance(issue_data, dict) else ""
+    body = str(issue_data.get("body") or "") if isinstance(issue_data, dict) else ""
     epic = is_epic(sorted(labels), title)
 
     pr_is_open = False
@@ -346,6 +356,7 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
         title=title,
         is_epic=epic,
         labels=labels,
+        body=body,
         pr_number=pr_number,
         pr_is_open=pr_is_open,
         pr_is_merged=pr_is_merged,
@@ -395,6 +406,8 @@ def seed_from_cli(
                 stage=stage,
                 reason=reason,
                 pr_number=facts.pr_number if facts.pr_is_open else None,
+                issue_title=facts.title,
+                issue_body=facts.body,
             )
         )
     for pr in prs:

@@ -415,19 +415,34 @@ class TestUntrustedFencing:
         assert prompts._UNTRUSTED_NOTICE in out
 
     def test_plan_loop_review_prompt_fences_untrusted_fields(self) -> None:
-        """get_plan_loop_review_prompt fences issue_body, advise, and plan_text."""
+        """get_plan_loop_review_prompt fences all untrusted planning-loop fields."""
         out = prompts.get_plan_loop_review_prompt(
             issue_number=1,
-            issue_title="t",
+            issue_title=self.INJECTION,
             issue_body=self.INJECTION,
             plan_text=self.INJECTION,
             learnings="",
-            iteration=0,
-            prior_review=None,
+            iteration=1,
+            prior_review=self.INJECTION,
             advise_findings=self.INJECTION,
         )
+        assert self._fence_present(out, "ISSUE_TITLE")
         assert self._fence_present(out, "ISSUE_BODY")
         assert self._fence_present(out, "ADVISE_FINDINGS")
+        assert self._fence_present(out, "PLAN_TEXT")
+        assert self._fence_present(out, "PRIOR_REVIEW")
+        assert prompts._UNTRUSTED_NOTICE in out
+
+    def test_plan_review_prompt_fences_untrusted_fields(self) -> None:
+        """get_plan_review_prompt fences title, body, and plan text."""
+        out = prompts.get_plan_review_prompt(
+            issue_number=1,
+            issue_title=self.INJECTION,
+            issue_body=self.INJECTION,
+            plan_text=self.INJECTION,
+        )
+        assert self._fence_present(out, "ISSUE_TITLE")
+        assert self._fence_present(out, "ISSUE_BODY")
         assert self._fence_present(out, "PLAN_TEXT")
         assert prompts._UNTRUSTED_NOTICE in out
 

@@ -1027,6 +1027,8 @@ class Coordinator:
                     stage=stage,
                     reason=reason,
                     pr_number=facts.pr_number if facts.pr_is_open else None,
+                    issue_title=facts.title,
+                    issue_body=facts.body,
                 )
             )
         for pr in self.config.prs:
@@ -1077,6 +1079,8 @@ class Coordinator:
                 pr=entry.pr_number,
                 stage=entry.stage,
             )
+            item.payload["issue_title"] = entry.issue_title
+            item.payload["issue_body"] = entry.issue_body
         item.state = "ENTER"
         item.payload["entry_reason"] = entry.reason
         return item

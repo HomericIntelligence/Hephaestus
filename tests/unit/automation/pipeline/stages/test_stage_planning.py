@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
@@ -11,6 +12,7 @@ from hephaestus.automation.pipeline.stages.planning import (
     PlanningStage,
     build_plan_prompt,
 )
+from hephaestus.automation.prompts._shared import _UNTRUSTED_NOTICE
 from hephaestus.automation.prompts.planning import get_plan_prompt
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
 from hephaestus.automation.state_labels import (
@@ -22,21 +24,41 @@ from hephaestus.automation.state_labels import (
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
+def _fence_present(prompt: str, label: str) -> bool:
+    """Return True when a prompt has nonce-delimited markers for label."""
+    return bool(
+        re.search(rf"BEGIN_[0-9A-F]+_{label}\b", prompt)
+        and re.search(rf"END_[0-9A-F]+_{label}\b", prompt)
+    )
+
+
 class TestBuildPlanPrompt:
     """build_plan_prompt composes the plan prompt with the advise block."""
 
-    def test_without_findings_is_plan_prompt_verbatim(self) -> None:
-        """No advise findings means the untouched template output."""
-        assert build_plan_prompt(7) == get_plan_prompt(7)
-        assert build_plan_prompt(7, "") == get_plan_prompt(7)
+    def test_without_findings_includes_issue_context(self) -> None:
+        """The planner prompt carries fenced TASK title/body before the template."""
+        prompt = build_plan_prompt(7, "Retry failure", "The loop retries forever.")
+
+        assert _UNTRUSTED_NOTICE in prompt
+        assert _fence_present(prompt, "ISSUE_TITLE")
+        assert _fence_present(prompt, "ISSUE_BODY")
+        assert "Retry failure" in prompt
+        assert "The loop retries forever." in prompt
+        assert prompt.endswith(get_plan_prompt(7))
 
     def test_with_findings_appends_learnings_block(self) -> None:
-        """Advise findings ride in the legacy learnings block."""
-        prompt = build_plan_prompt(7, "Use the retry helper from utils.")
+        """Advise findings ride in a fenced learnings block."""
+        prompt = build_plan_prompt(
+            7,
+            "Retry failure",
+            "The loop retries forever.",
+            "Use the retry helper from utils.",
+        )
 
-        assert prompt.startswith(get_plan_prompt(7))  # template reused verbatim
-        assert "## Prior Learnings from Team Knowledge Base" in prompt
-        assert prompt.endswith("Use the retry helper from utils.")
+        assert "## Prior Learnings from Team Knowledge Base (untrusted)" in prompt
+        assert _fence_present(prompt, "ADVISE_FINDINGS")
+        assert "Use the retry helper from utils." in prompt
+        assert prompt.endswith(get_plan_prompt(7))
 
 
 class TestPlanningStageEnter:
@@ -219,6 +241,23 @@ class TestPlanningStageEnter:
         assert STATE_PLAN_GO not in github.labels[20]
         assert STATE_NEEDS_PLAN in github.labels[20]
 
+    def test_replan_entry_ignores_existing_rejected_plan_comment(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A NOGO fail-back must not VERIFY against the stale rejected plan."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO], has_plan=True)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=23, state="ENTER")
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome is None
+        assert item.state == "ENTER"
+        assert github.mutation_log == [
+            ("edit_labels", (23, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO))),
+        ]
+
     def test_plan_go_on_entry_fast_forwards_without_swap(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -298,6 +337,8 @@ class TestPlanningStageStep:
         stage = PlanningStage()
         ctx = make_ctx()
         item = make_work_item(issue=4, state="PLAN_WAIT")
+        item.payload["issue_title"] = "Retry failure"
+        item.payload["issue_body"] = "The loop retries forever."
         item.payload["advise_findings"] = "prior learnings"
 
         result = stage.step(item, ctx)
@@ -311,6 +352,8 @@ class TestPlanningStageStep:
         # AgentJob is frozen, so no closures over payload).
         assert result.job.prompt_kwargs == {
             "issue_number": 4,
+            "issue_title": "Retry failure",
+            "issue_body": "The loop retries forever.",
             "advise_findings": "prior learnings",
         }
 
@@ -380,6 +423,29 @@ class TestPlanningStageStep:
             ("gh_issue_upsert_comment", (11, PLAN_COMMENT_MARKER)),
         ]
         assert github.comments[11] == ["# Implementation Plan\n\nDo the thing."]
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.ADVANCE
+
+    def test_verify_advances_after_upsert_even_when_old_review_gate_is_false(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A just-written revised plan is valid even before a new review exists."""
+
+        class StaleNoGoGitHub(FakeStageGitHub):
+            def has_existing_plan(self, issue_number: int) -> bool:
+                return False
+
+        stage = PlanningStage()
+        github = StaleNoGoGitHub(has_plan=False)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=24, state="VERIFY")
+        item.payload["plan_text"] = "# Implementation Plan\n\nRevised plan."
+
+        result = stage.step(item, ctx)
+
+        assert github.mutation_log == [
+            ("gh_issue_upsert_comment", (24, PLAN_COMMENT_MARKER)),
+        ]
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.ADVANCE
 

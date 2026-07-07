@@ -34,13 +34,14 @@ CODEX_GPT_56_MODEL = "gpt-5.6"
 CODEX_GPT_55_MODEL = "gpt-5.5"
 CODEX_FABLE_MODEL = CODEX_GPT_55_MODEL
 CODEX_FABLE_REASONING_EFFORT = "xhigh"
-CODEX_OPUS_MODEL = CODEX_GPT_56_MODEL
+CODEX_OPUS_MODEL = CODEX_GPT_55_MODEL
 CODEX_OPUS_REASONING_EFFORT = "xhigh"
 CODEX_SONNET_MODEL = CODEX_GPT_55_MODEL
 CODEX_SONNET_REASONING_EFFORT = "medium"
 CODEX_HAIKU_MODEL = "gpt-5.4-mini"
 CODEX_DEFAULT_MODEL = CODEX_OPUS_MODEL
 CODEX_DEFAULT_REASONING_EFFORT = CODEX_OPUS_REASONING_EFFORT
+CODEX_PARENT_CONTEXT_ENV_VARS = ("CODEX_THREAD_ID",)
 PI_PROVIDER_ENV = "HEPH_PI_PROVIDER"
 PI_MODEL_ENV = "HEPH_PI_MODEL"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
@@ -634,6 +635,8 @@ def _run_codex_command(
         cmd.extend(["--output-last-message", output_file.name, "-"])
         env = os.environ.copy()
         env.setdefault("CODEX_HOME", str(Path.home() / ".codex"))
+        for key in CODEX_PARENT_CONTEXT_ENV_VARS:
+            env.pop(key, None)
         try:
             stdout_text, stderr_text = _communicate_codex_process(
                 cmd,

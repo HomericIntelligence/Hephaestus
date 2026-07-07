@@ -57,9 +57,9 @@ from hephaestus.automation.agent_config import (
 )
 from hephaestus.automation.claude_invoke import parse_review_verdict
 from hephaestus.automation.learn import build_learn_prompt
+from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import (
     get_plan_loop_review_prompt,
-    get_plan_prompt,
 )
 from hephaestus.automation.session_naming import AGENT_PLAN_REVIEWER, AGENT_PLANNER
 from hephaestus.automation.state_labels import apply_plan_verdict
@@ -78,6 +78,7 @@ from .base import (
     agent_provider,
     stage_model,
 )
+from .planning import build_plan_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -88,35 +89,47 @@ logger = logging.getLogger(__name__)
 REVIEW_ERROR_RETRY_CAP = 2
 
 
-def build_amend_prompt(issue_number: int, prior_review: str) -> str:
-    """Compose the amend prompt: plan prompt + reviewer feedback block.
+def build_amend_prompt(
+    issue_number: int,
+    prior_review: str,
+    issue_title: str = "",
+    issue_body: str = "",
+    advise_findings: str = "",
+) -> str:
+    """Compose the amend prompt: task-aware plan prompt + reviewer feedback block.
 
     Module-level composed builder (NOT a closure): :class:`AgentJob` is
     frozen and prompt builders run in-worker, so the builder must be a
     top-level function receiving everything via ``prompt_kwargs``. The
-    feedback block appends the prior reviewer critique to the plan prompt (doc
-    section 3 step 3: "resume planner session with feedback block"); the
-    prompt template itself is reused verbatim via :func:`get_plan_prompt`.
+    feedback block appends the prior reviewer critique to the same
+    task-aware plan prompt used by initial planning (doc section 3 step 3:
+    "resume planner session with feedback block").
 
     Args:
         issue_number: GitHub issue number being re-planned.
         prior_review: The previous review round's NOGO critique text.
+        issue_title: Source issue title.
+        issue_body: Source issue body.
+        advise_findings: Advise-step findings; empty string means no block.
 
     Returns:
         The full amend prompt with the feedback block appended.
 
     """
-    prompt = get_plan_prompt(issue_number)
+    prompt = build_plan_prompt(issue_number, issue_title, issue_body, advise_findings)
+    fenced = fence_content()
     feedback = "\n".join(
         [
             "",
             "---",
             "",
+            fenced.untrusted_notice,
+            "",
             "## Prior reviewer critique — your previous plan got NOGO",
             "",
             "Address every concrete finding below in your revised plan:",
             "",
-            prior_review,
+            fenced.fence("PRIOR_REVIEW", prior_review),
         ]
     )
     return prompt + feedback
@@ -256,6 +269,9 @@ class PlanReviewStage(Stage):
                 # session (#1817 wires that session setup).
                 prompt_kwargs={
                     "issue_number": item.issue,
+                    "issue_title": item.payload.get("issue_title", ""),
+                    "issue_body": item.payload.get("issue_body", ""),
+                    "advise_findings": item.payload.get("advise_findings", ""),
                     "prior_review": item.payload.get("prior_review", ""),
                 },
                 descr="amend",

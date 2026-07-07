@@ -34,6 +34,7 @@ from hephaestus.automation.agent_config import (
     planner_claude_timeout,
     planner_model,
 )
+from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.advise import get_advise_prompt_builder
 from hephaestus.automation.prompts.planning import get_plan_prompt
 from hephaestus.automation.protocol import PLAN_COMMENT_MARKER
@@ -66,8 +67,13 @@ from .base import (
 logger = logging.getLogger(__name__)
 
 
-def build_plan_prompt(issue_number: int, advise_findings: str = "") -> str:
-    """Compose the plan prompt with the advise-findings block.
+def build_plan_prompt(
+    issue_number: int,
+    issue_title: str = "",
+    issue_body: str = "",
+    advise_findings: str = "",
+) -> str:
+    """Compose the plan prompt with the issue TASK and advise-findings block.
 
     Module-level composed builder (NOT a closure): :class:`AgentJob` is
     frozen and prompt builders run in-worker, so the builder must be a
@@ -78,6 +84,8 @@ def build_plan_prompt(issue_number: int, advise_findings: str = "") -> str:
 
     Args:
         issue_number: GitHub issue number to plan.
+        issue_title: Source issue title.
+        issue_body: Source issue body.
         advise_findings: Advise-step findings; empty string means no block.
 
     Returns:
@@ -85,20 +93,29 @@ def build_plan_prompt(issue_number: int, advise_findings: str = "") -> str:
         ``advise_findings`` is non-empty.
 
     """
-    prompt = get_plan_prompt(issue_number)
-    if not advise_findings:
-        return prompt
-    block = "\n".join(
-        [
-            "",
-            "---",
-            "",
-            "## Prior Learnings from Team Knowledge Base",
-            "",
-            advise_findings,
-        ]
-    )
-    return prompt + block
+    fenced = fence_content()
+    context_parts = [
+        fenced.untrusted_notice,
+        "",
+        f"**Issue Title (untrusted, GitHub issue #{issue_number}):**",
+        fenced.fence("ISSUE_TITLE", issue_title or f"Issue #{issue_number}"),
+        "",
+        "**Issue Description (untrusted):**",
+        fenced.fence("ISSUE_BODY", issue_body),
+    ]
+    if advise_findings:
+        context_parts.extend(
+            [
+                "",
+                "---",
+                "",
+                "## Prior Learnings from Team Knowledge Base (untrusted)",
+                "",
+                fenced.fence("ADVISE_FINDINGS", advise_findings),
+            ]
+        )
+    context_parts.extend(["", "---", "", get_plan_prompt(issue_number)])
+    return "\n".join(context_parts)
 
 
 def _normalize_plan_comment(plan: str) -> str:
@@ -202,7 +219,8 @@ class PlanningStage(Stage):
         # has_existing_plan gate stuck-False so VERIFY can never ADVANCE
         # (#1857). Swap atomically: add needs-plan, remove both siblings, in
         # ONE gh issue edit. Restores state:plan-no-go ──re-plan──▶ needs-plan.
-        if STATE_PLAN_NO_GO in labels or STATE_PLAN_GO in labels:
+        is_replan_entry = STATE_PLAN_NO_GO in labels
+        if is_replan_entry or STATE_PLAN_GO in labels:
             add, remove = enter_planning_transition()
             logger.info("planning:%d: entry swap; add %s, remove %s", item.issue, add, remove)
             ctx.github.edit_labels(item.issue, add=add, remove=remove)
@@ -214,7 +232,7 @@ class PlanningStage(Stage):
         # Restart fast-forward: a plan comment already exists (real has-plan
         # semantics via ctx.github), so re-entry must not redo advise + plan.
         # Jump straight to VERIFY; idempotent on repeated on_enter calls.
-        if ctx.github.has_existing_plan(item.issue):
+        if not is_replan_entry and ctx.github.has_existing_plan(item.issue):
             logger.info(
                 "planning:%d: plan comment already exists; fast-forward to VERIFY", item.issue
             )
@@ -277,11 +295,14 @@ class PlanningStage(Stage):
                 cwd=ctx.paths.worktree,
                 timeout_s=planner_claude_timeout(),
                 session_agent=AGENT_PLANNER,
-                # build_plan_prompt composes get_plan_prompt with the advise
-                # findings block in-worker. The issue title/body header is
-                # prepended by the worker session setup (#1817).
+                # build_plan_prompt composes get_plan_prompt with the issue
+                # title/body and advise findings in-worker, mirroring the
+                # legacy planner_review_loop.generate_plan(cached_advise=...)
+                # context assembly.
                 prompt_kwargs={
                     "issue_number": item.issue,
+                    "issue_title": item.payload.get("issue_title", ""),
+                    "issue_body": item.payload.get("issue_body", ""),
                     "advise_findings": item.payload.get("advise_findings", ""),
                 },
                 descr="plan",
@@ -295,13 +316,15 @@ class PlanningStage(Stage):
             # decision (journal order). Guarded by has_existing_plan so
             # re-entry never double-posts.
             plan_text = item.payload.get("plan_text")
+            posted_plan = False
             if plan_text and not ctx.github.has_existing_plan(item.issue):
                 logger.info("planning:%d: upserting plan comment", item.issue)
                 ctx.github.upsert_plan_comment(item.issue, _normalize_plan_comment(plan_text))
+                posted_plan = True
 
             # Doc step 4 [M], part 2: verify the plan comment exists (the
             # PlannerStateManager.has_existing_plan read, via ctx.github).
-            if ctx.github.has_existing_plan(item.issue):
+            if posted_plan or ctx.github.has_existing_plan(item.issue):
                 logger.info("planning:%d: plan verified; advancing", item.issue)
                 return StageOutcome(Disposition.ADVANCE, "plan generated and verified")
 
