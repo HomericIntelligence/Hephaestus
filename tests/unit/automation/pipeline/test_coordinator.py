@@ -595,6 +595,37 @@ class TestPipelineScopeWiring:
         assert item.payload["issue_title"] == "Hydrate planner context"
         assert item.payload["issue_body"] == "Use the real issue body."
 
+    def test_seed_pass_filters_closed_explicit_issues_before_classification(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Closed explicit --issues are dropped before pipeline classification (#1899)."""
+
+        class RecordingGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(labels=["state:needs-plan"])
+                self.issue_json_calls: list[int] = []
+
+            def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+                self.issue_json_calls.append(issue_number)
+                return super().gh_issue_json(issue_number)
+
+        def fake_filter(repo: str, issue_numbers: list[int]) -> list[int]:
+            assert repo == "repo-a"
+            assert issue_numbers == [1, 2, 3]
+            return [1, 3]
+
+        gh = RecordingGitHub()
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            fake_filter,
+        )
+        config = self._scoped_config(tmp_path, issues=[1, 2, 3])
+        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+
+        assert coordinator._seed_pass() == 2
+        assert [item.issue for item in coordinator.items] == [1, 3]
+        assert gh.issue_json_calls == [1, 3]
+
     def test_at_or_past_plan_go_issue_clamps_to_finished(self, tmp_path: Path) -> None:
         """A plan-go issue classifies to IMPLEMENTATION; the scope clamps it to FINISHED-pass."""
         gh = FakeStageGitHub(labels=["state:plan-go"])
