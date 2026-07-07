@@ -80,6 +80,7 @@ from hephaestus.automation.session_naming import AGENT_ADDRESS_REVIEW, AGENT_CI_
 from hephaestus.constants import read_timeout_env
 
 from .base import (
+    BACKOFF_CAP_S as _BACKOFF_CAP_S,
     GIT_JOB_TIMEOUT_S,
     AgentJob,
     Continue,
@@ -100,6 +101,8 @@ from .base import (
 
 logger = logging.getLogger(__name__)
 
+BACKOFF_CAP_S = _BACKOFF_CAP_S
+
 # In-memory mini-states (stage-local strings, never GitHub labels).
 ENTER = "ENTER"
 ARM = "ARM"
@@ -110,10 +113,6 @@ BLOCKED_ADDRESS_WAIT = "BLOCKED_ADDRESS_WAIT"
 BLOCKED_PUSH_WAIT = "BLOCKED_PUSH_WAIT"
 LEARN_WAIT = "LEARN_WAIT"
 FINISH = "FINISH"
-
-#: Poll backoff cap in seconds (legacy ``min(2**attempt, 60)`` —
-#: ``ci_driver._wait_for_pr_terminal`` :1583).
-BACKOFF_CAP_S = 60
 
 #: Env var bounding the merge wait (legacy ``_wait_for_pr_terminal`` budget).
 MERGE_MAX_WAIT_ENV = "HEPH_PR_MERGE_MAX_WAIT"

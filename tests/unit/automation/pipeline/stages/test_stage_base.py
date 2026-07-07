@@ -5,8 +5,19 @@ from __future__ import annotations
 from typing import Any
 
 from hephaestus.automation.pipeline.routing import Disposition, StageOutcome
-from hephaestus.automation.pipeline.stages import PlanningStage, PlanReviewStage, Stage
-from hephaestus.automation.pipeline.stages.base import Continue, JobRequest, StageContext
+from hephaestus.automation.pipeline.stages import (
+    PlanningStage,
+    PlanReviewStage,
+    Stage,
+    ci,
+    merge_wait,
+)
+from hephaestus.automation.pipeline.stages.base import (
+    BACKOFF_CAP_S,
+    Continue,
+    JobRequest,
+    StageContext,
+)
 
 
 class TestStageContext:
@@ -79,3 +90,13 @@ class TestStepResultTypes:
         """JobRequest names the state entered after on_job_done."""
         request = JobRequest(job=None, on_done_state="EVAL")  # type: ignore[arg-type]
         assert request.on_done_state == "EVAL"
+
+
+class TestSharedBackoffCap:
+    """The legacy poll backoff cap is owned once by the stage base module."""
+
+    def test_backoff_cap_is_shared_by_ci_and_merge_wait(self) -> None:
+        """Ci and merge_wait read the same exported cap from base.py."""
+        assert BACKOFF_CAP_S == 60
+        assert ci.BACKOFF_CAP_S == BACKOFF_CAP_S
+        assert merge_wait.BACKOFF_CAP_S == BACKOFF_CAP_S
