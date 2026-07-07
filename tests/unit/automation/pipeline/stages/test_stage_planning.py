@@ -426,6 +426,29 @@ class TestPlanningStageStep:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.ADVANCE
 
+    def test_verify_advances_after_upsert_even_when_old_review_gate_is_false(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A just-written revised plan is valid even before a new review exists."""
+
+        class StaleNoGoGitHub(FakeStageGitHub):
+            def has_existing_plan(self, issue_number: int) -> bool:
+                return False
+
+        stage = PlanningStage()
+        github = StaleNoGoGitHub(has_plan=False)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=24, state="VERIFY")
+        item.payload["plan_text"] = "# Implementation Plan\n\nRevised plan."
+
+        result = stage.step(item, ctx)
+
+        assert github.mutation_log == [
+            ("gh_issue_upsert_comment", (24, PLAN_COMMENT_MARKER)),
+        ]
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.ADVANCE
+
     def test_verify_posts_exactly_once_on_reentry(self, make_ctx: Any, make_work_item: Any) -> None:
         """Re-entering VERIFY never double-posts.
 

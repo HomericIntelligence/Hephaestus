@@ -316,13 +316,15 @@ class PlanningStage(Stage):
             # decision (journal order). Guarded by has_existing_plan so
             # re-entry never double-posts.
             plan_text = item.payload.get("plan_text")
+            posted_plan = False
             if plan_text and not ctx.github.has_existing_plan(item.issue):
                 logger.info("planning:%d: upserting plan comment", item.issue)
                 ctx.github.upsert_plan_comment(item.issue, _normalize_plan_comment(plan_text))
+                posted_plan = True
 
             # Doc step 4 [M], part 2: verify the plan comment exists (the
             # PlannerStateManager.has_existing_plan read, via ctx.github).
-            if ctx.github.has_existing_plan(item.issue):
+            if posted_plan or ctx.github.has_existing_plan(item.issue):
                 logger.info("planning:%d: plan verified; advancing", item.issue)
                 return StageOutcome(Disposition.ADVANCE, "plan generated and verified")
 
