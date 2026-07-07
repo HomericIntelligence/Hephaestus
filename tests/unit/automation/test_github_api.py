@@ -1,7 +1,9 @@
 """Tests for GitHub API utilities."""
 
 import json
+import threading
 import subprocess
+from collections.abc import Generator
 from typing import Any
 from unittest.mock import Mock, patch
 
@@ -9,6 +11,7 @@ import pytest
 
 import hephaestus.automation.github_api as _github_api_module
 import hephaestus.github.client as client_module
+from hephaestus.github.rate_limit import configure_gh_global_throttle
 from hephaestus.automation.github_api import (
     GitHubRateLimitError,
     _check_graphql_errors,
@@ -1771,11 +1774,14 @@ class TestGhCallThrottle:
     """Tests for the per-thread `gh` call throttle inside _gh_call."""
 
     @pytest.fixture(autouse=True)
-    def _reset_throttle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _reset_throttle(self, monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
         # Reset the per-thread throttle state and force a known rate so tests
         # don't inherit clock state from earlier suite calls.
-        client_module._GH_THROTTLE = __import__("threading").local()
+        client_module._GH_THROTTLE = threading.local()
         monkeypatch.setenv("GH_RATE_LIMIT_PER_SEC", "5")
+        configure_gh_global_throttle(rate=0, burst=10)
+        yield
+        configure_gh_global_throttle(rate=10.0, burst=30.0)
 
     @patch("hephaestus.github.client.run_subprocess")
     def test_consecutive_calls_are_paced_to_min_interval(self, mock_run: Any) -> None:
