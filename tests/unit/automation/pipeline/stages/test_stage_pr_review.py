@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 from hephaestus.automation.claude_invoke import ReviewVerdict, parse_review_verdict
 from hephaestus.automation.pipeline.jobs import AgentJob, GitJob, JobResult
@@ -107,6 +108,19 @@ class TestPrReviewStageOnEnter:
 
 class TestPrReviewStageStep:
     """step state machine: ENTER -> REVIEW -> VALIDATE -> POST -> ... -> EVAL."""
+
+    def test_review_wait_dispatches_to_handler(self, make_ctx: Any, make_work_item: Any) -> None:
+        """REVIEW_WAIT routes through the dedicated state handler."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
+        expected = StageOutcome(Disposition.ADVANCE, "dispatched")
+
+        with patch.object(stage, "_review_wait", create=True, return_value=expected) as mock:
+            result = stage.step(item, ctx)
+
+        assert result == expected
+        mock.assert_called_once_with(item, ctx)
 
     def test_no_issue_number_fails(self, make_ctx: Any, make_work_item: Any) -> None:
         """Step without an issue number finishes failed."""

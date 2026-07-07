@@ -104,7 +104,8 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 
 from hephaestus.automation.agent_config import (
     address_review_claude_timeout,
@@ -163,6 +164,27 @@ PUSH_WAIT = "PUSH_WAIT"
 EVAL = "EVAL"
 FOLLOWUP_WAIT = "FOLLOWUP_WAIT"
 FINISH = "FINISH"
+
+_STEP_HANDLER_NAMES: dict[str, str] = {
+    ENTER: "_enter",
+    REVIEW_WAIT: "_review_wait",
+    VALIDATE_WAIT: "_validate_wait",
+    POST: "_post",
+    DIFFICULTY_WAIT: "_difficulty_wait",
+    ADDRESS_WAIT: "_address",
+    PUSH_WAIT: "_push_wait",
+    EVAL: "_eval",
+    FOLLOWUP_WAIT: "_followup_wait",
+    FINISH: "_finish",
+}
+
+
+def _issue_number(item: WorkItem) -> int:
+    """Return the issue number after the stage-level guard has run."""
+    if item.issue is None:
+        raise RuntimeError("pr_review stage reached without an issue number")
+    return item.issue
+
 
 #: Max CONSECUTIVE reviewer-infrastructure failures (ERROR verdicts or
 #: failed/valueless review jobs) tolerated before failing back
@@ -351,7 +373,7 @@ class PrReviewStage(Stage):
             item.payload.pop("review_error_retries", None)
         return None
 
-    def step(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
+    def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Execute the next PR-review action for the item's current state.
 
         Args:
@@ -370,146 +392,158 @@ class PrReviewStage(Stage):
             logger.warning("pr_review:%d: no PR on item; failing back", item.issue)
             return self._fail_back_agent_error(item)
 
-        if item.state == ENTER:
-            return Continue(next_state=REVIEW_WAIT)
-
-        if item.state == REVIEW_WAIT:
-            # Clear ALL round-scoped payload at submission (stale-result
-            # guard, M3 pattern): a failed later round must never replay an
-            # earlier round's verdict, threads, or address output.
-            for key in _ROUND_PAYLOAD_KEYS:
-                item.payload.pop(key, None)
-            round_index = item.payload.get("pr_review_round", 0)
-            logger.info(
-                "pr_review:%d: requesting review job (round %d, PR #%d)",
-                item.issue,
-                round_index,
-                item.pr,
+        handler_name = _STEP_HANDLER_NAMES.get(item.state)
+        if handler_name is not None:
+            handler = cast(
+                Callable[[WorkItem, StageContext], StepResult],
+                getattr(self, handler_name),
             )
-            job = AgentJob(
-                repo=item.repo,
-                issue=item.issue,
-                agent=agent_provider(ctx),
-                model=stage_model(ctx, "reviewer", reviewer_model),
-                prompt_builder=get_pr_review_analysis_prompt,
-                cwd=_worktree_path(item, ctx),
-                timeout_s=pr_reviewer_claude_timeout(),
-                session_agent=AGENT_PR_REVIEWER,
-                # Diff / body / CI context are seeded into item.payload by
-                # the coordinator (#1817), which owns the gh reads.
-                prompt_kwargs={
-                    "pr_number": item.pr,
-                    "issue_number": item.issue,
-                    "pr_diff": item.payload.get("pr_diff", ""),
-                    "issue_body": item.payload.get("issue_body", ""),
-                    "ci_status": item.payload.get("ci_status", ""),
-                    "pr_description": item.payload.get("pr_description", ""),
-                    "advise_findings": item.payload.get("advise_findings", ""),
-                    "include_nitpicks": bool(
-                        getattr(
-                            ctx.config,
-                            "nitpick",
-                            getattr(ctx.config, "include_nitpicks", False),
-                        )
-                    ),
-                },
-                parse=parse_review_verdict,  # verdict parsed in-worker
-                descr="review",
-            )
-            return JobRequest(job, on_done_state=VALIDATE_WAIT)
-
-        if item.state == VALIDATE_WAIT:
-            if item.payload.pop("review_failed", None):
-                # The review job itself failed: skip the validate/post/
-                # address leg — EVAL's missing-verdict ERROR path handles it
-                # without burning a round.
-                return Continue(next_state=EVAL)
-            logger.info("pr_review:%d: requesting validation job", item.issue)
-            job = AgentJob(
-                repo=item.repo,
-                issue=item.issue,
-                agent=agent_provider(ctx),
-                model=stage_model(ctx, "reviewer", reviewer_model),
-                prompt_builder=get_review_validation_prompt,
-                cwd=_worktree_path(item, ctx),
-                timeout_s=pr_reviewer_claude_timeout(),
-                session_agent=AGENT_PR_REVIEWER,
-                prompt_kwargs={
-                    "pr_number": item.pr,
-                    "issue_number": item.issue,
-                    "prior_comments_json": item.payload.get("prior_comments_json", "[]"),
-                    "diff_text": item.payload.get("pr_diff", ""),
-                },
-                descr="validate",
-            )
-            return JobRequest(job, on_done_state=POST)
-
-        if item.state == POST:
-            return self._post(item, ctx)
-
-        if item.state == DIFFICULTY_WAIT:
-            logger.info("pr_review:%d: requesting difficulty job", item.issue)
-            job = AgentJob(
-                repo=item.repo,
-                issue=item.issue,
-                agent=agent_provider(ctx),
-                model=stage_model(ctx, "reviewer", reviewer_model),
-                prompt_builder=get_comment_difficulty_prompt,
-                cwd=_worktree_path(item, ctx),
-                timeout_s=pr_reviewer_claude_timeout(),
-                session_agent=AGENT_COMMENT_CLASSIFIER,
-                prompt_kwargs={
-                    "issue_number": item.issue,
-                    "comments_json": json.dumps(item.payload.get("review_threads", [])),
-                },
-                descr="difficulty",
-            )
-            return JobRequest(job, on_done_state=ADDRESS_WAIT)
-
-        if item.state == ADDRESS_WAIT:
-            return self._address(item, ctx)
-
-        if item.state == PUSH_WAIT:
-            logger.info("pr_review:%d: requesting push job", item.issue)
-            git_job = GitJob(
-                repo=item.repo,
-                op="commit_push",
-                timeout_s=GIT_JOB_TIMEOUT_S,
-                kwargs={
-                    "issue_number": item.issue,
-                    "worktree_path": item.worktree,
-                    "branch": item.branch,
-                    "agent": agent_provider(ctx),
-                },
-                descr="push_fixes",
-            )
-            return JobRequest(git_job, on_done_state=EVAL)
-
-        if item.state == EVAL:
-            return self._eval(item, ctx)
-
-        if item.state == FOLLOWUP_WAIT:
-            logger.info("pr_review:%d: requesting follow-up job", item.issue)
-            job = AgentJob(
-                repo=item.repo,
-                issue=item.issue,
-                agent=agent_provider(ctx),
-                model=stage_model(ctx, "implementer", implementer_model),
-                prompt_builder=get_follow_up_prompt,
-                cwd=_worktree_path(item, ctx),
-                timeout_s=follow_up_claude_timeout(),
-                session_agent=AGENT_IMPLEMENTER,  # resume implementer session (legacy parity)
-                prompt_kwargs={"issue_number": item.issue},
-                descr="follow_up",
-            )
-            return JobRequest(job, on_done_state=FINISH)
-
-        if item.state == FINISH:
-            logger.info("pr_review:%d: follow-up completed; advancing", item.issue)
-            return StageOutcome(Disposition.ADVANCE, "implementation review approved")
+            return handler(item, ctx)
 
         logger.warning("pr_review:%d: unknown state %r", item.issue, item.state)
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
+
+    def _enter(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """ENTER advances to REVIEW_WAIT."""
+        return Continue(next_state=REVIEW_WAIT)
+
+    def _review_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """REVIEW_WAIT submits the inline review job with parsed verdicts."""
+        issue = _issue_number(item)
+        # Clear ALL round-scoped payload at submission (stale-result
+        # guard, M3 pattern): a failed later round must never replay an
+        # earlier round's verdict, threads, or address output.
+        for key in _ROUND_PAYLOAD_KEYS:
+            item.payload.pop(key, None)
+        round_index = item.payload.get("pr_review_round", 0)
+        logger.info(
+            "pr_review:%d: requesting review job (round %d, PR #%d)",
+            issue,
+            round_index,
+            item.pr,
+        )
+        job = AgentJob(
+            repo=item.repo,
+            issue=issue,
+            agent=agent_provider(ctx),
+            model=stage_model(ctx, "reviewer", reviewer_model),
+            prompt_builder=get_pr_review_analysis_prompt,
+            cwd=_worktree_path(item, ctx),
+            timeout_s=pr_reviewer_claude_timeout(),
+            session_agent=AGENT_PR_REVIEWER,
+            # Diff / body / CI context are seeded into item.payload by
+            # the coordinator (#1817), which owns the gh reads.
+            prompt_kwargs={
+                "pr_number": item.pr,
+                "issue_number": item.issue,
+                "pr_diff": item.payload.get("pr_diff", ""),
+                "issue_body": item.payload.get("issue_body", ""),
+                "ci_status": item.payload.get("ci_status", ""),
+                "pr_description": item.payload.get("pr_description", ""),
+                "advise_findings": item.payload.get("advise_findings", ""),
+                "include_nitpicks": bool(
+                    getattr(
+                        ctx.config,
+                        "nitpick",
+                        getattr(ctx.config, "include_nitpicks", False),
+                    )
+                ),
+            },
+            parse=parse_review_verdict,  # verdict parsed in-worker
+            descr="review",
+        )
+        return JobRequest(job, on_done_state=VALIDATE_WAIT)
+
+    def _validate_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """VALIDATE_WAIT either skips the dead round or submits validation."""
+        issue = _issue_number(item)
+        if item.payload.pop("review_failed", None):
+            # The review job itself failed: skip the validate/post/
+            # address leg — EVAL's missing-verdict ERROR path handles it
+            # without burning a round.
+            return Continue(next_state=EVAL)
+        logger.info("pr_review:%d: requesting validation job", issue)
+        job = AgentJob(
+            repo=item.repo,
+            issue=issue,
+            agent=agent_provider(ctx),
+            model=stage_model(ctx, "reviewer", reviewer_model),
+            prompt_builder=get_review_validation_prompt,
+            cwd=_worktree_path(item, ctx),
+            timeout_s=pr_reviewer_claude_timeout(),
+            session_agent=AGENT_PR_REVIEWER,
+            prompt_kwargs={
+                "pr_number": item.pr,
+                "issue_number": item.issue,
+                "prior_comments_json": item.payload.get("prior_comments_json", "[]"),
+                "diff_text": item.payload.get("pr_diff", ""),
+            },
+            descr="validate",
+        )
+        return JobRequest(job, on_done_state=POST)
+
+    def _difficulty_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """DIFFICULTY_WAIT submits the comment-difficulty job."""
+        issue = _issue_number(item)
+        logger.info("pr_review:%d: requesting difficulty job", issue)
+        job = AgentJob(
+            repo=item.repo,
+            issue=issue,
+            agent=agent_provider(ctx),
+            model=stage_model(ctx, "reviewer", reviewer_model),
+            prompt_builder=get_comment_difficulty_prompt,
+            cwd=_worktree_path(item, ctx),
+            timeout_s=pr_reviewer_claude_timeout(),
+            session_agent=AGENT_COMMENT_CLASSIFIER,
+            prompt_kwargs={
+                "issue_number": item.issue,
+                "comments_json": json.dumps(item.payload.get("review_threads", [])),
+            },
+            descr="difficulty",
+        )
+        return JobRequest(job, on_done_state=ADDRESS_WAIT)
+
+    def _push_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """PUSH_WAIT submits the commit+push job for the addressing changes."""
+        issue = _issue_number(item)
+        logger.info("pr_review:%d: requesting push job", issue)
+        git_job = GitJob(
+            repo=item.repo,
+            op="commit_push",
+            timeout_s=GIT_JOB_TIMEOUT_S,
+            kwargs={
+                "issue_number": issue,
+                "worktree_path": item.worktree,
+                "branch": item.branch,
+                "agent": agent_provider(ctx),
+            },
+            descr="push_fixes",
+        )
+        return JobRequest(git_job, on_done_state=EVAL)
+
+    def _followup_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """FOLLOWUP_WAIT submits the follow-up job before FINISH advances."""
+        issue = _issue_number(item)
+        logger.info("pr_review:%d: requesting follow-up job", issue)
+        job = AgentJob(
+            repo=item.repo,
+            issue=issue,
+            agent=agent_provider(ctx),
+            model=stage_model(ctx, "implementer", implementer_model),
+            prompt_builder=get_follow_up_prompt,
+            cwd=_worktree_path(item, ctx),
+            timeout_s=follow_up_claude_timeout(),
+            session_agent=AGENT_IMPLEMENTER,  # resume implementer session (legacy parity)
+            prompt_kwargs={"issue_number": item.issue},
+            descr="follow_up",
+        )
+        return JobRequest(job, on_done_state=FINISH)
+
+    def _finish(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """FINISH advances after the follow-up job completes."""
+        issue = _issue_number(item)
+        logger.info("pr_review:%d: follow-up completed; advancing", issue)
+        return StageOutcome(Disposition.ADVANCE, "implementation review approved")
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Store job results on the item payload (state is still the WAIT state).

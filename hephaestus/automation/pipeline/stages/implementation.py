@@ -61,6 +61,8 @@ binding contract):
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from typing import cast
 
 from hephaestus.automation.agent_config import (
     advise_claude_timeout,
@@ -117,6 +119,28 @@ TEST_WAIT = "TEST_WAIT"
 TESTFIX_WAIT = "TESTFIX_WAIT"
 COMMIT_PUSH_WAIT = "COMMIT_PUSH_WAIT"
 PR_CREATE = "PR_CREATE"
+
+_STEP_HANDLER_NAMES: dict[str, str] = {
+    ENTER: "_enter",
+    GATE: "_gate",
+    WORKTREE_WAIT: "_worktree_wait",
+    DIRTY_DECISION_WAIT: "_dirty_decision_wait",
+    ADOPTED: "_adopted",
+    ADVISE_WAIT: "_advise_wait",
+    IMPLEMENT_WAIT: "_implement_wait",
+    TEST_WAIT: "_test_wait",
+    TESTFIX_WAIT: "_testfix_wait",
+    COMMIT_PUSH_WAIT: "_commit_push_wait",
+    PR_CREATE: "_create_pr",
+}
+
+
+def _issue_number(item: WorkItem) -> int:
+    """Return the issue number after the stage-level guard has run."""
+    if item.issue is None:
+        raise RuntimeError("implementation stage reached without an issue number")
+    return item.issue
+
 
 #: Max CONSECUTIVE transient git failures (worktree creation / commit+push)
 #: tolerated before the stage finishes failed (``git_error``) instead of
@@ -238,7 +262,7 @@ class ImplementationStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
         return None
 
-    def step(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
+    def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Execute the next implementation action for the item's current state.
 
         Args:
@@ -251,212 +275,230 @@ class ImplementationStage(Stage):
         """
         if not item.issue:
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
-
-        if item.state == ENTER:
-            return Continue(next_state=GATE)
-
-        if item.state == GATE:
-            return self._gate(item, ctx)
-
-        if item.state == WORKTREE_WAIT:
-            logger.info("implementation:%d: requesting worktree job", item.issue)
-            adopted = bool(item.payload.get("existing_pr"))
-            kwargs: dict[str, object] = {
-                "issue_number": item.issue,
-                "branch_name": item.branch,
-                # Fresh branch: cut from a freshly refreshed trunk (doc step
-                # 2: worktree_manager.create_worktree(refresh_base=True)).
-                # ADOPTED branch: never reset to trunk — sync to the PR's
-                # remote head instead (the anti-clobber reset of
-                # _prepare_worktree_for_existing_pr :649/:693, so re-running
-                # never discards pushed commits). Values coordinator-vetted.
-                "refresh_base": not adopted,
-            }
-            if adopted:
-                kwargs["sync_to_remote"] = True
-            worktree_job = GitJob(
-                repo=item.repo,
-                op="create_worktree",
-                timeout_s=GIT_JOB_TIMEOUT_S,
-                kwargs=kwargs,
-                descr="create_worktree",
+        handler_name = _STEP_HANDLER_NAMES.get(item.state)
+        if handler_name is not None:
+            handler = cast(
+                Callable[[WorkItem, StageContext], StepResult],
+                getattr(self, handler_name),
             )
-            return JobRequest(worktree_job, on_done_state=DIRTY_DECISION_WAIT)
-
-        if item.state == DIRTY_DECISION_WAIT:
-            if item.payload.pop("git_error", None):
-                # Worktree creation failed: transient infrastructure, not an
-                # implement outcome — RETRY without burning the implement
-                # budget, bounded by GIT_ERROR_RETRY_CAP (M5).
-                return self._git_retry(item, "worktree creation failed")
-            # Adopted-PR path: after the (clean or salvaged) worktree is
-            # ready, skip the implement leg — the PR's code already exists;
-            # pr_review's address leg drives it from here.
-            adopted_next = ADOPTED if item.payload.get("existing_pr") else ADVISE_WAIT
-            if not item.payload.get("worktree_dirty"):
-                return Continue(next_state=adopted_next)
-            logger.info("implementation:%d: requesting dirty-worktree decision", item.issue)
-            job = AgentJob(
-                repo=item.repo,
-                issue=item.issue,
-                agent=agent_provider(ctx),
-                model=stage_model(ctx, "implementer", implementer_model),
-                prompt_builder=get_dirty_reused_worktree_decision_prompt,
-                cwd=_worktree_path(item, ctx),
-                timeout_s=implementer_claude_timeout(),
-                session_agent=AGENT_IMPLEMENTER,
-                prompt_kwargs={
-                    "branch_name": item.branch,
-                    "status_text": item.payload.get("worktree_status", ""),
-                    "diff_text": item.payload.get("worktree_diff", ""),
-                },
-                descr="dirty_decision",
-            )
-            return JobRequest(job, on_done_state=adopted_next)
-
-        if item.state == ADOPTED:
-            # Existing-PR fast path complete: worktree ready on the PR's real
-            # head branch — hand the PR to pr_review (doc step 1 "skip to
-            # step 8": nothing to implement, commit, or create).
-            logger.info(
-                "implementation:%d: adopted PR #%s (branch %r); advancing to pr_review",
-                item.issue,
-                item.pr,
-                item.branch,
-            )
-            return StageOutcome(Disposition.ADVANCE, f"existing PR #{item.pr}")
-
-        if item.state == ADVISE_WAIT:
-            if not ctx.config.enable_advise:
-                logger.info("implementation:%d: advise disabled; skipping", item.issue)
-                return Continue(next_state=IMPLEMENT_WAIT)
-            logger.info("implementation:%d: requesting advise job", item.issue)
-            job = AgentJob(
-                repo=item.repo,
-                issue=item.issue,
-                agent=agent_provider(ctx),
-                model=stage_model(ctx, "advise", advise_model),
-                prompt_builder=get_advise_prompt_builder(ctx.config.agent),
-                cwd=_worktree_path(item, ctx),
-                timeout_s=advise_claude_timeout(),
-                session_agent=AGENT_ADVISE,
-                prompt_kwargs={
-                    "issue_number": item.issue,
-                    "issue_title": item.payload.get("issue_title", ""),
-                    "issue_body": item.payload.get("issue_body", ""),
-                    "marketplace_path": item.payload.get("marketplace_path", ""),
-                },
-                descr="advise",
-            )
-            return JobRequest(job, on_done_state=IMPLEMENT_WAIT)
-
-        if item.state == IMPLEMENT_WAIT:
-            budget = ctx.budget("implement")
-            if item.attempts.get("implement", 0) >= budget:
-                logger.error(
-                    "implementation:%d: implement budget exhausted (%d/%d)",
-                    item.issue,
-                    item.attempts.get("implement", 0),
-                    budget,
-                )
-                return StageOutcome(Disposition.FINISH_FAIL, "implement_exhausted")
-            # Clear stale results at submission so a failed later attempt can
-            # never replay an earlier attempt's output downstream.
-            item.payload.pop("implement_error", None)
-            item.payload.pop("implement_summary", None)
-            logger.info("implementation:%d: requesting implement job", item.issue)
-            job = AgentJob(
-                repo=item.repo,
-                issue=item.issue,
-                agent=agent_provider(ctx),
-                model=stage_model(ctx, "implementer", implementer_model),
-                prompt_builder=build_implementation_prompt,
-                cwd=_worktree_path(item, ctx),
-                timeout_s=implementer_claude_timeout(),
-                session_agent=AGENT_IMPLEMENTER,
-                prompt_kwargs={
-                    "issue_number": item.issue,
-                    "issue_title": item.payload.get("issue_title", ""),
-                    "issue_body": item.payload.get("issue_body", ""),
-                    "branch_name": item.branch,
-                    "worktree_path": item.worktree,
-                    "advise_findings": item.payload.get("advise_findings", ""),
-                },
-                descr="implement",
-            )
-            return JobRequest(job, on_done_state=TEST_WAIT)
-
-        if item.state == TEST_WAIT:
-            if item.payload.pop("implement_error", None):
-                # The implement job hard-failed. The attempt was counted in
-                # on_job_done (doc: agent_error consumes the implement
-                # budget); RETRY re-enters the stage for the next attempt.
-                return StageOutcome(Disposition.RETRY, "agent_error")
-            if not getattr(ctx.config, "run_pre_pr_tests", False):
-                return Continue(next_state=COMMIT_PUSH_WAIT)
-            item.payload.pop("tests_failed", None)
-            item.payload.pop("test_output", None)
-            logger.info("implementation:%d: requesting pre-PR test job", item.issue)
-            test_job = BuildTestJob(
-                repo=item.repo,
-                cwd=_worktree_path(item, ctx),
-                argv=PRE_PR_TEST_ARGV,
-                timeout_s=PRE_PR_TEST_TIMEOUT_S,
-                descr="pre_pr_tests",
-            )
-            return JobRequest(test_job, on_done_state=COMMIT_PUSH_WAIT)
-
-        if item.state == TESTFIX_WAIT:
-            budget = ctx.budget("test_fix")
-            if item.attempts.get("test_fix", 0) >= budget:
-                logger.error(
-                    "implementation:%d: tests still red after %d fix attempt(s)",
-                    item.issue,
-                    budget,
-                )
-                return StageOutcome(Disposition.FINISH_FAIL, "tests_red")
-            logger.info("implementation:%d: requesting test-fix job", item.issue)
-            job = AgentJob(
-                repo=item.repo,
-                issue=item.issue,
-                agent=agent_provider(ctx),
-                model=stage_model(ctx, "implementer", implementer_model),
-                prompt_builder=build_test_fix_prompt,
-                cwd=_worktree_path(item, ctx),
-                timeout_s=implementer_claude_timeout(),
-                session_agent=AGENT_IMPLEMENTER,
-                prompt_kwargs={
-                    "issue_number": item.issue,
-                    "prev_iteration": item.attempts.get("test_fix", 0),
-                    "test_output": item.payload.get("test_output", ""),
-                },
-                descr="test_fix",
-            )
-            return JobRequest(job, on_done_state=TEST_WAIT)
-
-        if item.state == COMMIT_PUSH_WAIT:
-            if item.payload.get("tests_failed"):
-                return Continue(next_state=TESTFIX_WAIT)
-            logger.info("implementation:%d: requesting commit+push job", item.issue)
-            push_job = GitJob(
-                repo=item.repo,
-                op="commit_push",
-                timeout_s=GIT_JOB_TIMEOUT_S,
-                kwargs={
-                    "issue_number": item.issue,
-                    "worktree_path": item.worktree,
-                    "branch": item.branch,
-                    "agent": agent_provider(ctx),
-                },
-                descr="commit_push",
-            )
-            return JobRequest(push_job, on_done_state=PR_CREATE)
-
-        if item.state == PR_CREATE:
-            return self._create_pr(item, ctx)
+            return handler(item, ctx)
 
         logger.warning("implementation:%d: unknown state %r", item.issue, item.state)
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
+
+    def _enter(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """ENTER advances to GATE."""
+        return Continue(next_state=GATE)
+
+    def _worktree_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """WORKTREE_WAIT submits the create-worktree git job."""
+        issue = _issue_number(item)
+        logger.info("implementation:%d: requesting worktree job", issue)
+        adopted = bool(item.payload.get("existing_pr"))
+        kwargs: dict[str, object] = {
+            "issue_number": issue,
+            "branch_name": item.branch,
+            # Fresh branch: cut from a freshly refreshed trunk (doc step
+            # 2: worktree_manager.create_worktree(refresh_base=True)).
+            # ADOPTED branch: never reset to trunk — sync to the PR's
+            # remote head instead (the anti-clobber reset of
+            # _prepare_worktree_for_existing_pr :649/:693, so re-running
+            # never discards pushed commits). Values coordinator-vetted.
+            "refresh_base": not adopted,
+        }
+        if adopted:
+            kwargs["sync_to_remote"] = True
+        worktree_job = GitJob(
+            repo=item.repo,
+            op="create_worktree",
+            timeout_s=GIT_JOB_TIMEOUT_S,
+            kwargs=kwargs,
+            descr="create_worktree",
+        )
+        return JobRequest(worktree_job, on_done_state=DIRTY_DECISION_WAIT)
+
+    def _dirty_decision_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """DIRTY_DECISION_WAIT routes either to retry or to the dirty-decision job."""
+        issue = _issue_number(item)
+        if item.payload.pop("git_error", None):
+            # Worktree creation failed: transient infrastructure, not an
+            # implement outcome — RETRY without burning the implement
+            # budget, bounded by GIT_ERROR_RETRY_CAP (M5).
+            return self._git_retry(item, "worktree creation failed")
+        # Adopted-PR path: after the (clean or salvaged) worktree is
+        # ready, skip the implement leg — the PR's code already exists;
+        # pr_review's address leg drives it from here.
+        adopted_next = ADOPTED if item.payload.get("existing_pr") else ADVISE_WAIT
+        if not item.payload.get("worktree_dirty"):
+            return Continue(next_state=adopted_next)
+        logger.info("implementation:%d: requesting dirty-worktree decision", issue)
+        job = AgentJob(
+            repo=item.repo,
+            issue=issue,
+            agent=agent_provider(ctx),
+            model=stage_model(ctx, "implementer", implementer_model),
+            prompt_builder=get_dirty_reused_worktree_decision_prompt,
+            cwd=_worktree_path(item, ctx),
+            timeout_s=implementer_claude_timeout(),
+            session_agent=AGENT_IMPLEMENTER,
+            prompt_kwargs={
+                "branch_name": item.branch,
+                "status_text": item.payload.get("worktree_status", ""),
+                "diff_text": item.payload.get("worktree_diff", ""),
+            },
+            descr="dirty_decision",
+        )
+        return JobRequest(job, on_done_state=adopted_next)
+
+    def _adopted(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """ADOPTED advances to pr_review after the adopted worktree is ready."""
+        issue = _issue_number(item)
+        # Existing-PR fast path complete: worktree ready on the PR's real
+        # head branch — hand the PR to pr_review (doc step 1 "skip to
+        # step 8": nothing to implement, commit, or create).
+        logger.info(
+            "implementation:%d: adopted PR #%s (branch %r); advancing to pr_review",
+            issue,
+            item.pr,
+            item.branch,
+        )
+        return StageOutcome(Disposition.ADVANCE, f"existing PR #{item.pr}")
+
+    def _advise_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """ADVISE_WAIT either skips advice or submits the advise job."""
+        issue = _issue_number(item)
+        if not ctx.config.enable_advise:
+            logger.info("implementation:%d: advise disabled; skipping", issue)
+            return Continue(next_state=IMPLEMENT_WAIT)
+        logger.info("implementation:%d: requesting advise job", issue)
+        job = AgentJob(
+            repo=item.repo,
+            issue=issue,
+            agent=agent_provider(ctx),
+            model=stage_model(ctx, "advise", advise_model),
+            prompt_builder=get_advise_prompt_builder(ctx.config.agent),
+            cwd=_worktree_path(item, ctx),
+            timeout_s=advise_claude_timeout(),
+            session_agent=AGENT_ADVISE,
+            prompt_kwargs={
+                "issue_number": item.issue,
+                "issue_title": item.payload.get("issue_title", ""),
+                "issue_body": item.payload.get("issue_body", ""),
+                "marketplace_path": item.payload.get("marketplace_path", ""),
+            },
+            descr="advise",
+        )
+        return JobRequest(job, on_done_state=IMPLEMENT_WAIT)
+
+    def _implement_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """IMPLEMENT_WAIT submits the implementation job when budget remains."""
+        issue = _issue_number(item)
+        budget = ctx.budget("implement")
+        if item.attempts.get("implement", 0) >= budget:
+            logger.error(
+                "implementation:%d: implement budget exhausted (%d/%d)",
+                issue,
+                item.attempts.get("implement", 0),
+                budget,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "implement_exhausted")
+        # Clear stale results at submission so a failed later attempt can
+        # never replay an earlier attempt's output downstream.
+        item.payload.pop("implement_error", None)
+        item.payload.pop("implement_summary", None)
+        logger.info("implementation:%d: requesting implement job", issue)
+        job = AgentJob(
+            repo=item.repo,
+            issue=issue,
+            agent=agent_provider(ctx),
+            model=stage_model(ctx, "implementer", implementer_model),
+            prompt_builder=build_implementation_prompt,
+            cwd=_worktree_path(item, ctx),
+            timeout_s=implementer_claude_timeout(),
+            session_agent=AGENT_IMPLEMENTER,
+            prompt_kwargs={
+                "issue_number": item.issue,
+                "issue_title": item.payload.get("issue_title", ""),
+                "issue_body": item.payload.get("issue_body", ""),
+                "branch_name": item.branch,
+                "worktree_path": item.worktree,
+                "advise_findings": item.payload.get("advise_findings", ""),
+            },
+            descr="implement",
+        )
+        return JobRequest(job, on_done_state=TEST_WAIT)
+
+    def _test_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """TEST_WAIT either retries the implementer or runs the pre-PR tests."""
+        issue = _issue_number(item)
+        if item.payload.pop("implement_error", None):
+            # The implement job hard-failed. The attempt was counted in
+            # on_job_done (doc: agent_error consumes the implement
+            # budget); RETRY re-enters the stage for the next attempt.
+            return StageOutcome(Disposition.RETRY, "agent_error")
+        if not getattr(ctx.config, "run_pre_pr_tests", False):
+            return Continue(next_state=COMMIT_PUSH_WAIT)
+        item.payload.pop("tests_failed", None)
+        item.payload.pop("test_output", None)
+        logger.info("implementation:%d: requesting pre-PR test job", issue)
+        test_job = BuildTestJob(
+            repo=item.repo,
+            cwd=_worktree_path(item, ctx),
+            argv=PRE_PR_TEST_ARGV,
+            timeout_s=PRE_PR_TEST_TIMEOUT_S,
+            descr="pre_pr_tests",
+        )
+        return JobRequest(test_job, on_done_state=COMMIT_PUSH_WAIT)
+
+    def _testfix_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """TESTFIX_WAIT submits the test-fix job while budget remains."""
+        issue = _issue_number(item)
+        budget = ctx.budget("test_fix")
+        if item.attempts.get("test_fix", 0) >= budget:
+            logger.error(
+                "implementation:%d: tests still red after %d fix attempt(s)",
+                issue,
+                budget,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "tests_red")
+        logger.info("implementation:%d: requesting test-fix job", issue)
+        job = AgentJob(
+            repo=item.repo,
+            issue=issue,
+            agent=agent_provider(ctx),
+            model=stage_model(ctx, "implementer", implementer_model),
+            prompt_builder=build_test_fix_prompt,
+            cwd=_worktree_path(item, ctx),
+            timeout_s=implementer_claude_timeout(),
+            session_agent=AGENT_IMPLEMENTER,
+            prompt_kwargs={
+                "issue_number": item.issue,
+                "prev_iteration": item.attempts.get("test_fix", 0),
+                "test_output": item.payload.get("test_output", ""),
+            },
+            descr="test_fix",
+        )
+        return JobRequest(job, on_done_state=TEST_WAIT)
+
+    def _commit_push_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """COMMIT_PUSH_WAIT either re-enters test-fix or submits commit+push."""
+        issue = _issue_number(item)
+        if item.payload.get("tests_failed"):
+            return Continue(next_state=TESTFIX_WAIT)
+        logger.info("implementation:%d: requesting commit+push job", issue)
+        push_job = GitJob(
+            repo=item.repo,
+            op="commit_push",
+            timeout_s=GIT_JOB_TIMEOUT_S,
+            kwargs={
+                "issue_number": issue,
+                "worktree_path": item.worktree,
+                "branch": item.branch,
+                "agent": agent_provider(ctx),
+            },
+            descr="commit_push",
+        )
+        return JobRequest(push_job, on_done_state=PR_CREATE)
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Store job results on the item payload (state is still the WAIT state).
