@@ -62,8 +62,8 @@ from hephaestus.cli.utils import (
 from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 from hephaestus.io.utils import write_secure
 
-from .github_api import _gh_call
 from .git_utils import issue_auto_impl_branch_name
+from .github_api import _gh_call
 from .models import DEFAULT_STATE_DIR as DEFAULT_STATE_DIR, DEFAULT_WORKER_COUNT
 
 if TYPE_CHECKING:

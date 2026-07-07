@@ -305,9 +305,7 @@ class TestRepoScoping:
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
-        pr_number = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).find_pr_for_issue(
-            7
-        )
+        pr_number = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).find_pr_for_issue(7)
 
         assert pr_number == 5
         assert calls == [

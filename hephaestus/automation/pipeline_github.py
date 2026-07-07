@@ -39,9 +39,9 @@ from hephaestus.automation._review_utils import (
     find_pr_for_issue,
     get_pr_head_branch,
 )
-from hephaestus.automation.git_utils import issue_auto_impl_branch_name
 from hephaestus.automation.arming_state import ArmingStateStore
 from hephaestus.automation.ci_check_inspector import CICheckInspector
+from hephaestus.automation.git_utils import issue_auto_impl_branch_name
 from hephaestus.automation.prompts.pr_review import (
     BLOCKING_SEVERITIES,
     SEVERITY_MARKER_PREFIX,
@@ -79,9 +79,7 @@ def _split_threads(threads: list[dict[str, Any]]) -> tuple[int, int]:
     if not threads:
         return (0, 0)
     current_login = github_api.gh_current_login()
-    automation = sum(
-        1 for thread in threads if _is_automation_owned_thread(thread, current_login)
-    )
+    automation = sum(1 for thread in threads if _is_automation_owned_thread(thread, current_login))
     return automation, len(threads) - automation
 
 
