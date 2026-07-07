@@ -324,7 +324,32 @@ def seed_issue(issue_number: int) -> IssueFacts:
 
 
 def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
-    """Fetch and normalize issue facts through a repo-scoped StageGitHub accessor."""
+    """Fetch and normalize repo-scoped GitHub state for a single issue (tri-state PR).
+
+    PR facts are a real tri-state fetch through the provided StageGitHub
+    accessor: ``github.find_pr_for_issue`` runs first; on a miss,
+    ``github.find_merged_pr_for_issue`` runs so merged work classifies as
+    finished instead of being re-queued after a restart. A PR that is neither
+    open nor merged (closed/abandoned) is invisible to both lookups and is
+    normalized to ``pr_number = None``, so :func:`classify_issue` only ever
+    sees a clean {no live PR | open PR | merged PR} tri-state.
+
+    Fail-closed: any GitHub error -- from the issue fetch or either PR lookup
+    -- propagates. Swallowing a PR-probe failure would misclassify toward
+    IMPLEMENTATION and cause duplicate-PR churn.
+
+    Args:
+        issue_number: GitHub issue number.
+        github: Repo-scoped StageGitHub accessor.
+
+    Returns:
+        Normalized GitHub state snapshot.
+
+    Raises:
+        Exception: Any GitHub API error from the issue fetch or the PR
+            lookups is re-raised (caller's responsibility to handle).
+
+    """
     issue_data = github.gh_issue_json(issue_number)
     raw_labels = issue_data.get("labels", []) if isinstance(issue_data, dict) else []
     labels = {
