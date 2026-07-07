@@ -285,8 +285,10 @@ unresolved-thread count decreases).
 2. [W:G] **Mechanical rebase** (optional, if base changed): attempt rebase via
    git; on success, push.
 3. [M] **POLL** (non-blocking): call
-   `ci_run_coordinator.classify_ci_state(ctx.github.pr_checks(pr))`. This is
-   the pure classifier extracted from the legacy sleep loop. It returns
+   `ci_run_coordinator.classify_ci_state(ctx.github.pr_checks(pr))`, the
+   shipped pure classifier imported by `hephaestus.automation.pipeline.stages.ci`
+   and covered by
+   `tests/unit/automation/pipeline/stages/test_classify_ci_state.py`. It returns
    PENDING, GREEN, FAILING, or terminal states. If PENDING → RETRY with timer
    backoff; if GREEN → ADVANCE; if FAILING → step 4.
 4. [W:A] **CI fix step** (budget ci_fix = 1) — `ci_fix_orchestrator.py:483
