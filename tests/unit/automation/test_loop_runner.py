@@ -138,6 +138,12 @@ def test_parse_args_accepts_issue_scope() -> None:
     assert args.issues == [8, 13]
 
 
+def test_parse_args_accepts_pr_scope() -> None:
+    """The loop runner can scope pipeline seeding to a comma-separated PR list."""
+    args = loop_runner._parse_args(["--prs", "77, 78"])
+    assert args.prs == [77, 78]
+
+
 @pytest.mark.parametrize("bad", ["0", "-1", "33", "100"])
 def test_parse_args_rejects_out_of_range_max_workers(bad: str) -> None:
     """Regression for #723: loop_runner must reject --max-workers outside 1-32."""
