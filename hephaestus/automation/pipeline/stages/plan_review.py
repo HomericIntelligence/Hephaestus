@@ -445,10 +445,14 @@ class PlanReviewStage(Stage):
 
         if result.value:
             if item.state == "REVIEW_WAIT":
-                item.payload["review_verdict"] = result.value
-                # Feed the raw review text to the next amend/review round,
-                # mirroring the legacy loop's prior_review threading.
-                item.payload["prior_review"] = getattr(result.value, "raw", str(result.value))
+                verdict = result.value
+                item.payload["review_verdict"] = verdict
+                if getattr(verdict, "verdict", None) == "NOGO":
+                    raw_review = getattr(verdict, "raw", None)
+                    assert isinstance(raw_review, str), (  # noqa: S101 - explicit worker contract
+                        "plan_review REVIEW_WAIT NOGO verdict must expose raw review text"
+                    )
+                    item.payload["prior_review"] = raw_review
             elif item.state == "AMEND_WAIT":
                 item.payload["plan_text"] = result.value
             # LEARN_WAIT intentionally has no branch: the learn job's output

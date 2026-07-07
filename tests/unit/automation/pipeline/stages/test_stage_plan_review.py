@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import pytest
+
 from hephaestus.automation.claude_invoke import ReviewVerdict, parse_review_verdict
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
@@ -425,18 +427,56 @@ class TestPlanReviewStageStep:
 class TestPlanReviewStageOnJobDone:
     """on_job_done payload handling (state still at the WAIT state)."""
 
-    def test_review_verdict_stored_in_payload(self, make_ctx: Any, make_work_item: Any) -> None:
-        """The parsed verdict and its raw text are stored on the payload."""
+    def test_nogo_review_verdict_threads_raw_prior_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A real NOGO stores raw review text for the amend prompt."""
         stage = PlanReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, state="REVIEW_WAIT")
-        verdict = _verdict("GO")
+        verdict = _verdict("NOGO")
         result = JobResult(ok=True, value=verdict)
 
         stage.on_job_done(item, result, ctx)
 
         assert item.payload["review_verdict"] == verdict
         assert item.payload["prior_review"] == verdict.raw
+
+    @pytest.mark.parametrize("kind", ["GO", "ERROR", "AMBIGUOUS"])
+    def test_non_nogo_review_verdict_does_not_thread_prior_review(
+        self, make_ctx: Any, make_work_item: Any, kind: str
+    ) -> None:
+        """GO, ERROR, and AMBIGUOUS verdicts do not create amend feedback."""
+        stage = PlanReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="REVIEW_WAIT")
+        verdict = _verdict(kind)
+        result = JobResult(ok=True, value=verdict)
+
+        stage.on_job_done(item, result, ctx)
+
+        assert item.payload["review_verdict"] == verdict
+        assert "prior_review" not in item.payload
+
+    def test_nogo_review_verdict_requires_raw_text(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A NOGO-shaped verdict without raw text fails instead of str() fallback."""
+
+        class NogoWithoutRaw:
+            verdict = "NOGO"
+
+        stage = PlanReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="REVIEW_WAIT")
+        verdict = NogoWithoutRaw()
+        result = JobResult(ok=True, value=verdict)
+
+        with pytest.raises(AssertionError, match="NOGO verdict must expose raw"):
+            stage.on_job_done(item, result, ctx)
+
+        assert item.payload["review_verdict"] is verdict
+        assert "prior_review" not in item.payload
 
     def test_amend_result_stored_in_payload(self, make_ctx: Any, make_work_item: Any) -> None:
         """The amended plan text is stored on the payload."""
