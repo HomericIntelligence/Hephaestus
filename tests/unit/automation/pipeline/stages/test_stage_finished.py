@@ -49,11 +49,15 @@ def _item(
     reason: str = "ok",
     worktree: str = "",
     state: str = "ENTER",
+    kind: ItemKind = ItemKind.ISSUE,
+    issue: int | None = 42,
+    pr: int | None = None,
 ) -> WorkItem:
     item = WorkItem(
         repo="repo-a",
-        kind=ItemKind.ISSUE,
-        issue=42,
+        kind=kind,
+        issue=issue,
+        pr=pr,
         stage=StageName.FINISHED,
         state=state,
         worktree=worktree,
@@ -165,6 +169,57 @@ class TestCleanup:
         stage.step(item, ctx)
 
         assert preserved == [(42, "/wt/issue-42")]
+
+    def test_pr_only_failure_preserves_pr_number(
+        self,
+        stage: FinishedStage,
+        preserved: list[tuple[int, str]],
+        make_ctx: Any,
+    ) -> None:
+        """PR-only failures are attributable in the preserved summary."""
+        item = _item(
+            passed=False,
+            reason="boom",
+            worktree="/wt/pr-777",
+            state="CLEANUP",
+            kind=ItemKind.PR,
+            issue=None,
+            pr=777,
+        )
+
+        result = stage.step(item, make_ctx())
+
+        assert isinstance(result, Continue) and result.next_state == "DONE"
+        assert preserved == [(777, "/wt/pr-777")]
+
+    def test_distinct_pr_only_failures_do_not_dedupe_on_zero_key(
+        self,
+        stage: FinishedStage,
+        preserved: list[tuple[int, str]],
+        make_ctx: Any,
+    ) -> None:
+        ctx = make_ctx()
+        first = _item(
+            passed=False,
+            worktree="/wt/shared-pr",
+            state="CLEANUP",
+            kind=ItemKind.PR,
+            issue=None,
+            pr=777,
+        )
+        second = _item(
+            passed=False,
+            worktree="/wt/shared-pr",
+            state="CLEANUP",
+            kind=ItemKind.PR,
+            issue=None,
+            pr=888,
+        )
+
+        stage.step(first, ctx)
+        stage.step(second, ctx)
+
+        assert preserved == [(777, "/wt/shared-pr"), (888, "/wt/shared-pr")]
 
     def test_no_worktree_skips_cleanup(self, stage: FinishedStage, make_ctx: Any) -> None:
         result = stage.step(_item(state="CLEANUP"), make_ctx())
