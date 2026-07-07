@@ -43,6 +43,10 @@ PROMPT_REFS: tuple[tuple[str, str, Callable[..., object]], ...] = (
 )
 
 
+def _arch_text() -> str:
+    return DOC_PATH.read_text(encoding="utf-8")
+
+
 def test_ci_stage_documents_shipped_classifier() -> None:
     """The CI-stage doc must describe classify_ci_state as shipped code."""
     text = DOC_PATH.read_text(encoding="utf-8")
@@ -63,3 +67,36 @@ def test_issue_1929_prompt_line_refs_match_source_definitions() -> None:
         refs = re.findall(rf"`{re.escape(path)}:(\d+)\s+{function_name}`", doc)
         assert refs, f"missing documented reference for {path} {function_name}"
         assert set(refs) == {expected_line}
+
+
+def test_automation_loop_architecture_status_is_implemented() -> None:
+    """The architecture contract must describe the implemented pipeline."""
+    text = _arch_text()
+    header = "\n".join(text.splitlines()[:5])
+
+    assert "Status: implemented for the epic #1809 queue-based automation loop." in header
+    assert "pre-implementation" not in header
+
+
+def test_automation_loop_architecture_has_interrupt_semantics_and_exit_codes() -> None:
+    """The architecture contract must keep interrupt and exit-code details."""
+    text = _arch_text()
+
+    assert "Finalized in the cutover issue." not in text
+    assert "## Interrupt semantics and exit codes" in text
+    assert "SIGINT, SIGTERM, and SIGHUP" in text
+    assert "resumable at <stage>" in text
+    assert "Exit codes are stable: `130` for interrupted runs" in text
+
+
+def test_automation_loop_architecture_has_concurrency_cli_dry_run_and_glossary() -> None:
+    """The architecture contract keeps concurrency, CLI, dry-run, and glossary details."""
+    text = _arch_text()
+
+    assert "## Concurrency and tuning" in text
+    assert "`parallel_repos * max_workers`" in text
+    assert "`--phase-timeout` bounds each agent job" in text
+    assert "Dry-run mode logs GitHub mutations and job submissions without executing them" in text
+    assert "## CLI scopes and rollout controls" in text
+    assert "## Glossary" in text
+    assert "- **Coordinator**:" in text
