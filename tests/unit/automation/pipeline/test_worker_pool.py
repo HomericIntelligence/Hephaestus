@@ -5,6 +5,7 @@ from __future__ import annotations
 import queue
 import subprocess
 import threading
+import time
 from collections.abc import Iterator
 from concurrent.futures import Future
 from pathlib import Path
@@ -869,10 +870,71 @@ class TestGitLocking:
         self,
         pool: WorkerPool,
     ) -> None:
-        """Two GitJobs for different repos use different locks."""
-        lock1 = pool._repo_lock("test/repo1")
-        lock2 = pool._repo_lock("test/repo2")
+        """Two active GitJob repo contexts use different in-process locks."""
+        with pool._repo_lock("test/repo1"), pool._repo_lock("test/repo2"):
+            with pool._repo_locks_guard:
+                lock1 = pool._repo_locks["test/repo1"].lock
+                lock2 = pool._repo_locks["test/repo2"].lock
+
         assert lock1 is not lock2
+        with pool._repo_locks_guard:
+            assert pool._repo_locks == {}
+
+    def test_repo_lock_evicted_after_git_job_completes(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """A completed GitJob does not leave an idle repo lock cached forever."""
+        job = GitJob(repo="test/repo", op="create_worktree", timeout_s=60, kwargs={})
+
+        with patch(f"{_WP}.WorktreeManager", return_value=MagicMock()):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        with pool._repo_locks_guard:
+            assert pool._repo_locks == {}
+
+    def test_repo_lock_not_evicted_while_waiter_holds_it(
+        self,
+        pool: WorkerPool,
+    ) -> None:
+        """A waiting same-repo user keeps the shared lock entry until it exits."""
+        waiter_acquired = threading.Event()
+        release_waiter = threading.Event()
+
+        def wait_for_users(expected: int) -> None:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                with pool._repo_locks_guard:
+                    entry = pool._repo_locks.get("test/repo")
+                    if entry is not None and entry.users == expected:
+                        return
+                time.sleep(0.01)
+            pytest.fail(f"repo lock users never reached {expected}")
+
+        def waiter() -> None:
+            with pool._repo_lock("test/repo"):
+                waiter_acquired.set()
+                release_waiter.wait(timeout=5.0)
+
+        with pool._repo_lock("test/repo"):
+            with pool._repo_locks_guard:
+                entry = pool._repo_locks["test/repo"]
+            thread = threading.Thread(target=waiter)
+            thread.start()
+            wait_for_users(2)
+
+        assert waiter_acquired.wait(timeout=5.0)
+        with pool._repo_locks_guard:
+            assert pool._repo_locks.get("test/repo") is entry
+
+        release_waiter.set()
+        thread.join(timeout=5.0)
+        assert not thread.is_alive()
+        with pool._repo_locks_guard:
+            assert "test/repo" not in pool._repo_locks
 
     def test_repo_lock_path_anchors_at_state_dir(self) -> None:
         """Default lock path is anchored at repo_root/DEFAULT_STATE_DIR, not CWD."""

@@ -11,8 +11,10 @@ import logging
 import subprocess
 import threading
 import time
+from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import replace
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hephaestus.agents.runtime import resolve_agent, run_agent_session
@@ -63,6 +65,14 @@ def _repo_lock_path(repo: str, lock_dir: Path | None = None) -> Path:
     return lock_dir / f"git-{repo.replace('/', '_')}.lock"
 
 
+@dataclass
+class _RepoLockEntry:
+    """In-process git lock plus active/waiting user count."""
+
+    lock: threading.Lock
+    users: int = 0
+
+
 class WorkerPool:
     """Thread pool executor for submitting and tracking frozen jobs.
 
@@ -104,14 +114,28 @@ class WorkerPool:
         self._executor = ThreadPoolExecutor(max_workers=size)
         self._shutdown = shutdown
         self._completion_q = completion_q
-        self._repo_locks: dict[str, threading.Lock] = {}
+        self._repo_locks: dict[str, _RepoLockEntry] = {}
         self._repo_locks_guard = threading.Lock()
         self._lock_dir = lock_dir
 
-    def _repo_lock(self, repo: str) -> threading.Lock:
-        """Get or create a per-repo lock (held during git operations)."""
+    @contextmanager
+    def _repo_lock(self, repo: str) -> Iterator[None]:
+        """Acquire a per-repo git lock and evict its cache entry when idle."""
         with self._repo_locks_guard:
-            return self._repo_locks.setdefault(repo, threading.Lock())
+            entry = self._repo_locks.get(repo)
+            if entry is None:
+                entry = _RepoLockEntry(threading.Lock())
+                self._repo_locks[repo] = entry
+            entry.users += 1
+
+        try:
+            with entry.lock:
+                yield
+        finally:
+            with self._repo_locks_guard:
+                entry.users -= 1
+                if entry.users == 0 and self._repo_locks.get(repo) is entry:
+                    self._repo_locks.pop(repo, None)
 
     def submit(
         self, job: AgentJob | BuildTestJob | GitJob, on_done_state: str | StageName
@@ -351,9 +375,8 @@ class WorkerPool:
         blocking flock wait to one thread. Both locks are held for the entire
         operation because worktrees share ``.git``.
         """
-        lock = self._repo_lock(job.repo)
         try:
-            with lock, file_lock(_repo_lock_path(job.repo, self._lock_dir)):
+            with self._repo_lock(job.repo), file_lock(_repo_lock_path(job.repo, self._lock_dir)):
                 return self._dispatch_git_op(job)
         except subprocess.TimeoutExpired as exc:
             return JobResult(
